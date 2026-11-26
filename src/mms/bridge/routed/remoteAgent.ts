@@ -66,14 +66,18 @@ export function parseRoutedAgentMark(value: unknown): RoutedAgentMark & { mode: 
 
 /** The keys a marked call may carry besides the target and the mark; anything else a person's call takes is refused. */
 const MARKED_KEYS: Readonly<Record<string, readonly string[]>> = {
-  'threads.create': ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId'],
+  'threads.create': ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId', 'hidden'],
   'threads.setModel': ['threadId', 'model', 'ifRevision'],
   'threads.setPermissionMode': ['threadId', 'mode', 'ifRevision'],
   'orchestrator.send': ['threadId', 'content', 'mode', 'clientRequestId', 'requestId', 'refuseWhilePaused', 'forceQueue', ROUTED_DEADLINE_KEY],
   'queue.enqueue': ['threadId', 'content', 'mode', 'requestId'],
   'orchestrator.steer': ['threadId', 'text', 'runId', 'clientRequestId'],
-  'orchestrator.abort': ['threadId', 'runId', 'clientRequestId']
+  'orchestrator.abort': ['threadId', 'runId', 'clientRequestId'],
+  'threads.archive': ['threadId', 'archived']
 }
+
+/** Whether `method` takes the mark here: the rows of `ROUTED_AGENT_METHODS`, and `threads.archive` (`ROUTED_AGENT_ARCHIVE_SINCE`). */
+const takesMark = (method: string): boolean => ROUTED_AGENT_METHODS[method] !== undefined || method === 'threads.archive'
 
 export interface RemoteAgentDeps {
   services: MmsProfileServices
@@ -99,7 +103,7 @@ export class RemoteAgentCalls {
 
   /** Runs one marked call. `params` no longer carries the mark. Throws a refusal with its own code. */
   async run(method: string, params: Record<string, unknown>, call: RemoteAgentCall): Promise<unknown> {
-    if (ROUTED_AGENT_METHODS[method] === undefined) throw new NetError('bad_request', `${method} does not take ${ROUTED_AGENT_KEY}.`)
+    if (!takesMark(method)) throw new NetError('bad_request', `${method} does not take ${ROUTED_AGENT_KEY}.`)
     for (const key of Object.keys(params))
       if (!MARKED_KEYS[method]!.includes(key))
         throw new DomainRpcError('invalid_params', `An agent's ${method} from another computer does not take ${key}.`)
@@ -169,6 +173,17 @@ export class RemoteAgentCalls {
           default:
             return { ok: false, ignored: true, reason: result.reason, runId }
         }
+      }
+      case 'threads.archive': {
+        if (params.archived !== undefined && typeof params.archived !== 'boolean') throw new DomainRpcError('invalid_params', 'archived must be true or false.')
+        const archived = params.archived !== false
+        const result = await services.orchestrator.archiveForRemoteAgent(threadId, archived, {
+          actor: this.actor(call, mode, 1),
+          // The app's own Archive, as a person's call from the device runs it, so every window hears of it.
+          archive: () => call.asPerson(method, { threadId, archived })
+        })
+        if (result.status === 'rejected') throw new DomainRpcError('thread_running', `Thread ${threadId} is still working, so it was not archived.`, { threadId })
+        return { ok: true, threadId, archived, changed: result.changed }
       }
       case 'orchestrator.abort': {
         const key = this.requestKey(call, params, 'clientRequestId')

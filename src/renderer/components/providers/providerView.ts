@@ -1,7 +1,7 @@
+import { nextEntryName } from '../../../shared/providerInstances'
 import type { BinarySource, InstallOwner, InstanceSnapshot } from '../../../shared/harness/status'
 import type {
   HarnessDriverKind,
-  ProviderScope,
   RegistryAgentView,
   RegistryChecksum,
   RegistrySourcePatch,
@@ -90,10 +90,12 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     iconId: 'google',
     family: 'agent',
     description: "Google's Antigravity CLI (agy), signed in with your Google account.",
-    multiInstance: false,
+    // A further entry is another Google account, kept in a home of its own.
+    multiInstance: true,
     customModels: false,
     executableHint: "agy, or Google's 1.1.1 ACP server",
     addHint: 'Mousse uses agy on this computer, or installs it after adding.',
+    // The first entry only: an entry with a home of its own signs out of that home alone.
     signOutHint: 'Also signs out agy on this computer'
   },
   cursor: {
@@ -223,6 +225,8 @@ export interface InstanceConfigView {
   binaryPath?: string
   args: string[]
   env: Record<string, string>
+  /** Another computer that hides its launch arguments and variable values from this one (no terminal access there). */
+  launchHidden?: true
   movedTo?: string
 }
 
@@ -243,36 +247,19 @@ export function instanceConfigOf(snapshot: InstanceSnapshot): InstanceConfigView
     ...(typeof raw.binaryPath === 'string' && raw.binaryPath ? { binaryPath: raw.binaryPath } : {}),
     args: Array.isArray(raw.args) ? raw.args.filter((arg): arg is string => typeof arg === 'string') : [],
     env,
+    ...(raw.launchHidden === true ? { launchHidden: true as const } : {}),
     ...(typeof raw.movedTo === 'string' && raw.movedTo ? { movedTo: raw.movedTo } : {})
   }
 }
+
+/** The tooltip of launch settings another computer hides from this one. */
+export const LAUNCH_HIDDEN_TITLE = 'Hidden: needs terminal access to that computer'
 
 /** The executable override: from the config when reported, else from an override binary. */
 export function binaryOverrideOf(snapshot: InstanceSnapshot): string | undefined {
   const config = instanceConfigOf(snapshot)
   if (config) return config.binaryPath
   return snapshot.binary?.source === 'override' ? snapshot.binary.path : undefined
-}
-
-/** The switch: the device setting is a ceiling, and a project can only narrow it. */
-export interface SwitchState {
-  checked: boolean
-  /** The device has it off, so a project cannot turn it on. */
-  locked: boolean
-  /** The project sets its own value ("Overridden for this project"). */
-  overridden: boolean
-  deviceEnabled: boolean
-}
-
-export function switchStateOf(snapshot: Pick<InstanceSnapshot, 'enabled'>, scope: ProviderScope): SwitchState {
-  const { enabled } = snapshot
-  if (scope.kind === 'device') return { checked: enabled.device, locked: false, overridden: false, deviceEnabled: enabled.device }
-  return {
-    checked: enabled.effective,
-    locked: !enabled.device,
-    overridden: enabled.project !== undefined,
-    deviceEnabled: enabled.device
-  }
 }
 
 /** How fresh a provider's model list is, for the editor's Models tooltip: when it was updated, or that it is a cached list. */
@@ -305,11 +292,7 @@ export function lastCheckedAt(snapshots: readonly InstanceSnapshot[]): number | 
 
 /** A label for a new instance that no other instance uses ("Claude Code 2"). */
 export function nextInstanceLabel(base: string, snapshots: readonly InstanceSnapshot[]): string {
-  const taken = new Set(snapshots.map((snapshot) => snapshot.displayName.trim().toLowerCase()))
-  for (let n = 2; ; n += 1) {
-    const label = `${base} ${n}`
-    if (!taken.has(label.toLowerCase())) return label
-  }
+  return nextEntryName(base, snapshots.map((snapshot) => snapshot.displayName))
 }
 
 /** `NAME=value` lines; blank lines and lines without a name are skipped. */

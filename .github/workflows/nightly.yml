@@ -63,6 +63,7 @@ jobs:
     uses: ./.github/workflows/package.yml
     with:
       version: ${{ needs.resolve.outputs.version }}
+    secrets: inherit
 
   publish:
     name: Publish nightly

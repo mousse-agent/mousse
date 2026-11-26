@@ -136,6 +136,8 @@ export interface NetEngineDevice {
   unreachable?: 'in' | 'out'
   /** Its last connection attempt failed on a certificate outside its validity window (either clock may be wrong). */
   certificateWindow?: boolean
+  /** Why its threads and projects cannot be read now (an error code such as `conflict`), while they cannot. */
+  listsError?: string
   /**
    * Its access here changed, but networking has not applied it yet (the helper refused the grant's new role): it may
    * still list and remove this computer's devices. Tried again on its own.
@@ -148,6 +150,11 @@ export interface NetEngineDevice {
   sshParked?: NetEngineSshParked
   /** Addresses added for it by hand (routes of any owner kind); none means it is found on the local network. */
   addresses?: string[]
+  /**
+   * The pairing ticket's tailnet, internet and tunnel hints the person approved at Connect, as routes: dialled after
+   * the same network, so they show as fallbacks. Not the ones under `addresses`.
+   */
+  approvedAddresses?: string[]
   /** The class of the route its connection runs over now (`conn.up.route`), while one is up; `relay` through one. */
   route?: RouteClass | 'relay'
   /** While connected through a relay: the relay's `host:port`. */

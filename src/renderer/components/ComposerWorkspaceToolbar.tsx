@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { ExpiryIcon, ExpiryMenu } from './ExpiryMenu'
 import { expiryDurationLabel, expiryShortLabel } from '../../shared/threadExpiry'
-import { Check, ChevronDown, Folder, FolderPlus, GitBranch, Incognito, Laptop, Search, Server } from '../lib/icons'
+import { Check, ChevronDown, Folder, FolderPlus, GitBranch, Incognito, Laptop, Plus, Search, Server } from '../lib/icons'
 import type { NodeId } from '../../shared/net'
 import type { GitScope, Project } from '../../shared/types'
 import { useMenuKeyboard } from '../hooks/useMenuKeyboard'
@@ -11,6 +11,7 @@ import { workspaceWithProject, type ComposerWorkspace } from '../lib/newThread'
 import { folderKey } from '../lib/activeProject'
 import { useGitStatus, type GitStatusView } from '../stores/gitStatusStore'
 import { LOCAL_RUN_ON_ID, buildRunOnOptions, canPickComputer, runOnLabel } from './sideCard/deviceMenu'
+import { runOnWithProject } from '../lib/addToMachine'
 import { RemoteProjectDialog } from './RemoteProjectDialog'
 import { ProjectIcon } from './ProjectIcon'
 import { branchSearchAria, localBranchNames } from './sideCard/gitSectionLogic'
@@ -30,6 +31,12 @@ export interface ComposerDeviceProps {
   onSelect: (node: NodeId | undefined) => void
   /** Asks the picked computer to open a folder as a project; resolves with its refusal, if any. */
   onOpenRemoteProject: (path: string) => Promise<string | undefined>
+  /**
+   * With a project picked: the computers that have it. The menu then offers only those (and this computer), and ends
+   * with Add to machine (`onAddToMachine`) for the others.
+   */
+  projectComputers?: ReadonlySet<string>
+  onAddToMachine?: () => void
 }
 
 /** A trigger and its floating menu: focus moves into the menu on open and back on close; a click outside closes it. */
@@ -213,7 +220,7 @@ export function ComposerThreadSettings({ workspace, disabled, device, onChange, 
     <div className="new-thread-row new-thread-row-below" role="group" aria-label="New thread settings">
       <div className="new-thread-row-group new-thread-row-start">
         {/* The computer is always named; it is a menu only when there is another one to pick. */}
-        {device && !workspace.localOnly && canPickComputer(device.devices, workspace.node)
+        {device && !workspace.localOnly && (canPickComputer(device.devices, workspace.node) || device.onAddToMachine)
           ? <ComposerDeviceButton device={device} node={workspace.node} disabled={disabled} />
           : (
             <div className="new-thread-chip new-thread-chip-static" role="note" aria-label="Runs on this computer" title={workspace.localOnly ? 'Private threads run on this computer only' : undefined}>
@@ -463,10 +470,13 @@ function ComposerWorkspaceMenu({ workspace, git, disabled, onChange }: {
 
 /** The computer item: names where the chat runs, and opens the Run on menu. */
 function ComposerDeviceButton({ device, node, disabled }: { device: ComposerDeviceProps; node: NodeId | undefined; disabled: boolean }) {
-  const run = buildRunOnOptions({ localName: device.localName, devices: device.devices, node, notSharing: device.notSharing })
+  const all = buildRunOnOptions({ localName: device.localName, devices: device.devices, node, notSharing: device.notSharing })
+  // With a project: only the computers that have it; the others are one Add to machine away.
+  const run = device.projectComputers ? runOnWithProject(all, device.projectComputers) : all
+  const adds = device.onAddToMachine ? 1 : 0
   const label = runOnLabel(device.localName, device.devices, node)
   const selectedIndex = Math.max(0, run.findIndex((option) => option.active))
-  const menu = useAnchoredMenu(disabled, run.length, device.onRefresh)
+  const menu = useAnchoredMenu(disabled, run.length + adds, device.onRefresh)
 
   const Icon = node ? Server : Laptop
   return (
@@ -523,6 +533,26 @@ function ComposerDeviceButton({ device, node, disabled }: { device: ComposerDevi
                 </button>
               )
             })}
+            {device.onAddToMachine && (
+              <>
+                <div className="composer-workspace-menu-separator" role="separator" />
+                <button
+                  ref={(element) => { menu.itemRefs.current[run.length] = element }}
+                  type="button"
+                  role="menuitem"
+                  tabIndex={-1}
+                  className="composer-workspace-menu-item"
+                  title="Clone this project on another computer, or use its checkout there"
+                  onClick={() => {
+                    menu.close()
+                    device.onAddToMachine?.()
+                  }}
+                >
+                  <Plus size={16} aria-hidden="true" />
+                  <span>Add to machine</span>
+                </button>
+              </>
+            )}
           </div>
         </FloatingPortal>
       )}

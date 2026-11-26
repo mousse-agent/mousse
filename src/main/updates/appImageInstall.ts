@@ -68,6 +68,7 @@ export function startAfterExit(pid: number, appImage: string, args: string[], en
   const { APPIMAGE: _appImage, APPDIR: _appDir, ARGV0: _argv0, OWD: _owd, ...rest } = env
   dropForeignAppImageMounts(rest, 'linux')
   const child = spawn('/bin/sh', ['-c', RESTART_SCRIPT, 'mousse-restart', String(pid), appImage, ...args], {
+    // eslint-disable-next-line mousse/no-console-window -- Linux only.
     detached: true,
     stdio: 'ignore',
     env: rest

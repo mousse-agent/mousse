@@ -92,19 +92,22 @@ export const AGENT_FOLD_HEIGHT = 110;
 
 /**
  * The agent or bot that sent this message, from the origin stored with it (never from its text); undefined for anyone
- * else. Its bubble names the sender and offers Copy of its words, never Edit.
+ * else. A sender is a thread of this computer (`threadId`) or an agent on another of the user's computers (`from`). Its
+ * bubble names the sender and offers Copy of its words, never Edit.
  */
 export function agentOriginOfMessage(message: UIMessage): AgentOrigin | undefined {
   const origin = (message.metadata as { origin?: AgentOrigin } | undefined)?.origin;
-  return origin?.kind === "agent" && typeof origin.threadId === "string" ? origin : undefined;
+  if (origin?.kind !== "agent") return undefined;
+  return typeof origin.threadId === "string" || (typeof origin.from === "object" && origin.from !== null) ? origin : undefined;
 }
 
 /**
  * The owner's bot behind a message: the one the origin names (`AgentOrigin.bot`), else, for a message stored before it
- * named one, the bot whose chat thread sent it.
+ * named one, the bot whose chat thread sent it. A sender on another computer names no thread here, so no bot.
  */
 function botOfOrigin<T extends { id: string; homeThreadId?: string }>(origin: AgentOrigin, bots: readonly T[]): T | undefined {
-  return origin.bot ? bots.find((bot) => bot.id === origin.bot!.id) : bots.find((bot) => bot.homeThreadId === origin.threadId);
+  if (origin.bot) return bots.find((bot) => bot.id === origin.bot!.id);
+  return origin.threadId ? bots.find((bot) => bot.homeThreadId === origin.threadId) : undefined;
 }
 
 /**

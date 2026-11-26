@@ -38,7 +38,8 @@ export const SteerGroup = memo(function SteerGroup({ messages, UserMessageCompon
       </div>
       <div className="steer-group-messages">
         {messages.map((message) => (
-          <div key={message.id} data-steered-id={message.id} className="steer-group-item group/user-message">
+          // `data-prompt-id`: each steered message has its own tick on the prompt rail, which finds it by that id.
+          <div key={message.id} data-steered-id={message.id} data-prompt-id={message.id} className="steer-group-item group/user-message">
             <UserMessageComponent message={message} className={className} enableImagePreview={enableImagePreview} />
             {renderActions?.(message)}
           </div>

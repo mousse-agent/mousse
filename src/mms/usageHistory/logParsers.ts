@@ -222,15 +222,30 @@ function antigravityBrainDirs(geminiDir: string): string[] {
   ]
 }
 
+/** A profile's Antigravity entries: the first one's folder, and each added entry's own home (`harness/antigravity_<slug>/home`). */
+function profileAntigravityBrains(profileHome: string): string[] {
+  const brains = [join(profileHome, 'providers', 'antigravity', 'gemini-home', 'antigravity-acp', 'brain')]
+  try {
+    const harnessDir = join(profileHome, 'harness')
+    for (const entry of readdirSync(harnessDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith('antigravity_')) continue
+      brains.push(join(harnessDir, entry.name, 'home', 'gemini-home', 'antigravity-acp', 'brain'))
+    }
+  } catch {
+    // No added entries.
+  }
+  return brains
+}
+
 function mousseAntigravityBrains(): string[] {
   const brains: string[] = []
   for (const mousseDir of [...env('MOUSSE_HOME'), join(home(), '.mousse')]) {
-    brains.push(join(mousseDir, 'providers', 'antigravity', 'gemini-home', 'antigravity-acp', 'brain'))
+    brains.push(...profileAntigravityBrains(mousseDir))
     try {
       const profilesDir = join(mousseDir, 'profiles')
       for (const entry of readdirSync(profilesDir, { withFileTypes: true })) {
         if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
-        brains.push(join(profilesDir, entry.name, 'providers', 'antigravity', 'gemini-home', 'antigravity-acp', 'brain'))
+        brains.push(...profileAntigravityBrains(join(profilesDir, entry.name)))
       }
     } catch {
       // No profiles folder yet.

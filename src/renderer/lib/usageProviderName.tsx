@@ -9,6 +9,7 @@ const COMPANIES: Record<string, string> = {
   claude: 'Anthropic',
   anthropic: 'Anthropic',
   google: 'Google',
+  antigravity: 'Google',
   copilot: 'GitHub',
   cursor: 'Cursor',
   aws: 'Amazon',

@@ -4,6 +4,7 @@ import { resolveModelChoice } from '../../lib/modelChoice'
 import { isRunningSubagent, type SubagentSummary } from '../../../shared/subagents'
 import { formatAgo } from '../../lib/formatAgo'
 import type { SubagentCardModel } from '../../chat/adapters/subagentCards'
+import type { Thread } from '../../../shared/types'
 
 /** Finished rows shown, once their group is open, before the list asks to be expanded. */
 export const LINEAGE_COLLAPSED_COUNT = 5
@@ -228,4 +229,18 @@ export async function stopAllSubagents(
     }
     await Promise.allSettled(subagents.filter(isRunningSubagent).map((row) => api.abort(row.childThreadId)))
   }
+}
+
+/** What a row of Started threads reads from a thread. */
+export type LaunchedThread = Pick<Thread, 'id' | 'name' | 'updatedAt' | 'hidden' | 'archivedAt' | 'node' | 'createdByThreadId' | 'startedByBot' | 'startedFrom'>
+
+/**
+ * The threads `threadId` started with `thread_create`, newest first: here (`createdByThreadId`), and on another computer
+ * (a row of that computer whose `startedFrom.agent` names this thread). The person reaches them here, since a thread an
+ * agent starts is out of the sidebar unless it was started as independent. Archived ones are left out, as in the sidebar.
+ */
+export function launchedThreadsOf<T extends LaunchedThread>(threads: readonly T[], threadId: string): T[] {
+  return threads
+    .filter((thread) => !thread.archivedAt && !thread.startedByBot && (thread.node ? thread.startedFrom?.agent?.thread === threadId : thread.createdByThreadId === threadId))
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
 }

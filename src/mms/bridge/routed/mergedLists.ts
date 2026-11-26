@@ -56,10 +56,35 @@ const SAME_AS_TTL_MS = 10 * 60_000
 const READ_POLL_MS = 30_000
 const RETRY_MIN_MS = 5_000
 const RETRY_MAX_MS = 5 * 60_000
+/**
+ * How long a lists stream stays up after catching up before a failure counts as a new run of failures: until then
+ * the backoff keeps growing and the copy on disk is not dropped again.
+ */
+const STEADY_MS = 60_000
 /** The copy of a computer's lists is written at most this often, and only when it changed. */
 const CACHE_SETTLE_MS = 30_000
 /** After a failed match the other computer is asked again no sooner than this. */
 const MATCH_RETRY_MS = 60_000
+/**
+ * Errors of the copy this computer keeps of a computer's lists, rather than of the computer: it holds another stream
+ * than the one the computer now offers (`conflict`, also a stream read through another pairing), it lost its place
+ * (`snapshot_required`, `stream_unknown`), or a record in it does not check (`bad_signature`, `forbidden`). The copy is
+ * only a cache: it is dropped, and the lists are read fresh.
+ */
+const COPY_ERRORS: ReadonlySet<string> = new Set([
+  'conflict',
+  'snapshot_required',
+  'stream_unknown',
+  'bad_signature',
+  'forbidden'
+])
+/** The code of an error, for the log and the computer's status. */
+const codeOf = (error: unknown): string =>
+  error instanceof NetError || error instanceof DomainRpcError
+    ? error.code
+    : error instanceof Error
+      ? error.name
+      : 'internal'
 
 interface Computer {
   node: NodeId
@@ -90,6 +115,12 @@ interface Computer {
   attaching?: Promise<void>
   retryAt: number
   failures: number
+  /** Why its lists cannot be read now (an error code), until they are again. */
+  error?: string
+  /** Its copy on disk was dropped in this run of failures: it is not dropped again until the stream is steady. */
+  copyDropped?: boolean
+  /** When its lists stream last caught up; a failure `STEADY_MS` after that starts a new run of failures. */
+  caughtUpAt?: number
   /** A project of the computer (qualified id) and the project of this computer with the same Git history. */
   sameAs: Map<string, string>
   /** The weaker matches: see `Project.similarTo`. */
@@ -103,7 +134,7 @@ interface Computer {
 
 export interface MergedListsOptions {
   services: MmsProfileServices
-  hub: Pick<BridgeHub, 'attach' | 'threads' | 'projects'>
+  hub: Pick<BridgeHub, 'attach' | 'threads' | 'projects' | 'dropCopy'>
   client: Pick<RoutedClient, 'openStream' | 'closeStream' | 'call'>
   store: SqliteRemoteLists
   /** This computer's node. */
@@ -222,14 +253,27 @@ export class MergedLists implements RemoteListsPort {
   }
 
   /** The computers that are listed, for tests and the device screens. */
-  state(): Array<{ node: NodeId; online: boolean; live: boolean; mode: string; threads: number }> {
+  state(): Array<{
+    node: NodeId
+    online: boolean
+    live: boolean
+    mode: string
+    threads: number
+    error?: string
+  }> {
     return [...this.computersByNode.values()].map((c) => ({
       node: c.node,
       online: c.online,
       live: c.live,
       mode: c.mode,
-      threads: c.threads.size
+      threads: c.threads.size,
+      ...(c.error ? { error: c.error } : {})
     }))
+  }
+
+  /** Why the lists of `node` cannot be read now (an error code), while they cannot. */
+  lastError(node: NodeId): string | undefined {
+    return this.computersByNode.get(node)?.error
   }
 
   private computerOf(ref: ComputerRef): Computer {
@@ -403,6 +447,13 @@ export class MergedLists implements RemoteListsPort {
     this.markOffline(c)
   }
 
+  /** What the threads of `c` do is not known now: their statuses go, and the windows are told. */
+  private clearActivity(c: Computer): void {
+    if (!c.activity.size) return
+    c.activity = new Map()
+    this.pushLists(false, false, true)
+  }
+
   /**
    * The rows stay, marked `offline` (the computer cannot be reached) or `notShared` (it refused this one:
    * it blocked it or turned sharing off). Statuses are dropped: what the threads do is not known.
@@ -442,6 +493,17 @@ export class MergedLists implements RemoteListsPort {
     this.pushLists(threads, projects, hadActivity)
   }
 
+  /** How the lists stream of `c` is attached: its own room, opened by asking the computer. */
+  private listsStream(c: Computer) {
+    return {
+      room: 'lists' as const,
+      open: async () => {
+        const opened = await this.options.client.openStream(c.node, { kind: 'lists' })
+        return { descriptor: opened.descriptor as StreamDescriptor, head: opened.head }
+      }
+    }
+  }
+
   private async attach(c: Computer): Promise<void> {
     if (c.attached || c.attaching) return c.attaching
     const { hub, client } = this.options
@@ -456,18 +518,34 @@ export class MergedLists implements RemoteListsPort {
             // The stream was ended. `forbidden` is a no: the computer blocked this one or turned sharing off.
             c.attached = undefined
             c.live = false
+            this.failed(c, code)
             if (code === 'forbidden') this.refuse(c)
-            else {
+            else if (this.options.online(c.node)) {
+              // The session is up: the rows stay as they are while the stream is opened again, but what their
+              // threads do is not known until it is.
+              this.clearActivity(c)
+              if (COPY_ERRORS.has(code) && !c.copyDropped) {
+                c.attaching = this.dropCopy(c).finally(() => {
+                  c.attaching = undefined
+                })
+                return
+              }
+              this.backOff(c)
+            } else {
               this.markOffline(c)
               this.backOff(c)
             }
           },
-          {
-            room: 'lists',
-            open: async () => {
-              const opened = await client.openStream(c.node, { kind: 'lists' })
-              return { descriptor: opened.descriptor as StreamDescriptor, head: opened.head }
+          this.listsStream(c),
+          undefined,
+          (caught) => {
+            if (!caught) {
+              // Steady means it stayed caught up, so falling behind starts the clock again.
+              c.caughtUpAt = undefined
+              return
             }
+            c.caughtUpAt = this.now()
+            this.worked(c)
           }
         )
         // The computer left the list (or routing went off) while the stream was being opened: let it go again.
@@ -478,7 +556,6 @@ export class MergedLists implements RemoteListsPort {
         }
         c.attached = handle
         c.mode = 'stream'
-        c.failures = 0
       } catch (error) {
         if (this.closed) return
         if (error instanceof DomainRpcError && error.code === 'computer_outdated') {
@@ -488,11 +565,22 @@ export class MergedLists implements RemoteListsPort {
           return
         }
         c.mode = 'none'
+        const code = codeOf(error)
+        this.failed(c, code)
         if (error instanceof DomainRpcError && error.code === 'computer_forbidden') {
           this.refuse(c)
           return
         }
         if (error instanceof DomainRpcError && error.code === 'computer_offline') c.online = false
+        else if (this.options.online(c.node)) {
+          // The session is up, so the computer is not offline: its rows stay as they are (their statuses go), and
+          // the stream is opened again, once a copy that cannot be read is dropped.
+          this.clearActivity(c)
+          if (error instanceof NetError && COPY_ERRORS.has(code) && !c.copyDropped)
+            await this.dropCopy(c)
+          else this.backOff(c)
+          return
+        }
         this.markOffline(c)
         this.backOff(c)
       }
@@ -500,6 +588,56 @@ export class MergedLists implements RemoteListsPort {
       c.attaching = undefined
     })
     return c.attaching
+  }
+
+  /**
+   * Drops the copy of the computer's lists on disk (the stream and its records; the rows shown and the cache of
+   * them stay), so the next attach reads the lists fresh. Once per run of failures.
+   */
+  private async dropCopy(c: Computer): Promise<void> {
+    c.copyDropped = true
+    try {
+      const dropped = await this.options.hub.dropCopy(
+        { nodeId: c.node, entityId: PRIVATE_LISTS_SUBJECT },
+        this.listsStream(c)
+      )
+      if (dropped)
+        console.warn('[lists] dropped the copy of the lists of a computer, to read them fresh', {
+          node: c.node,
+          code: c.error
+        })
+      this.backOff(c)
+    } catch (error) {
+      if (this.closed) return
+      console.warn('[lists] could not drop the copy of the lists of a computer', {
+        node: c.node,
+        code: codeOf(error)
+      })
+      this.backOff(c)
+    }
+  }
+
+  /** The lists of `c` could not be read: said in the log once per run of failures (and when the reason changes). */
+  private failed(c: Computer, code: string): void {
+    // A stream that stayed up a while after catching up ends a run of failures: this one starts the next.
+    if (c.caughtUpAt !== undefined && this.now() - c.caughtUpAt >= STEADY_MS) {
+      c.failures = 0
+      c.copyDropped = false
+    }
+    c.caughtUpAt = undefined
+    if (c.error === code) return
+    c.error = code
+    console.warn('[lists] cannot read the lists of a computer', {
+      node: c.node,
+      code,
+      online: this.options.online(c.node)
+    })
+  }
+
+  private worked(c: Computer): void {
+    if (!c.error) return
+    console.info('[lists] reading the lists of a computer again', { node: c.node, after: c.error })
+    c.error = undefined
   }
 
   /**
@@ -540,7 +678,9 @@ export class MergedLists implements RemoteListsPort {
         chats: []
       }
       this.ingest(c, snapshot, true)
-    } catch {
+      this.worked(c)
+    } catch (error) {
+      this.failed(c, codeOf(error))
       this.markOffline(c)
     }
   }

@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
 import type { StatusDescription } from '../../../shared/harness/status'
 import { ProviderIcon } from '../../lib/providerIcons'
-import { Check, CircleArrowUp, Copy, Folder, Layers, RefreshCw, RotateCcw } from '../../lib/icons'
+import { Check, CircleArrowUp, Copy, Folder, RefreshCw } from '../../lib/icons'
 import { Switch } from '../settings/SettingsRow'
 import { ipcErrorMessage } from '../../utils/voiceErrors'
-import type { SwitchState } from './providerView'
+import { ProvidersComputerContext } from '../../lib/providersComputer'
 
 /** Only warning and error show a dot. */
 export function needsAttention(status: StatusDescription): boolean {
@@ -116,6 +116,9 @@ export function BrowseButton({
   onPick: (path: string) => void
 }) {
   const [picking, setPicking] = useState(false)
+  // This computer's file picker cannot choose a path on another computer: its path is typed instead.
+  const remote = Boolean(useContext(ProvidersComputerContext).node)
+  if (remote) return null
   const browse = async () => {
     setPicking(true)
     try {
@@ -160,56 +163,10 @@ export function CommandBox({ command, label = 'Copy command', onCopy }: { comman
   )
 }
 
-/** The "Overridden for this project" marker; opens where the value comes from. */
-function OverrideInheritance({ projectEnabled, deviceEnabled }: { projectEnabled: boolean; deviceEnabled: boolean }) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLSpanElement>(null)
-  useEffect(() => {
-    if (!open) return
-    const close = (event: MouseEvent) => {
-      if (!ref.current?.contains(event.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', close)
-    return () => document.removeEventListener('mousedown', close)
-  }, [open])
-  const layers = [
-    { key: 'project', label: 'Project', enabled: projectEnabled, effective: true },
-    { key: 'device', label: 'Device', enabled: deviceEnabled, effective: false }
-  ]
-  return (
-    <span className="prov-override" ref={ref}>
-      <button
-        type="button"
-        className="settings-icon-btn prov-micro"
-        title="Overridden for this project"
-        aria-label="Overridden for this project. Show where this value comes from"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <Layers size={12} />
-      </button>
-      {open && (
-        <ol className="prov-override-pop" role="list">
-          {layers.map((layer) => (
-            <li key={layer.key} className={layer.effective ? 'is-effective' : undefined}>
-              <span>{layer.label}</span>
-              <span className="prov-override-value">
-                {layer.enabled ? 'On' : 'Off'}
-                {layer.effective ? <Check size={13} aria-hidden="true" /> : <span className="prov-override-pad" aria-hidden="true" />}
-              </span>
-            </li>
-          ))}
-        </ol>
-      )}
-    </span>
-  )
-}
-
 /**
  * A provider in the list pane: logo, name and version, then the status
  * line; the enable switch on the right. Selection is a background fill only. Switched off, the row
- * is dimmed until hovered or selected. In a project scope an override shows its marker and reset
- * under the status, so the name keeps the row's width (it wraps rather than truncates).
+ * is dimmed until hovered or selected.
  */
 export function ProviderListRow({
   iconId,
@@ -217,11 +174,10 @@ export function ProviderListRow({
   version,
   update,
   status,
-  toggle,
+  enabled,
   selected,
   onSelect,
-  onToggle,
-  onReset
+  onToggle
 }: {
   iconId: string
   name: string
@@ -229,12 +185,11 @@ export function ProviderListRow({
   /** An update is available: a small button takes the version's place, off while it runs. */
   update?: { label: string; busy?: boolean; onClick: () => void }
   status: StatusDescription
-  toggle: SwitchState
+  /** The provider is on for the computer the page shows. */
+  enabled: boolean
   selected: boolean
   onSelect: () => void
   onToggle: (enabled: boolean) => Promise<void>
-  /** Clears the project override; only passed in a project scope. */
-  onReset?: () => Promise<void>
 }) {
   const [busy, setBusy] = useState(false)
   const run = (action: () => Promise<void>) => {
@@ -242,7 +197,7 @@ export function ProviderListRow({
     void action().finally(() => setBusy(false))
   }
   return (
-    <div className={`prov-item${selected ? ' is-selected' : ''}${toggle.checked ? '' : ' is-off'}`}>
+    <div className={`prov-item${selected ? ' is-selected' : ''}${enabled ? '' : ' is-off'}`}>
       <div className="prov-item-main">
         <button type="button" className="prov-item-hit" onClick={onSelect} aria-label={`Select ${name}`} aria-pressed={selected} />
         <span className="prov-logo">
@@ -269,32 +224,10 @@ export function ProviderListRow({
             )}
           </span>
           <CompactStatus status={status} />
-          {toggle.overridden && onReset && (
-            <span className="prov-item-override">
-              <OverrideInheritance projectEnabled={toggle.checked} deviceEnabled={toggle.deviceEnabled} />
-              <button
-                type="button"
-                className="settings-icon-btn prov-micro"
-                title="Reset to the device setting"
-                aria-label={`Reset ${name} enablement to the device setting`}
-                disabled={busy}
-                onClick={() => run(onReset)}
-              >
-                <RotateCcw size={12} />
-              </button>
-            </span>
-          )}
         </span>
       </div>
       <span className="prov-item-controls">
-        <span title={toggle.locked ? 'Turned off on this device. Turn it on for the device first.' : undefined}>
-          <Switch
-            checked={toggle.checked}
-            label={`Enable ${name}`}
-            disabled={busy || toggle.locked}
-            onChange={(next) => run(() => onToggle(next))}
-          />
-        </span>
+        <Switch checked={enabled} label={`Enable ${name}`} disabled={busy} onChange={(next) => run(() => onToggle(next))} />
       </span>
     </div>
   )

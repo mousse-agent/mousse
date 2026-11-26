@@ -1,0 +1,137 @@
+/* Add to machine: the project, then rows on the dialog's own surface (no inner surfaces), then the status line. */
+.add-machine {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  min-width: min(440px, calc(100vw - 64px));
+}
+
+.add-machine-project {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-width: 0;
+  font-size: 13.5px;
+}
+
+.add-machine-project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.add-machine-muted {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.add-machine-rows {
+  background: transparent;
+  box-shadow: none;
+}
+
+.add-machine-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Online or not: a small status dot by the name. */
+.add-machine-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary, var(--text-secondary));
+  opacity: 0.6;
+}
+
+.add-machine-dot.online {
+  background: var(--success);
+  opacity: 1;
+}
+
+.add-machine-code {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.add-machine-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.add-machine-browser {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.add-machine-browser-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.add-machine-browser-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+/* Back and Use this folder: the same 28px controls as the rest of the dialog. */
+.add-machine-browser-head .settings-btn {
+  height: var(--settings-control-h);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small);
+}
+
+/* As tall as the rows it replaces, so the dialog does not jump when browsing starts. */
+.add-machine-browser-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 160px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+/* A line in place of the list (it could not be read, or it is empty), on the dialog's left edge. */
+.add-machine-browser-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  height: 28px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.add-machine-browser-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  height: 28px;
+  padding: 0 var(--space-8);
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.add-machine-browser-row:hover,
+button.add-machine-browser-row:focus-visible {
+  outline: none;
+  background: var(--ui-hover);
+}

@@ -89,11 +89,76 @@ it('uses the owning computer’s workspace lookup for a remote thread', async ()
   const getActiveProjectPath = vi.fn(async () => PROJECT)
   const getStatus = vi.fn(async () => ({ metadata: { lifecycle: 'ready' }, execution: { projectPath: WORKTREE, lifecycle: 'ready', generation: 4 } }))
   const heads = vi.fn()
-  ;(window as unknown as { mousse: unknown }).mousse = { app: { getActiveProjectPath }, workspace: { getStatus }, git: { heads } }
+  // The window reads the computers too; none are listed here.
+  const platformRequest = { request: async () => { throw new Error('Net is off') } }
+  ;(window as unknown as { mousse: unknown }).mousse = { app: { getActiveProjectPath }, workspace: { getStatus }, git: { heads }, platformRequest }
   act(() => root.render(createElement(Probe)))
   await flush()
   expect(getStatus).toHaveBeenCalledWith(threadId, false)
   expect(seen).toMatchObject({ path: WORKTREE, workspaceThreadId: threadId, workspaceGeneration: 4 })
   expect(heads).not.toHaveBeenCalled()
   expect(getActiveProjectPath).not.toHaveBeenCalled()
+})
+
+describe('a remote thread whose computer was offline when its folder was looked up', () => {
+  const node = 'nod_0123456789abcdefghjkmnpqrs'
+  const threadId = qualifyId(node, 't1')
+  let online = false
+  let netChanged: (() => void) | undefined
+  let getStatus: ReturnType<typeof vi.fn>
+  let profiles = 0
+
+  beforeEach(() => {
+    online = false
+    const thread = useAppStore.getState().threads[0]!
+    // A profile of its own: a lookup of the same thread made in the last two seconds would be shared.
+    useAppStore.setState({ profileId: `prf-${++profiles}`, activeThreadId: threadId, threads: [{ ...thread, id: threadId, projectId: qualifyId(node, 'p1'), node }] })
+    getStatus = vi.fn(async () => {
+      if (!online) throw new Error("Error invoking remote method 'workspace:getStatus': Error: The Mac is offline.")
+      return { metadata: { lifecycle: 'ready' }, execution: { projectPath: WORKTREE, lifecycle: 'ready', generation: 4 } }
+    })
+    // The computers as the window reads them: the device list, and Net's word that a device connected or dropped.
+    const request = vi.fn(async (method: string) => {
+      if (method === 'net.status') return { enabled: false, keystore: 'unlocked' }
+      if (method === 'netEngine.status') return { on: true }
+      if (method === 'bridge.nodes') return { nodes: [{ node, name: 'Mac', kind: 'desktop', state: online ? 'open' : 'closed' }] }
+      throw new Error(`unexpected ${method}`)
+    })
+    ;(window as unknown as { mousse: unknown }).mousse = {
+      app: { getActiveProjectPath: async () => PROJECT },
+      workspace: { getStatus },
+      git: { heads: vi.fn() },
+      platformRequest: { request },
+      net: { onUpdated: (listener: () => void) => { netChanged = listener; return () => { netChanged = undefined } } }
+    }
+  })
+
+  it('shows the folder once that computer is listed online again, without Retry', async () => {
+    act(() => root.render(createElement(Probe)))
+    await flush()
+    expect(seen).toMatchObject({ path: null, workspaceThreadId: threadId })
+    expect(seen?.unavailable).toMatch(/offline/)
+
+    online = true
+    await act(async () => { netChanged?.() })
+    await flush()
+    await flush()
+    expect(seen).toMatchObject({ path: WORKTREE, workspaceThreadId: threadId, workspaceGeneration: 4 })
+  })
+
+  it('looks again at most once per reading of the computers while the lookup keeps failing', async () => {
+    // The device list says online, but the lookup still fails (the computer dropped again in between).
+    online = true
+    getStatus.mockRejectedValue(new Error('The Mac is offline.'))
+    act(() => root.render(createElement(Probe)))
+    for (let i = 0; i < 5; i += 1) await flush()
+    const settled = getStatus.mock.calls.length
+    expect(settled).toBeLessThanOrEqual(2)
+    for (let i = 0; i < 5; i += 1) await flush()
+    expect(getStatus.mock.calls.length).toBe(settled)
+
+    await act(async () => { netChanged?.() })
+    for (let i = 0; i < 3; i += 1) await flush()
+    expect(getStatus.mock.calls.length).toBe(settled + 1)
+  })
 })

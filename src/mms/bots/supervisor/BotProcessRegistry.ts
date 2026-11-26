@@ -95,6 +95,7 @@ export function spawnBotSupervisor(script: string, execPath = process.execPath):
     const env: NodeJS.ProcessEnv = {}
     for (const [key, value] of Object.entries(process.env)) if (!DROPPED_ENV.test(key)) env[key] = value
     env.ELECTRON_RUN_AS_NODE = '1'
+    // eslint-disable-next-line mousse/no-console-window -- A bot supervisor outlives the daemon. It is Electron as Node, a GUI program with no console that starts plain spawns hidden.
     const child = spawn(execPath, [script, ...botSupervisorArgv(args)], { detached: true, stdio: 'ignore', windowsHide: true, env })
     child.on('error', (error) => console.warn('[bots] the bot supervisor failed', { dispatchId: args.dispatchId, error: error.message }))
     child.unref()

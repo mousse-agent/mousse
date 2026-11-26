@@ -110,6 +110,21 @@ describe('a message another thread\'s agent sent', () => {
     expect(header(bubble!)!.querySelector('a')).toBeNull()
   })
 
+  it('an agent on another computer is named by the title it sent, with nothing to open here, and offers no Edit', async () => {
+    // As the routed send stores it: the envelope this computer built, and the sender as `from` (no thread of this computer).
+    const letter = agentMessage('far-thread', 'Yo', WORDS, { computer: 'ANIMATRIX' })
+    const far: ChatMessage = {
+      id: 'm1', role: 'user', content: letter.text, timestamp: '2026-11-15T10:00:00.000Z', turnId: 't1',
+      origin: { kind: 'agent', from: { node: 'nod_far', thread: 'far-thread', run: 'run:far', title: 'Yo' }, hops: 1, body: { head: letter.head, tail: letter.tail } }
+    }
+    await show([far, reply('t1')])
+    const [bubble] = bubbles()
+    expect(header(bubble!)?.textContent).toBe('Agent·Yo')
+    expect(header(bubble!)!.querySelector('a')).toBeNull()
+    expect(bubble!.querySelector('.chat-user-text')?.textContent).toBe(WORDS)
+    expect(prompt('m1').querySelector('button[aria-label="Edit"]')).toBeNull()
+  })
+
   it('a message stored before its words were marked shows whole, still labelled', async () => {
     const old = sent('m1', 't1', { body: undefined, title: undefined })
     await show([old, reply('t1')])

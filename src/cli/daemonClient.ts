@@ -151,6 +151,7 @@ async function spawnDaemon(homeDir: string): Promise<void> {
     host.command,
     [...host.argsPrefix, 'service', 'run', '--home', homeDir],
     {
+      // eslint-disable-next-line mousse/no-console-window -- The daemon outlives the CLI. Its host is Electron as Node, a GUI program with no console that starts plain spawns hidden.
       detached: true,
       stdio: 'ignore',
       env: { ...host.env, MOUSSE_HOME: homeDir },

@@ -1,4 +1,4 @@
-import { ROUTED_DEADLINE_KEY, type RoutedAgentMark } from '../../shared/bridge/routed'
+import { ROUTED_DEADLINE_KEY, ROUTED_METHODS, type RoutedAgentMark } from '../../shared/bridge/routed'
 import { isPermissionMode, narrowPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { DomainRpcError } from '../protocol/domainRegistry'
 
@@ -48,6 +48,11 @@ export interface RemoteThreadStart {
   /** The far project that is the same repository; null for a thread with no project. */
   projectId: string | null
   worktree: boolean
+  /**
+   * Whether that computer keeps the thread out of its sidebar; sent only when given (none shows it, as before) and
+   * dropped for a computer from before it (`ROUTED_DROPPABLE_KEYS`).
+   */
+  hidden?: boolean
   /** The model chosen with the thread (both, or neither: that computer's default). */
   instanceId: string | null
   model: string | null
@@ -105,6 +110,28 @@ export function sendRefusal(sent: unknown, name: string, what = 'the task'): { c
 }
 
 /**
+ * The `hidden` a create of a new thread on `node` sends, from what is stored (`stored`; null sends none). A computer from
+ * before `hidden` on `threads.create` is sent the create without it (`routedParamsForOwner`), so the choice becomes none
+ * and `drop` stores that before anything goes out: every retry then sends what the first attempt put on the wire, even
+ * after that computer is updated, and is never taken as another request under the same key. Asked only before the
+ * thread exists there; a port that cannot tell the versions keeps the stored choice.
+ */
+export async function hiddenOnTheWire(
+  port: { versions?(node: string, signal?: AbortSignal): Promise<Record<string, number> | undefined> },
+  node: string,
+  stored: boolean | null,
+  created: boolean,
+  drop: () => void,
+  signal?: AbortSignal
+): Promise<boolean | null> {
+  if (stored === null || created || !port.versions) return stored
+  const versions = await port.versions(node, signal)
+  if ((versions?.['threads.create'] ?? 0) >= (ROUTED_METHODS['threads.create']?.since?.hidden ?? 1)) return stored
+  drop()
+  return null
+}
+
+/**
  * Runs the steps not yet done. `setModel` runs with the create that made the thread, or while `modelPending`; the mode is
  * set before every send, so a follow-up runs no looser than the run that sent it.
  */
@@ -117,6 +144,7 @@ export async function runRemoteThreadStart(start: RemoteThreadStart, io: RemoteT
       name: start.name,
       ...(start.projectId ? { projectId: start.projectId } : {}),
       worktreeEnabled: start.worktree,
+      ...(start.hidden !== undefined ? { hidden: start.hidden } : {}),
       ...start.mark
     }, keys.create)
     const thread = isRecord(created) && isRecord(created.thread) ? created.thread : undefined

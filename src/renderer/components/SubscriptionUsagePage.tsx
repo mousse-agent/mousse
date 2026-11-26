@@ -27,7 +27,7 @@ import type { UsageRowActions } from './UsageRowMenu'
 import { Modal } from './ui/Modal'
 import { showToast } from './ui/Toast'
 import { readHiddenUsage, writeHiddenUsage } from '../lib/usageHidden'
-import { DEVICE_SCOPE, onProviderSignInChanged } from '../lib/providerSnapshots'
+import { onProviderSignInChanged } from '../lib/providerSnapshots'
 import { usageInstanceId } from '../lib/usageSections'
 import { UsageCardSkeleton, UsageCollapsibleSection, UsageListRow, UsageRefreshButton } from './UsageSections'
 import { motionAllowed } from './ui/Collapse'
@@ -544,7 +544,7 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
   const disable = async (provider: ProviderUsage) => {
     setDisableAsk(null)
     // The same switch as Settings → Providers: off on this computer; existing threads stay as they are.
-    await window.mousse.providers.instances.setEnabled(usageInstanceId(provider), DEVICE_SCOPE, false)
+    await window.mousse.providers.instances.setEnabled(usageInstanceId(provider), false)
     void loadUsage()
   }
   const rowActions = useMemo<UsageRowActions>(() => ({

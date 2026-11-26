@@ -47,9 +47,10 @@ export function windowsGitRuntime(load: NodeJS.Require, koffiPath: string) {
   const osHandleAddress = address(module, 'uv_get_osfhandle')
   const translateAddress = address(module, 'uv_translate_sys_error')
   if (!pipeAddress || !osHandleAddress || !translateAddress) throw failure('Loading the runtime pipe functions')
-  const pipeType = ffi.proto('int uv_pipe(_Out_ int *, int, int)')
-  const osHandleType = ffi.proto('void * uv_get_osfhandle(int)')
-  const translateType = ffi.proto('int uv_translate_sys_error(int)')
+  // Unnamed, so a second runtime in the same process does not redefine a koffi type name.
+  const pipeType = ffi.proto('int', [ffi.out(ffi.pointer('int')), 'int', 'int']) // uv_pipe
+  const osHandleType = ffi.proto('void *', ['int']) // uv_get_osfhandle
+  const translateType = ffi.proto('int', ['int']) // uv_translate_sys_error
   const createJob = kernel.func('void * __stdcall CreateJobObjectW(void *, str16)')
   const openJob = kernel.func('void * __stdcall OpenJobObjectW(uint32_t, int32_t, str16)')
   const setJob = kernel.func('__stdcall', 'SetInformationJobObject', 'int32_t', [handle, 'int32_t', ffi.pointer(extendedLimit), 'uint32_t'])
@@ -179,14 +180,19 @@ export function windowsGitRuntime(load: NodeJS.Require, koffiPath: string) {
       // PROC_THREAD_ATTRIBUTE_HANDLE_LIST and PROC_THREAD_ATTRIBUTE_JOB_LIST.
       if (!updateAttribute(attributes, 0, 0x20002, inherited, inherited.length, null, null) ||
           !updateAttribute(attributes, 0, 0x2000d, jobs, jobs.length, null, null)) throw failure('UpdateProcThreadAttribute')
-      // EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED.
-      const flags = 0x80404 | (options.detached ? 0x208 : options.windowsHide ? 0x08000000 : 0)
+      // EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED, plus CREATE_NEW_PROCESS_GROUP when
+      // detached. Hidden unless `windowsHide: false` asks otherwise: CREATE_NO_WINDOW gives Git a console without a
+      // window, which hooks and filters it starts share. Never DETACHED_PROCESS: without a console of its own, each
+      // console program Git starts would open a new, visible one.
+      const hide = options.windowsHide !== false
+      const flags = 0x80404 | (options.detached ? 0x200 : 0) | (hide ? 0x08000000 : 0)
       const command = Buffer.from([file, ...args].map(quote).join(' ') + '\0', 'utf16le')
       const environmentBlock = Buffer.from(block, 'utf16le')
       beforeStart?.()
       for (const item of handles) if (!setHandle(item, 1, 1)) throw failure('SetHandleInformation')
       if (!createProcess(application, command, null, null, 1, flags, environmentBlock, cwd, {
-        cb: ffi.sizeof(startup), flags: options.windowsHide ? 0x101 : 0x100,
+        // STARTF_USESTDHANDLES, and STARTF_USESHOWWINDOW with SW_HIDE (show stays 0) when hidden.
+        cb: ffi.sizeof(startup), flags: hide ? 0x101 : 0x100,
         stdin: handles[0], stdout: handles[1], stderr: handles[2], attributes
       }, info)) {
         const code = lastError()

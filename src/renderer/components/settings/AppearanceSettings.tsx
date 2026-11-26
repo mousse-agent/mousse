@@ -112,7 +112,7 @@ export function AppearanceSettings({
   const patch = (fields: Partial<AppearanceValues>): Promise<void> => onUpdate({ appearance: fields } as MousseSettingsUpdate)
   const setTheme = (theme: ThemeId) => { if (theme !== appearance.theme || userTheme) void patch({ theme, userTheme: '' }) }
   const pickUserTheme = (id: string) => { if (id !== appearance.userTheme) void patch({ userTheme: id }) }
-  const saveUserTheme = (theme: UserTheme) => void patch({ userThemes: userThemes.map((entry) => (entry.id === theme.id ? theme : entry)), userTheme: theme.id })
+  const saveUserTheme = (theme: UserTheme) => patch({ userThemes: userThemes.map((entry) => (entry.id === theme.id ? theme : entry)), userTheme: theme.id })
   const addUserTheme = (theme: UserTheme) => void patch({ userThemes: [...userThemes, theme], userTheme: theme.id })
   const newUserTheme = () => {
     const base = isUserThemeBase(appearance.theme) ? appearance.theme : 'dark'
@@ -164,7 +164,7 @@ export function AppearanceSettings({
   const themeAccent = userTheme?.accent || ''
   const shownAccent = themeAccent || appearance.accentColor
   const pickAccent = (accentColor: string) => {
-    if (userTheme && themeAccent) saveUserTheme({ ...userTheme, accent: accentColor.toLowerCase() })
+    if (userTheme && themeAccent) void saveUserTheme({ ...userTheme, accent: accentColor.toLowerCase() })
     else void onUpdate({ appearance: { ...appearance, accentColor } })
   }
   const accentChosen = options.accentColors.some((color) => color.value.toLowerCase() === shownAccent.toLowerCase())

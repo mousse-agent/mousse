@@ -184,7 +184,7 @@ describe('stopping chats when an instance is removed or turned off', () => {
     const { turn } = await startOn(harness, instanceId, { threadId: 'thread-1', attemptId: 'a1' })
     await vi.waitFor(() => expect(script.started).toHaveLength(1))
 
-    await harness.instances.setEnabled(instanceId, { kind: 'device' }, false)
+    await harness.instances.setEnabled(instanceId, false)
     expect(script.started[0]!.signal.aborted).toBe(true)
     expect(script.interrupts).toEqual([])
     gate.resolve()
@@ -216,7 +216,7 @@ describe('stopping chats when an instance is removed or turned off', () => {
     harness.stop()
   })
 
-  it('turning off on the device stops running turns; turning off for one project only refuses new ones', async () => {
+  it('turning off on the device stops running turns', async () => {
     const gate = deferred()
     const { adapter, script } = gatedAdapter(gate.promise, { refBeforeGate: true })
     const { harness, notices } = fakeHarness(() => adapter)
@@ -224,12 +224,7 @@ describe('stopping chats when an instance is removed or turned off', () => {
     const running = await startOn(harness, instanceId, { threadId: 'thread-1', attemptId: 'a1' })
     await vi.waitFor(() => expect(script.started).toHaveLength(1))
 
-    await harness.instances.setEnabled(instanceId, { kind: 'project', projectId: 'p1' }, false)
-    await sleep(20)
-    expect(script.stopThreads).toEqual([])
-    expect(script.started[0]!.signal.aborted).toBe(false)
-
-    await harness.instances.setEnabled(instanceId, { kind: 'device' }, false)
+    await harness.instances.setEnabled(instanceId, false)
     await vi.waitFor(() => expect(script.stopThreads).toEqual(['thread-1']))
     gate.resolve()
     expect(await codeOf(running.turn.result)).toBe('instance_disabled')
@@ -245,8 +240,8 @@ describe('stopping chats when an instance is removed or turned off', () => {
     const old = await startOn(harness, instanceId, { threadId: 'thread-1', attemptId: 'a1' })
     await vi.waitFor(() => expect(script.started).toHaveLength(1))
 
-    await harness.instances.setEnabled(instanceId, { kind: 'device' }, false)
-    await harness.instances.setEnabled(instanceId, { kind: 'device' }, true)
+    await harness.instances.setEnabled(instanceId, false)
+    await harness.instances.setEnabled(instanceId, true)
     const fresh = await startOn(harness, instanceId, { threadId: 'thread-2', attemptId: 'a2' })
     await vi.waitFor(() => expect(script.started).toHaveLength(2))
     gate.resolve()
@@ -270,13 +265,13 @@ describe('stopping chats when an instance is removed or turned off', () => {
     await vi.waitFor(() => expect(scripts.some((script) => script.started.length === 1)).toBe(true))
     const first = scripts.find((script) => script.started.length === 1)!
 
-    await harness.instances.setEnabled(instanceId, { kind: 'device' }, false)
+    await harness.instances.setEnabled(instanceId, false)
     await vi.waitFor(() => expect(first.stopThreads).toEqual(['thread-1']))
     // The old attempt ends while its stop is still held, then a setting change replaces the runtime.
     gate.resolve()
     expect(await codeOf(old.turn.result)).toBe('instance_disabled')
     await harness.instances.configure(instanceId, { env: { A: '1' } })
-    await harness.instances.setEnabled(instanceId, { kind: 'device' }, true)
+    await harness.instances.setEnabled(instanceId, true)
 
     const fresh = await startOn(harness, instanceId, { threadId: 'thread-2', attemptId: 'a2' })
     const next = scripts.at(-1)!
@@ -313,9 +308,9 @@ describe('stopping chats when an instance is removed or turned off', () => {
     const next = scripts.at(-1)!
     expect(next).not.toBe(first)
 
-    await harness.instances.setEnabled(instanceId, { kind: 'device' }, false)
+    await harness.instances.setEnabled(instanceId, false)
     await vi.waitFor(() => expect(first.stopThreads).toEqual(['thread-1']))
-    await harness.instances.setEnabled(instanceId, { kind: 'device' }, true)
+    await harness.instances.setEnabled(instanceId, true)
     const fresh = harness.startTurn(turnSpec(instanceId, binding, { threadId: 'thread-2', attemptId: 'a2' }))
     await sleep(50)
     expect(next.started).toHaveLength(0)
@@ -331,10 +326,10 @@ describe('stopping chats when an instance is removed or turned off', () => {
     const { harness } = fakeHarness(() => adapter)
     const { instanceId } = await harness.instances.add({ driver: 'claude', config: { displayName: 'Work' } })
     const binding = await harness.bind(harness.resolveStored({ instanceId, llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'agent' })
-    await harness.instances.setEnabled(instanceId, { kind: 'device' }, false)
+    await harness.instances.setEnabled(instanceId, false)
     expect(await codeOf(harness.startTurn(turnSpec(instanceId, binding, { threadId: 'thread-1', attemptId: 'a1' })).result)).toBe('instance_disabled')
     expect(script.started).toHaveLength(0)
-    await harness.instances.setEnabled(instanceId, { kind: 'device' }, true)
+    await harness.instances.setEnabled(instanceId, true)
     await expect(harness.startTurn(turnSpec(instanceId, binding, { threadId: 'thread-1', attemptId: 'a2' })).result).resolves.toMatchObject({ text: 'ok' })
     harness.stop()
   })
@@ -550,7 +545,7 @@ describe('stopping chats on the real Claude adapter', () => {
       const turn = await rig.startWithCwd('thread-1', 'a1')
       await vi.waitFor(() => expect(rig.resolves()).toBe(1))
       if (how === 'remove') await rig.harness.instances.remove('claude:work')
-      else await rig.harness.instances.setEnabled('claude:work', { kind: 'device' }, false)
+      else await rig.harness.instances.setEnabled('claude:work', false)
       gate.resolve()
       expect(await codeOf(turn.result)).toBe(code)
       expect(rig.turnQueries).toHaveLength(0)
@@ -568,10 +563,10 @@ describe('stopping chats on the real Claude adapter', () => {
       const old = await rig.startWithCwd('thread-a', 'a1')
       await vi.waitFor(() => expect(rig.resolves()).toBe(1))
 
-      await rig.harness.instances.setEnabled('claude:work', { kind: 'device' }, false)
+      await rig.harness.instances.setEnabled('claude:work', false)
       await vi.waitFor(() => expect(rig.stopCalls).toEqual(['thread-a']))
       // The service's stop is still pending when the instance is turned on again.
-      await rig.harness.instances.setEnabled('claude:work', { kind: 'device' }, true)
+      await rig.harness.instances.setEnabled('claude:work', true)
 
       gate.resolve()
       expect(await codeOf(old.result)).toBe('instance_disabled')

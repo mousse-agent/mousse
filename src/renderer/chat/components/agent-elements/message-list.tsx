@@ -34,7 +34,7 @@ import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { ArrowShrink, CircleCheck, GitFork, History, ThinkingIcon, IconChevronDown, IconChevronRight, IconInfoCircle, IconX, MessageSquare, RefreshCw, RowTools, Square } from "../../../lib/icons";
+import { ArrowShrink, CircleCheck, GitFork, History, ThinkingIcon, IconChevronDown, IconChevronRight, IconInfoCircle, IconX, MessageSquare, RefreshCw, RowSubagent, RowTools, Square } from "../../../lib/icons";
 import {
   formatResponseTime,
   formatTokens,
@@ -53,6 +53,8 @@ import {
   isWaitingPermissionRequest,
 } from "./tools/permission-request";
 import { SubagentCardGroup } from "./tools/SubagentCard";
+import { isCardRunning } from "./tools/subagent-card-logic";
+import type { SubagentCardModel } from "../../adapters/subagentCards";
 import { SecretRequestInline, isSecretRequestPart, isWaitingSecretRequest } from "../../../components/secrets/secretRequestPart";
 import { BackgroundNotice, SettleNotice, SubagentNotice } from "./tools/SubagentNotice";
 import { SteerGroup } from "./steer-group";
@@ -293,6 +295,7 @@ function TurnWorkStatus({
   endYieldsToNotice = false,
   fold,
   foldedReplies = 0,
+  foldedSubagents = 0,
   waits,
   continued = false,
 }: {
@@ -312,6 +315,8 @@ function TurnWorkStatus({
   fold?: { open: boolean; onToggle: () => void; hiddenRuns?: readonly string[] };
   /** How many replies with text the fold hides, said on a finished turn's line so an earlier answer is not missed. */
   foldedReplies?: number;
+  /** How many distinct subagents the fold hides, said on a finished turn's line beside the reply count. */
+  foldedSubagents?: number;
   /** While the turn runs: when it waited on the person, which its time does not count. */
   waits?: readonly WaitSpan[];
   /** The line after a steered message: "Continued for …", the time of the work that answered it. */
@@ -352,6 +357,7 @@ function TurnWorkStatus({
         >
           {finished}
           {foldedReplies > 0 ? <FoldedRepliesCount count={foldedReplies} /> : null}
+          {foldedSubagents > 0 ? <FoldedSubagentsCount count={foldedSubagents} /> : null}
           <IconChevronRight className="turn-work-chevron" data-open={fold.open || undefined} aria-hidden="true" />
         </button>
       ) : (
@@ -407,6 +413,22 @@ function FoldedRepliesCount({ count }: { count: number }) {
     <span className="turn-work-replies" title={label}>
       <span aria-hidden="true">·</span>
       <MessageSquare className="turn-work-replies-icon" aria-hidden="true" />
+      <span aria-hidden="true">{count}</span>
+      <span className="sr-only">, {label}</span>
+    </span>
+  );
+}
+
+/**
+ * " · (subagent icon) 4" after a finished turn's time: how many distinct subagents its fold hides. Only the icon and
+ * number show; the tooltip and screen readers get "4 subagents inside".
+ */
+function FoldedSubagentsCount({ count }: { count: number }) {
+  const label = `${count} ${count === 1 ? "subagent" : "subagents"} inside`;
+  return (
+    <span className="turn-work-replies" title={label}>
+      <span aria-hidden="true">·</span>
+      <RowSubagent className="turn-work-replies-icon" aria-hidden="true" />
       <span aria-hidden="true">{count}</span>
       <span className="sr-only">, {label}</span>
     </span>
@@ -972,7 +994,11 @@ function reuseTurns(previous: Turn[], next: Turn[]): Turn[] {
   return reused === next.length && next.length === previous.length ? previous : merged;
 }
 
-type PromptMarker = { id: string; offset: number; preview: string; responsePreview: string };
+/**
+ * A tick on the prompt rail: a turn's prompt, or a message steered into its reply (`steer`, with the prompt of its
+ * turn as `turnId`). A steered message has no reply of its own, so its `responsePreview` is empty.
+ */
+type PromptMarker = { id: string; offset: number; preview: string; responsePreview: string; steer?: boolean; turnId?: string };
 
 /**
  * What the overlay needs from a windowed list, where most prompts are not in
@@ -980,7 +1006,8 @@ type PromptMarker = { id: string; offset: number; preview: string; responsePrevi
  */
 export type PromptMarkerLayout = {
   offsetOf: (id: string) => number | undefined;
-  scrollTo: (id: string) => void;
+  /** Settles once the row has landed; with `false` when another jump took over first. */
+  scrollTo: (id: string) => Promise<unknown> | void;
   subscribe: (listener: () => void) => () => void;
 };
 
@@ -989,7 +1016,7 @@ export type PromptMarkerLayout = {
 const PROMPT_RAIL_WIDTH = 40;
 const PROMPT_RAIL_EDGE = 12;
 const PROMPT_RAIL_GAP = 8;
-/** The rail shows once the thread has this many prompts to move between, however short the thread is. */
+/** The rail shows once the thread has this many messages to move between (prompts and steers), however short the thread is. */
 const PROMPT_RAIL_MIN_PROMPTS = 2;
 
 /**
@@ -1029,6 +1056,23 @@ function markerPreview(turn: Turn): { preview: string; responsePreview: string }
     markerPreviews.set(turn, cached);
   }
   return cached;
+}
+
+/** A steered message's tick tooltip text, kept per message object. */
+const steerPreviews = new WeakMap<UIMessage, string>();
+
+function steerPreview(message: UIMessage): string {
+  let cached = steerPreviews.get(message);
+  if (cached === undefined) {
+    cached = cappedWords(markdownPreviewText(getTextFromParts(message.parts ?? [], "\n")), 10);
+    steerPreviews.set(message, cached);
+  }
+  return cached;
+}
+
+/** The messages steered into a turn's reply, in the order sent. */
+function steeredMessagesOf(turn: Turn): UIMessage[] {
+  return turn.assistantMsgs.flatMap((message) => readSteerGroup(message) ?? []);
 }
 
 /**
@@ -1081,11 +1125,13 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   );
   const turnsRef = useRef(turns);
   turnsRef.current = turns;
-  // The prompts the ticks stand for. A streamed delta leaves it unchanged, so it does not place the ticks again.
+  // The messages the ticks stand for. A streamed delta leaves it unchanged, so it does not place the ticks again.
   const promptKey = useMemo(
     () =>
       turns
-        .map((turn) => (turn.userMsg && !isResultNotice(turn.userMsg) ? turn.userMsg.id : ""))
+        .map((turn) =>
+          [turn.userMsg && !isResultNotice(turn.userMsg) ? turn.userMsg.id : "", ...steeredMessagesOf(turn).map((message) => message.id)].join(" "),
+        )
         .join("\n"),
     [turns],
   );
@@ -1133,26 +1179,38 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           : (id: string) => id.replace(/["\\]/g, "\\$&");
       const next: PromptMarker[] = [];
       const containerRect = container.getBoundingClientRect();
+      // Rect-based so nested `relative` wrappers / transforms can't skew it.
+      const measured = (id: string) => {
+        const target = content.querySelector(`[data-prompt-id="${escapeId(id)}"]`);
+        return target instanceof HTMLElement
+          ? target.getBoundingClientRect().top - containerRect.top + container.scrollTop
+          : undefined;
+      };
+      const previous = (id: string) => markerPositionsRef.current.find((marker) => marker.id === id)?.offset;
       for (const turn of turnsRef.current) {
         const userMsg = turn.userMsg;
-        // A message that delivers subagent results is not a prompt the user wrote.
-        if (!userMsg || isResultNotice(userMsg)) continue;
-        const target: Element | null = layout
-          ? null
-          : content.querySelector(`[data-prompt-id="${escapeId(userMsg.id)}"]`);
-        // Rect-based so nested `relative` wrappers / transforms can't skew it.
-        const y = layout
-          ? layout.offsetOf(userMsg.id) ?? Infinity
-          : target instanceof HTMLElement
-            ? target.getBoundingClientRect().top - containerRect.top + container.scrollTop
-            : markerPositionsRef.current.find((marker) => marker.id === userMsg.id)?.offset ?? Infinity;
-        const { preview, responsePreview } = markerPreview(turn);
-        next.push({
-          id: userMsg.id,
-          offset: y,
-          preview: preview || "Your prompt",
-          responsePreview: responsePreview || "No response yet",
-        });
+        // A message that delivers subagent results is not a prompt the user wrote; messages steered into its reply are.
+        if (userMsg && !isResultNotice(userMsg)) {
+          const { preview, responsePreview } = markerPreview(turn);
+          next.push({
+            id: userMsg.id,
+            offset: (layout ? layout.offsetOf(userMsg.id) : measured(userMsg.id) ?? previous(userMsg.id)) ?? Infinity,
+            preview: preview || "Your prompt",
+            responsePreview: responsePreview || "No response yet",
+          });
+        }
+        for (const steered of steeredMessagesOf(turn)) {
+          // A steered message sits inside its turn's row: a windowed list knows only where that row starts.
+          const y = measured(steered.id) ?? (layout ? (userMsg ? layout.offsetOf(userMsg.id) : undefined) : previous(steered.id));
+          next.push({
+            id: steered.id,
+            offset: y ?? Infinity,
+            preview: steerPreview(steered) || "Your message",
+            responsePreview: "",
+            steer: true,
+            turnId: userMsg?.id,
+          });
+        }
       }
       markerPositionsRef.current = next;
       markerOffsetsRef.current = next.map((marker) => marker.offset);
@@ -1171,7 +1229,8 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
             (m, i) =>
               m.id === next[i]!.id &&
               m.preview === next[i]!.preview &&
-              m.responsePreview === next[i]!.responsePreview,
+              m.responsePreview === next[i]!.responsePreview &&
+              m.turnId === next[i]!.turnId,
           )
         ) {
           return prev;
@@ -1286,12 +1345,26 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       const targetTop = Math.max(0, y - 16);
       const start = container.scrollTop;
       const distance = targetTop - start;
+      const steer = markerPositionsRef.current.find((marker) => marker.id === id && marker.steer);
       // A prompt that is not mounted, or is far away, lands instantly and is
       // corrected against the real DOM; gliding across rows that are still
       // being measured would aim at an estimate.
       if (layout && (!(el instanceof HTMLElement) || !shouldGlide(distance, container.clientHeight))) {
         cancelScroll();
-        layout.scrollTo(id);
+        if (!steer) {
+          void layout.scrollTo(id);
+          return;
+        }
+        // A steered message sits inside its turn's row: land the row, then the message in it.
+        if (!steer.turnId) return;
+        void Promise.resolve(layout.scrollTo(steer.turnId)).then((settled) => {
+          // `false`: another jump took over before the row landed.
+          if (settled === false) return;
+          const landed = content.querySelector(`[data-prompt-id="${escapeId}"]`);
+          if (!(landed instanceof HTMLElement)) return;
+          markProgrammatic();
+          container.scrollTop = Math.max(0, landed.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - 16);
+        });
         return;
       }
       if (Math.abs(distance) < 4) {
@@ -1319,8 +1392,9 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           scrollAnimRef.current = requestAnimationFrame(step);
         } else {
           scrollAnimRef.current = 0;
-          // Rows measured on the way may have moved the target.
-          layout?.scrollTo(id);
+          // Rows measured on the way may have moved the target (a steered message's row is its turn's,
+          // so landing that row would move off the message).
+          if (!steer) void layout?.scrollTo(id);
         }
       };
       scrollAnimRef.current = requestAnimationFrame(step);
@@ -1340,6 +1414,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   if (markers.length === 0 || railLeft === null) return null;
   const previewMarker = markers.find((marker) => marker.id === previewId);
   const highlightedIndex = markers.findIndex((marker) => marker.id === previewId);
+  let promptNumber = 0;
 
   return (
     <div
@@ -1361,11 +1436,15 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       <div className="chat-prompt-column">
       {onFind && <FindRailButton onOpen={onFind} />}
       <nav className="chat-prompt-ticks" aria-label="Conversation turns">
-      {markers.map((marker, index) => (
+      {markers.map((marker, index) => {
+        // Prompts count among themselves; a steered message's tick is shorter, as it is part of its prompt's turn.
+        if (!marker.steer) promptNumber += 1;
+        const width = highlightedIndex < 0 ? 12 : Math.max(12, 36 - Math.abs(index - highlightedIndex) * 8);
+        return (
         <button
           key={marker.id}
           type="button"
-          aria-label={`Jump to prompt ${index + 1}: ${marker.preview}`}
+          aria-label={marker.steer ? `Jump to steered message: ${marker.preview}` : `Jump to prompt ${promptNumber}: ${marker.preview}`}
           aria-current={marker.id === activeId ? "location" : undefined}
           data-visible={visiblePromptIds.has(marker.id) ? "true" : undefined}
           data-prompt-marker-id={marker.id}
@@ -1377,15 +1456,17 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           }}
           className="chat-prompt-tick"
         >
-          <span style={{ width: `${highlightedIndex < 0 ? 12 : Math.max(12, 36 - Math.abs(index - highlightedIndex) * 8)}px` }} />
+          <span style={{ width: `${marker.steer ? Math.round((width * 2) / 3) : width}px` }} />
         </button>
-      ))}
+        );
+      })}
       </nav>
       </div>
       {previewMarker && (
         <div className="chat-prompt-preview" aria-hidden="true">
           <strong>{previewMarker.preview}</strong>
-          <p>{previewMarker.responsePreview}</p>
+          {/* A steered message has no reply of its own: its card is the message alone. */}
+          {previewMarker.responsePreview && <p>{previewMarker.responsePreview}</p>}
         </div>
       )}
     </div>
@@ -1647,6 +1728,8 @@ export const MessageList = memo(function MessageList({
   followerRef.current ??= createEndFollower({
     container: () => chatContainerRef.current,
     after: () => afterTurnsRef.current,
+    // The rows wrapper ends with the last turn's row (`windowRowItems`).
+    lastRow: () => rowsRef.current?.lastElementChild ?? null,
     mode: () => followModeRef.current,
     onProgrammaticScroll: () => {
       programmaticScrollAtRef.current = performance.now();
@@ -2049,7 +2132,7 @@ export const MessageList = memo(function MessageList({
                 turnKeyAliasRef.current.get(id) ?? id,
               ),
             scrollTo: (id: string) =>
-              void virtualizationRef.current?.scrollToKey(
+              virtualizationRef.current?.scrollToKey(
                 turnKeyAliasRef.current.get(id) ?? id,
                 { align: "start", offset: 16 },
               ),
@@ -2123,13 +2206,37 @@ export const MessageList = memo(function MessageList({
     const rows = rowsRef.current;
     const virtualization = virtualizationRef.current;
     if (index < 0 || !messageId || !container || !rows || !virtualization) return;
+    const turnKey = resolveTurnKey(turns[index]!, index, turnKeyAliasRef.current);
+    const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(toolCallId) : toolCallId.replace(/["\\]/g, "\\$&");
+    // A finished turn folds settled subagent cards behind "Worked for": open that part's fold first so the card mounts.
+    if (!rows.querySelector(`[data-native-subagent="${escaped}"]`)) {
+      let part = 0;
+      let seen = false;
+      for (const message of turns[index]!.assistantMsgs) {
+        if (message.id === messageId) break;
+        if (readSteerGroup(message)) {
+          if (seen) part += 1;
+        } else if (!isResultNotice(message)) {
+          seen = true;
+        }
+      }
+      const key = foldKey(turnKey, part);
+      if (!openWorkRef.current.has(key)) {
+        openMemory.folds.add(key);
+        setOpenWork((current) => {
+          const next = new Set(current);
+          next.add(key);
+          return next;
+        });
+        return;
+      }
+    }
     takenSubagentRef.current = seq;
     dispatchFollow({ type: "navigate" });
     const navigation = virtualization.beginNavigation();
-    const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(toolCallId) : toolCallId.replace(/["\\]/g, "\\$&");
     void revealMessage(
       {
-        turnKey: resolveTurnKey(turns[index]!, index, turnKeyAliasRef.current),
+        turnKey,
         messageId,
         element: (root) => root.querySelector<HTMLElement>(`[data-native-subagent="${escaped}"]`),
       },
@@ -2146,7 +2253,7 @@ export const MessageList = memo(function MessageList({
       flashLocated(element);
       element.querySelector<HTMLButtonElement>("button.subagent-card")?.focus({ preventScroll: true });
     });
-  }, [subagentRequest, turns, windowed, dispatchFollow, markProgrammaticScroll]);
+  }, [subagentRequest, turns, windowed, dispatchFollow, markProgrammaticScroll, openMemory, openWork]);
 
   const showPlanning = useMemo(() => {
     if (!isStreaming) return false;
@@ -2270,6 +2377,7 @@ export const MessageList = memo(function MessageList({
                 suppressQuestionTool={suppressQuestionTool}
                 cardedSubagents={cardedSubagents}
                 cardedThreads={cardedThreads}
+                subagentCards={subagentCards}
                 subagentCardIds={subagentCardIds}
                 spawningCardIds={spawningCardIds}
                 openFolds={openFoldsOf(openWork, turnKey)}
@@ -2406,6 +2514,7 @@ type TurnRowProps = {
   suppressQuestionTool: boolean;
   cardedSubagents: Set<string>;
   cardedThreads: Set<string>;
+  subagentCards: ReadonlyMap<string, SubagentCardModel>;
   subagentCardIds: Set<string>;
   spawningCardIds: Set<string>;
   /** Which parts of this finished turn (see `turnFoldParts`) have their work open, as part numbers ("0,2"). */
@@ -2413,6 +2522,17 @@ type TurnRowProps = {
   /** Opens or closes the work of a finished turn's part, by turn key and part number. */
   onToggleWork: (turnKey: string, part: number) => void;
 };
+
+/** A subagent card that stays visible outside a finished turn's fold: still going, or failed without being continued. */
+function cardStaysOut(card: SubagentCardModel | undefined): boolean {
+  if (!card) return false;
+  return isCardRunning(card) || (card.state === "failed" && !card.continued);
+}
+
+/** Stable identity of a subagent across tasks so continuations count once in a fold's summary. */
+function subagentIdentity(card: SubagentCardModel): string {
+  return card.childThreadId ?? card.removedThreadId ?? card.native?.taskId ?? card.delegationId ?? card.toolCallId;
+}
 
 /** A failed call the agent did not get past: it stays in view when the turn's work folds. */
 function isUnrecoveredFailure(part: unknown): boolean {
@@ -2492,6 +2612,7 @@ const TurnRow = memo(function TurnRow({
   suppressQuestionTool,
   cardedSubagents,
   cardedThreads,
+  subagentCards,
   subagentCardIds,
   spawningCardIds,
   openFolds,
@@ -2776,20 +2897,24 @@ const TurnRow = memo(function TurnRow({
               rows: liveRunItems.map((item, k) => renderTool(item.part, item.nestedTools, keyOf(item, k))),
             };
           })();
-          const rows = segments.map((segment, segmentIndex): { node: React.ReactNode; fold: FoldRow } => {
+          const rows = segments.map((segment, segmentIndex): { node: React.ReactNode; fold: FoldRow; subagentIds?: string[] } => {
             if (segment.kind === "cards") {
               // A card still starting is not drawn: the progress line says "Starting subagent…".
               const cardParts = segment.msgIndices.flatMap(
                 (msgIndex) => analyses[msgIndex]!.cardParts,
               ).filter((part) => !spawningCardIds.has(part.toolCallId!));
               if (cardParts.length === 0) return { node: null, fold: { kind: "cards" } };
+              const models = cardParts.map((part) => subagentCards.get(part.toolCallId!));
+              const keep = models.some(cardStaysOut);
+              const subagentIds = models.filter((card): card is SubagentCardModel => card !== undefined).map(subagentIdentity);
               const cardNested = new Map(
                 segment.msgIndices.flatMap((msgIndex) => [
                   ...(analyses[msgIndex]!.cardNestedTools ?? new Map()),
                 ]),
               );
               return {
-                fold: { kind: "cards" },
+                fold: { kind: "cards", keep },
+                subagentIds,
                 node: (
                   <SubagentCardGroup
                     key={`${answerMsgs[segment.msgIndices[0]!]!.id}-subagents`}
@@ -2925,13 +3050,15 @@ const TurnRow = memo(function TurnRow({
           const partFolds = parts.map(({ from, to }) => {
             let has = false;
             let replies = 0;
+            const subagents = new Set<string>();
             for (let index = from; index < to; index += 1) {
               if (!folded[index] || rows[index]!.node == null) continue;
               has = true;
               // Replies the fold hides, narration as well as answers that closed an earlier run, so none is missed.
               if (rows[index]!.fold.text) replies += 1;
+              for (const id of rows[index]!.subagentIds ?? []) subagents.add(id);
             }
-            return { has, replies };
+            return { has, replies, subagents: subagents.size };
           });
           // Each part's own time: from its prompt or steered message to where its last message ended.
           const msgsOfRow = (index: number) => {
@@ -3021,6 +3148,7 @@ const TurnRow = memo(function TurnRow({
                     endYieldsToNotice={isLastTurn && Boolean(turn.userMsg)}
                     fold={foldOf(k)}
                     foldedReplies={partFolds[k]!.replies}
+                    foldedSubagents={partFolds[k]!.subagents}
                   />,
                 );
               }
@@ -3047,6 +3175,7 @@ const TurnRow = memo(function TurnRow({
                 endYieldsToNotice={isLastTurn && Boolean(turn.userMsg)}
                 fold={foldOf(0)}
                 foldedReplies={partFolds[0]!.replies}
+                foldedSubagents={partFolds[0]!.subagents}
               />
               <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
                 <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
@@ -3146,9 +3275,10 @@ function ContextHandoffMarker({ handoff, text }: { handoff: HandoffMarker; text:
       <span>{reasoning.to}</span>
     </div>;
   }
+  // Each side shows its provider's logo, whatever model it ran (Claude on Antigravity shows Antigravity's).
   const iconId = (selection: HandoffSelection) => {
-    const brand = inferModelBrand(selection.model, undefined, selection.provider).brandId;
-    // An unknown model falls back to its provider's id, which ProviderIcon maps to the vendor logo.
+    if (selection.provider) return selection.provider;
+    const brand = inferModelBrand(selection.model).brandId;
     return brand === 'anthropic' ? 'claude' : brand;
   };
   const status = handoffStatus(handoff, text);

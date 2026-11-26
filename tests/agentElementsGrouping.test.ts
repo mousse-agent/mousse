@@ -312,7 +312,7 @@ describe('workGroupTitle', () => {
  * A finished turn's rows, one letter each: T a tool group, c calls in a message of their own, m text written beside
  * calls (work), x a reply (narration or an answer), s a steered message, k a row that stays in view whatever the fold
  * (an error, a question, an approval, a notice, a marker, an applet), f calls holding a failure the agent did not get
- * past, C subagent cards.
+ * past, C settled subagent cards, K subagent cards still going or failed without being continued.
  */
 const foldRows = (rows: string): FoldRow[] =>
   [...rows].map((letter) => {
@@ -325,6 +325,7 @@ const foldRows = (rows: string): FoldRow[] =>
       case 's': return { kind: 'message', steer: true }
       case 'k': return { kind: 'message', keep: true }
       case 'C': return { kind: 'cards' }
+      case 'K': return { kind: 'cards', keep: true }
       default: throw new Error(letter)
     }
   })
@@ -345,7 +346,9 @@ describe('foldTurnWork', () => {
     ['a failure: the error and what it said before stay', 'xTk', '010'],
     ['calls with a failure the agent did not get past stay', 'Tfk', '100'],
     ['a kept row between the work and the answer', 'TkTx', '1010'],
-    ['subagent cards stay where they were started', 'TCTCx', '10100'],
+    ['settled subagent cards fold behind Worked for', 'TCTCx', '11110'],
+    ['subagent cards still going or failed stay in view while settled ones fold', 'TCKCx', '11010'],
+    ['a subagent-only turn with no reply folds its settled cards', 'C', '1'],
     ['text written beside calls is work', 'mx', '10'],
     ['a stopped turn whose only text was beside calls', 'm', '1'],
   ])('%s', (_name, rows, expected) => {

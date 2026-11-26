@@ -26,8 +26,8 @@ const realMatchMedia = window.matchMedia
 const realResizeObserver = globalThis.ResizeObserver
 const realRect = Element.prototype.getBoundingClientRect
 
-/** The hand-made layout: content height and the scroll position. */
-const layout = { content: 0, scrollTop: 0, writes: 0 }
+/** The hand-made layout: content height, the scroll position, and the turns stacked in it. */
+const layout = { content: 0, scrollTop: 0, writes: 0, keys: [] as string[] }
 const list = () => host.querySelector<HTMLElement>('.an-message-list')!
 const reserve = () => Number.parseFloat(host.querySelector<HTMLElement>('[data-end-reserve]')?.style.height || '0')
 const scrollHeight = () => Math.max(CLIENT, layout.content + reserve())
@@ -58,11 +58,14 @@ beforeEach(() => {
     const el = this as HTMLElement
     if (el.classList?.contains('an-message-list')) return rect(0, CLIENT)
     if (el.hasAttribute?.('data-end-reserve')) { clamp(); return rect(layout.content - layout.scrollTop, reserve()) }
+    const row = el.dataset?.turnKey === undefined ? -1 : layout.keys.indexOf(el.dataset.turnKey)
+    if (row >= 0) { clamp(); return rect(24 + row * ROW - layout.scrollTop, ROW) }
     return realRect.call(this)
   }
   layout.content = 0
   layout.scrollTop = 0
   layout.writes = 0
+  layout.keys = []
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -92,6 +95,7 @@ function attachLayout() {
 
 /** Lays the thread's turns out from the top, ROW px each, plus `extra` px under the last one. */
 function place(keys: string[], extra = 0) {
+  layout.keys = keys
   layout.content = 24 + keys.length * ROW + extra
 }
 

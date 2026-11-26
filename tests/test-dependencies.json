@@ -7,6 +7,11 @@
       "run": ["tests/gitSpawnWorker.test.ts"]
     },
     {
+      "name": "Windows console-window probe runs the bundled launchers under Electron",
+      "when": ["tests/fixtures/consoleWindowParent.ts", "tests/fixtures/consoleWindowProbe.cjs", "src/mms/git/gitSpawn.ts", "src/mms/git/windowsGitProcess.ts", "src/mms/harness/windowsJobProcess.ts"],
+      "run": ["tests/windowsNoConsoleWindow.test.ts"]
+    },
+    {
       "name": "cli, main, preload and build inputs reach every spawned process",
       "when": ["src/cli/**", "src/main/**", "src/preload/**", "scripts/build*", "scripts/after-pack*", "scripts/prepare-package*", "scripts/ensure-*", "scripts/cached-build*", "scripts/start.mjs", "electron-builder*.yml", "build/**", "resources/**"],
       "projects": ["process", "heavy"]

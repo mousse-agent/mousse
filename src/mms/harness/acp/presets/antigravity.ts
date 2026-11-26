@@ -47,9 +47,24 @@ const ISOLATED_KEYS = [
   'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT',
   'GOOGLE_CLOUD_LOCATION', 'GOOGLE_CLOUD_QUOTA_PROJECT', 'GOOGLE_GENAI_USE_VERTEXAI',
   'GCLOUD_PROJECT', 'CLOUDSDK_CORE_PROJECT', 'AGY_ACP_CCPA_PROJECT', 'AGY_ACP_ENABLE_OAUTH',
-  'GEMINI_HOME', 'AGY_ACP_FORCE_FILE_STORAGE', 'ANTIGRAVITY_HARNESS_PATH', 'ELECTRON_RUN_AS_NODE',
-  'BROWSER', 'PYTHONUNBUFFERED'
+  'GEMINI_HOME', 'AGY_ACP_FORCE_FILE_STORAGE', 'AGY_CLI_FORCE_FILE_TOKEN_STORAGE', 'ANTIGRAVITY_HARNESS_PATH',
+  'ELECTRON_RUN_AS_NODE', 'BROWSER', 'PYTHONUNBUFFERED'
 ]
+
+/**
+ * Makes `agy` keep its Google sign-in in a file under its `--gemini-dir` instead of the system keyring, which is one
+ * per user on Windows, macOS and Linux with D-Bus. Seen in agy 1.5.17: with it, `agy acp` logs "Using file-based
+ * token storage because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set" and a home with no sign-in of its own answers
+ * `Authentication required` while the user's keyring holds one; without it, the same home signs in from the keyring.
+ */
+export const AGY_FILE_TOKEN_ENV = 'AGY_CLI_FORCE_FILE_TOKEN_STORAGE'
+
+/** The sign-in of an entry with a home of its own stays in that home (`AGY_FILE_TOKEN_ENV`); set last, over the user's variables. */
+export function privateSignInEnv(env: NodeJS.ProcessEnv, kind: 'legacy' | 'native'): NodeJS.ProcessEnv {
+  if (kind === 'native') env[AGY_FILE_TOKEN_ENV] = '1'
+  else env.AGY_ACP_FORCE_FILE_STORAGE = '1'
+  return env
+}
 
 function callbackTarget(authUrl: string): { origin: string; pathname: string; state: string } | undefined {
   try {
@@ -140,9 +155,14 @@ export function antigravityRuntimeArgs(kind: AntigravityRuntimeChoice['kind'], g
 }
 
 export interface AntigravityLaunchOptions {
-  /** `<profileHome>/providers/antigravity`: the isolated home and the browser helper live here. */
+  /** `<profileHome>/providers/antigravity`, or an added entry's state folder: the browser helper lives here. */
   profileDir: string
   profileHome: string
+  /**
+   * Where the agent's `gemini-home` and `bot-gemini-home` are: `profileDir` for the first entry, an added entry's own
+   * home for the others, whose sign-in then stays in that home (`privateSignInEnv`).
+   */
+  privateHome?: string
   /** The runtime to start; undefined when there is none. */
   runtime(): AntigravityRuntimeChoice | undefined
   /** The user's extra launch arguments and variables. */
@@ -162,7 +182,7 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
     const { binary, kind } = runtime
     if (request.bot && kind !== 'native') throw new Error('Bot turns require the agy CLI.')
     const env = scrubbedAntigravityEnv(process.env)
-    const geminiHome = join(options.profileDir, request.bot ? 'bot-gemini-home' : 'gemini-home')
+    const geminiHome = join(options.privateHome ?? options.profileDir, request.bot ? 'bot-gemini-home' : 'gemini-home')
     mkdirSync(geminiHome, { recursive: true, mode: 0o700 })
     const acpDir = join(geminiHome, ANTIGRAVITY_APP_DATA_DIR)
     mkdirSync(acpDir, { recursive: true, mode: 0o700 })
@@ -204,7 +224,9 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
     // Bot turns must use ACP approvals and the MCP servers Mousse supplies for their grant.
     const args = [...antigravityRuntimeArgs(kind, geminiHome), ...(request.bot ? ['--include-default-customizations=false'] : options.args())]
     // A process group on POSIX, so Stop ends the agent's helpers with it (`treeKilledChild`).
-    const child = spawn(binary, args, { env: request.bot ? env : options.env(env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' })
+    const launchEnv = request.bot ? env : options.env(env)
+    if (options.privateHome) privateSignInEnv(launchEnv, kind)
+    const child = spawn(binary, args, { env: launchEnv, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' })
     const acceptAuthUrl = (url: string) => {
       if (callbackTarget(url)) request.onAuthUrl?.(url)
     }

@@ -93,7 +93,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
 import { nativeHelperRules } from '../run/adapters/nativeHelperRuntimes'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from '../run/delegation/sources'
-import { deleteRunResults, readRunResultText } from '../run/delegation/hold'
+import { childBusy, deleteRunResults, readRunResultText } from '../run/delegation/hold'
 import { SettleNotices, type PlannedSettleNotice } from './settleNotices'
 import { decideUsageLimit, usageLimitOf, type UsageLimitDecision } from '../run/pausePolicy'
 import { boundedResetIso, estimatedReset } from './providerErrors'
@@ -157,7 +157,7 @@ import { acknowledgeRows } from '../run/terminal'
 import { cancelQueuedWakes, deliverAtToolBoundary, pendingWakeEffects, releaseToolBoundary, wakeThreads } from '../run/delegation/wake'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
 import { remoteSubagentPreamble, subagentPreamble, withoutSubagentPreamble } from '../run/delegation/guidance'
-import { qualifyId } from '../../shared/threadRef'
+import { parseQualifiedId, qualifyId } from '../../shared/threadRef'
 import { RemoteThreadLaunches, type RemoteLaunchOutcome } from './RemoteThreadLaunches'
 import { RemoteLaunchedThreads, RemoteThreadRefusal } from './RemoteLaunchedThreads'
 import type { RoutedAgentMark } from '../../shared/bridge/routed'
@@ -332,7 +332,7 @@ import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
 import { ThreadActionService, UNCAPTURED_START_FILE, UNRECORDED_END_FILE, type TurnStartCheck } from '../actions/ThreadActionService'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
-import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
+import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, remoteSubagentResultText, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
 import type { NativeContextBoundary, ThreadAction } from '../../shared/threadActions'
 import type { WorkspaceExecutionContext } from '../../shared/workspace'
 import { ThreadJournal } from '../data/ThreadJournal'
@@ -2064,12 +2064,33 @@ export class OrchestratorService extends EventEmitter {
       startedAt: wake.setAt,
       until: wake.dueAt
     }))
-    return { threadId, items: [...items, ...wakes], providerWork: this.providerBackground.has(threadId), ...(latest ? { latest } : {}) }
+    return {
+      threadId,
+      items: [...items, ...wakes],
+      providerWork: this.providerBackground.has(threadId),
+      ...(latest ? { latest } : {}),
+      ...(this.runEngine ? { busy: this.threadBusy(this.runEngine, threadId) } : {})
+    }
+  }
+
+  /** `childBusy`, never throwing: a thread whose state cannot be read is not held for it. */
+  private threadBusy(engine: RunEngine, threadId: string): boolean {
+    try {
+      return childBusy(engine.store, threadId)
+    } catch {
+      return false
+    }
   }
 
   /** What the thread runs in the background changed: the app is told (`thread.backgroundWork`). */
   backgroundWorkChanged(threadId: string): void {
     this.emit('background-work', { threadId })
+    // What the thread runs holds its tasks (`threadBackgroundWork`): one that ended may let them publish.
+    try {
+      this.runEngine?.store.settleHold(threadId)
+    } catch (error) {
+      console.warn('tasks waiting on background work could not be settled', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /**
@@ -3070,6 +3091,7 @@ export class OrchestratorService extends EventEmitter {
     this.runEngine?.setDelegationHost(null)
     this.runEngine?.setInFlightCanceller(null)
     this.runEngine?.store.setProviderBackgroundWork(null)
+    this.runEngine?.store.setThreadBackgroundWork(null)
     this.runEngine?.store.setUnreadSteers(null)
     this.questionRouterOff?.()
     this.questionRouterOff = null
@@ -3096,7 +3118,11 @@ export class OrchestratorService extends EventEmitter {
       setRunsOn: (threadId, runsOn) => { this.threadStore?.updateThreadMeta(threadId, { runsOn }, { touch: false }) },
       recordMessage: (threadId, role, text) => { this.recordRemoteSubagentMessage(threadId, role, text) },
       changed: (childThreadId) => { this.emit('subagent-changed', { threadId: childThreadId }) },
-      threadExists: (threadId) => Boolean(this.threadStore?.getThread(threadId))
+      threadExists: (threadId) => Boolean(this.threadStore?.getThread(threadId)),
+      archivedHere: (threadId) => {
+        const thread = this.threadStore?.getThread(threadId)
+        return thread ? Boolean(thread.archivedAt) : undefined
+      }
     })
     // Tasks left open by the previous daemon go on: their runs on the other computers did not stop with it.
     // Without Bridge the passes reach no computer, but a task's time limit still ends it here.
@@ -3125,6 +3151,11 @@ export class OrchestratorService extends EventEmitter {
       related: (callerThreadId, launcherThreadId) => callerThreadId === launcherThreadId || lineageRelation(engine, callerThreadId, launcherThreadId) !== null,
       localOnly: (threadId) => this.isLocalOnly(threadId),
       startedElsewhere: (threadId) => this.startedFromAnotherDevice(threadId),
+      remoteSubagentThread: (node, threadId) => {
+        const runsOn = this.threadStore?.getThread(threadId)?.runsOn
+        const there = runsOn?.node === node && runsOn.ref ? parseQualifiedId(runsOn.ref) : undefined
+        return there?.node === node ? there.id : undefined
+      },
       note: (launcherThreadId, text) => {
         // A launcher that is gone (deleted, expired) gets no note: nothing would show it.
         if (!this.threadStore?.getThread(launcherThreadId) || this.isExpired(launcherThreadId)) return
@@ -3137,6 +3168,9 @@ export class OrchestratorService extends EventEmitter {
     this.attachInFlightCanceller()
     // Input (4) of the hold predicate: synchronous, in memory, never throws (it is read inside transactions).
     engine.store.setProviderBackgroundWork((threadId) => this.providerBackground.has(threadId))
+    // Input (6): what the thread's agent left running (monitors, background commands, holds); each end tells it, and that
+    // turn's answer is the task's result.
+    engine.store.setThreadBackgroundWork((threadId) => this.monitors?.has(threadId) === true)
     // Input (5): steers a live turn has not read yet become a follow-up turn only after its terminal write.
     engine.store.setUnreadSteers((threadId) => this.hasUnreadSteers(threadId))
     this.questionRouterOff = this.routeSubagentQuestions(engine)
@@ -5747,8 +5781,9 @@ export class OrchestratorService extends EventEmitter {
       createdByThreadId: intent.createdByThreadId,
       // The bot that started it, by its name then: the thread says so after the bot is renamed or deleted.
       ...(intent.bot ? { startedByBot: intent.bot } : {}),
-      // A bot's thread starts out of the owner's sidebar, its chat lists it; a bot that asks shows it there from the start.
-      ...(intent.bot && intent.request.hidden !== false ? { hidden: true } : {}),
+      // An agent's thread starts out of the person's sidebar: a bot's chat lists it, and so does the side panel of the
+      // thread that launched it. One the agent starts as independent (hidden: false) shows there from the start.
+      ...(intent.request.hidden !== false ? { hidden: true } : {}),
       localOnly: intent.localOnly === true
     })
     // The marker: a thread is complete only once this event exists. Ids and names, never the message.
@@ -5929,6 +5964,8 @@ export class OrchestratorService extends EventEmitter {
         title,
         remoteProjectId: project.projectId,
         worktree: input.workspace === 'new_worktree',
+        // A bot's thread sends none, as before, and shows there; an agent's is hidden unless it asked otherwise.
+        hidden: bot ? null : input.hidden !== false,
         instanceId: input.instanceId ?? null,
         // That computer's `threads.setModel` reads a level packed with the model, as every computer does.
         model: input.model ? agentModelId(input.model, input.effort) : null,
@@ -6014,7 +6051,8 @@ export class OrchestratorService extends EventEmitter {
       },
       send: (target, input, options) => service.send(target, input, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, true, 'thread_send') }),
       steer: (target, runId, text, options) => service.steer(target, runId, text, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, true, 'thread_steer') }),
-      interrupt: (target, runId, options) => service.interrupt(target, runId, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, false, 'thread_interrupt') })
+      interrupt: (target, runId, options) => service.interrupt(target, runId, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, false, 'thread_interrupt') }),
+      archive: (target, archived, options) => service.archive(target, archived, { idem: options.idem, mark: this.remoteAgentMark(options.actor, false, 'thread_archive') })
     }
   }
 
@@ -6158,23 +6196,67 @@ export class OrchestratorService extends EventEmitter {
   /**
    * Archives (`archived`) or unarchives a thread: the app's Archive (`threads.archive`) and a bot's `thread_archive` both
    * come here. Archiving is a Stop: what the thread still runs ends with it, and its pull request watch ends as archived
-   * (`thread-archived`). Nothing is deleted.
+   * (`thread-archived`). Nothing is deleted. It answers once the thread and its side chats are marked archived and their
+   * Stops have begun (no new turn or message can start in between); the Stops end in the background, which can take
+   * long on a slow drive (#1901). `waitForStop` waits for them too. The stand-in of a subagent that runs on another
+   * computer has its thread there archived or unarchived with it, now or once that computer answers (`wantRemoteArchive`);
+   * `there: 'done'` is an agent's archive that computer already took. A thread above it does not reach it: archiving a
+   * parent only stops its subagents.
    */
-  async archiveThread(threadId: string, archived: boolean): Promise<Thread> {
+  async archiveThread(threadId: string, archived: boolean, options: { waitForStop?: boolean; there?: 'done' } = {}): Promise<Thread> {
     if (!this.threadStore) throw new Error('Thread store is not ready.')
+    // The request for that computer is kept before the change here, so a process that ends between the two never leaves
+    // a stand-in archived here with nothing on its way there (a request whose change here never happened is dropped).
+    if (options.there !== 'done') this.wantRemoteArchive(threadId, archived)
     const thread = this.threadStore.setThreadArchived(threadId, archived)
     if (archived) {
-      // The watch ends as archived, not as stopped.
-      this.emit('thread-archived', { threadId })
-      await this.stopThread(threadId, 'archived').catch((error: unknown) => {
-        console.warn('archiving a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
-      })
-      // An archived thread's runtime goes now when nothing holds it; otherwise the idle sweep drops it once free.
-      this.runtimeManager?.releaseRuntime(threadId, (id) => this.runtimeKeepReason(id))
-      // Its side chats end with it, and stay ended when it comes back.
-      for (const side of sideChatsOf(threadId, this.threadStore.listAllThreads())) await this.archiveThread(side.id, true)
+      const stopped = this.endArchivedThreadWork(threadId)
+      if (options.waitForStop) await stopped
     }
     return thread
+  }
+
+  /**
+   * Starts the Stop of a thread just marked archived, and marks and stops its side chats the same way; they end with
+   * it, and stay ended when it comes back. Everything up to each Stop's first wait runs now; the promise settles when
+   * all of them have ended, and never rejects: a failure is logged.
+   */
+  private endArchivedThreadWork(threadId: string): Promise<void> {
+    // The watch ends as archived, not as stopped.
+    this.emit('thread-archived', { threadId })
+    const stopped = this.stopThread(threadId, 'archived')
+      .catch((error: unknown) => {
+        console.warn('archiving a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
+      })
+      .then(() => {
+        // An archived thread's runtime goes now when nothing holds it; otherwise the idle sweep drops it once free.
+        this.runtimeManager?.releaseRuntime(threadId, (id) => this.runtimeKeepReason(id))
+      })
+    const sides = sideChatsOf(threadId, this.threadStore?.listAllThreads() ?? []).map((side) => {
+      try {
+        this.threadStore?.setThreadArchived(side.id, true)
+        return this.endArchivedThreadWork(side.id)
+      } catch (error) {
+        console.warn('archiving a thread could not archive its side chat', { threadId, sideChatId: side.id, error: error instanceof Error ? error.message : String(error) })
+        return Promise.resolve()
+      }
+    })
+    return Promise.all([stopped, ...sides]).then(() => undefined, (error: unknown) => {
+      console.warn('archiving a thread could not end its work', { threadId, error: error instanceof Error ? error.message : String(error) })
+    })
+  }
+
+  /**
+   * The app's Archive (or Unarchive) of a remote subagent's stand-in: its thread there is wanted so too, kept in
+   * `remote_archive` and sent by `RemoteSubagents` after any Stop of its tasks, now or once that computer answers. The
+   * archive here stands whatever becomes of it there; a request that cannot be kept fails the archive here too.
+   */
+  private wantRemoteArchive(threadId: string, archived: boolean): void {
+    const engine = this.runEngine
+    const runsOn = this.threadStore?.getThread(threadId)?.runsOn
+    const there = runsOn?.ref ? parseQualifiedId(runsOn.ref) : undefined
+    if (!engine || !runsOn || !there || there.node !== runsOn.node) return
+    if (engine.remoteArchive.want({ childThreadId: threadId, node: runsOn.node, remoteThreadId: there.id, archived })) this.remoteSubagents?.kick()
   }
 
   /**
@@ -6194,7 +6276,7 @@ export class OrchestratorService extends EventEmitter {
    * and the agent stops it first. Never the caller's own thread or a bot's. The change is recorded as an `agent.action`
    * of the thread.
    */
-  private async setThreadArchivedAsAgent(threadId: string, archived: boolean, options: { actor: AgentActor }): Promise<AgentArchiveResult> {
+  private async setThreadArchivedAsAgent(threadId: string, archived: boolean, options: { actor: AgentActor; clientRequestId: string }): Promise<AgentArchiveResult> {
     const engine = this.requireRunEngine()
     // The registry checked `person` (or the bot's grant) before the call; checked again here, where it acts.
     if (!this.runHoldsPerson(options.actor) && !this.botSenderOf(options.actor, 'thread_archive'))
@@ -6207,18 +6289,89 @@ export class OrchestratorService extends EventEmitter {
       botThread = true
     }
     if (!thread || botThread) throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not available to you.`)
+    // A subagent that runs on another computer: its thread there first, also when this stand-in already is so here.
+    const remote = this.remoteStandInTarget(thread)
+    if (!remote && Boolean(thread.archivedAt) === archived) return { status: 'accepted', archived, changed: false }
+    if (archived && !thread.archivedAt) {
+      const subtree = [threadId, ...subagentDescendants(threadId, this.threadStore?.listAllThreads() ?? [])]
+      if (subtree.some((id) => engine.getActiveRun(id) || engine.store.getPausedRun(id))) return { status: 'rejected', reason: 'thread_running' }
+    }
+    if (!remote) return this.archiveAsAgent(threadId, archived, options.actor)
+    if (!this.remoteThreads || !this.remoteSubagents)
+      throw new RemoteThreadRefusal('remote_unavailable', `This subagent runs on ${remote.computer}, and Mousse is not connected to your other computers (Settings → Devices), so nothing was changed.`, remote.computer)
+    const remoteThreads = this.remoteThreads
+    // In order with the app's Archive of this stand-in: one still waiting goes there first, so the last change asked here
+    // is the last that computer takes.
+    return this.remoteSubagents.inArchiveOrder(threadId, async (queued) => {
+      if (queued === 'unsent')
+        throw new RemoteThreadRefusal('computer_offline', `An earlier archive of this subagent has not reached ${remote.computer} yet, so nothing was changed. Try again once ${remote.computer} answers.`, remote.computer)
+      // One key per request (its clientRequestId): a retry after a lost answer gets that computer's first answer back.
+      const idem = `thread_archive:${options.actor.threadId}:${options.clientRequestId}:${threadId}:${archived ? 1 : 0}`
+      let there: { threadId: string; computer: string; changed: boolean; gone?: true }
+      try {
+        const result = await remoteThreads.archive(remote, archived, { idem, own: true, mark: this.remoteAgentMark(options.actor, false, 'thread_archive') })
+        // Not known there: nothing changes here.
+        if (result.status === 'uncertain') return result
+        there = { threadId: remote.threadId, computer: remote.computer, changed: result.changed }
+      } catch (error) {
+        // Deleted there: nothing is left to change there, and the stand-in follows the request.
+        if (!(error instanceof RemoteThreadRefusal) || error.code !== 'remote_thread_gone') throw error
+        there = { threadId: remote.threadId, computer: remote.computer, changed: false, gone: true }
+      }
+      // The app's Archive still waiting to be sent (refused there for now) is superseded by what that computer just took.
+      engine.remoteArchive.acknowledged({ childThreadId: threadId, node: remote.node, remoteThreadId: remote.remoteThreadId, archived })
+      return { ...(await this.archiveAsAgent(threadId, archived, options.actor, { there: 'done' })), there }
+    })
+  }
+
+  /** The change here of an agent's `thread_archive` (`setThreadArchivedAsAgent`), recorded as an `agent.action`. */
+  private async archiveAsAgent(threadId: string, archived: boolean, actor: AgentActor, options: { there?: 'done' } = {}): Promise<{ status: 'accepted'; archived: boolean; changed: boolean }> {
+    if (Boolean(this.threadStore?.getThread(threadId)?.archivedAt) === archived) return { status: 'accepted', archived, changed: false }
+    await this.archiveThread(threadId, archived, options)
+    this.requireRunEngine().store.appendEvent({
+      threadId,
+      runId: null,
+      type: 'agent.action',
+      payload: { action: archived ? 'archived_thread' : 'unarchived_thread', actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId }
+    })
+    return { status: 'accepted', archived, changed: true }
+  }
+
+  /** The thread on another computer of a remote subagent's stand-in, once that computer has made it. */
+  private remoteStandInTarget(thread: Thread): { node: string; computer: string; remoteThreadId: string; threadId: string } | undefined {
+    const runsOn = thread.runsOn
+    const there = runsOn?.ref ? parseQualifiedId(runsOn.ref) : undefined
+    if (!runsOn || !there || there.node !== runsOn.node) return undefined
+    return { node: runsOn.node, computer: this.remoteSubagents?.computerName(runsOn.node) ?? runsOn.computerName, remoteThreadId: there.id, threadId: runsOn.ref! }
+  }
+
+  /**
+   * An agent on another computer archives (`archived`) or unarchives a thread here (a marked `threads.archive`, its reach
+   * checked by `RemoteAgentCalls`): as an agent's archive here, it never ends work, so a thread with a run working or
+   * paused, there or in a subagent below it, is refused. `archive` is the app's own Archive; the change is recorded as an
+   * `agent.action` of the thread, naming that computer.
+   */
+  async archiveForRemoteAgent(threadId: string, archived: boolean, options: { actor: AgentActor; archive: () => Promise<unknown> }): Promise<{ status: 'accepted'; archived: boolean; changed: boolean } | { status: 'rejected'; reason: 'thread_running' }> {
+    const engine = this.requireRunEngine()
+    const thread = this.threadStore?.getThread(threadId)
+    if (!thread) throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not available.`)
     if (Boolean(thread.archivedAt) === archived) return { status: 'accepted', archived, changed: false }
     if (archived) {
       const subtree = [threadId, ...subagentDescendants(threadId, this.threadStore?.listAllThreads() ?? [])]
       if (subtree.some((id) => engine.getActiveRun(id) || engine.store.getPausedRun(id))) return { status: 'rejected', reason: 'thread_running' }
     }
-    await this.archiveThread(threadId, archived)
+    await options.archive()
+    const { actor } = options
+    const action = archived ? 'archived_thread' : 'unarchived_thread'
     engine.store.appendEvent({
       threadId,
       runId: null,
       type: 'agent.action',
-      payload: { action: archived ? 'archived_thread' : 'unarchived_thread', actorThreadId: options.actor.threadId, actorRunId: options.actor.runId, toolCallId: options.actor.toolCallId }
+      payload: { action, actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId, ...(actor.remote ? { actorNode: actor.remote.node, actorTitle: actor.remote.title } : {}) }
     })
+    // The sender is named by its title and computer: its thread id is that computer's.
+    const by = actor.remote ? `an agent in «${actor.remote.title || 'a thread'}» on ${actor.remote.computer}` : `an agent in thread ${actor.threadId}`
+    this.sessionAls.run(this.getOrCreateSession(threadId), () => this.addSystemMessage(`${archived ? 'Archived' : 'Unarchived'} by ${by}.`))
     return { status: 'accepted', archived, changed: true }
   }
 
@@ -6335,18 +6488,23 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * `thread_hide`: the owner's bot hides a thread it started from the owner's sidebar, or shows it there again
-   * (`Thread.hidden`), only from its chat in a chat turn its owner's message started (`botSenderOf`). Only a thread this
-   * bot started (`Thread.startedByBot`), since its chat is where the owner finds a hidden one. Nothing stops or changes in
-   * the thread. The change is recorded as an `agent.action` of the thread.
+   * `thread_hide`: an agent hides a thread it started from the person's sidebar, or shows it there again
+   * (`Thread.hidden`). The owner's bot does so only from its chat in a chat turn its owner's message started
+   * (`botSenderOf`), and only for a thread this bot started (`Thread.startedByBot`), since its chat lists it. Any other
+   * agent only for a thread its own thread launched (`Thread.createdByThreadId`), which that thread's side panel lists.
+   * Nothing stops or changes in the thread. The change is recorded as an `agent.action` of the thread.
    */
   private setThreadHiddenAsAgent(threadId: string, hidden: boolean, options: { actor: AgentActor }): { hidden: boolean; changed: boolean } {
     const engine = this.requireRunEngine()
-    const bot = this.botSenderOf(options.actor, 'thread_hide')
-    if (!bot) throw new McpToolError('mousse_scope_denied', 'Only a bot\'s chat hides threads this way.')
     const thread = this.threadStore?.getThread(threadId)
-    if (!thread || thread.startedByBot?.botId !== bot.botId)
-      throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not one you started: you hide or show only threads you started.`)
+    // A bot's thread that may not make the call is refused here; any other thread is no bot's.
+    const bot = this.botSenderOf(options.actor, 'thread_hide')
+    if (bot) {
+      if (!thread || thread.startedByBot?.botId !== bot.botId)
+        throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not one you started: you hide or show only threads you started.`)
+    } else if (!thread || thread.startedByBot || thread.createdByThreadId !== options.actor.threadId) {
+      throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not one you started: you hide or show only threads you started with thread_create.`)
+    }
     if (Boolean(thread.hidden) === hidden) return { hidden, changed: false }
     this.threadStore!.setThreadHidden(threadId, hidden)
     engine.store.appendEvent({
@@ -7453,6 +7611,9 @@ export class OrchestratorService extends EventEmitter {
       resultReport: (payload) => {
         const delegation = this.runEngine?.delegations.get(payload.delegationId)
         if (!delegation) return undefined
+        // A subagent on another computer worked there: its result names the branch, and nothing here holds its files.
+        const remote = this.remoteSubagentComputer(delegation)
+        if (remote) return remoteSubagentResultText(remote)
         const report = this.delegationResultReport(delegation)
         if (report) return formatSubagentResultReport(report)
         return delegation.workspace === 'shared' ? 'It worked in your own folder, shared with you; Mousse merged nothing.' : undefined
@@ -8695,11 +8856,12 @@ export class OrchestratorService extends EventEmitter {
     const reportResult = (ref: SubagentRef) => {
       const task = this.resolveTask(parentThreadId, ref, 'finished')
       if (!task.ok) return task.refusal
-      if (this.requireRunEngine().remoteSubagents.get(task.delegation.delegationId))
+      const remote = this.remoteSubagentComputer(task.delegation)
+      if (remote)
         return {
           delegationId: task.delegation.delegationId,
           merged: false,
-          note: 'This subagent worked on another computer; its result names the branch its work is on there. Fetch that branch to use it here.'
+          note: remoteSubagentResultText(remote)
         }
       const report = this.delegationResultReport(task.delegation)
       return {
@@ -8967,7 +9129,7 @@ export class OrchestratorService extends EventEmitter {
     // Its thread there expires with this thread's root (issue #685).
     this.trackRemoteExpiry(accepted.childThreadId, computer.node)
     if (accepted.replayed) return { ...value, replayed: true, note: 'Started. Mousse sends you the result when it finishes; end your turn.' }
-    this.recordRemoteSubagentMessage(accepted.childThreadId, 'user', input.prompt)
+    this.recordRemoteSubagentMessage(accepted.childThreadId, 'user', input.prompt, this.parentOrigin(parentThreadId, parentRunId))
     const launched = await remote.launch(accepted.delegationId)
     if (launched.ok === false) {
       // Nothing runs there: the task ends here without a notice, and its title is free again.
@@ -9328,7 +9490,7 @@ export class OrchestratorService extends EventEmitter {
     if (!delegation) throw new Error('The follow-up was not recorded as a task')
     if (base?.node) this.trackRemoteExpiry(target.childThreadId, base.node)
     if (accepted.replayed) return this.followUpValue(delegation, target.title, { replayed: true })
-    this.recordRemoteSubagentMessage(target.childThreadId, 'user', target.prompt)
+    this.recordRemoteSubagentMessage(target.childThreadId, 'user', target.prompt, this.parentOrigin(parentThreadId, parentRunId))
     const launched = await remote!.launch(accepted.delegationId)
     if (launched.ok === false) {
       await engine.cancelDelegation(accepted.delegationId).catch(() => [])
@@ -9378,14 +9540,37 @@ export class OrchestratorService extends EventEmitter {
     await this.stopThread(threadId, 'time_limit', { runId, clientRequestId: `time-limit:${runId}`, byAgent: true })
   }
 
-  /** A line a remote subagent's stand-in shows in its transcript: what it was asked, what it answered. Never sent to a model. */
-  private recordRemoteSubagentMessage(threadId: string, role: 'user' | 'assistant', content: string): void {
+  /** The parent thread as the sender of its subagent's task (`AgentOrigin`), with its title now. */
+  private parentOrigin(parentThreadId: string, parentRunId: string, body?: AgentOrigin['body']): AgentOrigin {
+    const title = this.titleOf(parentThreadId)?.trim().slice(0, AGENT_TITLE_MAX_CHARS)
+    return { kind: 'agent', threadId: parentThreadId, runId: parentRunId, ...(body ? { body } : {}), ...(title ? { title } : {}) }
+  }
+
+  /**
+   * The origin a subagent's task is stored with: its parent thread, so the chat shows the task as that agent's words
+   * ("Agent · <parent>", which opens the parent) and never as a message a person typed. Only for a turn its delegation
+   * started (`source` 'delegation': the first task, or a follow-up the parent sent, queued or not); a person's own message
+   * on a subagent's thread stays theirs. The words shown are the task, without the guidance Mousse puts before a first
+   * task; the model still reads the whole text.
+   */
+  private delegatedOrigin(source: string | undefined, runId: string | undefined, content: string): AgentOrigin | undefined {
+    if (source !== 'delegation' || !runId) return undefined
+    const delegation = this.runEngine?.delegations.getByChildRun(runId)
+    if (!delegation) return undefined
+    return this.parentOrigin(delegation.parentThreadId, delegation.parentRunId, { head: content.length - withoutSubagentPreamble(content).length, tail: 0 })
+  }
+
+  /**
+   * A line a remote subagent's stand-in shows in its transcript: what it was asked, what it answered. Never sent to a
+   * model. What it was asked is stored as its parent agent's (`origin`), never as something a person typed.
+   */
+  private recordRemoteSubagentMessage(threadId: string, role: 'user' | 'assistant', content: string, origin?: AgentOrigin): void {
     const text = content.trim()
     if (!text || (this.threadStore && !this.threadStore.getThread(threadId))) return
     const session = this.getOrCreateSession(threadId)
     if (session.deleted) return
     this.sessionAls.run(session, () => {
-      const msg: ChatMessage = { id: uuidv4(), role, content: text, timestamp: new Date().toISOString() }
+      const msg: ChatMessage = { id: uuidv4(), role, content: text, timestamp: new Date().toISOString(), ...(role === 'user' && origin ? { origin } : {}) }
       this.messages.push(msg)
       this.emitMessageAdded(msg)
       this.persist(true)
@@ -9503,6 +9688,8 @@ export class OrchestratorService extends EventEmitter {
     return {
       name: computer.name,
       online: computer.online,
+      // Its thread there, for thread_read and the other thread tools.
+      ...(computer.ref ? { threadId: computer.ref } : {}),
       ...(binding?.waitingInput ? { waitingForAnswer: true, note: `It waits for an answer on ${computer.name}; the user answers it there.` } : {}),
       ...(binding?.lastError && binding.state !== 'done' ? { lastError: binding.lastError } : {}),
       ...(binding?.lastSeenAt ? { lastSeenAt: binding.lastSeenAt } : {})
@@ -9591,7 +9778,9 @@ export class OrchestratorService extends EventEmitter {
       role: row.role,
       provider: row.provider,
       model: row.model,
-      ...(row.computer ? { computer: row.computer.name, computerOnline: row.computer.online } : { access: this.childAccess(row.childThreadId) })
+      ...(row.computer
+        ? { computer: row.computer.name, computerOnline: row.computer.online, ...(row.computer.ref ? { remoteThreadId: row.computer.ref } : {}) }
+        : { access: this.childAccess(row.childThreadId) })
     }))
   }
 
@@ -9639,6 +9828,17 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * The computer a delegated task ran on, when its subagent runs on another of the user's computers (its stand-in thread
+   * here has `runsOn`, or the task has a remote binding); undefined for a subagent on this computer.
+   */
+  private remoteSubagentComputer(delegation: DelegationRecord): string | undefined {
+    const runsOn = this.threadStore?.getThread(delegation.childThreadId)?.runsOn
+    if (runsOn) return runsOn.computerName || 'another computer'
+    const binding = this.runEngine?.remoteSubagents.get(delegation.delegationId)
+    return binding ? this.remoteSubagents?.computerName(binding.node) ?? 'another computer' : undefined
+  }
+
+  /**
    * The frozen result of a delegated task: the files its subagent started from and finished with, pinned under
    * `refs/mousse/delegations/<child>/<delegation>/`, where it worked and the Git state it left. Built once, from
    * snapshots already recorded (the subagent's task checkpoint, or for a shared folder the parent's own turn
@@ -9646,6 +9846,9 @@ export class OrchestratorService extends EventEmitter {
    * whatever the worktree does next. Nothing is merged. Undefined when the task left no recorded files.
    */
   private delegationResultReport(delegation: DelegationRecord): SubagentResultReport | undefined {
+    // A subagent on another computer left nothing in this computer's folders: any report from here would describe the
+    // parent's own folder (a shared task) or the stand-in thread, never where it worked.
+    if (this.remoteSubagentComputer(delegation)) return undefined
     const childDirectory = this.resolveThreadDir(delegation.childThreadId)
     if (!childDirectory) return undefined
     const path = join(childDirectory, SUBAGENT_RESULTS_FILE)
@@ -15394,7 +15597,7 @@ export class OrchestratorService extends EventEmitter {
             turnPermission,
             opts?.schedule,
             approvalNote,
-            opts?.agent,
+            opts?.agent ?? this.delegatedOrigin(opts?.source, opts?.runId, userContent),
             opts?.backgroundNotice,
             this.runEngine ? opts?.runId : undefined,
             opts?.settleNotice

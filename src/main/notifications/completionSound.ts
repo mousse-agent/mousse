@@ -49,7 +49,9 @@ export function playThreadCompletionSound(deps?: {
               `[System.Media.SoundPlayer]::new('${escapedFile}').PlaySync()`
             ]
           : [file],
-        { stdio: 'ignore', detached: true, windowsHide: windows }
+        // Not detached on Windows: detached starts PowerShell with no console at all (DETACHED_PROCESS), so any console
+        // program it starts opens a visible one. Attached, windowsHide gives it a console that has no window.
+        { stdio: 'ignore', detached: !windows, windowsHide: windows }
       )
       child.on('error', () => beep())
       child.unref()

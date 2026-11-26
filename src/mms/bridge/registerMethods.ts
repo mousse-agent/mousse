@@ -7,6 +7,7 @@ import { DomainHandlerRegistry } from '../protocol/domainRegistry'
 import type { DomainConnectionContext, TrustedProfileBinding } from '../protocol/domainRegistry'
 import type { BridgeProfileService } from './BridgeProfileService'
 import { BridgeDisplayEmitter, executeBridgeHubLocal, validateBridgeHubLocal } from './hub'
+import { isWordedRefusal } from './hub/engine'
 
 interface Owner {
   profile: string
@@ -15,12 +16,18 @@ interface Owner {
   emitter: BridgeDisplayEmitter
   unwatch(): void
 }
+/** The longest refusal of another computer a window is shown in its words. */
+const WORDED_REFUSAL_MAX = 1000
+/**
+ * What a window is told: the code and its fixed message, never this computer's own error text. A refusal the
+ * other computer worded for a person keeps its words, which are all that says why (a folder it will not open).
+ */
 function publicError(error: unknown): AppError {
   const code = error instanceof NetError ? error.code : 'internal',
     entry = NET_ERRORS[code]
   return new AppError({
     code,
-    message: entry.message,
+    message: isWordedRefusal(error) ? error.message.slice(0, WORDED_REFUSAL_MAX) : entry.message,
     errorInfo: { category: entry.category, retryable: entry.retryable }
   })
 }

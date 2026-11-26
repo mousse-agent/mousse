@@ -21,7 +21,7 @@ const INSTALLATION_METHODS = new Set([
 const PROFILE_PROVIDER_METHODS = new Set([
   'providers.getUsage', 'providers.getSubscriptionUsage', 'providers.usageSlots', 'providers.limitTrends', 'providers.watchUsage', 'providers.getUsageFor', 'providers.useLimitReset', 'providers.setUsageProxyKey', 'providers.clearUsageProxyKey',
   'providers.synthesizeSpeech', 'providers.transcribeAudio',
-  'providers.snapshots', 'providers.catalog.addOptions',
+  'providers.snapshots', 'providers.events', 'providers.catalog.addOptions',
   'providers.instances.add', 'providers.instances.setSecret', 'providers.instances.remove',
   'providers.instances.configure', 'providers.instances.setEnabled', 'providers.instances.install',
   'providers.instances.cancelInstall', 'providers.instances.update',

@@ -21,6 +21,9 @@ class FakeComputer implements RemoteComputersPort {
   online = true
   allowed: RemoteComputer[] = [{ node: MAC, name: 'Studio Mac', online: true }]
   farRun: Json = { status: 'running', userMessageId: 'far-user-1' }
+  /** What the thread there still runs (`threads.backgroundWork`), and its runs newest first (`runs.list`). */
+  farWork: Json = { items: [], providerWork: false, busy: false }
+  farRuns: Json[] = []
   pending: unknown[] = []
   finalText = 'All 40 tests pass on macOS.'
   match: { projectId: string; weak: boolean } | null = { projectId: 'far-project', weak: false }
@@ -82,6 +85,10 @@ class FakeComputer implements RemoteComputersPort {
         return { run: { runId: params.runId, ...this.farRun } }
       case 'orchestrator.pendingQuestions':
         return { pending: this.pending }
+      case 'threads.backgroundWork':
+        return { threadId: params.threadId, ...this.farWork }
+      case 'runs.list':
+        return { runs: this.farRuns.slice(0, Number(params.limit ?? 50)) }
       case 'thread.snapshot':
         return {
           messages: [
@@ -260,6 +267,94 @@ describe('remote subagents (issue #469)', () => {
     expect(d.engine.remoteSubagents.get(out.started.delegationId)!.state).toBe('done')
   })
 
+  describe('a run there that ended while the thread there still works for the task', () => {
+    /** The task's run there ended with an interim answer; its agent left a background command running there. */
+    const waiting = async (options: { maxMinutes?: number } = {}) => {
+      const w = remoteWorld()
+      if (options.maxMinutes) {
+        w.mac.marks = true
+        w.mac.routedVersions = { 'orchestrator.send': 8 }
+      }
+      w.steps['go'] = async (tools) => { w.out.started = await w.startOnMac(tools, 'Mac tester', options.maxMinutes ? { maxMinutes: options.maxMinutes } : {}) }
+      await w.say('go')
+      w.mac.farRun = { status: 'completed', userMessageId: 'far-user-1', ordinal: 1 }
+      w.mac.finalText = 'Verify is running in the background; I will continue when it reports back.'
+      w.mac.farWork = { items: [{ id: 'bg-1', kind: 'background', description: 'verify' }], providerWork: false, busy: true }
+      w.mac.farRuns = [{ runId: 'far-run-1', status: 'completed', ordinal: 1 }]
+      await w.service.pass()
+      const task = () => w.d.engine.delegations.get(w.out.started.delegationId)!
+      return { ...w, task }
+    }
+
+    it('the task waits, then publishes the answer of the turn that ended with nothing left', async () => {
+      const { d, parent, out, mac, service, task } = await waiting()
+      expect(task().status).toBe('running')
+      expect(d.engine.inbox.listForThread(parent.id).filter((row) => row.kind === 'child_result')).toEqual([])
+      expect(service.overlay(out.started.childThreadId)).toMatchObject({ activity: 'working' })
+
+      // The command ended there and woke the thread: its next turn runs, then ends with the final answer.
+      mac.farWork = { items: [], providerWork: false, busy: true }
+      mac.farRuns = [{ runId: 'far-run-2', status: 'running', ordinal: 2 }, ...mac.farRuns]
+      await service.pass()
+      expect(task().status).toBe('running')
+      mac.farWork = { items: [], providerWork: false, busy: false }
+      mac.farRuns[0] = { runId: 'far-run-2', status: 'completed', ordinal: 2 }
+      mac.finalText = 'Verify passed: 812 tests.'
+      await service.pass()
+      expect(task()).toMatchObject({ status: 'result_available', result: { runStatus: 'completed' } })
+      expect(task().result!.text).toContain('Verify passed: 812 tests.')
+      expect(task().result!.text).not.toContain('I will continue')
+      expect(d.engine.inbox.listForThread(parent.id).filter((row) => row.kind === 'child_result')).toHaveLength(1)
+    })
+
+    it('a computer too old to say busy is read by what it lists', async () => {
+      const { mac, service, task } = await waiting()
+      mac.farWork = { items: [{ id: 'mon-1', kind: 'command', description: 'CI' }], providerWork: false }
+      await service.pass()
+      expect(task().status).toBe('running')
+      // A wake-up set there is not work that runs: with nothing else, the run's end settles the task.
+      mac.farWork = { items: [{ id: 'wake-1', kind: 'wake', description: 'later' }], providerWork: false }
+      await service.pass()
+      expect(task()).toMatchObject({ status: 'result_available', result: { runStatus: 'completed' } })
+    })
+
+    it('a read that does not reach that computer settles nothing', async () => {
+      const { mac, service, task } = await waiting()
+      mac.farWork = { items: [], providerWork: false, busy: false }
+      mac.refuse['threads.backgroundWork'] = 'computer_offline'
+      await service.pass()
+      expect(task().status).toBe('running')
+      delete mac.refuse['threads.backgroundWork']
+      await service.pass()
+      expect(task().status).toBe('result_available')
+    })
+
+    it('Stop here stops the thread there, so what it left running ends too', async () => {
+      const { d, steps, out, mac, say, service } = await waiting()
+      steps['cancel'] = async (tools) => { out.cancelled = await tools.taskCancel({ subagent: 'Mac tester' }) as Json }
+      await say('cancel')
+      expect(d.engine.delegations.get(out.started.delegationId)!.status).toBe('cancelled')
+      await service.pass()
+      const abort = mac.calls.find((call) => call.method === 'orchestrator.abort')
+      expect(abort?.params).toMatchObject({ threadId: 'far-thread-1' })
+      expect(abort?.params).not.toHaveProperty('runId')
+    })
+
+    it('a limit that computer counted runs on here as wall time while the task waits, and stops the thread there', async () => {
+      const { d, mac, service, out, task } = await waiting({ maxMinutes: 5 })
+      expect(d.engine.remoteSubagents.get(out.started.delegationId)).toMatchObject({ limitMinutes: 5, deadlineAt: null })
+      expect(task().status).toBe('running')
+      ;(service as unknown as { deps: { now: () => number } }).deps.now = () => Date.now() + 6 * 60_000
+      await service.pass()
+      expect(task().result).toMatchObject({ runStatus: 'interrupted' })
+      expect(task().result!.error).toContain('5-minute limit on Studio Mac while it waited on its background work')
+      await service.pass()
+      const abort = mac.calls.find((call) => call.method === 'orchestrator.abort')
+      expect(abort?.params).toMatchObject({ threadId: 'far-thread-1' })
+      expect(abort?.params).not.toHaveProperty('runId')
+    })
+  })
+
   it('the time limit ends the task here and stops it there', async () => {
     const { d, parent, steps, out, say, mac, service, startOnMac } = remoteWorld()
     steps['go'] = async (tools) => { out.started = await startOnMac(tools, 'Mac tester', { maxMinutes: 5 }) }
@@ -425,7 +520,7 @@ describe('remote subagents (issue #469)', () => {
     expect(sends[0].params).not.toHaveProperty('refuseWhilePaused')
     expect(sends[1].params).toMatchObject({ refuseWhilePaused: true })
     expect(mac.methods().filter((method) => method === 'threads.create')).toHaveLength(1)
-    expect(out.merge).toMatchObject({ merged: false, note: expect.stringContaining('another computer') })
+    expect(out.merge).toMatchObject({ merged: false, note: expect.stringContaining('names the branch its work is on there') })
     expect(d.engine.remoteSubagents.get(out.more.delegationId)).toMatchObject({ remoteThreadId: 'far-thread-1', remoteRunId: 'far-run-2', state: 'running' })
   })
 
