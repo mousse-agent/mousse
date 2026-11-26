@@ -341,7 +341,9 @@ describe('the thread path across computers', () => {
   // Node ids are `nod_` and 26 characters; a thread of another computer is listed as `<node>:<id>`.
   const pc = 'nod_' + 'a'.repeat(26)
   const mac = 'nod_' + 'b'.repeat(26)
-  const agentOn = (node: string, from: string): Thread['startedFrom'] => ({ node, agent: { thread: from, title: 'Builder', mode: 'default' } as never })
+  // An agent on `node` started the thread: with `thread_create` (agentOn), or as its subagent (subagentOn).
+  const agentOn = (node: string, from: string): Thread['startedFrom'] => ({ node, agent: { thread: from, title: 'Builder', mode: 'default' } })
+  const subagentOn = (node: string, from: string): Thread['startedFrom'] => ({ node, agent: { thread: from, title: 'Builder', mode: 'default', subagent: true } })
 
   // Each row: which computer's list, the open thread, and the path a person sees in the title bar.
   const cases: { name: string; list: Thread[]; open: string; path: string[] }[] = [
@@ -356,16 +358,28 @@ describe('the thread path across computers', () => {
       path: ['acme-web', 'Fix flaky checkout test', 'Mac screenshot taker']
     },
     {
-      name: 'this computer opens a thread its agent started on another computer',
-      list: [thread('t1', 'Fix flaky checkout test', { projectId: 'p1' }), thread(`${mac}:r2`, 'Mac build', { node: mac, startedFrom: agentOn(pc, 't1') })],
+      name: 'this computer opens the thread another computer runs for its subagent, without its stand-in listed',
+      list: [thread('t1', 'Fix flaky checkout test', { projectId: 'p1' }), thread(`${mac}:r2`, 'Mac build', { node: mac, startedFrom: subagentOn(pc, 't1') })],
       open: `${mac}:r2`,
       path: ['acme-web', 'Fix flaky checkout test', 'Mac build']
     },
     {
-      name: 'the computer that runs it opens a thread an agent on another computer started',
-      list: [thread(`${pc}:t1`, 'Fix flaky checkout test', { node: pc, projectId: 'p1' }), thread('r2', 'Mac build', { startedFrom: agentOn(pc, 't1') })],
+      name: 'this computer opens a thread its agent started with thread_create on another computer: no parent',
+      list: [thread('t1', 'Fix flaky checkout test', { projectId: 'p1' }), thread(`${mac}:r2`, 'Mac build', { node: mac, startedFrom: agentOn(pc, 't1') })],
+      open: `${mac}:r2`,
+      path: ['Mac build']
+    },
+    {
+      name: 'the computer that runs a subagent for an agent on another computer opens it',
+      list: [thread(`${pc}:t1`, 'Fix flaky checkout test', { node: pc, projectId: 'p1' }), thread('r2', 'Mac build', { startedFrom: subagentOn(pc, 't1') })],
       open: 'r2',
       path: ['acme-web', 'Fix flaky checkout test', 'Mac build']
+    },
+    {
+      name: 'the computer that runs it opens a thread an agent on another computer started with thread_create: no parent',
+      list: [thread(`${pc}:t1`, 'Fix flaky checkout test', { node: pc, projectId: 'p1' }), thread('r2', 'Mac build', { startedFrom: agentOn(pc, 't1') })],
+      open: 'r2',
+      path: ['Mac build']
     },
     {
       name: 'a thread a person started from another computer has no parent',
@@ -375,7 +389,7 @@ describe('the thread path across computers', () => {
     },
     {
       name: 'a starting thread that is not listed leaves the thread on its own',
-      list: [thread('r2', 'Mac build', { startedFrom: agentOn(pc, 'gone') })],
+      list: [thread('r2', 'Mac build', { startedFrom: subagentOn(pc, 'gone') })],
       open: 'r2',
       path: ['Mac build']
     }
@@ -393,6 +407,18 @@ describe('the thread path across computers', () => {
     const menu = siblingThreads(`${mac}:r1`, list, projects)
     expect(menu?.label).toBe('Subagents of Fix flaky checkout test')
     expect(menu?.threads.map((entry) => entry.id).sort()).toEqual([`${mac}:r1`, 's9'])
+  })
+
+  it('lists, on the computer that runs them, the other subagents of the same agent and not the threads it started as its own', () => {
+    const list = [
+      thread(`${pc}:t1`, 'Fix flaky checkout test', { node: pc, projectId: 'p1' }),
+      thread('r2', 'Mac build', { startedFrom: subagentOn(pc, 't1') }),
+      thread('r4', 'Mac lint', { startedFrom: subagentOn(pc, 't1') }),
+      thread('r5', 'Mac release notes', { startedFrom: agentOn(pc, 't1') })
+    ]
+    const menu = siblingThreads('r2', list, projects)
+    expect(menu?.label).toBe('Subagents of Fix flaky checkout test')
+    expect(menu?.threads.map((entry) => entry.id).sort()).toEqual(['r2', 'r4'])
   })
 })
 

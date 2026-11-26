@@ -806,5 +806,14 @@ CREATE TABLE remote_archive(
 ) STRICT;
 CREATE INDEX remote_archive_state ON remote_archive(state);
 `
+  },
+  {
+    version: 28,
+    sql: `
+-- Whether a remote subagent's create sends subagent: true, so that computer records its thread as this one's subagent
+-- (ThreadStartedFrom.agent.subagent). 1 for a new task; set to NULL when that computer did not take it on the first
+-- attempt, and NULL for a task from before this column: its attempts send none, so a retry repeats the very same create.
+ALTER TABLE remote_subagents ADD COLUMN subagent INTEGER CHECK(subagent IS NULL OR subagent IN (0,1));
+`
   }
 ]

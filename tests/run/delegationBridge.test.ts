@@ -159,7 +159,7 @@ describe('delegation bridge (SPEC §14)', () => {
     await waitFor(() => first.engine.getRun(delegation.childRunId)?.status === 'completed', 'the child run')
     // The subagent is told whose it is and where its result goes, then its task.
     expect(first.adapter.turns.find((turn) => turn.threadId === childThreadId)?.prompt)
-      .toBe(`${subagentPreamble('Parent')}\n\nList the modules`)
+      .toBe(`${subagentPreamble('Parent', parent.id)}\n\nList the modules`)
     expect(first.engine.inbox.listPending(parent.id)).toHaveLength(1)
     await first.crash()
 

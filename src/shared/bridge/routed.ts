@@ -134,8 +134,9 @@ export const ROUTED_SEND_WINDOW_KEY = 'window'
 /** Optional behavior an older owner can omit while still providing its original answer. */
 export const ROUTED_DROPPABLE_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'orchestrator.send': [ROUTED_SEND_WINDOW_KEY],
-  // An owner from before it shows every thread; it never had a way to hide one.
-  'threads.create': ['hidden'],
+  // An owner from before it shows every thread; it never had a way to hide one. One from before `subagent` records the
+  // thread as one an agent started, without saying it is that agent's subagent.
+  'threads.create': ['hidden', 'subagent'],
   'git.status': GIT_READ,
   'git.diff': GIT_READ,
   'git.log': GIT_READ,
@@ -706,14 +707,15 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   // A new thread records the computer that asked (`startedFrom`), as for a phone.
   // Version 2: `agent` (`ROUTED_AGENT_KEY`), accepted from another computer's daemon only, never from a phone.
   // Version 3: `hidden`, read only with `agent`: a thread an agent starts is out of the sidebar unless it is false.
+  // Version 4: `subagent`, read only with `agent`: the thread is the sender's subagent (`ThreadStartedFrom.agent.subagent`).
   'threads.create': write(
     'computer',
-    ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId', ROUTED_AGENT_KEY, 'hidden'],
+    ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId', ROUTED_AGENT_KEY, 'hidden', 'subagent'],
     {
       via: 'backend',
       required: ['name'],
-      version: 3,
-      since: { [ROUTED_AGENT_KEY]: 2, hidden: 3 }
+      version: 4,
+      since: { [ROUTED_AGENT_KEY]: 2, hidden: 3, subagent: 4 }
     }
   ),
   'projects.rename': write('project', ['projectId', 'name'], { required: ['name'] }),

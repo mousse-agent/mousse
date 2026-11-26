@@ -9,7 +9,7 @@ import type { RunEngine } from '../run/RunEngine'
 import type { RunTerminalStatus } from '../run/terminal'
 import { TERMINAL_RUN_STATUSES, type RunOutcome, type RunStatus } from '../run/types'
 import { remoteReachRefusal } from './RemoteLaunchedThreads'
-import { hiddenOnTheWire, REMOTE_START_TRANSIENT, runRemoteThreadStart, sendRefusal, sentRunId } from './remoteThreadStart'
+import { hiddenOnTheWire, REMOTE_START_TRANSIENT, runRemoteThreadStart, sendRefusal, sentRunId, subagentOnTheWire } from './remoteThreadStart'
 
 /**
  * Remote subagents (issue #469): a subagent an agent starts on another of the user's computers. That
@@ -527,6 +527,13 @@ export class RemoteSubagents {
           record.hidden = null
         }, AbortSignal.timeout(CALL_TIMEOUT_MS))
         : record.hidden
+      // Its thread there is this one's subagent, with the mark only; decided like `hidden`, by the first attempt.
+      const subagent = port && record.marked === true
+        ? await subagentOnTheWire(port, record.node, record.subagent, record.remoteThreadId !== null, () => {
+          this.records.update(record.delegationId, { subagent: null })
+          record.subagent = null
+        }, AbortSignal.timeout(CALL_TIMEOUT_MS))
+        : null
       const started = await runRemoteThreadStart({
         key: `remote-subagent:${record.delegationId}`,
         name: this.deps.titleOf(record.childThreadId) ?? 'Subagent',
@@ -535,6 +542,7 @@ export class RemoteSubagents {
         // Out of that computer's sidebar; none for a task from before this, or for a computer that does not take it when
         // the first attempt goes out: every retry sends what that attempt did.
         ...(hidden !== null ? { hidden } : {}),
+        ...(subagent ? { subagent: true as const } : {}),
         instanceId: record.instanceId,
         model: record.model,
         permissionMode: record.permissionMode,

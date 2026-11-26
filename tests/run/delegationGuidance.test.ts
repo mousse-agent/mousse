@@ -8,8 +8,10 @@ import { delegationToolDefinitions, dispatchDelegationTool, LISTED_DELEGATION_TO
 import {
   delegationGuidanceLines,
   mcpDelegationInstructions,
+  remoteSubagentPreamble,
   subagentGuidanceLines,
-  subagentPreamble
+  subagentPreamble,
+  withoutSubagentPreamble
 } from '../../src/mms/run/delegation/guidance'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
 import { createAppToolRegistry, type AppToolHost } from '../../src/mms/run/mcp/appTools'
@@ -67,6 +69,18 @@ describe('subagent guidance', () => {
       'You are a subagent. Your final message is your result: keep it self-contained and bounded. ask_user questions reach your parent and the user. You may start your own subagents unless your instructions say not to.'
     )
     expect(subagentPreamble('')).toBe(subagentPreamble())
+    // With its parent thread's id, which thread_read needs: the subagent can read the parent when its brief is unclear.
+    expect(subagentPreamble('API reviewer', 'thr_parent')).toBe(
+      'You are a subagent of "API reviewer". Your final message is your result: keep it self-contained and bounded. ask_user questions reach your parent and the user. You may start your own subagents unless your instructions say not to. If your brief is unclear, read your parent thread (thread_read thr_parent).'
+    )
+  })
+
+  it('what a subagent on another computer is told in its first prompt, with its parent as that computer names it', () => {
+    expect(remoteSubagentPreamble('API reviewer', 'nod_pc:thr_parent')).toBe(
+      'You are a subagent of "API reviewer", started by an agent on another of the user\'s computers. Your final message is your result: keep it self-contained and bounded. Questions you ask are answered on this computer, by the user, not by the agent that started you. Commit your work to this thread\'s branch when you change code, so it can be fetched from here. If your brief is unclear, read your parent thread (thread_read nod_pc:thr_parent).'
+    )
+    // One line, so the chat can leave all of it out before the task (`withoutSubagentPreamble`).
+    expect(withoutSubagentPreamble(`${remoteSubagentPreamble('API reviewer', 'nod_pc:thr_parent')}\n\nRun the tests`)).toBe('Run the tests')
   })
 
   it('tells a subagent that it may start subagents of its own, and tells no one else', () => {
