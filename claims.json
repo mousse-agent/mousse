@@ -46,21 +46,6 @@
       "expiresAt": "2026-11-25T18:05:20.190Z"
     },
     {
-      "task": "bot-turn-kind-matrix",
-      "session": "Animatrix-949070",
-      "machine": "Animatrix",
-      "branch": "bot-turn-kind-matrix",
-      "paths": [
-        "src/mms/bots/activation/BotEngine.ts",
-        "src/mms/bots/activation/workWaiting.ts",
-        "src/mms/run/mcp/appTools/bots.ts",
-        "tests/run/toolApiContract.test.ts",
-        "docs/bots.md"
-      ],
-      "claimedAt": "2026-11-25T02:54:33.959Z",
-      "expiresAt": "2026-11-25T05:35:26.312Z"
-    },
-    {
       "task": "fix-windows-update-install-path",
       "session": "Animatrix-ccfd0b",
       "machine": "Animatrix",
@@ -110,20 +95,6 @@
       ],
       "claimedAt": "2026-11-25T18:29:30.139Z",
       "expiresAt": "2026-11-25T20:29:30.139Z"
-    },
-    {
-      "task": "sidebar-computer-multi-filter",
-      "session": "agibook-9e3994",
-      "machine": "agibook",
-      "branch": "sidebar-computer-multi-filter",
-      "paths": [
-        "src/renderer/lib/threadFilter.ts",
-        "src/renderer/stores/threadFilterStore.ts",
-        "src/renderer/components/sidebar/ThreadFilterBar.tsx",
-        "src/renderer/components/ThreadsSidebar.tsx"
-      ],
-      "claimedAt": "2026-11-26T05:33:41.469Z",
-      "expiresAt": "2026-11-26T07:33:41.469Z"
     }
   ]
 }
