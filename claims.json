@@ -61,6 +61,19 @@
       "expiresAt": "2026-11-25T05:35:26.312Z"
     },
     {
+      "task": "composer-background-work-strip",
+      "session": "agibook-8dc6ac",
+      "machine": "agibook",
+      "branch": "composer-background-work-strip",
+      "paths": [
+        "src/renderer/components/BackgroundWorkRow.tsx",
+        "src/renderer/components/backgroundWorkRow.css",
+        "src/renderer/components/NativeSubagentPage.tsx"
+      ],
+      "claimedAt": "2026-11-26T04:39:35.781Z",
+      "expiresAt": "2026-11-26T06:39:35.781Z"
+    },
+    {
       "task": "fix-windows-update-install-path",
       "session": "Animatrix-ccfd0b",
       "machine": "Animatrix",
