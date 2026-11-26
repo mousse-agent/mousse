@@ -42,6 +42,9 @@ export const sourceControlClient = {
     request<SourceRepositoryList>('sourceControl.repositories', computer, refresh ? { provider, refresh: true } : { provider }),
   clone: (computer: string, input: { repository: string; path: string; branch?: string }) =>
     request<RemoteClone>('sourceControl.clone', computer, { provider: 'github', ...input }),
+  /** A project of this computer: its GitHub repository and branch, for a clone on another computer. */
+  projectSource: (projectId: string) =>
+    request<{ repository?: string; branch?: string }>('sourceControl.projectSource', THIS_COMPUTER, { projectId }),
   browse: (computer: string, path?: string) => request<BrowsedFolders>('folders.browse', computer, path ? { path } : {})
 }
 

@@ -16,8 +16,9 @@ import type { SourceControlProviderStatus } from '../../shared/sourceControl'
 import { showToast } from './ui/Toast'
 import { Select, type SelectOption } from './ui/Select'
 import { Spinner } from './ui/Spinner'
-import { browseRows, joinFolder, newProjectRows, projectFolders, sameFolder, usualParent, withExisting, withRepositories, type NewProjectRow } from './newProjectLogic'
+import { addToComputerRows, browseRows, joinFolder, newProjectRows, projectFolders, sameFolder, usualParent, withExisting, withRepositories, type NewProjectRow } from './newProjectLogic'
 import { GitHubCode } from './GitHubCode'
+import { endAddToComputer, useAddToComputer } from '../lib/addToComputer'
 import { shortPath } from './newThreadPickerLogic'
 import './newProjectDialog.css'
 
@@ -39,7 +40,8 @@ interface Browser {
   view: BrowsedFolders | null
   loading: boolean
   error: string
-  pending: CloneRow | null
+  /** A clone waiting for where it goes, or a checkout there to add as the project (`checkout`). */
+  pending: CloneRow | 'checkout' | null
   /** What the field held before browsing, back when it ends. */
   savedQuery: string
 }
@@ -56,6 +58,13 @@ function remoteReason(error: unknown, computer: string): string {
 /** A project New project added: a thread opens in it while the dialog is open; once hidden, a toast offers one. */
 async function finish(project: Project): Promise<void> {
   const app = useAppStore.getState()
+  // Adding a project to another computer: the composer that asked takes it; no thread starts here.
+  if (useAddToComputer.getState().request) {
+    if (!app.projects.some((entry) => entry.id === project.id)) app.setProjects([...app.projects, project])
+    app.setNewProjectOpen(false)
+    endAddToComputer(project)
+    return
+  }
   if (app.newProjectOpen) {
     app.setNewProjectOpen(false)
     await runWithToast('start a thread', () => listProjectAndStartThread(project), { retry: true })
@@ -115,7 +124,8 @@ function NewProjectPanel() {
   const { byNode } = useComputers()
   const task = useProjectTask()
   const [query, setQuery] = useState('')
-  const [computer, setComputer] = useState(THIS_COMPUTER)
+  const add = useAddToComputer()
+  const [computer, setComputer] = useState(() => add.request?.node ?? THIS_COMPUTER)
   const [hint, setHint] = useState<'clone' | 'new' | null>(null)
   const [activeIndex, setActiveIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -130,15 +140,22 @@ function NewProjectPanel() {
   const computerName = remote ? byNode[computer]?.name ?? UNKNOWN_COMPUTER_NAME : 'This computer'
   const theirs = useMemo(() => projects.filter((project) => (remote ? project.node === computer : !project.node)), [projects, remote, computer])
   const parent = remote ? remoteParent ?? usualParent(theirs.map((project) => project.path)) : chosenParent ?? usualParent(theirs.map((project) => project.path))
+  // Adding a project of this computer to the one picked: its checkouts there, a clone of it, or its folder there.
+  const adding = add.request && add.request.node === computer && !query.trim() ? add.request : null
   const groups = useMemo(() => {
     if (browser) return browser.view ? browseRows(browser.view, query, computerName) : []
+    if (adding) {
+      const matches = theirs.filter((project) => project.sameAs === adding.projectId || project.similarTo === adding.projectId)
+      const rows = addToComputerRows({ name: adding.name, computer: computerName, repository: add.source?.repository, branch: add.source?.branch, parent, matches })
+      return withExisting(rows, (path) => theirs.find((project) => sameFolder(project.path, path)))
+    }
     const base = remote
       ? newProjectRows(query, { remote: true, computer: computerName, folders: projectFolders(theirs.map((project) => project.path)), parent })
       : newProjectRows(query, { remote: false, parent })
     const connected = github ? github.state === 'connected' : null
     const rows = withRepositories(base, query, { repositories, parent, cloning: hint === 'clone', connected })
     return withExisting(rows, (path) => theirs.find((project) => sameFolder(project.path, path)))
-  }, [browser, query, remote, computerName, theirs, parent, github, repositories, hint])
+  }, [browser, adding, add.source, query, remote, computerName, theirs, parent, github, repositories, hint])
   const rows = useMemo(() => groups.flatMap((group) => group.rows), [groups])
   const active = Math.min(activeIndex, Math.max(rows.length - 1, 0))
 
@@ -152,6 +169,10 @@ function NewProjectPanel() {
   useEffect(() => {
     inputRef.current?.focus()
     useProjectTask.setState({ error: '' })
+    // Closed without the project: the add ends, unless a clone for it goes on in the background.
+    return () => {
+      if (!useProjectTask.getState().label) endAddToComputer()
+    }
   }, [])
 
   // The account's repositories, of this computer or the one picked: shown from memory at once, read again behind them when old.
@@ -234,7 +255,7 @@ function NewProjectPanel() {
   }
 
   /** Browses the folders of the computer picked for where clones go; pending clones once one is picked. */
-  const openBrowser = (pending: CloneRow | null) => {
+  const openBrowser = (pending: Browser['pending']) => {
     setBrowser({ view: null, loading: true, error: '', pending, savedQuery: query })
     useProjectTask.setState({ error: '' })
     void loadFolder(parent ?? undefined)
@@ -257,7 +278,7 @@ function NewProjectPanel() {
     return runTask(`Cloning ${row.repository} on ${computerName}…`, async () => {
       let cloned: Awaited<ReturnType<typeof sourceControlClient.clone>>
       try {
-        cloned = await sourceControlClient.clone(computer, { repository: row.repository, path: destination })
+        cloned = await sourceControlClient.clone(computer, { repository: row.repository, path: destination, ...(row.branch ? { branch: row.branch } : {}) })
       } catch (error) {
         throw new Error(remoteReason(error, computerName))
       }
@@ -265,16 +286,34 @@ function NewProjectPanel() {
     })
   }
 
+  /** Adds a folder of the computer picked as a project there. */
+  const addThere = (path: string) =>
+    runTask(`Adding ${path} on ${computerName}…`, async () => {
+      const node = byNode[computer]?.node
+      if (!node) throw new Error(`${computerName} is not connected`)
+      let opened: Awaited<ReturnType<typeof openRemoteProject>>
+      try {
+        opened = await openRemoteProject(node, path)
+      } catch (error) {
+        throw new Error(remoteErrorMessage(error, computerName))
+      }
+      if (!opened.ok) throw new Error(opened.error)
+      return { ...opened.project, id: qualifyId(computer, opened.project.id), node: computer }
+    })
+
   const choose = async (row: NewProjectRow) => {
     switch (row.kind) {
       case 'browse-open':
         return loadFolder(row.path)
       case 'browse-use': {
-        useRemoteParents.setState({ [computer]: row.path })
         const pending = closeBrowser()?.pending
+        if (pending === 'checkout') return addThere(row.path)
+        useRemoteParents.setState({ [computer]: row.path })
         if (pending) return cloneThere({ ...pending, destination: joinFolder(row.path, pending.name) })
         return
       }
+      case 'pick-checkout':
+        return openBrowser('checkout')
       case 'open-folder':
         return runTask(null, () => window.mousse.projects.open())
       case 'clone-hint':
@@ -314,18 +353,7 @@ function NewProjectPanel() {
       }
       case 'add-path':
         if (!remote) return runTask(`Adding ${row.path}…`, () => window.mousse.projects.open({ path: row.path }))
-        return runTask(`Adding ${row.path} on ${computerName}…`, async () => {
-          const node = byNode[computer]?.node
-          if (!node) throw new Error(`${computerName} is not connected`)
-          let opened: Awaited<ReturnType<typeof openRemoteProject>>
-          try {
-            opened = await openRemoteProject(node, row.path)
-          } catch (error) {
-            throw new Error(remoteErrorMessage(error, computerName))
-          }
-          if (!opened.ok) throw new Error(opened.error)
-          return { ...opened.project, id: qualifyId(computer, opened.project.id), node: computer }
-        })
+        return addThere(row.path)
     }
   }
 
@@ -354,6 +382,8 @@ function NewProjectPanel() {
 
   const placeholder = browser
     ? `Filter folders on ${computerName}…`
+    : adding
+    ? `Add ${adding.name} to ${computerName}, or paste a GitHub URL…`
     : remote
     ? `Paste a GitHub URL, or a folder path on ${computerName}…`
     : hint === 'clone' ? 'Paste a GitHub URL or owner/name…'
@@ -369,7 +399,7 @@ function NewProjectPanel() {
         onKeyDown={onKeyDown}
         role="dialog"
         aria-modal="true"
-        aria-label="New project"
+        aria-label={adding ? `Add ${adding.name} to ${computerName}` : 'New project'}
       >
         <div className="thread-search-input-row">
           <FolderPlus size={16} strokeWidth={2} className="thread-search-icon" aria-hidden="true" />
@@ -511,13 +541,15 @@ function rowView(row: NewProjectRow, remote: boolean, computer: string, github: 
       return { icon: <FolderPlus size={15} strokeWidth={2} />, title: 'New empty project…', end: 'Folder + Git' }
     case 'clone':
       if (row.owned) return { icon: <GitHub size={15} strokeWidth={2} />, title: row.repository, meta: into(row.destination), ...(row.owned.private ? { end: <Lock size={13} strokeWidth={2} aria-label="Private" /> } : {}) }
-      return { icon: <GitFork size={15} strokeWidth={2} />, title: `Clone ${row.repository}`, meta: into(row.destination) }
+      return { icon: <GitFork size={15} strokeWidth={2} />, title: `Clone ${row.repository}`, meta: row.branch ? `${into(row.destination)} · ${row.branch}` : into(row.destination) }
     case 'connect-github': {
       if (!remote) return { icon: <GitHub size={15} strokeWidth={2} />, title: 'Connect GitHub…', meta: 'To list your repositories', end: 'Settings' }
       const install = github?.state === 'missing' ? github.install : undefined
       const meta = !install ? 'Its one-time code shows here' : install.automatic ? `Installs GitHub CLI there: ${install.command ?? ''}` : 'Install GitHub CLI there first'
       return { icon: <GitHub size={15} strokeWidth={2} />, title: `Connect GitHub on ${computer}…`, meta }
     }
+    case 'pick-checkout':
+      return { icon: <FolderOpen size={15} strokeWidth={2} />, title: `Pick its folder on ${computer}…`, end: 'Browse' }
     case 'browse-use':
       return { icon: <Check size={15} strokeWidth={2} />, title: 'Use this folder', meta: row.path }
     case 'browse-open':

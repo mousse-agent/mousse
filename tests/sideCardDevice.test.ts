@@ -25,8 +25,10 @@ import {
   localProjectIdOf,
   newThreadWorktree,
   localWorkspaceFor,
+  projectToAddThere,
   workspaceOnOtherComputer,
-  workspaceOnThisComputer
+  workspaceOnThisComputer,
+  workspaceWithAddedProject
 } from '../src/renderer/lib/newThread'
 import { workspaceOnDevice } from '../src/renderer/lib/remoteComputers'
 import { useAppStore } from '../src/renderer/stores/appStore'
@@ -112,6 +114,20 @@ describe('picking where a new chat runs', () => {
     expect(workspaceOnDevice({ projectId: 'b', worktreeEnabled: true }, listed, node))
       .toEqual({ projectId: undefined, worktreeEnabled: false, node, localProjectId: 'b' })
     expect(workspaceOnDevice({ worktreeEnabled: false }, listed, node)).toEqual({ projectId: undefined, worktreeEnabled: false, node })
+  })
+
+  it('offers to add the project to a computer that lacks it, and the draft takes it once it is there', () => {
+    const away = workspaceOnDevice({ projectId: 'b', worktreeEnabled: true }, listed, node)
+    expect(projectToAddThere(away, listed)).toMatchObject({ id: 'b', name: 'lib' })
+    // A computer that has it, or a draft with no project here, has nothing to add.
+    expect(projectToAddThere(workspaceOnDevice({ projectId: 'a', worktreeEnabled: true }, listed, node), listed)).toBeUndefined()
+    expect(projectToAddThere(workspaceOnDevice({ worktreeEnabled: false }, listed, node), listed)).toBeUndefined()
+    expect(workspaceWithAddedProject(away, node, 'node-1:lib')).toEqual({ ...away, projectId: 'node-1:lib' })
+    // Moved to another computer, or picked a project, while the clone ran: the draft stays as it is.
+    const moved = workspaceOnDevice(away, listed, other)
+    expect(workspaceWithAddedProject(moved, node, 'node-1:lib')).toBe(moved)
+    const picked = { ...away, projectId: 'node-1:remote-x' }
+    expect(workspaceWithAddedProject(picked, node, 'node-1:lib')).toBe(picked)
   })
 
   it('restores the project the draft had here when this computer is picked again', () => {

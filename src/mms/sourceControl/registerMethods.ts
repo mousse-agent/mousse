@@ -5,6 +5,7 @@ import { userAction, type UserAction } from '../git/gitPolicy'
 import type { GitHubAccount } from '../git/GitHubAccount'
 import { cloneHere, validBranch, type CloneHereResult } from './cloneHere'
 import { browseFolders, type FolderBrowseResult } from '../files/folderBrowse'
+import { projectSource, type ProjectSource } from './projectSource'
 
 const provider = (value: unknown) => {
   if (!isSourceControlProvider(value)) throw new DomainRpcError('invalid_params', 'provider must be github')
@@ -136,6 +137,21 @@ export function registerSourceControlMethods(domains: DomainHandlerRegistry, git
       }, userRequested)
       context.emitEvent?.('projects.updated', { projects: mms.projects.listProjects() })
       return result
+    }
+  })
+  // A project of this computer, to add to another one: its GitHub repository and branch, which a clone there takes.
+  domains.register({
+    method: 'sourceControl.projectSource',
+    scope: 'profile',
+    validate: (params) => {
+      const raw = domainObject(params ?? {}, ['profileId', 'projectId'])
+      if (typeof raw.projectId !== 'string' || !raw.projectId) throw new DomainRpcError('invalid_params', 'projectId is required')
+      return { projectId: raw.projectId }
+    },
+    handle: async (context: HandlerContext, params): Promise<ProjectSource> => {
+      const project = context.mms.projects.getProject(params.projectId)
+      if (!project) throw new DomainRpcError('not_found', 'That project is not on this computer.')
+      return await projectSource(project.path)
     }
   })
   // Where a clone from another computer goes: the folders of this computer, by name, to pick one by browsing.
