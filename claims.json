@@ -2,6 +2,17 @@
   "version": 1,
   "claims": [
     {
+      "task": "acp-close-idle-agent-processes",
+      "session": "agibook-6a562b",
+      "machine": "agibook",
+      "branch": "acp-close-idle-agent-processes",
+      "paths": [
+        "src/mms/harness/acp/session.ts"
+      ],
+      "claimedAt": "2026-11-26T15:42:26.702Z",
+      "expiresAt": "2026-11-26T17:42:26.702Z"
+    },
+    {
       "task": "agent-messages-show-sender",
       "session": "Avarnics-Mac-mini.local-6a8770",
       "machine": "Avarnics-Mac-mini.local",
