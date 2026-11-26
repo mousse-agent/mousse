@@ -88,23 +88,6 @@
       "expiresAt": "2026-11-25T17:27:21.463Z"
     },
     {
-      "task": "github-source-control-provider",
-      "session": "Animatrix-2c2a69",
-      "machine": "Animatrix",
-      "branch": "github-source-control-provider",
-      "paths": [
-        "src/mms/git/GitHubAccount.ts",
-        "src/mms/sourceControl",
-        "src/renderer/components/NewProjectDialog.tsx",
-        "src/renderer/components/newProjectLogic.ts",
-        "src/renderer/components/settings/SourceControlSettings.tsx",
-        "src/renderer/lib/sourceControl.ts",
-        "src/renderer/lib/remoteComputers.ts"
-      ],
-      "claimedAt": "2026-11-26T10:10:58.591Z",
-      "expiresAt": "2026-11-26T12:10:58.591Z"
-    },
-    {
       "task": "issue-476-computers-report-version",
       "session": "Avarnics-Mac-mini.local-0be74e",
       "machine": "Avarnics-Mac-mini.local",
