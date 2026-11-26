@@ -23,7 +23,7 @@ import { botAppToolRefusal } from '../../src/shared/bots/personal/walls'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { createBotJournal } from '../../src/mms/bots/memory/capture'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
-import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BotEngine, botAskedText } from '../../src/mms/bots/activation/BotEngine'
 import { RelayHandler } from '../../src/mms/run/mcp/relay/handler'
 import { ToolRegistry, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools/registry'
 import { AppToolTurns } from '../../src/mms/run/mcp/appTools/turns'
@@ -140,6 +140,8 @@ it('holds once, frees the slot, and Send executes exactly the stored arguments o
   await t.call()
   await t.call()
   expect(t.calls).toEqual([])
+  // A held call counts as one of the work's tool calls only once it is sent.
+  expect(f.store.counters(t.workId).toolCalls).toBe(0)
   const actions = f.store.all('SELECT * FROM bot_actions')
   expect(actions).toHaveLength(1)
   expect(f.store.all('SELECT id FROM bot_messages WHERE id = ?', actions[0].message_id)).toHaveLength(1)
@@ -148,6 +150,7 @@ it('holds once, frees the slot, and Send executes exactly the stored arguments o
   const answer = { actionId: String(actions[0].id), digest: String(actions[0].args_digest), answer: 'send' as const }
   await Promise.allSettled([f.bots.actions.answer(answer), f.bots.actions.answer(answer)])
   expect(t.calls).toEqual([t.args])
+  expect(f.store.counters(t.workId).toolCalls).toBe(1)
   expect(f.store.get('SELECT status, exec_args FROM bot_actions')).toMatchObject({ status: 'done', exec_args: null })
   expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('delivered')
 })
@@ -197,8 +200,21 @@ it('Not now makes no call and resumes with the refusal as data', async () => {
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
   await flush()
   expect(t.calls).toEqual([])
+  expect(f.store.counters(t.workId).toolCalls).toBe(0)
   expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('chose Not now; nothing was sent')
   expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: 'declined', exec_args: null })
+})
+it('a held call on Pi, whose budget counted it when the model made it, counts nothing more when it is sent', async () => {
+  const t = await setup(true)
+  // Pi charges each model request (and each tool call) through its own budget: the first request comes before any call.
+  t.work.prepared.runtimeCounters!.charge('request')
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  expect(t.calls).toEqual([t.args])
+  expect(f.store.counters(t.workId)).toMatchObject({ requests: 1, toolCalls: 0 })
 })
 it.each(['send', 'not_now'] as const)('Send racing Not now, %s arriving first, never calls twice', async first => {
   const t = await setup(true)
@@ -4018,7 +4034,7 @@ async function aloneAsk(answer: 'allow' | 'not_now' | 'pending' = 'allow', toolN
   const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
   const chat = await start(f, row.id)
   const request = { ask: 'let_alone', scheduleId: t.schedule.scheduleId, serverId: 'mail', tool: toolName }
-  chat.prepared.authority.escalate!({ permission: request as never, reason: 'Do it alone' })
+  const asked = chat.prepared.authority.escalate!({ permission: request as never, reason: 'Do it alone' })
   await finish(f, chat.payload, 'completed', { text: 'Allow this automation?' })
   const ask = f.store.openAsks(t.botId).find(a => 'ask' in a.permission && a.permission.ask === 'let_alone')!
   expect(ask).toBeDefined()
@@ -4027,7 +4043,7 @@ async function aloneAsk(answer: 'allow' | 'not_now' | 'pending' = 'allow', toolN
   expect(card).toMatchObject({ kind: 'permission', details: { items: expect.arrayContaining([expect.stringContaining('one@example.test')]) } })
   expect(f.bots.service.askKind(t.botId, ask.id)).toBe('export_memory')
   if (answer !== 'pending') await f.bots.service.answer(t.botId, ask.id, answer)
-  return { ...t, request, consent: ask, consentActivation: row.id }
+  return { ...t, request, consent: ask, consentActivation: row.id, asked }
 }
 async function aloneNext(t: Awaited<ReturnType<typeof aloneAsk>>, args = t.args) {
   f.clock.now += 60_000
@@ -4037,6 +4053,14 @@ async function aloneNext(t: Awaited<ReturnType<typeof aloneAsk>>, args = t.args)
   const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: `Mail__${t.request.tool}`, args, toolCallId: 'alone-next', signal: new AbortController().signal })
   return { id, turn, result, action: f.bots.actions.forWork(id)! }
 }
+it('E1 escalate answers with the exact title of the MCP card it made, the one the owner sees', async () => {
+  const t = await aloneAsk('pending')
+  const title = f.bots.chat.card(t.consent).title
+  // The card's title is made from this server and tool, not a fixed name.
+  expect(title).toContain('Mail')
+  expect(t.consent.title).toBe(title)
+  expect(t.asked).toBe(botAskedText(title, BOT_ASK_DEFERRED_TEXT))
+})
 it('E1 Allow lets only the same schedule destination run on the action ledger without a card', async () => {
   const t = await aloneAsk()
   expect(f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))).not.toHaveProperty('enabled')

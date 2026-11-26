@@ -5,6 +5,7 @@ import type { BindPolicy, ProviderSelection } from '../../../shared/harness/type
 import type { BrowserExecutionBinding } from '../../orchestrator/browser/binding'
 import type { BotTurnPayload } from '../../run/types'
 import type { ProviderMetrics } from '../../harness/adapter'
+import type { CounterScope } from '../../../shared/harness/counters'
 
 /**
  * What the `turn.start` executor asks of the bot engine (PR 6 §4 "Execution"). The payload names
@@ -43,15 +44,23 @@ export interface PreparedBotTurn {
   /** The binding's policy (`bind(…, {policy})`). */
   policy: BindPolicy
   authority: BotAuthority
+  /**
+   * The activation's counts as the turn's runtime charges them (its budget): `authority.counters`, noting that the
+   * runtime counts its own model requests. Absent: the runtime charges `authority.counters`.
+   */
+  runtimeCounters?: CounterScope
   /** The activation's private scratch folder: the turn's working directory. */
   scratch: string
   /** The runtime produced model text, thinking or a tool call: its prompt reached the model. */
   modelOutput?(): void
   /**
    * The turn's runtime reported token usage (`TurnSink.usage`): one request, or the whole turn where the runtime sums
-   * them. Kept as a measurement in `bots.db` (`bot_turn_usage`); it never changes the turn.
+   * them. A main turn keeps it as a measurement in `bots.db` (`bot_turn_usage`); every turn (a consult's and a
+   * subagent's too) adds what its runtime records none of itself to its activation's counts and spend. It never changes
+   * the turn. `costUsd`: what the runtime says it cost, when it says; `requests`: how many requests it covers, when it
+   * says.
    */
-  usage?(usage: { input: number; output: number; cacheRead: number; cacheWrite: number }): void
+  usage?(usage: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd?: number; requests?: number }): void
   /** The turn's runtime reported its measurements (`TurnSink.providerMetrics`): context size, window, cache and plan use. */
   metrics?(metrics: ProviderMetrics): void
   /** Skill ids the turn may list and load. */

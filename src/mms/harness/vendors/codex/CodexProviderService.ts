@@ -507,9 +507,17 @@ export interface CodexTurnUsage {
   context?: { input: number; cacheRead: number; cacheWrite: number; contextWindow?: number }
   /** The plan's usage windows of the latest rate-limit snapshot the server reported while the run was open. */
   quota?: PlanWindowUse[]
+  /** The model requests the run made: the token updates whose thread total grew. */
+  requests?: number
 }
 
 export type CodexChatInput = {
+  /**
+   * What a chat that ends in an error or a Stop used before it ended (the token updates of its turns so far), once, just
+   * before it throws: those requests were made and are spent. A chat that returns carries its usage in its result
+   * (`CodexChatResult.usage`) instead, never both.
+   */
+  onUnreturnedUsage?(usage: CodexTurnUsage): void
   threadId: string
   /** Provider instance running the turn; a saved Codex thread resumes only on the same instance. */
   instanceId?: string
@@ -756,6 +764,8 @@ class TurnRun {
   private readonly plans = new Set<string>()
   private usageStart: TokenUsageBreakdown | undefined
   private usageEnd: { total: TokenUsageBreakdown; last: TokenUsageBreakdown; window: number | null } | undefined
+  /** Token updates whose thread total grew: one per model response (a rate-limit update repeats the total unchanged). */
+  private requests = 0
   private retries = 0
   /** The last `error` notification Codex gave up on (`willRetry: false`). */
   lastError: TurnError | undefined
@@ -984,7 +994,8 @@ class TurnRun {
       reasoning: turn.reasoningOutputTokens ?? 0,
       totalTokens: turn.totalTokens ?? 0,
       context: { ...context, ...(this.usageEnd.window ? { contextWindow: this.usageEnd.window } : {}) },
-      ...(quotaOf(this.rateLimits) ? { quota: quotaOf(this.rateLimits)! } : {})
+      ...(quotaOf(this.rateLimits) ? { quota: quotaOf(this.rateLimits)! } : {}),
+      ...(this.requests ? { requests: this.requests } : {})
     }
   }
 
@@ -1276,6 +1287,7 @@ class TurnRun {
       const { total, last, modelContextWindow } = usage.tokenUsage
       // Baseline: the thread total before this chat's first model call.
       this.usageStart ??= usageDelta(last, total)
+      if ((total.totalTokens ?? 0) > (this.usageEnd?.total.totalTokens ?? this.usageStart.totalTokens ?? 0)) this.requests++
       this.usageEnd = { total, last, window: modelContextWindow }
       return
     }
@@ -3865,6 +3877,13 @@ export class CodexProviderService {
       }
     } catch (error) {
       handBack()
+      // What the model used before the chat failed or was stopped is still spent: reported once, here.
+      try {
+        const spent = run?.usage()
+        if (spent) input.onUnreturnedUsage?.(spent)
+      } catch {
+        // A measurement: the chat's own error is what it throws.
+      }
       // A failed or stopped chat leaves nothing of its own running: the thread's turn and every helper
       // under it are interrupted until they are at rest (or the sweep's deadline), after the chat has
       // already been rejected. The run is released when that ends.

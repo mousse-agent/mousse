@@ -21,7 +21,7 @@ import { PR_WAKE_READ_MS, pullRequestWakeEvent, pullRequestWakeOutcome, threadWa
 import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
-import { startTurnMeter } from './turnUsage'
+import { mirrorUsage, startTurnMeter, type ReportedUsage, type UsageMirror } from './turnUsage'
 import { turnTimingBind, turnTimingBotMark } from '../../diagnostics/turnTiming'
 import { chatEpochEnd, contextBudget, type BotChatDigestState, type BotChatEpoch, type BotChatEpochVerdict } from '../memory/contextBudget'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
@@ -434,8 +434,17 @@ function waitsForTools(permission: BotAskRequest): boolean {
 export const MAX_RUN_ASKS = 5
 /** New asks a bot's runs may write in a day. */
 export const MAX_BOT_ASKS_PER_DAY = 10
-/** What `escalate` returns in a chat turn: the cards show together under the turn's message. */
-export const BOT_ASK_DEFERRED_TEXT = 'Asked; the owner will answer after this message. Finish your message now.'
+/** What `escalate` returns in a chat turn, after the card's title (`botAskedText`): the cards show together under the turn's message. */
+export const BOT_ASK_DEFERRED_TEXT = 'The owner will answer after this message. Finish your message now.'
+/** What `escalate` returns in a run, after the card's title (`botAskedText`): the run carries on. */
+export const BOT_ASK_RAISED_TEXT = 'Carry on without it and say in your report what you skipped.'
+/**
+ * What `escalate` says once a card waits for the owner: the card's exact title as stored, the name the bot tells its
+ * owner it asked for (its instructions say so), then `then`.
+ */
+export function botAskedText(title: string, then: string): string {
+  return `Asked the owner — the card says "${title}". ${then}`
+}
 /** The stuck error after the journal could not be written (bot-context.md §4). */
 export const BOT_JOURNAL_ERROR: BotError = { text: 'I can\'t save my work. Free some disk space.', action: { kind: 'retry', label: 'Try again' } }
 /** Failed runs in a row that pause a bot's schedules. */
@@ -753,10 +762,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const tool = mcp?.offered(new Set([`${target.server}::${target.tool}`]))[0]
       if (!mcp?.call || !tool) throw new BotActionChanged('This tool changed. Nothing was sent.')
       const signal = new AbortController().signal
-      const actionId = this.actions.forWork(row.id)!.id
+      const action = this.actions.forWork(row.id)!
+      const actionId = action.id
       return callForBot({ mcp: mcp as BotMcp, bot: {
         activationId: row.id, mcpTools: [tool], workspace: null, time: { signal, deadline: () => Number.MAX_SAFE_INTEGER },
-        check: () => this.actionPair(row, target) ? { ok: true } : { ok: false, wall: { kind: 'revoked' } }
+        check: () => this.actionPair(row, target) ? { ok: true } : { ok: false, wall: { kind: 'revoked' } },
+        // Sent now: counted once, unless the runtime that held it counted it already (`holdMcp`).
+        callRuns: () => { if (!this.selfCountedHold(row.id, action.call_key, false)) this.countToolCall(row.id) }
       }, name: tool.name, args, signal, heldAction: true, sanitizeResult: (result) => removeHiddenArguments(result, args, mcp.inputSchema?.(target)), assertDispatchActive: () => {
         this.actions.assertRunning(actionId)
       } })
@@ -775,6 +787,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }) }
   readonly service: BotChatService
+  /**
+   * Held MCP calls (`call_key`) whose runtime counted them already when the model made them (Pi's budget), by activation:
+   * sending one counts nothing more. Kept in memory only, so after a restart a sent call of Pi's may count twice: the
+   * count is a measurement, and an extra one never lets a call through.
+   */
+  private readonly selfCountedHolds = new Map<string, Set<string>>()
   /** Pi file versions, shared by the activation's dispatches and discarded when it ends. */
   private readonly fileReads = new Map<string, Map<string, BotFileReadState>>()
   /** Each activation's context pack as its latest main dispatch read it (frozen by the provider, bot-context.md §5). */
@@ -3127,6 +3145,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const counterScope = this.wallingCounters(new BotCounterScope(this.store, row.id), row.id, dispatch.n)
     const spendLimited = spendLimits(effective)
     const spendScope = Object.keys(spendLimited).length ? this.wallingSpend(new BotSpendScope(this.store, row.id, payload.runId), row.id, dispatch.n) : null
+    const accounting = this.runtimeAccounting(counterScope, spendScope)
     const startedMono = this.monotonic()
     this.live.set(row.id, {
       controller, timer, startedMono, startedAt, checkpointMono: startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId,
@@ -3143,6 +3162,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       contexts: definition.context.map((thread) => ({ key: thread.key, title: thread.title })),
       dispatchId: dispatch.clientRequestId,
       mcpTools: this.offeredMcp(compiled.permissions.mcp),
+      countsAppCalls: accounting.countsAppCalls,
       permissionsNow: (now) => {
         const recompiled = compileWith(this.effectiveManifest(row, definition.permissions, now.manifest), now.digest)
         return recompiled.ok ? recompiled.permissions : undefined
@@ -3171,7 +3191,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const meter = startTurnMeter({
       row, n: dispatch.n, fresh: dispatch.kind === 'start' && (cleared || row.lane !== 'chat'), contextGen: epoch?.id ?? row.id, prompt,
       ...(told.instructions ? { instructions: told.instructions } : {}), ...(preamble ? { preamble } : {})
-    }, { store: this.store, now: () => this.now(), ...(this.host.toolList ? { tools: () => this.host.toolList!(payload.threadId, payload.runId) } : {}) })
+    }, {
+      store: this.store, now: () => this.now(), ...(this.host.toolList ? { tools: () => this.host.toolList!(payload.threadId, payload.runId) } : {}),
+      mirror: accounting.mirror
+    })
     // Where the reply's time goes, marked from here on the bot's thread (`turnTiming`).
     if (row.lane === 'chat') turnTimingBind(row.botId, payload.threadId)
     return {
@@ -3196,6 +3219,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       selection: { ...selection },
       policy: compiled.policy,
       authority,
+      runtimeCounters: accounting.runtimeCounters,
       scratch,
       skills: compiled.permissions.skills,
       history: dispatch.kind === 'start' ? (cleared ? 'cleared' : epoch ? 'thread' : 'none') : 'thread',
@@ -3517,11 +3541,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.liveRuns.set(payload.runId, row.id)
     // What the consult holds for the whole of its turn, recorded like its main dispatch's: a switch turned off stops it.
     main.consultPowers.set(dispatch.n, powersOf(compiled.permissions))
+    // Its requests, tokens, cost and calls are its activation's, on the main dispatch's counters and ledger.
+    const accounting = this.runtimeAccounting(main.counters, main.spend)
     const authority = this.authorityFor({
       row, mainN: main.n, role: 'context', permissions: compiled.permissions, grantDigest: grant.digest, startedWith: effective,
       controller: main.controller, deadline: main.deadline, counters: main.counters, spend: main.spend, contexts: [],
       // A consult's calls are chips of its main dispatch's message.
       dispatchId: main.dispatchId,
+      countsAppCalls: accounting.countsAppCalls,
       permissionsNow: (now) => {
         const recompiled = compileWith(this.effectiveManifest(row, definition.permissions, now.manifest), now.digest)
         return recompiled.ok ? recompiled.permissions : undefined
@@ -3536,6 +3563,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       selection: { ...selection },
       policy: compiled.policy,
       authority,
+      runtimeCounters: accounting.runtimeCounters,
+      usage: (usage) => this.observeUsage(row.id, usage, accounting),
       scratch,
       skills: compiled.permissions.skills,
       history: 'thread',
@@ -3846,6 +3875,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
      * grant that changed while the turn ran refuses every call.
      */
     permissionsNow?(grant: { digest: string; manifest: BotManifest }): BotPermissions | undefined
+    /**
+     * Whether the turn's runtime leaves its Mousse app and MCP tool calls uncounted (it has no budget of its own, as Pi
+     * has): each call is then counted here, once, when it runs (`callRuns`). Absent: nothing is counted here.
+     */
+    countsAppCalls?(): boolean
   }): BotAuthority {
     const { row, controller } = input
     const switchedAtStart = new Map(this.permissionSwitches.get(row.botId))
@@ -4046,6 +4080,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
             const allowed = base.check({ kind: 'mcp', server: tool.server, tool: tool.tool, args })
             if (!allowed.ok) return { text: checkMessage(allowed), isError: true }
           }
+          // A runtime that counts its own tool calls (Pi) counted this one when the model made it; any other has it
+          // counted when it is sent (`execute`), never while it waits for the owner's answer.
+          if (toolCallId && !input.countsAppCalls?.()) this.selfCountedHold(row.id, JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, toolCallId]), true)
           const outcome = this.actions.hold(row, input.callDispatchId ?? input.dispatchId, tool, args, toolCallId)
           if (outcome instanceof Promise) return outcome
           if (!outcome.isError && this.actions.forWork(row.id)?.status === 'open') { this.askedIn.set(row.id, input.mainN); this.releaseParked(this.store.activation(row.id) ?? row, 'approval') }
@@ -4064,6 +4101,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return decided.ok ? undefined : checkMessage(decided)
       },
       check,
+      // Counted where it runs, never where it is checked: one call is checked at several points (locked Claude's
+      // PreToolUse and canUseTool, then the registry or the relay), and two identical calls are two.
+      ...(input.countsAppCalls ? { callRuns: () => { if (input.countsAppCalls!()) this.countToolCall(row.id) } } : {}),
       held: (asked) => {
         this.progress(row.id)
         if (this.permissionOff(row.botId, asked as BotAskRequest)) return this.offText()
@@ -4130,7 +4170,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           this.refused(row.id, asked)
           const refused = this.raiseAsk(row, input.mainN, 'escalate', asked, reason, request.toolCallId)
           if (!('refused' in refused)) return checkMessage(refused as BotCheckDenied)
-          return refused.refused.askId ? 'Asked the owner. Carry on without it and say in your report what you skipped.' : refused.refused.text
+          if (!refused.refused.askId) return refused.refused.text
+          const card = this.store.escalation(refused.refused.askId)
+          return card ? botAskedText(this.cardTitle(row, card), BOT_ASK_RAISED_TEXT) : BOT_ASK_REFUSED_TEXT
         }
         return this.deferWall(row.id, { dispatchN: input.mainN, permission: asked, reason, ...(request.toolCallId ? { toolCallId: request.toolCallId } : {}) })
       },
@@ -4144,6 +4186,61 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (input.role === 'activation' && row.lane === 'run' && turnRightsOf(row).subagents)
       authority.subagents = this.subagentHandle({ row, mainN: input.mainN, controller })
     return authority
+  }
+
+  /**
+   * What a turn's runtime counts and settles itself, read from what it charges (`PreparedBotTurn.runtimeCounters`, which
+   * the orchestrator hands its budget), and so what the activation counts for it. Pi's budget charges each model request
+   * and tool call, and its first request comes before any call; under a spend limit it reserves and settles each request
+   * on `spend`. Any other runtime does neither: its usage reports' requests, tokens and cost (`mirror`) and its app and
+   * MCP calls (`countsAppCalls`) are counted for it. A tool that makes a request (an image) charges the authority's
+   * scope, never this one, so it says nothing about the runtime.
+   */
+  private runtimeAccounting(counters: CounterScope, spend: SpendScope | null): { runtimeCounters: CounterScope; countsAppCalls(): boolean; mirror(): UsageMirror } {
+    let runtimeCountsRequests = false
+    return {
+      runtimeCounters: {
+        charge: (kind, limit) => {
+          if (kind === 'request') runtimeCountsRequests = true
+          return counters.charge(kind, limit)
+        }
+      },
+      countsAppCalls: () => !runtimeCountsRequests,
+      mirror: () => ({ requests: !runtimeCountsRequests, tokens: !spend })
+    }
+  }
+
+  /** A consult's or subagent's usage report, on its activation's counts and spend (`runtimeAccounting`). */
+  private observeUsage(activationId: string, usage: ReportedUsage, accounting: { mirror(): UsageMirror }): void {
+    try {
+      mirrorUsage(this.store, activationId, usage, accounting.mirror())
+    } catch (error) {
+      // A measurement: it never touches the turn.
+      console.warn('a bot turn\'s usage could not be counted', { activationId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** One Mousse app or MCP call of the activation ran where its runtime counts none itself (`BotAuthority.callRuns`). */
+  private countToolCall(activationId: string): void {
+    try {
+      this.store.recordObservedToolCall(activationId)
+    } catch (error) {
+      // A measurement: it never fails the call it counts.
+      console.warn('a bot\'s tool call could not be counted', { activationId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** Marks (`add`) a held call its runtime counted itself, or takes the mark off: true when it was marked. */
+  private selfCountedHold(activationId: string, callKey: string, add: boolean): boolean {
+    let keys = this.selfCountedHolds.get(activationId)
+    if (add) {
+      if (!keys) this.selfCountedHolds.set(activationId, keys = new Set())
+      keys.add(callKey)
+      return true
+    }
+    const had = keys?.delete(callKey) ?? false
+    if (keys && !keys.size) this.selfCountedHolds.delete(activationId)
+    return had
   }
 
   /** The activation's counter: a refused count is a budget wall. */
@@ -4838,6 +4935,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return askText(permission, budget ? { budget } : {})
   }
 
+  /** The title an ask's card shows: as stored, or, on a row of an older build that kept none, as its card reads it. */
+  private cardTitle(row: BotActivationRow, ask: BotEscalationRow): string {
+    return ask.title ?? this.askCardText(row, ask.permission).title
+  }
+
   /** The bot's open ask for `fingerprint` becomes this activation's wall, or a new one is written. */
   private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): BotEscalationRow {
     const input = { ...asked, permission: this.limitAsk(row.botId, asked.permission) }
@@ -4900,14 +5002,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * waits for the owner once its text is complete (`advance`).
    */
   private deferWall(activationId: string, input: { dispatchN: number; permission: BotAskRequest; reason: string; toolCallId?: string }): string {
-    let result: 'asked' | 'too_many' | 'ended'
+    let result: { asked: string } | 'too_many' | 'ended'
     try {
       result = this.store.db.transaction(() => {
         const row = this.store.activation(activationId)
         if (!row || row.status !== 'running') return 'ended'
         if (this.store.countEscalations(activationId) >= MAX_BOT_WALLS) return 'too_many'
-        this.openWall(row, { ...input, kind: 'escalate' })
-        return 'asked'
+        return { asked: this.cardTitle(row, this.openWall(row, { ...input, kind: 'escalate' })) }
       })
     } catch (error) {
       const row = this.store.activation(activationId)
@@ -4919,7 +5020,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (result === 'too_many') return 'You have asked enough for this message. Finish it now.'
     const row = this.store.activation(activationId)
     this.changed({ ...(row ? { botId: row.botId } : {}), activationId })
-    return BOT_ASK_DEFERRED_TEXT
+    return botAskedText(result.asked, BOT_ASK_DEFERRED_TEXT)
   }
 
   /**
@@ -6906,12 +7007,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     main.consultPowers.set(dispatch.n, powersOf(compiled.permissions))
     // Its running time is counted in the work's from now.
     main.subagentStarts.set(dispatch.n, this.monotonic())
+    // Its requests, tokens, cost and calls are the work's, on the work's counters and ledger.
+    const accounting = this.runtimeAccounting(main.counters, main.spend)
     const authority = this.authorityFor({
       row, mainN: main.n, role: 'subagent', permissions: compiled.permissions, grantDigest: grant.digest, startedWith: effective,
       controller: main.controller, deadline: main.deadline, counters: main.counters, spend: main.spend, contexts: [],
       // Its calls are chips of the work's message.
       dispatchId: main.dispatchId, callDispatchId: dispatch.clientRequestId,
       mcpTools: this.offeredMcp(compiled.permissions.mcp),
+      countsAppCalls: accounting.countsAppCalls,
       // Compiled as it started, against the grant now (`compileSubagent` reads it).
       permissionsNow: () => {
         const now = this.compileSubagent(row, spec.selection, main.deadline)
@@ -6933,6 +7037,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       selection: { ...spec.selection },
       policy: compiled.policy,
       authority,
+      runtimeCounters: accounting.runtimeCounters,
+      usage: (usage) => this.observeUsage(row.id, usage, accounting),
       scratch: row.scratch ?? join(this.store.directory, 'scratch', row.id),
       skills: compiled.permissions.skills,
       history: first ? 'none' : 'thread',
@@ -7424,6 +7530,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private cleanup(row: BotActivationRow): void {
     if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
     this.fileReads.delete(row.id)
+    this.selfCountedHolds.delete(row.id)
     this.postChatDraft(row)
     for (const key of this.replyEffects.keys()) if (key.startsWith(`${row.id}:`)) this.replyEffects.delete(key)
     this.refusedAsks.delete(row.id)
