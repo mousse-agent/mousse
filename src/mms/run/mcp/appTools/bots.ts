@@ -577,8 +577,19 @@ export function workNoteAnswer(outcome: 'now' | 'after_compaction' | 'step_end' 
   const job = title ? `"${title}"` : 'that job'
   // A turn the owner did not start (a job notice, a wake): the update is the bot's own, and the owner is not waiting on a
   // promise about it. Their report comes from the work itself.
-  if (options?.fromOwner === false && (outcome === 'now' || outcome === 'after_compaction' || outcome === 'step_end' || outcome === 'start')) {
-    return `You passed this update on to ${job}; it takes it into account from here on, and its report says what came of it. The owner did not ask for it, so don't tell them they did. Reply to the owner only if they need to know something now; otherwise end your turn with ${SILENT_REPLY}.`
+  if (options?.fromOwner === false) {
+    const quiet = `Reply to the owner only if they need to know something now; otherwise end your turn with ${SILENT_REPLY}.`
+    const Job = `${job.charAt(0).toUpperCase()}${job.slice(1)}`
+    const notAdded = `The owner did not ask for it, so don't tell them they did, and don't offer to do the job again on its account. ${quiet}`
+    switch (outcome) {
+      case 'now': case 'after_compaction': case 'step_end': case 'start':
+        return `You passed this update on to ${job}; it takes it into account from here on, and its report says what came of it. The owner did not ask for it, so don't tell them they did. ${quiet}`
+      case 'ended': return `${Job} had already finished, so this update was not used. ${notAdded}`
+      case 'held': return `${Job} stopped part-way and can't go on as it is, so this update was not used. ${notAdded}`
+      case 'approval': return `${Job} waits for the owner's Send or Not now on its held action, so this update was not added. ${notAdded}`
+      case 'question': return `${Job} waits for the owner's answer to the question you asked them and takes nothing else until then, so this update was not added. It is not their answer: never pass it on with question_answer. ${notAdded}`
+      case 'waiting': return `${Job} carries on by itself when its time or event comes, so this update was not added. ${notAdded}`
+    }
   }
   const line = note.replace(/\s+/g, ' ').trim()
   const cut = line.length > 300 ? `${line.slice(0, 299).trimEnd()}…` : line
@@ -966,11 +977,13 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const result = call.deps.host.work.note(call.botId, args.workId, args.note, call.activationId)
         call.deps.activity?.onAppResult(call.activity, 'work_note', { result, ...(title ? { title } : {}) })
         if (result === 'not_found') return error('You have no work with that id. See work_list.')
-        if (result !== 'noted') return json({ result, note: workNoteAnswer(result, args.note, title) })
+        // Who is behind the note decides what the bot is told to say, refused or not: a turn the owner did not start (a
+        // wake, a job notice) passes on its own update, so the owner is never told they said it, nor offered a rerun.
+        const provenance = call.deps.host.work.fromOwner?.(call.botId, call.activationId) === false ? { fromOwner: false } : undefined
+        if (result !== 'noted') return json({ result, note: workNoteAnswer(result, args.note, title, provenance) })
         // When the work takes it in, truly: the bot tells the owner that, as its own, when the owner's message asked for it.
         const reaches = call.deps.host.work.reach?.(call.botId, args.workId) ?? 'step_end'
-        const fromOwner = call.deps.host.work.fromOwner?.(call.botId, call.activationId)
-        return json({ result, reaches, note: workNoteAnswer(reaches, args.note, title, fromOwner === false ? { fromOwner } : undefined) })
+        return json({ result, reaches, note: workNoteAnswer(reaches, args.note, title, provenance) })
       }
     }),
     ownTool(byName.get('remind')!, deps, {

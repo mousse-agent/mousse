@@ -362,6 +362,24 @@ describe('the bot speaks of its work as its own', () => {
     }
   })
 
+  it('a note passed on from a turn the owner did not start, to work that ended or cannot take it: never the owner\'s words, never a rerun offer', async () => {
+    // The race: a wake passes an update on just as the work finishes.
+    const ended = fakeBots('chat', { work: { list: () => ({ now: [], recent: [{ workId: 'w1', title: 'SSD search', status: 'done' as const, endedAt: '2026-11-13T10:05:00.000Z' }] }), note: () => 'ended' as const, fromOwner: () => false } })
+    const late = await ended.call('work_note', { workId: 'w1', note: 'Prices changed since you started.' })
+    expect(late.value).toMatchObject({ result: 'ended' })
+    expect(late.value.note).toContain('"SSD search" had already finished')
+    expect(late.value.note).toContain(SILENT_REPLY)
+    expect(late.value.note).not.toMatch(/offer to do it again|before the owner said this|Tell them so/)
+    // Every other refusal: the same, and a question's is never passed on as the owner's answer.
+    for (const outcome of ['held', 'approval', 'question', 'waiting'] as const) {
+      const bots = fakeBots('chat', { work: { list: () => SSD_SEARCH, note: () => outcome, fromOwner: () => false } })
+      const answer = (await bots.call('work_note', { workId: 'w1', note: 'Prices changed since you started.' })).value.note
+      expect(answer, outcome).toContain(SILENT_REPLY)
+      expect(answer, outcome).toMatch(/don't tell them they did/)
+      expect(answer, outcome).not.toMatch(/Tell (the owner|them) (so|their)|offer to stop it|pass them on with question_answer/)
+    }
+  })
+
   it('stopping a job: the chip names it, as "started" does', async () => {
     const bots = fakeBots('chat', { work: { list: () => SSD_SEARCH } })
     bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'work_stop', input: { workId: 'w1' } })
