@@ -147,8 +147,8 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   },
   {
     id: 'work',
-    line: 'stop work, pick a model for one piece of work, pass on an answer to work, subagents, a task checklist, consults',
-    tools: ['work_stop', 'work_models', 'question_answer', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'create_task', 'list_tasks', 'update_task', 'consult'],
+    line: 'stop work, pick a model for one piece of work, pass on an answer to work, take back a question, subagents, a task checklist, consults',
+    tools: ['work_stop', 'work_models', 'question_answer', 'question_withdraw', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'create_task', 'list_tasks', 'update_task', 'consult'],
     guidance: WORK_GUIDANCE
   },
   {

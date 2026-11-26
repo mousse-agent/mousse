@@ -28,7 +28,7 @@ import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools
 import type { BotBrowserHost, PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import type { BotChatMessage } from '../../src/shared/bots/personal/chat'
-import { QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_END_TURN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, QUESTIONS_ENOUGH_TEXT, questionGoneText } from '../../src/shared/bots/personal/questions'
+import { QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_END_TURN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText } from '../../src/shared/bots/personal/questions'
 import { capturedRows } from '../../src/mms/bots/memory/capture'
 import { keepToolImages, resetToolImages } from '../../src/mms/bots/chat/toolImages'
 import type { ChatMessage } from '../../src/shared/types'
@@ -94,7 +94,7 @@ async function workThatAsks(title = 'Flat hunt', key = 'w1', args: Record<string
   const { workId, asked } = await handOff(title, key)
   const work = await start(f, workId)
   const answer = await tool('ask_owner', work.prepared, work.payload.threadId, args)
-  expect(JSON.parse(answer.text)).toEqual({ asked: true, note: QUESTION_WORK_ASKED_TEXT })
+  expect(JSON.parse(answer.text)).toEqual({ asked: true, questionId: expect.stringMatching(/^q_/), note: QUESTION_WORK_ASKED_TEXT })
   const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === workId)!
   expect(f.store.message(bubble.id)?.tell).toBe('soon')
   return { workId, work, asked, bubble, questionId: bubble.question!.questionId }
@@ -229,9 +229,8 @@ describe('work that asks', () => {
     expect(summary()).toMatchObject({ state: 'needs_you', stateText: `Asked: ${FLATS.question}` })
   })
 
-  it('a second answer is refused before anything is written, and one piece of work asks one question at a time', async () => {
+  it('a second answer is refused before anything is written', async () => {
     const { work, questionId } = await workThatAsks()
-    expect(await tool('ask_owner', work.prepared, work.payload.threadId, { question: 'And which day?', yesNo: true })).toEqual({ text: QUESTIONS_ENOUGH_TEXT, isError: true })
     await endTurn(work)
     await tap(questionId, 'Flat A', 'tap-1')
     const rows = chatOf(f, botId).length
@@ -529,7 +528,7 @@ describe('a scheduled run that asks (#1360)', () => {
     await flush()
     const run = await start(f, scheduled.activationId)
     expect(run.prepared.authority.appTools.has('ask_owner')).toBe(true)
-    expect(JSON.parse((await tool('ask_owner', run.prepared, run.payload.threadId, FLATS)).text)).toEqual({ asked: true, note: QUESTION_WORK_ASKED_TEXT })
+    expect(JSON.parse((await tool('ask_owner', run.prepared, run.payload.threadId, FLATS)).text)).toEqual({ asked: true, questionId: expect.stringMatching(/^q_/), note: QUESTION_WORK_ASKED_TEXT })
     await endTurn(run)
     expect(f.store.activation(scheduled.activationId)).toMatchObject({ status: 'blocked', endReason: 'question' })
     const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === scheduled.activationId)!
@@ -567,7 +566,7 @@ describe('a scheduled run that asks (#1360)', () => {
     await flush()
     const run = await start(f, manual.id)
     expect(run.prepared.authority.appTools.has('ask_owner')).toBe(false)
-    expect(f.bots.askOwner(botId, manual.id, { question: 'Which?', choices: [{ label: 'A' }, { label: 'B' }], other: true })).toEqual({ asked: false, text: QUESTION_NOT_OFFERED_TEXT })
+    expect(f.bots.askOwner(botId, manual.id, [{ spec: { question: 'Which?', choices: [{ label: 'A' }, { label: 'B' }], other: true } }])).toEqual({ asked: false, text: QUESTION_NOT_OFFERED_TEXT })
     expect(f.store.countQuestions(botId, {})).toBe(0)
   })
 })

@@ -16,7 +16,7 @@ async function work() {
 }
 async function asks(defaulted = false) {
   const t = await work()
-  f.bots.askOwner(botId, t.workId, { question: 'Which flat?', choices: [{ label: 'A' }, { label: 'B' }], other: false }, defaulted ? { kind: 'default', afterMs: 30 * 60_000, default: 'A' } : undefined)
+  f.bots.askOwner(botId, t.workId, [{ spec: { question: 'Which flat?', choices: [{ label: 'A' }, { label: 'B' }], other: false }, follow: defaulted ? { kind: 'default', afterMs: 30 * 60_000, default: 'A' } : undefined }])
   const questionId = f.store.workQuestion(t.workId)!.id
   await finish(f, t.turn.payload)
   return { ...t, questionId }

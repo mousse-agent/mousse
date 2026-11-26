@@ -8,7 +8,7 @@ import { BOT_BASE_SLOT_NAMES, BOT_MODEL_SLOT_KEYS, DEFAULT_BOT_MODEL, ENDED_ACTI
 import { normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
 import { isSpecialAsk } from '../../../shared/bots/personal/escalation'
 import { plainCards, type BotCard } from '../../../shared/bots/personal/cards'
-import { BOT_THREADS_PERMISSION, botGrantTool } from '../../../shared/bots/personal/manifest'
+import { BOT_THREADS_PERMISSION, botGrantTool, withFullTrust } from '../../../shared/bots/personal/manifest'
 import type { BotOwnerTurn } from '../../../shared/bots/personal/definition'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
@@ -687,7 +687,8 @@ export class BotChatService {
         if (answering) this.store.answerQuestion(answering.id, tap ? { choice: tap.choice, by: 'owner', tapped: true } : { text, by: 'owner' }, posted.id)
         if (late) this.store.lateAnswer(late.id, tap ? { choice: tap.choice, tapped: true } satisfies BotQuestionLateAnswer : { text }, posted.id)
         // Any other question still open is moved past: the owner wrote something else, and the bot hears what it had asked.
-        const moved = this.store.moveOnQuestions(input.botId, posted.id, answering?.id)
+        // The ones asked with the question answered stay open: the owner answers a batch one tap at a time.
+        const moved = this.store.moveOnQuestions(input.botId, posted.id, answers)
         touched = [...(answers ? [answers] : []), ...moved]
         const body = messageInput({ id: posted.id, botId: input.botId, text, attachments: saved, replyTo: replyTo?.id ?? null, ...(answers ? { questionId: answers.id } : {}) }, (id) => this.store.message(id), (id) => this.store.question(id))
         // The late answer's line quotes the question and the default: kept with the question, so forgetting the bubble
@@ -885,8 +886,11 @@ export class BotChatService {
     if (id.startsWith('alone:')) { this.engine.alone.remove(botId, id); return this.detailOf(botId) }
     const off = this.store.disabledPermissions(botId).find((item) => item.id === id)
     const grant = this.store.activeGrant(botId)
-    const permission = grant ? grantedPermissions(off?.manifest ?? grant.manifest).find((item) => permissionId(item) === id) : undefined
+    const permission = grant ? grantedPermissions(withFullTrust(off?.manifest ?? grant.manifest)).find((item) => permissionId(item) === id) : undefined
     if (!permission) throw new BotEngineError('permission_not_found', 'This bot doesn\'t have that permission.')
+    // Allow everything would give it straight back, and forgetting a switch-off would let it: refused, with the way out.
+    if (grant!.manifest.fullTrust === true && grantedPermissions(withFullTrust(withoutPermission(grant!.manifest, permission))).some((item) => permissionId(item) === id))
+      throw new BotEngineError('permission_full_trust', 'Allow everything gives this bot every tool, so Remove can\'t take this one away. Switch it off instead, or turn off Allow everything first.')
     this.store.db.transaction(() => {
       this.engine.narrowGrant(botId, (manifest) => withoutPermission(manifest, permission))
       this.store.forgetDisabledPermission(botId, id)

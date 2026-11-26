@@ -4,7 +4,7 @@ import type { BotChip } from '../../shared/bots/personal/chat'
 import type { BotChipCall, BotChipContext } from '../../shared/bots/personal/chips'
 import type { BotDepth, BotLane, BotModelPick, BotModelSlotKey, BotModelSlots, BotSchedule, BotWorkLevel, BotWorkModelName } from '../../shared/bots/personal/definition'
 import type { BotModelRows, BotPickMiss } from '../../shared/bots/personal/modelSlots'
-import type { BotQuestionFollow, BotQuestionSpec } from '../../shared/bots/personal/questions'
+import type { BotQuestionAsk, BotQuestionStatus } from '../../shared/bots/personal/questions'
 import type { BotCard } from '../../shared/bots/personal/cards'
 import type { BotWakeEvent } from '../../shared/bots/personal/wakes'
 import type { BotJournalKind, BotJournalWho, BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from '../../shared/bots/personal/memory'
@@ -125,12 +125,17 @@ export interface BotToolHost {
   mcpServers?(botId: string, lane: BotLane): Promise<BotMcpListing>
   /**
    * `ask_owner` (issue #1123): a question to the owner with answers to tap, shown under a chat turn's reply, or at once
-   * from work, which then waits for the answer. `asked` is false, with why, when it was not kept (a cap, a permission
+   * from work, which then waits for the answers. `asked` is false, with why, when it was not kept (a repeat, a permission
    * asked first, a turn never offered it). Absent: no questions here.
    */
   questions?: {
     /** `follow`: what happens if the owner doesn't answer (absent: nothing, as an earlier build kept it). */
-    ask(botId: string, activationId: string, spec: BotQuestionSpec, follow?: BotQuestionFollow): { asked: boolean; text: string }
+    ask(botId: string, activationId: string, asks: readonly BotQuestionAsk[]): { asked: boolean; text: string; questionIds?: string[] }
+    /**
+     * `question_withdraw` (issue #1446): the activation takes back an open question it asked. `withdrawn: false` with the
+     * question's status (and the owner's answer) when it was no longer open; `refused` when it is not this activation's.
+     */
+    withdraw?(botId: string, activationId: string, questionId: string): { withdrawn: true } | { withdrawn: false; status: BotQuestionStatus; answer?: string } | { refused: string }
     /**
      * `question_answer`: a chat turn the owner's own message started passes on to work the answer they gave in the chat
      * to the question it waits on; `title` is the work's.

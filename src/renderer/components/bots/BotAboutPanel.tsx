@@ -5,6 +5,7 @@ import {
 } from '../../lib/icons'
 import type { BotContextSummary, BotDetail, BotPermissionItem, BotReminderItem, BotRunItem, BotSummary, BotTurnUsageSummary } from '../../../shared/bots/personal/chat'
 import type { BotModelPick } from '../../../shared/bots/personal/definition'
+import { BOT_FULL_TRUST_PERMISSION } from '../../../shared/bots/personal/manifest'
 import type { BotShownRows, BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
 import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
 import { Switch } from '../settings/SettingsRow'
@@ -405,6 +406,9 @@ function doingText(bot: BotSummary, now: number): string {
   return bot.last ? `Free · last message ${agoText(bot.last.at, now)}` : 'Free'
 }
 
+/** What "Allow everything" gives and what still holds, for its tooltip. */
+const FULL_TRUST_TIP = 'Every tool and permission a bot can be given, without asking. What you switch off here, Settings and Labs still apply, and tools that ask first still ask.'
+
 function permissionsSummary(detail: BotDetail | undefined): string | undefined {
   if (!detail) return undefined
   const off = detail.permissions.filter((item) => item.enabled === false || (item.mark && !item.asksFirst) || item.gone).length
@@ -488,9 +492,16 @@ export function BotAboutPanel({ bot, inPanel = false }: { bot: BotSummary; inPan
         <BotPrompt bot={bot} />
       </Fold>
 
-      <Fold id="permissions" icon={ShieldCheck} title="Can use" open={open.includes('permissions')} onToggle={toggle} summary={permissionsSummary(detail)}>
-        {detail?.permissions.length
+      <Fold id="permissions" icon={ShieldCheck} title="Can use" open={open.includes('permissions')} onToggle={toggle} summary={detail?.fullTrust ? 'Everything' : permissionsSummary(detail)}>
+        {detail?.permissions.length || detail?.fullTrust !== undefined
           ? <div className="settings-group-rows bot-about-surface">
+            {/* Allow everything: on asks first in a dialog, as any grant is approved; off narrows at once. */}
+            {detail.fullTrust !== undefined && <Row icon={ShieldCheck} title="Allow everything" titleTip={FULL_TRUST_TIP} testId="bot-full-trust">
+              <span title={FULL_TRUST_TIP}><Switch label="Allow everything" checked={detail.fullTrust} onChange={(on) => {
+                if (on) useBotsStore.setState({ dialog: { kind: 'fullTrust', botId: bot.id }, error: null })
+                else void store().setPermission(bot.id, BOT_FULL_TRUST_PERMISSION, false)
+              }} /></span>
+            </Row>}
             {detail.permissions.map((item) => {
               const off = item.mark ?? (item.gone ? 'Gone from Mousse' : undefined)
               return <Row key={item.id} icon={permissionIcon(item)} className={`bot-about-permission${item.enabled === false ? ' is-off' : ''}${item.under ? ' indent' : ''}`}
@@ -498,7 +509,7 @@ export function BotAboutPanel({ bot, inPanel = false }: { bot: BotSummary; inPan
                 {...(item.note ? { desc: item.note } : {})}
                 {...(off ? { status: { text: off, tone: 'warn' as const } } : {})}>
                 {item.enabled !== undefined && <span title={item.note}><Switch label={item.title} checked={item.enabled} onChange={(enabled) => void store().setPermission(bot.id, item.id, enabled)} /></span>}
-                {item.builtIn ? null : <ConfirmRemoveButton label={`Remove ${item.title}`} onRemove={() => void store().revokePermission(bot.id, item.id)} />}
+                {item.builtIn || item.fromFullTrust ? null : <ConfirmRemoveButton label={`Remove ${item.title}`} onRemove={() => void store().revokePermission(bot.id, item.id)} />}
               </Row>
             })}
           </div>

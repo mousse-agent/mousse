@@ -7,7 +7,8 @@
  * - states: open, moved on, answered, withdrawn (stopped turn, wall), redacted (Forget)
  * - actors: a tap, a typed reply, another message, a second tap (or another device), Stop, escalate before and after
  * - owner's words: a tapped label never counts as theirs (threads, models, and its turn says so); a typed answer does
- * - limits: one per chat turn, six open per bot, twenty a day (questions from work: botWorkQuestions.test.ts)
+ * - counts: none (issue #1363); up to four in one call, the same one again returns its id, and a repeat the owner has
+ *   not written about since it was shown is refused (questions from work, repeats and withdrawing: botWorkQuestions*.test.ts)
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
@@ -20,7 +21,7 @@ import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools
 import type { BotChatMessage } from '../../src/shared/bots/personal/chat'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
-import { QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTIONS_ENOUGH_TEXT } from '../../src/shared/bots/personal/questions'
+import { QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT } from '../../src/shared/bots/personal/questions'
 import { BOT_ASK_DEFERRED_TEXT, botAskedText } from '../../src/mms/bots/activation/BotEngine'
 import { BOT_THREADS_READ_ONLY_TURN_NOTE, botInstructions } from '../../src/mms/bots/instructions'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
@@ -74,7 +75,7 @@ async function asked(args: Record<string, unknown> = FLATS, reply = 'I found two
   const turn = await chatTurn('Find me a flat to view this week.', id)
   const answer = await tool('ask_owner', turn.prepared, turn.payload.threadId, args)
   expect(answer.isError).toBeFalsy()
-  expect(JSON.parse(answer.text)).toEqual({ asked: true, note: QUESTION_ASKED_TEXT })
+  expect(JSON.parse(answer.text)).toEqual({ asked: true, questionId: expect.stringMatching(/^q_/), note: QUESTION_ASKED_TEXT })
   await finish(f, turn.payload, 'completed', { text: reply })
   const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === turn.activation.id)!
   return { turn, bubble }
@@ -246,33 +247,36 @@ describe('what a question never does', () => {
     expect(f.store.activationQuestions(turn.activation.id)[0]?.status).toBe('withdrawn')
   })
 
-  it('keeps to one question per chat turn, six open per bot and twenty a day', async () => {
+  it('asks up to four questions in one call, each its own bubble under the reply; a fifth is refused', async () => {
+    const turn = await chatTurn('Plan my move', 'c1')
+    const four = ['Which flat?', 'Which day?', 'Which movers?', 'Keep the sofa?'].map((question) => ({ question, yesNo: true }))
+    expect(await tool('ask_owner', turn.prepared, turn.payload.threadId, { questions: [...four, { question: 'And the cat?', yesNo: true }] })).toEqual({ text: expect.stringContaining('at most 4 questions'), isError: true })
+    expect(f.store.activationQuestions(turn.activation.id)).toEqual([])
+    const asked = JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, { questions: four })).text)
+    expect(asked).toEqual({ asked: true, questionIds: [expect.stringMatching(/^q_/), expect.stringMatching(/^q_/), expect.stringMatching(/^q_/), expect.stringMatching(/^q_/)], note: QUESTION_ASKED_TEXT })
+    await finish(f, turn.payload, 'completed', { text: 'A few things first.' })
+    const bubbles = chatOf(f, botId).filter((message) => message.question && message.activationId === turn.activation.id)
+    expect(bubbles.map((message) => [message.question!.questionId, message.text.split('\n')[0]])).toEqual(four.map((entry, index) => [asked.questionIds[index], entry.question]))
+    // Each is answered on its own: a tap on one leaves the others' buttons answering them.
+    await tap(asked.questionIds[1], 'Yes')
+    expect(f.store.question(asked.questionIds[1])?.status).toBe('answered')
+    expect((await tap(asked.questionIds[2], 'No')).question?.question).toMatchObject({ status: 'answered', answer: 'No' })
+  })
+
+  it('questions are not counted: open ones of other turns and earlier days stop nothing', async () => {
+    for (let i = 0; i < 30; i += 1) f.store.insertQuestion({ id: `q_seed-${i}`, botId, activationId: `act-seed-${i}`, dispatchN: 1, lane: 'chat', spec: { question: `Q${i}`, choices: [{ label: 'A' }, { label: 'B' }], other: false }, createdAt: f.store.now() })
     const turn = await chatTurn('Find me a flat', 'c1')
     expect(JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, FLATS)).text).asked).toBe(true)
-    expect(await tool('ask_owner', turn.prepared, turn.payload.threadId, { question: 'And when?', yesNo: true })).toEqual({ text: QUESTIONS_ENOUGH_TEXT, isError: true })
+    expect(JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, { question: 'And when?', yesNo: true })).text).asked).toBe(true)
+  })
+
+  it('the same question again returns the one already asked; reworded or reordered, it is still the same', async () => {
+    const turn = await chatTurn('Find me a flat', 'c1')
+    const first = JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, FLATS)).text)
+    const again = JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, { question: '  which FLAT should I book a viewing for ', choices: ['flat b', 'Flat A'] })).text)
+    expect(again).toEqual({ asked: true, questionId: first.questionId, note: QUESTION_ASKED_TEXT })
     await finish(f, turn.payload, 'completed', { text: 'Two options.' })
-    const seed = (n: number, status: 'open' | 'answered') => {
-      for (let i = 0; i < n; i += 1) {
-        const id = `q_seed-${status}-${i}`
-        f.store.insertQuestion({ id, botId, activationId: `act-seed-${status}-${i}`, dispatchN: 1, lane: 'chat', spec: { question: 'Q', choices: [{ label: 'A' }, { label: 'B' }], other: false }, createdAt: f.store.now() })
-        if (status === 'answered') f.store.answerQuestion(id, { choice: 'A', by: 'owner' }, 'bm_x')
-      }
-    }
-    // The owner's next message moves the first one on; six others still open are the most.
-    seed(6, 'open')
-    const sixth = await chatTurn('Anything else?', 'c2')
-    expect(await tool('ask_owner', sixth.prepared, sixth.payload.threadId, FLATS)).toEqual({ text: QUESTIONS_ENOUGH_TEXT, isError: true })
-    await finish(f, sixth.payload, 'completed', { text: 'No.' })
-    // Answered ones free their places, but twenty in a day is the most (7 so far).
-    f.store.run("UPDATE bot_questions SET status = 'answered' WHERE bot_id = ?", botId)
-    seed(13, 'answered')
-    const many = await chatTurn('And now?', 'c3')
-    expect(await tool('ask_owner', many.prepared, many.payload.threadId, FLATS)).toEqual({ text: QUESTIONS_ENOUGH_TEXT, isError: true })
-    await finish(f, many.payload, 'completed', { text: 'Nothing more.' })
-    // A day later it may ask again.
-    f.clock.now += 25 * 60 * 60_000
-    const later = await chatTurn('Today?', 'c4')
-    expect(JSON.parse((await tool('ask_owner', later.prepared, later.payload.threadId, FLATS)).text).asked).toBe(true)
+    expect(chatOf(f, botId).filter((message) => message.question)).toHaveLength(1)
   })
 
 })

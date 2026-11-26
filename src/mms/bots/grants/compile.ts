@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_RETIRED_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_COMPUTER_REQUEST_TOOL, BOT_COMPUTER_TOOLS, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SECRET_TOOLS, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_RETIRED_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_QUESTION_WITHDRAW_TOOL, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_COMPUTER_REQUEST_TOOL, BOT_COMPUTER_TOOLS, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SECRET_TOOLS, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
 import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from '../../../shared/bots/personal/catalogue'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import { BOT_ITEM_TOOLS } from '../../../shared/bots/personal/items'
@@ -168,7 +168,7 @@ export interface CompileInput {
      */
     subagent?: true
     /**
-     * `ask_owner` (`BOT_QUESTION_TOOL`): a question with answers to tap; it grants nothing. Every chat turn, work and a
+     * `ask_owner` (`BOT_QUESTION_TOOL`) and `question_withdraw`: questions with answers to tap; they grant nothing. Every chat turn, work and a
      * scheduled run (`BOT_TURN_KINDS`); a front desk (a chat turn) also gets `question_answer`, to pass on to work an
      * answer given in the chat.
      */
@@ -293,7 +293,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(!own?.frontDesk && own?.timers ? ['remind', ...(own.watcherStart ? ['watch_start'] : [])] : []),
     ...(own?.images ? [BOT_IMAGE_TOOL] : []),
     ...(own?.applets ? [BOT_APPLET_TOOL] : []),
-    ...(own?.questions ? [BOT_QUESTION_TOOL, ...(own.frontDesk ? [BOT_QUESTION_ANSWER_TOOL] : [])] : []),
+    ...(own?.questions ? [BOT_QUESTION_TOOL, BOT_QUESTION_WITHDRAW_TOOL, ...(own.frontDesk ? [BOT_QUESTION_ANSWER_TOOL] : [])] : []),
     ...(own?.cards ? [BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL] : []),
     ...(own?.bots ? BOT_MESSAGE_TOOLS : []),
     // A run's main turn splits its job among subagents, on models from the same list the chat picks work's from.

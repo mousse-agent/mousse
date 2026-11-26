@@ -127,6 +127,21 @@ async function legacyExpired(action: { id: string }): Promise<void> {
   f.bots.actions.transition(action.id, 'open', 'expired', { text: 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.' })
   await f.bots.maintain(new Date(f.clock.now)); await flush()
 }
+it('Allow everything never gets past asks first: work under it still holds a call that sends for the owner', async () => {
+  const t = await setup(true)
+  f.bots.setFullTrust(t.botId, true)
+  expect(f.store.activeGrant(t.botId)!.manifest).toMatchObject({ fullTrust: true, mcp: [{ serverId: 'mail', tool: 'send', level: 'asks_first' }] })
+  await finish(f, t.work.payload)
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Send another', clientRequestId: 'owner-2' })
+  const chat = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const talk = await start(f, chat.id)
+  const { workId } = await f.bots.tools.work.start(t.botId, chat.id, { title: 'Email', brief: 'Send another email', key: 'email-2' })
+  await finish(f, talk.payload)
+  const work = await start(f, workId)
+  const outcome = await callForBot({ bot: work.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'trusted-call', signal: new AbortController().signal })
+  expect(outcome.text).toBe('This call is held for your owner. End your turn now.')
+  expect(t.calls).toEqual([])
+})
 it('switch off runs the same offered call directly and writes no action', async () => {
   const t = await setup(false, true)
   expect((await t.call()).text).toContain('delivered')
@@ -1012,7 +1027,7 @@ it('R4 a question after a settled action ends as a question, not an approval', a
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   await flush()
   const next = await start(f, t.workId, 2)
-  expect(f.bots.askOwner(t.botId, t.workId, { question: 'Which next?', choices: [{ label: 'A' }, { label: 'B' }], other: true }).asked).toBe(true)
+  expect(f.bots.askOwner(t.botId, t.workId, [{ spec: { question: 'Which next?', choices: [{ label: 'A' }, { label: 'B' }], other: true } }]).asked).toBe(true)
   const denied = next.prepared.authority.check({ kind: 'app', tool: 'web_fetch', args: {} })
   expect(JSON.stringify(denied)).not.toContain('call is held')
   expect(JSON.stringify(denied)).toContain('question')
@@ -2829,7 +2844,7 @@ it.each([true, false])('C4 next wrapper preserves held review and retry identity
 
 it('C4 next wait-false question survives a held call and its answer reaches the continuation', async () => {
   const t = await setup(true)
-  const asked = f.bots.askOwner(t.botId, t.workId, { question: 'Which inbox?', choices: [{ label: 'Personal' }, { label: 'Work' }], other: false, wait: false })
+  const asked = f.bots.askOwner(t.botId, t.workId, [{ spec: { question: 'Which inbox?', choices: [{ label: 'Personal' }, { label: 'Work' }], other: false, wait: false } }])
   expect(asked.asked).toBe(true)
   expect(f.store.activation(t.workId)!.status).toBe('running')
   const q = f.store.workQuestion(t.workId)!
@@ -3098,7 +3113,7 @@ it.each(['expiry', 'nudges'] as const)('C9 failed action %s backs off without st
   const chat = await f.bots.enqueueChat(other, 'chat:upkeep-choice', 'Pick one')
   await flush()
   const turn = await start(f, chat.id)
-  f.bots.askOwner(other, chat.id, { question: 'Which?', choices: [{ label: 'A' }, { label: 'B' }], other: false }, { kind: 'default', afterMs: 15 * 60_000, default: 'A' })
+  f.bots.askOwner(other, chat.id, [{ spec: { question: 'Which?', choices: [{ label: 'A' }, { label: 'B' }], other: false }, follow: { kind: 'default', afterMs: 15 * 60_000, default: 'A' } }])
   await finish(f, turn.payload, 'completed', { text: 'Pick one.' })
   const questionId = String(f.store.get('SELECT id FROM bot_questions WHERE activation_id = ?', chat.id)!.id)
   f.clock.now += 15 * 60_000

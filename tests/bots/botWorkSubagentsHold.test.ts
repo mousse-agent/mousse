@@ -100,6 +100,16 @@ describe('a subagent on another entry is never held less tightly than its work',
     }
   })
 
+  it('Allow everything never gets past the hold: on an entry that holds commands less tightly, its subagent still runs without them', async () => {
+    f.bots.setFullTrust(botId, true)
+    const job = await work('w1')
+    expect(job.prepared.authority.check(command)).toEqual({ ok: true })
+    const started = await job.prepared.authority.subagents!.start({ title: 'Reviews', brief: 'Find reviews.', model: cheap })
+    expect(started).toMatchObject({ lacks: ['run commands'] })
+    const child = await start(f, job.id, subagentNs(job.id)[0])
+    expect(child.prepared.authority.check(command)).toMatchObject({ ok: false })
+  })
+
   it('a power its entry can\'t run without refuses the start, names the entries that would do, and nothing starts', async () => {
     // The work has no web; a runtime that searches the web whatever the bot holds can't hold a subagent of it.
     f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, appTools: manifest.appTools.filter((tool) => tool !== 'web_search' && tool !== 'web_fetch') }))

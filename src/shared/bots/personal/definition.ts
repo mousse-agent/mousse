@@ -31,6 +31,13 @@ export interface BotManifest {
   budget: BotBudget
   /** Personal bots work for their owner only; bots for other people are not available yet. */
   audience: 'owner'
+  /**
+   * "Allow everything" (issue #1363), a bot's Full access: every capability a personal bot can be granted
+   * (`withFullTrust`), without asking. Only `true` is ever stored, so a grant without it hashes as before. It never
+   * passes the owner's switches, Settings and Labs, what each kind of turn may do, a subagent's narrower set, or asks
+   * first; limits stay as they are.
+   */
+  fullTrust?: true
 }
 
 export interface BotWorkspace {
@@ -464,7 +471,7 @@ export interface BotApprovalView {
 
 /** A permission of a manifest, as the approval dialog states it. */
 export interface BotPermissionLine {
-  kind: 'tool' | 'app_tool' | 'mcp' | 'skill' | 'workspace' | 'budget'
+  kind: 'tool' | 'app_tool' | 'mcp' | 'skill' | 'workspace' | 'budget' | 'full_trust'
   text: string
 }
 

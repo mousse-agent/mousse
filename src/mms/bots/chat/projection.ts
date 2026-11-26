@@ -11,7 +11,7 @@ import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, ty
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
 import { askFingerprint, BOT_BUDGET_WALL_KEYS, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
-import { BOT_AUTOMATION_APP_TOOLS, BOT_RETIRED_APP_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
+import { BOT_AUTOMATION_APP_TOOLS, BOT_RETIRED_APP_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest, canonicalManifest, isOwnBotAppTool, withFullTrust } from '../../../shared/bots/personal/manifest'
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
@@ -740,14 +740,20 @@ export class BotChatProjection {
     const reminders: BotReminderItem[] = this.store.waitingReminders(definition.id).filter((reminder) => !reminder.workId).map((reminder) => (
       { id: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ownerSet: reminder.ownerSet, ...(reminder.work ? { work: true as const } : {}), ...(reminder.wake ? { wake: reminder.event ? wakeEventLabel(reminder.event) : '' } : {}) }
     ))
+    const disabled = grant ? this.store.disabledPermissions(definition.id) : []
+    // While "Allow everything" is on, a tool it gives can be switched off but not removed: it would come straight back.
+    const given = grant?.manifest.fullTrust === true ? new Set(grantedPermissions(withFullTrust(grant.manifest)).filter((item) => 'tool' in item).map(permissionId)) : undefined
+    const trusted = (item: BotPermissionItem) => given?.has(item.id) ? { fromFullTrust: true as const } : {}
     return {
       summary: this.summary(definition, now),
       permissions: grant ? [
         ...(this.options.defaultItems?.(definition.id) ?? []),
         ...(this.options.aloneItems?.(definition.id) ?? []),
-        ...this.permissionItems(definition.id, grant.manifest, grant.approvedAt).filter((item) => !this.store.disabledPermissions(definition.id).some((off) => off.id === item.id)).map((item) => ({ ...item, enabled: true })),
-        ...this.store.disabledPermissions(definition.id).flatMap((off) => this.permissionItems(definition.id, off.manifest, grant.approvedAt).filter((item) => item.id === off.id).map((item) => ({ ...item, enabled: false, note: `Switched off for this bot. ${item.note}` })))
+        // Each permission "Allow everything" gives is a row of its own, so the owner can switch one off and keep the rest.
+        ...this.permissionItems(definition.id, withFullTrust(grant.manifest), grant.approvedAt).filter((item) => !disabled.some((off) => off.id === item.id)).map((item) => ({ ...item, enabled: true, ...trusted(item) })),
+        ...disabled.flatMap((off) => this.permissionItems(definition.id, withFullTrust(off.manifest), grant.approvedAt).filter((item) => item.id === off.id).map((item) => ({ ...item, enabled: false, note: `Switched off for this bot. ${item.note}`, ...trusted(item) })))
       ] : [],
+      ...(grant ? { fullTrust: grant.manifest.fullTrust === true } : {}),
       runs,
       reminders,
       ...((usage) => (usage ? { usage } : {}))(turnUsageSummary(this.store.turnUsageSince(definition.id, 'chat', now - BOT_USAGE_WINDOW_MS))),
@@ -776,6 +782,14 @@ export class BotChatProjection {
 /** A permission's id in About: its ask fingerprint (a limit's without its amount). */
 export function permissionId(permission: BotPermissionRequest): string {
   return askFingerprint('budget' in permission ? { budget: { key: permission.budget.key } } : permission)
+}
+
+/**
+ * The permission a switched-off row names, from the manifest it kept. "Allow everything" is expanded first, so a
+ * permission only it gave (Run commands on a bot that never asked) is found too.
+ */
+export function switchedOffPermission(off: { id: string; manifest: BotManifest }): BotPermissionRequest | undefined {
+  return grantedPermissions(withFullTrust(off.manifest)).find((item) => permissionId(item) === off.id)
 }
 
 /** The fingerprint of an ask: at most one is open per bot and fingerprint (a limit's without its amount). */

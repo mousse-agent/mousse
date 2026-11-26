@@ -5,9 +5,9 @@ import { Type, type Tool } from '@earendil-works/pi-ai'
 import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule, type BotWorkLevel } from '../../../../shared/bots/personal/definition'
 import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, pickReasonText, pickSourceOf, plainLabel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
 import type { BotModelOption, BotWorkChoices } from '../../../../shared/bots/personal/methods'
-import { BOT_CARD_TOOL, BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL } from '../../../../shared/bots/personal/manifest'
+import { BOT_CARD_TOOL, BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_QUESTION_WITHDRAW_TOOL } from '../../../../shared/bots/personal/manifest'
 import type { BotSubagentView } from '../../../../shared/bots/personal/authority'
-import { DEFAULT_ANSWER_AFTER_MINUTES, DEFAULT_NUDGE_AFTER_MINUTES, MAX_CHOICE_DETAIL_CHARS, MAX_CHOICE_LABEL_CHARS, MAX_FOLLOW_UP_MINUTES, MAX_QUESTION_CHARS, MAX_QUESTION_CHOICES, MIN_FOLLOW_UP_MINUTES, MIN_QUESTION_CHOICES, QUESTION_NOT_OFFERED_TEXT, questionFollowOf, questionSpecOf } from '../../../../shared/bots/personal/questions'
+import { DEFAULT_ANSWER_AFTER_MINUTES, DEFAULT_NUDGE_AFTER_MINUTES, MAX_CHOICE_DETAIL_CHARS, MAX_CHOICE_LABEL_CHARS, MAX_FOLLOW_UP_MINUTES, MAX_QUESTION_CHARS, MAX_QUESTION_CHOICES, MAX_QUESTIONS_PER_CALL, MIN_FOLLOW_UP_MINUTES, MIN_QUESTION_CHOICES, QUESTION_NOT_OFFERED_TEXT, questionAsksOf } from '../../../../shared/bots/personal/questions'
 import { cardOf, MAX_CARD_TITLE_CHARS, MAX_CHECKLIST_ITEMS, MAX_CHECKLIST_TEXT_CHARS, MAX_FACT_LABEL_CHARS, MAX_FACT_ROWS, MAX_FACT_VALUE_CHARS, MAX_GALLERY_CAPTION_CHARS, MAX_GALLERY_FILES, MAX_PROGRESS_LABEL_CHARS, MAX_PROGRESS_NOTE_CHARS } from '../../../../shared/bots/personal/cards'
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
@@ -99,6 +99,23 @@ const card = (description?: string) => Type.Union([
     }), { description: `1 to ${MAX_GALLERY_FILES} pictures.` })
   }, { description: 'Pictures from your files folder: ones you made, saved or a tool handed you.' })
 ], description ? { description } : {})
+
+/** What one `ask_owner` question takes besides its words: its answers and what happens if the owner doesn't answer. */
+const questionFields = {
+  choices: Type.Optional(Type.Array(Type.Union([
+    Type.String({ description: `A short label, at most ${MAX_CHOICE_LABEL_CHARS} characters.` }),
+    Type.Object({
+      label: Type.String({ description: `At most ${MAX_CHOICE_LABEL_CHARS} characters.` }),
+      detail: Type.Optional(Type.String({ description: `A line more on it, at most ${MAX_CHOICE_DETAIL_CHARS} characters.` }))
+    })
+  ]), { description: `${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} answers to tap, each different.` })),
+  yesNo: Type.Optional(Type.Literal(true, { description: 'The answers are Yes and No (instead of choices).' })),
+  other: Type.Optional(Type.Boolean({ description: 'Offer "Other…" for an answer in their own words. Default true.' })),
+  ifNoAnswer: Type.Optional(Type.Union([Type.Literal('nudge'), Type.Literal('default')], { description: "If they don't answer: 'nudge' (default) reminds them and keeps waiting; 'default' goes with default after the time. Use 'default' only for a minor choice that is easy to undo." })),
+  after: Type.Optional(Type.Number({ description: `Minutes before the first reminder or the default, ${MIN_FOLLOW_UP_MINUTES} to ${MAX_FOLLOW_UP_MINUTES}. Default ${DEFAULT_NUDGE_AFTER_MINUTES} for a nudge, ${DEFAULT_ANSWER_AFTER_MINUTES} for a default.` })),
+  default: Type.Optional(Type.String({ description: "The label of the choice you go with if they don't answer (with ifNoAnswer 'default')." })),
+  card: Type.Optional(card('One card for context, shown above the answers: the options as facts, or pictures to pick from.'))
+}
 
 export const BOT_TOOLS: Tool[] = [
   {
@@ -320,23 +337,28 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: BOT_QUESTION_TOOL,
-    description: `Ask your owner a question they answer with a tap: ${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} short choices (or yesNo), and "Other…" so they can write their own answer. Ask only when the answer changes what you do; settle a minor choice yourself and say what you picked. Never use it for a permission: that is escalate, and a "Yes" here allows nothing. Ask as yourself, in the first person. In the chat it shows under your reply as its own message: don't repeat the question in your reply, and end your turn; their answer comes as their next message. In work it reaches them at once. By default your work waits for the answer: end your turn, and you carry on in this thread with it. Wait when nothing useful can happen without the answer. When you can carry on with other parts of the job meanwhile, set wait to false: keep working, and the answer reaches you as a note naming the question (or carries your work on in this thread if your turn ended first); don't do the part that needs it until then. One question at a time per piece of work. If they don't answer, Mousse reminds them (ifNoAnswer 'nudge', the default: at most twice). Only for a minor choice that is easy to undo, you may instead name a default, one of your choices: if they haven't answered within after minutes, you go with it and say so. Never default on anything that spends money, can't be undone, or speaks for your owner.`,
+    description: `Ask your owner a question they answer with a tap: ${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} short choices (or yesNo), and "Other…" so they can write their own answer. To ask several things at once, give questions: up to ${MAX_QUESTIONS_PER_CALL}, each with its own choices; each shows as its own bubble. Ask only when the answer changes what you do; settle a minor choice yourself and say what you picked. Never use it for a permission: that is escalate, and a "Yes" here allows nothing. Ask as yourself, in the first person. It returns the question's id (questionIds for several): question_withdraw takes one back when you no longer need it. Asking the same question again before your owner answers or writes is refused. In the chat it shows under your reply: don't repeat the question in your reply, and end your turn; their answer comes as their next message. In work it reaches them at once. By default your work waits for the answers: end your turn, and you carry on in this thread once every question is answered. Wait when nothing useful can happen without them. When you can carry on with other parts of the job meanwhile, set wait to false: keep working, and each answer reaches you as a note naming its question (or carries your work on in this thread if your turn ended first); don't do the part that needs it until then. If they don't answer, Mousse reminds them (ifNoAnswer 'nudge', the default: at most twice). Only for a minor choice that is easy to undo, you may instead name a default, one of your choices: if they haven't answered within after minutes, you go with it and say so. Never default on anything that spends money, can't be undone, or speaks for your owner.`,
     parameters: Type.Object({
-      question: Type.String({ description: `The question, at most ${MAX_QUESTION_CHARS} characters. It must read on its own: the owner may see it in a notification.` }),
-      choices: Type.Optional(Type.Array(Type.Union([
-        Type.String({ description: `A short label, at most ${MAX_CHOICE_LABEL_CHARS} characters.` }),
-        Type.Object({
-          label: Type.String({ description: `At most ${MAX_CHOICE_LABEL_CHARS} characters.` }),
-          detail: Type.Optional(Type.String({ description: `A line more on it, at most ${MAX_CHOICE_DETAIL_CHARS} characters.` }))
-        })
-      ]), { description: `${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} answers to tap, each different.` })),
-      yesNo: Type.Optional(Type.Literal(true, { description: 'The answers are Yes and No (instead of choices).' })),
-      other: Type.Optional(Type.Boolean({ description: 'Offer "Other…" for an answer in their own words. Default true.' })),
-      ifNoAnswer: Type.Optional(Type.Union([Type.Literal('nudge'), Type.Literal('default')], { description: "If they don't answer: 'nudge' (default) reminds them and keeps waiting; 'default' goes with default after the time. Use 'default' only for a minor choice that is easy to undo." })),
-      after: Type.Optional(Type.Number({ description: `Minutes before the first reminder or the default, ${MIN_FOLLOW_UP_MINUTES} to ${MAX_FOLLOW_UP_MINUTES}. Default ${DEFAULT_NUDGE_AFTER_MINUTES} for a nudge, ${DEFAULT_ANSWER_AFTER_MINUTES} for a default.` })),
-      default: Type.Optional(Type.String({ description: "The label of the choice you go with if they don't answer (with ifNoAnswer 'default')." })),
-      card: Type.Optional(card('One card for context, shown above the answers: the options as facts, or pictures to pick from.')),
-      wait: Type.Optional(Type.Boolean({ description: 'In work: true (default) ends your turn and waits for the answer; false keeps you working and the answer comes later. No effect in the chat.' }))
+      question: Type.Optional(Type.String({ description: `The question, at most ${MAX_QUESTION_CHARS} characters. It must read on its own: the owner may see it in a notification. Leave it out when you give questions.` })),
+      ...questionFields,
+      // Each entry takes what question does, without a card; kept bare so the tool stays small in every turn's prompt.
+      questions: Type.Optional(Type.Array(Type.Object({
+        question: Type.String(),
+        choices: Type.Optional(Type.Array(Type.Union([Type.String(), Type.Object({ label: Type.String(), detail: Type.Optional(Type.String()) })]))),
+        yesNo: Type.Optional(Type.Literal(true)),
+        other: Type.Optional(Type.Boolean()),
+        ifNoAnswer: Type.Optional(Type.Union([Type.Literal('nudge'), Type.Literal('default')])),
+        after: Type.Optional(Type.Number()),
+        default: Type.Optional(Type.String())
+      }), { minItems: 1, maxItems: MAX_QUESTIONS_PER_CALL, description: `Up to ${MAX_QUESTIONS_PER_CALL} questions at once, instead of question; each takes the same fields.` })),
+      wait: Type.Optional(Type.Boolean({ description: 'In work: true (default) ends your turn and waits for the answers; false keeps you working and the answers come later. No effect in the chat.' }))
+    })
+  },
+  {
+    name: BOT_QUESTION_WITHDRAW_TOOL,
+    description: 'Take back a question you asked with ask_owner, by its id, when you no longer need the answer (you found it out, or the plan changed). Its bubble says it was withdrawn. Only a question asked in this chat turn or this piece of work, while it is still open. If your owner answered first, nothing is withdrawn and you get their answer.',
+    parameters: Type.Object({
+      questionId: Type.String({ description: 'The id ask_owner returned.' })
     })
   },
   {
@@ -1246,18 +1268,38 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
           if (isOutcome(call)) return call
           // A chat turn and work the owner asked for; a scheduled run, a consult and a subagent put theirs in the report.
           if (!call.deps.host.questions) return error(QUESTION_NOT_OFFERED_TEXT)
-          const spec = questionSpecOf(args)
-          if ('problem' in spec) return error(spec.problem)
-          const follow = questionFollowOf(args, spec)
-          if ('problem' in follow) return error(follow.problem)
-          const asked = call.deps.host.questions.ask(call.botId, call.activationId, spec, follow)
-          return asked.asked ? json({ asked: true, note: asked.text }) : error(asked.text)
+          const asks = questionAsksOf(args)
+          if ('problem' in asks) return error(asks.problem)
+          const asked = call.deps.host.questions.ask(call.botId, call.activationId, asks)
+          if (!asked.asked) return error(asked.text)
+          const ids = asked.questionIds ?? []
+          return json({ asked: true, ...(Array.isArray(args.questions) ? { questionIds: ids } : ids[0] ? { questionId: ids[0] } : {}), note: asked.text })
         }
       }),
       // A chat turn and work hold it (`compileBotThread`); a scheduled run, a consult and a subagent never list it.
       listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_QUESTION_TOOL)),
       available: (turn) => (turn.bot?.appTools.has(BOT_QUESTION_TOOL) && deps?.() ? true : QUESTION_NOT_OFFERED_TEXT),
       offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_QUESTION_TOOL) && deps?.())
+    },
+    {
+      ...ownTool(byName.get(BOT_QUESTION_WITHDRAW_TOOL)!, deps, {
+        class: 'mutation',
+        describe: () => 'Take back a question',
+        handler: async (args, ctx) => {
+          const call = botCall(deps, ctx)
+          if (isOutcome(call)) return call
+          if (!call.deps.host.questions?.withdraw) return error(QUESTION_NOT_OFFERED_TEXT)
+          if (typeof args.questionId !== 'string' || !args.questionId.trim()) return error('question_withdraw needs the id ask_owner returned.')
+          const result = call.deps.host.questions.withdraw(call.botId, call.activationId, args.questionId.trim())
+          if ('refused' in result) return error(result.refused)
+          if (result.withdrawn) return json({ withdrawn: true, note: 'Withdrawn: its bubble says so. Carry on without its answer.' })
+          return json({ ...result, note: result.status === 'answered' ? 'Your owner answered it first: go with their answer.' : 'It is no longer open, so nothing was withdrawn.' })
+        }
+      }),
+      // Held with `ask_owner` (`compileBotThread`), wherever a turn may ask.
+      listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_QUESTION_WITHDRAW_TOOL)),
+      available: (turn) => (turn.bot?.appTools.has(BOT_QUESTION_WITHDRAW_TOOL) && deps?.() ? true : QUESTION_NOT_OFFERED_TEXT),
+      offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_QUESTION_WITHDRAW_TOOL) && deps?.())
     },
     {
       ...ownTool(byName.get(BOT_CARD_TOOL)!, deps, {

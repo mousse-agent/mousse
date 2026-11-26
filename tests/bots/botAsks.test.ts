@@ -8,7 +8,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_NOW_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_MCP_UNAVAILABLE_TEXT, BOT_SKILLS_NO_ASK_TEXT, BOT_WORK_HAS_TEXT, BOT_ASK_RAISED_TEXT, botAskedText } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_DUPLICATE_TEXT, BOT_ASK_NOT_NOW_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_MCP_UNAVAILABLE_TEXT, BOT_SKILLS_NO_ASK_TEXT, BOT_WORK_HAS_TEXT, BOT_ASK_RAISED_TEXT, botAskedText } from '../../src/mms/bots/activation/BotEngine'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
@@ -88,7 +88,7 @@ describe('asks in a run', () => {
     expect(f.store.activation(second.activation.id)!.status).toBe('done')
   })
 
-  it('Not now holds off a new ask for 24 hours; then the run asks again', async () => {
+  it('Not now holds off a new ask for 24 hours, then until the owner writes; then the run asks again', async () => {
     const first = await run('r1')
     first.prepared.authority.check(command('ls'))
     await finish(f, first.payload, 'completed', { text: 'Skipped.' })
@@ -104,10 +104,18 @@ describe('asks in a run', () => {
     await finish(f, second.payload, 'completed', { text: 'Skipped again.' })
     expect(f.store.openAsks(botId)).toEqual([])
     expect(chatOf(f, botId).filter((row) => row.ask)).toHaveLength(1)
+    // A day on, the owner has still not written: asking again would be a loop (issue #1363).
     f.clock.now += 2 * 60_000
     const third = await run('r3')
-    third.prepared.authority.check(command('ls'))
-    await finish(f, third.payload, 'completed', { text: 'Asked.' })
+    expect(third.prepared.authority.check(command('ls'))).toEqual({ ok: false, refused: { text: BOT_ASK_DUPLICATE_TEXT, askId: '' } })
+    await finish(f, third.payload, 'completed', { text: 'Skipped.' })
+    expect(f.store.openAsks(botId)).toEqual([])
+    // Once they write, the run asks again.
+    await f.bots.service.chatSend({ botId, text: 'what are you up to?', clientRequestId: 'm-up' })
+    f.clock.now += 60_000
+    const fourth = await run('r4')
+    fourth.prepared.authority.check(command('ls'))
+    await finish(f, fourth.payload, 'completed', { text: 'Asked.' })
     expect(f.store.openAsks(botId)).toHaveLength(1)
     expect(f.store.openAsks(botId)[0]!.id).not.toBe(askId)
   })
@@ -287,34 +295,22 @@ describe('asks across lanes and timing (review)', () => {
   })
 })
 
-describe('asks: caps, limits and grant moves (review round 2)', () => {
-  /** An ask an older build made (a skill, before skills were on by default), in this run or another: it counts toward the caps. */
+describe('asks: limits and grant moves (review round 2)', () => {
+  /** An ask an older build made (a skill, before skills were on by default), in this run or another. */
   const olderAsk = (n: number, activationId: string) => f.store.insertEscalation({
     id: `esc_old_${n}`, botId, activationId, dispatchN: 1, toolCallId: null, kind: 'escalate', permission: { skill: `skill-${n}` }, reason: 'r',
     createdAt: f.store.now(), expiresAt: null, mode: 'ask', fingerprint: askFingerprintOf({ skill: `skill-${n}` }), title: `use the skill-${n} skill`, note: '', messageId: null
   })
 
-  it('a run writes at most 5 new asks; later ones are refused without asking', async () => {
-    const { activation, prepared, payload } = await run('r-many')
-    for (let n = 1; n <= 4; n += 1) olderAsk(n, activation.id)
-    expect(prepared.authority.escalate!({ permission: { tool: 'browser' }, reason: 'To read a page.' })).toMatch(/^Asked the owner/)
-    expect(prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'One more.' })).toBe(BOT_ASK_ENOUGH_TEXT)
-    expect(prepared.authority.check(command('ls'))).toMatchObject({ ok: false, refused: { text: BOT_ASK_ENOUGH_TEXT, askId: '' } })
-    await finish(f, payload, 'completed', { text: 'Done.' })
-    expect(f.store.openAsks(botId)).toHaveLength(5)
-    expect(chatOf(f, botId).filter((message) => message.ask)).toHaveLength(1)
-  })
-
-  it('a bot\'s runs write at most 10 new asks a day', async () => {
+  it('a run\'s asks are not counted, in the run or in the day: each new permission is asked for', async () => {
     for (let n = 1; n <= 10; n += 1) olderAsk(n, `act-old-${n}`)
-    const third = await run('r-c')
-    expect(third.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Commands.' })).toBe(BOT_ASK_ENOUGH_TEXT)
-    await finish(f, third.payload, 'completed', { text: 'Done.' })
-    expect(f.store.openAsks(botId)).toHaveLength(10)
-    // A day later the run may ask again.
-    f.clock.now += DAY + 60_000
-    const fourth = await run('r-d')
-    expect(fourth.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Commands.' })).toMatch(/^Asked the owner/)
+    const { activation, prepared, payload } = await run('r-many')
+    for (let n = 11; n <= 15; n += 1) olderAsk(n, activation.id)
+    expect(prepared.authority.escalate!({ permission: { tool: 'browser' }, reason: 'To read a page.' })).toMatch(/^Asked the owner/)
+    expect(prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'One more.' })).toMatch(/^Asked the owner/)
+    expect(prepared.authority.check(command('ls'))).toMatchObject({ ok: false, refused: { text: expect.stringMatching(/^The owner has not allowed this yet/) } })
+    await finish(f, payload, 'completed', { text: 'Done.' })
+    expect(f.store.openAsks(botId)).toHaveLength(18)
   })
 
   it('a skill, whatever it names, and an MCP tool where there are no servers are never asked for', async () => {

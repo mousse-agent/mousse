@@ -13,6 +13,7 @@ import { AT, fakeBots, installPreload, summary, type FakeBots } from './fakeBots
 
 const { BotAboutPanel, nextRunText, reminderWhenText } = await import('../../src/renderer/components/bots/BotAboutPanel')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
+const { BotDialogs } = await import('../../src/renderer/components/bots/BotDialogs')
 
 let root: Root
 let host: HTMLElement
@@ -252,6 +253,34 @@ describe('About this bot', () => {
     expect(laptop?.getAttribute('aria-disabled')).toBe('true')
   })
 
+  it('Allow everything turns on only after its approval dialog, and off at once; an older service shows no switch', async () => {
+    fake.details.b1 = { ...fake.details.b1!, fullTrust: false }
+    fake.bots = [bot]
+    await act(async () => root.render(createElement('div', null, createElement(BotAboutPanel, { bot }), createElement(BotDialogs))))
+    await act(async () => {})
+    const toggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Allow everything"]')!
+    expect(toggle().getAttribute('aria-checked')).toBe('false')
+    await click(toggle())
+    // Nothing is granted until the owner allows it in the dialog.
+    expect(fake.calls.some(([name]) => name === 'setPermission')).toBe(false)
+    const dialog = host.querySelector('[role="dialog"]')!
+    expect(dialog.textContent).toContain('Allow Inbox helper everything?')
+    expect(dialog.textContent).toContain('Your switches, Settings and Labs still apply.')
+    await click([...dialog.querySelectorAll('button')].find((element) => element.textContent === 'Allow everything'))
+    expect(fake.calls).toContainEqual(['setPermission', 'b1', 'full_trust', true])
+    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(toggle().getAttribute('aria-checked')).toBe('true')
+    expect(section('Can use')?.querySelector('.bot-about-fold-summary')?.textContent).toBe('Everything')
+    await click(toggle())
+    expect(fake.calls).toContainEqual(['setPermission', 'b1', 'full_trust', false])
+    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    // An older service sends no fullTrust: no switch.
+    fake.details.b1 = { ...fake.details.b1!, fullTrust: undefined }
+    useBotsStore.setState({ details: {} })
+    await show()
+    expect(toggle()).toBeNull()
+  })
+
   it('lists what it can use and removes one', async () => {
     await show()
     expect(rows('Can use')).toEqual(['Use files on this computer', 'Use the pdf skill'])
@@ -275,6 +304,19 @@ describe('About this bot', () => {
     expect(fake.calls).toContainEqual(['setPermission', 'b1', 'default:mcp:srv-github', false])
     await click(host.querySelector('[role="switch"][aria-label="use your skills"]') ?? undefined)
     expect(fake.calls).toContainEqual(['setPermission', 'b1', 'default:skills', true])
+  })
+
+  it('a permission Allow everything gives has its own switch and no Remove', async () => {
+    const grantedAt = '2026-11-06T10:00:00.000Z'
+    fake.details.b1 = { ...fake.details.b1!, fullTrust: true, permissions: [
+      { id: 'tool:shell', enabled: true, fromFullTrust: true, title: 'run commands', note: 'Runs commands on this computer.', grantedAt },
+      { id: 'tool:browser', enabled: false, fromFullTrust: true, title: 'use the browser', note: 'Switched off for this bot.', grantedAt }
+    ] }
+    await show()
+    expect(rows('Can use')).toEqual(['Allow everything', 'Run commands', 'Use the browser'])
+    expect([...section('Can use')!.querySelectorAll('button')].some((element) => element.getAttribute('aria-label')?.startsWith('Remove'))).toBe(false)
+    await click(host.querySelector('[role="switch"][aria-label="run commands"]') ?? undefined)
+    expect(fake.calls).toContainEqual(['setPermission', 'b1', 'tool:shell', false])
   })
 
   it('marks an MCP server that gives nothing now with what is true of it, keeping Remove', async () => {
