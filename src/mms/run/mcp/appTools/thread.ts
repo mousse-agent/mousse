@@ -1328,13 +1328,16 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         }
         return out
       }
-      // The newest messages, to find the turns in; a turn longer than that is read back to its prompt, so far.
-      let rows = await readSpan(Math.max(0, total - RECENT_REMOTE_MESSAGES), total)
+      // The newest messages, to find the turns in; a turn longer than that is read back to its prompt, so far. The reach
+      // counts transcript indices, not rows: a computer there leaves out system rows with no text (`messageRows`), so a
+      // span of tool markers reads as no rows, and the reading goes on before it.
+      let start = Math.max(0, total - RECENT_REMOTE_MESSAGES)
+      let rows = await readSpan(start, total)
       const prompts = () => rows.filter((row) => row.role === 'user').length
-      while (rows.length && rows[0]!.index > 0 && prompts() < turns && total - rows[0]!.index < RECENT_REMOTE_LOOKBACK) {
-        const earlier = await readSpan(Math.max(0, rows[0]!.index - RECENT_REMOTE_MESSAGES), rows[0]!.index)
-        if (!earlier.length) break
-        rows = [...earlier, ...rows]
+      while (start > 0 && prompts() < turns && total - start < RECENT_REMOTE_LOOKBACK) {
+        const from = Math.max(0, start - RECENT_REMOTE_MESSAGES)
+        rows = [...await readSpan(from, start), ...rows]
+        start = from
       }
       // Then the prompt and the answer of each of those turns, as far as the view shows them.
       const shown = recentTurns(rows, turns).turns.flatMap((turn) => [
