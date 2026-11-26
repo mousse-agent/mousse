@@ -167,7 +167,7 @@ describe('which Antigravity runs', () => {
     expect(spawned.calls.at(-1)?.args[0] === 'acp').toBe(row.kind === 'native')
   })
 
-  it('offers Update only for Mousse\'s own copy: the user\'s agy updates itself', async () => {
+  it('offers the feed\'s release for Mousse\'s own copy and the user\'s agy, never for a manual path', async () => {
     const first = setup({ feed: '1.5.12' })
     await first.service.install()
     const managed = setup({ home: first.home, feed: '1.5.13' })
@@ -175,12 +175,20 @@ describe('which Antigravity runs', () => {
     await flush()
     // The feed was read (once it was due) and names a newer release: Update reaches it.
     expect(managed.driver.latestVersion).toEqual({ kind: 'pinned', version: '1.5.13' })
-    const user = setup({ home: first.home, userAgy: '1.5.12' })
-    expect(user.driver.latestVersion).toBeUndefined()
+    // The user's agy learns of it too (Update runs `agy update`), and nothing is downloaded over it.
+    const user = setup({ home: first.home, userAgy: '1.5.12', feed: '1.5.13' })
+    void user.driver.latestVersion
     await flush()
-    expect(user.driver.latestVersion).toBeUndefined()
-    expect(user.fetchFile).not.toHaveBeenCalled()
+    expect(user.driver.latestVersion).toEqual({ kind: 'pinned', version: '1.5.13' })
+    expect(user.fetchFile.mock.calls.filter(([url]) => String(url).endsWith('.exe'))).toHaveLength(0)
     expect(user.service.managedRuntime()).toBeUndefined()
+    expect(user.driver.updateCommand?.('standalone')).toBe('agy update')
+    expect(user.driver.updateCommand?.('unknown')).toBeUndefined()
+    const manual = setup({ home: first.home, manual: 'agy', feed: '1.5.13' })
+    void manual.driver.latestVersion
+    await flush()
+    expect(manual.driver.latestVersion).toBeUndefined()
+    expect(manual.fetchFile).not.toHaveBeenCalled()
   })
 
   it('moves an earlier 1.1.1 install to agy: Update installs the feed\'s release, and threads hand their history over', async () => {

@@ -941,14 +941,22 @@ export class AntigravityProviderService {
   }
 
   /**
+   * Whether Update can bring what runs to the feed's release: Mousse's own install, or the user's own
+   * `agy` (its owner command, `agy update`). A manual path is the user's to keep.
+   */
+  private feedApplies(): boolean {
+    return this.managesRuntime() || this.runtime()?.source === 'user'
+  }
+
+  /**
    * The release Google's feed names for this computer, read at most every `FEED_TTL_MS` unless
    * `now`. Undefined when it could not be read or names no usable release. Read only while Mousse's
-   * own install is what runs. When it names a newer release than the one that runs and no turn is
-   * running, the update installs on its own.
+   * own install or the user's own `agy` is what runs. When it names a newer release than Mousse's own
+   * install and no turn is running, the update installs on its own; the user's `agy` waits for Update.
    */
   private readFeed(now = false): Promise<NativeRelease | undefined> {
     const target = this.nativeTarget()
-    if (!target || (!now && !this.managesRuntime())) return Promise.resolve(this.feed?.value)
+    if (!target || (!now && !this.feedApplies())) return Promise.resolve(this.feed?.value)
     const clock = this.options.native?.now ?? Date.now
     if (!now && this.feed && clock() - this.feed.at < FEED_TTL_MS) return Promise.resolve(this.feed.value)
     if (this.feedReading) return this.feedReading
@@ -983,12 +991,12 @@ export class AntigravityProviderService {
   }
 
   /**
-   * The version Update installs, while Mousse's own install is what runs: the feed's release. The
-   * user's own `agy` updates itself and a manual path is the user's, so neither gets one. Reading it
-   * starts a feed check when one is due.
+   * The version Update brings, while Mousse's own install or the user's own `agy` is what runs: the
+   * feed's release. A manual path is the user's, so it gets none. Reading it starts a feed check when
+   * one is due.
    */
   latestVersion(): string | undefined {
-    if (!this.managesRuntime()) return undefined
+    if (!this.feedApplies()) return undefined
     void this.readFeed()
     const release = this.feed?.value
     if (!release || nativeReleaseRefusal(release, this.withdrawn())) return undefined

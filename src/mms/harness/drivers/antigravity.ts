@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import type { InstallOwner } from '../../../shared/harness/status'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import { AntigravityProviderService, type AntigravityEntry } from '../acp/presets/antigravity/AntigravityProviderService'
 import { manualAntigravityRuntime } from '../acp/presets/antigravity/installation'
@@ -69,8 +70,8 @@ export function antigravityDriver(options: {
     // The user's own `agy`; Google's installer folder is searched too (`agyStandalonePaths`).
     binaryNames: cliNames('agy'),
     ...compatibilityFields('antigravity'),
-    // Update offers the feed's release only while Mousse's own install runs: the user's own `agy`
-    // updates itself. Read on every update check; it starts a feed read when one is due.
+    // The release Google's feed names, while Mousse's own install or the user's own `agy` runs (Update
+    // runs `agy update` for the latter). Read on every update check; it starts a feed read when one is due.
     get latestVersion() {
       const version = options.builtIn().latestVersion()
       return version ? { kind: 'pinned' as const, version } : undefined
@@ -100,7 +101,8 @@ export function antigravityDriver(options: {
     nativeToolNames: (neutral) => ACP_NATIVE_TOOLS[neutral] ?? [],
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: true }),
     caps: () => ANTIGRAVITY_CAPS,
-    updateCommand: () => undefined,
+    // Google's installer's `agy` replaces itself in place; Mousse's own install updates one-click.
+    updateCommand: (owner: InstallOwner) => (owner === 'standalone' ? 'agy update' : undefined),
     create(context: DriverContext): DriverRuntime {
       // Only the gateway's built-in entry runs on the profile's service; every added one has its own.
       const own = context.builtIn === false
