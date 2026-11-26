@@ -162,19 +162,6 @@
       "expiresAt": "2026-11-26T10:22:51.331Z"
     },
     {
-      "task": "mousse/fix-remote-open-project-error",
-      "session": "Animatrix-c37be4",
-      "machine": "Animatrix",
-      "branch": "mousse/fix-remote-open-project-error",
-      "paths": [
-        "src/mms/bridge/hub",
-        "src/mms/bridge/registerMethods.ts",
-        "src/renderer/lib/remoteComputers.ts"
-      ],
-      "claimedAt": "2026-11-26T10:01:34.409Z",
-      "expiresAt": "2026-11-26T12:01:34.409Z"
-    },
-    {
       "task": "mousse/mousse-net-session-wedge-investigation",
       "session": "Animatrix-0f51d4",
       "machine": "Animatrix",
