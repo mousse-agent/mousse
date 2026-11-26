@@ -27,6 +27,7 @@ import type { DriverRuntime } from '../../src/mms/harness/driver'
 import { refusalOfResponse } from './appToolsFixture'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 import { echoBranchNamer } from '../support/echoBranchNamer'
+import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
 
 /**
  * A fault a test puts before every atomic JSON write: the store writes a project thread's first `meta.json` directly
@@ -484,8 +485,12 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       // The title Mousse gives a thread from its first message, and the worktree's branch, come from the words alone.
       expect(w.d.store.getThread(seen.made.threadId)?.name).toBe(heuristicTitle('Fix the login redirect'))
       const branches = () => execFileSync('git', ['branch', '--list', 'mousse/*', '--format=%(refname:short)'], { cwd: join(home!, 'repo'), encoding: 'utf8' }).split('\n').filter(Boolean)
-      await waitFor(() => branches().some((branch) => branch.startsWith('mousse/fix-the-login-redirect')), 'the branch named from the words')
-      expect(branches()).toEqual([expect.stringMatching(/^mousse\/fix-the-login-redirect/)])
+      // The rename makes the new branch, deletes the temporary one, and only then records the new name for the thread, so
+      // the Git branch list is read once that record is there: before it, both branches can be listed for a moment, and the
+      // rename still holds the repository's lock file, which the cleanup could not delete on Windows.
+      const recorded = () => new ThreadWorkspaceManager(w.d.store.getThreadDir(seen.made.threadId)).load()?.branch
+      await waitFor(() => recorded()?.startsWith('mousse/fix-the-login-redirect') ?? false, 'the thread to record the branch named from the words')
+      expect(branches()).toEqual([recorded()])
     })
 
     it('an agent message in a row counts: a creation at the hop limit is refused before anything is made, and so is one from a run that carries on that chain', async () => {
