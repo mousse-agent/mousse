@@ -473,6 +473,8 @@ export function normalizeProviderId(providerId: string): string {
   if (id.startsWith('pi:') && id.length > 3) id = id.slice(3)
   // Added instances are `<driver>:<slug>` (a second Claude Code account is `claude:work`).
   else if (/^[a-z-]+:./.test(id)) id = id.slice(0, id.indexOf(':'))
+  // A local model server (`local-<slug>`) is named after its runtime or address, never a model maker's brand.
+  if (id.startsWith('local-')) return 'local'
   if (id === 'claude' || id === 'claude-subscription') return 'claude'
   if (id === 'codex' || id === 'openai-codex') return 'openai'
   if (id.includes('antigravity')) return 'antigravity'

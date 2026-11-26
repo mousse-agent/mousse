@@ -24,7 +24,7 @@ import {
 } from '../../lib/providerSnapshots'
 import { ProvidersComputerContext, providersApi, useProvidersComputer } from '../../lib/providersComputer'
 import { useComputers } from '../../lib/computers'
-import { refreshLocalModels } from '../../lib/localModels'
+import { isLocalEntry, refreshLocalModels } from '../../lib/localModels'
 import { isComputer, worksOnThreads, type Device } from '../../lib/netDevices'
 import { takePendingAddProvider, takePendingProvider } from '../../lib/settingsNavigation'
 import { Select } from '../ui/Select'
@@ -466,6 +466,7 @@ function ProvidersPage({
               ambientInstructions={option?.ambientInfo?.instructions}
               status={status}
               retired={retired}
+              local={isLocalEntry(snapshot)}
               onReplaceKey={async (apiKey) => {
                 if (apiKey) apply(await instances.setSecret(snapshot.instanceId, apiKey))
                 else await runSignIn(snapshot.instanceId, snapshot.displayName, 'api_key')

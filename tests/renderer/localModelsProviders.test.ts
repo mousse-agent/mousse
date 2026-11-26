@@ -229,6 +229,12 @@ describe('Settings → Providers: local model servers', () => {
       await click(document.body.querySelector('button[aria-label="Select Ollama"]'))
     })
 
+    it('the entry’s Setup is its server, with no key to replace', () => {
+      const setup = [...document.body.querySelectorAll('.settings-item')].find((item) => item.textContent?.startsWith('Server'))
+      expect(setup?.textContent).toBe('ServerConnected')
+      expect(text()).not.toContain('API key')
+    })
+
     it('show the window, Chat only, Images and Cloud on each row', () => {
       expect(modelRow('qwen3:8b')?.textContent).toContain('32K')
       expect(modelRow('llama3.2:1b')?.textContent).toContain('Chat only')
