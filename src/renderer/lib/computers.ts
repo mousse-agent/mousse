@@ -6,6 +6,7 @@ import type { NetEngineStatus } from '../../shared/netEngine/local'
 import type { Thread } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 import { lastSeenLabel, type Device } from './netDevices'
+import { profileBound, readWhenIdleAfterBinding } from './readAfterBinding'
 
 /**
  * One of the user's other computers, as a thread's row names it: the row carries `node`, and this is what
@@ -174,7 +175,7 @@ export const COMPUTERS_FIRST_READ_MS = 10_000
 /**
  * Reads the computers again when one connects or drops, or the window gains focus while there are some, at most once per
  * `COMPUTERS_REFRESH_MS` (a later change waits for the end of that time). The computers already connected when the
- * window opened are read once, when it is idle after its first paint, so opening the app waits on nothing; there is no
+ * window opened are read once, when it is idle after the profile is bound, so opening the app waits on nothing; there is no
  * timer after that. A profile switch drops the other profile's list and reads this one's. The update button follows the
  * computers behind this one with it. Safe to call more than once.
  */
@@ -183,8 +184,9 @@ export function followComputerChanges(): void {
   following = true
   let last = 0
   let waiting: ReturnType<typeof setTimeout> | undefined
+  // Nothing is read before the profile is bound; the first read after the binding catches up on changes before it.
   const refresh = () => {
-    if (waiting) return
+    if (waiting || !profileBound()) return
     const wait = last + COMPUTERS_REFRESH_MS - Date.now()
     const read = () => {
       waiting = undefined
@@ -194,9 +196,7 @@ export function followComputerChanges(): void {
     if (wait <= 0) read()
     else waiting = setTimeout(read, wait)
   }
-  if (typeof window.requestIdleCallback === 'function')
-    window.requestIdleCallback(refresh, { timeout: COMPUTERS_FIRST_READ_MS })
-  else setTimeout(refresh, COMPUTERS_FIRST_READ_MS)
+  readWhenIdleAfterBinding(refresh, COMPUTERS_FIRST_READ_MS)
   // Focus reads again only once other computers are known: networking's own changes found them.
   window.addEventListener?.('focus', () => {
     if (useComputersStore.getState().devices.some((device) => !device.self)) refresh()
@@ -207,7 +207,7 @@ export function followComputerChanges(): void {
   })
   // The list belongs to one profile: the other one's is never shown under this one's name.
   useAppStore.subscribe((state, previous) => {
-    if (state.profileId === previous.profileId) return
+    if (state.profileId === previous.profileId || !previous.profileReady) return
     useComputersStore.setState(NO_COMPUTERS)
     last = 0
     refresh()
@@ -216,11 +216,14 @@ export function followComputerChanges(): void {
 
 /**
  * The user's other computers, kept current while any view that uses them is mounted. A view with nothing
- * from another computer to show passes `enabled: false`, so a window of one computer never polls.
+ * from another computer to show passes `enabled: false`, so a window of one computer never polls. Nothing is read
+ * before the window's profile is bound (a warm start can show rows of other computers before it).
  */
 export function useComputers(enabled = true): ComputersState {
+  const bound = useAppStore((state) => state.profileReady)
+  const active = enabled && bound
   useEffect(() => {
-    if (!enabled) return
+    if (!active) return
     if (subscribers++ === 0) stop = start()
     return () => {
       if (--subscribers === 0) {
@@ -228,7 +231,7 @@ export function useComputers(enabled = true): ComputersState {
         stop = undefined
       }
     }
-  }, [enabled])
+  }, [active])
   return useComputersStore()
 }
 
