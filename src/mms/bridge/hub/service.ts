@@ -49,7 +49,7 @@ import type { BridgeDisplayPosition } from '../../../shared/bridge'
 import { DispatchInputJournal } from './inputs'
 import { streamBoundElsewhere } from '../../netEngine/store'
 import type { BridgeClient } from '../peers'
-import { engineTwin, openPrivateThread, routedResult } from './engine'
+import { engineTwin, isWordedRefusal, openPrivateThread, routedResult } from './engine'
 import { copyLimits } from '../copyLimits'
 
 /** How long a usage history read on another computer may take: its first read of many logs runs for minutes. */
@@ -995,13 +995,30 @@ export class BridgeHub {
       request
     )
   }
-  /** Registers an existing directory on the target as a project; the target validates the path. */
-  openProject(
+  /**
+   * Registers an existing directory on the target as a project; the target validates the path. The answer is
+   * `{ ok: true, project }` or `{ ok: false, error }` from any target: a v1 computer answers that itself, while an
+   * engine pairing answers the routed row's `{ project }` or refuses the folder (`project_refused`) in its own words.
+   */
+  async openProject(
     target: NodeId,
     path: string,
     options: BridgeHubRequestOptions = {}
   ): Promise<unknown> {
-    return this.call(target, 'projects.open', { path }, options)
+    let value: unknown
+    try {
+      value = await this.call(target, 'projects.open', { path }, options)
+    } catch (error) {
+      if (
+        isWordedRefusal(error) &&
+        (error.details as { reason?: unknown } | undefined)?.reason === 'project_refused'
+      )
+        return { ok: false, error: error.message }
+      throw error
+    }
+    if (value && typeof value === 'object' && !Object.hasOwn(value, 'ok') && Object.hasOwn(value, 'project'))
+      return { ok: true, project: (value as { project: unknown }).project }
+    return value
   }
   /** Asks the target which of its projects is the same repository; read-only, and sends no path. */
   matchProject(
