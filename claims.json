@@ -14,6 +14,23 @@
       "expiresAt": "2026-11-25T20:34:18.437Z"
     },
     {
+      "task": "background-jobs-shared",
+      "session": "Animatrix-955f26",
+      "machine": "Animatrix",
+      "branch": "background-jobs-shared",
+      "paths": [
+        "src/mms/background",
+        "src/mms/monitors",
+        "src/mms/bots/watchers.ts",
+        "src/mms/wakes",
+        "src/mms/bots/wakeSources.ts",
+        "src/mms/MmsProfileServices.ts",
+        "src/mms/bots/activation/BotEngine.ts"
+      ],
+      "claimedAt": "2026-11-26T06:12:52.524Z",
+      "expiresAt": "2026-11-26T08:12:52.524Z"
+    },
+    {
       "task": "bot-asks-and-questions",
       "session": "Animatrix-949070",
       "machine": "Animatrix",
