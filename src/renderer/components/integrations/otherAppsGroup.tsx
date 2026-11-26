@@ -3,17 +3,9 @@ import type { McpServerConfig, SkillDescriptor } from '../../../shared/integrati
 import { ChevronDown, ChevronUp } from '../../lib/icons'
 import { SettingsGroup, SettingsRow } from '../settings/SettingsRow'
 import { Collapse } from '../ui/Collapse'
-import { isManagedSource } from './integrationUi'
+import { isManagedSource, sourceLabel } from './integrationUi'
 import { itemId, type IntegrationKind } from './itemState'
 
-const SOURCE_LABELS: Record<string, string> = {
-  cursor: 'Cursor', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', agents: 'Agents folder'
-}
-export function sourceLabel(source: string): string {
-  // Only unmanaged copies get here, so a Mousse source means the project's own files.
-  if (source === 'generated-agent' || source.startsWith('mousse')) return 'Project files'
-  return SOURCE_LABELS[source.split('-')[0]] ?? source
-}
 
 /** One name found in other apps' config: the copy in effect plus every app it is in. */
 export interface OtherAppRow {

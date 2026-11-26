@@ -12,6 +12,7 @@ import { SecretsSettings } from './SecretsSettings'
 import { compactionModelOf, ContextCompactionControl } from './ContextCompactionControl'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { SettingsModelPicker } from './SettingsModelPicker'
+import { DRIVER_INFO } from '../providers/providerView'
 import { Brain, Layers, RotateCcw } from '../../lib/icons'
 import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
 import { DEVICE_SCOPE, useProviderSnapshots } from '../../lib/providerSnapshots'
@@ -165,6 +166,9 @@ export function AgentsSettings({
   const titleUnavailable = !titleIsAutomatic && providers.length > 0 && !titleProviders.some((provider) =>
     (titleInstance ? provider.instanceId === titleInstance : provider.id === titleProvider) &&
     Boolean(findListedModel(provider.models, titleModel)))
+  // Antigravity may name threads (chosen, or Automatic with it connected): its naming is best-effort.
+  const antigravityNames = !titleIsOff && !titleUnavailable &&
+    (titleIsAutomatic ? titleProviders.some((provider) => provider.id === 'antigravity') : titleProvider === 'antigravity')
 
   // The bots' default model: blank is Automatic (each bot picks by how deeply it works).
   const botProviders = options.botProviders ?? []
@@ -217,7 +221,9 @@ export function AgentsSettings({
             ? `${modelLabel(resolveModelChoice({ instanceId: titleInstance, provider: titleProvider, model: titleModel }, providers), { effort: false })} can't name threads here, so threads keep their first line as the title. Choose another model or Automatic.`
             : titleIsOff
               ? 'Threads keep their first line as the title. Automatic picks a fast connected model to name threads.'
-              : 'Automatic picks a fast connected model to name threads.'}
+              : antigravityNames
+                ? <>Automatic picks a fast connected model to name threads. <span title={DRIVER_INFO.antigravity.bestEffortNaming}>Antigravity naming is best-effort.</span></>
+                : 'Automatic picks a fast connected model to name threads.'}
           titleAction={(!titleIsAutomatic || titleIsOff) && (
             <button
               type="button"

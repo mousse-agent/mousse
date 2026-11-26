@@ -1,9 +1,10 @@
-import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFile, spawn, spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative } from 'node:path'
 import { Transform } from 'node:stream'
+import { harnessAppError } from '../../../../shared/harness/types'
 import type { ProviderCapabilities } from '../../adapter'
 import { ACP_BASE_CAPABILITIES } from '../capabilities'
 import { connectAcpProcess, treeKilledChild, type AcpConnectionFactory } from '../connection'
@@ -174,6 +175,10 @@ export interface AntigravityLaunchOptions {
  * Starts the agent with its isolated Google home. A sign-in link the agent prints (on ACP stdout,
  * on stderr or through the `BROWSER` helper) goes to `onAuthUrl` once it proves to be a Google
  * sign-in with a loopback callback this process owns.
+ *
+ * A one-shot on `agy` (`request.purpose === 'one_shot'`) gets a launch of its own (`antigravityOneShotArgs`): its
+ * scratch folder as working folder, an empty home of its own as gemini dir ({@link antigravityOneShotHome}),
+ * {@link oneShotAntigravityEnv}, its own settings, none of the user's arguments, variables or skill links. On the 1.1.1 server a one-shot keeps the ordinary launch, which is not checked.
  */
 export function antigravityConnectionFactory(options: AntigravityLaunchOptions): AcpConnectionFactory {
   return (request) => {
@@ -181,13 +186,16 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
     if (!runtime) throw new Error('Install Google Antigravity or select its official ACP binary first')
     const { binary, kind } = runtime
     if (request.bot && kind !== 'native') throw new Error('Bot turns require the agy CLI.')
-    const env = scrubbedAntigravityEnv(process.env)
-    const geminiHome = join(options.privateHome ?? options.profileDir, request.bot ? 'bot-gemini-home' : 'gemini-home')
+    const oneShot = request.purpose === 'one_shot' && kind === 'native'
+    if (oneShot && !request.cwd) throw new Error('An Antigravity one-shot needs a folder of its own.')
+    const env = oneShot ? oneShotAntigravityEnv(process.env) : scrubbedAntigravityEnv(process.env)
+    const geminiHome = antigravityGeminiHome(options.privateHome ?? options.profileDir, request.bot)
     mkdirSync(geminiHome, { recursive: true, mode: 0o700 })
     const acpDir = join(geminiHome, ANTIGRAVITY_APP_DATA_DIR)
     mkdirSync(acpDir, { recursive: true, mode: 0o700 })
-    writeFileSync(join(acpDir, 'settings.json'), JSON.stringify({ auth: { type: ANTIGRAVITY_AUTH_METHOD } }), { mode: 0o600 })
-    for (const part of request.bot ? [] : [['config', 'skills'], ['antigravity-cli', 'skills']]) {
+    // A one-shot reads settings of its own (`--cli_dir_name`) and leaves the home's alone.
+    if (!oneShot) writeFileSync(join(acpDir, 'settings.json'), JSON.stringify({ auth: { type: ANTIGRAVITY_AUTH_METHOD } }), { mode: 0o600 })
+    for (const part of request.bot || oneShot ? [] : [['config', 'skills'], ['antigravity-cli', 'skills']]) {
       const link = join(geminiHome, ...part)
       if (existsSync(link)) continue
       try {
@@ -202,7 +210,10 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
       writeFileSync(browserHelper, `#!/bin/sh\nprintf '${BROWSER_MARKER}%s\\n' "$1" >&2\n`, { mode: 0o700 })
       chmodSync(browserHelper, 0o700)
     }
-    env.GEMINI_HOME = geminiHome
+    // A one-shot reads its `config` (hooks, MCP servers, plugins) from an empty home of its own (`antigravityOneShotHome`).
+    const oneShotHome = oneShot ? antigravityOneShotHome(geminiHome, request.cwd!) : undefined
+    if (oneShotHome) mkdirSync(oneShotHome, { recursive: true, mode: 0o700 })
+    env.GEMINI_HOME = oneShotHome ?? geminiHome
     if (kind === 'legacy') {
       env.AGY_ACP_FORCE_FILE_STORAGE = '1'
       env.ANTIGRAVITY_HARNESS_PATH = join(dirname(binary), process.platform === 'win32' ? 'localharness_external.exe' : 'localharness_external')
@@ -221,12 +232,19 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
     mkdirSync(tempDir, { recursive: true, mode: 0o700 })
     if (process.platform === 'win32') { env.TEMP = tempDir; env.TMP = tempDir }
     else env.TMPDIR = tempDir
-    // Bot turns must use ACP approvals and the MCP servers Mousse supplies for their grant.
-    const args = [...antigravityRuntimeArgs(kind, geminiHome), ...(request.bot ? ['--include-default-customizations=false'] : options.args())]
-    // A process group on POSIX, so Stop ends the agent's helpers with it (`treeKilledChild`).
-    const launchEnv = request.bot ? env : options.env(env)
+    // Bot turns must use ACP approvals and the MCP servers Mousse supplies for their grant; a one-shot runs nothing.
+    const args = oneShotHome ? antigravityOneShotArgs(binary, oneShotHome, acpDir, request.cwd!)
+      : [...antigravityRuntimeArgs(kind, geminiHome), ...(request.bot ? ['--include-default-customizations=false'] : options.args())]
+    const launchEnv = request.bot || oneShot ? env : options.env(env)
     if (options.privateHome) privateSignInEnv(launchEnv, kind)
-    const child = spawn(binary, args, { env: launchEnv, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' })
+    // A process group on POSIX, so Stop ends the agent's helpers with it (`treeKilledChild`).
+    const child = spawn(binary, args, {
+      env: launchEnv,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      detached: process.platform !== 'win32',
+      ...(oneShot ? { cwd: request.cwd } : {})
+    })
     const acceptAuthUrl = (url: string) => {
       if (callbackTarget(url)) request.onAuthUrl?.(url)
     }
@@ -248,4 +266,121 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
     connection.child = treeKilledChild(child)
     return connection
   }
+}
+
+/** The agent's Google home under `root` (an entry's own home, or its state folder): the one a launch passes as `--gemini-dir`. */
+export function antigravityGeminiHome(root: string, bot?: boolean): string {
+  return join(root, bot ? 'bot-gemini-home' : 'gemini-home')
+}
+
+/** Where an entry's one-shot scratch folders are, under its state folder; each folder's name is its request's id. */
+export const ANTIGRAVITY_ONE_SHOT_DIR = 'one-shot'
+
+/**
+ * The folder under `agy`'s app data where a one-shot's settings and logs go (`--cli_dir_name`), named after its
+ * scratch folder so the request's files are found, and removed, with it.
+ */
+export function antigravityOneShotCliDir(cwd: string): string {
+  return `${ANTIGRAVITY_ONE_SHOT_DIR}-${basename(cwd)}`
+}
+
+/**
+ * A one-shot's `agy` settings: the `default` agent mode, `strict` tool permission (it asks before every tool, a read
+ * included, and Mousse refuses every ask), no access outside the empty workspace, the terminal sandbox, and a rule
+ * denying every action `agy` names. Seen in agy 1.5.17: it reads them from `<app data>/<cli dir>/settings.json`
+ * (`--cli_dir_name`), and its bundled changelog documents `strict` and `allowNonWorkspaceAccess`.
+ */
+export const ANTIGRAVITY_ONE_SHOT_SETTINGS = Object.freeze({
+  auth: { type: ANTIGRAVITY_AUTH_METHOD },
+  agentMode: '',
+  toolPermission: 'strict',
+  allowNonWorkspaceAccess: false,
+  enableTerminalSandbox: true,
+  permissions: { deny: ['read_file(*)', 'write_file(*)', 'read_url(*)', 'execute_url(*)', 'command(*)', 'unsandboxed(*)', 'mcp(*)'] }
+})
+
+/** Where an entry's one-shot homes are, beside its `gemini-home` (`antigravityOneShotHome`). */
+export const ANTIGRAVITY_ONE_SHOT_HOMES_DIR = 'one-shot-homes'
+
+/**
+ * The empty home a one-shot passes as `--gemini-dir`, beside the entry's `geminiHome` and named after its scratch
+ * folder `cwd`. `agy` reads the global hooks and MCP servers from `<gemini-dir>/config` (`hooks.json`,
+ * `mcp_config.json`); neither `--cli_dir_name` nor `--include-default-customizations=false` keeps them out (seen on
+ * agy 1.5.18), so a one-shot's home has none. It also holds the request's record (`oneShotGuards`).
+ */
+export function antigravityOneShotHome(geminiHome: string, cwd: string): string {
+  return join(dirname(geminiHome), ANTIGRAVITY_ONE_SHOT_HOMES_DIR, basename(cwd))
+}
+
+/**
+ * A one-shot's whole `agy acp` argument list, with its settings written: the empty home `home` as `--gemini-dir`, the
+ * entry's own app data `acpDir` (its sign-in and sessions) as `--app-data-dir`, a settings folder of its own, and none
+ * of Google's default customizations where this `agy` can leave them out. `agy` refuses an absolute app data path and
+ * reads a relative one from the gemini dir. Refused when this `agy`'s flags were not read ({@link readAgyAcpFlags}),
+ * it cannot keep the settings apart, or the app data has no relative path from `home`.
+ */
+function antigravityOneShotArgs(binary: string, home: string, acpDir: string, cwd: string): string[] {
+  const flags = knownAgyAcpFlags(binary)
+  if (!flags?.cliDir) throw harnessAppError({ code: 'wont_run', message: 'This agy cannot keep a single request apart from its other sessions. Update agy.' })
+  const appData = relative(home, acpDir)
+  if (!appData || isAbsolute(appData)) throw harnessAppError({ code: 'wont_run', message: `Antigravity's app data ${acpDir} has no relative path from ${home}.` })
+  const cliDir = antigravityOneShotCliDir(cwd)
+  const settingsDir = join(acpDir, cliDir)
+  mkdirSync(settingsDir, { recursive: true, mode: 0o700 })
+  writeFileSync(join(settingsDir, 'settings.json'), JSON.stringify(ANTIGRAVITY_ONE_SHOT_SETTINGS), { mode: 0o600 })
+  return ['acp', '--gemini-dir', home, '--app-data-dir', appData, '--cli_dir_name', cliDir,
+    ...(flags.customizations ? ['--include-default-customizations=false'] : [])]
+}
+
+/** What an `agy acp` takes: `--cli_dir_name` (a settings folder of its own) and `--include-default-customizations`. */
+export interface AgyAcpFlags { cliDir: boolean; customizations: boolean }
+
+const agyFlags = new Map<string, AgyAcpFlags>()
+
+/** The executable as it is now: a replaced `agy` is read again. */
+function agyFingerprint(binary: string): string | undefined {
+  try {
+    const stat = statSync(binary)
+    return `${binary}\0${stat.size}\0${stat.mtimeMs}`
+  } catch { return undefined }
+}
+
+/** This `agy`'s flags, once {@link readAgyAcpFlags} has read them. */
+export function knownAgyAcpFlags(binary: string): AgyAcpFlags | undefined {
+  const key = agyFingerprint(binary)
+  return key ? agyFlags.get(key) : undefined
+}
+
+/** The flags `agy acp --help` lists, read on a one-shot once per executable (about 150 ms on agy 1.5.17), never at start. */
+export async function readAgyAcpFlags(binary: string): Promise<AgyAcpFlags> {
+  const known = knownAgyAcpFlags(binary)
+  if (known) return known
+  const key = agyFingerprint(binary)
+  const help = await new Promise<string>((resolve) => {
+    execFile(binary, ['acp', '--help'], { env: oneShotAntigravityEnv(process.env), timeout: 10_000, windowsHide: true, maxBuffer: 1024 * 1024 },
+      (_error, stdout, stderr) => resolve(`${stdout}\n${stderr}`))
+  })
+  const flags = { cliDir: /--cli_dir_name\b/.test(help), customizations: /--include-default-customizations\b/.test(help) }
+  // A help that did not list them is not remembered: the next request reads it again.
+  if (key && flags.cliDir) agyFlags.set(key, flags)
+  return flags
+}
+
+/** The variables a one-shot's `agy` keeps from Mousse's own: the system's and the user's folders, locale and proxy. */
+const ONE_SHOT_ENV_KEYS = new Set([
+  'PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'SYSTEMDRIVE', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)',
+  'PROGRAMW6432', 'COMMONPROGRAMFILES', 'COMMONPROGRAMFILES(X86)', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'OS',
+  'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'USER', 'USERNAME', 'LOGNAME',
+  'LANG', 'LANGUAGE', 'TZ', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR'
+])
+
+/** A one-shot's environment: only {@link ONE_SHOT_ENV_KEYS} and `LC_*` of `base`, in any case. */
+export function oneShotAntigravityEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(base)) {
+    const upper = key.toUpperCase()
+    if (value !== undefined && (ONE_SHOT_ENV_KEYS.has(upper) || upper.startsWith('LC_'))) env[key] = value
+  }
+  return env
 }

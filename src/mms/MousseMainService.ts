@@ -304,7 +304,7 @@ export class MousseMainService extends MmsProfileServices {
       async profileId => (await profile(profileId)).net,
       async profileId => {
         const services = await profile(profileId)
-        return { peers: services.peers, engine: { isEngine: (node) => services.netEngine.isEngine(node), setPolicy: (node, change) => services.netEngine.setPolicy(node, change) } }
+        return { peers: services.peers, engine: { isEngine: (node) => services.netEngine.isEngine(node), setPolicy: (node, change) => services.netEngine.setPolicy(node, change), updateThere: (params) => services.netEngine.updateThere(params) } }
       }
     )
     registerEditorTunnelMethods(this.domains, async profileId => (await profile(profileId)).net)

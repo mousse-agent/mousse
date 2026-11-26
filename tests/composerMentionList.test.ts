@@ -5,10 +5,12 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   ComposerSuggestionList,
   MentionRowContent,
+  skillSource,
   splitMentionPath,
   type SuggestionRow
 } from '../src/renderer/components/ComposerSuggestionList'
 import type { MentionItem } from '../src/shared/composerCommands'
+import type { SkillDescriptor } from '../src/shared/integrations'
 
 const noop = () => {}
 
@@ -18,30 +20,48 @@ function renderList(rows: SuggestionRow[], selected: number, extra: { footer?: s
   )
 }
 
-const skillItem: MentionItem = { kind: 'skill', skill: { id: 'review', name: 'review', description: 'Review a change' } }
+const skillItem: MentionItem<SkillDescriptor> = {
+  kind: 'skill',
+  skill: { id: 'review', name: 'review', description: 'Review a change', rootPath: '', skillPath: '', scope: 'project', source: 'mousse-project' }
+}
 const fileItem: MentionItem = { kind: 'file', path: 'src/components/ChatComposer.tsx', positions: [15, 16, 17, 18] }
 const folderItem: MentionItem = { kind: 'directory', path: 'src/shared', positions: [4, 5] }
 
 describe('mention suggestion list', () => {
-  it('marks matched characters of the basename and dims the parent folder', () => {
+  it('marks matched characters of the basename and puts the parent folder on the second line', () => {
     const html = renderToStaticMarkup(createElement(MentionRowContent, { item: fileItem }))
     expect(html).toContain('<mark>Chat</mark>Composer.tsx')
-    expect(html).toContain('composer-mention-path')
     expect(html).toContain('src/components/')
-    expect(html).not.toContain('Skill</span>')
+    expect(html).toContain('aria-label="File"')
   })
 
   it('marks matches that fall in the parent folder', () => {
     const html = renderToStaticMarkup(createElement(MentionRowContent, { item: folderItem }))
     expect(html).toContain('<mark>sh</mark>ared')
     expect(html).toContain('src/')
+    expect(html).toContain('aria-label="Folder"')
   })
 
-  it('shows a skill with a Skill badge and its description', () => {
-    const html = renderToStaticMarkup(createElement(MentionRowContent, { item: skillItem }))
-    expect(html).toContain('composer-mention-badge')
-    expect(html).toContain('>Skill<')
+  it('shows a skill with its source and description, the query marked', () => {
+    const html = renderToStaticMarkup(createElement(MentionRowContent, { item: skillItem, query: 'rev' }))
+    expect(html).toContain('<mark>rev</mark>iew')
+    expect(html).toContain('aria-label="Project"')
     expect(html).toContain('Review a change')
+  })
+
+  // [source, scope, managed, the label its icon gives]
+  const sources: Array<[SkillDescriptor['source'], SkillDescriptor['scope'], boolean | undefined, string]> = [
+    ['mousse-profile', 'global', undefined, 'Personal'],
+    ['generated-agent', 'project', undefined, 'Project'],
+    ['claude-project', 'project', undefined, 'Claude Code · project'],
+    ['codex-global', 'global', undefined, 'Codex · personal'],
+    ['cursor-project', 'project', undefined, 'Cursor · project'],
+    ['opencode-global', 'global', undefined, 'OpenCode · personal'],
+    ['agents-project', 'project', undefined, 'Agents folder · project'],
+    ['claude-project', 'project', true, 'Project']
+  ]
+  it.each(sources)('names a %s skill (%s, managed %s) %j', (source, scope, managed, label) => {
+    expect(skillSource({ source, scope, managed }).label).toBe(label)
   })
 
   it('splits a path into basename and folder, including a folder with a trailing slash', () => {

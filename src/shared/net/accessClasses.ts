@@ -17,11 +17,13 @@ import type { StreamKind } from './streams'
  *   automations and agent chats; and reads that expose the computer's files (Files, Git, review).
  * - `terminal`: opens, reads or types into a terminal (the device's terminal switch governs it).
  * - `editor`: an editor connection or its folder (the device's editor switch governs it).
+ * - `update`: installs an update of Mousse here, which stops every turn and the service. Only a device with Full
+ *   control that is not blocked reaches it (`checkNodePolicy`), whatever its grant says.
  *
  * "Work on threads from this device" off (`net_node_policy.work`) refuses `work` and `bots_manage` in every family,
  * with the reason `work_off`. Kept apart from the rows of `ROUTED_METHODS` and keyed by the Net method name.
  */
-export const ACCESS_CLASSES = ['view', 'bots_chat', 'bots_manage', 'work', 'terminal', 'editor'] as const
+export const ACCESS_CLASSES = ['view', 'bots_chat', 'bots_manage', 'work', 'terminal', 'editor', 'update'] as const
 export type AccessClass = (typeof ACCESS_CLASSES)[number]
 
 const routed = (classes: Record<string, AccessClass>): Record<string, AccessClass> =>
@@ -41,6 +43,11 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
   'authority.transfer.activate': 'view',
   'authority.transfer.ack': 'view',
   'authority.transfer.retirement': 'view',
+  // Updating this computer from another one (its status included: a blocked device sees nothing of it).
+  'update.prepare': 'update',
+  'update.status': 'update',
+  'update.install': 'update',
+  'update.cancel': 'update',
 
   // ---------------------------------------------------------------- the Bridge remote API (phones)
   'projects.list': 'view',

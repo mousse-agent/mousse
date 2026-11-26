@@ -37,6 +37,8 @@ import { resolveDaemonHostInvocation } from '../daemonHost'
 import { dropForeignAppImageMounts } from '../appImageMounts'
 import { MmsProtocolServer } from '../../mms/protocol'
 import { prepareMemoryMonitor } from '../../mms/diagnostics/startMemoryMonitor'
+import { remoteUpdatesFor } from '../../mms/updates/remoteUpdates'
+import { registerRemoteUpdateMethods } from '../../mms/updates/registerRemoteUpdateMethods'
 import { formatStartupTiming, startupPhase, startupTimingBegin, startupTimingEnd } from '../../mms/startup/startupTiming'
 import { logInfo } from '../../mms/log/diag'
 import { startDaemonExitWatchdog } from '../daemonExitWatchdog'
@@ -262,6 +264,18 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
       } catch (error) {
         log(`memory monitor not started: ${error instanceof Error ? error.message : String(error)}`)
       }
+    }
+    // Update requests from the user's other computers: the desktop app takes them on its own connection.
+    if (opened.mms.domains) {
+      const domains = opened.mms.domains
+      registerRemoteUpdateMethods(domains, remoteUpdatesFor(homeDir), {
+        emit: (type, data) => protocolServer.emitInstallationEvent(type, data),
+        activeTurns: () =>
+          (opened.mms.getInstallationHost()?.liveServices() ?? [opened.mms]).reduce(
+            (sum, services) => sum + services.orchestrator.activeTurnCount(),
+            0
+          )
+      })
     }
     const endpoint = await startupPhase('protocolServer', () => protocolServer.start())
     if (await stoppedDuringStartup()) return state

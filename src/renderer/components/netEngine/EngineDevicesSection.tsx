@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Laptop, Monitor, MonitorSmartphone, Plus, RefreshCw, Smartphone } from '../../lib/icons'
 import type {
   NetEngineDevice,
@@ -32,6 +32,7 @@ import { useMousseIdAvailable, useMousseIdStore } from '../../stores/mousseIdSto
 import { DeviceLimitsDialog } from '../devices/DeviceLimitsDialog'
 import { EditorSshSettings } from '../devices/EditorSshSettings'
 import { UndoSetupDialog, UpdateRemoteDialog } from '../devices/SshRecordDialogs'
+import { RemoteUpdateDialog } from '../devices/RemoteUpdateDialog'
 import { WorkHereRow } from '../devices/WorkHereRow'
 import { errorText } from '../devices/useDaemonCall'
 import { RowMenu, type RowMenuItem } from '../integrations/RowMenu'
@@ -169,6 +170,31 @@ export function EngineDevicesSection() {
     record: SshRecordView
     name: string
   }>()
+  // Updating another computer from here (it takes update requests: its app is running there).
+  const [updating, setUpdating] = useState<{ node: string; name: string; version: string; runs?: string }>()
+  // A computer behind that updates itself but did not say it takes requests may have opened its app since it last
+  // said: asked again once while Devices is open, so Update shows for it.
+  const asked = useRef(new Set<string>())
+  const reloadLegacy = legacy.reload
+  useEffect(() => {
+    // Rows of the new networking read the computers list; the old networking's read its own.
+    const stale = [...nodes, ...legacy.devices].filter(
+      (device) =>
+        device.state === 'open' &&
+        device.update?.self &&
+        !device.update.requests &&
+        !asked.current.has(device.node) &&
+        versionTag(device, current)?.label === 'Behind'
+    )
+    if (!stale.length) return
+    for (const device of stale) asked.current.add(device.node)
+    void Promise.allSettled(
+      stale.map((device) => window.mousse.platformRequest.request('net.update.there', { node: device.node, step: 'refresh' }))
+    ).then(() => {
+      void refreshComputers()
+      void reloadLegacy().catch(() => undefined)
+    })
+  }, [nodes, legacy.devices, reloadLegacy, current])
   const [everywhere, setEverywhere] = useState<NetEngineDevice>()
   // "Let <name> use this computer…": the Allow prompt for a computer this one uses.
   const [letting, setLetting] = useState<NetEngineDevice>()
@@ -513,18 +539,20 @@ export function EngineDevicesSection() {
   }
 
   /**
-   * Under a computer that is behind: how it gets updated. One this computer installed over SSH is updated from here;
-   * any other is updated on itself, and the tooltip says why and what it runs.
+   * Under a computer that is behind: how it gets updated. One this computer installed over SSH is updated from here
+   * over SSH; one this computer uses whose app takes update requests gets Update; any other is updated on itself,
+   * and the tooltip says why and what it runs.
    */
-  const updateRow = (key: string, name: string, device: Device | undefined, record?: SshRecordView) => {
+  const updateRow = (key: string, name: string, device: Device | undefined, record?: SshRecordView, canAsk = false) => {
     const tag = device ? versionTag({ ...device, name }, current) : undefined
     if (tag?.label !== 'Behind') return null
     const fromHere = record?.owner === 'managed' ? record : undefined
+    const asks = !fromHere && canAsk && !!current && device?.state === 'open' && !!device.update?.requests
     return (
       <SettingsRow
         key={`${key}-update`}
         indent
-        title={<span title={tag.detail}>{fromHere ? `Update ${name} from here` : `Update on ${name}`}</span>}
+        title={<span title={tag.detail}>{fromHere || asks ? `Update ${name} from here` : `Update on ${name}`}</span>}
         control={
           fromHere ? (
             <button
@@ -534,6 +562,16 @@ export function EngineDevicesSection() {
               onClick={() => setRecordDialog({ kind: 'update', record: fromHere, name })}
             >
               Update…
+            </button>
+          ) : asks ? (
+            <button
+              type="button"
+              className="settings-btn"
+              disabled={busy}
+              title={`Installs ${current} on ${name} after a 10-second countdown there`}
+              onClick={() => setUpdating({ node: device!.node, name, version: current!, ...(device!.version ? { runs: device!.version } : {}) })}
+            >
+              Update
             </button>
           ) : undefined
         }
@@ -559,7 +597,7 @@ export function EngineDevicesSection() {
     const view = engineView(device, 'out')
     return [
       row(view, `Id ${device.shortId}`),
-      updateRow(view.key, device.name, nodes.find((item) => item.node === device.node)),
+      updateRow(view.key, device.name, nodes.find((item) => item.node === device.node), undefined, true),
       device.olderApp && (
         <SettingsRow
           key={`${device.node}-older`}
@@ -701,7 +739,7 @@ export function EngineDevicesSection() {
     .filter((device) => oldSides(device).includes('out'))
     .flatMap((device) => {
       const view = legacyView(device, 'out')
-      return [row(view), updateRow(view.key, device.name, device, sshRecordFor(device, legacy.ssh))]
+      return [row(view), updateRow(view.key, device.name, device, sshRecordFor(device, legacy.ssh), true)]
     })
   const oldInRows = oldDevices.flatMap((device) => [
     row(legacyView(device, 'in')),
@@ -1288,6 +1326,18 @@ export function EngineDevicesSection() {
           name={recordDialog.name}
           onClose={() => setRecordDialog(undefined)}
           onDone={reloadAll}
+        />
+      )}
+      {updating && (
+        <RemoteUpdateDialog
+          node={updating.node}
+          name={updating.name}
+          version={updating.version}
+          runs={nodes.find((item) => item.node === updating.node)?.version}
+          onClose={() => {
+            setUpdating(undefined)
+            void refreshComputers()
+          }}
         />
       )}
       {recordDialog?.kind === 'update' && (

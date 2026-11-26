@@ -167,6 +167,91 @@ export function findMentionQueryAtCaret(text: string, caret: number): MentionQue
   return { index, query: text.slice(index + 1, end) }
 }
 
+// ---------------------------------------------------------------------------
+// `/` for skills: at the start with the commands, mid-message skills only
+// ---------------------------------------------------------------------------
+
+/** Characters a `/` skill query may contain: no `/`, so a path never reads as one. */
+const SLASH_QUERY_CHAR = /[^\s/()[\]{}<>"'`;,@]/
+
+export interface SlashQuery {
+  /** Index of the `/` in the text; 0 when it starts the message. */
+  index: number
+  /** Text between the `/` and the caret. */
+  query: string
+}
+
+/**
+ * The `/query` the caret is at the end of, or null. The `/` must start the text or follow
+ * whitespace, so `src/re` and `and/or` are ordinary text; a `/` just after the caret
+ * (`/usr|/bin`) means a path is being edited. Nothing opens inside an unclosed ``` fence.
+ */
+export function findSlashQueryAtCaret(text: string, caret: number): SlashQuery | null {
+  if (!Number.isInteger(caret) || caret < 0) return null
+  const end = Math.min(caret, text.length)
+  if (text[end] === '/') return null
+  let start = end
+  while (start > 0 && SLASH_QUERY_CHAR.test(text[start - 1])) start--
+  if (start === 0 || text[start - 1] !== '/') return null
+  const index = start - 1
+  if (index > 0 && !/\s/.test(text[index - 1])) return null
+  const fences = text.slice(0, end).split('```').length - 1
+  if (fences % 2 === 1) return null
+  return { index, query: text.slice(index + 1, end) }
+}
+
+/**
+ * Skills a `/query` offers: names and ids that contain it (descriptions are not searched, so
+ * an ordinary `/word` mid-message rarely opens a list), an exact name first, then prefixes.
+ */
+export function filterSlashSkills<T extends { id: string; name: string }>(skills: T[], query: string, limit = 8): T[] {
+  const normalized = query.trim().toLowerCase()
+  const rank = (skill: T): number => {
+    const names = [skill.name.toLowerCase(), skill.id.toLowerCase()]
+    if (!normalized) return 2
+    if (names.includes(normalized)) return 0
+    if (names.some((name) => name.startsWith(normalized))) return 1
+    if (names.some((name) => name.includes(normalized))) return 2
+    return -1
+  }
+  return skills
+    .map((skill, order) => ({ skill, order, rank: rank(skill) }))
+    .filter((entry) => entry.rank >= 0)
+    .sort((a, b) => a.rank - b.rank || a.order - b.order)
+    .slice(0, Math.max(0, limit))
+    .map((entry) => entry.skill)
+}
+
+/** One row of the `/` list: a command (only at the start of the message) or a skill. */
+export type SlashItem<S> = { kind: 'command'; command: ComposerCommandDef } | { kind: 'skill'; skill: S }
+
+/**
+ * What the `/` list shows for the box and caret. At the start of a one-word message it lists
+ * matching commands, then matching skills; after whitespace mid-message it lists skills only.
+ * `range` is the text a picked skill replaces; null when the list is closed. `skillsAtStart: false`
+ * leaves the start of the message to the commands alone.
+ */
+export function slashSuggestions<S extends { id: string; name: string }>(
+  text: string,
+  caret: number,
+  options: { commands: ComposerCommandDef[]; skills: S[]; skillsAtStart?: boolean }
+): { items: SlashItem<S>[]; midMessage: boolean; range: { index: number; end: number } | null } {
+  if (text.startsWith('/') && !/\s/.test(text)) {
+    const query = text.slice(1)
+    const items: SlashItem<S>[] = [
+      ...options.commands.map((command): SlashItem<S> => ({ kind: 'command', command })),
+      ...(options.skillsAtStart === false ? [] : filterSlashSkills(options.skills, query)).map(
+        (skill): SlashItem<S> => ({ kind: 'skill', skill })
+      )
+    ]
+    return { items, midMessage: false, range: items.length ? { index: 0, end: text.length } : null }
+  }
+  const slash = findSlashQueryAtCaret(text, caret)
+  if (!slash || slash.index === 0) return { items: [], midMessage: false, range: null }
+  const items = filterSlashSkills(options.skills, slash.query).map((skill): SlashItem<S> => ({ kind: 'skill', skill }))
+  return { items, midMessage: true, range: items.length ? { index: slash.index, end: Math.min(caret, text.length) } : null }
+}
+
 export interface MentionSkill {
   id: string
   name: string

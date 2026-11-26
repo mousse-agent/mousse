@@ -73,7 +73,7 @@ function memoryStore(initial: UpdaterRecord = {}): UpdaterRecordStore & { record
   }
 }
 
-function setup(options: { version?: string; store?: ReturnType<typeof memoryStore>; disabledReason?: string; prepareInstall?: () => Promise<void> } = {}) {
+function setup(options: { version?: string; store?: ReturnType<typeof memoryStore>; disabledReason?: string; prepareInstall?: () => Promise<void>; lock?: () => (() => void) | null } = {}) {
   vi.useFakeTimers()
   const backend = new FakeBackend()
   const store = options.store ?? memoryStore()
@@ -88,6 +88,7 @@ function setup(options: { version?: string; store?: ReturnType<typeof memoryStor
     prepareInstall: options.prepareInstall ?? (async () => { hooks.prepared += 1 }),
     recoverInstall: async () => { hooks.recovered += 1 },
     onState: (state) => states.push(state),
+    ...(options.lock ? { lock: options.lock } : {}),
     now: () => Date.now(),
     random: () => 0.5
   })
@@ -400,5 +401,36 @@ describe('updaterRecordFile', () => {
     expect(store.read()).toEqual({})
     writeFileSync(path, 'not json')
     expect(store.read()).toEqual({})
+  })
+})
+
+describe('DesktopUpdater for another computer\'s request', () => {
+  it('downloads and installs only the exact version asked for', async () => {
+    const { backend, updater, hooks } = setup({ version: '0.1.2' })
+    backend.offer('0.1.4')
+    // The feed offers another: nothing is downloaded.
+    expect(await updater.prepareExact('0.1.3')).toEqual({ ok: false, error: 'version_unavailable' })
+    expect(updater.getState().phase).toBe('available')
+    expect(await updater.prepareExact('0.1.4')).toEqual({ ok: true })
+    // A download of another version is never installed in its place.
+    expect(await updater.installExact('0.1.3')).toEqual({ ok: false, error: 'version_unavailable' })
+    expect(hooks.prepared).toBe(0)
+    backend.offer('0.1.5')
+    expect(await updater.prepareExact('0.1.5')).toEqual({ ok: false, error: 'version_unavailable' })
+    expect(await updater.installExact('0.1.4')).toEqual({ ok: true })
+    expect(backend.installs).toHaveLength(1)
+  })
+
+  it('does not download while another Mousse sharing the install holds its lock', async () => {
+    const { backend, updater } = setup({ version: '0.1.2', lock: () => null })
+    const download = vi.spyOn(backend, 'downloadUpdate')
+    backend.offer('0.1.4')
+    expect(await updater.prepareExact('0.1.4')).toEqual({ ok: false, error: 'busy' })
+    expect(download).not.toHaveBeenCalled()
+  })
+
+  it('refuses in a build that cannot update itself', async () => {
+    const { updater } = setup({ disabledReason: 'Updates on macOS need a signed build.' })
+    expect(await updater.prepareExact('0.1.4')).toEqual({ ok: false, error: 'not_accepting' })
   })
 })

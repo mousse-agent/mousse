@@ -58,6 +58,7 @@ import {
 } from './limits'
 import { EngineSessions } from './sessions'
 import type { BridgeClient, EngineClient } from './session/client'
+import { askUpdate, type UpdateThereParams } from '../updates/askUpdate'
 import type { EngineConnection } from './session/transport'
 import { AppChannel, helperCode, type AppPipe } from './helper/appChannel'
 import { EngineHelper } from './helper/connections'
@@ -2281,6 +2282,19 @@ export class NetEngineService implements EngineDirectoryPort {
     if (this.started !== started) return
     this.notePeer((presence) => (info ? presence.info(node, info) : presence.unknown(node)))
     this.changed()
+  }
+  /**
+   * `net.update.there` for a pairing: asks it again what it runs (`refresh`), or one step of updating it (`update.*`).
+   * Only a computer this one uses (its client here) can be asked.
+   */
+  async updateThere(params: UpdateThereParams): Promise<unknown> {
+    const node = params.node as NodeId
+    if (params.step === 'refresh') {
+      await this.askPeerInfo(node)
+      return { ok: true }
+    }
+    const client = this.client(node)
+    return askUpdate((method, body, options) => client.rpc(method, body, options), params)
   }
   isEngine(node: NodeId): boolean {
     return !!this.started?.peers.get(node)

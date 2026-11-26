@@ -1404,40 +1404,88 @@ html[data-chat-width='full'] .chat {
   bottom: calc(100% + 8px);
   max-height: 260px;
   overflow-y: auto;
-  padding: 6px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.28);
-  border-radius: 10px;
+  padding: var(--ui-menu-pad, 4px);
+  border: 0;
+  border-radius: var(--ui-menu-radius, 10px);
   background: var(--floating-surface);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
 }
 
+/* Compact two-line rows: a 14px source icon, the name, and one muted line under it. */
 .composer-command-suggestion {
   display: flex;
   width: 100%;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px;
+  padding: 6px 8px;
   color: var(--text-primary);
   text-align: left;
   background: transparent;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--ui-menu-row-radius, 6px);
   cursor: pointer;
 }
 
-.composer-command-suggestion:hover,
+.composer-command-suggestion:hover {
+  background: var(--ui-hover);
+}
+
+/* Selection is a neutral raised fill; polish.css adds the shared specular light. Never an accent tint or an edge bar. */
 .composer-command-suggestion.selected {
-  background: rgba(var(--accent-pale-rgb), 0.16);
+  background: color-mix(in srgb, var(--text-primary) 8%, var(--ui-raised));
+}
+
+.composer-suggestion-row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.composer-suggestion-text {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* The icon sits on the name line; colour says where the row comes from, at icon scale only. */
+.composer-suggestion-icon {
+  display: inline-flex;
+  flex: none;
+  height: 18px;
+  align-items: center;
+  color: var(--text-secondary);
+}
+
+.composer-suggestion-icon-project { color: var(--accent); }
+.composer-suggestion-icon-personal { color: var(--success); }
+.composer-suggestion-icon-other-app { color: var(--warning); }
+
+.composer-command-suggestion-name,
+.composer-command-suggestion-description {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .composer-command-suggestion-name {
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 13.5px;
+  font-weight: 400;
+  line-height: 18px;
 }
 
 .composer-command-suggestion-description {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 12.5px;
+  line-height: 16px;
+}
+
+.composer-command-suggestion-name mark,
+.composer-command-suggestion-description mark {
+  color: inherit;
+  background: transparent;
+  font-weight: 600;
 }
 
 .composer-command-suggestion-empty {
@@ -1460,66 +1508,15 @@ html[data-chat-width='full'] .chat {
   text-decoration: underline;
 }
 
-/* `@` mention rows: icon, name, dimmed parent folder. The selected row only gets the shared background. */
-.composer-mention-row {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 8px;
-}
-
-.composer-mention-icon {
-  flex: none;
-  color: var(--text-secondary);
-}
-
-.composer-mention-name {
-  flex: none;
-  max-width: 60%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.composer-mention-name mark,
-.composer-mention-path mark {
-  color: var(--text-primary);
-  background: transparent;
-  font-weight: 700;
-}
-
-.composer-mention-path {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.composer-mention-badge {
-  flex: none;
-  padding: 0 6px;
-  color: var(--text-secondary);
-  font-size: 10px;
-  line-height: 16px;
-  background: rgba(var(--accent-pale-rgb), 0.14);
-  border-radius: 8px;
-}
-
-.composer-mention-description {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
+/* Pinned to the bottom of the scrolling list, so a long list never hides it. */
 .composer-mention-footer {
-  padding: 6px 10px 4px;
-  color: var(--text-secondary);
+  position: sticky;
+  bottom: calc(-1 * var(--ui-menu-pad, 4px));
+  padding: 6px 8px 4px;
+  background-color: var(--ui-raised, var(--floating-surface));
+  color: color-mix(in srgb, var(--text-secondary) 80%, transparent);
   font-size: 11px;
   line-height: 1.4;
-  opacity: 0.8;
 }
 
 .composer-footer {
@@ -6545,15 +6542,6 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
 .composer-action-btn-active:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.06); }
 
 .composer-icon-btn { border-radius: 9px; width: 30px; height: 30px; }
-
-.composer-command-suggestions {
-  border-radius: 14px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.14);
-  box-shadow: 0 16px 40px rgba(0,0,0,0.24);
-  overflow-y: auto;
-}
-
-.composer-command-suggestion { border-radius: 10px; padding: 9px 12px; }
 
 .composer-attachments { border-bottom: none; }
 

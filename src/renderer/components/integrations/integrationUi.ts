@@ -23,6 +23,16 @@ export function isManagedSource(source: string | undefined, managed?: boolean): 
   return source === 'mousse-profile' || source === 'mousse-project' || source === 'generated-agent' || source === 'mousse'
 }
 
+const SOURCE_LABELS: Record<string, string> = {
+  cursor: 'Cursor', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', agents: 'Agents folder'
+}
+/** The app a skill or server copy comes from, as the Settings lists name it. */
+export function sourceLabel(source: string): string {
+  // Only unmanaged copies get here, so a Mousse source means the project's own files.
+  if (source === 'generated-agent' || source.startsWith('mousse')) return 'Project files'
+  return SOURCE_LABELS[source.split('-')[0]] ?? source
+}
+
 export function scopeLabel(scope: string, projectName?: string): string {
   return scope === 'project' ? `Project${projectName ? ` · ${projectName}` : ''}` : 'Profile'
 }

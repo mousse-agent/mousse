@@ -368,6 +368,15 @@ describe('Automatic naming', () => {
     expect(h.limits.isLimited('claude')).toBe(false)
   })
 
+  it.each(['one_shot_tool_refused', 'wont_run'] as const)('an entry whose single request is refused (%s) gives way to another entry', async (code) => {
+    const refused = harnessAppError({ code, message: 'Refused.' })
+    const h = setup({ providers: connected(), answer: (request) => request.selection.instanceId === 'claude' ? refused : 'OAuth callback loop' })
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await h.settle()
+    expect(h.thread()).toMatchObject({ name: 'OAuth callback loop', titleSource: 'auto' })
+    expect(picked(h).slice(0, 2)).toEqual(['claude/haiku', 'codex/gpt-6-luna'])
+  })
+
   it.each(['provider_timeout', 'timeout', 'provider_cancelled', 'aborted', 'policy_unenforceable'])('%s ends the naming with no other model asked', async (code) => {
     const error = Object.assign(new Error(code), { code })
     const h = setup({ providers: connected(), answer: () => error })
