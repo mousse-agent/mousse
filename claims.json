@@ -28,6 +28,20 @@
       "expiresAt": "2026-11-26T16:33:14.859Z"
     },
     {
+      "task": "applet-buttons-watchdog-scroll",
+      "session": "Avarnics-Mac-mini.local-6ef1d6",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "applet-buttons-watchdog-scroll",
+      "paths": [
+        "src/main/applets",
+        "src/shared/appletAppearanceStyles.ts",
+        "src/shared/appletDocument.ts",
+        "src/renderer/components/applets"
+      ],
+      "claimedAt": "2026-11-26T14:36:19.275Z",
+      "expiresAt": "2026-11-26T16:36:19.275Z"
+    },
+    {
       "task": "background-jobs-shared",
       "session": "Animatrix-955f26",
       "machine": "Animatrix",
