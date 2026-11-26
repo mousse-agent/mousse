@@ -82,14 +82,49 @@ function domainOf(url: unknown): string | undefined {
 
 const trimSeparators = (path: string) => (path.length > 1 ? path.replace(/[\\/]+$/, '') : path)
 
-function insideFolder(folder: string | undefined, path: string): boolean {
-  if (!folder) return false
-  const base = trimSeparators(folder)
-  return path === base || path.startsWith(`${base}/`) || path.startsWith(`${base}\\`)
-}
-
 const parts = (path: string) => path.split(/[\\/]+/).filter(Boolean)
 const isAbsolute = (path: string) => path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')
+/** A Windows drive (`C:\`, `C:/`) or UNC (`\\server\share`) path, where either separator works and case does not count. */
+const isWindowsPath = (path: string) => /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')
+
+/**
+ * An absolute path with `/` between its parts, `.` and `..` resolved, repeated and trailing separators dropped. A Windows
+ * drive or UNC path takes either separator; a Unix path splits on `/` only (a `\` is part of a file name there). A
+ * relative path is resolved against `cwd`, and is undefined without one.
+ */
+function resolvePath(path: string, cwd?: string): { path: string; windows: boolean } | undefined {
+  if (!isAbsolute(path)) return cwd && isAbsolute(cwd) ? resolvePath(`${cwd}${isWindowsPath(cwd) ? '\\' : '/'}${path}`) : undefined
+  const windows = isWindowsPath(path)
+  const segments = (windows ? path.split(/[\\/]+/) : path.split('/')).filter(Boolean)
+  // The part `..` never climbs above: `/`, a drive (`c:`) or a UNC share (`//server/share`).
+  const root = !windows ? '' : path.startsWith('\\\\') ? `//${segments.splice(0, 2).join('/')}` : segments.shift()!
+  const resolved: string[] = []
+  for (const segment of segments) {
+    if (segment === '..') resolved.pop()
+    else if (segment !== '.') resolved.push(segment)
+  }
+  return { path: `${root}/${resolved.join('/')}`, windows }
+}
+
+/** One spelling of a path, to compare two: `resolvePath`, and case ignored on a Windows drive or UNC path only. */
+function comparablePath(path: string, cwd?: string): string | undefined {
+  const resolved = resolvePath(path, cwd)
+  return resolved && (resolved.windows ? resolved.path.toLowerCase() : resolved.path)
+}
+
+/** Whether `path` (relative ones against `cwd`) is `folder` or inside it, compared by `comparablePath`. */
+function insideFolder(folder: string | undefined, path: string, cwd?: string): boolean {
+  const base = folder ? comparablePath(folder) : undefined
+  const target = comparablePath(path, cwd)
+  if (!base || !target) return false
+  return target === base || target.startsWith(base.endsWith('/') ? base : `${base}/`)
+}
+
+/** A path's last name, split as `resolvePath` splits it: a Unix file name may hold a `\`. */
+function nameOf(path: string, cwd?: string): string | undefined {
+  const windows = isAbsolute(path) ? isWindowsPath(path) : !!cwd && isWindowsPath(cwd)
+  return (windows ? path.split(/[\\/]+/) : path.split('/')).filter((segment) => segment && segment !== '.' && segment !== '..').pop()
+}
 
 function pathOf(input: unknown): string | undefined {
   const args = record(input)
@@ -107,14 +142,17 @@ function folderName(tool: string, path: string, ctx: BotChipContext): string | u
 function classifyFile(tool: string, input: unknown, ctx: BotChipContext): Classified | null {
   const writes = WRITE_TOOLS.has(tool)
   const path = pathOf(input)
-  // No path or a relative one: the working folder, which is the scratch folder.
-  if (!path || !isAbsolute(path) || insideFolder(ctx.scratch, path))
+  // No path, a relative one with no working folder to resolve it against, or one in the scratch folder, where the bot
+  // works (a relative path resolves against it): a draft.
+  if (!path || (!isAbsolute(path) && !ctx.scratch) || insideFolder(ctx.scratch, path, ctx.scratch))
     return writes ? { kind: 'draft', icon: 'edit', live: 'working on a draft' } : { kind: 'read', icon: 'read', live: 'reading files' }
-  if (insideFolder(ctx.filesFolder, path)) {
-    if (writes) return { kind: 'save', icon: 'edit', live: 'saving a file', ...(parts(path).length > parts(ctx.filesFolder!).length ? { detail: parts(path).pop() } : {}) }
-    return { kind: 'read', icon: 'read', live: 'reading files', detail: 'saved files' }
+  if (insideFolder(ctx.filesFolder, path, ctx.scratch)) {
+    if (!writes) return { kind: 'read', icon: 'read', live: 'reading files', detail: 'saved files' }
+    const name = comparablePath(path, ctx.scratch) === comparablePath(ctx.filesFolder!) ? undefined : nameOf(path, ctx.scratch)
+    return { kind: 'save', icon: 'edit', live: 'saving a file', ...(name ? { detail: name } : {}) }
   }
-  const detail = folderName(tool, path, ctx)
+  // A relative one by where it resolves, so its highlight is never "..".
+  const detail = folderName(tool, isAbsolute(path) ? path : resolvePath(path, ctx.scratch)?.path ?? path, ctx)
   return writes
     ? { kind: 'change', icon: 'edit', live: 'changing files', ...(detail ? { detail } : {}) }
     : { kind: 'read', icon: 'read', live: 'reading files', ...(detail ? { detail } : {}) }
@@ -415,7 +453,7 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
 }
 
 /** The settled chip of a group of calls of one kind. */
-function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified[], all: readonly BotChipCall[]): BotChip | null {
+function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified[], all: readonly BotChipCall[], ctx: BotChipContext): BotChip | null {
   const n = calls.length
   const details = calls.flatMap((call) => (call.detail ? [call.detail] : []))
   const chip = (text: string, highlight?: string): BotChip => ({ icon, text, ...(highlight ? { highlight } : {}) })
@@ -427,12 +465,16 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
     case 'read': return chip('read files', listed(details))
     case 'change': return chip('changed files', listed(details))
     case 'save': {
-      // A file written, then edited, is one file saved.
-      const files = new Set(all.map((call, index) => {
+      // A file written, then edited, is one file saved, however its path was spelled (`insideFolder`'s comparison), and
+      // named as it was first written. A call with no path saved no file it can name, and is not counted.
+      const names = new Map<string, string | undefined>()
+      all.forEach((call, index) => {
         const path = pathOf(call.input)
-        return path ? trimSeparators(path).replace(/[\\/]+/g, '/') : `#${index}`
-      })).size
-      return chip(files === 1 ? 'saved a file' : `saved ${files} files`, listed(details))
+        const spelled = path ? comparablePath(path, ctx.scratch) : undefined
+        if (spelled && !names.has(spelled)) names.set(spelled, calls[index]?.detail)
+      })
+      const files = names.size
+      return chip(files <= 1 ? 'saved a file' : `saved ${files} files`, listed([...names.values()].flatMap((name) => (name ? [name] : []))))
     }
     case 'draft': return chip('worked on a draft')
     case 'lookback': return chip('looked back', n === 1 ? details[0] : String(n))
@@ -523,7 +565,7 @@ export function rollUpChips(calls: readonly BotChipCall[], ctx: BotChipContext =
   return order.flatMap((entry) => {
     if (entry.chip) return [entry.chip]
     const group = groups.get(entry.key)
-    const chip = group ? groupChip(group.kind, group.icon, group.classified, group.calls) : null
+    const chip = group ? groupChip(group.kind, group.icon, group.classified, group.calls, ctx) : null
     return chip ? [chip] : []
   })
 }

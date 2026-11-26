@@ -94,6 +94,45 @@ describe('rollUpChips: settled chips', () => {
     expect(rollUpChips([save('write', 'a.md'), save('edit', 'b.md'), save('edit', 'a.md')], ctx)).toEqual([{ icon: 'edit', text: 'saved 2 files', highlight: 'a.md, b.md' }])
   })
 
+  it('counts a file once however its path is spelled: `.`, `..`, doubled or trailing separators, or relative to the scratch folder', () => {
+    const files = ctx.filesFolder
+    expect(rollUpChips([
+      { tool: 'write', input: { path: `${files}/a.md` } },
+      { tool: 'edit', input: { file_path: `${files}/./a.md` } },
+      { tool: 'edit', input: { file_path: `${files}/notes/../a.md` } },
+      { tool: 'edit', input: { file_path: `${files}//a.md/` } },
+      // The bot works in its scratch folder: a relative path resolves there.
+      { tool: 'edit', input: { file_path: '../../files/b1/a.md' } }
+    ], ctx)).toEqual([{ icon: 'edit', text: 'saved a file', highlight: 'a.md' }])
+    expect(chipForCall('write', { path: '../../files/b1/a.md' }, ctx)).toEqual({ icon: 'edit', text: 'saving a file', highlight: 'a.md', live: true })
+    expect(chipForCall('write', { path: 'a.md' }, ctx)).toMatchObject({ text: 'working on a draft' })
+  })
+
+  it('on Windows, a drive or UNC path is one file in either separator and any case, named as first written', () => {
+    const windows = { home: 'C:\\Users\\Me', filesFolder: 'C:\\Users\\Me\\Mousse\\files\\b1' }
+    expect(chipForCall('write', { path: 'c:/users/me/MOUSSE/Files/B1/Notes.md' }, windows)).toEqual({ icon: 'edit', text: 'saving a file', highlight: 'Notes.md', live: true })
+    expect(rollUpChips([
+      { tool: 'write', input: { path: 'C:\\Users\\Me\\Mousse\\files\\b1\\Notes.md' } },
+      { tool: 'edit', input: { file_path: 'c:/users/me/mousse/files/b1/notes.md' } },
+      { tool: 'edit', input: { file_path: 'C:\\Users\\Me\\Mousse\\files\\b1\\.\\sub\\..\\NOTES.MD' } }
+    ], windows)).toEqual([{ icon: 'edit', text: 'saved a file', highlight: 'Notes.md' }])
+    const share = { filesFolder: '\\\\NAS\\Home\\files\\b1' }
+    expect(rollUpChips([
+      { tool: 'write', input: { path: '\\\\nas\\home\\files\\b1\\a.md' } },
+      { tool: 'edit', input: { file_path: '\\\\NAS\\Home/Files/B1/A.md' } }
+    ], share)).toEqual([{ icon: 'edit', text: 'saved a file', highlight: 'a.md' }])
+  })
+
+  it('on Linux, a backslash is part of a file name: never a folder, nor a way into the files folder', () => {
+    const files = ctx.filesFolder
+    expect(rollUpChips([
+      { tool: 'write', input: { path: `${files}/a\\b.md` } },
+      { tool: 'write', input: { path: `${files}/a/b.md` } }
+    ], ctx)).toEqual([{ icon: 'edit', text: 'saved 2 files', highlight: 'a\\b.md, b.md' }])
+    // A file named `b1\x.md` beside the files folder, not in it.
+    expect(chipForCall('write', { path: `${files}\\x.md` }, ctx)).toMatchObject({ text: 'changing files' })
+  })
+
   it('work\'s subagents settle to one chip with their titles; waiting on them and reading them show none', () => {
     const start = (title: string): BotChipCall => ({ tool: 'subagent_start', input: { title, brief: 'x' }, result: { subagent: title } })
     expect(chipForCall('subagent_start', { title: 'Prices', brief: 'x' }, ctx)).toMatchObject({ text: 'starting a subagent', highlight: 'Prices' })
