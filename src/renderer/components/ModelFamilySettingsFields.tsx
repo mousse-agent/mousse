@@ -23,8 +23,7 @@ function findFamilyForModel(families: ModelFamily[], modelId: string, models: Ll
   const { baseId } = parseThinkingSuffixFromModelId(modelId)
   const model = models.find((entry) => entry.id === modelId) ?? models.find((entry) => entry.id === baseId)
   if (!model) return families[0]
-  const familyLabel = parseModelVariant(model).familyLabel
-  return families.find((family) => family.familyLabel === familyLabel) ?? families[0]
+  return families.find((family) => family.variants.some((variant) => variant.id === model.id)) ?? families[0]
 }
 
 function getVariantSelections(modelId: string, models: LlmModelOption[], family?: ModelFamily) {

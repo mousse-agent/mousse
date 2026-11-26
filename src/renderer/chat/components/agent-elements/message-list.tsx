@@ -3214,9 +3214,10 @@ function ContextHandoffMarker({ handoff, text }: { handoff: HandoffMarker; text:
       <span>{reasoning.to}</span>
     </div>;
   }
+  // Each side shows its provider's logo, whatever model it ran (Claude on Antigravity shows Antigravity's).
   const iconId = (selection: HandoffSelection) => {
-    const brand = inferModelBrand(selection.model, undefined, selection.provider).brandId;
-    // An unknown model falls back to its provider's id, which ProviderIcon maps to the vendor logo.
+    if (selection.provider) return selection.provider;
+    const brand = inferModelBrand(selection.model).brandId;
     return brand === 'anthropic' ? 'claude' : brand;
   };
   const status = handoffStatus(handoff, text);
