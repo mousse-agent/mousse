@@ -10212,8 +10212,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       },
       () => this.tellings.next(botId),
       () => {
-        const row = this.store.nextReminder(botId)
-        return row ? Math.max(Date.parse(row.dueAt), forTimer ? this.reminderRetryAt.get(row.id) ?? 0 : 0) : undefined
+        // A reminder held for a retry (a pull request's last read) must not hide one due sooner behind it: look past
+        // each held one.
+        const rows = this.store.nextReminders(botId, forTimer ? this.reminderRetryAt.size + 1 : 1)
+        const times = rows.map((row) => Math.max(Date.parse(row.dueAt), forTimer ? this.reminderRetryAt.get(row.id) ?? 0 : 0))
+        return times.length ? Math.min(...times) : undefined
       },
       () => {
         const row = this.store.nextQuestionDue(botId)

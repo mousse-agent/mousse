@@ -295,14 +295,16 @@ export class ThreadWakes {
   }
 
   /**
-   * Arms the next look as soon as this one has fired what was due, and again once its pull request reads end: a read
-   * still under way, or queued behind a slow one, never holds back a time wake.
+   * Arms the next look as soon as this one has fired what was due, not when its pull request reads end: a read still
+   * under way, or queued behind a slow one, never holds back a time wake. (A wake fired or added meanwhile arms on its
+   * own; one a read keeps is looked at again at the next tick.)
    */
   private tick(): void {
     this.timer = undefined
-    const reads = this.pass()
+    this.pass().catch((error: unknown) => {
+      console.warn('thread wake-ups could not be checked; the next tick tries again', { error: error instanceof Error ? error.message : String(error) })
+    })
     this.arm()
-    void reads.finally(() => this.arm())
   }
 
   /**
