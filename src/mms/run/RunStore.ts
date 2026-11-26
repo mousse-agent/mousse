@@ -40,6 +40,7 @@ export class RunStore {
   private readonly settleQueue = new Set<string>()
   private settling = false
   private providerBackground: ((threadId: string) => boolean) | null = null
+  private threadBackground: ((threadId: string) => boolean) | null = null
   private unreadSteers: ((threadId: string) => boolean) | null = null
 
   constructor(readonly db: ProfileDatabase) {
@@ -59,6 +60,24 @@ export class RunStore {
   providerBackgroundWork(threadId: string): boolean {
     try {
       return this.providerBackground?.(threadId) === true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Input (6) of the hold predicate (`childBusy`): whether the thread's agent left work running that will tell it when
+   * it ends (a monitor, a background command or a `keep_working` hold). Synchronous and in memory, like
+   * `setProviderBackgroundWork`. Absent means no thread has any.
+   */
+  setThreadBackgroundWork(read: ((threadId: string) => boolean) | null): void {
+    this.threadBackground = read
+  }
+
+  /** Never throws: a host that cannot answer has no background work to wait for. */
+  threadBackgroundWork(threadId: string): boolean {
+    try {
+      return this.threadBackground?.(threadId) === true
     } catch {
       return false
     }
@@ -87,7 +106,7 @@ export class RunStore {
   /**
    * Something `settleWaitingDelegations` reads for `threadId` changed: a run ended, an inbox row or
    * a delivery effect changed status, a delegation of the thread left `running`, a queue entry was
-   * removed, the provider's background work changed. Publishes the tasks waiting on the thread that
+   * removed, the provider's or the thread's own background work changed. Publishes the tasks waiting on the thread that
    * are no longer held, inside the caller's transaction (or one of its own). A call made while a
    * settlement is running (publishing one task changes the next thread's inputs) is queued and
    * handled after the current thread is done, so no thread is judged on a half-written state.

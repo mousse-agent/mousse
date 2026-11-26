@@ -19,8 +19,10 @@ import { hiddenOnTheWire, REMOTE_START_TRANSIENT, runRemoteThreadStart, sendRefu
  *
  * - `starting`: create the thread there (once), set its permission mode and model, send the task (the sequence
  *   `runRemoteThreadStart` shares with `thread_create` on another computer);
- * - `running`: read the run there until it ends, then end the stand-in with its status and final message,
- *   so the task publishes and the parent hears exactly as for a local subagent;
+ * - `running`: read the run there until it ends and the thread there has nothing left for the task (`busy` from
+ *   `threads.backgroundWork`: a background command or monitor its agent left will wake it), then end the stand-in with
+ *   the status of the last turn there and the last answer, so the task publishes and the parent hears exactly as for a
+ *   local subagent;
  * - `stopping`: the task ended here first (a Stop, a cancel, the time limit): tell the run there to stop. The row stays
  *   until that computer took the Stop, also across restarts; the subagent's row shows the Stop as requested meanwhile.
  *
@@ -115,6 +117,8 @@ export class RemoteSubagents {
   private readonly offline = new Set<string>()
   /** Tasks a call is working on now (a launch, or a pass): one at a time each, so nothing is sent twice. */
   private readonly inFlight = new Set<string>()
+  /** Tasks whose run there ended while the thread there still works for them (`workAfterRun`). */
+  private readonly waitingThere = new Set<string>()
 
   constructor(private readonly deps: RemoteSubagentsDeps) {}
 
@@ -317,7 +321,10 @@ export class RemoteSubagents {
 
   private setState(record: RemoteSubagentRecord, state: RemoteSubagentRecord['state']): void {
     this.records.update(record.delegationId, { state })
-    if (state === 'done') this.seen.delete(record.delegationId)
+    if (state === 'done') {
+      this.seen.delete(record.delegationId)
+      this.waitingThere.delete(record.delegationId)
+    }
     this.deps.changed(record.childThreadId)
   }
 
@@ -484,28 +491,97 @@ export class RemoteSubagents {
     }
     const status = String(run.status) as RunStatus
     const stamp = { lastError: null, lastSeenAt: new Date(this.now()).toISOString() }
-    if (!TERMINAL_RUN_STATUSES.has(status)) {
-      // A question or approval there is not stored in its runs; it is read on its own.
-      const pending = await this.call(record, 'orchestrator.pendingQuestions', { threadId: record.remoteThreadId }).catch(() => undefined)
-      const waitingInput = isRecord(pending) && Array.isArray(pending.pending) ? pending.pending.length > 0 : record.waitingInput
-      const activity: RemoteSubagentOverlay['activity'] = waitingInput ? 'needs_input' : status === 'paused' ? 'paused' : status === 'queued' || status === 'starting' ? 'starting' : 'working'
-      const before = this.seen.get(record.delegationId)
-      this.seen.set(record.delegationId, activity)
-      this.records.update(record.delegationId, { ...stamp, waitingInput })
-      if (before !== activity || waitingInput !== record.waitingInput || record.lastError) this.deps.changed(record.childThreadId)
-      return
+    if (!TERMINAL_RUN_STATUSES.has(status)) return this.stillWorking(record, status, stamp)
+    // The run ended, but the thread there may not be done with the task: work its agent left running (a background
+    // command, a monitor) tells it when it ends, and the task's result is the answer of the turn that ends with nothing
+    // left, as for a subagent on this computer.
+    const after = await this.workAfterRun(record, run)
+    if (after === 'retry') return
+    if (after === 'busy') {
+      this.waitingThere.add(record.delegationId)
+      if (await this.pastLimitWhileWaiting(record)) return
+      return this.stillWorking(record, 'running', stamp)
     }
+    this.waitingThere.delete(record.delegationId)
+    const final = String(after.status) as RunStatus
+    // The text after the task's own message: the last answer, of whichever turn gave it.
     const text = await this.resultText(record, run)
-    const outcome = isRecord(run.outcome) ? run.outcome : {}
+    const outcome = isRecord(after.outcome) ? after.outcome : {}
     const ended: RunOutcome = {
       ...(typeof outcome.error === 'string' ? { error: `On ${name}: ${outcome.error}` } : {}),
       // A person who stopped it there stopped it; anything else that cut it off did not.
       ...(outcome.interruptedBy === 'user' ? { interruptedBy: 'user' } : {})
     }
     this.records.update(record.delegationId, { ...stamp, waitingInput: false })
-    await this.deps.engine.settleRemoteRun(record.childRunId, terminalStatus(status), Object.keys(ended).length ? ended : undefined, text)
+    await this.deps.engine.settleRemoteRun(record.childRunId, terminalStatus(final), Object.keys(ended).length ? ended : undefined, text)
     if (text) this.deps.recordMessage(record.childThreadId, 'assistant', text)
     this.setState(record, 'done')
+  }
+
+  /** The task still works there (`status`, the run's or `running` for a turn after it): what the subagent's row shows. */
+  private async stillWorking(record: RemoteSubagentRecord, status: RunStatus, stamp: { lastError: null; lastSeenAt: string }): Promise<void> {
+    // A question or approval there is not stored in its runs; it is read on its own.
+    const pending = await this.call(record, 'orchestrator.pendingQuestions', { threadId: record.remoteThreadId }).catch(() => undefined)
+    const waitingInput = isRecord(pending) && Array.isArray(pending.pending) ? pending.pending.length > 0 : record.waitingInput
+    const activity: RemoteSubagentOverlay['activity'] = waitingInput ? 'needs_input' : status === 'paused' ? 'paused' : status === 'queued' || status === 'starting' ? 'starting' : 'working'
+    const before = this.seen.get(record.delegationId)
+    this.seen.set(record.delegationId, activity)
+    this.records.update(record.delegationId, { ...stamp, waitingInput })
+    if (before !== activity || waitingInput !== record.waitingInput || record.lastError) this.deps.changed(record.childThreadId)
+  }
+
+  /**
+   * After the task's run there ended: `busy` while the thread there still works for it (`ThreadBackgroundWork.busy`: a
+   * turn runs, a notice waits to start one, or something its agent left will tell it), else the newest run there, whose
+   * end is the task's. `retry` when that computer did not answer: nothing is settled on a guess. A computer too old to
+   * say `busy` is read by what it lists (its agent's monitors, commands and holds, its provider's work).
+   */
+  private async workAfterRun(record: RemoteSubagentRecord, run: Record<string, unknown>): Promise<'busy' | 'retry' | Record<string, unknown>> {
+    let work: unknown
+    try {
+      work = await this.call(record, 'threads.backgroundWork', { threadId: record.remoteThreadId })
+    } catch (error) {
+      if (!(error instanceof DomainRpcError) || REMOTE_START_TRANSIENT.has(error.code)) {
+        this.records.update(record.delegationId, { lastError: messageOf(error) })
+        return 'retry'
+      }
+      // A refusal of this read says nothing about the work: the run's end settles the task, as before.
+      return run
+    }
+    if (isRecord(work)) {
+      const listed = Array.isArray(work.items) ? work.items : []
+      const busy = typeof work.busy === 'boolean'
+        ? work.busy
+        : work.providerWork === true || listed.some((item) => isRecord(item) && item.kind !== 'wake')
+      if (busy) return 'busy'
+    }
+    try {
+      const got = await this.call(record, 'runs.list', { threadId: record.remoteThreadId, limit: 1 })
+      const newest = isRecord(got) && Array.isArray(got.runs) && isRecord(got.runs[0]) ? got.runs[0] : undefined
+      if (newest && typeof newest.ordinal === 'number' && typeof run.ordinal === 'number' && newest.ordinal > run.ordinal) {
+        // A turn after the task's own that has not ended (an older computer, between the work's end and the turn).
+        if (!TERMINAL_RUN_STATUSES.has(String(newest.status) as RunStatus)) return 'busy'
+        return newest
+      }
+    } catch {
+      /* the task's own run stands */
+    }
+    return run
+  }
+
+  /**
+   * A task whose limit that computer counts (`limitMinutes` taken there) is no longer counted there once its run ended:
+   * while it waits on its background work, the limit runs here as wall time from the task's start. Past it, the task
+   * ends here, and the next pass stops the thread there.
+   */
+  private async pastLimitWhileWaiting(record: RemoteSubagentRecord): Promise<boolean> {
+    if (!record.limitMinutes || record.deadlineAt) return false
+    if (this.now() < Date.parse(record.createdAt) + record.limitMinutes * 60_000) return false
+    await this.deps.engine.settleRemoteRun(record.childRunId, 'interrupted', {
+      error: `Stopped after its ${record.limitMinutes}-minute limit on ${this.computerName(record.node)} while it waited on its background work.`
+    })
+    this.kick()
+    return true
   }
 
   /** The far run's final message, with where its work is when it had a worktree there. */
@@ -534,10 +610,13 @@ export class RemoteSubagents {
   /** Tells the far run (or thread) to stop; `done` once that computer accepted it. */
   private async stopThere(record: RemoteSubagentRecord): Promise<void> {
     if (!record.remoteThreadId) return this.setState(record, 'done')
+    // A task whose run there ended and that waits on its background work: the run is over, so the Stop is the thread's,
+    // which ends what it left running there.
+    const thread = this.waitingThere.has(record.delegationId)
     try {
       await this.call(record, 'orchestrator.abort', {
         threadId: record.remoteThreadId,
-        ...(record.remoteRunId ? { runId: record.remoteRunId } : {}),
+        ...(record.remoteRunId && !thread ? { runId: record.remoteRunId } : {}),
         clientRequestId: `remote-subagent:${record.delegationId}:stop`,
         ...this.markOf(record)
       })
