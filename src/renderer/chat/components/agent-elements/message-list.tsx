@@ -1352,7 +1352,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       if (layout && (!(el instanceof HTMLElement) || !shouldGlide(distance, container.clientHeight))) {
         cancelScroll();
         if (!steer) {
-          layout.scrollTo(id);
+          void layout.scrollTo(id);
           return;
         }
         // A steered message sits inside its turn's row: land the row, then the message in it.
@@ -1394,7 +1394,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           scrollAnimRef.current = 0;
           // Rows measured on the way may have moved the target (a steered message's row is its turn's,
           // so landing that row would move off the message).
-          if (!steer) layout?.scrollTo(id);
+          if (!steer) void layout?.scrollTo(id);
         }
       };
       scrollAnimRef.current = requestAnimationFrame(step);
