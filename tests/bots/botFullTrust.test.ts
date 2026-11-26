@@ -191,8 +191,9 @@ describe('approving a new grant', () => {
     expect(f.store.escalation(ask!.id)!.status).toBe('withdrawn')
     expect(chatOf(f, botId).some((message) => message.kind === 'notice' && message.text === 'I stopped there: my permissions changed.')).toBe(true)
     // Its slot is free: the owner's next message runs at once.
-    await f.bots.service.chatSend({ botId, text: 'never mind', clientRequestId: 'next' })
+    const sent = await f.bots.service.chatSend({ botId, text: 'never mind', clientRequestId: 'next' })
     await flush()
+    console.log(JSON.stringify(sent), JSON.stringify(f.store.listActivations(botId).map(r=>[r.id,r.lane,r.status,r.endReason,r.idempotencyKey])))
     expect(f.store.activationByKey('chat:next')!.status).toBe('running')
   })
 })
@@ -229,6 +230,39 @@ describe('Allow everything, row by row', () => {
     f.bots.service.setPermission(botId, BOT_FULL_TRUST_PERMISSION, false)
     expect((await start(f, await activate('after'))).prepared.authority.check(command)).toMatchObject({ ok: stays })
     expect(f.bots.service.get(botId).permissions.some((item) => /run commands/i.test(item.title))).toBe(stays)
+  })
+
+  it('switched off and on again, Run commands is as it was when the revision names it and only Allow everything gives it', async () => {
+    f.bots.setFullTrust(botId, true)
+    // A narrower revision that names Run commands itself, published with no approval: the grant does not name it.
+    const entry = f.bots.get(botId)
+    const { fullTrust: _on, ...rest } = entry.published!.permissions
+    f.bots.publish(botId, f.bots.save({ ...entry.draft, permissions: { ...rest, tools: [...rest.tools, 'shell'] } }, entry.draftHash).draftHash)
+    const before = f.bots.get(botId)
+    const shell = () => f.bots.service.get(botId).permissions.find((item) => /run commands/i.test(item.title))!
+    f.bots.service.setPermission(botId, shell().id, false)
+    const off = await start(f, await activate('off'))
+    expect(off.prepared.authority.check(command)).toMatchObject({ ok: false })
+    await finish(f, off.payload, 'completed', { text: 'Done.' })
+    f.bots.service.setPermission(botId, shell().id, true)
+    expect((await start(f, await activate('on'))).prepared.authority.check(command)).toEqual({ ok: true })
+    // The switch kept the revision and the draft as they were.
+    const after = f.bots.get(botId)
+    expect(after.published!.permissions).toEqual(before.published!.permissions)
+    expect(after.draft.permissions).toEqual(before.draft.permissions)
+  })
+
+  it.each([
+    ['Allow everything still on: it can again', false, 'I can run commands again.'],
+    ['Allow everything turned off between: it still cannot', true, "I still can't run commands. It needs Allow everything, or your OK when I ask."]
+  ] as const)('switching back on Run commands that only Allow everything gave says what the bot gets: %s', async (_name, trustOff, said) => {
+    f.bots.setFullTrust(botId, true)
+    const id = f.bots.service.get(botId).permissions.find((item) => /run commands/i.test(item.title))!.id
+    f.bots.service.setPermission(botId, id, false)
+    if (trustOff) f.bots.service.setPermission(botId, BOT_FULL_TRUST_PERMISSION, false)
+    f.bots.service.setPermission(botId, id, true)
+    expect(chatOf(f, botId).filter((message) => message.kind === 'notice').at(-1)!.text).toBe(said)
+    expect((await start(f, await activate('after'))).prepared.authority.check(command)).toMatchObject({ ok: !trustOff })
   })
 })
 
@@ -349,6 +383,78 @@ describe('a chat turn waiting at a card ends at every narrowing', () => {
     await f.bots.service.chatSend({ botId, text: 'never mind', clientRequestId: 'next' })
     await flush()
     expect(f.store.activationByKey('chat:next')!.status).toBe('running')
+  })
+
+  // The same, when the turn meets a wall at once instead (a tool-call limit), not at the end of its reply.
+  it.each([
+    ['Allow everything off', 'ends', () => { approve(withLimits({ maxToolCalls: 1 })); f.bots.setFullTrust(botId, true) }, () => { f.bots.service.setPermission(botId, BOT_FULL_TRUST_PERMISSION, false) }],
+    ['Remove, then Allow everything on, which gives it all again', 'waits', () => { approve((held) => ({ ...held, tools: [...held.tools, 'shell'], budget: { maxToolCalls: 1 } })) }, () => { removeShell(); f.bots.setFullTrust(botId, true) }]
+  ] as const)('%s, then the running turn reaches its tool-call limit: it %s at the card', async (_name, outcome, setup, change) => {
+    setup()
+    await f.bots.service.chatSend({ botId, text: 'Tidy up', clientRequestId: 'limit' })
+    const turn = await start(f, f.store.activationByKey('chat:limit')!.id)
+    const id = turn.payload.activationId
+    change()
+    await flush()
+    expect(f.store.activation(id)!.status).toBe('running')
+    expect(turn.prepared.authority.counters.charge('toolCall')).toMatchObject({ ok: true })
+    expect(turn.prepared.authority.counters.charge('toolCall')).toMatchObject({ ok: false })
+    const ask = f.store.escalations({ activationId: id }).find((entry) => 'budget' in entry.permission)!
+    await finish(f, turn.payload, 'interrupted', { text: 'Tidying.', outcome: { interruptedBy: 'bot_wall' } })
+    if (outcome === 'waits') {
+      // It waits under the grant in place, so Allow continues it there.
+      expect(f.store.activation(id)).toMatchObject({ status: 'waiting_grant', grantDigest: f.store.activeGrant(botId)!.digest })
+      await f.bots.service.answer(botId, ask.id, 'allow')
+      await flush()
+      expect(f.store.activation(id)!.status).toBe('running')
+      expect(f.store.dispatch(id, 2)).toMatchObject({ kind: 'continue' })
+      return
+    }
+    expect(f.store.activation(id)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
+    expect(f.store.escalation(ask.id)!.status).toBe('withdrawn')
+    expect(chatOf(f, botId).some((message) => message.kind === 'notice' && message.text === 'I stopped there: my permissions changed.')).toBe(true)
+    await f.bots.service.chatSend({ botId, text: 'never mind', clientRequestId: 'next' })
+    await flush()
+    expect(f.store.activationByKey('chat:next')!.status).toBe('running')
+  })
+
+  it('a turn that waits under the grant in place moves onto it alone: a run paused under the old grant stays there', async () => {
+    withShell()
+    const old = f.store.activeGrant(botId)!.digest
+    // A run paused before the grant changed: a call of it whose outcome nobody knows.
+    const run = await start(f, await activate('paused'))
+    f.runs.tools.start({ invocationId: 'inv-edit', runId: run.payload.runId, attemptId: f.runs.getRun(run.payload.runId)!.activeAttemptId!, tool: 'edit', argsDigest: 'd', now: 'n', idempotent: false })
+    await finish(f, run.payload, 'interrupted')
+    expect(f.store.activation(run.payload.activationId)).toMatchObject({ status: 'paused', grantDigest: old })
+    await f.bots.service.chatSend({ botId, text: 'Export your memory', clientRequestId: 'wall' })
+    const turn = await start(f, f.store.activationByKey('chat:wall')!.id)
+    turn.prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'You asked.' })
+    removeShell()
+    f.bots.setFullTrust(botId, true)
+    await finish(f, turn.payload, 'completed', { text: 'Pick a folder.' })
+    expect(f.store.activation(turn.payload.activationId)).toMatchObject({ status: 'waiting_grant', grantDigest: f.store.activeGrant(botId)!.digest })
+    expect(f.store.activation(run.payload.activationId)).toMatchObject({ status: 'paused', grantDigest: old })
+  })
+
+  it('a turn left at its card under a grant no longer in place (Mousse stopped before ending it) ends at the restart', async () => {
+    approve(withLimits({ maxUsd: 5 }))
+    await f.bots.service.chatSend({ botId, text: 'Export your memory', clientRequestId: 'wall' })
+    const turn = await start(f, f.store.activationByKey('chat:wall')!.id)
+    turn.prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'You asked.' })
+    await finish(f, turn.payload, 'completed', { text: 'Pick a folder.' })
+    const id = turn.payload.activationId
+    const [ask] = f.store.openAsks(botId)
+    // A narrower grant was written, and Mousse stopped before anything ended under the old one.
+    const narrower = { ...f.store.activeGrant(botId)!.manifest, budget: { maxUsd: 2 } }
+    f.bots.close()
+    f.store.approve(botId, botManifestDigest(narrower), narrower)
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+    await flush()
+    expect(f.store.activation(id)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
+    expect(f.store.escalation(ask!.id)!.status).toBe('withdrawn')
+    // Nothing holds the chat's one slot.
+    expect(f.store.laneActivations(botId, 'chat', ['queued', 'running', 'waiting_grant'])).toEqual([])
   })
 })
 
