@@ -10,7 +10,7 @@ import { canonicalJson, encodeEnvelope } from '../../../../src/mms/net/sync/code
 import { systemClock } from '../../../../src/mms/net/clock'
 import { BridgeHub } from '../../../../src/mms/bridge/hub'
 import { COPY_LIMIT_DEFAULTS, readCopyLimits } from '../../../../src/mms/bridge/copyLimits'
-import { newId } from '../../../../src/shared/net'
+import { NetError, newId } from '../../../../src/shared/net'
 import type {
   NodeDelegation,
   NodeId,
@@ -230,6 +230,8 @@ async function computers(options: { own?: boolean } = {}) {
     live,
     held,
     remember,
+    /** What the session was asked to tell the attachment. */
+    handlers: () => handlers,
     nextEpoch: () => {
       epoch++
       seq = 0
@@ -354,19 +356,33 @@ describe("a copy of another computer's lists", () => {
 })
 
 describe('a copy that begins part-way through a snapshot', () => {
-  it('passes over the cut-off snapshot when it is read whole, and shows the next one', async () => {
+  it('passes over a cut-off snapshot when it is read whole and a complete one follows, and says so once', async () => {
+    const f = await computers()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    cleanups.push(() => warn.mockRestore())
+    // Read from its oldest record, as a reader that ignores where the newest snapshot starts does.
+    const open = f.store.openSnapshot.bind(f.store)
+    vi.spyOn(f.store, 'openSnapshot').mockImplementation((stream) => open(stream))
+    f.receive([...f.snapshot(f.lists(1)), ...f.snapshot(f.lists(2))])
+    // The copy lost the start of the first snapshot.
+    f.db.database.prepare('DELETE FROM net_records WHERE epoch=1 AND seq=1').run()
+    const { shown, handle } = await f.attach()
+    expect(shown).toEqual([f.lists(2)])
+    handle.close()
+    await f.attach()
+    expect(
+      warn.mock.calls.filter(([message]) => String(message).includes('part-way through a snapshot'))
+    ).toHaveLength(1)
+  })
+
+  it('keeps the error when no complete snapshot follows the cut-off one', async () => {
     const f = await computers()
     const first = f.snapshot(f.lists(1)),
       second = f.snapshot(f.lists(2))
-    // The copy lost the start of the first snapshot, and the second is still arriving: it is read from its oldest
-    // record, which belongs to a snapshot it cannot show.
+    // The second snapshot is still arriving: nothing whole follows what was cut.
     f.receive([...first, ...second.slice(0, -1)])
     f.db.database.prepare('DELETE FROM net_records WHERE epoch=1 AND seq=1').run()
-    const { shown, handle } = await f.attach()
-    expect(shown).toEqual([])
-    await f.live(second.slice(-1))
-    expect(shown).toEqual([f.lists(2)])
-    handle.close()
+    await expect(f.attach()).rejects.toMatchObject({ code: 'snapshot_required' })
   })
 
   it('says a copy whose snapshot does not read as needing a fresh one, so the copy can be dropped', async () => {
@@ -421,6 +437,65 @@ describe("dropping a copy of another computer's lists", () => {
     expect(
       await f.hub.dropCopy({ nodeId: newId('node') as NodeId, entityId: LISTS }, options)
     ).toBe(false)
+  })
+})
+
+describe('a copy that stops reading once attached', () => {
+  it('says a new snapshot that does not read as the copy needing a fresh one', async () => {
+    const f = await computers()
+    f.receive(f.snapshot(f.lists(1)))
+    const errors: string[] = []
+    await f.hub.attach(
+      { nodeId: f.writer as NodeId, entityId: LISTS },
+      () => {},
+      (code) => errors.push(code),
+      {
+        room: 'lists',
+        open: async () => ({ descriptor: f.descriptor, head: f.store.head(f.descriptor.id) })
+      }
+    )
+    // A snapshot is installed, and its chunk does not reach the disk.
+    f.receive(f.snapshot(f.lists(2)))
+    f.db.database.prepare('DELETE FROM net_records WHERE epoch=1 AND seq=5').run()
+    f.handlers()!.onSnapshotInstalled!()
+    await f.hub.drain()
+    expect(errors).toEqual(['snapshot_required'])
+  })
+})
+
+describe('a drop of a copy that stops part-way', () => {
+  it('leaves an empty copy, read afresh by the next attach, and the next tidy takes what is left', async () => {
+    const f = await computers()
+    const records: StoredRecord[] = []
+    for (let n = 1; n <= 300; n++) records.push(...f.snapshot(f.lists(n)))
+    f.receive(records)
+    const first = await f.attach()
+    expect(first.shown).toEqual([f.lists(300)])
+    first.handle.close()
+    const options = {
+      room: 'lists' as const,
+      open: async () => ({ descriptor: f.descriptor, head: { epoch: 1, seq: 900 } })
+    }
+    const ref = { nodeId: f.writer as NodeId, entityId: LISTS }
+    // The service stops after the first step that removes records.
+    const transaction = f.db.transaction.bind(f.db)
+    let steps = 0
+    const stop = vi.spyOn(f.db, 'transaction').mockImplementation((work) => {
+      if (++steps === 3) throw new NetError('cancelled')
+      return transaction(work)
+    })
+    await expect(f.hub.dropCopy(ref, options)).rejects.toMatchObject({ code: 'cancelled' })
+    stop.mockRestore()
+    expect(f.db.database.prepare('SELECT count(*) AS n FROM net_records').get()!.n).toBeGreaterThan(
+      0
+    )
+    // Attached again, the copy holds nothing to show: it is read from the start, not as whole from where it was cut.
+    const again = await f.attach()
+    expect(again.shown).toEqual([])
+    expect(f.store.head(f.descriptor.id)).toEqual({ epoch: 1, seq: 0 })
+    again.handle.close()
+    await f.hub.tidyCopies()
+    expect(f.db.database.prepare('SELECT count(*) AS n FROM net_records').get()!.n).toBe(0)
   })
 })
 

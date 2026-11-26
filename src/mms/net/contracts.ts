@@ -309,6 +309,12 @@ export interface StreamStore {
    * empty. Returns how many rows went; 0 when nothing is left.
    */
   retireUnread?(step: DropStep): number
+  /**
+   * Empties a copy of another computer's thread display stream in one transaction, for it to be read afresh: a new
+   * empty active generation from position 0, and every earlier one archived (its records go later, by
+   * `retireUnread` or the caller). A copy dropped part-way is then never read as whole.
+   */
+  resetCopy?(stream: StreamId): void
   /** Begin invisible bounded staging for a fixed target; incomplete work is discarded on crash. */
   beginSnapshot(stream: StreamId, target: StreamHead): SnapshotStage
   /** Bounded convenience wrapper only (<=500 rows/1 MiB); larger inputs throw too_large. */

@@ -56,6 +56,11 @@ const SAME_AS_TTL_MS = 10 * 60_000
 const READ_POLL_MS = 30_000
 const RETRY_MIN_MS = 5_000
 const RETRY_MAX_MS = 5 * 60_000
+/**
+ * How long a lists stream stays up after catching up before a failure counts as a new run of failures: until then
+ * the backoff keeps growing and the copy on disk is not dropped again.
+ */
+const STEADY_MS = 60_000
 /** The copy of a computer's lists is written at most this often, and only when it changed. */
 const CACHE_SETTLE_MS = 30_000
 /** After a failed match the other computer is asked again no sooner than this. */
@@ -112,8 +117,10 @@ interface Computer {
   failures: number
   /** Why its lists cannot be read now (an error code), until they are again. */
   error?: string
-  /** Its copy on disk was dropped in this run of failures: it is not dropped again until an attach works. */
+  /** Its copy on disk was dropped in this run of failures: it is not dropped again until the stream is steady. */
   copyDropped?: boolean
+  /** When its lists stream last caught up; a failure `STEADY_MS` after that starts a new run of failures. */
+  caughtUpAt?: number
   /** A project of the computer (qualified id) and the project of this computer with the same Git history. */
   sameAs: Map<string, string>
   /** The weaker matches: see `Project.similarTo`. */
@@ -440,6 +447,13 @@ export class MergedLists implements RemoteListsPort {
     this.markOffline(c)
   }
 
+  /** What the threads of `c` do is not known now: their statuses go, and the windows are told. */
+  private clearActivity(c: Computer): void {
+    if (!c.activity.size) return
+    c.activity = new Map()
+    this.pushLists(false, false, true)
+  }
+
   /**
    * The rows stay, marked `offline` (the computer cannot be reached) or `notShared` (it refused this one:
    * it blocked it or turned sharing off). Statuses are dropped: what the threads do is not known.
@@ -507,7 +521,9 @@ export class MergedLists implements RemoteListsPort {
             this.failed(c, code)
             if (code === 'forbidden') this.refuse(c)
             else if (this.options.online(c.node)) {
-              // The session is up: the rows stay as they are while the stream is opened again.
+              // The session is up: the rows stay as they are while the stream is opened again, but what their
+              // threads do is not known until it is.
+              this.clearActivity(c)
               if (COPY_ERRORS.has(code) && !c.copyDropped) {
                 c.attaching = this.dropCopy(c).finally(() => {
                   c.attaching = undefined
@@ -520,7 +536,13 @@ export class MergedLists implements RemoteListsPort {
               this.backOff(c)
             }
           },
-          this.listsStream(c)
+          this.listsStream(c),
+          undefined,
+          (caught) => {
+            if (!caught) return
+            c.caughtUpAt = this.now()
+            this.worked(c)
+          }
         )
         // The computer left the list (or routing went off) while the stream was being opened: let it go again.
         if (this.closed || this.computersByNode.get(c.node) !== c || !this.options.enabled()) {
@@ -530,9 +552,6 @@ export class MergedLists implements RemoteListsPort {
         }
         c.attached = handle
         c.mode = 'stream'
-        c.failures = 0
-        c.copyDropped = false
-        this.worked(c)
       } catch (error) {
         if (this.closed) return
         if (error instanceof DomainRpcError && error.code === 'computer_outdated') {
@@ -550,8 +569,9 @@ export class MergedLists implements RemoteListsPort {
         }
         if (error instanceof DomainRpcError && error.code === 'computer_offline') c.online = false
         else if (this.options.online(c.node)) {
-          // The session is up, so the computer is not offline: its rows stay as they are, and the stream is opened
-          // again, sooner once a copy that cannot be read is dropped.
+          // The session is up, so the computer is not offline: its rows stay as they are (their statuses go), and
+          // the stream is opened again, once a copy that cannot be read is dropped.
+          this.clearActivity(c)
           if (error instanceof NetError && COPY_ERRORS.has(code) && !c.copyDropped)
             await this.dropCopy(c)
           else this.backOff(c)
@@ -582,7 +602,7 @@ export class MergedLists implements RemoteListsPort {
           node: c.node,
           code: c.error
         })
-      c.retryAt = 0
+      this.backOff(c)
     } catch (error) {
       if (this.closed) return
       console.warn('[lists] could not drop the copy of the lists of a computer', {
@@ -595,6 +615,12 @@ export class MergedLists implements RemoteListsPort {
 
   /** The lists of `c` could not be read: said in the log once per run of failures (and when the reason changes). */
   private failed(c: Computer, code: string): void {
+    // A stream that stayed up a while after catching up ends a run of failures: this one starts the next.
+    if (c.caughtUpAt !== undefined && this.now() - c.caughtUpAt >= STEADY_MS) {
+      c.failures = 0
+      c.copyDropped = false
+    }
+    c.caughtUpAt = undefined
     if (c.error === code) return
     c.error = code
     console.warn('[lists] cannot read the lists of a computer', {

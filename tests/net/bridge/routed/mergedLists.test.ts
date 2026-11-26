@@ -101,13 +101,25 @@ function harness(
   }
   const attachments = new Map<
     NodeId,
-    { update: (value: unknown) => void; error: () => void; close: ReturnType<typeof vi.fn> }
+    {
+      update: (value: unknown) => void
+      error: () => void
+      close: ReturnType<typeof vi.fn>
+      catchUp?: (caught: boolean) => void
+    }
   >()
   const hub = {
     attach: vi.fn(
-      async (ref: { nodeId: NodeId }, update: (value: unknown) => void, error: () => void) => {
+      async (
+        ref: { nodeId: NodeId },
+        update: (value: unknown) => void,
+        error: () => void,
+        _options?: unknown,
+        _delta?: unknown,
+        catchUp?: (caught: boolean) => void
+      ) => {
         const close = vi.fn()
-        attachments.set(ref.nodeId, { update, error, close })
+        attachments.set(ref.nodeId, { update, error, close, catchUp })
         return { close, descriptor: {} }
       }
     ),
@@ -685,36 +697,50 @@ describe('lists that cannot be read while the session with the computer is open'
     const h = harness()
     await h.feed(
       snapshot([{ id: 'a', updatedAt: iso(1) }], {
-        projects: [{ id: 'p', name: 'P', path: '/p', order: 0 }]
+        projects: [{ id: 'p', name: 'P', path: '/p', order: 0 }],
+        status: { a: { state: 'processing' } }
       })
     )
+    expect(h.lists.activity()).toEqual({ [h.q('a')]: 'processing' })
     if (session === 'closed') h.online.delete(h.node)
     await fail(h)
+    // Online or not, what its threads do is not known while their lists cannot be read.
+    expect(h.lists.activity()).toEqual({})
     expect(h.lists.threads().map((row) => row.offline)).toEqual([offline || undefined])
     expect(h.lists.projects().map((row) => row.offline)).toEqual([offline || undefined])
     expect(h.hub.dropCopy).toHaveBeenCalledTimes(dropped ? 1 : 0)
     expect(h.lists.lastError(h.node)).toBe(error)
   })
 
-  it('drops the copy once per run of failures, reads fresh at once, and says the failure once', async () => {
+  it('drops the copy once per run of failures, then waits longer each time, and says the failure once', async () => {
     const h = harness()
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     cleanups.push(() => warn.mockRestore())
     await h.feed(snapshot([{ id: 'a', updatedAt: iso(1) }]))
-    h.attachments.get(h.node)!.error('cancelled' as never)
-    h.hub.attach.mockRejectedValueOnce(new NetError('conflict'))
-    h.now.at += 10 * 60_000
-    await h.lists.reconcile()
-    expect(h.hub.dropCopy).toHaveBeenCalledTimes(1)
+    // The stream ends on a record of the copy that does not check, before it caught up.
+    h.attachments.get(h.node)!.error('bad_signature' as never)
+    await vi.waitFor(() => expect(h.hub.dropCopy).toHaveBeenCalledTimes(1))
     expect(h.hub.dropCopy.mock.calls[0]![0]).toEqual({ nodeId: h.node, entityId: 'mousse:lists' })
-    // Read fresh at the next look, with no wait; it fails the same way, and the copy is not dropped again.
-    h.hub.attach.mockRejectedValueOnce(new NetError('conflict'))
+    // A drop is followed by a wait, not by an attach at once.
     await h.lists.reconcile()
-    expect(h.hub.attach).toHaveBeenCalledTimes(3)
+    expect(h.hub.attach).toHaveBeenCalledTimes(1)
+    h.now.at += 5_000
+    await h.lists.reconcile()
+    expect(h.hub.attach).toHaveBeenCalledTimes(2)
+    // Attached again, it fails the same way before catching up: no second drop, and a longer wait.
+    h.attachments.get(h.node)!.error('bad_signature' as never)
     expect(h.hub.dropCopy).toHaveBeenCalledTimes(1)
-    // Then it waits before trying again.
+    h.now.at += 5_000
+    await h.lists.reconcile()
+    expect(h.hub.attach).toHaveBeenCalledTimes(2)
+    h.now.at += 5_000
     await h.lists.reconcile()
     expect(h.hub.attach).toHaveBeenCalledTimes(3)
+    // Caught up but ended again soon after: still the same run of failures.
+    h.attachments.get(h.node)!.catchUp!(true)
+    h.now.at += 1_000
+    h.attachments.get(h.node)!.error('bad_signature' as never)
+    expect(h.hub.dropCopy).toHaveBeenCalledTimes(1)
     const said = (code: string) =>
       warn.mock.calls.filter(
         ([message, details]) =>
@@ -722,13 +748,17 @@ describe('lists that cannot be read while the session with the computer is open'
           (details as { node?: string; code?: string }).node === h.node &&
           (details as { code?: string }).code === code
       ).length
-    expect([said('cancelled'), said('conflict')]).toEqual([1, 1])
-    // It works again: the error is gone, and a later failure may drop the copy again.
+    // Once for the failures before it caught up, once for the one after.
+    expect(said('bad_signature')).toBe(2)
+    // Once it stayed up a while after catching up, a failure starts a new run: the copy may go again.
     h.now.at += 10 * 60_000
-    await h.feed(snapshot([{ id: 'a', updatedAt: iso(2) }]))
+    await h.lists.reconcile()
+    expect(h.hub.attach).toHaveBeenCalledTimes(4)
+    h.attachments.get(h.node)!.catchUp!(true)
     expect(h.lists.lastError(h.node)).toBeUndefined()
     expect(h.lists.threads().map((row) => row.offline)).toEqual([undefined])
-    h.attachments.get(h.node)!.error('conflict' as never)
+    h.now.at += 2 * 60_000
+    h.attachments.get(h.node)!.error('bad_signature' as never)
     await vi.waitFor(() => expect(h.hub.dropCopy).toHaveBeenCalledTimes(2))
   })
 })

@@ -199,20 +199,44 @@ const projectionTypes = (options?: HubAttachOptions): readonly string[] =>
 const pause = (ms: number): Promise<void> =>
   new Promise<void>((resolve) => (ms > 0 ? setTimeout(resolve, ms) : setImmediate(resolve)))
 /**
- * For a read of a copy from its oldest record: true for the records of a snapshot whose start is no longer held
- * (its chunks and end before any begin), which are passed over rather than failing the read: copies made by
- * earlier builds can begin part-way through a snapshot.
+ * For a read of a copy from its oldest record: passes over the records of a snapshot whose start is no longer held
+ * (its chunks and end before any begin; copies made by earlier builds can begin part-way through a snapshot). Only
+ * when a complete snapshot follows them: `finish` keeps the error otherwise, so a stream damaged at its start is not
+ * shown as if it were whole.
  */
-function cutOffSnapshot(): (record: StoredRecord) => boolean {
-  let leading = true
-  return (record) => {
-    if (!leading) return false
-    const type = decodeEnvelope(record.envelope).envelope.type
-    if (type === 'thread.snapshot.chunk' || type === 'thread.snapshot.end') return true
-    leading = false
-    return false
+function cutOffSnapshot() {
+  let leading = true,
+    skipped = 0,
+    shown = false
+  return {
+    skip(record: StoredRecord): boolean {
+      if (!leading) return false
+      const type = decodeEnvelope(record.envelope).envelope.type
+      if (type === 'thread.snapshot.chunk' || type === 'thread.snapshot.end') {
+        skipped++
+        return true
+      }
+      leading = false
+      return false
+    },
+    saw(value: ThreadDisplayUpdate | undefined): void {
+      if (value?.kind === 'snapshot') shown = true
+    },
+    /** How many records were passed over; throws `bad_request` when no complete snapshot came after them. */
+    finish(): number {
+      if (skipped && !shown) throw new NetError('bad_request', 'The stream begins part-way through a snapshot.')
+      return skipped
+    }
   }
 }
+/**
+ * A record of the copy on disk that does not read is the copy's fault, not the other computer's: said as
+ * `snapshot_required`, so the caller can drop the copy (`dropCopy`) and read it fresh.
+ */
+const copyError = (error: unknown): unknown =>
+  error instanceof NetError && error.code === 'bad_request'
+    ? new NetError('snapshot_required', 'The copy on disk cannot be read.', { cause: error })
+    : error
 /** Free pages one step of giving space back moves (16 MiB of 4 KiB pages). */
 const RECLAIM_STEP_PAGES = 4096
 /** The code of an error, for a log line. */
@@ -1211,7 +1235,7 @@ export class BridgeHub {
                 for (const each of attachment.listeners) notifyCatchUp(each, false)
                 return this.rebuild(attachment)
               })
-              .catch((e) => this.attachmentError(attachment, e))
+              .catch((e) => this.attachmentError(attachment, copyError(e)))
           },
           onError: (code) => {
             if (
@@ -1275,18 +1299,20 @@ export class BridgeHub {
     const projection = new ThreadDisplayProjection(ref.entityId, projectionTypes(options))
     const reader = this.openFromSnapshot(descriptor.id),
       reading = this.reading(),
-      leading = cutOffSnapshot()
+      cut = cutOffSnapshot()
     try {
       for (;;) {
         const page = reader.next(1024 * 1024, 64)
         for (const record of page.records) {
-          if (leading(record)) continue
+          if (cut.skip(record)) continue
           const value = projection.accept(this.checkRecord(record, descriptor, reading))
+          cut.saw(value)
           if (value) update(value)
         }
         if (page.done) break
         await new Promise<void>((resolve) => setImmediate(resolve))
       }
+      this.passedOver(descriptor, cut.finish())
     } finally {
       reader.close()
     }
@@ -1645,6 +1671,15 @@ export class BridgeHub {
       await pause(dropPauseMs)
     }
   }
+  /** Says in the log, once a run for each stream, that a read passed over the start of a cut-off snapshot. */
+  private passedOver(descriptor: StreamDescriptor, records: number): void {
+    if (records)
+      this.failed(`cut ${descriptor.id}`, 'a copy began part-way through a snapshot: its first records were passed over', {
+        node: descriptor.authority,
+        stream: descriptor.id,
+        records
+      })
+  }
   /** Says in the log, once until it works again, that work on the copies failed, with its error code. */
   private failed(key: string, what: string, details: Record<string, unknown>): void {
     if (this.failing.has(key)) return
@@ -1672,8 +1707,13 @@ export class BridgeHub {
       stream = descriptor.id
     this.drops.delete(stream)
     this.dropNodes.delete(stream)
+    // First, in one step, the copy is emptied: stopped part-way (a quit, a failed step), it is read afresh by the
+    // next attach rather than as whole from where it was cut, and what it held goes with the next tidy. The binding
+    // stays until the end, so a later drop still finds the stream.
     const { dropBatchRows, dropBatchBytes, dropPauseMs } = copyLimits()
     const database = this.options.db.database
+    if (database.prepare('SELECT 1 FROM net_streams WHERE id=?').get(stream))
+      this.options.store.resetCopy?.(stream)
     const has = (table: string): boolean =>
       !!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)
     // Records first, a bounded step at a time: a copy may hold gigabytes.
@@ -1757,17 +1797,12 @@ export class BridgeHub {
     )
     return pending
   }
-  /**
-   * `rebuild` for an attach. A record of the copy on disk that does not read is the copy's fault, not the other
-   * computer's: it is said as `snapshot_required`, so the caller can drop the copy (`dropCopy`) and read it fresh.
-   */
+  /** `rebuild` for an attach, with an error of the copy on disk said as one (`copyError`). */
   private async rebuildCopy(attachment: Attachment): Promise<void> {
     try {
       await this.rebuild(attachment)
     } catch (error) {
-      if (error instanceof NetError && error.code === 'bad_request')
-        throw new NetError('snapshot_required', 'The copy on disk cannot be read.', { cause: error })
-      throw error
+      throw copyError(error)
     }
   }
   private async rebuildNow(attachment: Attachment): Promise<void> {
@@ -1775,15 +1810,17 @@ export class BridgeHub {
     attachment.begin = undefined
     const reader = this.openFromSnapshot(attachment.descriptor.id),
       reading = this.reading(),
-      leading = cutOffSnapshot()
+      cut = cutOffSnapshot()
     try {
       for (;;) {
         if (attachment.stopped || this.stopped) return
         const page = reader.next(1024 * 1024, 64)
-        for (const record of page.records) if (!leading(record)) await this.display(attachment, record, reading)
+        for (const record of page.records)
+          if (!cut.skip(record)) cut.saw(await this.display(attachment, record, reading))
         if (page.done) break
         await new Promise<void>((resolve) => setImmediate(resolve))
       }
+      this.passedOver(attachment.descriptor, cut.finish())
     } finally {
       reader.close()
     }
@@ -1792,8 +1829,8 @@ export class BridgeHub {
     attachment: Attachment,
     record: StoredRecord,
     reading?: () => { user: string }
-  ): Promise<void> {
-    if (attachment.stopped || this.stopped) return
+  ): Promise<ThreadDisplayUpdate | undefined> {
+    if (attachment.stopped || this.stopped) return undefined
     const envelope = this.checkRecord(record, attachment.descriptor, reading)
     const value = attachment.projection.accept(envelope)
     if (envelope.type === 'thread.snapshot.begin')
@@ -1819,6 +1856,7 @@ export class BridgeHub {
         }
       }
     }
+    return value
   }
   private enqueue(attachment: Attachment, record: StoredRecord): void {
     const bytes = record.envelope.length + record.sig.length
@@ -1829,7 +1867,9 @@ export class BridgeHub {
     attachment.queued++
     attachment.bytes += bytes
     attachment.pending = attachment.pending
-      .then(() => this.display(attachment, record))
+      .then(async () => {
+        await this.display(attachment, record)
+      })
       .catch((error) => this.attachmentError(attachment, error))
       .finally(() => {
         attachment.queued--

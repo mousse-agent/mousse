@@ -317,6 +317,14 @@ export class NetDatabase {
    * in use is at most `REWRITE_MAX_IN_USE_BYTES` and the database's disk has room for twice that; otherwise it is
    * `deferred`, and a later tidy tries again. A rewrite that fails (a full disk included) is rolled back: the database
    * stays as it was, and writes go on.
+   *
+   * It runs in one synchronous call: the service's event loop waits for it (about a tenth of a second for 27 MiB in
+   * use; seconds at the 128 MiB limit), and memory grows by up to what is in use while it runs. That is why it waits
+   * for a tidy to have made the database small, and runs once.
+   *
+   * Row ids: a rewrite keeps the row ids of tables with a primary key and may renumber those without one. `net_outbox`
+   * hands its row id out as a cursor (`SpaceProfileService`, `SpaceLocalService`); its `id TEXT PRIMARY KEY` is what
+   * keeps that id across the rewrite. `reclaim` only moves pages, and never changes a row id.
    */
   rewriteToReclaim(): Reclaimable {
     this.assertCompactable()
@@ -462,6 +470,7 @@ CREATE TABLE IF NOT EXISTS net_records(generation TEXT NOT NULL REFERENCES net_g
 CREATE TABLE IF NOT EXISTS net_event_ids(stream TEXT NOT NULL REFERENCES net_streams(id), id TEXT NOT NULL, epoch INTEGER NOT NULL, seq INTEGER NOT NULL, recv_ts INTEGER NOT NULL, payload_hash TEXT NOT NULL, signature_hash TEXT NOT NULL, PRIMARY KEY(stream,id)) STRICT;
 CREATE INDEX IF NOT EXISTS net_event_positions ON net_event_ids(stream,epoch,seq);
 CREATE INDEX IF NOT EXISTS net_record_positions ON net_records(epoch,seq);
+-- Its row id is a cursor handed to callers: the TEXT primary key keeps it across a VACUUM (see rewriteToReclaim).
 CREATE TABLE IF NOT EXISTS net_outbox(id TEXT PRIMARY KEY, stream TEXT NOT NULL, space_id TEXT, envelope BLOB NOT NULL, sig BLOB NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, created_at INTEGER NOT NULL, error TEXT, epoch INTEGER, seq INTEGER) STRICT;
 CREATE INDEX IF NOT EXISTS net_outbox_stream ON net_outbox(stream,created_at,id);
 CREATE TABLE IF NOT EXISTS net_executions(id TEXT PRIMARY KEY, scope TEXT NOT NULL, target TEXT NOT NULL, trigger TEXT NOT NULL, payload_hash TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result TEXT, error TEXT, binding TEXT, UNIQUE(scope,target,trigger)) STRICT;
