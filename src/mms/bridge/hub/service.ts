@@ -198,6 +198,56 @@ const projectionTypes = (options?: HubAttachOptions): readonly string[] =>
 /** Lets other work run between two steps of background work. */
 const pause = (ms: number): Promise<void> =>
   new Promise<void>((resolve) => (ms > 0 ? setTimeout(resolve, ms) : setImmediate(resolve)))
+/**
+ * For a read of a copy from its oldest record: passes over the records of a snapshot whose start is no longer held
+ * (its chunks and end before any begin; copies made by earlier builds can begin part-way through a snapshot). Only
+ * when a complete snapshot follows them: `finish` keeps the error otherwise, so a stream damaged at its start is not
+ * shown as if it were whole.
+ */
+function cutOffSnapshot() {
+  let leading = true,
+    skipped = 0,
+    shown = false
+  return {
+    skip(record: StoredRecord): boolean {
+      if (!leading) return false
+      const type = decodeEnvelope(record.envelope).envelope.type
+      if (type === 'thread.snapshot.chunk' || type === 'thread.snapshot.end') {
+        skipped++
+        return true
+      }
+      leading = false
+      return false
+    },
+    saw(value: ThreadDisplayUpdate | undefined): void {
+      if (value?.kind === 'snapshot') shown = true
+    },
+    /** How many records were passed over; throws `bad_request` when no complete snapshot came after them. */
+    finish(): number {
+      if (skipped && !shown) throw new NetError('bad_request', 'The stream begins part-way through a snapshot.')
+      return skipped
+    }
+  }
+}
+/**
+ * A record of the copy on disk that does not read is the copy's fault, not the other computer's: said as
+ * `snapshot_required`, so the caller can drop the copy (`dropCopy`) and read it fresh.
+ */
+const copyError = (error: unknown): unknown =>
+  error instanceof NetError && error.code === 'bad_request'
+    ? new NetError('snapshot_required', 'The copy on disk cannot be read.', { cause: error })
+    : error
+/** Free pages one step of giving space back moves (16 MiB of 4 KiB pages). */
+const RECLAIM_STEP_PAGES = 4096
+/** The code of an error, for a log line. */
+const codeOf = (error: unknown): string =>
+  error instanceof NetError
+    ? error.code
+    : typeof (error as { code?: unknown })?.code === 'string'
+      ? String((error as { code: string }).code)
+      : error instanceof Error
+        ? error.name
+        : 'internal'
 /** Trusted local caller journal. A sent mutation is never resubmitted by recovery. */
 export class BridgeHub {
   private readonly clock: Clock
@@ -240,6 +290,10 @@ export class BridgeHub {
   /** Copies to drop records from, each up to the start of its newest complete snapshot; one step at a time. */
   private readonly drops = new Map<StreamId, SnapshotStart>()
   private dropping?: Promise<void>
+  /** The work on copies that is failing now, each said once in the log until it works again. */
+  private readonly failing = new Set<string>()
+  /** The computer each copy in `drops` is of, for the log. */
+  private readonly dropNodes = new Map<StreamId, NodeId>()
   constructor(readonly options: BridgeHubOptions) {
     this.clock = options.clock ?? systemClock
     for (const [key, maximum] of [
@@ -1061,7 +1115,7 @@ export class BridgeHub {
       existing.listeners.add(listener)
       notifyCatchUp(listener, false)
       try {
-        await this.rebuild({
+        await this.rebuildCopy({
           ...existing,
           projection: new ThreadDisplayProjection(ref.entityId, projectionTypes(options)),
           listeners: new Set([listener])
@@ -1161,7 +1215,7 @@ export class BridgeHub {
       this.attachments.set(key, attachment)
       try {
         notifyCatchUp(listener, false)
-        await this.rebuild(attachment)
+        await this.rebuildCopy(attachment)
         if (attachment.stopped) return fail('cancelled')
         attachment.subscription = session.subscribe(descriptor.id, {
           onRecord: (record) => this.enqueue(attachment, record),
@@ -1181,7 +1235,7 @@ export class BridgeHub {
                 for (const each of attachment.listeners) notifyCatchUp(each, false)
                 return this.rebuild(attachment)
               })
-              .catch((e) => this.attachmentError(attachment, e))
+              .catch((e) => this.attachmentError(attachment, copyError(e)))
           },
           onError: (code) => {
             if (
@@ -1244,17 +1298,21 @@ export class BridgeHub {
     if (!this.options.store.getStream(descriptor.id)) return false
     const projection = new ThreadDisplayProjection(ref.entityId, projectionTypes(options))
     const reader = this.openFromSnapshot(descriptor.id),
-      reading = this.reading()
+      reading = this.reading(),
+      cut = cutOffSnapshot()
     try {
       for (;;) {
         const page = reader.next(1024 * 1024, 64)
         for (const record of page.records) {
+          if (cut.skip(record)) continue
           const value = projection.accept(this.checkRecord(record, descriptor, reading))
+          cut.saw(value)
           if (value) update(value)
         }
         if (page.done) break
         await new Promise<void>((resolve) => setImmediate(resolve))
       }
+      this.passedOver(descriptor, cut.finish())
     } finally {
       reader.close()
     }
@@ -1461,19 +1519,37 @@ export class BridgeHub {
     if (!this.options.store.dropBefore || this.stopped || start.seq <= 1) return
     if (descriptor.authority === this.options.identity.self()?.node) return
     this.drops.set(descriptor.id, { ...start })
+    this.dropNodes.set(descriptor.id, descriptor.authority)
     if (this.dropping) return
     const run = (async () => {
       const { dropBatchRows, dropBatchBytes, dropPauseMs } = copyLimits()
-      while (this.drops.size && !this.stopped) {
-        const [stream, keep] = this.drops.entries().next().value!
-        let dropped = 0
-        try {
-          dropped = this.options.store.dropBefore!(stream, keep, { rows: dropBatchRows, bytes: dropBatchBytes })
-        } catch {
-          // The stream is gone, or writes are suspended: the next snapshot of it tries again.
+      // Drops that come while the space is given back are taken in the next round.
+      for (let round = true; round; round = this.drops.size > 0 && !this.stopped) {
+        while (this.drops.size && !this.stopped) {
+          const [stream, keep] = this.drops.entries().next().value!
+          let dropped = 0
+          try {
+            dropped = this.options.store.dropBefore!(stream, keep, {
+              rows: dropBatchRows,
+              bytes: dropBatchBytes
+            })
+            this.worked(`drop ${stream}`)
+          } catch (error) {
+            // The stream is gone, or writes are suspended: the next snapshot of it tries again.
+            this.failed(`drop ${stream}`, 'a copy could not drop the records before its snapshot', {
+              node: this.dropNodes.get(stream),
+              stream,
+              code: codeOf(error)
+            })
+          }
+          if (!dropped && this.drops.get(stream) === keep) {
+            this.drops.delete(stream)
+            this.dropNodes.delete(stream)
+          }
+          await pause(dropPauseMs)
         }
-        if (!dropped && this.drops.get(stream) === keep) this.drops.delete(stream)
-        await pause(dropPauseMs)
+        // What the drops freed goes back to the file system.
+        await this.reclaim()
       }
     })().finally(() => {
       this.cleanup.delete(run)
@@ -1500,7 +1576,10 @@ export class BridgeHub {
         let count = 0
         try {
           count = this.options.store.retireUnread({ rows: dropBatchRows, bytes: dropBatchBytes })
-        } catch {
+        } catch (error) {
+          this.failed('retire', 'the copies could not drop the records no read reaches', {
+            code: codeOf(error)
+          })
           break
         }
         if (!count) break
@@ -1508,8 +1587,9 @@ export class BridgeHub {
         await pause(dropPauseMs)
       }
     const rows = this.options.db.database
-      .prepare('SELECT entity,descriptor FROM net_bridge_hub_threads')
-      .all() as Array<{ entity: string; descriptor: string }>
+      .prepare('SELECT target,entity,descriptor FROM net_bridge_hub_threads')
+      .all() as Array<{ target: string; entity: string; descriptor: string }>
+    let kept = 0
     for (const row of rows) {
       if (this.stopped) return removed
       try {
@@ -1520,14 +1600,165 @@ export class BridgeHub {
           row.entity.startsWith('private:') ? row.entity.slice('private:'.length) : row.entity
         )
         if (start) this.dropBefore(descriptor, start)
-      } catch {
+        else kept++
+        this.worked(`tidy ${row.target} ${row.entity}`)
+      } catch (error) {
         // A copy that cannot be checked now keeps everything.
+        kept++
+        this.failed(
+          `tidy ${row.target} ${row.entity}`,
+          'a copy could not be checked to be tidied',
+          {
+            node: row.target,
+            entity: row.entity,
+            code: codeOf(error)
+          }
+        )
       }
       await pause(dropPauseMs)
     }
     const before = this.dropping
     if (before) await before
+    await this.compact()
+    if (removed || kept)
+      console.info('[net] copies of other computers tidied', {
+        unreadRows: removed,
+        keptWhole: kept
+      })
     return removed
+  }
+  /**
+   * Gives what the copies freed back to the file system. Once, a database made before that was possible is set to do
+   * it, by a rewrite that waits until what it holds is small (`NetDatabase.rewriteToReclaim`); then free pages go a
+   * step at a time.
+   */
+  private async compact(): Promise<void> {
+    if (this.stopped) return
+    try {
+      const done = this.options.db.rewriteToReclaim()
+      if (done.outcome === 'rewritten')
+        console.info('[net] net.db now gives back the space it frees', {
+          inUseMiB: Math.round(done.inUseBytes / 2 ** 20),
+          freedMiB: Math.round(done.freeBytes / 2 ** 20)
+        })
+      else if (done.outcome === 'deferred')
+        this.failed('rewrite', 'net.db cannot give back its free space yet', {
+          reason: done.reason,
+          inUseMiB: Math.round(done.inUseBytes / 2 ** 20),
+          freeMiB: Math.round(done.freeBytes / 2 ** 20)
+        })
+      else this.worked('rewrite')
+    } catch (error) {
+      this.failed('rewrite', 'net.db could not be rewritten to give back its free space', {
+        code: codeOf(error)
+      })
+    }
+    await this.reclaim()
+  }
+  /** Free pages back to the file system, a step at a time, between other work. */
+  private async reclaim(): Promise<void> {
+    const { dropPauseMs } = copyLimits()
+    while (!this.stopped) {
+      let freed = 0
+      try {
+        freed = this.options.db.reclaim(RECLAIM_STEP_PAGES)
+        this.worked('reclaim')
+      } catch (error) {
+        this.failed('reclaim', 'net.db could not give back free space', { code: codeOf(error) })
+        return
+      }
+      if (!freed) return
+      await pause(dropPauseMs)
+    }
+  }
+  /** Says in the log, once a run for each stream, that a read passed over the start of a cut-off snapshot. */
+  private passedOver(descriptor: StreamDescriptor, records: number): void {
+    if (records)
+      this.failed(`cut ${descriptor.id}`, 'a copy began part-way through a snapshot: its first records were passed over', {
+        node: descriptor.authority,
+        stream: descriptor.id,
+        records
+      })
+  }
+  /** Says in the log, once until it works again, that work on the copies failed, with its error code. */
+  private failed(key: string, what: string, details: Record<string, unknown>): void {
+    if (this.failing.has(key)) return
+    this.failing.add(key)
+    console.warn(`[net] ${what}`, details)
+  }
+  private worked(key: string): void {
+    this.failing.delete(key)
+  }
+  /**
+   * Drops this computer's copy of another computer's private stream (`ref` with the `options` it is attached with):
+   * what the Bridge remembers of it, its binding to a pairing, and the stream with everything stored under it, a step
+   * at a time. The copy is only a cache of what that computer holds: the next attach reads it fresh. False when
+   * there was none.
+   */
+  async dropCopy(ref: BridgeEntityRef, options: HubAttachOptions): Promise<boolean> {
+    this.guard()
+    this.detach(ref, options)
+    const entity = this.attachmentEntity(ref, options)
+    const row = this.options.db.database
+      .prepare('SELECT descriptor FROM net_bridge_hub_threads WHERE target=? AND entity=?')
+      .get(ref.nodeId, entity)
+    if (!row) return false
+    const descriptor = JSON.parse(row.descriptor as string) as StreamDescriptor,
+      stream = descriptor.id
+    this.drops.delete(stream)
+    this.dropNodes.delete(stream)
+    // First, in one step, the copy is emptied: stopped part-way (a quit, a failed step), it is read afresh by the
+    // next attach rather than as whole from where it was cut, and what it held goes with the next tidy. The binding
+    // stays until the end, so a later drop still finds the stream.
+    const { dropBatchRows, dropBatchBytes, dropPauseMs } = copyLimits()
+    const database = this.options.db.database
+    if (database.prepare('SELECT 1 FROM net_streams WHERE id=?').get(stream))
+      this.options.store.resetCopy?.(stream)
+    const has = (table: string): boolean =>
+      !!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)
+    // Records first, a bounded step at a time: a copy may hold gigabytes.
+    for (;;) {
+      if (this.stopped) return fail('cancelled')
+      const count = this.options.db.transaction(() => {
+        const rows = database
+          .prepare(
+            'SELECT r.rowid AS rowid,length(r.envelope)+length(r.sig) AS bytes FROM net_records r JOIN net_generations g ON g.id=r.generation WHERE g.stream=? LIMIT ?'
+          )
+          .all(stream, dropBatchRows) as Array<{ rowid: number; bytes: number }>
+        let total = 0,
+          taken = 0
+        for (const each of rows) {
+          taken++
+          total += Number(each.bytes)
+          if (total >= dropBatchBytes) break
+        }
+        const ids = database
+          .prepare('SELECT rowid FROM net_event_ids WHERE stream=? LIMIT ?')
+          .all(stream, Math.max(0, dropBatchRows - taken)) as Array<{ rowid: number }>
+        this.options.db.charge(taken + ids.length)
+        for (const each of rows.slice(0, taken))
+          database.prepare('DELETE FROM net_records WHERE rowid=?').run(each.rowid)
+        for (const each of ids)
+          database.prepare('DELETE FROM net_event_ids WHERE rowid=?').run(each.rowid)
+        return taken + ids.length
+      })
+      if (!count) break
+      await pause(dropPauseMs)
+    }
+    this.options.db.transaction(() => {
+      this.options.db.charge(1)
+      database
+        .prepare('DELETE FROM net_bridge_hub_threads WHERE target=? AND entity=?')
+        .run(ref.nodeId, entity)
+      if (has('net_engine_streams'))
+        database.prepare('DELETE FROM net_engine_streams WHERE stream=?').run(stream)
+      database.prepare('DELETE FROM net_blob_refs WHERE stream=?').run(stream)
+      if (has('net_outbox')) database.prepare('DELETE FROM net_outbox WHERE stream=?').run(stream)
+      database.prepare('DELETE FROM net_generations WHERE stream=?').run(stream)
+      database.prepare('DELETE FROM net_streams WHERE id=?').run(stream)
+    })
+    await this.reclaim()
+    return true
   }
   /** The newest snapshot of a copy on disk, if every one of its records passes a display's checks. */
   private async checkedSnapshot(
@@ -1566,19 +1797,30 @@ export class BridgeHub {
     )
     return pending
   }
+  /** `rebuild` for an attach, with an error of the copy on disk said as one (`copyError`). */
+  private async rebuildCopy(attachment: Attachment): Promise<void> {
+    try {
+      await this.rebuild(attachment)
+    } catch (error) {
+      throw copyError(error)
+    }
+  }
   private async rebuildNow(attachment: Attachment): Promise<void> {
     attachment.projection.reset()
     attachment.begin = undefined
     const reader = this.openFromSnapshot(attachment.descriptor.id),
-      reading = this.reading()
+      reading = this.reading(),
+      cut = cutOffSnapshot()
     try {
       for (;;) {
         if (attachment.stopped || this.stopped) return
         const page = reader.next(1024 * 1024, 64)
-        for (const record of page.records) await this.display(attachment, record, reading)
+        for (const record of page.records)
+          if (!cut.skip(record)) cut.saw(await this.display(attachment, record, reading))
         if (page.done) break
         await new Promise<void>((resolve) => setImmediate(resolve))
       }
+      this.passedOver(attachment.descriptor, cut.finish())
     } finally {
       reader.close()
     }
@@ -1587,8 +1829,8 @@ export class BridgeHub {
     attachment: Attachment,
     record: StoredRecord,
     reading?: () => { user: string }
-  ): Promise<void> {
-    if (attachment.stopped || this.stopped) return
+  ): Promise<ThreadDisplayUpdate | undefined> {
+    if (attachment.stopped || this.stopped) return undefined
     const envelope = this.checkRecord(record, attachment.descriptor, reading)
     const value = attachment.projection.accept(envelope)
     if (envelope.type === 'thread.snapshot.begin')
@@ -1614,6 +1856,7 @@ export class BridgeHub {
         }
       }
     }
+    return value
   }
   private enqueue(attachment: Attachment, record: StoredRecord): void {
     const bytes = record.envelope.length + record.sig.length
@@ -1624,7 +1867,9 @@ export class BridgeHub {
     attachment.queued++
     attachment.bytes += bytes
     attachment.pending = attachment.pending
-      .then(() => this.display(attachment, record))
+      .then(async () => {
+        await this.display(attachment, record)
+      })
       .catch((error) => this.attachmentError(attachment, error))
       .finally(() => {
         attachment.queued--
@@ -1664,6 +1909,7 @@ export class BridgeHub {
     this.stopped = true
     this.offRoster()
     this.drops.clear()
+    this.dropNodes.clear()
     this.inputs.close()
     this.ownerAttachments.clear()
     for (const pending of this.ownerPending.values()) pending.cancelled = true
