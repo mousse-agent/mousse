@@ -19,6 +19,7 @@ import {
   summarizeCheckRollup
 } from '../src/mms/git/GitHubCodeHost'
 import { createGhFallbackRunner, type ExecutableRunner } from '../src/mms/git/GitHubService'
+import { ghFallbackPaths } from '../src/mms/git/ghRunner'
 import { parsePullRequestReference, pullRequestIdentityKey, pullRequestReferenceMismatch } from '../src/shared/pullRequests'
 import { FakeGh, ghFailure, stamp } from './fakeGh'
 
@@ -727,13 +728,16 @@ describe('createGhFallbackRunner', () => {
     expect(base.mock.calls.map((call) => call[0])).toEqual(['/usr/local/bin/gh'])
   })
 
-  it('rethrows the original error when no fallback exists, and skips fallbacks on Windows or for other commands', async () => {
+  it('rethrows the original error when no fallback exists, tries the GitHub CLI install folders on Windows, and skips fallbacks for other commands', async () => {
     const base = vi.fn<ExecutableRunner>(async () => { throw enoent() })
     await expect(createGhFallbackRunner(base, 'darwin')('gh', [])).rejects.toMatchObject({ code: 'ENOENT' })
     base.mockClear()
     await expect(createGhFallbackRunner(base, 'win32')('gh', [])).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(createGhFallbackRunner(base, 'darwin')('git', [])).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(base.mock.calls.map((call) => call[0])).toEqual(['gh', 'git'])
+    const windows = ghFallbackPaths('win32')
+    expect(windows.length).toBeGreaterThan(0)
+    expect(windows.every((path) => path.endsWith('\\GitHub CLI\\gh.exe'))).toBe(true)
+    expect(base.mock.calls.map((call) => call[0])).toEqual(['gh', ...windows, 'git'])
   })
 
   it('does not retry when gh runs but fails', async () => {
