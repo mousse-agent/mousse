@@ -2195,9 +2195,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       total += text.length
       blocks.push({ row: other, text })
     }
+    // The related-jobs lines and the breaks between notices count too: the notices that no longer fit with them wait
+    // for the next turn, as those past the cap above do.
+    let text = this.withRelatedJobs(row.botId, blocks)
+    while (text.length > NOTICE_BATCH_MAX_CHARS && blocks.length > (kind ? 1 : 0)) {
+      blocks.pop()
+      this.noticeOverflow.add(`${row.botId}:${want}`)
+      text = this.withRelatedJobs(row.botId, blocks)
+    }
     const merged = blocks.filter((block) => block.row.id !== row.id).map((block) => block.row.id)
     if (!kind && !merged.length) return undefined
-    const text = this.withRelatedJobs(row.botId, blocks)
     return kind ? { input: text, merged } : { input: row.trigger.input, after: `${OWNER_TURN_NOTICES_HEADING}\n\n${text}`, merged }
   }
 
@@ -2217,19 +2224,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const [index, job] of told) if (job.activationId) roots.set(index, this.jobRoot(job.activationId, memo))
     const toldIds = new Set([...told.values()].map((job) => job.id))
     const open = this.store.openJobsOf(botId).filter((job) => job.activationId && !toldIds.has(job.id))
-    // The bot's own work that has not ended goes on for its request too (a `work_start` run beside the chat).
-    const work = this.store.laneActivations(botId, 'run', NOT_ENDED)
-      .flatMap((row) => row.trigger.kind === 'work' && row.trigger.title.trim() ? [{ id: row.id, title: row.trigger.title.trim() }] : [])
+    // The bot's own work that goes on goes on for its request too (a `work_start` run beside the chat), as `work_list`
+    // lists it (`standingWork`): never work that stopped and can't go on. Work that waits for the owner says so.
+    const work = this.standingWork(botId)
+      .flatMap((row) => row.trigger.kind === 'work' && row.trigger.title.trim() ? [{ id: row.id, title: row.trigger.title.trim(), waitsForOwner: workWaits(row) && Boolean(workWaitRule(row)?.waitsOnOwner(row, this.workWaitLookups)) }] : [])
     const last = new Map<string, number>()
     for (const [index, root] of roots) last.set(root, index)
     return blocks.map((block, index) => {
       const root = roots.get(index)
       if (root === undefined || last.get(root) !== index) return block.text
-      const titles = [
+      const related = [
         ...open.filter((job) => this.jobRoot(job.activationId, memo) === root).map((job) => job.title),
-        ...work.filter((run) => this.jobRoot(run.id, memo) === root).map((run) => run.title)
+        ...work.filter((run) => this.jobRoot(run.id, memo) === root).map((run) => ({ title: run.title, waitsForOwner: run.waitsForOwner }))
       ]
-      return `${block.text}\n${relatedJobsLine(titles)}`
+      return `${block.text}\n${relatedJobsLine(related)}`
     }).join('\n\n')
   }
 
@@ -8955,8 +8963,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** `work_list`: what runs or waits in the run lane now (work and scheduled runs), and the last few that ended. */
   listWork(botId: string): BotWorkList {
-    // Work that waits to go on is listed too: held while it waits for the owner, waiting its turn once allowed.
-    const now = this.store.laneActivations(botId, 'run', ['running', 'waiting_grant', 'queued', 'paused', 'blocked']).filter((row) => row.status !== 'blocked' || workWaits(row)).sort(workOrder).map((row) => {
+    const now = this.standingWork(botId).sort(workOrder).map((row) => {
       const chip = this.liveChips.get(row.id)?.chip
       const line = workWaitLine(row, this.workWaitLookups)
       const status = line.status
@@ -8985,6 +8992,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return [{ workId: row.id, title: this.workTitle(row), status: row.status === 'done' ? 'done' as const : row.status === 'failed' ? 'failed' as const : 'stopped' as const, endedAt: row.endedAt ?? row.createdAt, ...(report ? { report } : {}) }]
     })
     return { now, recent }
+  }
+
+  /**
+   * The bot's work that goes on, as `work_list` lists it: what runs or waits its turn, and work that waits to go on (held
+   * while it waits for the owner, waiting its turn once allowed). Blocked work with nothing to wait for (its grant
+   * revoked, say) can't go on by itself, and is not listed.
+   */
+  private standingWork(botId: string): BotActivationRow[] {
+    return this.store.laneActivations(botId, 'run', ['running', 'waiting_grant', 'queued', 'paused', 'blocked']).filter((row) => row.status !== 'blocked' || workWaits(row))
   }
 
   /** `work_stop` (and the work line's Stop): one run of this bot ends; the chat is never stopped this way. */

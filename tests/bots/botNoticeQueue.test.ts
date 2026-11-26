@@ -327,4 +327,60 @@ describe('the related-jobs line', () => {
     await threadEnds('t2', 'Fixed B.')
     expect(related(noticeOf(jobIds[1]!).id)).toBe('Nothing else for that request is still going.')
   })
+
+  it('names only work that goes on, as work_list lists it: never work stopped for good, and work held for the owner says so', async () => {
+    f.host.noticeSettleMs = 0
+    const related = (id: string) => prompt(id).split('\n').find((line) => /^(Still going|Nothing else)/.test(line))
+    await f.bots.service.chatSend({ botId, text: 'Fix pages A, B and C, compare prices and book the trip', clientRequestId: 'm1' })
+    const turn = running()[0]!
+    const { payload } = await start(f, turn.id)
+    const jobIds = ['Page A', 'Page B', 'Page C'].map((title, index) => {
+      threads.set(`t${index + 1}`, { status: 'running', title })
+      return f.bots.openJob(botId, turn.id, { threadId: `t${index + 1}`, title, sent: title }).jobId
+    })
+    const prices = (await f.bots.tools.work.start(botId, turn.id, { title: 'Compare prices', brief: 'Compare prices.', key: 'm1:prices' })).workId
+    const trip = (await f.bots.tools.work.start(botId, turn.id, { title: 'Book the trip', brief: 'Book the trip.', key: 'm1:trip' })).workId
+    await finish(f, payload, 'completed', { text: 'On it.' })
+    // Its permissions changed: it stopped and can't go on by itself (work_list leaves it out). The trip waits on the owner's answer.
+    expect(f.store.moveActivation(prices, ['queued', 'running'], 'blocked', { endReason: 'bot_grant_revoked' })).toBe(true)
+    expect(f.store.moveActivation(trip, ['queued', 'running'], 'blocked', { endReason: 'question' })).toBe(true)
+    expect(f.bots.tools.work.list(botId).now.map((work) => work.title)).toEqual(['Book the trip'])
+
+    await threadEnds('t1', 'Fixed A.')
+    const line = related(noticeOf(jobIds[0]!).id)!
+    expect(line).toContain('"Page B"')
+    expect(line).toContain('"Book the trip" (waits for the owner)')
+    expect(line).not.toContain('Compare prices')
+    expect(line).not.toMatch(/"Page B" \(waits/)
+  })
+
+  it('a batch near the cap with many related jobs stays within it: the notices that no longer fit wait for the next turn', async () => {
+    // Each request: one thread that ends with a long answer, and nine others still at work, with long titles.
+    const report = (r: number) => `Report ${r}: ${'the detail of what changed and why. '.repeat(110)}`.slice(0, 3_900)
+    expect(report(0).length).toBeGreaterThan(2_000)
+    expect(report(0).length).toBeLessThanOrEqual(4_000)
+    const requests: Array<{ turn: string; jobIds: string[] }> = []
+    for (let r = 0; r < 5; r += 1) requests.push(await handOff(Array.from({ length: 10 }, (_, j) => ({ threadId: `t${r}-${j}`, title: `Task ${r}-${j}: ${'a long description of the part to fix '.repeat(4)}` })), `m${r}`))
+    for (let r = 0; r < 5; r += 1) {
+      await threadEnds(`t${r}-0`, report(r))
+      f.clock.now += 500
+    }
+    await fireSettle()
+    const [leader] = running()
+    const text = prompt(leader!.id)
+    expect(text.length).toBeLessThanOrEqual(24_000)
+    expect(text.length).toBeLessThanOrEqual(NOTICE_BATCH_MAX_CHARS)
+    // Each answer the batch holds is whole, past the old 2,000-character cap, with its request's line after it, bounded.
+    expect(text).toContain(report(0))
+    const lines = text.split('\n').filter((line) => line.startsWith('Still going for the same request: '))
+    expect(lines.length).toBeGreaterThan(0)
+    for (const line of lines) {
+      expect(line).toMatch(/, and 1 more\.$/)
+      expect(line.match(/"Task /g)).toHaveLength(8)
+    }
+    // What did not fit waits, untouched, and starts the next turn.
+    const held = requests.flatMap((request, r) => text.includes(report(r)) ? [] : [noticeOf(request.jobIds[0]!).id])
+    expect(held.length).toBeGreaterThan(0)
+    for (const id of held) expect(row(id).status).toBe('queued')
+  })
 })

@@ -179,14 +179,26 @@ export function jobNoticeInput(job: BotJob, seen: { result?: string; asks?: read
   return notice({ kind: 'job_update', reply: 'if-needed', ref: job.threadId }, parts)
 }
 
+/** One job or piece of work the related-jobs line names: its title, and whether it waits for the owner to go on. */
+export interface RelatedJob {
+  readonly title: string
+  readonly waitsForOwner?: boolean
+}
+
+/** Most jobs the related-jobs line names by title; the rest are counted. */
+export const RELATED_JOBS_SHOWN = 8
+
 /**
  * The line a batch of notices gets after a request's job notices (`BotEngine.noticeBatchInTx`): which other threads
- * that request started still work or wait, by title, or that none does. No count: the bot judges whether it is done.
+ * and work that request started still work or wait, by title (the first `RELATED_JOBS_SHOWN`, then how many more), work
+ * that waits for the owner marked so, or that none does. No count of what ended: the bot judges whether it is done.
  */
-export function relatedJobsLine(titles: readonly string[]): string {
-  return titles.length
-    ? `Still going for the same request: ${titles.map((title) => `"${defuse(jobLine(title, 80).replace(/"/g, "'"))}"`).join(', ')}.`
-    : 'Nothing else for that request is still going.'
+export function relatedJobsLine(jobs: ReadonlyArray<string | RelatedJob>): string {
+  if (!jobs.length) return 'Nothing else for that request is still going.'
+  const named = jobs.slice(0, RELATED_JOBS_SHOWN).map((job) => typeof job === 'string' ? { title: job } : job)
+  const more = jobs.length - named.length
+  const titles = named.map((job) => `"${defuse(jobLine(job.title, 80).replace(/"/g, "'"))}"${job.waitsForOwner ? ' (waits for the owner)' : ''}`)
+  return `Still going for the same request: ${titles.join(', ')}${more ? `, and ${more} more` : ''}.`
 }
 
 /**
