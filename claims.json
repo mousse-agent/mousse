@@ -103,6 +103,20 @@
       "expiresAt": "2026-11-26T10:43:48.333Z"
     },
     {
+      "task": "lan-first-paths",
+      "session": "Avarnics-Mac-mini.local-8600b4",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "mousse/1c08161d",
+      "paths": [
+        "src/renderer/components/netEngine/engineRows.ts",
+        "src/mms/netEngine/NetEngineService.ts",
+        "src/shared/netEngine/local.ts",
+        "native/net-helper/ENGINE_COMMIT"
+      ],
+      "claimedAt": "2026-11-26T09:23:17.394Z",
+      "expiresAt": "2026-11-26T11:23:17.394Z"
+    },
+    {
       "task": "lists-attach-retention",
       "session": "Avarnics-Mac-mini.local-28e6be",
       "machine": "Avarnics-Mac-mini.local",
