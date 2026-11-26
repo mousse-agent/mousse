@@ -21,8 +21,8 @@ export function isThreadStarted(thread: { startedAt?: string; name?: string }): 
 /**
  * Return the newest empty draft for a sidebar context. New-chat actions reuse
  * this hidden thread so its composer draft and per-thread model survive while
- * the user visits another thread or project. Without a project, an empty thread on another computer is not
- * one of them: a new chat starts on this computer unless the person picks another.
+ * the user visits another thread or project. Only this computer's own drafts (rows without `node`) count: an empty
+ * thread listed from another computer is someone's draft there, so a new chat, in a project there too, starts fresh.
  */
 export function findUnstartedThread<T extends {
   projectId?: string
@@ -36,7 +36,7 @@ export function findUnstartedThread<T extends {
     .filter(
       (thread) =>
         !thread.archivedAt &&
-        (projectId !== undefined || !thread.node) &&
+        !thread.node &&
         thread.projectId === projectId &&
         !isThreadStarted(thread)
     )

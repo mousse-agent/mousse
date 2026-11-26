@@ -1,4 +1,4 @@
-import { ROUTED_AGENT_KEY, ROUTED_AGENT_READ, ROUTED_RUN_WAIT_DEADLINE_MS, ROUTED_RUN_WAIT_MAX_MS, type RoutedAgentMark } from '../../shared/bridge/routed'
+import { ROUTED_AGENT_ARCHIVE_SINCE, ROUTED_AGENT_KEY, ROUTED_AGENT_READ, ROUTED_RUN_WAIT_DEADLINE_MS, ROUTED_RUN_WAIT_MAX_MS, type RoutedAgentMark } from '../../shared/bridge/routed'
 import { outgoingMessageText, qualifyRoutedResult, ROUTED_THREAD_ID_KEYS } from '../../shared/bridge/routedIds'
 import { parseQualifiedId, qualifyId } from '../../shared/threadRef'
 import { DomainRpcError } from '../protocol/domainRegistry'
@@ -12,7 +12,7 @@ import { archivedAtOf } from '../../shared/archivedAt'
 
 /**
  * The thread tools on a thread of another of the user's computers (issue #1160): `thread_read`, `thread_wait`,
- * `thread_send`, `thread_steer` and `thread_interrupt` with a qualified id (`<node>:<id>`), `thread_list` and
+ * `thread_send`, `thread_steer`, `thread_interrupt` and `thread_archive` with a qualified id (`<node>:<id>`), `thread_list` and
  * `thread_search` with `computer`, and the Stop a person's Stop (or the deletion or expiry) of a launcher sends there.
  *
  * - **Which threads.** `reach` is the one place that decides. A thread `remote_launches` records as launched by the
@@ -605,6 +605,44 @@ export class RemoteLaunchedThreads {
       ...(typeof stopped.runId === 'string' ? { runId: stopped.runId } : runId ? { runId } : {}),
       ...(typeof stopped.left === 'string' ? { left: stopped.left } : {})
     }
+  }
+
+  /**
+   * `thread_archive` there: a marked `threads.archive` (`ROUTED_AGENT_ARCHIVE_SINCE`), for a thread there by its qualified
+   * id or for a subagent's thread there when its stand-in here is archived (`own`). That computer decides it by the reach
+   * its person gave this one, and, as here, refuses to archive a thread that still works (`thread_running`). A computer
+   * from before the marked archive is refused here as outdated, before anything is sent: an agent's archive is never sent
+   * as a person's. One `idem` per request, so a retry never acts twice there; a call the link dropped is `uncertain`.
+   */
+  async archive(
+    target: Pick<RemoteTarget, 'node' | 'computer' | 'remoteThreadId' | 'threadId' | 'record'>,
+    archived: boolean,
+    options: { idem: string; mark: RoutedAgentMark; own?: boolean }
+  ): Promise<{ status: 'done'; archived: boolean; changed: boolean } | RemoteUncertain> {
+    // As a Stop: an agent may always tidy away its own work there (a thread it launched, its subagent's); any other
+    // thread there only while it may work there.
+    if (!target.record && !options.own) this.assertAllowed(target as RemoteTarget)
+    const what = archived ? 'the archive' : 'the unarchive'
+    let result: unknown
+    try {
+      const port = this.deps.port()
+      if (port?.versions) {
+        const versions = await this.reachVersions(target)
+        if ((versions?.['threads.archive'] ?? 0) < ROUTED_AGENT_ARCHIVE_SINCE)
+          throw new RemoteThreadRefusal('computer_outdated', `Update Mousse on ${target.computer}: it is too old to ${archived ? 'archive' : 'unarchive'} a thread for an agent on this computer, so nothing was changed there or here.`, target.computer)
+      }
+      result = (await this.call(target, 'threads.archive', { threadId: target.remoteThreadId, archived, [ROUTED_AGENT_KEY]: options.mark }, { idem: options.idem, what })).result
+    } catch (error) {
+      if (error instanceof RemoteThreadRefusal) throw error
+      const code = codeOf(error)
+      if (code === 'outcome_uncertain' || code === 'cancelled')
+        return { status: 'uncertain', computer: target.computer, message: `${target.computer} has not confirmed ${what} of ${target.threadId}, so nothing was changed here. Call thread_archive again with the same clientRequestId to learn what became of it; it never acts twice there.` }
+      if (code === 'thread_running')
+        throw new RemoteThreadRefusal('thread_running', `Thread ${target.threadId} on ${target.computer} is still working, so it was not archived there or here. If the user wants it archived anyway, stop it first with thread_interrupt, then archive it with a new clientRequestId (that computer keeps this answer under the old one).`, target.computer)
+      throw remoteReachRefusal(error, target.computer, what)
+    }
+    const done = isRecord(result) ? result : {}
+    return { status: 'done', archived, changed: done.changed !== false }
   }
 
   // ------------------------------------------------------------------ listing and searching

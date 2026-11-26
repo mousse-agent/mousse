@@ -61,7 +61,6 @@
     "tests/net/spaces/host/process.test.ts",
     "tests/net/spaces/private/tls.test.ts",
     "tests/net/store/crash.test.ts",
-    "tests/net/store/compactionOutOfRoom.test.ts",
     "tests/platformAgentProductionExecution.test.ts",
     "tests/platformBrowserConnectionCommands.test.ts",
     "tests/platformBrowserDaemonComposition.test.ts",
@@ -172,6 +171,7 @@
     "tests/renderer/profile-footer-electron.test.ts",
     "tests/renderer/profileReady-startup-electron.test.ts",
     "tests/renderer/storage-settings-electron.test.ts",
+    "tests/renderer/thread-open-blank-electron.test.ts",
     "tests/renderer/turn-window-electron.test.ts",
     "tests/resourceLifecycleFullShell.test.ts",
     "tests/threadBrowsers.test.ts"

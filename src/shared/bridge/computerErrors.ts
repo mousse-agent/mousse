@@ -35,3 +35,24 @@ export function outdatedComputerName(error: unknown): string | undefined {
   const line = message.replace(/^Error invoking remote method '[^']*':\s*/, '').replace(/^(?:Error|GitError):\s*/i, '').trim()
   return OUTDATED_MESSAGE.exec(line)?.[1]
 }
+
+/**
+ * The codes of a read of a thread on another computer that asking again at once will not change: the computer is
+ * offline, not answering or too slow, or it refuses this computer until something changes there. A window waits for
+ * that computer (or a while) before it reads such a thread again.
+ */
+const COMPUTER_WAIT_CODES: ReadonlySet<string> = new Set([
+  'computer_offline',
+  'computer_unreachable',
+  'computer_slow',
+  'computer_outdated',
+  'computer_forbidden',
+  'computer_not_shared',
+  'computer_not_allowed',
+  'not_available_remotely'
+])
+
+export function waitsForComputer(error: unknown): boolean {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+  return typeof code === 'string' && COMPUTER_WAIT_CODES.has(code)
+}

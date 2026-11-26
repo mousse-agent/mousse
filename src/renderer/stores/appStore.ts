@@ -283,6 +283,8 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
     if (
       left.id !== right.id ||
       left.name !== right.name ||
+      // A provisional title becomes `auto` without a new name or `updatedAt`, and its row stops being dimmed.
+      left.titleSource !== right.titleSource ||
       left.projectId !== right.projectId ||
       left.updatedAt !== right.updatedAt ||
       left.order !== right.order ||

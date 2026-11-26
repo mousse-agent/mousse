@@ -359,6 +359,7 @@ function groupFamilies(providerId: string, models: LlmModelOption[]): ModelFamil
   }
 
   return [...byFamily.entries()]
+    .flatMap(splitByAlias)
     .map(([familyLabel, variants]) => {
       const contexts = uniqueSorted(variants.map((variant) => variant.context))
       const efforts = uniqueEfforts([
@@ -393,6 +394,26 @@ function groupFamilies(providerId: string, models: LlmModelOption[]): ModelFamil
     })
     .sort((a, b) => b.score - a.score || newestFirstCollator.compare(b.key, a.key))
     .map(({ family }) => family)
+}
+
+/**
+ * A family whose models each carry a different name in brackets, and that no context, level or speed tells apart
+ * ("Orchestrator (Neon)", "Orchestrator (Carbon)"), is several models, not one. Each keeps its bracketed name as a
+ * family of its own, so every one stays selectable. A bracketed nickname beside the plain name ("Fable 5" and
+ * "Fable 5 (fable)") is the same model and stays in its family.
+ */
+function splitByAlias([familyLabel, variants]: [string, ParsedModelVariant[]]): Array<[string, ParsedModelVariant[]]> {
+  if (variants.length < 2 || variants.some((variant) => !variant.alias)) return [[familyLabel, variants]]
+  const aliases = new Set(variants.map((variant) => variant.alias!))
+  if (aliases.size < 2) return [[familyLabel, variants]]
+  const choiceOf = (variant: ParsedModelVariant) => `${variant.context ?? ''}|${variant.effort ?? ''}|${variant.speed}`
+  if (new Set(variants.map(choiceOf)).size === variants.length) return [[familyLabel, variants]]
+  const split = new Map<string, ParsedModelVariant[]>()
+  for (const variant of variants) {
+    const label = `${familyLabel} (${variant.alias})`
+    split.set(label, [...(split.get(label) ?? []), variant])
+  }
+  return [...split.entries()]
 }
 
 export function groupFamiliesByBrand(families: ModelFamily[]): ModelBrandSection[] {
@@ -448,8 +469,7 @@ export function findModelFamily(
         family.variants.some((variant) => variant.id === baseId)
     )
   }
-  const { familyLabel } = parseModelVariant(parsed)
-  return groupModelsByFamily(providerId, models).find((family) => family.familyLabel === familyLabel)
+  return groupModelsByFamily(providerId, models).find((family) => family.variants.some((variant) => variant.id === parsed.id))
 }
 
 function withEffortSuffix(variant: ParsedModelVariant, effort: string): ParsedModelVariant {

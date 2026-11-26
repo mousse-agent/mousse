@@ -12,6 +12,7 @@ import { deliverBotResults, withoutBotParentRows, type BotExecutionPort } from '
 import { RemoteLaunchRecords } from './delegation/remoteLaunches'
 import { RemoteSubagentRecords } from './delegation/remoteSubagents'
 import { RemoteExpiryRecords } from './delegation/remoteExpiry'
+import { RemoteArchiveRecords } from './delegation/remoteArchive'
 import { RunTimeLimitRecords } from './runTimeLimits'
 import { Delegations } from './Delegations'
 import { EffectOutbox } from './EffectOutbox'
@@ -526,6 +527,7 @@ export class RunEngine extends EventEmitter {
   /** The expiry each remote subagent's thread there must have (
 emote_expiry). */
   readonly remoteExpiry: RemoteExpiryRecords
+  readonly remoteArchive: RemoteArchiveRecords
   /** Running-time limits of runs on this computer (
 un_time_limits). */
   readonly runTimeLimits: RunTimeLimitRecords
@@ -572,6 +574,7 @@ un_time_limits). */
     this.delegations = new Delegations(opts.store, this.inbox)
     this.remoteSubagents = new RemoteSubagentRecords(opts.store)
     this.remoteExpiry = new RemoteExpiryRecords(opts.store)
+    this.remoteArchive = new RemoteArchiveRecords(opts.store)
     this.runTimeLimits = new RunTimeLimitRecords(opts.store)
     this.remoteLaunches = new RemoteLaunchRecords(opts.store)
     this.approvals = new ThreadApprovals(opts.store, { outbox: this.outbox, lineage: (threadId) => this.delegations.getLineage(threadId) })

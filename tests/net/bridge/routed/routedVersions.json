@@ -149,6 +149,11 @@
     "digest": "deeb1b534049ea69",
     "security": "4ad9001de2441ed0"
   },
+  "folders.browse": {
+    "version": 1,
+    "digest": "aaf24dee1b2f1da7",
+    "security": "b7307faace33096b"
+  },
   "git.abortInProgress": {
     "version": 1,
     "digest": "52d0d38816c25d26",
@@ -403,6 +408,106 @@
     "version": 1,
     "digest": "10c6fd7389bbd96b",
     "security": "de3ef6c62fff7e7d"
+  },
+  "providers.catalog.addOptions": {
+    "version": 1,
+    "digest": "e1b2634dfa7c5469",
+    "security": "2455464eaace895f"
+  },
+  "providers.events": {
+    "version": 1,
+    "digest": "beb677bdc7607756",
+    "security": "2455464eaace895f"
+  },
+  "providers.instances.add": {
+    "version": 1,
+    "digest": "3b66affe3ee20f84",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.allowKnownProblem": {
+    "version": 1,
+    "digest": "c00cdccf760b0f8a",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.cancelInstall": {
+    "version": 1,
+    "digest": "08bb84fe4d7736d0",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.configure": {
+    "version": 1,
+    "digest": "f952ed7ea788601d",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.install": {
+    "version": 1,
+    "digest": "f0782cac7656bdc6",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.recheck": {
+    "version": 1,
+    "digest": "f0782cac7656bdc6",
+    "security": "2455464eaace895f"
+  },
+  "providers.instances.refreshAllModels": {
+    "version": 1,
+    "digest": "e1b2634dfa7c5469",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.refreshModels": {
+    "version": 1,
+    "digest": "f0782cac7656bdc6",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.remove": {
+    "version": 1,
+    "digest": "f0782cac7656bdc6",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.removeInstall": {
+    "version": 1,
+    "digest": "0b2442e8d9ed5077",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.respondSignIn": {
+    "version": 1,
+    "digest": "80229e01b8f43bb8",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.setEnabled": {
+    "version": 1,
+    "digest": "79d6986365a266e6",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.setModelPrefs": {
+    "version": 1,
+    "digest": "f952ed7ea788601d",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.setSecret": {
+    "version": 1,
+    "digest": "82c4011f6bf674ec",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.signIn": {
+    "version": 1,
+    "digest": "3e6b2a0fe196a9e7",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.signOut": {
+    "version": 1,
+    "digest": "f0782cac7656bdc6",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.instances.update": {
+    "version": 1,
+    "digest": "f0782cac7656bdc6",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.registry.search": {
+    "version": 1,
+    "digest": "aec28b608406bb6a",
+    "security": "2455464eaace895f"
   },
   "providers.snapshots": {
     "version": 1,
@@ -674,6 +779,31 @@
     "digest": "5539dc1c60cdd943",
     "security": "2455464eaace895f"
   },
+  "sourceControl.cancel": {
+    "version": 1,
+    "digest": "a4b10ec84d73c4fe",
+    "security": "f6de1278fc74cc34"
+  },
+  "sourceControl.clone": {
+    "version": 1,
+    "digest": "1f9db127db196a15",
+    "security": "d75e0295e334e6db"
+  },
+  "sourceControl.connect": {
+    "version": 1,
+    "digest": "a4b10ec84d73c4fe",
+    "security": "f6de1278fc74cc34"
+  },
+  "sourceControl.repositories": {
+    "version": 1,
+    "digest": "d0865932a35a7c91",
+    "security": "412a1de3adf5afef"
+  },
+  "sourceControl.status": {
+    "version": 1,
+    "digest": "0ef81b69315c1e70",
+    "security": "412a1de3adf5afef"
+  },
   "subagents.list": {
     "version": 1,
     "digest": "2a27f073e7829290",
@@ -740,8 +870,8 @@
     "security": "04f7c680ffd36337"
   },
   "threads.archive": {
-    "version": 1,
-    "digest": "58cd3663c031c258",
+    "version": 2,
+    "digest": "9d09de715d1c881b",
     "security": "ceacd93869361a7a"
   },
   "threads.backgroundWork": {
@@ -765,8 +895,8 @@
     "security": "926c4af141d1208d"
   },
   "threads.create": {
-    "version": 2,
-    "digest": "b1ae8b79e2d13bc9",
+    "version": 3,
+    "digest": "f23a83dee2f959d6",
     "security": "38223490f704a80a"
   },
   "threads.delete": {

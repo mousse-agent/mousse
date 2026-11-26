@@ -397,7 +397,8 @@ const shown = (text: string): { address: string; full?: string } =>
  */
 export function deviceRoutes(device: NetEngineDevice): DeviceRoute[] {
   const routes: DeviceRoute[] = []
-  if (device.direction !== 'out' && device.source !== 'ssh')
+  // This computer looks for it on the same network whenever it dials it, one way or both, added over SSH or not.
+  if (device.direction !== 'in')
     routes.push({ key: 'local', cls: 'lan', address: 'Found automatically', state: 'available' })
   for (const address of device.addresses ?? []) {
     routes.push({
@@ -408,6 +409,10 @@ export function deviceRoutes(device: NetEngineDevice): DeviceRoute[] {
       remove: { method: 'netEngine.address.remove', params: { node: device.node, address } }
     })
   }
+  // The pairing ticket's hints approved at Connect: dialled after the same network, not removable here.
+  for (const address of device.approvedAddresses ?? [])
+    if (!routes.some((route) => route.key === address))
+      routes.push({ key: address, cls: classOf(address) ?? 'public', ...shown(routeText(address)), state: 'available' })
   if (device.ssh || device.source === 'ssh')
     routes.push({ key: 'ssh', cls: 'ssh', ...(device.ssh ? shown(device.ssh) : {}), state: 'available' })
   for (const destination of device.relay?.allowed ?? [])

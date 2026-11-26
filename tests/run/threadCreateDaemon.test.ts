@@ -27,6 +27,7 @@ import type { DriverRuntime } from '../../src/mms/harness/driver'
 import { refusalOfResponse } from './appToolsFixture'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 import { echoBranchNamer } from '../support/echoBranchNamer'
+import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
 
 /**
  * A fault a test puts before every atomic JSON write: the store writes a project thread's first `meta.json` directly
@@ -381,21 +382,17 @@ describe('thread_create end to end (SPEC §15.1)', () => {
   })
 
   describe('the provider instance and model', () => {
-    it('are checked as threads.setModel checks them: an unknown instance, a hidden model and an instance the project turned off are refused before any receipt', async () => {
+    it('are checked as threads.setModel checks them: an unknown instance and a hidden model are refused before any receipt', async () => {
       const seen: Record<string, Rpc | AgentCreatedThread> = {}
       const w = world(async (input, mcp, d) => {
         if (input.threadId !== w.parent.id) return 'ok'
-        const harness = (d.orch as unknown as { harness: { instances: { setModelPrefs(id: string, patch: unknown): Promise<unknown>; setEnabled(id: string, scope: unknown, enabled: boolean | null): Promise<unknown> } } }).harness
+        const harness = (d.orch as unknown as { harness: { instances: { setModelPrefs(id: string, patch: unknown): Promise<unknown> } } }).harness
         seen.explicit = parse<AgentCreatedThread>(await w.create(mcp!, { instanceId: 'claude', model: 'sonnet', clientRequestId: 'm1' }))
         // A model alone is on the creator's own instance.
         seen.onlyModel = parse<AgentCreatedThread>(await w.create(mcp!, { model: 'opus', clientRequestId: 'm2' }))
         seen.unknown = await w.create(mcp!, { instanceId: 'nope', model: 'x', clientRequestId: 'm3' })
         await harness.instances.setModelPrefs('claude', { hide: ['haiku'] })
         seen.hidden = await w.create(mcp!, { instanceId: 'claude', model: 'haiku', clientRequestId: 'm4' })
-        await harness.instances.setEnabled('claude', { kind: 'project', projectId: w.project.id }, false)
-        seen.off = await w.create(mcp!, { instanceId: 'claude', model: 'sonnet', clientRequestId: 'm5' })
-        // Not naming a model inherits the creator's own, which this project no longer allows.
-        seen.offInherited = await w.create(mcp!, { clientRequestId: 'm6' })
         return 'ok'
       })
       await w.attach()
@@ -407,11 +404,9 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect((seen.onlyModel as AgentCreatedThread).model).toEqual({ instanceId: 'claude', model: 'opus' })
       expect(refusal(seen.unknown as Rpc)).toMatch(/nope/)
       expect(refusal(seen.hidden as Rpc)).toMatch(/hidden/)
-      expect(refusal(seen.off as Rpc)).toMatch(/turned off for this project/)
-      expect(refusal(seen.offInherited as Rpc)).toMatch(/Your own model is not available/)
-      // Only the two good ones exist, and the refused four left no receipt.
+      // Only the two good ones exist, and the refused two left no receipt.
       expect(w.launchedBy(w.parent.id)).toHaveLength(2)
-      for (const key of ['m3', 'm4', 'm5', 'm6']) expect(w.d.engine.store.getReceipt(`thread_create:${w.parent.id}:mcp:${key}`), key).toBeNull()
+      for (const key of ['m3', 'm4']) expect(w.d.engine.store.getReceipt(`thread_create:${w.parent.id}:mcp:${key}`), key).toBeNull()
     })
 
     it('take a reasoning level, and a model or level the picker does not offer is refused in words with no thread made', async () => {
@@ -490,8 +485,12 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       // The title Mousse gives a thread from its first message, and the worktree's branch, come from the words alone.
       expect(w.d.store.getThread(seen.made.threadId)?.name).toBe(heuristicTitle('Fix the login redirect'))
       const branches = () => execFileSync('git', ['branch', '--list', 'mousse/*', '--format=%(refname:short)'], { cwd: join(home!, 'repo'), encoding: 'utf8' }).split('\n').filter(Boolean)
-      await waitFor(() => branches().some((branch) => branch.startsWith('mousse/fix-the-login-redirect')), 'the branch named from the words')
-      expect(branches()).toEqual([expect.stringMatching(/^mousse\/fix-the-login-redirect/)])
+      // The rename makes the new branch, deletes the temporary one, and only then records the new name for the thread, so
+      // the Git branch list is read once that record is there: before it, both branches can be listed for a moment, and the
+      // rename still holds the repository's lock file, which the cleanup could not delete on Windows.
+      const recorded = () => new ThreadWorkspaceManager(w.d.store.getThreadDir(seen.made.threadId)).load()?.branch
+      await waitFor(() => recorded()?.startsWith('mousse/fix-the-login-redirect') ?? false, 'the thread to record the branch named from the words')
+      expect(branches()).toEqual([recorded()])
     })
 
     it('an agent message in a row counts: a creation at the hop limit is refused before anything is made, and so is one from a run that carries on that chain', async () => {

@@ -450,6 +450,7 @@ export const PROTOCOL_METHODS = [
   // Harness gateway: instance snapshots and commands. Long operations return an operation id
   // and report through `providers.operation` events.
   'providers.snapshots',
+  'providers.events',
   'providers.instances.add',
   'providers.instances.setSecret',
   'providers.instances.remove',

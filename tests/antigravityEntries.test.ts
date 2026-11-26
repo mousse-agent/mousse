@@ -64,13 +64,19 @@ function connectTo(agent: Agent) {
   }
 }
 
-/** A file standing in for `agy`: the services find it as the user's own. */
+/**
+ * A file standing in for `agy`, named and marked executable as this platform's: the services find it as the user's
+ * own, and the gateway finds it in `home/bin` (see `agyFolder`), so the entries count as installed on any computer.
+ */
 function fakeAgy(home: string): string {
-  const agy = join(home, 'bin', 'agy.exe')
-  mkdirSync(join(home, 'bin'), { recursive: true })
-  writeFileSync(agy, 'agy')
+  const windows = process.platform === 'win32'
+  const agy = join(agyFolder(home), windows ? 'agy.cmd' : 'agy')
+  mkdirSync(agyFolder(home), { recursive: true })
+  // The gateway's install check asks it for its version.
+  writeFileSync(agy, windows ? '@echo 1.5.0\r\n' : '#!/bin/sh\necho 1.5.0\n', { mode: 0o755 })
   return agy
 }
+const agyFolder = (home: string) => join(home, 'bin')
 
 /**
  * `agent` answers in the entry's own folders; `outside` in the empty scratch home Mousse checks a sign-in against
@@ -103,7 +109,13 @@ describe('Antigravity entries in the gateway', () => {
         return entryService(home, entry, agent)
       }
     })
-    const harness = testHarness({ drivers: [adapterDriver(new PiStubAdapter()), driver], instances: source, profileHome: home })
+    fakeAgy(home)
+    const harness = testHarness({
+      drivers: [adapterDriver(new PiStubAdapter()), driver],
+      instances: source,
+      profileHome: home,
+      shellPath: async () => ({ entries: [agyFolder(home)], source: 'login_shell' })
+    })
     const events: HarnessGatewayEvent[] = []
     harness.instances.subscribe((event) => events.push(event))
     const signIn = async (instanceId: string) => {

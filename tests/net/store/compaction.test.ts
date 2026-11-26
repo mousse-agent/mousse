@@ -105,6 +105,30 @@ it('a rewrite while a copy is being read does not wait on the reader, and leaves
   expect(rows(db)).toBe(2)
 })
 
+it('a rewrite that runs out of room is rolled back: the database keeps what it holds and takes writes', () => {
+  const db = database(true)
+  // 10 MiB in use and no page free, so the rewrite's copy (with the page maps its new setting adds) needs more pages.
+  const insert = db.database.prepare('INSERT INTO filler(data) VALUES(randomblob(65536))')
+  db.database.exec('BEGIN')
+  for (let n = 0; n < 160; n++) insert.run()
+  db.database.exec('COMMIT; PRAGMA wal_checkpoint(TRUNCATE)')
+  expect(pragma(db, 'freelist_count')).toBe(0)
+  // The file may not grow past its size: SQLite then fails the write as it fails one to a full disk.
+  db.database.exec(`PRAGMA max_page_count=${pragma(db, 'page_count')}`)
+  expect(() => db.rewriteToReclaim()).toThrow(expect.objectContaining({ code: 'storage_full' }))
+  expect(pragma(db, 'auto_vacuum')).toBe(0)
+  expect(rows(db)).toBe(160)
+  expect(db.database.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' })
+  // The same connection writes on: a rewrite that failed does not suspend writes.
+  db.transaction(() => db.database.exec("INSERT INTO filler(data) VALUES(x'00')"))
+  expect(rows(db)).toBe(161)
+  // Tried again with room, it goes through.
+  db.database.exec('PRAGMA max_page_count=4294967294')
+  expect(db.rewriteToReclaim()).toMatchObject({ outcome: 'rewritten' })
+  expect(pragma(db, 'auto_vacuum')).toBe(2)
+  expect(rows(db)).toBe(161)
+})
+
 it('does nothing inside a transaction', () => {
   const db = database()
   expect(() => db.transaction(() => db.reclaim(10))).toThrow(/during a transaction/)

@@ -151,6 +151,11 @@ export interface RemoteThreadsHost {
   send(target: RemoteTarget, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'sent'; runId?: string; queued: boolean; replayed: boolean; mode?: string } | RemoteUncertain>
   steer(target: RemoteTarget, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'accepted'; runId: string } | { status: 'ignored'; reason: string; runId?: string } | RemoteUncertain>
   interrupt(target: RemoteTarget, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'stopped' | 'left'; runId?: string; left?: string } | RemoteUncertain>
+  /**
+   * `thread_archive` of a thread there, under one key per request (`idem`). A refusal (still working, outside the reach,
+   * too old, offline) is thrown with its code; an answer the link lost is `uncertain`.
+   */
+  archive(target: RemoteTarget, archived: boolean, options: { actor: AgentActor; idem: string }): Promise<{ status: 'done'; archived: boolean; changed: boolean } | RemoteUncertain>
 }
 
 /** A thread an agent created, as the creation decided it (never as the retry's arguments say). */
@@ -188,10 +193,14 @@ export type AgentRunCommandResult =
 /**
  * What archiving or unarchiving a thread for a personal bot did (`thread_archive`): `changed` is false when the thread
  * already was so. Refused (`thread_running`) while the thread or a subagent below it has a run working or paused.
+ * A subagent that runs on another computer is archived or unarchived there first, and here only once that computer said
+ * so: `there` names its thread there. That computer's refusal is thrown (`RemoteThreadRefusal`); an answer the link lost
+ * is `uncertain`, with nothing changed here.
  */
 export type AgentArchiveResult =
-  | { status: 'accepted'; archived: boolean; changed: boolean }
+  | { status: 'accepted'; archived: boolean; changed: boolean; there?: { threadId: string; computer: string; changed: boolean; gone?: true } }
   | { status: 'rejected'; reason: 'thread_running' }
+  | RemoteUncertain
 
 /**
  * What asking to archive the caller's own thread did (`thread_archive` from a thread's agent): `scheduled` archives it
@@ -518,7 +527,7 @@ export interface AppToolHost extends DelegationToolsHost {
   /** Stops run `runId` of another thread and what is below it, as `actor`'s Stop (`thread_interrupt`). */
   stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** Archives (`archived`) or unarchives another thread through the app's own Archive, as a personal bot's call (`thread_archive`). */
-  setThreadArchived?(threadId: string, archived: boolean, options: { actor: AgentActor }): Promise<AgentArchiveResult>
+  setThreadArchived?(threadId: string, archived: boolean, options: { actor: AgentActor; clientRequestId: string }): Promise<AgentArchiveResult>
   /** Archives the caller's own thread once its running turn ends well (`thread_archive` from a thread's agent). */
   archiveOwnThreadAfterTurn?(options: { actor: AgentActor }): AgentArchiveOwnResult
   /**

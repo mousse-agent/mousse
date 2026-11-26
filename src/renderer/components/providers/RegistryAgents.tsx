@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import type { RegistryAgentView, RemoveInstallResult } from '../../../shared/harness/types'
 import { Trash2 } from '../../lib/icons'
 import { ProviderIcon, registerProviderIcons } from '../../lib/providerIcons'
+import { ProvidersComputerContext, providersApi } from '../../lib/providersComputer'
 import { Modal } from '../ui/Modal'
 import { SettingsRow } from '../settings/SettingsRow'
 import type { InstanceActions } from './CliSections'
@@ -41,6 +42,7 @@ const ICON_ROUNDS = 12
  * again until they arrive, and every icon found is registered so the agent shows it everywhere.
  */
 function useRegistrySearch(query: string) {
+  const { node } = useContext(ProvidersComputerContext)
   const [agents, setAgents] = useState<RegistryAgentView[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [attempt, setAttempt] = useState(0)
@@ -48,7 +50,7 @@ function useRegistrySearch(query: string) {
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
     const search = (round: number) => {
-      window.mousse.providers.registry.search(query.trim()).then(
+      providersApi(node).registry.search(query.trim()).then(
         (found) => {
           if (cancelled) return
           registerProviderIcons(found)
@@ -69,7 +71,7 @@ function useRegistrySearch(query: string) {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [query, attempt])
+  }, [query, attempt, node])
   const retry = () => {
     setError(null)
     setAttempt((value) => value + 1)
@@ -272,13 +274,14 @@ export function RegistrySourceRow({
   const [accepted, setAccepted] = useState(false)
   const { busy, error, run } = useAsyncAction()
   const { agentId, version } = source
+  const { node } = useContext(ProvidersComputerContext)
   useEffect(() => {
     let cancelled = false
     setUpdate(undefined)
     setConfirming(false)
     // A failed lookup only means no update is offered; the entry itself is fine.
-    window.mousse.providers.registry
-      .search(agentId)
+    providersApi(node)
+      .registry.search(agentId)
       .then((agents) => {
         if (!cancelled) setUpdate(registryUpdateOf({ agentId, version }, agents))
       })
@@ -286,7 +289,7 @@ export function RegistrySourceRow({
     return () => {
       cancelled = true
     }
-  }, [agentId, version])
+  }, [agentId, version, node])
 
   const installing = snapshot.install.state === 'installing'
   const target = update ? (formatVersion(update.version) ?? update.version) : undefined

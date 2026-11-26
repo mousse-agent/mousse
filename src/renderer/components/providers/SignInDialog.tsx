@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { SignInPrompt, SignInResponse } from '../../../shared/harness/types'
 import { Check, Copy, ExternalLink, Loader2 } from '../../lib/icons'
 import { useProviderSnapshotsStore } from '../../lib/providerSnapshots'
+import { useProvidersComputer } from '../../lib/providersComputer'
 import { Modal } from '../ui/Modal'
 import { errorText } from './parts'
 
@@ -23,6 +24,14 @@ export function offersRedirectPaste(prompt: SignInPrompt): boolean {
   return prompt.type === 'auth_url' && prompt.acceptsRedirectPaste === true
 }
 
+/**
+ * A browser sign-in of another computer whose page returns to a small server on that computer: the browser here
+ * cannot reach it, so the address it ends on is pasted back instead.
+ */
+export function pastesBackFromHere(prompt: SignInPrompt, remote: boolean): boolean {
+  return remote && prompt.type === 'auth_url' && prompt.usesCallbackServer && prompt.acceptsRedirectPaste === true
+}
+
 /** What to say when the sign-in refuses an answer. */
 export function refusedText(response: SignInResponse): string {
   return response.kind === 'redirect_url'
@@ -36,6 +45,9 @@ export function refusedText(response: SignInResponse): string {
  * Closing cancels the sign-in. It closes itself when the operation completes. A failed sign-in stays
  * open with its reason and, given `onRetry`, Try again, which starts a fresh sign-in the same way the
  * first one was started (the dialog follows it through its new `operationId`).
+ *
+ * On Settings → Providers of another computer the sign-in runs there: its link opens in this computer's browser,
+ * and an answer typed here goes to that computer only.
  */
 export function SignInDialog({
   operationId,
@@ -48,6 +60,7 @@ export function SignInDialog({
   onClose: () => void
   onRetry?: () => Promise<void>
 }) {
+  const { api, node, name: computerName } = useProvidersComputer()
   const event = useProviderSnapshotsStore((state) => (operationId ? state.operations[operationId] : undefined))
   const latestPrompt = useProviderSnapshotsStore((state) => (operationId ? state.prompts[operationId] : undefined))
   /** An answered field or choice gives way to progress until the next step arrives. */
@@ -73,6 +86,11 @@ export function SignInDialog({
     setError(null)
     openedRef.current = null
   }, [operationId])
+  // The browser here cannot finish a sign-in that returns to the other computer: the paste field shows at once.
+  const pasteBack = prompt ? pastesBackFromHere(prompt, Boolean(node)) : false
+  useEffect(() => {
+    if (pasteBack) setShowPaste(true)
+  }, [pasteBack])
 
   useEffect(() => {
     if (event?.phase === 'completed' || event?.phase === 'cancelled') onClose()
@@ -98,7 +116,7 @@ export function SignInDialog({
     setError(null)
     if (response.promptId) setAnswered(response.promptId)
     setValue('')
-    void window.mousse.providers.instances
+    void api.instances
       .respondSignIn(operationId, response)
       .then((accepted) => {
         // Refused (a stale prompt, a wrong address): say so and show the step again.
@@ -139,6 +157,9 @@ export function SignInDialog({
             <p className="provider-login-message">
               {prompt.instructions ?? 'We opened your browser to finish signing in. Come back here when you’re done and this window will close on its own.'}
             </p>
+            {node && prompt.usesCallbackServer && !offersRedirectPaste(prompt) && (
+              <p className="provider-login-hint">This sign-in returns to {computerName ?? 'the other computer'}. Finish it there.</p>
+            )}
             <div className="provider-login-actions">
               <button type="button" className="settings-btn" onClick={() => void window.mousse.providers.openLoginUrl(prompt.url)}>
                 <ExternalLink size={14} />
@@ -161,7 +182,12 @@ export function SignInDialog({
                   </button>
                 ) : (
                   <>
-                    {!prompt.pasteMessage && (
+                    {!prompt.pasteMessage && pasteBack && (
+                      <p className="provider-login-hint">
+                        After signing in, paste the address the browser ended on. It may say it can&apos;t be reached.
+                      </p>
+                    )}
+                    {!prompt.pasteMessage && !pasteBack && (
                       <p className="provider-login-hint">
                         After signing in, copy the full address from the browser&apos;s address bar and paste it here. The page may say it
                         can&apos;t be reached, which is expected.

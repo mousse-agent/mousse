@@ -1,0 +1,36 @@
+/* Settings → Source control. Rows, buttons and status words are the shared settings ones; these only lay out a few. */
+
+.source-control-add,
+.source-control-phase,
+.source-control-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.source-control-add {
+  gap: var(--space-4);
+}
+
+/* The one-time code, its Copy and Open GitHub on one line under the row. */
+.source-control-code {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  margin-top: var(--space-8);
+}
+
+.source-control-code .provider-login-code {
+  margin-right: var(--space-4);
+  user-select: all;
+}
+
+.source-control-error {
+  margin: var(--space-4) 0 0;
+  font-size: var(--settings-fs-small);
+}
+
+#source-control .settings-group-rows > .settings-muted {
+  margin: 0;
+  padding: var(--space-12) var(--space-16);
+}

@@ -195,6 +195,17 @@ describe('a title being generated', () => {
   })
 })
 
+describe('a title being generated, when the first reply keeps it', () => {
+  it('stops dimming a title that becomes final with the same name and time, as a pushed list says', () => {
+    show([thread('a', 'Fix the OAuth callback loop', { titleSource: 'provisional' })])
+    openProject()
+    const title = () => host.querySelector('.threads-sidebar-thread-name')!
+    expect(title().classList.contains('provisional')).toBe(true)
+    act(() => useAppStore.getState().setThreads([thread('a', 'Fix the OAuth callback loop', { titleSource: 'auto' })]))
+    expect(title().classList.contains('provisional')).toBe(false)
+  })
+})
+
 describe('the row menu', () => {
   it('opens from the "…" button with the same items as a right-click, and focuses the first', () => {
     show([thread('a', 'Fix tests')])

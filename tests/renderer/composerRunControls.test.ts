@@ -197,8 +197,8 @@ describe('composer model picker', () => {
     act(() => level('Medium').click())
     expect(onModelSelect).toHaveBeenCalledWith('antigravity', 'gemini-4-neon:medium', undefined)
 
-    // Clicking Claude Opus 5.5 selects it at its default level.
-    clickModel('Opus 5.5')
+    // Clicking Claude Opus 5.5 selects it at its default level. Beside Antigravity's logo it is named in full.
+    clickModel('Claude Opus 5.5')
     expect(onModelSelect).toHaveBeenLastCalledWith('antigravity', 'claude-opus-5-5:high', undefined)
 
     // Claude Opus 5.5 shows its three levels and notes that a saved Extra high runs at the default.

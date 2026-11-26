@@ -6,8 +6,19 @@ export type NewProjectRow =
   /** Start from: says what to type for a clone or a new project. */
   | { kind: 'clone-hint' }
   | { kind: 'new-hint' }
-  /** Clones a GitHub repository (`owner/name`) into `destination`; null until a folder for new projects is known. */
-  | { kind: 'clone'; repository: string; name: string; destination: string | null }
+  /**
+   * Clones a GitHub repository (`owner/name`) into `destination`; null until a folder for new projects is known.
+   * `owned` marks one of the signed-in account's repositories, offered from its list.
+   */
+  | { kind: 'clone'; repository: string; name: string; destination: string | null; owned?: { private: boolean } }
+  /**
+   * GitHub is not connected: on this computer Settings → Source control connects it; on another, it connects there from
+   * here. The account's repositories then show here.
+   */
+  | { kind: 'connect-github' }
+  /** Browsing another computer's folders for where a clone goes: use the folder shown, or open another. */
+  | { kind: 'browse-use'; path: string }
+  | { kind: 'browse-open'; name: string; path: string; up?: true }
   /** Makes an empty folder and a Git repository in it. */
   | { kind: 'create'; name: string; destination: string | null }
   /** Adds a folder that is already there, by its path. */
@@ -80,7 +91,7 @@ export function withExisting(groups: readonly RowGroup[], projectAt: (path: stri
       })
     }))
     .filter((group) => group.rows.length > 0)
-    .map((group) => (group.rows[0]!.kind === 'existing' ? { ...group, label: 'Open' } : group))
+    .map((group) => (group.rows.every((row) => row.kind === 'existing') ? { ...group, label: 'Open' } : group))
 }
 
 /** The folder a path is in; null for a path with none. */
@@ -115,22 +126,81 @@ export function projectFolders(paths: readonly string[]): string[] {
 }
 
 /**
+ * The account's repositories that match what is typed, best first: a name that starts with it, then `owner/name`
+ * that does, then one that contains it. With nothing typed, the most recently pushed. The repository the text itself
+ * names is left out: its own Clone row is already there.
+ */
+export function repositoryMatches<T extends { nameWithOwner: string }>(text: string, repositories: readonly T[], limit = 6): T[] {
+  const typed = text.trim().toLowerCase()
+  if (!typed) return repositories.slice(0, limit)
+  const named = githubRepository(typed)?.toLowerCase()
+  const scored: { repository: T; score: number }[] = []
+  for (const repository of repositories) {
+    const full = repository.nameWithOwner.toLowerCase()
+    if (full === named) continue
+    const name = full.slice(full.indexOf('/') + 1)
+    const score = name.startsWith(typed) ? 3 : full.startsWith(typed) ? 2 : full.includes(typed) ? 1 : 0
+    if (score > 0) scored.push({ repository, score })
+  }
+  // Stable: among equal scores the list's own order (most recently pushed) holds.
+  return scored.sort((a, b) => b.score - a.score).slice(0, limit).map((entry) => entry.repository)
+}
+
+/**
+ * New project on this computer with the account's repositories: the ones that match what is typed, as Clone rows
+ * into the projects folder. After "Clone a repository…" (`cloning`) they come first and, with nothing typed, show
+ * the most recent; otherwise they follow the other rows and show only once something matches. When GitHub is not
+ * connected, "Clone a repository…" offers to connect it instead.
+ */
+export function withRepositories(
+  groups: readonly RowGroup[],
+  text: string,
+  options: { repositories: readonly { nameWithOwner: string; private: boolean }[]; parent: string | null; cloning: boolean; connected: boolean | null }
+): RowGroup[] {
+  const typed = text.trim()
+  if (isFolderPath(typed) || (!typed && !options.cloning)) return [...groups]
+  let group: RowGroup | null = null
+  if (options.connected === false) {
+    // Clone a repository… with nothing typed, or a repository typed: its clone needs GitHub connected.
+    if ((options.cloning && !typed) || githubRepository(typed)) group = { label: 'GitHub', rows: [{ kind: 'connect-github' }] }
+  } else {
+    const matches = repositoryMatches(typed, options.repositories, options.cloning && !typed ? 8 : 5)
+    if (matches.length > 0) {
+      group = {
+        label: 'Your repositories',
+        rows: matches.map((repository) => {
+          const name = repository.nameWithOwner.split('/')[1]!
+          return { kind: 'clone', repository: repository.nameWithOwner, name, destination: options.parent ? joinFolder(options.parent, name) : null, owned: { private: repository.private } }
+        })
+      }
+    }
+  }
+  if (!group) return [...groups]
+  return options.cloning ? [group, ...groups] : [...groups, group]
+}
+
+/**
  * The rows for what is typed. On this computer: Start from (empty); a GitHub repository clones, or names a new
  * project; a path adds that folder; a name makes a new project. On another computer only a folder that is already
  * there can be added, by its path; the folders its projects are in are offered as starting points.
  */
-export function newProjectRows(text: string, where: { remote: false; parent: string | null } | { remote: true; folders: readonly string[]; computer: string }): RowGroup[] {
+export function newProjectRows(text: string, where: { remote: false; parent: string | null } | { remote: true; folders: readonly string[]; computer: string; parent?: string | null }): RowGroup[] {
   const typed = text.trim()
+  const into = (name: string) => (where.parent ? joinFolder(where.parent, name) : null)
   if (where.remote) {
     const lower = typed.toLowerCase()
     const folders = where.folders.filter((folder) => folder.toLowerCase().startsWith(lower) && folder.toLowerCase() !== lower)
     const suggestions: RowGroup[] = folders.length > 0 ? [{ label: `Folders with projects on ${where.computer}`, rows: folders.map((path) => ({ kind: 'suggest', path })) }] : []
-    if (!typed) return suggestions
+    if (!typed) return [{ label: 'Start from', rows: [{ kind: 'clone-hint' }] }, ...suggestions]
+    const repository = githubRepository(typed)
+    if (repository) {
+      const name = repository.split('/')[1]!
+      return [{ label: `Clone on ${where.computer}`, rows: [{ kind: 'clone', repository, name, destination: into(name) }] }]
+    }
     if (!isFolderPath(typed)) return []
     return [{ label: `On ${where.computer}`, rows: [{ kind: 'add-path', path: typed }] }, ...suggestions]
   }
   if (!typed) return [{ label: 'Start from', rows: [{ kind: 'open-folder' }, { kind: 'clone-hint' }, { kind: 'new-hint' }] }]
-  const into = (name: string) => (where.parent ? joinFolder(where.parent, name) : null)
   const repository = githubRepository(typed)
   if (repository) {
     const name = repository.split('/')[1]!
@@ -144,3 +214,17 @@ export function newProjectRows(text: string, where: { remote: false; parent: str
   if (isProjectName(typed)) return [{ label: 'New', rows: [{ kind: 'create', name: typed, destination: into(typed) }] }]
   return []
 }
+
+/**
+ * The rows of the folder browser: Use this folder (once a folder is shown), the folder above it, then the folders in it
+ * that match what is typed.
+ */
+export function browseRows(view: { path: string | null; parent: string | null; folders: readonly { name: string; path: string }[] }, text: string, computer: string): RowGroup[] {
+  const typed = text.trim().toLowerCase()
+  const rows: NewProjectRow[] = []
+  if (view.path) rows.push({ kind: 'browse-use', path: view.path })
+  if (view.parent && !typed) rows.push({ kind: 'browse-open', name: '..', path: view.parent, up: true })
+  for (const folder of view.folders) if (!typed || folder.name.toLowerCase().includes(typed)) rows.push({ kind: 'browse-open', name: folder.name, path: folder.path })
+  return [{ label: view.path ?? `Folders on ${computer}`, rows }]
+}
+

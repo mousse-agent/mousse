@@ -1,6 +1,6 @@
 import { isComputerErrorCode } from '../../shared/bridge/computerErrors'
 import { describePermissionMode, isPermissionMode, isStricter, narrowPermissionMode, type PermissionMode } from '../../shared/permissionMode'
-import type { NodeId } from '../../shared/net'
+import { isNetErrorCode, NET_ERRORS, type NodeId } from '../../shared/net'
 import type { LlmProviderOption } from '../../shared/settings'
 import type { Project } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
@@ -23,6 +23,13 @@ export async function openRemoteProject(node: NodeId, path: string): Promise<Ope
 }
 
 /** Plain words for a failed request to another computer. */
+/** Plain words for a refusal from another computer about its folders or GitHub: its own reason when it gave one. */
+export function remoteReason(error: unknown, deviceName: string): string {
+  const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown }
+  if ((code === 'forbidden' || code === 'project_refused' || code === 'not_found') && typeof message === 'string' && message) return message
+  return remoteErrorMessage(error, deviceName)
+}
+
 export function remoteErrorMessage(error: unknown, deviceName: string): string {
   const code = (error as { code?: unknown } | null)?.code
   const message = (error as { message?: unknown } | null)?.message
@@ -30,6 +37,13 @@ export function remoteErrorMessage(error: unknown, deviceName: string): string {
   if (isComputerErrorCode(code) && typeof message === 'string' && message) return message
   if (code === 'peer_offline' || code === 'route_unreachable' || code === 'outcome_uncertain') return `${deviceName} is not connected`
   if (code === 'forbidden') return `${deviceName} does not let this computer do that`
+  // A refusal the other computer worded comes with its own words; a bare code comes with its fixed message,
+  // which is written for logs ("The request is malformed."), not for a person.
+  if (isNetErrorCode(code) && message === NET_ERRORS[code].message) {
+    if (NET_ERRORS[code].category === 'invalid' || NET_ERRORS[code].category === 'unsupported')
+      return `${deviceName} could not do that. Updating Mousse on both computers may fix it.`
+    if (NET_ERRORS[code].retryable) return `${deviceName} could not do that right now. Try again in a moment.`
+  }
   return typeof message === 'string' && message ? message : `Could not reach ${deviceName}`
 }
 

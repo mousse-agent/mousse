@@ -442,6 +442,42 @@ describe('Settings → Devices, new networking', () => {
     expect(d.called('netEngine.remove')).toEqual([{ node: 'n1', direction: 'out' }])
   })
 
+  it('lists the same network on a computer used one way, and the ticket hints approved at Connect as fallbacks', async () => {
+    daemon({
+      devices: [
+        device({
+          node: 'n1',
+          direction: 'out',
+          route: 'tailnet',
+          approvedAddresses: ['tcp://100.101.7.9:47100', 'wss://studio.example.com/mousse-net/1']
+        })
+      ]
+    })
+    await mount()
+    await menuItems('Studio', 'out')
+    await click(button('Routes'))
+    const routes = [...host.querySelectorAll<HTMLElement>('[aria-label="Routes to Studio"] [data-route-state]')].map(
+      (row) => (row.textContent ?? '').replace(/\s+/g, ' ').trim()
+    )
+    expect(routes[0]).toMatch(/^Tailscale\s*100\.101\.7\.9:47100 · In use/)
+    expect(routes).toContainEqual(expect.stringMatching(/^Same network\s*Found automatically · Available/))
+    expect(routes).toContainEqual(expect.stringMatching(/^Tunnel\s*studio\.example\.com · Available/))
+    // Approved at Connect, not added here: nothing to remove on the row.
+    expect(button('Actions for Tunnel studio.example.com')).toBeUndefined()
+  })
+
+  it('lists the same network ahead of SSH on a computer added over SSH', async () => {
+    daemon({ devices: [device({ node: 'n1', direction: 'out', route: 'ssh', source: 'ssh', ssh: 'me@box.example' })] })
+    await mount()
+    await menuItems('Studio', 'out')
+    await click(button('Routes'))
+    const routes = [...host.querySelectorAll<HTMLElement>('[aria-label="Routes to Studio"] [data-route-state]')].map(
+      (row) => (row.textContent ?? '').replace(/\s+/g, ' ').trim()
+    )
+    expect(routes[0]).toMatch(/^SSH\s*me@box\.example · In use/)
+    expect(routes).toContainEqual(expect.stringMatching(/^Same network\s*Found automatically · Available/))
+  })
+
   it('says once that profiles in this account can read each other, with the reason as its tooltip', async () => {
     const d = daemon()
     await mount()

@@ -213,6 +213,16 @@ describe('the snapshot an owner sends', () => {
     expect(new MmsListsSource(fake, undefined, {}).snapshot().threads.map((thread) => thread.id)).toEqual([shown.id])
   })
 
+  it('gives the person\'s other computers a title still being named, so its row is dimmed there; a phone does not read it', () => {
+    const naming = row(1, { name: 'Fix the login', titleSource: 'provisional' })
+    const named = row(2, { name: 'Fix the login page', titleSource: 'auto' })
+    const own = new MmsListsSource(services([naming, named]), undefined, { private: true }).snapshot().threads as Array<Record<string, unknown>>
+    expect(threadRow(own[0]!, 0, { node: 'n-far', offline: false })).toMatchObject({ name: 'Fix the login', titleSource: 'provisional' })
+    expect(threadRow(own[1]!, 1, { node: 'n-far', offline: false })).not.toHaveProperty('titleSource')
+    const phone = new MmsListsSource(services([naming]), undefined, {}).snapshot().threads as Array<Record<string, unknown>>
+    expect(phone[0]).not.toHaveProperty('titleSource')
+  })
+
   it('gives a phone its whole list past the wire bound: a phone parses it with plain JSON.parse', () => {
     // A phone's list is its own: no trimming. It used to stop at the wire's 16,384 nodes (about 700 threads).
     const many = Array.from({ length: 2000 }, (_, n) => row(n))

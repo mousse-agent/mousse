@@ -18,7 +18,7 @@ The newest 10 nightlies are kept; older ones and their tags are deleted.
 
 Every desktop build exists for x64 and arm64: Windows (`Mousse.Setup.<version>.exe` and `Mousse.Setup.<version>-arm64.exe`), Linux (`Mousse-<version>.AppImage` and `Mousse-<version>-arm64.AppImage`) and macOS. Each packages on a runner of its own architecture, and carries the network helper built for it (see [the engine's desktop builds](net/engine-desktop-builds.md)).
 
-macOS gets two disk images: `arm64` for Apple silicon and `x64` for Intel Macs. Without a Developer ID certificate they are ad-hoc signed and not notarized, so macOS blocks the first launch: open Mousse once, then choose **Open Anyway** in System Settings → Privacy & Security. Its `mousse-cli` is inside the app at `Mousse.app/Contents/Resources/mousse-cli`.
+macOS gets two disk images: `arm64` for Apple silicon and `x64` for Intel Macs. When the signing and notarization secrets (`CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`) are configured, builds are signed with Developer ID, Hardened Runtime and Apple notarization (stapled to both `Mousse.app` and the `.dmg`). Without a Developer ID certificate they fall back to ad-hoc signing without notarization, so macOS blocks the first launch: open Mousse once, then choose **Open Anyway** in System Settings → Privacy & Security. Its `mousse-cli` is inside the app at `Mousse.app/Contents/Resources/mousse-cli`.
 
 ## The app version
 

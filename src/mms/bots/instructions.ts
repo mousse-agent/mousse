@@ -266,10 +266,10 @@ export function baseInstructionsWithout(off?: BotSwitchedOff): string {
 /** The chat lane's text, its lists of what goes to work naming nothing the owner switched off for this bot. */
 function chatInstructionsWithout(off?: BotSwitchedOff): string {
   if (!off?.shell && !off?.browser) return BOT_CHAT_INSTRUCTIONS
-  const uses = ['the web', ...(off.browser ? [] : ['the browser']), ...(off.shell ? [] : ['commands'])]
+  const uses = [...(off.browser ? [] : ['the browser']), ...(off.shell ? [] : ['commands'])]
   return BOT_CHAT_INSTRUCTIONS
-    .replace('work_start: the web, the browser, commands, research,', `work_start: ${[...uses, 'research'].join(', ')},`)
-    .replace('never uses the web, the browser, commands or MCP tools:', `never uses ${uses.join(', ')} or MCP tools:`)
+    .replace('work_start: the browser, commands, research,', `work_start: ${[...uses, 'research'].join(', ')},`)
+    .replace('never uses the browser, commands or apps on this computer:', `never uses ${uses.length ? `${uses.join(', ')} or ` : ''}apps on this computer:`)
 }
 
 /** The "Run commands" line when the owner allows them, and what it becomes where they can't run (`botShellWithheld`). */

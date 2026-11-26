@@ -1,5 +1,5 @@
 /**
- * A bot's work subagents run as delegations of the run database (Run DB v27), through the bot port: the run database owns
+ * A bot's work subagents run as delegations of the run database (Run DB v28), through the bot port: the run database owns
  * their lifecycle and lineage, bots.db their place on the work's counts and spend (`bot_subagent_runs`, v15). Each
  * reserves before its turn can be dispatched, is charged once whatever crashes in between, reaches its work only through
  * the bot port (acknowledged once recorded), and holds no more than the work did when it started.

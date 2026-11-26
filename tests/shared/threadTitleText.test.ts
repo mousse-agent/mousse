@@ -75,8 +75,35 @@ describe('cleaning what the title model sees', () => {
   })
 
   it('turns paths into file names and links into hosts, and leaves "and/or" alone', () => {
-    const { text } = cleanTitleText('see C:\\work\\mousse\\src\\main\\index.ts and https://github.com/mousse-agent/mousse/pull/373?x=1 and/or src/a/b.ts')
-    expect(text).toBe('see index.ts and github.com and/or b.ts')
+    const { text } = cleanTitleText('see C:\\work\\mousse\\src\\main\\index.ts and https://example.com/docs/a?x=1 and/or src/a/b.ts')
+    expect(text).toBe('see index.ts and example.com and/or b.ts')
+  })
+
+  // A bare GitHub link shows as a "#1901" chip in the bubble; "github.com" made the model name a website.
+  it.each([
+    ['review https://github.com/mousse-agent/mousse/pull/1901', 'review PR #1901'],
+    ['review https://github.com/mousse-agent/mousse/pull/1901/files.', 'review PR #1901'],
+    ['look at https://github.com/mousse-agent/mousse/issues/42', 'look at issue #42'],
+    ['revert https://github.com/mousse-agent/mousse/commit/9541194a4abc', 'revert commit 9541194'],
+    ['review [#1901](https://github.com/mousse-agent/mousse/pull/1901)', 'review PR #1901'],
+    ['read [the plan](https://github.com/mousse-agent/mousse/pull/1901)', 'read the plan'],
+    ['star https://github.com/mousse-agent/mousse', 'star github.com']
+  ])('reads a GitHub link as its chip does: %s', (content, expected) => {
+    expect(cleanTitleText(content).text).toBe(expected)
+  })
+
+  it('reads inline chips as their names and drops pasted images with generated names', () => {
+    const content = [
+      'poor title [image 1: paste-1795680902893.png] [image 2: paste-1795680905032.png] compare [image 3: before.png] with [file: src/a/after.tsx]',
+      '',
+      '[Attached files: paste-1795680902893.png (C:\\Temp\\paste-1795680902893.png), paste-1795680905032.png (C:\\Temp\\paste-1795680905032.png)]'
+    ].join('\n')
+    const { text, hints } = cleanTitleText(content)
+    expect(text).toBe('poor title compare before.png with after.tsx')
+    expect(hints.files).toEqual(['before.png', 'after.tsx'])
+    expect(hints.images).toBe(2)
+    expect(heuristicTitle('poor title [image 1: paste-1795680902893.png] [image 2: paste-1795680905032.png]')).toBe('Poor title')
+    expect(buildTitlePrompt({ request: content })).toContain('Hints: 2 images; files before.png, after.tsx')
   })
 
   it('reads a leading command as the command, with its arguments as the topic', () => {
@@ -127,6 +154,7 @@ describe('the model answer as a sidebar name', () => {
   it('strips labels, bullets, quotes, markdown and ending punctuation', () => {
     expect(normalizeTitle('Title: "Sidebar title clipping."')).toBe('Sidebar title clipping')
     expect(normalizeTitle('- **OAuth callback retries**\nBecause the user asked...')).toBe('OAuth callback retries')
+    expect(normalizeTitle('## Review PR #1901')).toBe('Review PR #1901')
   })
 
   it('drops a generic opener', () => {

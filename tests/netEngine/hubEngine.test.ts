@@ -74,6 +74,24 @@ describe('the Hub over an engine pairing', () => {
     expect(await hub('questions', { ref: { nodeId: target, entityId: threadId } })).toBeTruthy()
   }, 60_000)
 
+  it("answers an opened folder as ok and a refused one with the owner's reason, as the New project dialog reads them", async () => {
+    // The dialog reads `{ ok: true, project }` or `{ ok: false, error }`, the shape a v1 computer answers.
+    expect(await hub('openProject', { target, path: folder })).toMatchObject({ ok: true, project: { id: projectId } })
+    expect(await hub('openProject', { target, path: join(folder, 'missing') })).toEqual({
+      ok: false,
+      error: 'That folder does not exist on this computer.'
+    })
+  }, 60_000)
+
+  it("keeps the owner's words in any other refusal the window is told", async () => {
+    const refused = await hub('threads', { target, projectId: 'no-such-project' }).then(
+      () => undefined,
+      (error: { message?: string }) => error.message
+    )
+    expect(refused).toBeTruthy()
+    expect(refused).not.toBe('The request is malformed.')
+  }, 60_000)
+
   it('changes the model, sends, steers and stops on the owner', async () => {
     const ref = { nodeId: target, entityId: threadId }
     const send = vi.spyOn(pair.owner.orchestrator, 'send').mockResolvedValue({ accepted: true } as never)

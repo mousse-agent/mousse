@@ -56,7 +56,9 @@ const LONG_METHODS = new Set([
   'actions.redo',
   'actions.revertCode',
   'workspace.restore',
-  'workspace.discardPendingChanges'
+  'workspace.discardPendingChanges',
+  // A clone downloads the repository.
+  'sourceControl.clone'
 ])
 
 export interface RoutedClientDeps {

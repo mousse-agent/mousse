@@ -780,11 +780,39 @@ ALTER TABLE remote_subagents ADD COLUMN hidden INTEGER CHECK(hidden IS NULL OR h
 `
   },
   {
+    version: 27,
+    sql: `
+-- Whether a remote subagent's thread on its computer must be archived: its stand-in here is archived. Kept until that
+-- computer took it, so the app's Archive made while it is offline reaches it when it answers. One row per subagent, made
+-- the first time its stand-in is archived.
+--   pending:   archived (1, or 0 to unarchive) is not yet so there; generation rises with each change;
+--   sent:      that computer took it (also an agent's archive it answered), or its thread there is gone;
+--   left_open: that computer would not take it (too old, or its person does not let agents here change it); last_error
+--              says why. A later change here tries again.
+-- Each send goes under the key remote-archive:<child>:<generation>.<attempt>: a resend after a lost answer keeps it, so
+-- that computer replays the first answer; a resend after that computer refused (the thread still worked there) takes
+-- the next attempt, since that computer keeps its refusal under the old key.
+CREATE TABLE remote_archive(
+  child_thread_id  TEXT PRIMARY KEY,
+  node             TEXT NOT NULL,
+  remote_thread_id TEXT NOT NULL,
+  archived         INTEGER NOT NULL CHECK(archived IN (0,1)),
+  generation       INTEGER NOT NULL DEFAULT 1,
+  attempt          INTEGER NOT NULL DEFAULT 0,
+  state            TEXT NOT NULL CHECK(state IN ('pending','sent','left_open')),
+  last_error       TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL
+) STRICT;
+CREATE INDEX remote_archive_state ON remote_archive(state);
+`
+  },
+  {
     // A personal bot's work subagents are delegations (issues #1454, #1369): the bot, the work's activation at the root
     // of the tree (whose counts and spend in bots.db the subagent shares), and what the subagent inherits from that
     // turn: the limit of the device its owner wrote from, and whether it may only read the owner's threads. Written in
     // the delegation's own transaction (`RunEngine.commitDelegation`); NULL on every thread's delegation.
-    version: 27,
+    version: 28,
     sql: `
 ALTER TABLE delegations ADD COLUMN bot_id TEXT;
 ALTER TABLE delegations ADD COLUMN root_activation_id TEXT;

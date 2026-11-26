@@ -34,7 +34,8 @@ describe('ProviderIcon colours', () => {
   it('keeps multi-colour logos as their own artwork with no filter', () => {
     for (const id of ['antigravity', 'google', 'mistral']) {
       const markup = render(id)
-      expect(markup, id).toMatch(/^<img /)
+      expect(markup, id).toContain('<img ')
+      expect(markup, id).not.toContain('mask-image')
       expect(markup, id).not.toContain('filter')
     }
   })
@@ -74,7 +75,7 @@ describe('subagent provider icons', () => {
       ['codex', 'openai'],
       ['cursor', 'cursor'],
       ['opencode', 'opencode'],
-      ['antigravity', 'google'],
+      ['antigravity', 'antigravity'],
       ['pi:openai', 'openai']
     ]
     for (const [provider, logo] of cases) expect(normalizeProviderId(subagentIconId(provider, null)), provider).toBe(logo)
@@ -137,7 +138,7 @@ describe('ACP agent logos', () => {
     ['acp:opencode', 'opencode'],
     ['acp:opencode-v2', 'opencode'],
     ['acp:gemini', 'google'],
-    ['acp:antigravity-acp', 'google'],
+    ['acp:antigravity-acp', 'antigravity'],
     ['acp:github-copilot-cli', 'copilot'],
     ['acp:qwen-code', 'qwen'],
     ['acp:kimi', 'kimi'],

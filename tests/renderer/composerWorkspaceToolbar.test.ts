@@ -231,4 +231,22 @@ describe('new thread settings row', () => {
     expect(computerButton()!.getAttribute('aria-haspopup')).toBe('menu')
     expect(host.querySelector('[aria-label="Runs on this computer"]')).toBeNull()
   })
+
+  it('with a project, lists only the computers that have it, then Add to machine', () => {
+    const onAddToMachine = vi.fn()
+    const devices = [computer('n-self', 'Studio Mac', true), computer('n-linux', 'Build Linux'), computer('n-mini', 'Mac mini')]
+    renderSettings({ projectId: 'p1', worktreeEnabled: false }, { ...deviceProps(devices), projectComputers: new Set(['n-linux']), onAddToMachine })
+    act(() => computerButton()!.click())
+    const items = [...document.querySelectorAll<HTMLButtonElement>('[role="menu"][aria-label="Run on"] button')]
+    expect(items.map((item) => item.textContent)).toEqual(['Studio Mac', 'Build Linux', 'Add to machine'])
+    act(() => items[2]!.click())
+    expect(onAddToMachine).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers Add to machine even when no other computer has the project yet', () => {
+    const devices = [computer('n-self', 'Studio Mac', true), computer('n-mini', 'Mac mini')]
+    renderSettings({ projectId: 'p1', worktreeEnabled: false }, { ...deviceProps(devices), projectComputers: new Set(), onAddToMachine: () => {} })
+    act(() => computerButton()!.click())
+    expect([...document.querySelectorAll('[role="menu"][aria-label="Run on"] button')].map((item) => item.textContent)).toEqual(['Studio Mac', 'Add to machine'])
+  })
 })

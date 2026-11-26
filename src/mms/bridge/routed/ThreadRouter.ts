@@ -54,7 +54,7 @@ const RESULT_WITH_THREADS = new Set([
   'pullRequests.unlink',
   'pullRequests.watch'
 ])
-const RESULT_WITH_PROJECTS = new Set(['projects.open', 'projects.remove', 'projects.rename', 'projects.pin'])
+const RESULT_WITH_PROJECTS = new Set(['projects.open', 'projects.remove', 'projects.rename', 'projects.pin', 'sourceControl.clone'])
 /** Git actions that report progress; it travels on the channel stream to the window that started the action. */
 const GIT_PROGRESS = new Set([
   'git.checkout',

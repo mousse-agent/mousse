@@ -110,7 +110,7 @@ export interface ListsSnapshot {
     } &
       /** Only in a private lists stream: the subagent rows' place in the tree, and what the thread runs with. */
       Partial<
-        Pick<Thread, 'lineage' | 'permissionMode' | 'modelOverride' | 'startedFrom' | 'sentFrom' | 'hidden'>
+        Pick<Thread, 'lineage' | 'permissionMode' | 'modelOverride' | 'startedFrom' | 'sentFrom' | 'hidden' | 'titleSource'>
       >
   >
   /** Threads that are not idle, by id. */
@@ -416,7 +416,9 @@ export class MmsListsSource {
                 // Out of the sidebar there as here (`Thread.hidden`); an older computer reads no such key and lists it.
                 ...(thread.hidden ? { hidden: true } : {}),
                 // A chat made for its first message: a window binds that message (`Thread.firstSendPending`).
-                ...(thread.firstSendPending ? { firstSendPending: true } : {})
+                ...(thread.firstSendPending ? { firstSendPending: true } : {}),
+                // A title still being named shows dimmed there as here; the other sources look the same, so only this one is sent.
+                ...(thread.titleSource === 'provisional' ? { titleSource: 'provisional' as const } : {})
               }
             : {})
         })),

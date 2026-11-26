@@ -105,7 +105,7 @@ describe('legacy profiles', () => {
   it('enabling an instance writes only that entry, keeping its unknown fields', async () => {
     const profile = legacyProfile({ loginPolicy: 'cli' }, { claude: { driver: 'claude', enabled: true }, codex: { driver: 'codex', enabled: false, note: 'kept' } })
     try {
-      await profile.harness.instances.setEnabled('codex', { kind: 'device' }, true)
+      await profile.harness.instances.setEnabled('codex', true)
       expect(profile.section().instances).toMatchObject({ claude: { driver: 'claude', enabled: true }, codex: { driver: 'codex', enabled: true, note: 'kept' } })
       expect(profile.section().instancesSeedVersion).toBe(1)
     } finally {
@@ -118,7 +118,7 @@ describe('legacy profiles', () => {
     const acp = { driver: 'acp', enabled: true, config: { binaryPath: '/opt/agent/bin/agent' } }
     const profile = legacyProfile({ loginPolicy: 'cli' }, { claude: { driver: 'claude', enabled: true }, 'grok:main': grok, 'acp:agent': acp })
     try {
-      await profile.harness.instances.setEnabled('claude', { kind: 'device' }, false)
+      await profile.harness.instances.setEnabled('claude', false)
       expect(profile.section().instances).toMatchObject({ 'grok:main': grok, 'acp:agent': acp })
       // An older reader routes nothing of a new driver to the pi loop: there is no legacy name.
       const binding = { instanceId: 'acp:agent', driver: 'acp' as const, accountGeneration: 0, homeId: 'default', configRevision: 0, model: 'default', policy: { mode: 'default' as const, approvals: 'ask' as const } }
@@ -132,7 +132,7 @@ describe('legacy profiles', () => {
     const cursor = { driver: 'cursor', enabled: true, config: { displayName: 'Work' } }
     const profile = legacyProfile({ loginPolicy: 'cli' }, { claude: { driver: 'claude', enabled: true }, 'cursor:work': cursor })
     try {
-      await profile.harness.instances.setEnabled('claude', { kind: 'device' }, false)
+      await profile.harness.instances.setEnabled('claude', false)
       expect(profile.section().instances).toMatchObject({ 'cursor:work': cursor })
       const binding = { instanceId: 'cursor:work', driver: 'cursor' as const, accountGeneration: 0, homeId: 'default', configRevision: 0, model: 'default', policy: { mode: 'default' as const, approvals: 'ask' as const } }
       expect(profile.harness.selectionOf(binding)).toEqual({ instanceId: 'cursor:work', llmProvider: '', model: 'default' })
@@ -145,7 +145,7 @@ describe('legacy profiles', () => {
     const grok = { driver: 'grok', enabled: true, config: { displayName: 'Work', home: 'private' } }
     const profile = legacyProfile({ loginPolicy: 'cli' }, { claude: { driver: 'claude', enabled: true }, 'grok:work': grok })
     try {
-      await profile.harness.instances.setEnabled('claude', { kind: 'device' }, false)
+      await profile.harness.instances.setEnabled('claude', false)
       expect(profile.section().instances).toMatchObject({ 'grok:work': grok })
       const binding = { instanceId: 'grok:work', driver: 'grok' as const, accountGeneration: 0, homeId: 'private:grok:work', configRevision: 0, model: 'default', policy: { mode: 'default' as const, approvals: 'ask' as const } }
       expect(profile.harness.selectionOf(binding)).toEqual({ instanceId: 'grok:work', llmProvider: '', model: 'default' })

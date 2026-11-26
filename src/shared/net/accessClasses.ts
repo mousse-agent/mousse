@@ -182,6 +182,9 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
     'skills.list': 'view',
     'skills.read': 'view',
     'github.status': 'view',
+    'sourceControl.status': 'view',
+    'sourceControl.repositories': 'view',
+    'folders.browse': 'work',
     'automations.list': 'view',
     // Reads of the computer's files and Git: not a view of the thread.
     'workspace.getStatus': 'work',
@@ -310,12 +313,37 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
     'projects.pin': 'work',
     'projects.remove': 'work',
     'projects.open': 'work',
+    'sourceControl.connect': 'work',
+    'sourceControl.cancel': 'work',
+    'sourceControl.clone': 'work',
     'scheduled.create': 'work',
     'scheduled.update': 'work',
     'scheduled.run': 'work',
     'scheduled.pause': 'work',
     'scheduled.resume': 'work',
-    'scheduled.delete': 'work'
+    'scheduled.delete': 'work',
+    // Settings → Providers of this computer, from another one: reading it is a view; changing it is work. Checking an
+    // entry again starts its agent and may reset what is known of it, so it is work too.
+    'providers.events': 'view',
+    'providers.catalog.addOptions': 'view',
+    'providers.registry.search': 'view',
+    'providers.instances.recheck': 'work',
+    'providers.instances.add': 'work',
+    'providers.instances.setSecret': 'work',
+    'providers.instances.remove': 'work',
+    'providers.instances.configure': 'work',
+    'providers.instances.setEnabled': 'work',
+    'providers.instances.install': 'work',
+    'providers.instances.removeInstall': 'work',
+    'providers.instances.cancelInstall': 'work',
+    'providers.instances.update': 'work',
+    'providers.instances.signIn': 'work',
+    'providers.instances.respondSignIn': 'work',
+    'providers.instances.signOut': 'work',
+    'providers.instances.allowKnownProblem': 'work',
+    'providers.instances.refreshModels': 'work',
+    'providers.instances.refreshAllModels': 'work',
+    'providers.instances.setModelPrefs': 'work'
   })
 })
 

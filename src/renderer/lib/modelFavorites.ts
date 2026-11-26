@@ -14,6 +14,7 @@ import {
   type ProfileBinding
 } from './providerSnapshots'
 import { profilePreferenceKey } from './profilePreferences'
+import { providersApi } from './providersComputer'
 
 /**
  * Favorite models live in the daemon's model preferences (`ModelPrefs.favorites`, model ids per
@@ -160,15 +161,17 @@ const savingPrefs = new Map<string, Promise<ModelPrefsSave>>()
 export function saveModelPrefs(
   instanceId: string,
   patch: ModelPrefsPatch,
-  binding: ProfileBinding = currentProfileBinding()
+  binding: ProfileBinding = currentProfileBinding(),
+  /** Another computer whose entry this is (Settings → Providers of it); none for this computer's. */
+  node?: string
 ): Promise<ModelPrefsSave> {
-  const key = `${binding.profileId}\0${binding.epoch}\0${instanceId}`
+  const key = `${binding.profileId}\0${binding.epoch}\0${node ?? ''}\0${instanceId}`
   const previous = savingPrefs.get(key) ?? Promise.resolve<ModelPrefsSave>('saved')
   const saving = previous
     .catch(() => undefined)
     .then(async (): Promise<ModelPrefsSave> => {
       if (!isCurrentProfileBinding(binding)) return 'skipped'
-      applySnapshot(await window.mousse.providers.instances.setModelPrefs(instanceId, patch), binding)
+      applySnapshot(await providersApi(node).instances.setModelPrefs(instanceId, patch), binding, node)
       return 'saved'
     })
   savingPrefs.set(key, saving)

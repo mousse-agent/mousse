@@ -402,7 +402,7 @@ export interface DelegationRecord {
 }
 
 /**
- * A bot subagent's place in its bot's work (Run DB v27): the bot, the work activation at the root of the tree (its counts
+ * A bot subagent's place in its bot's work (Run DB v28): the bot, the work activation at the root of the tree (its counts
  * and spend in bots.db are the subagent's too), and the narrowing the subagent inherits from the turn that started it.
  */
 export interface BotDelegation {
@@ -632,7 +632,7 @@ export interface BotTurnPayload {
   /** The bot dispatch the run carries; 0 for a work subagent's turn, which is a delegation (`delegationId`) instead. */
   dispatchN: number
   /**
-   * A work subagent's turn (Run DB v27): the delegation it runs for, under `activationId` (the work at the root). A build
+   * A work subagent's turn (Run DB v28): the delegation it runs for, under `activationId` (the work at the root). A build
    * without it reads dispatch 0, which no activation has, and refuses the turn.
    */
   delegationId?: string

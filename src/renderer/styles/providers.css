@@ -36,12 +36,6 @@
   white-space: nowrap;
 }
 
-.prov-scope-note {
-  margin: 0;
-  font-size: var(--settings-fs-small);
-  color: var(--text-secondary);
-}
-
 .prov-toolbar-actions {
   display: inline-flex;
   align-items: center;
@@ -352,9 +346,6 @@ html[data-theme='high-contrast'] .prov-status-badge {
   background: var(--danger);
 }
 
-/* Project override marker and reset: small icon buttons on their own line under the status,
-   above the row's select target. */
-
 /* Update available: a small button where the version was, above the row's select target. The
    title aligns on text baselines, and an icon has none: the button is centred on the name's line
    instead, and its negative margins keep that line (and the name) where it is in every other row. */
@@ -371,69 +362,9 @@ html[data-theme='high-contrast'] .prov-status-badge {
   cursor: progress;
 }
 
-.prov-item-override {
-  position: relative;
-  z-index: 2;
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  align-self: flex-start;
-  margin-left: -3px;
-}
-
 .settings-icon-btn.prov-micro {
   width: 22px;
   height: 22px;
-}
-
-.prov-override {
-  position: relative;
-  display: inline-flex;
-}
-
-.prov-override .settings-icon-btn {
-  color: var(--accent);
-}
-
-.prov-override-pop {
-  position: absolute;
-  top: calc(100% + var(--space-4));
-  left: 0;
-  z-index: 20;
-  min-width: 11rem;
-  margin: 0;
-  padding: var(--space-8);
-  list-style: none;
-  border-radius: var(--ui-card-radius);
-  background: var(--ui-raised);
-  box-shadow: var(--ui-dialog-edge), var(--ui-dialog-drop);
-  font-size: var(--settings-fs-small);
-}
-
-.prov-override-pop li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-12);
-  padding: var(--space-4) var(--space-8);
-  border-radius: var(--ui-control-radius);
-  color: var(--text-secondary);
-}
-
-.prov-override-pop li.is-effective {
-  background: var(--ui-hover);
-  color: var(--text-primary);
-  font-weight: 500;
-}
-
-.prov-override-value {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.prov-override-pad {
-  width: 13px;
 }
 
 /* Editor sections: heading, then its rows in one minimal card. Setup, Models and Advanced head the
@@ -499,8 +430,7 @@ html[data-theme='high-contrast'] .prov-status-badge {
   padding-top: var(--space-32);
 }
 
-.prov-editor .settings-advanced-body > .prov-editor-section:first-child,
-.prov-editor .settings-advanced-body > .prov-advanced-note + .prov-editor-section {
+.prov-editor .settings-advanced-body > .prov-editor-section:first-child {
   padding-top: var(--space-16);
 }
 
@@ -511,11 +441,6 @@ html[data-theme='high-contrast'] .prov-status-badge {
 .prov-editor .settings-advanced > summary:focus-visible {
   outline: none;
   background-image: var(--ui-focus-layer);
-}
-
-/* The device-wide note above Advanced's groups. */
-.prov-editor .prov-advanced-note {
-  margin: var(--space-8) 0 0;
 }
 
 .prov-secret-mask {

@@ -169,8 +169,13 @@ const TERMINAL_KILL: Phrase = phrase('Closed a terminal', 'closed a terminal', '
 const CREATE: Phrase = phrase('Created a thread', 'created a thread', 'created {n} threads')
 const PROJECT: Phrase = phrase('Changed a project', 'changed a project', 'changed projects {n} times')
 const PROJECT_OPEN: Phrase = phrase('Opened a folder as a project', 'opened a folder as a project', 'opened {n} folders as projects')
+const CLONE: Phrase = phrase('Cloned a repository as a project', 'cloned a repository as a project', 'cloned {n} repositories as projects')
+const SOURCE_CONTROL: Phrase = phrase('Connected GitHub', 'connected GitHub', 'connected GitHub {n} times')
 const AUTOMATION: Phrase = phrase('Changed an automation', 'changed an automation', 'changed automations {n} times')
 const AUTOMATION_RUN: Phrase = phrase('Ran an automation', 'ran an automation', 'ran automations {n} times')
+const PROVIDER: Phrase = phrase('Changed a provider', 'changed a provider', 'changed providers {n} times')
+const PROVIDER_KEY: Phrase = phrase("Saved a provider's key", "saved a provider's key", 'saved provider keys {n} times')
+const PROVIDER_SIGN_IN: Phrase = phrase('Signed a provider in or out', 'signed a provider in or out', 'signed providers in or out {n} times')
 const OTHER: Phrase = phrase('Made a change', 'made a change', 'made {n} other changes')
 
 /** A change that is a notice to the owner, not a thing to count. */
@@ -294,12 +299,31 @@ const PHRASES: Record<string, Phrase> = {
   'projects.pin': PROJECT,
   'projects.remove': PROJECT,
   'projects.open': PROJECT_OPEN,
+  'sourceControl.clone': CLONE,
+  'sourceControl.connect': SOURCE_CONTROL,
+  'sourceControl.cancel': SOURCE_CONTROL,
   'scheduled.create': AUTOMATION,
   'scheduled.update': AUTOMATION,
   'scheduled.pause': AUTOMATION,
   'scheduled.resume': AUTOMATION,
   'scheduled.delete': AUTOMATION,
-  'scheduled.run': AUTOMATION_RUN
+  'scheduled.run': AUTOMATION_RUN,
+  'providers.instances.add': PROVIDER,
+  'providers.instances.remove': PROVIDER,
+  'providers.instances.configure': PROVIDER,
+  'providers.instances.setEnabled': PROVIDER,
+  'providers.instances.install': PROVIDER,
+  'providers.instances.removeInstall': PROVIDER,
+  'providers.instances.cancelInstall': PROVIDER,
+  'providers.instances.update': PROVIDER,
+  'providers.instances.allowKnownProblem': PROVIDER,
+  'providers.instances.refreshModels': PROVIDER,
+  'providers.instances.refreshAllModels': PROVIDER,
+  'providers.instances.setModelPrefs': PROVIDER,
+  'providers.instances.setSecret': PROVIDER_KEY,
+  'providers.instances.signIn': PROVIDER_SIGN_IN,
+  'providers.instances.respondSignIn': PROVIDER_SIGN_IN,
+  'providers.instances.signOut': PROVIDER_SIGN_IN
 }
 
 /** Every method the owner audits as a change that has words of its own; the test checks it against the routed table. */

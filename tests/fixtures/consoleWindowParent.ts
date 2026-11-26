@@ -7,7 +7,7 @@ import { windowsGitRuntime } from '../../src/mms/git/windowsGitProcess'
 import { spawnWindowsJobProcess } from '../../src/mms/harness/windowsJobProcess'
 
 const [, , node, probe, koffi] = process.argv as [string, string, string, string, string]
-const args = [probe, koffi]
+const args = [probe]
 const load = createRequire(__filename)
 const ffi = load(koffi) as typeof import('koffi')
 const consoleWindow = ffi.load('kernel32.dll').func('void * __stdcall GetConsoleWindow()')

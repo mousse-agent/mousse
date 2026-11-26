@@ -42,8 +42,14 @@ describe('harness provider protocol', () => {
 
     expect(await dispatchMethod(ctx, 'providers.snapshots', { scope: { kind: 'project', projectId: 'p1' } }))
       .toEqual({ scope: { kind: 'project', projectId: 'p1' }, snapshots: [] })
-    await dispatchMethod(ctx, 'providers.instances.setEnabled', { instanceId: 'claude', scope: { kind: 'project', projectId: 'p1' }, enabled: null })
-    expect(setEnabled).toHaveBeenCalledWith('claude', { kind: 'project', projectId: 'p1' }, null)
+    await dispatchMethod(ctx, 'providers.instances.setEnabled', { instanceId: 'claude', enabled: false })
+    expect(setEnabled).toHaveBeenCalledWith('claude', false)
+    // A provider is on or off for the whole computer: a project's switch, or none at all, is refused.
+    await expect(dispatchMethod(ctx, 'providers.instances.setEnabled', { instanceId: 'claude', scope: { kind: 'project', projectId: 'p1' }, enabled: false }))
+      .rejects.toMatchObject({ code: 'invalid_params' })
+    await expect(dispatchMethod(ctx, 'providers.instances.setEnabled', { instanceId: 'claude', enabled: null }))
+      .rejects.toMatchObject({ code: 'invalid_params' })
+    expect(setEnabled).toHaveBeenCalledTimes(1)
     expect(await dispatchMethod(ctx, 'providers.instances.signIn', { instanceId: 'claude' }))
       .toEqual({ operation: { operationId: 'op-1', instanceId: 'claude', kind: 'sign_in' } })
   })

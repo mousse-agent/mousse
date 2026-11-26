@@ -23,6 +23,7 @@ import type { BotChatMessage } from '../../shared/bots/personal/chat'
 import { AUTOMATIONS_METHODS, type ScheduledRunEnded } from '../../shared/automations'
 import { SECRET_METHODS } from '../../shared/secretRequests'
 import { COMPUTER_USE_METHODS } from '../../shared/computerUse'
+import { SOURCE_CONTROL_METHODS } from '../../shared/sourceControl'
 import { BUG_REPORT_METHODS } from '../../shared/bugReports'
 import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
@@ -191,6 +192,8 @@ import { resnapshotTurnState } from '../mms/resnapshotTurnState'
 import type { GuiConnectionLog } from '../mms/guiConnectionLog'
 import { describeLinkError } from '../mms/guiConnectionLog'
 import { QuietTurnWatch } from '../mms/quietTurnWatch'
+import { ComputerWait } from '../mms/computerWait'
+import { waitsForComputer } from '../../shared/bridge/computerErrors'
 import { createDevTurnEndDropper } from '../mms/devTurnEndDropper'
 import { isQualifiedId, parseQualifiedId, unqualifyId } from '../../shared/threadRef'
 import type { UsageHistoryRequest } from '../../shared/usageHistory'
@@ -273,6 +276,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...AUTOMATIONS_METHODS,
   ...SECRET_METHODS,
   ...COMPUTER_USE_METHODS,
+  ...SOURCE_CONTROL_METHODS,
   ...BUG_REPORT_METHODS,
   ...SPACE_ARCHIVE_METHODS,
   ...SPEECH_HOST_METHODS,
@@ -457,6 +461,31 @@ function pullRequestScopeParams(scope: PullRequestScope | undefined): Record<str
     ...(typeof scope?.branch === 'string' ? { expectedBranch: scope.branch } : {})
   }
 }
+
+/** The provider calls a window may send to another computer, and the field of the answer it returns (`.`: all of it). */
+export const REMOTE_PROVIDER_RESULTS: Readonly<Record<string, string>> = Object.freeze({
+  'providers.snapshots': 'snapshots',
+  'providers.events': '.',
+  'providers.catalog.addOptions': 'options',
+  'providers.registry.search': 'agents',
+  'providers.instances.add': 'snapshot',
+  'providers.instances.setSecret': 'snapshot',
+  'providers.instances.remove': '.',
+  'providers.instances.configure': 'snapshot',
+  'providers.instances.setEnabled': 'snapshot',
+  'providers.instances.install': 'operation',
+  'providers.instances.removeInstall': 'result',
+  'providers.instances.cancelInstall': 'cancelled',
+  'providers.instances.update': 'operation',
+  'providers.instances.signIn': 'operation',
+  'providers.instances.respondSignIn': 'ok',
+  'providers.instances.signOut': 'snapshot',
+  'providers.instances.allowKnownProblem': 'snapshot',
+  'providers.instances.recheck': 'snapshot',
+  'providers.instances.refreshModels': 'snapshot',
+  'providers.instances.refreshAllModels': 'results',
+  'providers.instances.setModelPrefs': 'snapshot'
+})
 
 export function registerGuiIpc(
   services: GuiIpcServices,
@@ -1217,6 +1246,13 @@ export function registerGuiIpc(
       return
     }
     if (!binding || (event.profileId && event.profileId !== binding.profileId)) return
+    // A network change (a device connected or dropped) or an update from the thread itself: the computer of a shown
+    // thread that could not be reached may be back.
+    if (
+      event.type === 'net.updated' ||
+      (event.type === 'ui.notify' && (event.data as { kind?: unknown } | null)?.kind === 'net-engine') ||
+      (event.threadId && computerWait.waiting(senderId, event.threadId))
+    ) computerWait.wake(senderId)
     // Installation events are already bridged by the base session. Personal
     // events, including Default, need this exact window's presentation state.
     if (!event.profileId) return
@@ -1463,7 +1499,10 @@ export function registerGuiIpc(
   const catchUpWindow = coalescedRunner(async (senderId: number) => {
     const reasons = takeReasons(catchUpReasons, senderId)
     const win = windowBySender(senderId)
-    if (!win) return
+    if (!win) {
+      computerWait.clear(senderId)
+      return
+    }
     const binding = guiMms.getWindowBindingForSender(senderId)
     if (!binding) {
       // A profile switch reads the new profile in full when it ends: nothing to catch up.
@@ -1481,6 +1520,8 @@ export function registerGuiIpc(
     const profileId = binding.profileId
     const presentation = presentationForSender(senderId)
     const activeId = presentation.getActiveThreadId()
+    // The shown thread's computer cannot be reached: its own wait reads it (`COMPUTER_RETRY`), not every gap.
+    const threadWaits = computerWait.waiting(senderId, activeId) && !reasons.includes(COMPUTER_RETRY)
     const target = (channel: string, data: unknown): void => {
       if (win.isDestroyed()) return
       warmStart?.observe(profileId, channel, data)
@@ -1495,7 +1536,7 @@ export function registerGuiIpc(
     // The missed events may have changed any thread's status (a turn ended, the service restarted): read them all
     // again, so the sidebar's Working and Done marks are the service's.
     try {
-      const moved = await readStatuses(senderId, profileId, !activeId)
+      const moved = await readStatuses(senderId, profileId, !activeId || threadWaits)
       if (moved) changed.push(`activity:${moved}`)
       target('threads:activity', tracker.getSnapshot())
     } catch (error) {
@@ -1504,7 +1545,8 @@ export function registerGuiIpc(
     }
     let turnAfter: TurnState | undefined
     let messages: number | undefined
-    if (activeId) {
+    let waitMs: number | undefined
+    if (activeId && !threadWaits) {
       try {
         const instance = guiMms.instanceForSender?.(senderId)
         const snap = await guiMms.snapshotThreadForSender(senderId, activeId)
@@ -1516,9 +1558,14 @@ export function registerGuiIpc(
           messages = Array.isArray(snap.messages) ? snap.messages.length : undefined
           if (turnBefore?.phase !== turnAfter.phase || turnBefore?.turnId !== turnAfter.turnId) changed.push('turn')
         }
+        computerWait.clear(senderId)
       } catch (error) {
         failed = describeLinkError(error)
-        console.error('window thread could not be read again:', failed)
+        if (isQualifiedId(activeId) && waitsForComputer(error)) waitMs = computerWait.failed(senderId, activeId)
+        else {
+          computerWait.clear(senderId)
+          console.error('window thread could not be read again:', failed)
+        }
       }
     }
     if (reasons.some((reason) => LIST_REREAD_REASONS.has(reason))) {
@@ -1538,9 +1585,24 @@ export function registerGuiIpc(
       // The answer was older than an update already applied: the update stays.
       kept: kept.length ? kept : undefined,
       messages,
-      error: failed
+      error: failed,
+      // The thread's computer cannot be reached: the next read waits this long, or until that computer may be back.
+      retryInMs: waitMs,
+      waiting: threadWaits || undefined
     })
     noteShown(senderId)
+  })
+
+  /** The reason a catch-up carries when the wait for the shown thread's computer is over. */
+  const COMPUTER_RETRY = 'computer-retry'
+  const computerWait = new ComputerWait({
+    onRetry: (senderId, threadId) => {
+      if (presentationForSender(senderId).getActiveThreadId() !== threadId) {
+        computerWait.clear(senderId)
+        return
+      }
+      requestCatchUp(senderId, COMPUTER_RETRY)
+    }
   })
 
   const catchUpTimers = new Map<number, ReturnType<typeof setTimeout>>()
@@ -1605,6 +1667,7 @@ export function registerGuiIpc(
       const win = windowBySender(senderId)
       if (!win) {
         quietWatch.forget(senderId)
+        computerWait.clear(senderId)
         return
       }
       const binding = guiMms.getWindowBindingForSender(senderId)
@@ -1615,6 +1678,19 @@ export function registerGuiIpc(
       }
       const activeId = presentationForSender(senderId).getActiveThreadId()
       const answersGap = reasons.includes('gap')
+      if (activeId && computerWait.waiting(senderId, activeId)) {
+        // The shown thread's computer cannot be reached and its own wait reads it again. A gap reads every thread's
+        // status, which answers the gap flag: the flag a failed read left would otherwise ask again on every update.
+        if (answersGap) {
+          try {
+            await readStatuses(senderId, binding.profileId, true)
+            if (!win.isDestroyed()) win.webContents.send('threads:activity', activityTrackerFor(binding.profileId).getSnapshot())
+          } catch (error) {
+            linkLog.write('check.failed', { window: senderId, reasons, read: 'activity', error: describeLinkError(error) })
+          }
+        }
+        return
+      }
       if (!activeId) {
         // With no thread open, a gap is answered by reading every thread's status (it clears the gap flag).
         if (answersGap) {
@@ -1658,10 +1734,14 @@ export function registerGuiIpc(
       for (const reason of reasons) addCatchUpReason(senderId, catchUpReasonOfCheck(reason))
       await catchUpWindow(senderId)
     } catch (error) {
-      linkLog.write('check.failed', { window: senderId, reasons, error: describeLinkError(error) })
+      const activeId = presentationForSender(senderId).getActiveThreadId()
+      // The shown thread's computer cannot be reached: reading it in full now would fail the same way. Its wait reads
+      // it once that computer may be back.
+      const retryInMs = activeId && isQualifiedId(activeId) && waitsForComputer(error) ? computerWait.failed(senderId, activeId) : undefined
+      linkLog.write('check.failed', { window: senderId, reasons, error: describeLinkError(error), retryInMs })
       // A failed status check cannot say that the transcript is current. Read it in full or let the window's
       // reopening do so if the connection closed.
-      if (reasons.includes('gap')) requestCatchUp(senderId, 'live-gap')
+      if (retryInMs === undefined && reasons.includes('gap')) requestCatchUp(senderId, 'live-gap')
     } finally {
       if (reasons.includes('quiet')) quietWatch.checked(senderId)
     }
@@ -3980,8 +4060,8 @@ export function registerGuiIpc(
   })
   registerHandler('providers:instances:configure', async (_e, instanceId: string, patch: unknown) =>
     configureInstance({ instanceId, patch }))
-  registerHandler('providers:instances:setEnabled', async (_e, instanceId: string, scope: unknown, enabled: unknown) =>
-    setInstanceEnabled({ instanceId, scope, enabled }))
+  registerHandler('providers:instances:setEnabled', async (_e, instanceId: string, enabled: unknown) =>
+    setInstanceEnabled({ instanceId, enabled }))
   registerHandler('providers:instances:install', async (_e, instanceId: string) => installInstance({ instanceId }))
   registerHandler('providers:instances:cancelInstall', async (_e, operationId: string) =>
     cancelInstanceInstall({ operationId }))
@@ -4014,6 +4094,16 @@ export function registerGuiIpc(
   registerHandler('providers:instances:refreshAllModels', async () => refreshAllInstanceModels({}))
   registerHandler('providers:instances:setModelPrefs', async (_e, instanceId: string, patch: unknown) =>
     setInstanceModelPrefs({ instanceId, patch }))
+  // Settings → Providers of another computer: the call goes to that computer through this computer's service, which
+  // routes only the rows the routed table offers. A key in `params` is passed on and never kept or logged here.
+  registerHandler('providers:remote', async (_e, node: unknown, method: unknown, params: unknown) => {
+    const key = typeof method === 'string' ? REMOTE_PROVIDER_RESULTS[method] : undefined
+    if (!key) throw new Error('Not a provider call another computer takes.')
+    if (typeof node !== 'string' || !node) throw new Error('Choose a computer.')
+    const body = params && typeof params === 'object' && !Array.isArray(params) ? (params as Record<string, unknown>) : {}
+    const res = await guiMms.request<Record<string, unknown>>(method as never, { ...body, node } as never)
+    return key === '.' ? res : res[key]
+  })
   // A bot's "export your memory" ask and its chat's Attach pick here, with the system's pickers.
   registerHandler('dialog:pickFolder', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
