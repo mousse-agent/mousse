@@ -1,6 +1,6 @@
 import type { Api, Model, Models, ThinkingLevel } from '@earendil-works/pi-ai'
 import { harnessAppError } from '../../../../shared/harness/types'
-import { parseThinkingSuffixFromModelId } from '../../../../shared/modelVariants'
+import { parseListedModelId } from '../../../../shared/modelVariants'
 import { customModelDefinition } from '../../catalog'
 import { ONE_SHOT_TASK_TEXT, type OneShotSpec } from '../../driver'
 import { piOneShotRunsOn } from './oneShotApis'
@@ -15,7 +15,8 @@ export type PiOneShotModels = Pick<Models, 'getModel' | 'getModels' | 'getAuth' 
  * keeps and refreshes them, and the reply's text. Not a loop: one request, no retry.
  */
 export async function runPiOneShot(models: PiOneShotModels, providerId: string, spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
-  const { baseId, effort } = parseThinkingSuffixFromModelId(spec.model)
+  // An id the provider lists exactly is that model (`phi3:medium` on Ollama), never a model at an effort.
+  const { baseId, effort } = parseListedModelId(spec.model, (id) => models.getModel(providerId, id) !== undefined)
   const model = models.getModel(providerId, baseId) ?? customModel(models, providerId, spec)
   if (!model)
     throw harnessAppError({ code: 'model_unavailable', message: `${baseId} is not a model of this provider. Refresh models or choose another one.` })

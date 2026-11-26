@@ -504,6 +504,26 @@
     "digest": "f0782cac7656bdc6",
     "security": "6f4539c345ae2836"
   },
+  "providers.local.checkTools": {
+    "version": 1,
+    "digest": "637569c737339148",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.local.connect": {
+    "version": 1,
+    "digest": "c38e9c5799f446da",
+    "security": "6f4539c345ae2836"
+  },
+  "providers.local.detect": {
+    "version": 1,
+    "digest": "e1b2634dfa7c5469",
+    "security": "2455464eaace895f"
+  },
+  "providers.local.setModel": {
+    "version": 1,
+    "digest": "82b18d26dc4b1b96",
+    "security": "6f4539c345ae2836"
+  },
   "providers.registry.search": {
     "version": 1,
     "digest": "aec28b608406bb6a",

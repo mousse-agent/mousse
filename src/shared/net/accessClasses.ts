@@ -350,7 +350,12 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
     'providers.instances.allowKnownProblem': 'work',
     'providers.instances.refreshModels': 'work',
     'providers.instances.refreshAllModels': 'work',
-    'providers.instances.setModelPrefs': 'work'
+    'providers.instances.setModelPrefs': 'work',
+    // Local model servers: finding them is a view; connecting one, setting a window or checking tools is work.
+    'providers.local.detect': 'view',
+    'providers.local.connect': 'work',
+    'providers.local.setModel': 'work',
+    'providers.local.checkTools': 'work'
   })
 })
 

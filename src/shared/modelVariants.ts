@@ -1,3 +1,4 @@
+import { isLocalInstanceId } from './localServers'
 import { canonicalModelName } from './modelNames'
 import { ANTIGRAVITY_INSTANCE_ID } from './providerInstances'
 import type { LlmModelOption } from './settings'
@@ -71,6 +72,15 @@ export function parseThinkingSuffixFromModelId(modelId: string): {
   }
 
   return { baseId: modelId }
+}
+
+/**
+ * `parseThinkingSuffixFromModelId`, except that an id the agent lists as it is never loses its last part: a local
+ * server's `phi3:medium` is that model, not `phi3` at medium effort. Exact ids resolve before effort parsing.
+ */
+export function parseListedModelId(modelId: string, listed: (id: string) => boolean): { baseId: string; effort?: string } {
+  if (listed(modelId)) return { baseId: modelId }
+  return parseThinkingSuffixFromModelId(modelId)
 }
 
 export function extractFamilyLabel(label: string): string {
@@ -350,17 +360,23 @@ const newestFirstCollator = new Intl.Collator(undefined, { numeric: true, sensit
 function groupFamilies(providerId: string, models: LlmModelOption[]): ModelFamily[] {
   const byFamily = new Map<string, ParsedModelVariant[]>()
 
+  // A local server's ids are its models as they are (`phi3:medium` is not `phi3` at medium): one family each.
+  const local = isLocalInstanceId(providerId)
   for (const model of models) {
-    const parsed = parseModelVariant(model)
+    const parsed = local
+      ? { ...parseModelVariant(model), familyLabel: model.label, context: undefined, effort: undefined, speed: 'standard' }
+      : parseModelVariant(model)
     parsed.effort ??= antigravityModelEffort(providerId, model.id)
-    const bucket = byFamily.get(parsed.familyLabel) ?? []
+    const key = local ? model.id : parsed.familyLabel
+    const bucket = byFamily.get(key) ?? []
     bucket.push(parsed)
-    byFamily.set(parsed.familyLabel, bucket)
+    byFamily.set(key, bucket)
   }
 
   return [...byFamily.entries()]
-    .flatMap(splitByAlias)
-    .map(([familyLabel, variants]) => {
+    .flatMap((entry) => (local ? [entry] : splitByAlias(entry)))
+    .map(([key, variants]) => {
+      const familyLabel = local ? variants[0]!.familyLabel : key
       const contexts = uniqueSorted(variants.map((variant) => variant.context))
       const efforts = uniqueEfforts([
         ...variants.map((variant) => variant.effort),
@@ -375,7 +391,7 @@ function groupFamilies(providerId: string, models: LlmModelOption[]): ModelFamil
       const brand = inferModelBrand(brandSource?.id ?? familyLabel, familyLabel, providerId)
 
       return {
-        familyId: `${providerId}:${familyLabel}`,
+        familyId: `${providerId}:${key}`,
         familyLabel,
         variants,
         contexts,

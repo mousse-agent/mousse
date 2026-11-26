@@ -140,6 +140,7 @@ import type { CliInstallEvent, ProviderUsage, UsageForResponse, UsageProxyKeyRes
 import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } from '../shared/harness/status'
 import type { SetVendorSettingInput, VendorSettingsView } from '../shared/harness/vendorSettings'
 import type { MoveResult } from '../shared/harness/move'
+import type { LocalCheckToolsInput, LocalCheckToolsResult, LocalConnectInput, LocalConnectResult, LocalServerRow, LocalSetModelInput } from '../shared/localServers'
 import type {
   AddInstanceInput,
   InstanceConfigPatch,
@@ -1392,6 +1393,13 @@ const api = {
       /** Each present field replaces the stored one. */
       setModelPrefs: (instanceId: string, patch: ModelPrefsPatch): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:setModelPrefs', instanceId, patch)
+    },
+    /** Local model servers of this computer (Add provider → Local models). Detection runs only when called. */
+    local: {
+      detect: (): Promise<LocalServerRow[]> => ipcRenderer.invoke('providers:local:detect'),
+      connect: (input: LocalConnectInput): Promise<LocalConnectResult> => ipcRenderer.invoke('providers:local:connect', input),
+      setModel: (input: LocalSetModelInput): Promise<boolean> => ipcRenderer.invoke('providers:local:setModel', input),
+      checkTools: (input: LocalCheckToolsInput): Promise<LocalCheckToolsResult> => ipcRenderer.invoke('providers:local:checkTools', input)
     }
   },
   readAloud: {

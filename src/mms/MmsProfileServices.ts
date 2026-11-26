@@ -911,7 +911,10 @@ export class MmsProfileServices {
       connectivity: createBotConnectivity({
         apiHost: (instanceId) => {
           const driver = this.providerInstances.get(instanceId)?.driver
-          return botApiHost(driver, driver === 'pi' ? instanceId.split(':')[1] : undefined)
+          const provider = driver === 'pi' ? instanceId.split(':')[1] : undefined
+          // A local server is reached on its own address (this computer or the network), never over the internet.
+          if (provider && this.providerAuth?.local?.has(provider)) return 'local'
+          return botApiHost(driver, provider)
         }
       }),
       // By hand (#673): each ready entry's models that can hold a bot here, named by the entry, with their reasoning levels,
