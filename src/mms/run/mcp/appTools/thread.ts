@@ -1282,6 +1282,25 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     if (!reach.ok) throw new RemoteThreadRefusal(reach.code, reach.message, reach.computer)
     return reach
   }
+  /**
+   * `thread_archive` of a thread on another computer (a qualified id): an agent's archive there, decided by that
+   * computer's reach for this one (by default only the threads this computer's agents started there), refused while it
+   * still works, and by a computer too old to take an agent's archive.
+   */
+  const archiveOnComputer = (threadId: string, archived: boolean, requestId: string, ctx: ToolCallContext): Promise<ToolOutcome> => onComputer(async () => {
+    const target = remoteTarget(threadId, ctx, 'thread_archive')
+    const idem = `thread_archive:${ctx.caller.threadId}:${requestId}:${target.threadId}:${archived ? 1 : 0}`
+    const result = await host.remoteThreads!.archive(target, archived, { actor: actorOf(ctx), idem })
+    if (result.status === 'uncertain') return json({ ok: false, status: 'uncertain', computer: result.computer, message: result.message })
+    return json({
+      threadId: target.threadId,
+      link: threadLink(target.threadId),
+      computer: target.computer,
+      archived,
+      changed: result.changed,
+      note: archived ? `It is in Archived on ${target.computer} now; thread_archive with archived: false brings it back.` : `It is back in the thread list on ${target.computer}.`
+    })
+  })
   /** Runs a tool's branch for a thread on another computer: a refusal comes back with its code, never thrown on. */
   const onComputer = async (work: () => Promise<ToolOutcome>): Promise<ToolOutcome> => {
     try {
@@ -2356,13 +2375,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_archive',
-      description: 'Archive a thread, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. Only when the user asks you to archive a thread once its work is done (merged, or dropped), never on your own. Without threadId it archives this thread when your turn ends: call it last, in the turn that finishes the work, and only when nothing is outstanding (no subagent, launched thread, background command, pending check or question to the user); a failed or stopped turn leaves the thread open. With threadId it archives that thread now, or unarchives it with archived: false; a thread that is still working is refused. Needs a turn the user started, in a thread that is not a subagent.',
+      description: 'Archive a thread, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. Only when the user asks you to archive a thread once its work is done (merged, or dropped), never on your own. Without threadId it archives this thread when your turn ends: call it last, in the turn that finishes the work, and only when nothing is outstanding (no subagent, launched thread, background command, pending check or question to the user); a failed or stopped turn leaves the thread open. With threadId it archives that thread now, or unarchives it with archived: false; a thread that is still working is refused. A subagent that runs on another computer is archived or unarchived on that computer first, and here only once it said so; status uncertain means that computer did not confirm it (call again with the same clientRequestId to get its first answer; it never acts twice). A qualified id (<computer id>:<thread id>) archives a thread on another computer, within the reach that computer gives this one\'s agents (by default only the threads this computer\'s agents started there; outside_agent_reach otherwise). Needs a turn the user started, in a thread that is not a subagent.',
       botDescription: 'Archive one of your owner\'s threads when its work is merged or dropped and your owner asks you to tidy it away, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. archived: false unarchives it again. A thread that is still working is refused: stop it first with thread_interrupt.',
       inputSchema: {
         type: 'object',
         properties: {
-          threadId: { type: 'string', description: 'Another thread to archive now; omit to archive this thread when your turn ends.' },
-          archived: { type: 'boolean', description: 'Defaults to true; false unarchives the thread named by threadId.' }
+          threadId: { type: 'string', description: 'Another thread to archive now (a qualified id for a thread on another computer); omit to archive this thread when your turn ends.' },
+          archived: { type: 'boolean', description: 'Defaults to true; false unarchives the thread named by threadId.' },
+          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
         }
       },
       botInputSchema: {
@@ -2376,10 +2396,18 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       // One rule (§1.5): `person` (a bot: its grant), and `threads.manage` for another thread, as every thread tool reaches it.
       access: 'managesOthers',
       needsPerson: true,
+      // A thread on another computer (a qualified id) is decided by that computer's reach (`archiveOnComputer`). Without
+      // threadId the call is about the caller's own thread, as before.
+      target: (args) => (isQualifiedId(args.threadId) ? undefined : { threadId: args.threadId as string | undefined }),
       class: 'mutation',
       offered: () => false,
       handler: async (args, ctx) => {
         const bot = botThreadCall(bots, ctx)
+        // A thread on another computer (a qualified id): archived there, as that computer lets this one's agents.
+        if (typeof args.threadId === 'string' && isQualifiedId(args.threadId)) {
+          if (args.archived !== undefined && typeof args.archived !== 'boolean') throw new Error('archived must be true or false')
+          return archiveOnComputer(args.threadId, args.archived !== false, toolRequestId(args, ctx), ctx)
+        }
         if (!bot && args.threadId !== undefined && args.threadId !== ctx.caller.threadId) {
           const threadId = requiredId(args, 'threadId')
           if (args.archived !== undefined && typeof args.archived !== 'boolean') throw new Error('archived must be true or false')
@@ -2387,17 +2415,24 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           if (!host.setThreadArchived) return notAvailable('thread_archive')
           assertNotBotThread(host, threadId, 'thread_archive')
           const actor = actorOf(ctx)
-          const result = await host.setThreadArchived(threadId, archived, { actor })
-          if (result.status === 'rejected')
-            throw new McpToolError('mousse_conflict', `Thread ${threadId} is still working, so it was not archived. If the user wants it archived anyway, stop it first with thread_interrupt, then archive it.`, { conflict: result.reason, threadId })
-          if (result.changed) showAction(host, threadId, actor, archived ? 'archived this thread' : 'unarchived this thread')
-          return json({
-            threadId,
-            link: threadLink(threadId),
-            title: titleOf(threadId) ?? null,
-            archived,
-            changed: result.changed,
-            note: archived ? 'It is in Archived now; thread_archive with archived: false brings it back.' : 'It is back in the thread list.'
+          // A subagent that runs on another computer is changed there first; that computer's refusal comes back with its code.
+          return onComputer(async () => {
+            const result = await host.setThreadArchived!(threadId, archived, { actor, clientRequestId: toolRequestId(args, ctx) })
+            if (result.status === 'rejected')
+              throw new McpToolError('mousse_conflict', `Thread ${threadId} is still working, so it was not archived. If the user wants it archived anyway, stop it first with thread_interrupt, then archive it.`, { conflict: result.reason, threadId })
+            if (result.status === 'uncertain') return json({ ok: false, status: 'uncertain', threadId, computer: result.computer, message: result.message })
+            if (result.changed) showAction(host, threadId, actor, archived ? 'archived this thread' : 'unarchived this thread')
+            const there = result.there
+            return json({
+              threadId,
+              link: threadLink(threadId),
+              title: titleOf(threadId) ?? null,
+              archived,
+              changed: result.changed,
+              ...(there ? { computer: there.computer, remoteThreadId: there.threadId, changedThere: there.changed } : {}),
+              note: (archived ? 'It is in Archived now; thread_archive with archived: false brings it back.' : 'It is back in the thread list.')
+                + (there ? there.gone ? ` Its thread on ${there.computer} was deleted there.` : ` Its thread on ${there.computer} is ${archived ? 'archived' : 'unarchived'} there too.` : '')
+            })
           })
         }
         if (!bot) {
@@ -2432,9 +2467,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         requireBotReach(host, engine, ctx.caller.threadId, threadId)
         assertNotBotThread(host, threadId, 'thread_archive')
         const actor = actorOf(ctx)
-        const result = await host.setThreadArchived(threadId, archived, { actor })
+        const result = await host.setThreadArchived(threadId, archived, { actor, clientRequestId: toolRequestId(args, ctx) })
         if (result.status === 'rejected')
           throw new McpToolError('mousse_conflict', `Thread ${threadId} is still working, so it was not archived. If your owner wants it archived anyway, stop it first with thread_interrupt, then archive it.`, { conflict: result.reason, threadId })
+        if (result.status === 'uncertain') return json({ ok: false, status: 'uncertain', threadId, computer: result.computer, message: result.message })
         const title = titleOf(threadId)
         if (result.changed) {
           // The thread says who archived it, and the bot's chat gets a chip with the thread to open.

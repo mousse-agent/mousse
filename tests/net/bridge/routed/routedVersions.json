@@ -840,8 +840,8 @@
     "security": "04f7c680ffd36337"
   },
   "threads.archive": {
-    "version": 1,
-    "digest": "58cd3663c031c258",
+    "version": 2,
+    "digest": "9d09de715d1c881b",
     "security": "ceacd93869361a7a"
   },
   "threads.backgroundWork": {

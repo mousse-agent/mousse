@@ -778,5 +778,33 @@ ALTER TABLE runs ADD COLUMN owner_proof TEXT;
 ALTER TABLE remote_launches ADD COLUMN hidden INTEGER CHECK(hidden IS NULL OR hidden IN (0,1));
 ALTER TABLE remote_subagents ADD COLUMN hidden INTEGER CHECK(hidden IS NULL OR hidden IN (0,1));
 `
+  },
+  {
+    version: 27,
+    sql: `
+-- Whether a remote subagent's thread on its computer must be archived: its stand-in here is archived. Kept until that
+-- computer took it, so the app's Archive made while it is offline reaches it when it answers. One row per subagent, made
+-- the first time its stand-in is archived.
+--   pending:   archived (1, or 0 to unarchive) is not yet so there; generation rises with each change;
+--   sent:      that computer took it (also an agent's archive it answered), or its thread there is gone;
+--   left_open: that computer would not take it (too old, or its person does not let agents here change it); last_error
+--              says why. A later change here tries again.
+-- Each send goes under the key remote-archive:<child>:<generation>.<attempt>: a resend after a lost answer keeps it, so
+-- that computer replays the first answer; a resend after that computer refused (the thread still worked there) takes
+-- the next attempt, since that computer keeps its refusal under the old key.
+CREATE TABLE remote_archive(
+  child_thread_id  TEXT PRIMARY KEY,
+  node             TEXT NOT NULL,
+  remote_thread_id TEXT NOT NULL,
+  archived         INTEGER NOT NULL CHECK(archived IN (0,1)),
+  generation       INTEGER NOT NULL DEFAULT 1,
+  attempt          INTEGER NOT NULL DEFAULT 0,
+  state            TEXT NOT NULL CHECK(state IN ('pending','sent','left_open')),
+  last_error       TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL
+) STRICT;
+CREATE INDEX remote_archive_state ON remote_archive(state);
+`
   }
 ]

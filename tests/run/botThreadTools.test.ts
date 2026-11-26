@@ -580,7 +580,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     const archived = await text('thread_archive', { threadId: 'mine' })
     expect(archived.error).toBe(false)
     expect(JSON.parse(archived.text)).toMatchObject({ threadId: 'mine', archived: true, changed: true })
-    expect(host.setThreadArchived).toHaveBeenLastCalledWith('mine', true, { actor: expect.objectContaining({ threadId: 'home', runId }) })
+    expect(host.setThreadArchived).toHaveBeenLastCalledWith('mine', true, { actor: expect.objectContaining({ threadId: 'home', runId }), clientRequestId: expect.any(String) })
     expect(host.showAgentAction).toHaveBeenCalledWith({ threadId: 'mine' }, expect.objectContaining({ threadId: 'home' }), 'archived this thread', { notice: true })
     expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_archive', { threadId: 'mine', title: 'Fix the login page', archived: true })
     expect((await text('thread_archive', { threadId: 'archived', archived: false })).error).toBe(false)
@@ -614,7 +614,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     fresh.turns.register(appTurn({ threadId: 'mine', runId: plain.runId }))
     const asAgent = (args: Record<string, unknown>) => fresh.registry.call('thread_archive', args, fresh.request({ threadId: 'mine', runId: plain.runId }))
     expect(JSON.parse((await asAgent({ threadId: 'archived', archived: false })).text)).toMatchObject({ threadId: 'archived', archived: false, changed: true })
-    expect(fresh.host.setThreadArchived).toHaveBeenLastCalledWith('archived', false, { actor: expect.objectContaining({ kind: 'agent', threadId: 'mine' }) })
+    expect(fresh.host.setThreadArchived).toHaveBeenLastCalledWith('archived', false, { actor: expect.objectContaining({ kind: 'agent', threadId: 'mine' }), clientRequestId: expect.any(String) })
     expect(fresh.host.showAgentAction).toHaveBeenCalledWith({ threadId: 'archived' }, expect.objectContaining({ threadId: 'mine' }), 'unarchived this thread')
     // Still working: refused, with what to do.
     vi.mocked(fresh.host.setThreadArchived!).mockResolvedValueOnce({ status: 'rejected', reason: 'thread_running' })
