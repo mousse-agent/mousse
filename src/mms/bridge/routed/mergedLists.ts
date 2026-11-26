@@ -539,7 +539,11 @@ export class MergedLists implements RemoteListsPort {
           this.listsStream(c),
           undefined,
           (caught) => {
-            if (!caught) return
+            if (!caught) {
+              // Steady means it stayed caught up, so falling behind starts the clock again.
+              c.caughtUpAt = undefined
+              return
+            }
             c.caughtUpAt = this.now()
             this.worked(c)
           }
