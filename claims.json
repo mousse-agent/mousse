@@ -74,17 +74,6 @@
       "expiresAt": "2026-11-25T17:27:21.463Z"
     },
     {
-      "task": "fix/bot-tool-bloat-and-telemetry",
-      "session": "agibook-dc08ba",
-      "machine": "agibook",
-      "branch": "fix/bot-tool-bloat-and-telemetry",
-      "paths": [
-        "src/mms/bots/activation/turnUsage.ts"
-      ],
-      "claimedAt": "2026-11-25T20:05:19.694Z",
-      "expiresAt": "2026-11-25T22:05:19.694Z"
-    },
-    {
       "task": "fix/browser-automation-bugs",
       "session": "agibook-664429",
       "machine": "agibook",
@@ -94,18 +83,6 @@
       ],
       "claimedAt": "2026-11-25T10:31:12.671Z",
       "expiresAt": "2026-11-25T12:31:12.671Z"
-    },
-    {
-      "task": "issue-1830-grant-roles",
-      "session": "Avarnics-Mac-mini.local-c3024a",
-      "machine": "Avarnics-Mac-mini.local",
-      "branch": "issue-1830-grant-roles",
-      "paths": [
-        "src/mms/netEngine",
-        "src/shared/net/accessPresets.ts"
-      ],
-      "claimedAt": "2026-11-25T02:21:03.217Z",
-      "expiresAt": "2026-11-25T04:21:03.217Z"
     },
     {
       "task": "lists-attach-retention",
