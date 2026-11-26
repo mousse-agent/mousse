@@ -80,7 +80,7 @@ function useAnchoredMenu(disabled: boolean, itemCount: number, onOpen?: () => vo
 }
 
 /** Above a new thread's composer: the project it starts in. */
-export function ComposerProjectPicker({ projects, workspace, disabled, device, onChange, onOpenProject, onError }: {
+export function ComposerProjectPicker({ projects, workspace, disabled, device, onChange, onOpenProject, onError, addThere }: {
   projects: Project[]
   workspace: ComposerWorkspace
   disabled: boolean
@@ -88,6 +88,8 @@ export function ComposerProjectPicker({ projects, workspace, disabled, device, o
   onChange: (workspace: ComposerWorkspace) => void
   onOpenProject: () => Promise<void>
   onError: (message: string) => void
+  /** The project the draft had on this computer, which the computer picked does not have: offered to add there. */
+  addThere?: { name: string; onAdd: () => void }
 }) {
   const [opening, setOpening] = useState(false)
   const [remoteDialog, setRemoteDialog] = useState(false)
@@ -117,6 +119,21 @@ export function ComposerProjectPicker({ projects, workspace, disabled, device, o
         <span>{project?.name ?? (workspace.projectId ? 'Unavailable project' : 'No project')}</span>
         <ChevronDown size={12} aria-hidden="true" />
       </button>
+      {addThere && device && workspace.node && (() => {
+        const there = runOnLabel(device.localName, device.devices, workspace.node)
+        return (
+          <button
+            type="button"
+            className="new-thread-chip new-thread-add-there"
+            title={`${addThere.name} isn’t on ${there} yet. Clone it there, or pick its folder there.`}
+            disabled={disabled}
+            onClick={addThere.onAdd}
+          >
+            <FolderPlus size={14} aria-hidden="true" />
+            <span>{`Add ${addThere.name} to ${there}`}</span>
+          </button>
+        )
+      })()}
       {menu.open && (
         <FloatingPortal>
           <div

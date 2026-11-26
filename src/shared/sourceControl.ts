@@ -11,6 +11,7 @@ export const SOURCE_CONTROL_METHODS = [
   'sourceControl.signOut',
   'sourceControl.repositories',
   'sourceControl.clone',
+  'sourceControl.projectSource',
   'folders.browse'
 ] as const
 export type SourceControlMethod = (typeof SOURCE_CONTROL_METHODS)[number]

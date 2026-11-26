@@ -121,8 +121,9 @@ import { SetupFailureNotice } from '../chat/components/SetupFailureNotice'
 import { CommandInfoNotice, GoalNotice } from '../chat/components/GoalNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, isPendingRowId, pendingThreadRow, typedAfterSend, type PendingThreadRow } from '../lib/pendingThreadRows'
-import { type ComposerWorkspace, composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, newThreadWorktree, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
+import { type ComposerWorkspace, composerWorkspaceFor, projectToAddThere, workspaceWithAddedProject, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, newThreadWorktree, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
 import { ComposerProjectPicker, ComposerThreadSettings, type ComposerDeviceProps } from './ComposerWorkspaceToolbar'
+import { openAddToComputer } from '../lib/addToComputer'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
 import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 import { threadReferenceRefusal } from '../lib/threadReference'
@@ -2043,6 +2044,26 @@ export function OrchestratorChat() {
     setComposerWorkspaceDraft(activeThreadId, workspaceOnDevice(workspace, projects, node))
   }
 
+  // The project the draft had here, when the computer picked does not have it: offered to add there instead of dropped.
+  const carriedProject = projectToAddThere(workspace, projects)
+  const addCarriedProject = () => {
+    const node = workspace.node
+    if (!node || !carriedProject) return
+    const threadId = activeThreadId
+    openAddToComputer({
+      node,
+      projectId: carriedProject.id,
+      name: carriedProject.name,
+      onAdded: (project) => {
+        const state = useAppStore.getState()
+        if (state.profileId !== profileId) return
+        const draft = composerWorkspaceFor(state.composerWorkspaceDrafts[threadId ?? '__blank__'], state.threads.find((t) => t.id === threadId), state.projects)
+        const next = workspaceWithAddedProject(draft, node, project.id)
+        if (next !== draft) setComposerWorkspaceDraft(threadId, next)
+      }
+    })
+  }
+
   /** Asks the picked computer to open a folder; resolves with its refusal, if any. */
   const openProjectOnRunOnDevice = async (path: string): Promise<string | undefined> => {
     const node = workspace.node
@@ -2256,6 +2277,7 @@ export function OrchestratorChat() {
             onChange={pickDraftProject}
             onOpenProject={openProjectForDraft}
             onError={setSendError}
+            {...(carriedProject ? { addThere: { name: carriedProject.name, onAdd: addCarriedProject } } : {})}
           />
         )}
             <ChatComposer
