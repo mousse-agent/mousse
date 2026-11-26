@@ -46,6 +46,24 @@
       "expiresAt": "2026-11-25T18:05:20.190Z"
     },
     {
+      "task": "bot-subagents-delegations",
+      "session": "LAPTOP-HIEROJK7-ee6868",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "bot-subagents-delegations",
+      "paths": [
+        "src/mms/bots/activation/BotEngine.ts",
+        "src/mms/run/RunEngine.ts",
+        "src/mms/run/Delegations.ts",
+        "src/mms/run/delegation/wake.ts",
+        "src/mms/run/db/migrations.ts",
+        "src/mms/bots/store/scopes.ts",
+        "src/mms/run/Inbox.ts",
+        "src/mms/bots/botExecutionPort.ts"
+      ],
+      "claimedAt": "2026-11-26T06:11:22.348Z",
+      "expiresAt": "2026-11-26T08:11:22.348Z"
+    },
+    {
       "task": "computer-scoped-provider-settings",
       "session": "Animatrix-fbfc56",
       "machine": "Animatrix",
