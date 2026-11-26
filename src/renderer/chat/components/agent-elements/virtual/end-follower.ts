@@ -33,6 +33,8 @@ export function createEndFollower(options: {
   container: () => HTMLElement | null;
   /** What is drawn after the turns (the queued messages); null or empty when nothing is queued. */
   after?: () => HTMLElement | null;
+  /** The last turn's row: what changes size above it is not near the end. */
+  lastRow?: () => Element | null;
   mode: () => FollowMode;
   onProgrammaticScroll: () => void;
 }) {
@@ -52,6 +54,9 @@ export function createEndFollower(options: {
   let collapseFrame = 0;
   /** The person folded something near the end away (`closeNext`): the next shrink is not held. */
   let closing = false;
+  /** The last turn's row and its top in scroll space, as last sized. */
+  let lastRow: Element | null = null;
+  let lastRowTop = 0;
 
   const setReserve = (px: number) => {
     const next = Math.max(0, Math.round(px));
@@ -148,8 +153,27 @@ export function createEndFollower(options: {
     else setReserve(held(container));
   };
 
+  /**
+   * How far the last turn's row moved since the space was last sized: what changed size above it. In a long thread
+   * that is mostly rows the transcript mounts in place of their estimated height, many at once when a thread opens.
+   * Only what changes from that row down is near the end; the rest moves the end and everything near it alike.
+   */
+  const shiftAbove = (container: HTMLElement): number => {
+    const row = options.lastRow?.() ?? null;
+    const top = row ? offsetIn(container, row) : 0;
+    const moved = row !== null && row === lastRow ? top - lastRowTop : 0;
+    lastRow = row;
+    lastRowTop = top;
+    return moved;
+  };
+
   const updateReserve = (container: HTMLElement) => {
     const content = contentHeight(container);
+    // Content that left above the last turn is not held: a held space would push the end, and the view standing on
+    // it, below everything there is to see.
+    const moved = shiftAbove(container);
+    lastContent += moved;
+    if (holdTotal !== null) holdTotal += moved;
     sizeReserve(container, content);
     // The fold is committed in the same task as `closeNext`, so the first size after it is the one.
     closing = false;
@@ -234,6 +258,7 @@ export function createEndFollower(options: {
           holdTotal = Math.max(content, lastContent) + reserve;
         }
         lastContent = content;
+        shiftAbove(container);
         holdTimer = setTimeout(() => {
           releaseHold();
           const current = options.container();

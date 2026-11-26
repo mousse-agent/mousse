@@ -43,6 +43,7 @@ const ENTRY_POINTS = [
   'tests/fixtures/storage-settings/main.ts',
   'tests/fixtures/style-recalc-scope/main.ts',
   'tests/fixtures/theme-css/main.ts',
+  'tests/fixtures/thread-open-blank/main.ts',
   'tests/fixtures/turn-window/main.ts',
   'tests/fixtures/wallpaper/main.ts',
   'tests/fixtures/warm-start-column/main.ts'
@@ -94,6 +95,7 @@ const COMPUTED_LAUNCHES: Record<string, { starts: string; how: string }> = {
   'tests/renderer/storage-settings-electron.test.ts:25': { starts: 'tests/fixtures/storage-settings/main.ts', how: 'esbuild bundle of tests/fixtures/storage-settings/main.ts (line 20) in a temporary folder' },
   'tests/renderer/steer-and-selection-actions-electron.test.ts:30': { starts: 'tests/fixtures/steer-and-selection-actions/main.ts', how: 'esbuild bundle of tests/fixtures/steer-and-selection-actions/main.ts in a temporary folder' },
   'tests/renderer/theme-css-electron.test.ts:34': { starts: 'tests/fixtures/theme-css/main.ts', how: 'esbuild bundle of tests/fixtures/theme-css/main.ts in a temporary folder' },
+  'tests/renderer/thread-open-blank-electron.test.ts:25': { starts: 'tests/fixtures/thread-open-blank/main.ts', how: 'esbuild bundle of tests/fixtures/thread-open-blank/main.ts (line 22) in a temporary folder' },
   'tests/renderer/turn-window-electron.test.ts:100': { starts: 'tests/fixtures/turn-window/main.ts', how: 'esbuild bundle of tests/fixtures/turn-window/main.ts in a temporary folder' },
   'tests/renderer/warm-start-column-electron.test.ts:37': { starts: 'tests/fixtures/warm-start-column/main.ts', how: 'esbuild bundle of tests/fixtures/warm-start-column/main.ts (line 34) in a temporary folder' },
   'tests/net/chats/gui-electron.test.ts:37': { starts: 'tests/fixtures/repository-upgrades/electron-net-chats-bridge.ts', how: 'esbuild bundle of tests/fixtures/repository-upgrades/electron-net-chats-bridge.ts (line 32) in a temporary folder' },

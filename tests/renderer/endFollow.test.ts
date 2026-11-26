@@ -55,7 +55,8 @@ describe('holding the end while something near it is replaced', () => {
 function transcript(options: { content: number; mode?: FollowMode; scrollTop?: number }) {
   const clientHeight = 800
   // `queue`: where the queued messages start, in scroll space; null when nothing is queued.
-  const state = { content: options.content, mode: (options.mode ?? 'following-end') as FollowMode, scrollTop: 0, writes: 0, queue: null as number | null }
+  // `row`: where the last turn's row starts, in scroll space; null when the list draws none.
+  const state = { content: options.content, mode: (options.mode ?? 'following-end') as FollowMode, scrollTop: 0, writes: 0, queue: null as number | null, row: null as number | null }
   const reserveEl = document.createElement('div')
   const reserve = () => Number.parseFloat(reserveEl.style.height || '0')
   const scrollHeight = () => Math.max(clientHeight, state.content + reserve())
@@ -73,9 +74,11 @@ function transcript(options: { content: number; mode?: FollowMode; scrollTop?: n
     get childElementCount() { return state.queue === null ? 0 : 1 },
     getBoundingClientRect: () => ({ top: (state.queue ?? state.content) - container.scrollTop })
   } as unknown as HTMLElement
+  const lastRow = { getBoundingClientRect: () => ({ top: (state.row ?? 0) - container.scrollTop }) } as unknown as Element
   const follower = createEndFollower({
     container: () => container,
     after: () => after,
+    lastRow: () => (state.row === null ? null : lastRow),
     mode: () => state.mode,
     onProgrammaticScroll: () => { state.writes += 1 }
   })
@@ -167,6 +170,50 @@ describe('the transcript while a reply streams', () => {
     t.follower.follow()
     expect(t.reserve()).toBe(0)
     expect(t.container.scrollTop).toBe(at + 10)
+    expect(t.follower.holding()).toBe(false)
+  })
+
+  // A long thread opening mid-turn mounts rows in place of their estimated heights, which a turn whose work is folded
+  // sits far under: the content above the last turn drops by thousands of px in a commit. Held, that space put the end
+  // below every row and the view showed nothing until the person scrolled.
+  it('lands on the new end when content above the last turn leaves mid-turn, and still holds what leaves near the end', () => {
+    const t = transcript({ content: 3000 })
+    t.state.row = 3000
+    send(t)
+    t.state.content += 1200
+    t.follower.follow()
+    t.state.content -= 1000
+    t.state.row -= 1000
+    t.follower.follow()
+    expect(t.reserve()).toBe(0)
+    expect(t.follower.holding()).toBe(false)
+    expect(t.container.scrollTop).toBe(t.end())
+    // In one commit: rows above shrink and a queued message leaves under the reply. Only the message's space is held.
+    t.state.content -= 400 + 60
+    t.state.row -= 400
+    t.follower.follow()
+    expect(t.reserve()).toBe(60)
+    expect(t.container.scrollTop).toBe(t.end())
+  })
+
+  it('keeps a held space the same size when content above the last turn leaves while it is held', () => {
+    const t = transcript({ content: 3000 })
+    t.state.row = 3000
+    send(t)
+    t.state.content += 1200
+    t.follower.follow()
+    t.state.content -= 60
+    t.follower.follow()
+    expect(t.reserve()).toBe(60)
+    t.state.content -= 900
+    t.state.row -= 900
+    t.follower.follow()
+    // The end moves up with the rows: the reply stays where it was above the held space.
+    expect(t.reserve()).toBe(60)
+    expect(t.container.scrollTop).toBe(t.end())
+    t.state.content += 70
+    t.follower.follow()
+    expect(t.reserve()).toBe(0)
     expect(t.follower.holding()).toBe(false)
   })
 
