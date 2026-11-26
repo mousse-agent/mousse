@@ -979,9 +979,22 @@ html .composer-command-suggestion.selected::before {
   100% { background-position: 100% 0; opacity: 0; }
 }
 
+/* The composer's pickers: a lit menu surface (sheen and the specular top edge, no border) and a neutral raised
+   selection; the shared specular ring and glint above light it. */
+html .composer-command-suggestions {
+  background-color: var(--ui-raised);
+  background-image: var(--ui-sheen);
+  background-repeat: no-repeat;
+  box-shadow: inset 0 1px 0 var(--specular-top), inset 0 0 0 1px var(--specular-end), var(--ui-menu-drop);
+}
+
 html .composer-command-suggestion.selected {
-  background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised));
   box-shadow: var(--ui-specular);
+}
+
+html[data-theme='high-contrast'] .composer-command-suggestions {
+  border: 1px solid var(--border);
+  background-image: none;
 }
 
 html[data-theme='high-contrast'] .app .threads-sidebar-thread.active,

@@ -1,4 +1,5 @@
 import { COMPOSER_COMMANDS, parseComposerCommand, type ComposerCommandDef } from '../../shared/composerCommands'
+import type { OrchestratorSteerResult } from '../../shared/types'
 import { ipcErrorLine } from './errorText'
 
 /** What the composer has and can do when a command runs. Every action is passed in, so handlers stay testable. */
@@ -12,7 +13,7 @@ export interface SlashCommandEnv {
   openUsage(): void
   stop(): Promise<void>
   /** Adds the text to the running turn; false when no turn took it. */
-  steer(text: string): Promise<boolean | 'queued'>
+  steer(text: string): Promise<OrchestratorSteerResult>
   newThread(title?: string): Promise<void>
   clearContext(threadId: string): Promise<void>
   compact(threadId: string, focus?: string): Promise<void>
@@ -89,8 +90,11 @@ export const SLASH_COMMANDS: ReadonlyMap<string, SlashCommand> = new Map(
       duringTurn: true,
       run: async (argument, env) => {
         if (!argument) return { kind: 'keep' }
+        const result = await env.steer(argument)
+        if (result && typeof result === 'object' && result.refused) return refused(result.message)
+        if (result === 'uncertain') return refused('The steer was not confirmed; check whether it reached the reply.')
         // No turn took it: it becomes next-turn guidance, an ordinary message.
-        return (await env.steer(argument)) ? DONE : { kind: 'send', text: argument }
+        return result ? DONE : { kind: 'send', text: argument }
       }
     },
     {

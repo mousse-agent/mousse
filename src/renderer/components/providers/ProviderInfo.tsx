@@ -82,6 +82,8 @@ export function agentInfoRows(snapshot: InstanceSnapshot): InfoRow[] {
     else rows.push({ label: 'Account home', value: hint ? `Shared with terminal · ${hint}` : 'Shared with terminal' })
   }
   if (snapshot.settingsFile) rows.push({ label: 'Settings file', value: snapshot.settingsFile.path, copy: true })
+  const bestEffort = DRIVER_INFO[snapshot.driver].bestEffortNaming
+  if (bestEffort) rows.push({ label: 'Thread titles', value: 'Best-effort', full: bestEffort })
   rows.push({ label: 'ID', value: snapshot.instanceId, copy: true })
   return rows
 }

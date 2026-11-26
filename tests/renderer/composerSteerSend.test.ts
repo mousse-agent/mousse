@@ -178,6 +178,51 @@ describe('a steer from the composer', () => {
     // It did not arrive: the text is back in the composer.
     expect(host.querySelector<HTMLTextAreaElement>('.composer-input')!.value).toBe('Use the id')
   })
+
+  it('restores the text immediately with the refusal reason on a definite refusal, without refreshing or resending', async () => {
+    orchestrator.isTurnActive = vi.fn(async () => true)
+    orchestrator.steer = vi.fn(async () => ({ refused: true, code: 'computer_offline', message: 'Mac mini is offline.' }))
+    orchestrator.sendToThread = vi.fn(async () => ({ message: '', actions: [], queued: true }))
+    orchestrator.send = vi.fn(async () => ({ message: '', actions: [], queued: true }))
+    const select = vi.fn(async () => undefined)
+    const list = vi.fn(async () => [])
+    await mount()
+    const bridge = (window as unknown as { mousse: Record<string, Record<string, unknown>> }).mousse
+    bridge.threads.select = select
+    bridge.queue.list = list
+    await send('Use the id', { ctrlKey: true })
+    await settle(20)
+    expect(orchestrator.steer).toHaveBeenCalledTimes(1)
+    expect(orchestrator.sendToThread).not.toHaveBeenCalled()
+    expect(orchestrator.send).not.toHaveBeenCalled()
+    expect(select).not.toHaveBeenCalled()
+    expect(list).not.toHaveBeenCalled()
+    expect(host.textContent).toContain('Mac mini is offline.')
+    expect(host.querySelector<HTMLTextAreaElement>('.composer-input')!.value).toBe('Use the id')
+  })
+
+  it('checks the thread without resending when main reports an uncertain steer outcome', async () => {
+    orchestrator.isTurnActive = vi.fn(async () => true)
+    orchestrator.steer = vi.fn(async () => 'uncertain')
+    orchestrator.sendToThread = vi.fn(async () => ({ message: '', actions: [], queued: true }))
+    orchestrator.send = vi.fn(async () => ({ message: '', actions: [], queued: true }))
+    const select = vi.fn(async () => undefined)
+    const list = vi.fn(async () => [])
+    await mount()
+    const bridge = (window as unknown as { mousse: Record<string, Record<string, unknown>> }).mousse
+    bridge.threads.select = select
+    bridge.queue.list = list
+    await send('Use the id', { ctrlKey: true })
+    await settle(20)
+    expect(orchestrator.steer).toHaveBeenCalledTimes(1)
+    expect(orchestrator.sendToThread).not.toHaveBeenCalled()
+    expect(orchestrator.send).not.toHaveBeenCalled()
+    expect(select).toHaveBeenCalledWith('thread-a')
+    expect(list).toHaveBeenCalledWith('thread-a')
+    const { STEER_NOT_ARRIVED } = await import('../../src/renderer/components/OrchestratorChat')
+    expect(host.textContent).toContain(STEER_NOT_ARRIVED)
+    expect(host.querySelector<HTMLTextAreaElement>('.composer-input')!.value).toBe('Use the id')
+  })
 })
 
 describe('the composer while the thread works with no turn of its own running here', () => {

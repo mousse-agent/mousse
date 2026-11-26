@@ -1,6 +1,7 @@
 import { channelForVersion, type UpdateChannel, type UpdateState } from '../../shared/updates'
 import { normalizeReleaseNotes, type RawReleaseNotes } from './releaseNotes'
 import type { UpdaterRecordStore } from './updaterRecord'
+import type { RemoteUpdateError } from '../../shared/remoteUpdates'
 
 /** The part of electron-updater's `AppUpdater` this module drives. */
 export interface UpdaterBackend {
@@ -29,6 +30,8 @@ export const FOCUS_CHECK_MIN_GAP_MS = 10 * 60_000
 const RETRY_BASE_MS = 5 * 60_000
 const RETRY_MAX_MS = 2 * 60 * 60_000
 const PROGRESS_EMIT_MS = 1_000
+/** Shown while another Mousse sharing this install is downloading or installing an update. */
+export const BUSY_MESSAGE = 'Another Mousse that shares this install is updating it.'
 
 /** Failures that mean there is nothing to update to, such as a release without update files. */
 const NOTHING_TO_UPDATE = new Set([
@@ -52,6 +55,11 @@ export interface DesktopUpdaterOptions {
   recoverInstall: () => Promise<void>
   /** The installer process is starting and Mousse is quitting for it. */
   onInstallStarted?: () => void
+  /**
+   * One update at a time per install folder, whichever home or computer started it (`installFolderLock`). Taken
+   * for a download and an install; null when another Mousse sharing the install is updating it.
+   */
+  lock?: (purpose: 'download' | 'install') => (() => void) | null
   onState: (state: UpdateState) => void
   now?: () => number
   random?: () => number
@@ -88,6 +96,7 @@ export class DesktopUpdater {
   /** 'started' once the installer process is launching; Mousse quits right after. */
   private installStep: 'none' | 'starting' | 'started' = 'none'
   private lastProgressEmit = 0
+  private installRelease: (() => void) | null = null
   private disposed = false
   private readonly now: () => number
   private readonly random: () => number
@@ -144,6 +153,37 @@ export class DesktopUpdater {
 
   install(): Promise<UpdateState> {
     return this.enqueue(() => this.runInstall())
+  }
+
+  /**
+   * Downloads exactly `version` for another computer's request (#476): fails, never downloads another, when this
+   * build can't update itself, the feed offers another version, or another version is already downloaded.
+   */
+  prepareExact(version: string): Promise<{ ok: true } | { ok: false; error: RemoteUpdateError }> {
+    return this.enqueue(async () => {
+      if (this.disposed || this.state.phase === 'disabled') return { ok: false as const, error: 'not_accepting' as const }
+      if (this.state.phase === 'installing') return { ok: false as const, error: 'busy' as const }
+      if (this.state.phase !== 'downloaded') {
+        await this.runCheck(false)
+        if (this.state.availableVersion !== version) return { ok: false as const, error: 'version_unavailable' as const }
+        await this.runDownload()
+        if (this.state.phase === 'error' && this.state.error?.message === BUSY_MESSAGE) return { ok: false as const, error: 'busy' as const }
+      }
+      if (this.state.phase !== 'downloaded') return { ok: false as const, error: 'download_failed' as const }
+      // A download kept from earlier is another version: never installed in its place.
+      return this.state.availableVersion === version ? { ok: true as const } : { ok: false as const, error: 'version_unavailable' as const }
+    })
+  }
+
+  /** Installs `version` only: the one `prepareExact` downloaded. Anything else is refused. */
+  installExact(version: string): Promise<{ ok: true } | { ok: false; error: RemoteUpdateError }> {
+    return this.enqueue(async () => {
+      if (this.state.phase !== 'downloaded' || this.state.availableVersion !== version)
+        return { ok: false as const, error: 'version_unavailable' as const }
+      const after = await this.runInstall()
+      if (after.phase === 'installing') return { ok: true as const }
+      return { ok: false as const, error: after.error?.message === BUSY_MESSAGE ? ('busy' as const) : ('install_failed' as const) }
+    })
   }
 
   setChannel(channel: UpdateChannel): Promise<UpdateState> {
@@ -210,6 +250,11 @@ export class DesktopUpdater {
     // A failed download is retried from its error; a failed check or install is not a download.
     const retry = this.state.phase === 'error' && this.state.error?.during === 'download'
     if (this.state.phase !== 'available' && !retry) return this.state
+    const release = this.takeLock('download')
+    if (release === null) {
+      this.update({ phase: 'error', error: { message: BUSY_MESSAGE, during: 'download' } }, ['downloadPercent'])
+      return this.state
+    }
     this.lastProgressEmit = this.now()
     this.update({ phase: 'downloading', downloadPercent: 0 }, ['error'])
     try {
@@ -217,6 +262,8 @@ export class DesktopUpdater {
       this.update({ phase: 'downloaded', downloadPercent: 100 })
     } catch (error) {
       this.update({ phase: 'error', error: { message: errorMessage(error), during: 'download' } }, ['downloadPercent'])
+    } finally {
+      release()
     }
     return this.state
   }
@@ -224,6 +271,13 @@ export class DesktopUpdater {
   private async runInstall(): Promise<UpdateState> {
     const target = this.state.availableVersion
     if (this.state.phase !== 'downloaded' || !target) return this.state
+    // Held until Mousse quits for the installer; let go when the install fails.
+    const release = this.takeLock('install')
+    if (release === null) {
+      this.update({ error: { message: BUSY_MESSAGE, during: 'install' } })
+      return this.state
+    }
+    this.installRelease = release
     this.update({ phase: 'installing' }, ['error', 'notAppliedVersion'])
     const record = this.options.store.read()
     this.options.store.write({ ...record, install: { from: this.state.currentVersion, to: target, at: this.now() } })
@@ -250,6 +304,8 @@ export class DesktopUpdater {
 
   private async failInstall(error: unknown): Promise<void> {
     this.installStep = 'none'
+    this.installRelease?.()
+    this.installRelease = null
     const { install: _install, ...kept } = this.options.store.read()
     this.options.store.write(kept)
     try {
@@ -259,6 +315,18 @@ export class DesktopUpdater {
     }
     // The download is still on disk; installing again retries.
     this.update({ phase: 'downloaded', error: { message: errorMessage(error), during: 'install' } })
+  }
+
+  /** The install folder's lock: a release function, a no-op without a lock, or null while another holds it. */
+  private takeLock(purpose: 'download' | 'install'): (() => void) | null {
+    if (!this.options.lock) return () => undefined
+    try {
+      return this.options.lock(purpose)
+    } catch (error) {
+      // A lock that can't be read or written never stops updates.
+      console.warn('Update lock unavailable:', errorMessage(error))
+      return () => undefined
+    }
   }
 
   private loadBackend(): Promise<UpdaterBackend> {

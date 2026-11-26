@@ -13,6 +13,7 @@ import {
   filterSkillSuggestions,
   findInlineSkillToken,
   findMentionQueryAtCaret,
+  findSlashQueryAtCaret,
   isImeComposing,
   isMentionResultCurrent,
   mentionItemReference,
@@ -21,10 +22,11 @@ import {
   parseSkillsPickerQuery,
   pickerKeyAction,
   removeInlineSkillToken,
+  slashSuggestions,
   type ComposerCommandDef,
   type MentionItem
 } from '../../shared/composerCommands'
-import { ComposerSuggestionList, MentionRowContent, type SuggestionRow } from './ComposerSuggestionList'
+import { CommandRowContent, ComposerSuggestionList, MentionRowContent, SkillRowContent, type SuggestionRow } from './ComposerSuggestionList'
 import { ComposerFooter, STEER_BINDING, formatRecordingTime as formatDuration, isSteerKey, type ComposerRunProps } from './ComposerFooter'
 import { markSteerKey, steersOnEnter, type SendMode } from '../lib/steerKey'
 import { useThreadSendMode } from '../lib/sendMode'
@@ -375,13 +377,14 @@ export function ChatComposer({
   const [selectedSuggestion, setSelectedSuggestion] = useState(0)
   // Caret of the text box, or -1 while a range is selected (a range is never a mention).
   // Moving the caret across ordinary text does not trigger a React re-render; state updates only
-  // when entering, moving within, or leaving an `@mention` query.
+  // when entering, moving within, or leaving an `@mention` or mid-message `/skill` query.
   const caretRef = useRef(0)
   const mentionCaretRef = useRef(0)
   const [caret, setCaretState] = useState(0)
   const setCaret = useCallback((next: number, value = inputValueRef.current) => {
     caretRef.current = next
-    if (findMentionQueryAtCaret(value, next) === null && findMentionQueryAtCaret(value, mentionCaretRef.current) === null) return
+    const inQuery = (at: number) => findMentionQueryAtCaret(value, at) !== null || findSlashQueryAtCaret(value, at) !== null
+    if (!inQuery(next) && !inQuery(mentionCaretRef.current)) return
     if (next === mentionCaretRef.current) return
     mentionCaretRef.current = next
     setCaretState(next)
@@ -512,7 +515,20 @@ export function ChatComposer({
   const showMentionPicker =
     !disabled && !suggestionsDismissed && mentionQuery !== null && (mentionItems.length > 0 || mentionFooter !== null)
 
-  const suggestions = !slashCommands || showSkillsPicker || showMentionPicker ? [] : filterComposerCommandSuggestions(input).filter((command) => !skillsPickerDisabled || command.name !== 'skills')
+  // `/` lists commands and matching skills at the start of a one-word message, and skills only after whitespace
+  // mid-message. With no match the list stays closed, so Enter sends the text as typed.
+  const slash = disabled || showSkillsPicker || showMentionPicker
+    ? null
+    : slashSuggestions(input, caret, {
+        commands: slashCommands
+          ? filterComposerCommandSuggestions(input).filter((command) => !skillsPickerDisabled || command.name !== 'skills')
+          : [],
+        skills: skillsPickerDisabled ? [] : enabledSkills,
+        // A bot's composer leaves the start of the message to its own commands.
+        skillsAtStart: Boolean(slashCommands)
+      })
+  const suggestions = slash?.items ?? []
+  const slashQueryText = slash?.range ? input.slice(slash.range.index + 1, slash.range.end) : ''
   const showSuggestions = !disabled && !suggestionsDismissed && suggestions.length > 0
   const ownSuggestions = commandSuggestions && !showSuggestions && !showSkillsPicker && !showMentionPicker ? commandSuggestions(input) : NO_COMMAND_SUGGESTIONS
   const showOwnSuggestions = !disabled && !suggestionsDismissed && ownSuggestions.length > 0
@@ -1128,6 +1144,13 @@ export function ChatComposer({
     if (!existing) takeReference(reference)
   }
 
+  // A skill picked from the `/` list becomes the same inline `@skill` token an `@` pick leaves, so it is never sent
+  // as an unknown command.
+  const pickSlashSkill = (skill: SkillDescriptor) => {
+    if (!slash?.range || composingRef.current) return
+    applySkill(skill.id, slash.range)
+  }
+
   const submit = (options?: { steer?: boolean }) => {
     if (!canSend) return
     const skillMode: SkillChatMode | undefined = skillToken
@@ -1273,8 +1296,11 @@ export function ChatComposer({
             // Tab only fills in; Enter also runs a finished command.
             pickOwnSuggestion(ownSuggestions[selectedSuggestion], e.key !== 'Tab')
           } else {
-            const suggestion = suggestions[selectedSuggestion]
-            if (suggestion) {
+            const item = suggestions[selectedSuggestion]
+            if (item?.kind === 'skill') {
+              pickSlashSkill(item.skill)
+            } else if (item) {
+              const suggestion = item.command
               // An exact command that needs no text is already complete: execute it instead of
               // making users press Enter twice (first to re-apply the same suggestion).
               if (e.key === 'Enter' && suggestion.argument !== 'required' && input.trim().toLowerCase() === `/${suggestion.name}`) {
@@ -1611,7 +1637,7 @@ export function ChatComposer({
               ? sendMode === 'steer'
                 ? `Steer the reply · ${formatBinding(STEER_BINDING, platform)} queues`
                 : `Queue a follow-up · ${formatBinding(STEER_BINDING, platform)} steers`
-              : 'Ask anything · @ files · / commands')
+              : 'Ask anything · / commands and skills · @ files')
           }
           rows={3}
           disabled={disabled}
@@ -1631,7 +1657,7 @@ export function ChatComposer({
           rows={mentionItems.map(
             (item): SuggestionRow => ({
               key: item.kind === 'skill' ? `skill:${item.skill.id}` : `${item.kind}:${item.path}`,
-              content: <MentionRowContent item={item} />
+              content: <MentionRowContent item={item} query={mentionQuery?.query} />
             })
           )}
           selected={selectedSuggestion}
@@ -1648,12 +1674,7 @@ export function ChatComposer({
           rows={skillSuggestions.map(
             (skill): SuggestionRow => ({
               key: skill.id,
-              content: (
-                <>
-                  <span className="composer-command-suggestion-name">{skill.name}</span>
-                  <span className="composer-command-suggestion-description">{skill.description || skill.id}</span>
-                </>
-              )
+              content: <SkillRowContent skill={skill} query={skillsPickerQuery ?? ''} />
             })
           )}
           selected={selectedSuggestion}
@@ -1673,26 +1694,30 @@ export function ChatComposer({
 
       {showSuggestions && (
         <ComposerSuggestionList
-          ariaLabel="Slash command suggestions"
+          ariaLabel={slash?.midMessage ? 'Skill suggestions' : 'Slash command suggestions'}
           rows={suggestions.map(
-            (command): SuggestionRow => ({
-              key: command.name,
-              content: (
-                <>
-                  <span className="composer-command-suggestion-name">
-                    /{command.name}{command.argsHint ? ` ${command.argsHint}` : ''}
-                  </span>
-                  <span className="composer-command-suggestion-description">{command.description}</span>
-                </>
-              )
-            })
+            (item): SuggestionRow =>
+              item.kind === 'skill'
+                ? { key: `skill:${item.skill.id}`, content: <SkillRowContent skill={item.skill} query={slashQueryText} /> }
+                : {
+                    key: item.command.name,
+                    content: (
+                      <CommandRowContent
+                        label={`/${item.command.name}${item.command.argsHint ? ` ${item.command.argsHint}` : ''}`}
+                        description={item.command.description}
+                        query={slashQueryText ? `/${slashQueryText}` : ''}
+                      />
+                    )
+                  }
           )}
           selected={selectedSuggestion}
           onHover={setSelectedSuggestion}
           onPick={(index) => {
-            const command = suggestions[index]
-            if (command) applySuggestion(command)
+            const item = suggestions[index]
+            if (item?.kind === 'skill') pickSlashSkill(item.skill)
+            else if (item) applySuggestion(item.command)
           }}
+          footer={slash?.midMessage ? 'Skills only mid-message' : undefined}
           registerRow={registerSuggestionRow}
         />
       )}
@@ -1703,12 +1728,7 @@ export function ChatComposer({
           rows={ownSuggestions.map(
             (row): SuggestionRow => ({
               key: row.key,
-              content: (
-                <>
-                  <span className="composer-command-suggestion-name">{row.label}</span>
-                  <span className="composer-command-suggestion-description">{row.description}</span>
-                </>
-              )
+              content: <CommandRowContent label={row.label} description={row.description} />
             })
           )}
           selected={selectedSuggestion}

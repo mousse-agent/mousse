@@ -2,7 +2,7 @@
 /**
  * Settings → Devices says which computers run another Mousse than this one: "Behind" or "Newer" on the row, the
  * versions and whether it updates itself in the tooltip, and under a computer that is behind how it gets updated:
- * from here when this computer installed it over SSH, otherwise "Update on <name>". The daemon is stubbed at
+ * from here when this computer installed it over SSH or its app takes update requests, otherwise "Update on <name>". The daemon is stubbed at
  * `platformRequest`; rows of both networkings are read from `bridge.nodes`, as the section reads them.
  */
 import { act, createElement } from 'react'
@@ -33,8 +33,11 @@ const row = (node: string, name: string, extra: Record<string, unknown>) => ({
 const unsigned = { channel: 'stable', self: false, reason: 'Updates on macOS need a signed build.' }
 
 let answers: Record<string, unknown> = {}
-const request = vi.fn(async (method: string, _params?: unknown) => {
-  if (method in answers) return answers[method]
+const request = vi.fn(async (method: string, params?: unknown) => {
+  if (method in answers) {
+    const answer = answers[method]
+    return typeof answer === 'function' ? answer(params) : answer
+  }
   switch (method) {
     case 'netEngine.status': return { enabled: false, on: false, helper: { state: 'off' }, devices: [], approvals: [] }
     case 'net.status':
@@ -138,5 +141,62 @@ describe('Settings → Devices, versions', () => {
     await mount()
     expect(rowText('n1')).toMatch(/Connected.*· Behind/)
     expect(titled('Update on Studio')?.title).toContain("Studio runs 0.9.0 (stable), this computer 0.9.2. It can't update itself")
+  })
+  it('updates a computer whose app takes requests from here: its running turns, Install with that count, and Close cancels', async () => {
+    const taking = { channel: 'stable', self: true, requests: true }
+    answers['bridge.nodes'] = {
+      nodes: [
+        row('node_b', 'Laptop', { version: '0.9.0', update: taking, olderThanThis: true }),
+        // Updates itself, but its app has not said it takes requests: updated there, and asked once whether it does now.
+        row('node_c', 'Desk PC', { version: '0.9.0', update: { channel: 'stable', self: true }, olderThanThis: true })
+      ]
+    }
+    const asks: Array<Record<string, unknown>> = []
+    answers['net.update.there'] = (params: Record<string, unknown>) => {
+      asks.push(params)
+      if (params.step === 'prepare') return { job: 'j1', phase: 'preparing', runningTurns: 2 }
+      if (params.step === 'status') return { job: 'j1', phase: 'ready', runningTurns: 2 }
+      if (params.step === 'install') return { job: 'j1', phase: 'countdown', runningTurns: 2, installAt: Date.now() + 10_000 }
+      return {}
+    }
+    await mount()
+    expect(asks).toEqual([{ node: 'node_c', step: 'refresh' }])
+    expect(host.textContent).toContain('Update Laptop from here')
+    expect(host.textContent).toContain('Update on Desk PC')
+    expect(host.textContent).not.toMatch(/Update all/i)
+
+    await act(async () => button('Update')!.click())
+    await flush()
+    expect(asks.at(-1)).toEqual({ node: 'node_b', step: 'prepare', version: '0.9.2' })
+    expect(document.body.textContent).toContain('Update Laptop to 0.9.2?')
+    await act(async () => vi.advanceTimersByTime(1_000))
+    await flush()
+    expect(document.body.textContent).toContain('2 running turns on Laptop will stop.')
+    expect(document.body.textContent).toContain('Other Mousse homes sharing its install stop too.')
+    await act(async () => button('Install')!.click())
+    await flush()
+    expect(asks.at(-1)).toEqual({ node: 'node_b', step: 'install', job: 'j1', runningTurns: 2 })
+    expect(document.body.textContent).toContain('Updating Laptop in a few seconds.')
+  })
+
+  it('cancels the request there when the dialog closes before Install', async () => {
+    answers['bridge.nodes'] = {
+      nodes: [row('node_b', 'Laptop', { version: '0.9.0', update: { channel: 'stable', self: true, requests: true }, olderThanThis: true })]
+    }
+    const asks: Array<Record<string, unknown>> = []
+    answers['net.update.there'] = (params: Record<string, unknown>) => {
+      asks.push(params)
+      return { job: 'j1', phase: params.step === 'prepare' ? 'preparing' : 'ready', runningTurns: 0 }
+    }
+    await mount()
+    await act(async () => button('Update')!.click())
+    await flush()
+    await act(async () => vi.advanceTimersByTime(1_000))
+    await flush()
+    expect(document.body.textContent).toContain('No turns are running on Laptop.')
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Close"]')!.click())
+    await flush()
+    expect(asks.at(-1)).toEqual({ node: 'node_b', step: 'cancel', job: 'j1' })
+    expect(document.body.textContent).not.toContain('Update Laptop to 0.9.2?')
   })
 })

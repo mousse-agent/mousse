@@ -121,7 +121,7 @@ describe('composer keys', () => {
 
   it('says what Enter does in the placeholder', () => {
     render({})
-    expect(box().placeholder).toBe('Ask anything · @ files · / commands')
+    expect(box().placeholder).toBe('Ask anything · / commands and skills · @ files')
     act(() => root.unmount())
     root = createRoot(host)
     render({ loading: true })
