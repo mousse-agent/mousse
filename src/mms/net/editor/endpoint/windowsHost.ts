@@ -266,6 +266,7 @@ export function createWindowsHost(options: WindowsHostOptions): WindowsProcessHo
       const child = spawnProcess(helper, ['keep', daemon, jobName(scope)], {
         stdio: ['pipe', 'pipe', 'ignore'],
         windowsHide: true,
+        // eslint-disable-next-line mousse/no-console-window -- The keeper outlives the daemon. It only holds a job and starts no programs.
         detached: true
       })
       keeper.process = child

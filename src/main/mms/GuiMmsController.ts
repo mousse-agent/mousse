@@ -1599,6 +1599,7 @@ export class GuiMmsController extends EventEmitter {
         command,
         [...argsPrefix, 'service', 'run', '--home', this.homeDir],
         {
+          // eslint-disable-next-line mousse/no-console-window -- The daemon outlives the app. Its host is Electron as Node, a GUI program with no console that starts plain spawns hidden.
           detached: true,
           stdio: ['ignore', logFd, logFd],
           env: { ...gitEnv, MOUSSE_HOME: this.homeDir, [DAEMON_OWNER_TOKEN_ENV]: ownerToken,

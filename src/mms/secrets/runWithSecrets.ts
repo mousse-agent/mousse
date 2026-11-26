@@ -75,9 +75,11 @@ export async function runWithSecrets(input: {
         // A bot's where Mousse has a sandbox: in it, with its folders and the private folder of its secret files only.
         // Otherwise (a thread's agent, or a bot's elsewhere) a shell: on POSIX in a process group of its own.
         child = containment?.sandbox === 'bubblewrap'
+          // eslint-disable-next-line mousse/no-console-window -- bubblewrap is Linux only.
           ? spawn(containment.program, containment.args(input.command, { cwd: input.cwd, writable: input.contain!.folders, readOnly: folder ? [folder] : [] }), { cwd: input.cwd, env, detached: true })
           : windows
             ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${input.command}"`], { cwd: input.cwd, env, windowsVerbatimArguments: true, windowsHide: true })
+            // eslint-disable-next-line mousse/no-console-window -- POSIX only: Windows takes the branch above.
             : spawn('/bin/sh', ['-c', input.command], { cwd: input.cwd, env, detached: true })
       } catch (error) {
         // Node's refusal quotes the environment it was given: only its code is kept.
