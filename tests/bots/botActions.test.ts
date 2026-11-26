@@ -33,11 +33,15 @@ import { appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { toolNeeds } from '../../src/mms/run/mcp/appTools/authority'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
-import { botFixture, createBot, finish, flush, start, type BotFixture } from './botFixture'
+import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
+import { keepToolImages, resetToolImages } from '../../src/mms/bots/chat/toolImages'
+
+/** A one-pixel PNG, as a browser screenshot hands it over. */
+const SCREENSHOT = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
 
 let f: BotFixture
 const connections: McpManager[] = []
-afterEach(async () => { f?.close(); await Promise.all(connections.splice(0).map(m => m.shutdown())) })
+afterEach(async () => { f?.close(); resetToolImages(); await Promise.all(connections.splice(0).map(m => m.shutdown())) })
 async function setup(on: boolean, realServer = false, secondTool = false, threads = false, ownerTools = false, realContext = false, toolName = 'send', hint?: boolean, unstamped = false) {
   f = botFixture()
   const settings = getDefaultSettings()
@@ -146,6 +150,27 @@ it('holds once, frees the slot, and Send executes exactly the stored arguments o
   expect(t.calls).toEqual([t.args])
   expect(f.store.get('SELECT status, exec_args FROM bot_actions')).toMatchObject({ status: 'done', exec_args: null })
   expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('delivered')
+})
+
+it("a held action's card shows the screenshot its work took for it before the owner answers, and the report after it does not again", async () => {
+  const t = await setup(true)
+  // The work takes a screenshot of the page (botBrowserScreenshot.test.ts: what browser_screenshot keeps), then its call is held.
+  expect(keepToolImages({ activationId: t.workId, filesFolder: t.work.prepared.authority.workspace!.files!, source: 'browser-screenshot', images: [{ data: SCREENSHOT }] })).toContain('Your owner sees')
+  await t.call()
+  const action = f.bots.actions.forWork(t.workId)!
+  const messages = chatOf(f, t.botId)
+  const card = messages.find((message) => message.id === action.message_id)!
+  expect(card.attachments).toEqual([expect.objectContaining({ name: expect.stringMatching(/^browser-screenshot-.+\.png$/) })])
+  // The notice that introduces asking first, posted with the first card, carries none.
+  expect(messages.filter((message) => message.id !== card.id).flatMap((message) => message.attachments ?? [])).toEqual([])
+  await finish(f, t.work.payload)
+  await f.bots.actions.answer({ actionId: action.id, digest: action.args_digest, answer: 'send' })
+  await flush()
+  const resumed = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
+  await finish(f, resumed.payload, 'completed', { text: 'Sent it.' })
+  const report = chatOf(f, t.botId).at(-1)!
+  expect(report).toMatchObject({ kind: 'run_report', text: 'Sent it.' })
+  expect(report.attachments ?? []).toEqual([])
 })
 
 // Actors: a second device, changed schema/configuration/grant/device ceiling, restart.

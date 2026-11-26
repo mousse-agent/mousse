@@ -744,7 +744,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const binding = this.host.mcp?.binding?.(tool)
       return Boolean(binding && (binding.configDigest !== held.configDigest || binding.schemaDigest !== held.schemaDigest))
     },
-    post: (row, id, text) => this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text, external: true, ...(id === `bm_asks_first_${row.botId}` ? { quiet: true as const } : {}), activationId: row.id, lane: 'run', ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}) }),
+    // A held action's card carries the screenshots the work took for it, so its owner sees them before approving.
+    post: (row, id, text) => this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text, external: true, ...(id === `bm_asks_first_${row.botId}` ? { quiet: true as const } : { toolImages: true as const }), activationId: row.id, lane: 'run', ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}) }),
     sentAlone: () => this.scheduledCallChecks.clear(),
     settled: (row) => { const action = this.actions.forWork(row.id); if (action?.card_json !== null) this.chat.republish(action!.message_id); this.changed({ botId: row.botId }); this.pumpLater(row.botId) },
     execute: async (row, target, args) => {
@@ -8725,11 +8726,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const id = `q_${randomUUID()}`
       questionId = id
       this.store.insertQuestion({ id, botId: row.botId, activationId: row.id, dispatchN: n, lane: 'run', spec, createdAt: this.store.now(), ...(follow ? { follow } : {}) })
-      // Its bubble: the bot's words from its work, under the owner's message that asked for it. Its id is its place among
-      // the work's questions, so it is written once.
+      // Its bubble: the bot's words from its work, under the owner's message that asked for it, with the screenshots the
+      // work took for it. Its id is its place among the work's questions, so it is written once.
       const place = this.store.activationQuestions(row.id).length
       this.chat.post({
-        id: `bm_${row.id}_q${place}`, botId: row.botId, author: 'bot', kind: 'notice', text: spec.question, questionId: id, activationId: row.id, lane: 'run',
+        id: `bm_${row.id}_q${place}`, botId: row.botId, author: 'bot', kind: 'notice', text: spec.question, questionId: id, activationId: row.id, lane: 'run', toolImages: true,
         ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {})
       })
       return 'asked'
