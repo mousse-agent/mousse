@@ -4,6 +4,7 @@ import { folderRecheckKey, resolveActiveProject, type ActiveProject } from '../l
 import { isNewEmptyThread, localWorkspaceFor } from '../lib/newThread'
 import { useAppStore } from '../stores/appStore'
 import { isQualifiedId } from '../../shared/threadRef'
+import { useComputer } from '../lib/computers'
 
 interface ResolvedWorkspace {
   path: string | null
@@ -160,6 +161,15 @@ export function useActiveProjectLocation(): ActiveProject {
   const [retried, setRetried] = useState<{ scope: string; fresh: number } | null>(null)
   const fresh = Math.max(changed, retried?.scope === scope ? retried.fresh : 0)
   const retry = useCallback(() => setRetried({ scope, fresh: nextFresh() }), [scope])
+  // A thread of another computer whose lookup failed (that computer was offline, or did not answer) is looked up again
+  // when the computers are read again and list it online: at most once per read, never in a loop.
+  const node = useAppStore((s) => (s.activeThreadId && isQualifiedId(s.activeThreadId) ? s.threads.find((thread) => thread.id === s.activeThreadId)?.node : undefined))
+  const computer = useComputer(node)
+  const lookupFailed = Boolean(node) && resolved?.scope === scope && Boolean(resolved.unavailable) && !resolved.path
+  useEffect(() => {
+    if (lookupFailed && computer?.online) retry()
+    // `computer` is a new object each time the computers are read.
+  }, [computer, lookupFailed, retry])
   const turnPhase = useAppStore((s) => (s.activeThreadId ? s.turnStates[s.activeThreadId]?.phase ?? null : null))
   // The warm start's thread is not looked up until the window knows its profile (showWarmView).
   const warmOnly = useAppStore((s) => !s.profileReady && s.warmView !== null)

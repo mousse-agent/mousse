@@ -191,6 +191,8 @@ import { resnapshotTurnState } from '../mms/resnapshotTurnState'
 import type { GuiConnectionLog } from '../mms/guiConnectionLog'
 import { describeLinkError } from '../mms/guiConnectionLog'
 import { QuietTurnWatch } from '../mms/quietTurnWatch'
+import { ComputerWait } from '../mms/computerWait'
+import { waitsForComputer } from '../../shared/bridge/computerErrors'
 import { createDevTurnEndDropper } from '../mms/devTurnEndDropper'
 import { isQualifiedId, parseQualifiedId, unqualifyId } from '../../shared/threadRef'
 import type { UsageHistoryRequest } from '../../shared/usageHistory'
@@ -1217,6 +1219,13 @@ export function registerGuiIpc(
       return
     }
     if (!binding || (event.profileId && event.profileId !== binding.profileId)) return
+    // A network change (a device connected or dropped) or an update from the thread itself: the computer of a shown
+    // thread that could not be reached may be back.
+    if (
+      event.type === 'net.updated' ||
+      (event.type === 'ui.notify' && (event.data as { kind?: unknown } | null)?.kind === 'net-engine') ||
+      (event.threadId && computerWait.waiting(senderId, event.threadId))
+    ) computerWait.wake(senderId)
     // Installation events are already bridged by the base session. Personal
     // events, including Default, need this exact window's presentation state.
     if (!event.profileId) return
@@ -1463,7 +1472,10 @@ export function registerGuiIpc(
   const catchUpWindow = coalescedRunner(async (senderId: number) => {
     const reasons = takeReasons(catchUpReasons, senderId)
     const win = windowBySender(senderId)
-    if (!win) return
+    if (!win) {
+      computerWait.clear(senderId)
+      return
+    }
     const binding = guiMms.getWindowBindingForSender(senderId)
     if (!binding) {
       // A profile switch reads the new profile in full when it ends: nothing to catch up.
@@ -1481,6 +1493,8 @@ export function registerGuiIpc(
     const profileId = binding.profileId
     const presentation = presentationForSender(senderId)
     const activeId = presentation.getActiveThreadId()
+    // The shown thread's computer cannot be reached: its own wait reads it (`COMPUTER_RETRY`), not every gap.
+    const threadWaits = computerWait.waiting(senderId, activeId) && !reasons.includes(COMPUTER_RETRY)
     const target = (channel: string, data: unknown): void => {
       if (win.isDestroyed()) return
       warmStart?.observe(profileId, channel, data)
@@ -1495,7 +1509,7 @@ export function registerGuiIpc(
     // The missed events may have changed any thread's status (a turn ended, the service restarted): read them all
     // again, so the sidebar's Working and Done marks are the service's.
     try {
-      const moved = await readStatuses(senderId, profileId, !activeId)
+      const moved = await readStatuses(senderId, profileId, !activeId || threadWaits)
       if (moved) changed.push(`activity:${moved}`)
       target('threads:activity', tracker.getSnapshot())
     } catch (error) {
@@ -1504,7 +1518,8 @@ export function registerGuiIpc(
     }
     let turnAfter: TurnState | undefined
     let messages: number | undefined
-    if (activeId) {
+    let waitMs: number | undefined
+    if (activeId && !threadWaits) {
       try {
         const instance = guiMms.instanceForSender?.(senderId)
         const snap = await guiMms.snapshotThreadForSender(senderId, activeId)
@@ -1516,9 +1531,14 @@ export function registerGuiIpc(
           messages = Array.isArray(snap.messages) ? snap.messages.length : undefined
           if (turnBefore?.phase !== turnAfter.phase || turnBefore?.turnId !== turnAfter.turnId) changed.push('turn')
         }
+        computerWait.clear(senderId)
       } catch (error) {
         failed = describeLinkError(error)
-        console.error('window thread could not be read again:', failed)
+        if (isQualifiedId(activeId) && waitsForComputer(error)) waitMs = computerWait.failed(senderId, activeId)
+        else {
+          computerWait.clear(senderId)
+          console.error('window thread could not be read again:', failed)
+        }
       }
     }
     if (reasons.some((reason) => LIST_REREAD_REASONS.has(reason))) {
@@ -1538,9 +1558,24 @@ export function registerGuiIpc(
       // The answer was older than an update already applied: the update stays.
       kept: kept.length ? kept : undefined,
       messages,
-      error: failed
+      error: failed,
+      // The thread's computer cannot be reached: the next read waits this long, or until that computer may be back.
+      retryInMs: waitMs,
+      waiting: threadWaits || undefined
     })
     noteShown(senderId)
+  })
+
+  /** The reason a catch-up carries when the wait for the shown thread's computer is over. */
+  const COMPUTER_RETRY = 'computer-retry'
+  const computerWait = new ComputerWait({
+    onRetry: (senderId, threadId) => {
+      if (presentationForSender(senderId).getActiveThreadId() !== threadId) {
+        computerWait.clear(senderId)
+        return
+      }
+      requestCatchUp(senderId, COMPUTER_RETRY)
+    }
   })
 
   const catchUpTimers = new Map<number, ReturnType<typeof setTimeout>>()
@@ -1605,6 +1640,7 @@ export function registerGuiIpc(
       const win = windowBySender(senderId)
       if (!win) {
         quietWatch.forget(senderId)
+        computerWait.clear(senderId)
         return
       }
       const binding = guiMms.getWindowBindingForSender(senderId)
@@ -1615,6 +1651,19 @@ export function registerGuiIpc(
       }
       const activeId = presentationForSender(senderId).getActiveThreadId()
       const answersGap = reasons.includes('gap')
+      if (activeId && computerWait.waiting(senderId, activeId)) {
+        // The shown thread's computer cannot be reached and its own wait reads it again. A gap reads every thread's
+        // status, which answers the gap flag: the flag a failed read left would otherwise ask again on every update.
+        if (answersGap) {
+          try {
+            await readStatuses(senderId, binding.profileId, true)
+            if (!win.isDestroyed()) win.webContents.send('threads:activity', activityTrackerFor(binding.profileId).getSnapshot())
+          } catch (error) {
+            linkLog.write('check.failed', { window: senderId, reasons, read: 'activity', error: describeLinkError(error) })
+          }
+        }
+        return
+      }
       if (!activeId) {
         // With no thread open, a gap is answered by reading every thread's status (it clears the gap flag).
         if (answersGap) {
@@ -1658,10 +1707,14 @@ export function registerGuiIpc(
       for (const reason of reasons) addCatchUpReason(senderId, catchUpReasonOfCheck(reason))
       await catchUpWindow(senderId)
     } catch (error) {
-      linkLog.write('check.failed', { window: senderId, reasons, error: describeLinkError(error) })
+      const activeId = presentationForSender(senderId).getActiveThreadId()
+      // The shown thread's computer cannot be reached: reading it in full now would fail the same way. Its wait reads
+      // it once that computer may be back.
+      const retryInMs = activeId && isQualifiedId(activeId) && waitsForComputer(error) ? computerWait.failed(senderId, activeId) : undefined
+      linkLog.write('check.failed', { window: senderId, reasons, error: describeLinkError(error), retryInMs })
       // A failed status check cannot say that the transcript is current. Read it in full or let the window's
       // reopening do so if the connection closed.
-      if (reasons.includes('gap')) requestCatchUp(senderId, 'live-gap')
+      if (retryInMs === undefined && reasons.includes('gap')) requestCatchUp(senderId, 'live-gap')
     } finally {
       if (reasons.includes('quiet')) quietWatch.checked(senderId)
     }
