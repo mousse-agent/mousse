@@ -29,7 +29,10 @@ import { disposeFixtures, memoryFixture } from './memory/memoryFixture'
 // provider), with report_bug and the thread-link line that came beside them, bring the chat lane to about 59,200 on
 // Codex and Pi and 25,550 on Claude Code.
 // The line that browser screenshots show to the owner by themselves, and Other… on ask_owner, add about 150 to each.
-const CEILING = { codexPi: 59_400, claude: 25_700 } as const
+// The chat's own quick calls (its line on the web, secret_fetch and MCP tools with their budgets, and what stays work's)
+// add about 350 to the chat lane, escalate's card name about 75, and thread_create's hidden (a thread an agent starts
+// stays out of the sidebar) about 560 on Codex and Pi: the chat lane there says hello in about 60,050 characters.
+const CEILING = { codexPi: 60_300, claude: 25_700 } as const
 
 let fx: DelegationFixture | undefined
 afterEach(() => {
