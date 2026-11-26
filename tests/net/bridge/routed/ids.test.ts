@@ -265,7 +265,7 @@ describe('the walker', () => {
       }
     }
     // Most rows were called, and what they returned does name the owner's threads, qualified.
-    expect(called).toBeGreaterThan(Object.keys(ROUTED_METHODS).length - skipped.size - 1)
+    expect(called).toBeGreaterThan(Object.keys(ROUTED_METHODS).filter((method) => !providerRow(method)).length - skipped.size - 1)
     expect(seen.join(' ')).toContain(`${t.node}:${parent.id}`)
   }, 300_000)
 })

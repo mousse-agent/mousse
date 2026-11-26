@@ -41,12 +41,23 @@ export interface ProvidersApi {
   }
 }
 
+/** This computer's calls, looked up when made (a page renders before, and without, a window bridge). */
+const LOCAL: ProvidersApi = {
+  snapshots: (scope) => window.mousse.providers.snapshots(scope),
+  catalog: { addOptions: () => window.mousse.providers.catalog.addOptions() },
+  registry: { search: (query) => window.mousse.providers.registry.search(query) },
+  instances: new Proxy({} as ProvidersApi['instances'], {
+    get: (_target, key) => (...args: unknown[]) =>
+      (window.mousse.providers.instances as unknown as Record<PropertyKey, (...args: unknown[]) => unknown>)[key]!(...args)
+  })
+}
+
 /**
  * The calls for `node`, or for this computer without one. A remote call names the computer, and the service
  * of this computer sends it there; a key passed to `setSecret` goes there in that call and nowhere else.
  */
 export function providersApi(node?: string): ProvidersApi {
-  if (!node) return window.mousse.providers
+  if (!node) return LOCAL
   const call = <T>(method: string, params: Record<string, unknown> = {}): Promise<T> =>
     window.mousse.providers.remote<T>(node, `providers.${method}`, params)
   return {

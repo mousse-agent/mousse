@@ -205,7 +205,7 @@ describe('Model list freshness', () => {
   })
   const row = (entry: InstanceSnapshot) => at(() => renderToStaticMarkup(createElement(ProviderListRow, {
     iconId: 'claude', name: entry.displayName, status: describeStatus(entry),
-    toggle: switchStateOf(entry, { kind: 'device' }), selected: false, onSelect: () => undefined, onToggle: noop
+    enabled: entry.enabled.device, selected: false, onSelect: () => undefined, onToggle: noop
   })))
 
   it('says when the list was updated, from the time the daemon kept with it, in the Models tooltip only', () => {
@@ -238,7 +238,7 @@ describe('Model list freshness', () => {
 })
 
 describe('Providers page toolbar', () => {
-  it('heads the list with Add provider, then Refresh provider status and Refresh models; no scope without a project', () => {
+  it('heads the list with Add provider, then Refresh provider status and Refresh models; no computer choice without another computer', () => {
     const html = renderToStaticMarkup(createElement(ProvidersSettings, {
       settings: {} as never, refreshProviderData: async () => ({ opts: {} as never }), updateSettings: async () => undefined, ensureValidProviderSelection: async (next) => next
     }))
@@ -246,8 +246,7 @@ describe('Providers page toolbar', () => {
     expect(labels(html)).toContain('Refresh provider status')
     expect(html.indexOf('Add provider')).toBeLessThan(html.indexOf('aria-label="Refresh provider status"'))
     expect(html.indexOf('aria-label="Refresh provider status"')).toBeLessThan(html.indexOf('Refresh models'))
-    // With no project to choose, the device is implied.
-    expect(html).not.toContain('Settings scope')
+    // With no other computer to choose, this one is implied.
     expect(html).not.toContain('Applying settings for')
     // Usage stays on its own page.
     expect(html).not.toMatch(/usage|quota|meter/i)
@@ -648,15 +647,3 @@ describe('Agent editor for a managed ChatGPT entry', () => {
   })
 })
 
-describe('Agent editor scope', () => {
-  const editor = (scope: InstanceSnapshot['scope']) => {
-    const entry = snapshot({ scope })
-    return renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
-  }
-
-  it('in a project scope, says display name, the Advanced settings and models apply to the whole device', () => {
-    const notes = (html: string) => html.split('Applies to this device, in every project.').length - 1
-    expect(notes(editor({ kind: 'project', projectId: 'p1' }))).toBe(3)
-    expect(notes(editor({ kind: 'device' }))).toBe(0)
-  })
-})
