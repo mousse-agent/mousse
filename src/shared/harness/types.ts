@@ -271,6 +271,11 @@ export const HARNESS_ERROR_CODES = [
   'model_unavailable',
   'model_hidden',
   'policy_unenforceable',
+  /**
+   * A one-shot's agent tried to use a tool, ask a question or leave files behind, and Mousse ended the request. The
+   * entry may still answer another request; Automatic naming moves on to its next model.
+   */
+  'one_shot_tool_refused',
   /** The thread's permission mode needs more control than the instance has (it approves tools itself). */
   'permission_mode_unenforceable',
   'operation_busy',
@@ -364,6 +369,7 @@ const HARNESS_ERROR_CATEGORY: Record<HarnessErrorCode, ErrorCategory> = {
   model_unavailable: 'unavailable',
   model_hidden: 'invalid',
   policy_unenforceable: 'unsupported',
+  one_shot_tool_refused: 'denied',
   permission_mode_unenforceable: 'unsupported',
   operation_busy: 'conflict',
   operation_unknown: 'invalid',
