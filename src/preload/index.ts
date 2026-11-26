@@ -147,6 +147,7 @@ import type {
   ProviderOperationStarted,
   ProviderScope,
   RegistryAgentView,
+  RemoteProviderEvent,
   RemoveInstallResult,
   SignInResponse
 } from '../shared/harness/types'
@@ -1324,6 +1325,18 @@ const api = {
      * Provider instance commands. Mutations resolve with the instance's snapshot; install, update
      * and sign-in resolve at once with an operation id and report through `onOperation`.
      */
+    /**
+     * Settings → Providers of another computer (`node`): one of the provider calls that computer takes, answered
+     * with the same value the call of this computer's own API answers. A key goes to that computer only.
+     */
+    remote: <T = unknown>(node: string, method: string, params: Record<string, unknown>): Promise<T> =>
+      ipcRenderer.invoke('providers:remote', node, method, params),
+    /** Operations this computer started on another one, and changes to that computer's providers. */
+    onRemote: (cb: (event: RemoteProviderEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: RemoteProviderEvent) => cb(event)
+      ipcRenderer.on('providers:remote', handler)
+      return () => ipcRenderer.removeListener('providers:remote', handler)
+    },
     /** The ACP agent registry ("More ACP agents"): agents that fit this computer, best match first. */
     registry: {
       search: (query: string): Promise<RegistryAgentView[]> => ipcRenderer.invoke('providers:registry:search', query)
@@ -1338,9 +1351,9 @@ const api = {
       remove: (instanceId: string): Promise<void> => ipcRenderer.invoke('providers:instances:remove', instanceId),
       configure: (instanceId: string, patch: InstanceConfigPatch): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:configure', instanceId, patch),
-      /** `null` clears a project override; the device scope takes a boolean. */
-      setEnabled: (instanceId: string, scope: ProviderScope, enabled: boolean | null): Promise<InstanceSnapshot> =>
-        ipcRenderer.invoke('providers:instances:setEnabled', instanceId, scope, enabled),
+      /** Turns the instance on or off on this computer. */
+      setEnabled: (instanceId: string, enabled: boolean): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:setEnabled', instanceId, enabled),
       install: (instanceId: string): Promise<ProviderOperationStarted> =>
         ipcRenderer.invoke('providers:instances:install', instanceId),
       /** Deletes the files Mousse downloaded for it; other entries using them block it unless `force`. */

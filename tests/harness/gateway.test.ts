@@ -198,29 +198,26 @@ describe('harness gateway: resolution (absorbs AdapterRegistry)', () => {
 })
 
 describe('harness gateway: scope and model prefs', () => {
-  it('a project narrows the device setting and never lifts it', async () => {
+  it('turns an instance on or off for the computer, and ignores the per-project switches an older Mousse stored', async () => {
     const profileHome = home()
+    // Written by a Mousse that still had per-project switches: Claude off in p1, Codex on there.
+    mkdirSync(join(profileHome, 'harness'), { recursive: true })
+    const stored = { version: 1, projects: { p1: { instances: { claude: { enabled: false }, codex: { enabled: true } } } } }
+    writeFileSync(join(profileHome, 'harness', 'scopes.json'), JSON.stringify(stored))
     const source = instances({ codex: { driver: 'codex', enabled: false } })
-    const adapters = [pi(), fake('claude'), fake('antigravity'), fake('codex')]
-    const harness = testHarness({ adapters, instances: source, profileHome })
+    const harness = testHarness({ adapters: [pi(), fake('claude'), fake('antigravity'), fake('codex')], instances: source, profileHome })
     const project = { kind: 'project' as const, projectId: 'p1' }
 
-    const off = await harness.instances.setEnabled('claude', project, false)
-    expect(off.enabled).toEqual({ device: true, project: false, effective: false, setBy: 'project' })
+    const inProject = await harness.instances.snapshots(project)
+    expect(inProject.find((entry) => entry.instanceId === 'claude')!.enabled).toEqual({ device: true, effective: true, setBy: 'device' })
+    expect(inProject.find((entry) => entry.instanceId === 'codex')!.enabled).toEqual({ device: false, effective: false, setBy: 'device' })
+    expect(harness.resolve({ instanceId: 'claude', model: 'm' }, project, 'composer').driver).toBe('claude')
+
+    expect((await harness.instances.setEnabled('codex', true)).enabled).toEqual({ device: true, effective: true, setBy: 'device' })
+    expect((await harness.instances.setEnabled('claude', false)).enabled).toEqual({ device: false, effective: false, setBy: 'device' })
     expect(codeOf(() => harness.resolve({ instanceId: 'claude', model: 'm' }, project, 'composer'))).toBe('instance_disabled')
-    // The device scope is unaffected.
-    expect(harness.resolve({ instanceId: 'claude', model: 'm' }, { kind: 'device' }, 'composer').driver).toBe('claude')
-    // Device off is a ceiling a project override cannot lift.
-    const lifted = await harness.instances.setEnabled('codex', project, true)
-    expect(lifted.enabled).toMatchObject({ device: false, project: true, effective: false, setBy: 'device' })
-
-    // Persisted in <profileHome>/harness/scopes.json and read back by a new gateway.
-    expect(JSON.parse(readFileSync(join(profileHome, 'harness', 'scopes.json'), 'utf8'))).toMatchObject({ version: 1, projects: { p1: { instances: { claude: { enabled: false } } } } })
-    const again = testHarness({ adapters: [pi(), fake('claude'), fake('antigravity'), fake('codex')], instances: source, profileHome })
-    expect(codeOf(() => again.resolve({ instanceId: 'claude', model: 'm' }, project, 'turn'))).toBe('instance_disabled')
-
-    // Clearing the override follows the device again.
-    expect((await harness.instances.setEnabled('claude', project, null)).enabled).toEqual({ device: true, effective: true, setBy: 'device' })
+    // The stored file is left as it was: nothing is deleted.
+    expect(JSON.parse(readFileSync(join(profileHome, 'harness', 'scopes.json'), 'utf8'))).toEqual(stored)
   })
 
   it('lists models by name in one style, and keeps their names while the list is empty', async () => {
@@ -424,7 +421,7 @@ describe('harness gateway: instances', () => {
     let stored: unknown = { future: { driver: 'acp', enabled: true, config: { x: 1 } }, claude: { driver: 'claude', enabled: true, extra: 'kept' } }
     const source = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
     const harness = testHarness({ adapters: [pi(), fake('claude')], instances: source, profileHome: home() })
-    await harness.instances.setEnabled('claude', { kind: 'device' }, false)
+    await harness.instances.setEnabled('claude', false)
     expect(stored).toMatchObject({ future: { driver: 'acp', enabled: true, config: { x: 1 } }, claude: { driver: 'claude', enabled: false, extra: 'kept' } })
   })
 

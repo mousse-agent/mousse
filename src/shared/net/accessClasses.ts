@@ -315,7 +315,27 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
     'scheduled.run': 'work',
     'scheduled.pause': 'work',
     'scheduled.resume': 'work',
-    'scheduled.delete': 'work'
+    'scheduled.delete': 'work',
+    // Settings → Providers of this computer, from another one: reading it is a view; changing it is work.
+    'providers.catalog.addOptions': 'view',
+    'providers.registry.search': 'view',
+    'providers.instances.recheck': 'view',
+    'providers.instances.add': 'work',
+    'providers.instances.setSecret': 'work',
+    'providers.instances.remove': 'work',
+    'providers.instances.configure': 'work',
+    'providers.instances.setEnabled': 'work',
+    'providers.instances.install': 'work',
+    'providers.instances.removeInstall': 'work',
+    'providers.instances.cancelInstall': 'work',
+    'providers.instances.update': 'work',
+    'providers.instances.signIn': 'work',
+    'providers.instances.respondSignIn': 'work',
+    'providers.instances.signOut': 'work',
+    'providers.instances.allowKnownProblem': 'work',
+    'providers.instances.refreshModels': 'work',
+    'providers.instances.refreshAllModels': 'work',
+    'providers.instances.setModelPrefs': 'work'
   })
 })
 

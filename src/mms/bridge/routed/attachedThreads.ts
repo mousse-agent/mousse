@@ -43,6 +43,8 @@ export interface AttachedThreadsOptions {
   computer(node: NodeId): ComputerRef
   /** Progress of a Git action, from the channel stream of `node`. */
   onGit(node: NodeId, data: unknown): void
+  /** A provider operation this computer started on `node`, or a change to `node`'s providers (`ProviderEventRelay`). */
+  onProviders?(node: NodeId, type: 'providers.operation' | 'providers.changed', data: unknown): void
   /** The thread's own row changed on its computer (a rename, a pin...): the merged lists take it at once. */
   onMetadata?(node: NodeId, thread: Json): void
   idleMs?: number
@@ -733,7 +735,7 @@ export class AttachedThreads {
 
   // ------------------------------------------------------------------ the channel stream
 
-  /** The stream this computer reads for the progress of the Git actions it starts on `node`. */
+  /** The stream this computer reads for the progress of the Git actions and provider operations it starts on `node`. */
   channel(node: NodeId): Promise<void> {
     let held = this.channels.get(node)
     if (!held) {
@@ -742,8 +744,10 @@ export class AttachedThreads {
         const handle = await hub.attach(
           { nodeId: node, entityId: CHANNEL_ENTITY },
           (update) => {
-            if (update.kind === 'event' && update.type === 'git.operation')
-              this.options.onGit(node, update.data)
+            if (update.kind !== 'event') return
+            if (update.type === 'git.operation') this.options.onGit(node, update.data)
+            else if (update.type === 'providers.operation' || update.type === 'providers.changed')
+              this.options.onProviders?.(node, update.type, update.data)
           },
           () => {
             this.channels.delete(node)

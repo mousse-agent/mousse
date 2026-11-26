@@ -35,6 +35,7 @@ import { cleanDeviceName } from '../../shared/bridge/editorAsk'
 import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
+import { ProviderEventRelay } from './routed/providerEvents'
 import { OwnerRoutes } from './routed/OwnerRoutes'
 import { PeerDirectory } from './peers'
 import { EditorAsks } from './routed/editorAsks'
@@ -385,8 +386,19 @@ export class BridgeProfileService {
       // The upload belongs to the staging request, so it is read through its request-bound artifact.
       readInput: (ref, context) => this.artifacts.input(ref, context, 'routed.stage')
     })
+    // Settings → Providers of this computer, worked on from another one: its operations and changes reach that
+    // computer on its own channel stream.
+    const providerEvents = new ProviderEventRelay({
+      push: (node, type, data) => this.threads.pushChannel(node, type, data)
+    })
+    const offHarness = services.harness?.instances.subscribe((event) => providerEvents.event(event))
+    this.disposers.add(() => {
+      offHarness?.()
+      providerEvents.close()
+    })
     const routes = new OwnerRoutes({
       services,
+      providerEvents,
       rpc: rt.rpc,
       policy: rt.policy,
       audit: rt.audit,

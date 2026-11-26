@@ -41,7 +41,6 @@ describe('describeStatus', () => {
     ['signed in shows the account', {}, { headline: 'Signed in · Max plan', tone: 'ready', action: null }],
     ['no sign-in needed is available', { auth: { state: 'not_required', account: undefined } }, { headline: 'Available', tone: 'ready', action: null }],
     ['off on the device', { enabled: { device: false, effective: false, setBy: 'device' } }, { headline: 'Disabled', tone: 'disabled', action: 'enable' }],
-    ['off for the project', { scope: { kind: 'project', projectId: 'p1' }, enabled: { device: true, project: false, effective: false, setBy: 'project' } }, { headline: 'Disabled', tone: 'disabled', action: 'enable' }],
     ['installing', { install: { state: 'installing', operationId: 'op-1', progress: { message: 'Downloading 40%' } } }, { headline: 'Installing', tone: 'neutral', action: 'cancel_install' }],
     ['never checked', { checkedAt: undefined, lastGoodAt: undefined }, { headline: 'Checking status', tone: 'neutral', action: null }],
     ['override that does not run', { runs: { state: 'no', failure: 'override_not_found' }, binary: { path: 'C:\\tools\\claude.exe', source: 'override' } }, { headline: 'Override not found', tone: 'error', action: 'fix_override' }],

@@ -81,7 +81,6 @@ import {
   asAfterSequence,
   asAnswersMap,
   asOptionalAnswerAttachments,
-  asEnabledForScope,
   asInstanceConfigPatch,
   asInstanceId,
   asModelPrefsPatch,
@@ -4355,9 +4354,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.instances.setEnabled': {
       const p = isObject(params) ? params : {}
       const instanceId = asInstanceId(p.instanceId)
-      const scope = asProviderScope(p.scope)
-      const enabled = asEnabledForScope(p.enabled, scope)
-      return { snapshot: await harnessGateway(ctx).instances.setEnabled(instanceId, scope, enabled) }
+      // On or off for the whole computer; per-project switches are gone (an older window's device scope is accepted).
+      if (p.scope !== undefined && asProviderScope(p.scope).kind !== 'device')
+        throw new DomainRpcError('invalid_params', 'A provider is turned on or off for the whole computer, not for one project.')
+      return { snapshot: await harnessGateway(ctx).instances.setEnabled(instanceId, asBoolean(p.enabled, 'enabled')) }
     }
     // Install, update and sign-in return an operation id at once; progress, prompts and the
     // outcome arrive as `providers.operation` events, so no request waits on them.

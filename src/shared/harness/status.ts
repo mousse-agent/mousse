@@ -73,12 +73,10 @@ export interface NextStep {
 
 export interface InstanceEnabled {
   device: boolean
-  /** The project override; absent when the project does not set one or the scope is the device. */
-  project?: boolean
-  /** What applies in the snapshot's scope. Device off is a ceiling a project cannot lift. */
+  /** What applies: the computer's own switch, in every scope. */
   effective: boolean
-  /** The layer that decided `effective`. */
-  setBy: 'device' | 'project'
+  /** The layer that decided `effective`: always the computer. */
+  setBy: 'device'
 }
 
 /** An instance's settings as stored: the editor's name, account home, executable, args and variables. */
@@ -359,7 +357,7 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
   if (!enabled.effective) {
     return {
       headline: 'Disabled',
-      detail: enabled.setBy === 'project' ? 'Turned off for this project.' : 'Turned off on this device.',
+      detail: 'Turned off on this device.',
       tone: 'disabled',
       nextStep: step(snapshot, 'enable')
     }

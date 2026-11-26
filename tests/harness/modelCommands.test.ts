@@ -115,7 +115,7 @@ describe('/model honours hidden models and disabled instances', () => {
     expect(harness.resolve({ instanceId: 'claude:work', model: 'work-only' }, { kind: 'device' }, 'cli_model').selection.instanceId).toBe('claude:work')
 
     // Both enabled: a model both list goes to the instance already selected, and both are listed apart.
-    await harness.instances.setEnabled('claude', { kind: 'device' }, true)
+    await harness.instances.setEnabled('claude', true)
     expect(listModels().map((option) => option.instanceId)).toEqual(['claude', 'claude:work'])
     const current = cliContext(listModels)
     current.ctx.getGlobalModel = () => ({ instanceId: 'claude:work', llmProvider: 'claude-subscription', model: 'work-only' })

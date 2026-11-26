@@ -35,6 +35,7 @@ import {
 } from '../../../shared/bridge/routed'
 import { WORKFLOW_RUN_CAPABILITY } from '../../../shared/workflowRunPlatform'
 import { isProjectShellAgentId } from '../../../shared/types'
+import type { ProviderEventRelay } from './providerEvents'
 import {
   AppError,
   errorDiagnostic,
@@ -123,6 +124,11 @@ export interface OwnerRoutesOptions {
    * what that computer can now do and where to limit it. Written to the audit too (`thread.first_use`).
    */
   onFirstUse?: (info: { node: NodeId; name: string; threadId?: string }) => void
+  /**
+   * Settings → Providers of this computer from another one: checks a call that names an operation, and learns of
+   * each providers call that went through (`ProviderEventRelay`).
+   */
+  providerEvents?: Pick<ProviderEventRelay, 'admit' | 'called'>
   /**
    * The first folder a device registers as a project here (`projects.open`): a desktop notice for the owner, and a
    * row of its own in the audit (`project.first_open`). It stands in for the first-use notice when both are due.
@@ -607,6 +613,7 @@ export class OwnerRoutes {
         params = rest
       }
       await this.assertOwned(method, row, params)
+      if (method.startsWith('providers.')) this.options.providerEvents?.admit(node, method, params)
       // Terminals: a device types into, resizes and stops only the ones it opened, takes a slot before it starts one,
       // and each numbered input is applied once.
       if (method === 'pty.create') slot = this.terminals.claim(node, thread!, String(params.agentId))
@@ -628,6 +635,7 @@ export class OwnerRoutes {
         const sent = typeof params.data === 'string' ? Buffer.byteLength(params.data) : 0
         result = await verdict.apply(sent, () => this.dispatch(method, row, params, context, head))
       } else result = marked ? await this.remoteAgent.run(method, params, marked) : await this.dispatch(method, row, params, context, head, slot)
+      if (method.startsWith('providers.')) this.options.providerEvents?.called(node, method, result)
       // A thread a bot started names that bot only to a computer that reaches it ("Started by a bot" otherwise).
       if (!row.sequenced) result = withHiddenBots(result, this.options.services.botReach?.hiddenFor(node))
       // A caller that runs an older Mousse reads a thread's archive time only as `settledAt`.

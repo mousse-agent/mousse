@@ -1,18 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
 import { describeStatus, type InstanceSnapshot } from '../../../shared/harness/status'
-import type { AddOptionMethod, HarnessDriverKind, InstanceConfigPatch, ProviderAddOption, ProviderScope } from '../../../shared/harness/types'
+import type { AddOptionMethod, HarnessDriverKind, InstanceConfigPatch, ProviderAddOption } from '../../../shared/harness/types'
 import { Plus, RefreshCw, Sparkles } from '../../lib/icons'
 import { saveModelPrefs, useLegacyFavoritesImport } from '../../lib/modelFavorites'
 import {
   DEVICE_SCOPE,
   applySnapshot,
+  computerKey,
   loadProviderSnapshots,
   modelPrefsByInstance,
   onProviderListingsChanged,
   operationOutcome,
-  projectScope,
   removeSnapshot,
+  runsOn,
   sortInstances,
   stopPendingSignIns,
   useProviderSnapshots,
@@ -20,7 +21,9 @@ import {
   useRunningOperation,
   watchPendingSignIn
 } from '../../lib/providerSnapshots'
-import { useLocalProjects } from '../../hooks/useLocalProjects'
+import { ProvidersComputerContext, providersApi, useProvidersComputer } from '../../lib/providersComputer'
+import { useComputers } from '../../lib/computers'
+import { isComputer, worksOnThreads, type Device } from '../../lib/netDevices'
 import { takePendingAddProvider, takePendingProvider } from '../../lib/settingsNavigation'
 import { Select } from '../ui/Select'
 import { AddProviderDialog, type AddProviderHandlers } from './AddProviderDialog'
@@ -29,7 +32,7 @@ import type { InstanceActions } from './CliSections'
 import { MoveNotice } from './MoveProviderDialog'
 import { AgentEditor, ApiEditor } from './ProviderEditor'
 import { ProviderListRow, errorText, useAsyncAction, useRelativeTime } from './parts'
-import { formatVersion, iconIdOf, isApiInstance, lastCheckedAt, switchStateOf, usedByLabel } from './providerView'
+import { formatVersion, iconIdOf, isApiInstance, lastCheckedAt, usedByLabel } from './providerView'
 import { SignInDialog } from './SignInDialog'
 import '../../styles/providers.css'
 
@@ -49,8 +52,18 @@ interface SignInSession {
   onEnd?: () => void
 }
 
-/** The scope last chosen on this page, kept while the app runs. */
-let lastScopeId = ''
+/** The computer last chosen on this page ('' is this one), kept while the app runs. */
+let lastComputer = ''
+
+/**
+ * The other computers whose providers this page can manage: computers of the user's list, not revoked, that work on
+ * threads with this one (the `settings` grant the routed calls need).
+ */
+export function providerComputers(devices: readonly Device[]): Array<{ node: string; name: string; online: boolean }> {
+  return devices
+    .filter((device) => !device.self && !device.revoked && isComputer(device) && worksOnThreads(device))
+    .map((device) => ({ node: device.node, name: device.name, online: device.state === 'open' }))
+}
 
 /** The catalog less the models hidden in Settings, as the pickers offer it. */
 function withoutHiddenModels(providers: LlmProviderOption[]): LlmProviderOption[] {
@@ -80,26 +93,70 @@ function apiRemoveHint(name: string, method: AddOptionMethod | undefined, retire
 }
 
 /**
- * Settings → Providers: a provider list beside the selected
- * instance's editor. Everything shown comes from the daemon's instance snapshots for the chosen
- * scope (this device, or a project's overrides); every change goes through `providers.instances`.
+ * Settings → Providers of this computer or, chosen in the toolbar, of another of the user's computers that works on
+ * threads with this one. The page below acts on the chosen computer only.
  */
-export function ProvidersSettings({ settings, refreshProviderData, updateSettings, ensureValidProviderSelection }: ProvidersSettingsProps) {
+export function ProvidersSettings(props: ProvidersSettingsProps) {
+  const { devices } = useComputers()
+  const computers = providerComputers(devices)
+  const [chosen, setChosen] = useState(lastComputer)
+  // A computer that left the list (removed, revoked, no longer working on threads) falls back to this one.
+  const computer = chosen ? computers.find((entry) => entry.node === chosen) : undefined
+  const node = computer?.node
+  const choose = (next: string) => {
+    lastComputer = next
+    setChosen(next)
+  }
+  const menu =
+    computers.length > 0 ? (
+      <span className="prov-scope" title="Changes on this page apply to the chosen computer">
+        <span className="prov-scope-label">Applying settings for</span>
+        <Select
+          ariaLabel="Computer"
+          size="small"
+          value={node ?? ''}
+          onChange={choose}
+          options={[
+            { value: '', label: 'This device' },
+            ...computers.map((entry) => ({
+              value: entry.node,
+              label: entry.online ? entry.name : `${entry.name} (offline)`,
+              disabled: !entry.online && entry.node !== node
+            }))
+          ]}
+        />
+      </span>
+    ) : null
+  return (
+    <ProvidersComputerContext.Provider value={node ? { node, name: computer!.name } : {}}>
+      <ProvidersPage key={node ?? ''} {...props} computerMenu={menu} />
+    </ProvidersComputerContext.Provider>
+  )
+}
+
+/**
+ * A provider list beside the selected instance's editor. Everything shown comes from the daemon's instance snapshots
+ * of the chosen computer; every change goes through `providers.instances` there.
+ */
+function ProvidersPage({
+  settings,
+  refreshProviderData,
+  updateSettings,
+  ensureValidProviderSelection,
+  computerMenu
+}: ProvidersSettingsProps & { computerMenu: ReactNode }) {
   const settingsRef = useRef(settings)
   settingsRef.current = settings
-  const projects = useLocalProjects()
-
-  /** '' is this device; otherwise a project id. A removed project falls back to the device. */
-  const [chosenScopeId, setChosenScopeId] = useState(lastScopeId)
-  const scopeId = chosenScopeId && projects.some((project) => project.id === chosenScopeId) ? chosenScopeId : ''
-  const setScopeId = (next: string) => {
-    lastScopeId = next
-    setChosenScopeId(next)
-  }
-  const scope: ProviderScope = projectScope(scopeId || null)
-  const { snapshots, error: loadError, loading, reload } = useProviderSnapshots(scope)
-  const { snapshots: deviceSnapshots } = useProviderSnapshots(DEVICE_SCOPE)
+  const { node, api } = useProvidersComputer()
+  const remote = Boolean(node)
+  const { snapshots, error: loadError, loading, reload } = useProviderSnapshots(DEVICE_SCOPE, node)
+  // Another computer pushes no snapshots here: its list is read whenever its page opens.
+  useEffect(() => {
+    if (node) void reload()
+  }, [node, reload])
   useLegacyFavoritesImport()
+  /** A snapshot a call returned, into the chosen computer's list. */
+  const apply = (snapshot: InstanceSnapshot) => applySnapshot(snapshot, undefined, node)
 
   // A bot's Sign in opens Providers on one entry's card, before or after the page mounted.
   const [selectedId, setSelectedId] = useState<string | null>(() => takePendingProvider() ?? null)
@@ -115,11 +172,11 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     const open = () => {
       if (!takePendingAddProvider()) return
       setAddOpen(true)
-      void window.mousse.providers.catalog.addOptions().then(setAddOptions).catch(() => {})
+      void providersApi(node).catalog.addOptions().then(setAddOptions).catch(() => {})
     }
     window.addEventListener('mousse:settings-add-provider', open)
     return () => window.removeEventListener('mousse:settings-add-provider', open)
-  }, [])
+  }, [node])
   const [signIn, setSignIn] = useState<SignInSession | null>(null)
   /** Opens Models in the editor of this entry: after it signs in, to show what is connected now. */
   const [revealModels, setRevealModels] = useState<{ instanceId: string; count: number } | null>(null)
@@ -137,12 +194,16 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
 
   // What Add provider offers for model APIs, and how each one signs in; a change to any entry may change `added`.
   const loadAddOptions = useCallback(async () => {
-    setAddOptions(await window.mousse.providers.catalog.addOptions())
-  }, [])
+    setAddOptions(await providersApi(node).catalog.addOptions())
+  }, [node])
   useEffect(() => {
     void loadAddOptions().catch(() => {})
-    return onProviderListingsChanged(() => void loadAddOptions().catch(() => {}))
-  }, [loadAddOptions])
+    // Another computer's changes come as its notices, which read its list again.
+    if (!node) return onProviderListingsChanged(() => void loadAddOptions().catch(() => {}))
+  }, [loadAddOptions, node])
+  useEffect(() => {
+    if (node && snapshots) void loadAddOptions().catch(() => {})
+  }, [node, snapshots, loadAddOptions])
 
   // A failed install or update reports here; a failed sign-in stays in its dialog. A sign-in that
   // finished with a warning (its old sign-in still waits to be revoked) says so here once its
@@ -151,7 +212,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     () =>
       useProviderSnapshotsStore.subscribe((state, previous) => {
         for (const event of Object.values(state.operations)) {
-          if (previous.operations[event.operationId] === event) continue
+          if (previous.operations[event.operationId] === event || !runsOn(state, event.operationId, node)) continue
           if (event.phase === 'completed' && event.kind === 'sign_in') {
             if (event.warning) setPageNotice(event.warning)
             showModels(event.instanceId)
@@ -160,15 +221,19 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
           setPageError(event.error.message)
         }
       }),
-    [showModels]
+    [showModels, node]
   )
 
   const sorted = sortInstances(snapshots ?? [])
   const selected = sorted.find((snapshot) => snapshot.instanceId === selectedId) ?? sorted[0] ?? null
-  const operation = useRunningOperation(selected?.instanceId ?? '')
+  const operation = useRunningOperation(selected?.instanceId ?? '', node)
 
-  /** Keep the default model on an instance that is still on, and on a model it still offers. */
+  /**
+   * Keep the default model on an instance that is still on, and on a model it still offers. The defaults are this
+   * computer's: another computer's page leaves them alone.
+   */
   const reconcileSelection = async () => {
+    if (remote) return
     const { opts } = await refreshProviderData()
     const current = settingsRef.current
     const next = await ensureValidProviderSelection(current, withoutHiddenModels(opts.llmProviders))
@@ -194,7 +259,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
    * wait with that failure.
    */
   const runSignIn = async (instanceId: string, name: string, method: AddOptionMethod) => {
-    const { instances } = window.mousse.providers
+    const { instances } = api
     if (method === 'ambient') {
       const outcome = await operationOutcome(await instances.signIn(instanceId, method))
       if (outcome.phase === 'failed') throw new Error(outcome.error.message || 'Could not verify the credentials.')
@@ -205,7 +270,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
       let failure: Error | null = null
       const attempt = async () => {
         const started = await instances.signIn(instanceId, method)
-        watchPendingSignIn(instanceId)
+        watchPendingSignIn(instanceId, node)
         failure = null
         // Closing ends the wait: a sign-in that completed resolves, any other rejects.
         const onEnd = () => {
@@ -224,8 +289,8 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
 
   /** An agent's own sign-in: its prompts open the sign-in dialog, which can start it again. */
   const startAgentSignIn = async (instanceId: string, name: string) => {
-    const started = await window.mousse.providers.instances.signIn(instanceId)
-    watchPendingSignIn(instanceId)
+    const started = await api.instances.signIn(instanceId)
+    watchPendingSignIn(instanceId, node)
     setSignIn({ operationId: started.operationId, name, retry: () => startAgentSignIn(instanceId, name) })
   }
 
@@ -236,17 +301,16 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     setSignIn(null)
   }, [])
 
-  const setEnabled = async (snapshot: InstanceSnapshot, target: ProviderScope, enabled: boolean | null) => {
-    applySnapshot(await window.mousse.providers.instances.setEnabled(snapshot.instanceId, target, enabled))
-    if (target.kind === 'device') await reconcileSelection()
+  const setEnabled = async (snapshot: InstanceSnapshot, enabled: boolean) => {
+    apply(await api.instances.setEnabled(snapshot.instanceId, enabled))
+    await reconcileSelection()
   }
 
   const actionsFor = (snapshot: InstanceSnapshot): InstanceActions => {
-    const { instances } = window.mousse.providers
+    const { instances } = api
     const id = snapshot.instanceId
     return {
-      // Off on the device is a ceiling: turning on starts there, a project override only narrows.
-      enable: () => setEnabled(snapshot, snapshot.enabled.device ? scope : DEVICE_SCOPE, true),
+      enable: () => setEnabled(snapshot, true),
       install: async () => {
         await instances.install(id)
       },
@@ -258,24 +322,23 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
       },
       signIn: () => startAgentSignIn(id, snapshot.displayName),
       // The sign-in command was copied to run in a terminal: Mousse learns of it only by checking.
-      signInElsewhere: () => void watchPendingSignIn(id),
-      signOut: async () => applySnapshot(await instances.signOut(id)),
-      recheck: async () => applySnapshot(await instances.recheck(id)),
-      allowKnownProblem: async (version) => applySnapshot(await instances.allowKnownProblem(id, version)),
-      configure: async (patch) => applySnapshot(await instances.configure(id, patch)),
+      signInElsewhere: () => void watchPendingSignIn(id, node),
+      signOut: async () => apply(await instances.signOut(id)),
+      recheck: async () => apply(await instances.recheck(id)),
+      allowKnownProblem: async (version) => apply(await instances.allowKnownProblem(id, version)),
+      configure: async (patch) => apply(await instances.configure(id, patch)),
       removeInstall: (force) => instances.removeInstall(id, force)
     }
   }
 
-  const refreshModels = (snapshot: InstanceSnapshot) => async () =>
-    applySnapshot(await window.mousse.providers.instances.refreshModels(snapshot.instanceId))
+  const refreshModels = (snapshot: InstanceSnapshot) => async () => apply(await api.instances.refreshModels(snapshot.instanceId))
 
   /** The header's refresh: checks every instance again. */
   const refreshStatus = () =>
     void refreshing.run('refresh', async () => {
       if (!snapshots) return reload()
-      const results = await Promise.allSettled(sorted.map((snapshot) => window.mousse.providers.instances.recheck(snapshot.instanceId)))
-      for (const result of results) if (result.status === 'fulfilled') applySnapshot(result.value)
+      const results = await Promise.allSettled(sorted.map((snapshot) => api.instances.recheck(snapshot.instanceId)))
+      for (const result of results) if (result.status === 'fulfilled') apply(result.value)
       const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
       if (failed) throw failed.reason
     })
@@ -286,8 +349,8 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
    */
   const refreshAllModels = () =>
     void refreshingModels.run('models', async () => {
-      const results = await window.mousse.providers.instances.refreshAllModels()
-      for (const result of results) applySnapshot(result.snapshot)
+      const results = await api.instances.refreshAllModels()
+      for (const result of results) apply(result.snapshot)
       const failed = results.filter((result) => result.outcome === 'failed')
       if (failed.length)
         throw new Error(`Could not refresh models: ${failed.map((result) => `${result.snapshot.displayName} (${result.message ?? 'failed'})`).join('; ')}`)
@@ -295,27 +358,27 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
 
   const addHandlers: AddProviderHandlers = {
     add: async (driver: HarnessDriverKind, config: InstanceConfigPatch, slug?: string) => {
-      const snapshot = await window.mousse.providers.instances.add({ driver, config, ...(slug ? { slug } : {}) })
-      applySnapshot(snapshot)
-      void loadProviderSnapshots(DEVICE_SCOPE)
-      if (scope.kind === 'project') void reload()
+      const snapshot = await api.instances.add({ driver, config, ...(slug ? { slug } : {}) })
+      apply(snapshot)
+      void loadProviderSnapshots(DEVICE_SCOPE, node)
       return snapshot.instanceId
     },
     // Add (idempotent: a retry after a failed sign-in finds the entry), then the pasted key or the
     // sign-in. A credential saved on this device already (by another profile) needs neither. Cloud
     // credentials are checked before the entry is added, so a failed check adds nothing.
     connectApi: async (option, method, apiKey) => {
-      const { instances } = window.mousse.providers
+      const { instances } = api
       const ambient = method === 'ambient' && !option.hasSavedKey
       const added = await instances.add(ambient ? { ...option.add, signIn: 'ambient' } : option.add)
-      applySnapshot(added)
-      if (method === 'api_key' && apiKey) applySnapshot(await instances.setSecret(added.instanceId, apiKey))
+      apply(added)
+      // The key goes to the chosen computer in this call; nothing here keeps it.
+      if (method === 'api_key' && apiKey) apply(await instances.setSecret(added.instanceId, apiKey))
       else if (!ambient && !option.hasSavedKey) await runSignIn(added.instanceId, added.displayName, method)
       await loadAddOptions().catch(() => {})
-      await loadProviderSnapshots(DEVICE_SCOPE)
-      if (scope.kind === 'project') void reload()
-      const instance = useProviderSnapshotsStore.getState().scopes.device?.snapshots?.find((entry) => entry.instanceId === added.instanceId)
-      if (instance && !instance.enabled.device) await setEnabled(instance, DEVICE_SCOPE, true)
+      await loadProviderSnapshots(DEVICE_SCOPE, node)
+      const list = useProviderSnapshotsStore.getState().scopes[node ? computerKey(node) : 'device']?.snapshots
+      const instance = list?.find((entry) => entry.instanceId === added.instanceId)
+      if (instance && !instance.enabled.device) await setEnabled(instance, true)
       else await reconcileSelection()
       return added.instanceId
     }
@@ -327,11 +390,11 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     const status = describeStatus(snapshot)
     // Hiding a model may hide the default one; move the default to a model that is still offered.
     const onSaveModelPrefs = async (patch: Parameters<typeof saveModelPrefs>[1]) => {
-      await saveModelPrefs(snapshot.instanceId, patch)
+      await saveModelPrefs(snapshot.instanceId, patch, undefined, node)
       if (patch.hidden || patch.hide?.length) await reconcileSelection()
     }
     if (isApiInstance(snapshot)) {
-      const { instances } = window.mousse.providers
+      const { instances } = api
       const option = addOptions.find((entry) => entry.instanceId === snapshot.instanceId)
       const method = apiMethodOf(snapshot, option)
       const retired = snapshot.nextStep?.action === 'move'
@@ -339,10 +402,10 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
         <ApiEditor
           snapshot={snapshot}
           removeHint={apiRemoveHint(snapshot.displayName, method, retired)}
-          onSaveTelemetry={async (telemetry) => applySnapshot(await instances.configure(snapshot.instanceId, { telemetry }))}
+          onSaveTelemetry={async (telemetry) => apply(await instances.configure(snapshot.instanceId, { telemetry }))}
           onRemove={async () => {
             await instances.remove(snapshot.instanceId)
-            removeSnapshot(snapshot.instanceId)
+            removeSnapshot(snapshot.instanceId, node)
             setSelectedId(null)
             await reconcileSelection()
           }}
@@ -355,7 +418,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
               status={status}
               retired={retired}
               onReplaceKey={async (apiKey) => {
-                if (apiKey) applySnapshot(await instances.setSecret(snapshot.instanceId, apiKey))
+                if (apiKey) apply(await instances.setSecret(snapshot.instanceId, apiKey))
                 else await runSignIn(snapshot.instanceId, snapshot.displayName, 'api_key')
                 await reload()
               }}
@@ -365,8 +428,9 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
               }}
             />
           }
-          banner={<MoveNotice variant="banner" snapshot={snapshot} snapshots={sorted} onMoved={reload} />}
-          move={<MoveNotice snapshot={snapshot} snapshots={sorted} onMoved={reload} />}
+          // Moving an entry can copy a saved key, so it is done from a window of its own computer.
+          banner={remote ? undefined : <MoveNotice variant="banner" snapshot={snapshot} snapshots={sorted} onMoved={reload} />}
+          move={remote ? undefined : <MoveNotice snapshot={snapshot} snapshots={sorted} onMoved={reload} />}
           onSaveModelPrefs={onSaveModelPrefs}
           onRefreshModels={refreshModels(snapshot)}
           revealModels={revealFor(snapshot)}
@@ -380,13 +444,13 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
         operation={operation}
         actions={actionsFor(snapshot)}
         onRemove={async ({ deleteFiles }) => {
-          const { instances } = window.mousse.providers
+          const { instances } = api
           setPageNotice(null)
           // Deleting the files comes first: if it fails, nothing is removed. Files other entries
           // use stay; the entry is removed anyway and the page says why the files are still there.
           const files = deleteFiles ? await instances.removeInstall(snapshot.instanceId) : undefined
           await instances.remove(snapshot.instanceId)
-          removeSnapshot(snapshot.instanceId)
+          removeSnapshot(snapshot.instanceId, node)
           setSelectedId(null)
           if (files && !files.removed) {
             setPageNotice(`The downloaded files of ${snapshot.displayName} stay because other entries use them: ${files.usedBy.map(usedByLabel).join(', ')}.`)
@@ -401,9 +465,6 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
   }
 
   const checkedLabel = useRelativeTime(snapshots ? lastCheckedAt(snapshots) : null)
-  // A scope is a choice only once there is a project to choose.
-  const scopeOptions = [{ value: '', label: 'This device' }, ...projects.map((project) => ({ value: project.id, label: project.name }))]
-  const hasScopeChoice = projects.length > 0
 
   const openAdd = () => {
     setPageError(null)
@@ -422,12 +483,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
           Add provider
         </button>
         <span className="prov-toolbar-actions">
-          {hasScopeChoice && (
-            <span className="prov-scope">
-              <span className="prov-scope-label">Applying settings for</span>
-              <Select ariaLabel="Settings scope" size="small" value={scopeId} onChange={setScopeId} options={scopeOptions} />
-            </span>
-          )}
+          {computerMenu}
           <button
             type="button"
             className="settings-icon-btn"
@@ -451,10 +507,10 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
           </button>
         </span>
       </div>
-      {scopeId && (
-        <p className="prov-scope-note">Only the switches apply to this project; setup and models apply to this device. A provider off for the device stays off here.</p>
+      {/* Another computer that refuses or does not answer a read says so above the list it showed last. */}
+      {(pageError ?? refreshing.error ?? refreshingModels.error ?? (remote && snapshots ? loadError : undefined)) && (
+        <p className="prov-error">{pageError ?? refreshing.error ?? refreshingModels.error ?? loadError}</p>
       )}
-      {(pageError ?? refreshing.error ?? refreshingModels.error) && <p className="prov-error">{pageError ?? refreshing.error ?? refreshingModels.error}</p>}
       {pageNotice && <p className="prov-notice">{pageNotice}</p>}
 
       {!snapshots ? (
@@ -502,14 +558,13 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
                     : undefined
                 }
                 status={describeStatus(snapshot)}
-                toggle={switchStateOf(snapshot, scope)}
+                enabled={snapshot.enabled.device}
                 selected={selected?.instanceId === snapshot.instanceId}
                 onSelect={() => {
                   if (revealModels?.instanceId !== snapshot.instanceId) setRevealModels(null)
                   setSelectedId(snapshot.instanceId)
                 }}
-                onToggle={(next) => guard(() => setEnabled(snapshot, scope, next))}
-                onReset={scope.kind === 'project' ? () => guard(() => setEnabled(snapshot, scope, null)) : undefined}
+                onToggle={(next) => guard(() => setEnabled(snapshot, next))}
               />
             ))}
           </div>
@@ -525,7 +580,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
 
       <AddProviderDialog
         open={addOpen}
-        snapshots={deviceSnapshots ?? []}
+        snapshots={snapshots ?? []}
         addOptions={addOptions}
         handlers={addHandlers}
         onClose={() => setAddOpen(false)}

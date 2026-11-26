@@ -23,6 +23,9 @@ export async function cleanupAll(): Promise<void> {
   for (const close of cleanups.splice(0).reverse()) await close()
 }
 
+/** The home folder of each daemon a fixture made, for tests that read what a daemon keeps on disk. */
+export const homeOf = new Map<MousseMainService, string>()
+
 async function profile(): Promise<MousseMainService> {
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'bridge-router-')))
   const mms = await MousseMainService.create({
@@ -31,6 +34,7 @@ async function profile(): Promise<MousseMainService> {
     headless: true,
     requireOwnership: false
   })
+  homeOf.set(mms, home)
   cleanups.push(
     () => { try { rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 }) } catch { /* a database file the system still holds is left to the temp folder */ } },
     () => mms.stop()

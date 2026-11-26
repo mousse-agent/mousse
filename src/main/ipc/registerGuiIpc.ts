@@ -458,6 +458,30 @@ function pullRequestScopeParams(scope: PullRequestScope | undefined): Record<str
   }
 }
 
+/** The provider calls a window may send to another computer, and the field of the answer it returns (`.`: all of it). */
+export const REMOTE_PROVIDER_RESULTS: Readonly<Record<string, string>> = Object.freeze({
+  'providers.snapshots': 'snapshots',
+  'providers.catalog.addOptions': 'options',
+  'providers.registry.search': 'agents',
+  'providers.instances.add': 'snapshot',
+  'providers.instances.setSecret': 'snapshot',
+  'providers.instances.remove': '.',
+  'providers.instances.configure': 'snapshot',
+  'providers.instances.setEnabled': 'snapshot',
+  'providers.instances.install': 'operation',
+  'providers.instances.removeInstall': 'result',
+  'providers.instances.cancelInstall': 'cancelled',
+  'providers.instances.update': 'operation',
+  'providers.instances.signIn': 'operation',
+  'providers.instances.respondSignIn': 'ok',
+  'providers.instances.signOut': 'snapshot',
+  'providers.instances.allowKnownProblem': 'snapshot',
+  'providers.instances.recheck': 'snapshot',
+  'providers.instances.refreshModels': 'snapshot',
+  'providers.instances.refreshAllModels': 'results',
+  'providers.instances.setModelPrefs': 'snapshot'
+})
+
 export function registerGuiIpc(
   services: GuiIpcServices,
   getWindow: () => BrowserWindow | null
@@ -3980,8 +4004,8 @@ export function registerGuiIpc(
   })
   registerHandler('providers:instances:configure', async (_e, instanceId: string, patch: unknown) =>
     configureInstance({ instanceId, patch }))
-  registerHandler('providers:instances:setEnabled', async (_e, instanceId: string, scope: unknown, enabled: unknown) =>
-    setInstanceEnabled({ instanceId, scope, enabled }))
+  registerHandler('providers:instances:setEnabled', async (_e, instanceId: string, enabled: unknown) =>
+    setInstanceEnabled({ instanceId, enabled }))
   registerHandler('providers:instances:install', async (_e, instanceId: string) => installInstance({ instanceId }))
   registerHandler('providers:instances:cancelInstall', async (_e, operationId: string) =>
     cancelInstanceInstall({ operationId }))
@@ -4014,6 +4038,16 @@ export function registerGuiIpc(
   registerHandler('providers:instances:refreshAllModels', async () => refreshAllInstanceModels({}))
   registerHandler('providers:instances:setModelPrefs', async (_e, instanceId: string, patch: unknown) =>
     setInstanceModelPrefs({ instanceId, patch }))
+  // Settings → Providers of another computer: the call goes to that computer through this computer's service, which
+  // routes only the rows the routed table offers. A key in `params` is passed on and never kept or logged here.
+  registerHandler('providers:remote', async (_e, node: unknown, method: unknown, params: unknown) => {
+    const key = typeof method === 'string' ? REMOTE_PROVIDER_RESULTS[method] : undefined
+    if (!key) throw new Error('Not a provider call another computer takes.')
+    if (typeof node !== 'string' || !node) throw new Error('Choose a computer.')
+    const body = params && typeof params === 'object' && !Array.isArray(params) ? (params as Record<string, unknown>) : {}
+    const res = await guiMms.request<Record<string, unknown>>(method as never, { ...body, node } as never)
+    return key === '.' ? res : res[key]
+  })
   // A bot's "export your memory" ask and its chat's Attach pick here, with the system's pickers.
   registerHandler('dialog:pickFolder', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()

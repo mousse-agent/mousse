@@ -134,9 +134,8 @@ describe('model refresh schedule', () => {
   }
 
   const device = { kind: 'device' } as const
-  const project = { kind: 'project', projectId: 'p' } as const
 
-  it.each(['add', 'enable on device', 'enable in project', 'sign in', 'sign in again', 'sign in outside Mousse'] as const)(
+  it.each(['add', 'enable on device', 'sign in', 'sign in again', 'sign in outside Mousse'] as const)(
     'publishes newly listed models after %s without a manual refresh',
     async (action) => {
       const id = action === 'add' ? 'claude' : 'claude:a'
@@ -145,7 +144,6 @@ describe('model refresh schedule', () => {
       const { harness, binary, advance } = fixture(world, action === 'add' ? [] : [id], {
         enabled: { [id]: action !== 'enable on device' }
       })
-      if (action === 'enable in project') await harness.instances.setEnabled(id, project, false)
       if (needsSignIn || action === 'sign in again') {
         const [snapshot] = await harness.instances.snapshots(device)
         expect(snapshot?.auth.state).toBe(needsSignIn ? 'signed_out' : 'signed_in')
@@ -158,10 +156,7 @@ describe('model refresh schedule', () => {
           await harness.instances.add({ driver: 'claude', config: { binaryPath: binary } })
           break
         case 'enable on device':
-          await harness.instances.setEnabled(id, device, true)
-          break
-        case 'enable in project':
-          await harness.instances.setEnabled(id, project, null)
+          await harness.instances.setEnabled(id, true)
           break
         case 'sign in':
         case 'sign in again':

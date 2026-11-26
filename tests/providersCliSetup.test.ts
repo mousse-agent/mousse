@@ -11,7 +11,7 @@ import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayMod
 import { AgentEditor, ModelsEditorSection, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow, StatusLine, shortStatus } from '../src/renderer/components/providers/parts'
 import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
-import { commandLabel, modelsFreshness, parseEnvLines, switchStateOf } from '../src/renderer/components/providers/providerView'
+import { commandLabel, modelsFreshness, parseEnvLines } from '../src/renderer/components/providers/providerView'
 import { ProvidersSettings } from '../src/renderer/components/providers/ProvidersSettings'
 import { model, snapshot, type SnapshotOverrides } from './providerSnapshotFixture'
 import { addedInstanceId, defaultInstanceId } from '../src/mms/harness/instances'
@@ -164,53 +164,11 @@ describe('Runtime rows', () => {
   })
 })
 
-function listRow(entry: InstanceSnapshot, scope: Parameters<typeof switchStateOf>[1]) {
-  return renderToStaticMarkup(createElement(ProviderListRow, {
-    iconId: 'claude',
-    name: entry.displayName,
-    status: describeStatus(entry),
-    toggle: switchStateOf(entry, scope),
-    selected: false,
-    onSelect: () => undefined,
-    onToggle: noop,
-    onReset: scope.kind === 'project' ? noop : undefined
-  }))
-}
-
-describe('Scope: device ceiling and project overrides', () => {
-  const project = { kind: 'project', projectId: 'p1' } as const
-
-  it('shows no override marker on the device', () => {
-    const html = listRow(snapshot(), { kind: 'device' })
-    expect(labels(html)).not.toContain('Overridden for this project. Show where this value comes from')
-  })
-
-  it('marks a project override and offers the reset to the device setting', () => {
-    const entry = snapshot({ scope: project, enabled: { device: true, project: false, effective: false, setBy: 'project' } })
-    const html = listRow(entry, project)
-    expect(html).toContain('title="Overridden for this project"')
-    expect(html).toContain('title="Reset to the device setting"')
-    expect(html).toContain('>Disabled</span>')
-    expect(html).toContain('is-off')
-  })
-
-  it('inherits without a marker when the project sets nothing', () => {
-    const html = listRow(snapshot({ scope: project }), project)
-    expect(html).not.toContain('Overridden for this project')
-  })
-
-  it('locks the switch in a project when the device has it off', () => {
-    const entry = snapshot({ scope: project, enabled: { device: false, effective: false, setBy: 'device' } })
-    expect(switchStateOf(entry, project)).toEqual({ checked: false, locked: true, overridden: false, deviceEnabled: false })
-    expect(listRow(entry, project)).toContain('Turned off on this device. Turn it on for the device first.')
-  })
-})
-
 describe('List row and editor status', () => {
   const row = (entry: InstanceSnapshot, update?: { label: string; onClick: () => void }) =>
     renderToStaticMarkup(createElement(ProviderListRow, {
       iconId: 'claude', name: entry.displayName, version: 'v2.1.0', update, status: describeStatus(entry),
-      toggle: switchStateOf(entry, { kind: 'device' }), selected: false, onSelect: () => undefined, onToggle: noop
+      enabled: entry.enabled.device, selected: false, onSelect: () => undefined, onToggle: noop
     }))
 
   it('shows the short status in the list and the whole line, in its tone, in the editor', () => {

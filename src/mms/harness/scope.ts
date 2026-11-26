@@ -1,14 +1,14 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstanceEnabled } from '../../shared/harness/status'
-import type { HarnessScopesFile, ProjectProviderOverrides, ProviderScope, ProviderSelection } from '../../shared/harness/types'
+import type { HarnessScopesFile, ProjectProviderOverrides, ProviderSelection } from '../../shared/harness/types'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { upgradeSelection, type ModelPick } from '../../shared/modelSelection'
 
 /**
- * Project overrides of the profile's provider instances, in `<profileHome>/harness/scopes.json`.
- * The device setting (the instance's `enabled`) is a ceiling: a project can only turn an instance
- * off for itself, or back on when the device has it on, and pick its default selection.
+ * Project defaults of the profile's provider instances, in `<profileHome>/harness/scopes.json`.
+ * Whether an instance is on is decided by the computer alone (the instance's `enabled`); per-project
+ * switches written by an older Mousse stay in the file and are ignored.
  * `ProjectManager`'s `projects.json` is never touched.
  */
 export class HarnessScopeStore {
@@ -35,14 +35,6 @@ export class HarnessScopeStore {
 
   project(projectId: string): ProjectProviderOverrides | undefined {
     return this.read().projects[projectId]
-  }
-
-  /** `enabled: null` clears the project's override of the instance. */
-  setEnabled(projectId: string, instanceId: string, enabled: boolean | null): void {
-    this.update(projectId, (project) => {
-      if (enabled === null) delete project.instances[instanceId]
-      else project.instances[instanceId] = { enabled }
-    })
   }
 
   setDefaultSelection(projectId: string, selection: ProviderSelection | null): void {
@@ -82,16 +74,6 @@ export class HarnessScopeStore {
       }
     }
     if (changed) this.write(file)
-  }
-
-  /** Whether an instance applies in `scope`, and which layer decided it. */
-  enabled(instanceId: string, deviceEnabled: boolean, scope: ProviderScope): InstanceEnabled {
-    if (scope.kind !== 'project') return { device: deviceEnabled, effective: deviceEnabled, setBy: 'device' }
-    const project = this.project(scope.projectId)?.instances[instanceId]?.enabled
-    const base = { device: deviceEnabled, ...(project !== undefined ? { project } : {}) }
-    if (!deviceEnabled) return { ...base, effective: false, setBy: 'device' }
-    if (project !== undefined) return { ...base, effective: project, setBy: 'project' }
-    return { ...base, effective: true, setBy: 'device' }
   }
 
   private update(projectId: string, change: (project: ProjectProviderOverrides) => void): void {
@@ -134,4 +116,9 @@ export function decodeScopes(raw: unknown): HarnessScopesFile {
     file.projects[projectId] = project
   }
   return file
+}
+
+/** Whether an instance is on: the computer's own switch, in every scope. */
+export function instanceEnabled(deviceEnabled: boolean): InstanceEnabled {
+  return { device: deviceEnabled, effective: deviceEnabled, setBy: 'device' }
 }

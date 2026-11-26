@@ -108,7 +108,7 @@ describe('Disable provider', () => {
     expect(document.body.textContent).toContain("It won't be offered for new threads. You can turn it back on in Settings.")
     expect(setEnabled).not.toHaveBeenCalled()
     await act(async () => { (document.querySelector('[data-testid="usage-disable-confirm"]') as HTMLElement).click() })
-    expect(setEnabled).toHaveBeenCalledWith('pi:opencode-go', { kind: 'device' }, false)
+    expect(setEnabled).toHaveBeenCalledWith('pi:opencode-go', false)
   })
 
   it('Cancel turns nothing off', async () => {

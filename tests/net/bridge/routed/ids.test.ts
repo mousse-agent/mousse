@@ -218,8 +218,10 @@ describe('the walker', () => {
       'git.commit', 'git.discard', 'git.createBranch', 'git.renameBranch', 'git.deleteBranch', 'git.suggestCommitMessage',
       'actions.undoLatest', 'actions.redo', 'actions.revertCode', 'workspace.restore',
       // These read the installation's skills, accounts and models (they hold files in its home open), and carry no ids.
-      'skills.list', 'skills.read', 'providers.snapshots', 'github.status', 'composer.options'
+      'skills.list', 'skills.read', 'github.status', 'composer.options'
     ])
+    // Settings → Providers of the owner: they read and change its provider entries (installs, sign-ins) and carry no ids.
+    const providerRow = (method: string) => method.startsWith('providers.')
     const value = (key: string): unknown =>
       key === 'path' || key === 'oldPath' ? 'a.txt'
         : key === 'scope' ? 'worktree'
@@ -234,7 +236,7 @@ describe('the walker', () => {
     let called = 0
     const seen: string[] = []
     for (const [method, row] of Object.entries(ROUTED_METHODS)) {
-      if (skipped.has(method)) continue
+      if (skipped.has(method) || providerRow(method)) continue
       const params: Record<string, unknown> = {}
       if (row.target === 'thread') params[row.threadIds?.[0] ?? 'threadId'] = t.qualified(parent.id)
       else if (row.target === 'folder') params.threadId = t.qualified(parent.id)

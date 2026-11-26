@@ -5,6 +5,7 @@ import type { AddOptionMethod, HarnessDriverKind, InstanceConfigPatch, ProviderA
 import { Check } from '../../lib/icons'
 import { ProviderIcon } from '../../lib/providerIcons'
 import { llmProviderOf } from '../../lib/providerSnapshots'
+import { useProvidersComputer } from '../../lib/providersComputer'
 import { Modal } from '../ui/Modal'
 import { WizardSteps } from '../ui/WizardSteps'
 import { Segmented, SettingsGroup, SettingsRow } from '../settings/SettingsRow'
@@ -178,6 +179,7 @@ export function AddProviderDialog({
   /** The instance that was added or turned on; select it in the list. */
   onFinished: (instanceId: string) => void
 }) {
+  const { api } = useProvidersComputer()
   const [query, setQuery] = useState('')
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   /**
@@ -281,7 +283,7 @@ export function AddProviderDialog({
           ? added.instanceId
           : await handlers.add(choice.driver, { displayName: agent.name, source })
       registryAdded.current = { agentId: agent.id, version: agent.version, instanceId }
-      await window.mousse.providers.instances.install(instanceId)
+      await api.instances.install(instanceId)
       finish(instanceId)
     })
 
@@ -455,7 +457,7 @@ export function AddProviderDialog({
                     void run(selected.key, async () => {
                       const instanceId = await handlers.add(selected.driver, { displayName: label.trim() || DRIVER_INFO[selected.driver].label, setup: 'managed' })
                       // The download starts at once; it shows in the downloads indicator and the editor.
-                      await window.mousse.providers.instances.install(instanceId)
+                      await api.instances.install(instanceId)
                       finish(instanceId)
                     })
                   }

@@ -245,13 +245,9 @@ describe('the usage page of the gateway', () => {
     ])
   })
 
-  it('leaves out an agent that is not signed in, one that is turned off, and one a project turns off', async () => {
+  it('leaves out an agent that is not signed in, and one that is turned off', async () => {
     expect(await profile({ configured: false }).instances.usage(device)).toEqual([expect.objectContaining({ id: 'claude' })])
     expect((await profile({ entries: { codex: { driver: 'codex', enabled: false }, claude: { driver: 'claude', enabled: true } } }).instances.usage(device)).map((entry) => entry.id)).toEqual(['claude'])
-    const harness = profile()
-    await harness.instances.setEnabled('codex', { kind: 'project', projectId: 'p1' }, false)
-    expect((await harness.instances.usage({ kind: 'project', projectId: 'p1' })).map((entry) => entry.id)).toEqual(['claude'])
-    expect((await harness.instances.usage(device)).map((entry) => entry.id)).toEqual(['codex', 'claude'])
   })
 
   it('the usage page alone also lists a signed-out agent, marked and never asked', async () => {

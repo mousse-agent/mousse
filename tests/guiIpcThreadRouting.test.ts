@@ -54,6 +54,7 @@ const request = vi.fn(async (method: string, params?: unknown): Promise<unknown>
   if (method === 'files.root') return { root: '/remote/worktree' }
   if (method === 'workspace.getStatus') return { metadata: { branch: 'recorded', lifecycle: 'ready' }, execution: { projectPath: '/remote/worktree', branch: 'live-branch', lifecycle: 'ready' } }
   if (method === 'git.status') return { status: { isRepo: true, branch: 'project-main' } }
+  if (method === 'providers.instances.setSecret') return { snapshot: { instanceId: 'pi:openai' } }
   return {}
 })
 const snapshotThread = vi.fn(async (threadId: string) => {
@@ -700,5 +701,20 @@ describe('a checkout switch the service refuses', () => {
     await expect(invoke('threads:setWorktreeEnabled', 'thread-1', true, true)).resolves.toMatchObject({ ok: false, code: 'worktree_locked' })
     request.mockImplementationOnce(async () => { throw new MmsProtocolError('thread_not_found', 'Thread not found') })
     await expect(invoke('threads:setWorktreeEnabled', 'thread-1', true)).rejects.toMatchObject({ code: 'thread_not_found' })
+  })
+})
+
+describe('Settings → Providers of another computer', () => {
+  it("sends the page's call to the chosen computer and answers with the value this computer's own call answers", async () => {
+    const reply = await invoke('providers:remote', NODE, 'providers.instances.setSecret', { instanceId: 'pi:openai', value: 'sk-typed-here' })
+    expect(reply).toEqual({ instanceId: 'pi:openai' })
+    expect(calls).toEqual([{ method: 'providers.instances.setSecret', params: { instanceId: 'pi:openai', value: 'sk-typed-here', node: NODE } }])
+  })
+
+  it("sends no other call there: a provider's own settings file, moving an entry, usage, or a call without a computer", async () => {
+    for (const method of ['providers.instances.vendorSettings', 'providers.instances.setVendorSetting', 'providers.instances.move', 'providers.getUsage', 'threads.list'])
+      await expect(invoke('providers:remote', NODE, method, { instanceId: 'claude' })).rejects.toThrow()
+    await expect(invoke('providers:remote', '', 'providers.instances.setEnabled', { instanceId: 'claude', enabled: true })).rejects.toThrow()
+    expect(calls).toEqual([])
   })
 })

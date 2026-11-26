@@ -162,7 +162,7 @@ describe('TurnBridge (PR 2 §2)', () => {
     const result = s.turn('codex', { runId: 'run-stop' })
     const failed = result.then(() => undefined, (error: { code?: string }) => error.code)
     await vi.waitFor(() => expect(s.codex.hosts).toHaveLength(1))
-    await s.harness.instances.setEnabled('codex', { kind: 'device' }, false)
+    await s.harness.instances.setEnabled('codex', false)
     expect(await failed).toBe('instance_disabled')
     expect(s.mcp.ends.filter((end) => end.runId === 'run-stop')).toEqual([expect.objectContaining({ settlement: { status: 'aborted' } })])
   })

@@ -656,6 +656,8 @@ export type ProtocolEventType =
   | 'providers.install-event'
   | 'providers.snapshots'
   | 'providers.operation'
+  /** A provider operation this computer started on another, or a change to that computer's providers. */
+  | 'providers.remote'
   | 'providers.usage'
   | 'mcp.changed'
   | 'turn.interrupted'

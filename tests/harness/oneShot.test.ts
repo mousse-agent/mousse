@@ -194,11 +194,9 @@ describe('gateway.oneShot refusals', () => {
     expect(s.pi.requests).toHaveLength(0)
   })
 
-  it('refuses an instance turned off on the device or for the project', async () => {
+  it('refuses an instance turned off on the device', async () => {
     const s = setup()
-    await s.harness.instances.setEnabled('pi:openai', { kind: 'project', projectId: 'p1' }, false)
-    await expect(s.harness.oneShot(s.request({ scope: { kind: 'project', projectId: 'p1' } }))).rejects.toMatchObject({ code: 'instance_disabled' })
-    await s.harness.instances.setEnabled('pi:openai', { kind: 'device' }, false)
+    await s.harness.instances.setEnabled('pi:openai', false)
     await expect(s.harness.oneShot(s.request())).rejects.toMatchObject({ code: 'instance_disabled' })
     expect(s.pi.requests).toHaveLength(0)
   })

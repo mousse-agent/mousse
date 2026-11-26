@@ -1,7 +1,7 @@
 import { useCallback, useEffect } from 'react'
 import { create } from 'zustand'
 import { describeStatus, type InstanceSnapshot, type ProviderSnapshotsEvent, type StatusDescription } from '../../shared/harness/status'
-import type { HarnessCaps, HarnessDriverKind, ProviderOperationEvent, ProviderOperationStarted, ProviderScope, SignInPrompt } from '../../shared/harness/types'
+import type { HarnessCaps, HarnessDriverKind, ProviderOperationEvent, ProviderOperationStarted, ProviderScope, RemoteProviderEvent, SignInPrompt } from '../../shared/harness/types'
 import type { PermissionLimits } from '../../shared/permissionMode'
 import { legacyProviderForInstance } from '../../shared/providerInstances'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
@@ -9,6 +9,7 @@ import { useAppStore } from '../stores/appStore'
 import { ipcErrorLine } from './errorText'
 import { syncInstanceIcons } from './providerIcons'
 import { isApiInstance } from '../components/providers/providerView'
+import { providersApi } from './providersComputer'
 
 /**
  * Provider instance snapshots as the daemon reports them (`providers.snapshots`), kept per scope
@@ -28,6 +29,16 @@ export function scopeKey(scope: ProviderScope): string {
   return scope.kind === 'device' ? 'device' : `project:${scope.projectId}`
 }
 
+/** Where the snapshots of another computer (Settings → Providers of it) are kept. */
+export function computerKey(node: string): string {
+  return `computer:${node}`
+}
+
+/** The key of `scope` on this computer, or of another computer's own list. */
+function keyOf(scope: ProviderScope, node: string | undefined): string {
+  return node ? computerKey(node) : scopeKey(scope)
+}
+
 interface ScopeState {
   snapshots?: InstanceSnapshot[]
   error?: string
@@ -42,9 +53,11 @@ interface ProviderSnapshotsState {
   operations: Record<string, ProviderOperationEvent>
   /** The latest sign-in step each operation asked for (progress events do not replace it). */
   prompts: Record<string, SignInPrompt>
+  /** The computer each operation started on another computer runs on, by operation id; absent for this computer's. */
+  operationNodes: Record<string, string>
 }
 
-export const useProviderSnapshotsStore = create<ProviderSnapshotsState>(() => ({ profileId: null, scopes: {}, operations: {}, prompts: {} }))
+export const useProviderSnapshotsStore = create<ProviderSnapshotsState>(() => ({ profileId: null, scopes: {}, operations: {}, prompts: {}, operationNodes: {} }))
 
 // Every logo of an ACP entry (pickers, thread rows, settings) follows the registry agent and the
 // icon its snapshot carries.
@@ -55,7 +68,8 @@ useProviderSnapshotsStore.subscribe((state, previous) => {
   syncInstanceIcons(byScope)
 })
 
-const scopesByKey = new Map<string, ProviderScope>()
+/** What each key reads: a scope of this computer, or another computer's own list (`node`). */
+const scopesByKey = new Map<string, { scope: ProviderScope; node?: string }>()
 /** The newest load of each scope: an older reply never replaces a newer one. */
 const latestLoads = new Map<string, number>()
 let loadCount = 0
@@ -67,13 +81,16 @@ function setScope(key: string, patch: Partial<ScopeState>): void {
   }))
 }
 
-/** Fetches the snapshots of `scope`; a failure keeps the last snapshots and records the error. */
-export async function loadProviderSnapshots(scope: ProviderScope): Promise<void> {
-  const key = scopeKey(scope)
+/**
+ * Fetches the snapshots of `scope`, or with `node` that computer's own list; a failure keeps the last snapshots
+ * and records the error.
+ */
+export async function loadProviderSnapshots(scope: ProviderScope, node?: string): Promise<void> {
+  const key = keyOf(scope, node)
   const load = ++loadCount
   const binding = currentProfileBinding()
   latestLoads.set(key, load)
-  scopesByKey.set(key, scope)
+  scopesByKey.set(key, node ? { scope: DEVICE_SCOPE, node } : { scope })
   setScope(key, { loading: true })
   // A reply from before a profile switch, or one a newer load replaced, is dropped. The newest
   // load still ends the loading state of the profile it was made in.
@@ -83,7 +100,7 @@ export async function loadProviderSnapshots(scope: ProviderScope): Promise<void>
     else if (useProviderSnapshotsStore.getState().profileId === binding.profileId) setScope(key, { loading: false })
   }
   try {
-    const snapshots = await window.mousse.providers.snapshots(scope)
+    const snapshots = await providersApi(node).snapshots(scope)
     settle({ snapshots, error: undefined })
   } catch (error) {
     settle({ error: ipcErrorLine(error) || String(error) })
@@ -93,12 +110,36 @@ export async function loadProviderSnapshots(scope: ProviderScope): Promise<void>
 /** A pushed change: take it for its scope, and refetch the other scopes on screen. */
 export function applySnapshotsEvent(event: ProviderSnapshotsEvent): void {
   const key = scopeKey(event.scope)
-  scopesByKey.set(key, event.scope)
+  scopesByKey.set(key, { scope: event.scope })
   setScope(key, { snapshots: event.snapshots, error: undefined })
   for (const [other, state] of Object.entries(useProviderSnapshotsStore.getState().scopes)) {
-    const scope = scopesByKey.get(other)
-    if (other !== key && scope && state.snapshots && !state.loading) void loadProviderSnapshots(scope)
+    const read = scopesByKey.get(other)
+    // Another computer's list is not changed by this computer's.
+    if (other !== key && read && !read.node && state.snapshots && !state.loading) void loadProviderSnapshots(read.scope)
   }
+}
+
+/** Reads of another computer's list asked for by its notices, gathered per computer. */
+const remoteReloads = new Map<string, ReturnType<typeof setTimeout>>()
+
+/**
+ * An event of Settings → Providers of another computer: an operation this computer started there, or a notice that
+ * its providers changed, which reads its list again when it is on screen.
+ */
+export function applyRemoteProviderEvent(event: RemoteProviderEvent): void {
+  if (event.type === 'providers.operation') {
+    if (event.data?.event) applyOperationEvent(event.data.event, event.node)
+    return
+  }
+  const key = computerKey(event.node)
+  if (!useProviderSnapshotsStore.getState().scopes[key]?.snapshots || remoteReloads.has(event.node)) return
+  remoteReloads.set(
+    event.node,
+    setTimeout(() => {
+      remoteReloads.delete(event.node)
+      void loadProviderSnapshots(DEVICE_SCOPE, event.node)
+    }, LISTING_RELOAD_DELAY_MS)
+  )
 }
 
 /**
@@ -142,14 +183,14 @@ export function beginProfileSwitch(): (switched: boolean) => void {
 }
 
 /**
- * The snapshot a command returned, merged into its scope (it reaches other scopes by event). With
- * the binding the command was sent in, a reply from before a profile switch is dropped.
+ * The snapshot a command returned, merged into its scope (it reaches other scopes by event), or with `node` into
+ * that computer's list. With the binding the command was sent in, a reply from before a profile switch is dropped.
  */
-export function applySnapshot(snapshot: InstanceSnapshot, binding?: ProfileBinding): void {
+export function applySnapshot(snapshot: InstanceSnapshot, binding?: ProfileBinding, node?: string): void {
   if (binding && !isCurrentProfileBinding(binding)) return
   const state = useProviderSnapshotsStore.getState()
   if (state.profileId !== useAppStore.getState().profileId) return
-  const key = scopeKey(snapshot.scope)
+  const key = keyOf(snapshot.scope, node)
   const current = state.scopes[key]?.snapshots
   if (!current) return
   const index = current.findIndex((entry) => entry.instanceId === snapshot.instanceId)
@@ -157,21 +198,28 @@ export function applySnapshot(snapshot: InstanceSnapshot, binding?: ProfileBindi
   setScope(key, { snapshots: next })
 }
 
-export function removeSnapshot(instanceId: string): void {
+/** Drops a removed instance from this computer's scopes, or with `node` from that computer's list. */
+export function removeSnapshot(instanceId: string, node?: string): void {
+  const remote = node ? computerKey(node) : undefined
   useProviderSnapshotsStore.setState((state) => ({
     scopes: Object.fromEntries(
       Object.entries(state.scopes).map(([key, value]) => [
         key,
-        value.snapshots ? { ...value, snapshots: value.snapshots.filter((entry) => entry.instanceId !== instanceId) } : value
+        value.snapshots && (remote ? key === remote : !key.startsWith('computer:'))
+          ? { ...value, snapshots: value.snapshots.filter((entry) => entry.instanceId !== instanceId) }
+          : value
       ])
     )
   }))
 }
 
-export function applyOperationEvent(event: ProviderOperationEvent): void {
+/** An event of an operation of this computer, or with `node` of one this computer started on that computer. */
+export function applyOperationEvent(event: ProviderOperationEvent, node?: string): void {
   useProviderSnapshotsStore.setState((state) => ({
     operations: { ...state.operations, [event.operationId]: event },
-    prompts: event.phase === 'prompt' ? { ...state.prompts, [event.operationId]: event.prompt } : state.prompts
+    prompts: event.phase === 'prompt' ? { ...state.prompts, [event.operationId]: event.prompt } : state.prompts,
+    operationNodes:
+      node && state.operationNodes[event.operationId] !== node ? { ...state.operationNodes, [event.operationId]: node } : state.operationNodes
   }))
 }
 
@@ -179,10 +227,17 @@ export function clearOperation(operationId: string): void {
   useProviderSnapshotsStore.setState((state) => {
     const operations = { ...state.operations }
     const prompts = { ...state.prompts }
+    const operationNodes = { ...state.operationNodes }
     delete operations[operationId]
     delete prompts[operationId]
-    return { operations, prompts }
+    delete operationNodes[operationId]
+    return { operations, prompts, operationNodes }
   })
+}
+
+/** Whether an operation runs on `node` (another computer), or on this computer without one. */
+export function runsOn(state: Pick<ProviderSnapshotsState, 'operationNodes'>, operationId: string, node: string | undefined): boolean {
+  return state.operationNodes[operationId] === node
 }
 
 type FinishedOperation = Extract<ProviderOperationEvent, { phase: 'completed' | 'failed' | 'cancelled' }>
@@ -277,7 +332,8 @@ function ensureListening(): void {
   if (listening || typeof window === 'undefined' || !window.mousse?.providers?.onSnapshots) return
   listening = true
   window.mousse.providers.onSnapshots(applySnapshotsEvent)
-  window.mousse.providers.onOperation(applyOperationEvent)
+  window.mousse.providers.onOperation((event) => applyOperationEvent(event))
+  window.mousse.providers.onRemote?.(applyRemoteProviderEvent)
   window.mousse.providers.onServiceRestarted?.(() => {
     failRunningOperations('The connection to the Mousse service was lost. Start the sign-in again.')
     // Changes pushed while the window was not connected never arrived: read every scope on screen again.
@@ -289,8 +345,8 @@ function ensureListening(): void {
 function reloadLoadedScopes(): Promise<void> {
   const loads: Array<Promise<void>> = []
   for (const [key, state] of Object.entries(useProviderSnapshotsStore.getState().scopes)) {
-    const scope = scopesByKey.get(key)
-    if (scope && state.snapshots && !state.loading) loads.push(loadProviderSnapshots(scope))
+    const read = scopesByKey.get(key)
+    if (read && state.snapshots && !state.loading) loads.push(loadProviderSnapshots(read.scope, read.node))
   }
   return Promise.all(loads).then(() => undefined)
 }
@@ -349,12 +405,19 @@ interface PendingSignIn {
 
 const pendingSignIns = new Map<string, PendingSignIn>()
 
-function snapshotsOf(instanceId: string): InstanceSnapshot[] {
-  return Object.values(useProviderSnapshotsStore.getState().scopes).flatMap((state) => (state.snapshots ?? []).filter((entry) => entry.instanceId === instanceId))
+/** The instance's snapshots on this computer (every scope), or with `node` in that computer's list. */
+function snapshotsOf(instanceId: string, node?: string): InstanceSnapshot[] {
+  const remote = node ? computerKey(node) : undefined
+  return Object.entries(useProviderSnapshotsStore.getState().scopes)
+    .filter(([key]) => (remote ? key === remote : !key.startsWith('computer:')))
+    .flatMap(([, state]) => (state.snapshots ?? []).filter((entry) => entry.instanceId === instanceId))
 }
 
-function signInOperations(instanceId: string): ProviderOperationEvent[] {
-  return Object.values(useProviderSnapshotsStore.getState().operations).filter((event) => event.instanceId === instanceId && event.kind === 'sign_in')
+function signInOperations(instanceId: string, node?: string): ProviderOperationEvent[] {
+  const state = useProviderSnapshotsStore.getState()
+  return Object.values(state.operations).filter(
+    (event) => event.instanceId === instanceId && event.kind === 'sign_in' && runsOn(state, event.operationId, node)
+  )
 }
 
 /**
@@ -365,31 +428,32 @@ function signInOperations(instanceId: string): ProviderOperationEvent[] {
  * instance is signed in (as someone new, or after a sign-in Mousse ran completed), when that
  * sign-in fails or is cancelled, or when the returned function (or `stopPendingSignIns`) is called.
  */
-export function watchPendingSignIn(instanceId: string): () => void {
+export function watchPendingSignIn(instanceId: string, node?: string): () => void {
   // Starting again (Try again) replaces the earlier watch, and its two-minute window.
-  const previous = pendingSignIns.get(instanceId)
+  const watchKey = node ? `${computerKey(node)}/${instanceId}` : instanceId
+  const previous = pendingSignIns.get(watchKey)
   if (previous) {
     previous.stopped = true
     if (previous.timer) clearTimeout(previous.timer)
   }
   const pending: PendingSignIn = { stopped: false }
-  pendingSignIns.set(instanceId, pending)
+  pendingSignIns.set(watchKey, pending)
   const binding = currentProfileBinding()
   const startedAt = Date.now()
-  const before = new Set(snapshotsOf(instanceId).map(signInSignature))
-  const wasSignedIn = snapshotsOf(instanceId).some((entry) => entry.auth.state === 'signed_in')
+  const before = new Set(snapshotsOf(instanceId, node).map(signInSignature))
+  const wasSignedIn = snapshotsOf(instanceId, node).some((entry) => entry.auth.state === 'signed_in')
   // Operations of this instance already finished are not this sign-in's outcome.
-  const earlier = new Set(signInOperations(instanceId).map((event) => `${event.operationId}:${event.phase}`))
+  const earlier = new Set(signInOperations(instanceId, node).map((event) => `${event.operationId}:${event.phase}`))
   const stop = () => {
     pending.stopped = true
     if (pending.timer) clearTimeout(pending.timer)
-    if (pendingSignIns.get(instanceId) === pending) pendingSignIns.delete(instanceId)
+    if (pendingSignIns.get(watchKey) === pending) pendingSignIns.delete(watchKey)
   }
-  const ended = () => signInOperations(instanceId).filter((event) => finished(event) && !earlier.has(`${event.operationId}:${event.phase}`))
+  const ended = () => signInOperations(instanceId, node).filter((event) => finished(event) && !earlier.has(`${event.operationId}:${event.phase}`))
   const abandoned = () => ended().some((event) => event.phase !== 'completed')
   // Asked only after a reading, so a completed sign-in still gets one: its account may be new.
   const done = (): boolean => {
-    const signedIn = snapshotsOf(instanceId).filter((entry) => entry.auth.state === 'signed_in')
+    const signedIn = snapshotsOf(instanceId, node).filter((entry) => entry.auth.state === 'signed_in')
     if (!signedIn.length) return false
     return !wasSignedIn || ended().length > 0 || signedIn.some((entry) => !before.has(signInSignature(entry)))
   }
@@ -399,10 +463,12 @@ export function watchPendingSignIn(instanceId: string): () => void {
     if (pending.stopped) return
     if (!isCurrentProfileBinding(binding) || Date.now() - startedAt >= PENDING_SIGN_IN_WINDOW_MS || abandoned()) return stop()
     polls += 1
-    const running = signInOperations(instanceId).some((event) => event.phase === 'progress' || event.phase === 'prompt')
+    const running = signInOperations(instanceId, node).some((event) => event.phase === 'progress' || event.phase === 'prompt')
     try {
       // While Mousse runs the sign-in it reports the end itself; a full check is for the rest.
-      if (!running && polls % PENDING_SIGN_IN_RECHECK_EVERY === 0) applySnapshot(await window.mousse.providers.instances.recheck(instanceId), binding)
+      if (!running && polls % PENDING_SIGN_IN_RECHECK_EVERY === 0)
+        applySnapshot(await providersApi(node).instances.recheck(instanceId), binding, node)
+      else if (node) await loadProviderSnapshots(DEVICE_SCOPE, node)
       else await reloadLoadedScopes()
     } catch {
       // The next poll tries again; the manual refresh stays at hand.
@@ -430,7 +496,7 @@ function ensureProfile(profileId: string): void {
   failRunningOperations('The profile changed before the sign-in finished.')
   scopesByKey.clear()
   latestLoads.clear()
-  useProviderSnapshotsStore.setState({ profileId, scopes: {}, operations: {}, prompts: {} })
+  useProviderSnapshotsStore.setState({ profileId, scopes: {}, operations: {}, prompts: {}, operationNodes: {} })
 }
 
 export interface ProviderSnapshotsView {
@@ -441,13 +507,16 @@ export interface ProviderSnapshotsView {
   reload: () => Promise<void>
 }
 
-/** The snapshots of `scope`, loaded on first use and kept current by pushed changes. */
-export function useProviderSnapshots(scope: ProviderScope): ProviderSnapshotsView {
+/**
+ * The snapshots of `scope`, or with `node` that computer's own list, loaded on first use and kept current by pushed
+ * changes (another computer's by its notices).
+ */
+export function useProviderSnapshots(scope: ProviderScope, node?: string): ProviderSnapshotsView {
   const profileId = useAppStore((state) => state.profileId)
-  const key = scopeKey(scope)
+  const key = keyOf(scope, node)
   const state = useProviderSnapshotsStore((store) => (store.profileId === profileId ? store.scopes[key] : undefined))
   const projectId = scope.kind === 'project' ? scope.projectId : undefined
-  const reload = useCallback(() => loadProviderSnapshots(projectScope(projectId)), [projectId])
+  const reload = useCallback(() => loadProviderSnapshots(node ? DEVICE_SCOPE : projectScope(projectId), node), [projectId, node])
   useEffect(() => {
     ensureProfile(profileId)
     ensureListening()
@@ -485,10 +554,13 @@ export function watchDeviceSnapshots(changed: (snapshots: InstanceSnapshot[] | u
   }
 }
 
-/** An operation of the instance that is still running (progress or waiting on a prompt). */
-export function useRunningOperation(instanceId: string): ProviderOperationEvent | undefined {
+/** An operation of the instance that is still running (progress or waiting on a prompt), here or with `node` there. */
+export function useRunningOperation(instanceId: string, node?: string): ProviderOperationEvent | undefined {
   return useProviderSnapshotsStore((store) =>
-    Object.values(store.operations).find((event) => event.instanceId === instanceId && (event.phase === 'progress' || event.phase === 'prompt'))
+    Object.values(store.operations).find(
+      (event) =>
+        event.instanceId === instanceId && (event.phase === 'progress' || event.phase === 'prompt') && runsOn(store, event.operationId, node)
+    )
   )
 }
 
