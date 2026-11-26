@@ -25,7 +25,22 @@ const skippedFolders = new Set(['node_modules'])
 type FileDate = { name: string; mtime: number }
 type Folder = { path: string; relative: string; kind: string }
 
-/** No contents are opened. Managed folders are counted only after the bot's files are scanned. */
+/** A 0-byte file of a masked name (`sandboxStubs`): the sandbox's, not the bot's. Only such names are looked at. */
+function isSandboxStub(path: string, name: string): boolean {
+  if (!sandboxStubs.has(name)) return false
+  try {
+    const stat = lstatSync(path)
+    return stat.isFile() && stat.size === 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * No contents are opened. Managed folders are counted only after the bot's files are scanned. Folders are read
+ * breadth first, so a deep tree (one full of sandbox stubs, say) spends the entry limit only after every shallower
+ * folder was read, and never hides a saved file beside it.
+ */
 function listFiles(folder: string) {
   const files: FileDate[] = []
   const managed: Folder[] = []
@@ -33,8 +48,9 @@ function listFiles(folder: string) {
   const scan = (pending: Folder[], limit: number): boolean => {
     let visited = 0
     let incomplete = false
-    while (pending.length && visited < limit) {
-      const current = pending.pop()!
+    // A queue: folders found are read after every folder already waiting.
+    for (let head = 0; head < pending.length && visited < limit; head++) {
+      const current = pending[head]!
       let directory: ReturnType<typeof opendirSync>
       try { directory = opendirSync(current.path) } catch {
         if (current.relative) incomplete = true
@@ -58,6 +74,7 @@ function listFiles(folder: string) {
             if (kind && !current.kind) managed.push(next)
             else pending.push(next)
           } else if (entry.isFile()) {
+            if (current.kind && isSandboxStub(path, entry.name)) continue
             if (current.kind === 'images') pictures++
             else if (current.kind === 'attachments') attached++
             else if (current.kind === 'temporary') temporaryFiles++

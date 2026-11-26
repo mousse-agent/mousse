@@ -22,8 +22,15 @@ function fixture() {
     fs.writeFileSync(path, 'NEVER LOAD THIS CONTENT')
     fs.utimesSync(path, new Date(`2026-11-${String(day).padStart(2, '0')}T12:00:00Z`), new Date(`2026-11-${String(day).padStart(2, '0')}T12:00:00Z`))
   }
-  return { ...fx, packs, file, folder }
+  /** An empty file, as Claude Code's Linux sandbox leaves over a masked name. */
+  const empty = (name: string) => {
+    const path = join(folder, name)
+    fs.mkdirSync(dirname(path), { recursive: true })
+    fs.writeFileSync(path, '')
+  }
+  return { ...fx, packs, file, empty, folder }
 }
+const listed = (pack: string) => lines(pack).split('\n').filter((line) => line.startsWith('- ')).map((line) => JSON.parse(line.slice(2, line.lastIndexOf(' · '))) as string)
 it('lists newest relative names and dates, counts the rest and managed files in both packs within budget', async () => {
   const fx = fixture()
   for (let n = 1; n <= 26; n++) fx.file(`plans/todo-${String(n).padStart(2, '0')}.md`, n)
@@ -179,4 +186,33 @@ it('leaves sandbox stubs and node_modules out so they never crowd out saved file
     expect(entries.map((line) => JSON.parse(line.slice(2, line.lastIndexOf(' · '))))).toEqual(['notes.md', 'app/package.json', 'plans/trip.md'])
     expect(lines(pack)).not.toMatch(/ more/)
   }
+})
+it('reads folders breadth first: deep trees of sandbox stubs past the entry limit never hide a saved file in a folder beside them', async () => {
+  const fx = fixture()
+  // Two trees of 52 levels, each level 9 empty stubs and the next folder: 520 entries each, past the limit of 512.
+  const stubs = ['package.json', 'package-lock.json', 'yarn.lock', 'Cargo.toml', 'go.mod', 'Gemfile', 'Makefile', 'Dockerfile', 'compose.yaml']
+  for (const tree of ['build', 'cache']) {
+    for (let depth = 1, folder = tree; depth <= 52; depth++, folder += '/sub') for (const stub of stubs) fx.empty(`${folder}/${stub}`)
+  }
+  fx.file('reports/q3.md', 2)
+  for (const pack of [await fx.packs.chatPreamble({ botId: 'ada', activationId: 'c' }), await fx.packs.runPreamble({ botId: 'ada', activationId: 'r', input: 'Go' })]) {
+    expect(listed(pack)).toEqual(['reports/q3.md'])
+    // The cap still holds: the trees were not read to their ends.
+    expect(lines(pack)).toContain('and many more')
+  }
+})
+it('leaves sandbox stubs out of the managed counts too, and still counts an empty picture or a real package.json', async () => {
+  const fx = fixture()
+  fx.file('images/a.png')
+  fx.empty('images/b.png')
+  fx.empty('images/package.json')
+  fx.file('attachments/invoice.pdf')
+  fx.file('attachments/package.json')
+  fx.empty('attachments/yarn.lock')
+  fx.empty('tmp/Makefile')
+  fx.empty('tmp/pyproject.toml')
+  fx.file('notes.md')
+  const index = lines(await fx.packs.chatPreamble({ botId: 'ada', activationId: 'c' }))
+  expect(index).toContain('plus 2 pictures and 2 attached files')
+  expect(index).not.toContain('temporary')
 })
