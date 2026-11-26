@@ -30,6 +30,8 @@ export interface FakeOpencode {
   emit(type: string, data: Record<string, unknown>): void
   /** What happens when a prompt arrives (default: the reply `ok`, then success). */
   onPrompt: (session: FakeSession, body: Record<string, unknown>) => void
+  /** Whether a reply with this decision fails (HTTP 500), as from a server that cannot take it. */
+  replyFails: (decision: unknown) => boolean
   /** What happens when a permission request is answered. */
   onReply: (session: FakeSession, requestId: string, body: Record<string, unknown>) => void
   models: Array<Record<string, unknown>>
@@ -70,6 +72,7 @@ export async function fakeOpencodeServer(): Promise<FakeOpencode> {
     },
     onPrompt: (session) => fake.reply(session.id, 'ok'),
     onReply: () => {},
+    replyFails: () => false,
     models: [
       { providerID: 'anthropic', id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', enabled: true, variants: [{ id: 'default' }, { id: 'high' }], limit: { context: 200_000, output: 8_000 }, cost: [{ input: 1, output: 5 }] },
       { providerID: 'opencode', id: 'big-pickle', name: 'Big Pickle', enabled: true, variants: [], limit: { context: 100_000, output: 8_000 }, cost: [{ input: 0, output: 0 }] }
@@ -153,6 +156,7 @@ export async function fakeOpencodeServer(): Promise<FakeOpencode> {
       }
       const reply = /^permission\/([^/]+)\/reply$/.exec(rest)
       if (req.method === 'POST' && reply) {
+        if (fake.replyFails(body?.decision)) return json(500, { _tag: 'UnknownError', message: 'the reply was not taken' })
         json(204)
         setImmediate(() => fake.onReply(session, decodeURIComponent(reply[1]!), body ?? {}))
         return

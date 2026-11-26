@@ -8,10 +8,11 @@
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ClassifiedOption, PermissionPrompter } from '../../src/mms/harness/acp/permissions'
 import type { DriverRuntime } from '../../src/mms/harness/driver'
 import { opencodeDriver } from '../../src/mms/harness/drivers/opencode'
+import { OpencodeServer } from '../../src/mms/harness/opencode/server'
 import { instanceEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { supportedPermissionModes, type PermissionMode } from '../../src/shared/permissionMode'
@@ -161,6 +162,32 @@ describe('OpenCode on its server API', () => {
     expect(replies.map((reply) => reply.body.decision)).toEqual(['reject'])
   })
 
+  it('an allow OpenCode does not take is sent again as a reject, and the turn goes on', async () => {
+    const { fake, runtime, project } = await setup()
+    const replies = asksAbout(fake, 'edit')
+    fake.replyFails = (decision) => decision === 'once'
+    const { result } = await turn(runtime, project, { mode: 'ask', prompter: prompter('once').value })
+    expect(result.text).toBe('done')
+    expect(fake.calls.filter((call) => call.path.endsWith('/reply')).map((call) => call.body?.decision)).toEqual(['once', 'reject'])
+    expect(replies.map((reply) => reply.body.decision)).toEqual(['reject'])
+  })
+
+  it.each(['once', 'reject'] as const)('when OpenCode cannot be told the answer (%s) at all, its run is interrupted and the turn fails instead of waiting', async (pick) => {
+    const { fake, runtime, project } = await setup()
+    asksAbout(fake, 'edit')
+    fake.replyFails = () => true
+    // The fake ends the run only when an answer arrives: only the failed answer can end this turn.
+    await expect(turn(runtime, project, { mode: 'ask', prompter: prompter(pick).value })).rejects.toThrow(/could not answer its permission request/)
+    await vi.waitFor(() => expect(fake.calls.some((call) => call.path.endsWith('/interrupt'))).toBe(true))
+  })
+
+  it('an error while choosing, with a reject OpenCode cannot take either, fails the turn instead of waiting', async () => {
+    const { fake, runtime, project } = await setup()
+    asksAbout(fake, 'edit')
+    fake.replyFails = () => true
+    await expect(turn(runtime, project, { mode: 'ask', prompter: { choose: async () => { throw new Error('the question service failed') } } })).rejects.toThrow(/could not answer its permission request/)
+  })
+
   it.each([
     ['ask', 'ask', true],
     ['accept_edits', 'ask', true],
@@ -259,6 +286,38 @@ describe('OpenCode on its server API', () => {
   })
 })
 
+describe('the server', () => {
+  it('a turn stopped before the server is ready does not leave it running: it closes once idle', async () => {
+    const fake = await fakeOpencodeServer()
+    let ready: () => void = () => {}
+    let closed = false
+    const server = new OpencodeServer({
+      label: 'OpenCode',
+      env: () => instanceEnv({ instanceId: 'opencode:opencode', driver: 'opencode', configRevision: 0, searchPath: [], base: { PATH: '' } }),
+      launch: () => ({ command: 'opencode', args: [], env: {}, cwd: '.' }),
+      // Ready only when the test says so.
+      start: async (launch, signal) => {
+        await new Promise<void>((resolve) => { ready = resolve })
+        const started = await fake.start(launch, signal)
+        return { ...started, close: () => { closed = true; started.close() } }
+      },
+      idleMs: 50,
+      onEvent: () => {}
+    })
+    cleanups.push(async () => { server.stop(); await fake.close() })
+    const release = server.hold()
+    const stop = new AbortController()
+    const waiting = server.client(stop.signal)
+    stop.abort(new Error('stopped'))
+    await expect(waiting).rejects.toThrow('stopped')
+    release()
+    ready()
+    await vi.waitFor(() => expect(server.running()).toBe(true))
+    await vi.waitFor(() => expect(closed).toBe(true), { timeout: 2_000 })
+    expect(server.running()).toBe(false)
+  })
+})
+
 describe('OpenCode one-shots', () => {
   const spec = (model: string) => ({ model, system: 'You name chats.', prompt: 'fix the login bug', onActivity: () => {} })
 
@@ -281,6 +340,27 @@ describe('OpenCode one-shots', () => {
     await runtime.oneShot!(spec('opencode/big-pickle'), new AbortController().signal)
     const [session] = fake.sessions.values()
     expect(session!.permissions).toEqual([{ action: '*', resource: '*', effect: 'deny' }, { action: 'read', resource: '*', effect: 'allow' }])
+  })
+
+  it('a read in a free model one-shot runs, in its empty scratch folder; any other tool ends the request', async () => {
+    const { fake, runtime } = await setup()
+    fake.onPrompt = (session) => {
+      fake.emit('session.tool.input.started', { sessionID: session.id, assistantMessageID: 'm', id: 'r1', name: 'read' })
+      fake.emit('session.tool.called', { sessionID: session.id, assistantMessageID: 'm', id: 'r1', name: 'read', input: { path: 'x' } })
+      fake.reply(session.id, 'Title')
+    }
+    expect(await runtime.oneShot!(spec('opencode/big-pickle'), new AbortController().signal)).toEqual({ text: 'Title' })
+    const first = [...fake.sessions.values()][0]!
+    expect((first.body.location as { directory: string }).directory).toMatch(/one-shot/)
+    fake.onPrompt = (session) => fake.emit('session.tool.input.started', { sessionID: session.id, assistantMessageID: 'm', id: 'w1', name: 'write' })
+    await expect(runtime.oneShot!(spec('opencode/big-pickle'), new AbortController().signal)).rejects.toMatchObject({ code: 'policy_unenforceable' })
+  })
+
+  it('an ask in a one-shot that OpenCode cannot be told to refuse ends the request', async () => {
+    const { fake, runtime } = await setup()
+    fake.replyFails = () => true
+    fake.onPrompt = (session) => fake.emit('permission.asked', { id: 'per_9', sessionID: session.id, action: 'read', resources: ['x'] })
+    await expect(runtime.oneShot!(spec('opencode/big-pickle'), new AbortController().signal)).rejects.toMatchObject({ code: 'policy_unenforceable' })
   })
 
   it.each([

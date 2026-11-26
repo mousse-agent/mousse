@@ -431,10 +431,32 @@ export class OpencodeSessions {
       const action = str(request.action) ?? 'other'
       const source = isRecord(request.source) ? request.source : {}
       const callId = str(source.id)
-      const reply = async (decision: 'once' | 'reject') => {
-        await client.request('POST', `/api/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}/reply`, {
+      const send = (decision: 'once' | 'reject') =>
+        client.request('POST', `/api/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}/reply`, {
           body: decision === 'reject' ? { decision, message: 'Declined in Mousse.' } : { decision }
-        }).catch(() => undefined)
+        })
+      /**
+       * Tells OpenCode the decision. An allow it did not take is sent again as a reject; when OpenCode cannot be told
+       * at all, its tool would wait for good, so the run is interrupted and the turn fails.
+       */
+      const reply = async (decision: 'once' | 'reject') => {
+        try {
+          await send(decision)
+          return
+        } catch (error) {
+          if (decision === 'once') {
+            try {
+              await send('reject')
+              return
+            } catch {
+              // Not told either way: below.
+            }
+          }
+          if (input.signal?.aborted) return
+          const reason = error instanceof Error ? error.message : String(error)
+          ending?.({ kind: 'failed', error: { type: 'permission.reply', message: `could not answer its permission request (${reason})` } })
+          void client.request('POST', `/api/session/${encodeURIComponent(sessionId)}/interrupt`).catch(() => undefined)
+        }
       }
       try {
         if (input.signal?.aborted) return await reply('reject')
@@ -713,7 +735,9 @@ export class OpencodeSessions {
           const name = str(data.name) ?? 'a tool'
           if (!(withRead && name === 'read')) refuse(harnessAppError({ code: 'policy_unenforceable', message: `${label} tried to use a tool (${name}) in a request that runs none, so Mousse stopped it.` }))
         } else if (type === 'permission.asked') {
-          void live.request('POST', `/api/session/${encodeURIComponent(id)}/permission/${encodeURIComponent(str(data.id) ?? '')}/reply`, { body: { decision: 'reject' } }).catch(() => undefined)
+          // Nothing may run here; an ask OpenCode cannot be told the answer to would wait for good, so the request ends.
+          void live.request('POST', `/api/session/${encodeURIComponent(id)}/permission/${encodeURIComponent(str(data.id) ?? '')}/reply`, { body: { decision: 'reject' } })
+            .catch(() => refuse(harnessAppError({ code: 'policy_unenforceable', message: `${label} asked to use a tool (${str(data.action) ?? 'a tool'}) in a request that runs none, and could not be refused.` })))
         } else if (type === 'session.retry.scheduled') {
           refuse(opencodeTurnError(label, data.error))
         } else if (type === 'session.execution.succeeded') finish?.({ kind: 'succeeded' })

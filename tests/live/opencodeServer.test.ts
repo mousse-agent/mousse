@@ -11,8 +11,10 @@
  * - in Auto-accept edits the write runs unasked;
  * - outside Full access the model is offered no shell, no OpenCode subagents, no Code Mode and no questions;
  * - a saved "always" grant in the project, or a plugin of the user's, refuses an asking turn before its prompt;
- * - a one-shot is offered no tool and makes one model request, a failed one included; its session is deleted.
+ * - a one-shot is offered no tool and makes one model request, a failed one included; its session is deleted;
+ * - the server exits when the process that started it is killed (`--stdio`: its stdin closes with that process).
  */
+import { spawn } from 'node:child_process'
 import { createServer, type Server } from 'node:http'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -249,6 +251,42 @@ describe.skipIf(!live)('OpenCode on its server API (real opencode serve)', () =>
     expect(reply.text).toBe('Fix login bug')
     expect(requests.length).toBe(1)
     expect(requests[0]!.tools).toEqual([])
+  }, TIMEOUT)
+
+  it('the server exits when the process that started it is killed', async () => {
+    const { root, env, opencodeEnv } = setup()
+    const jiti = join(__dirname, '..', '..', 'node_modules', 'jiti', 'lib', 'jiti-cli.mjs')
+    const holder = spawn(process.execPath, [jiti, join(__dirname, 'fixtures', 'opencodeServerHolder.ts'), binary(), root], {
+      env: { ...env.env, ...opencodeEnv },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true
+    })
+    let errors = ''
+    holder.stderr!.on('data', (chunk: Buffer) => { errors += chunk.toString('utf8') })
+    const { url, pid } = await new Promise<{ url: string; pid: number }>((resolve, reject) => {
+      let out = ''
+      holder.stdout!.on('data', (chunk: Buffer) => {
+        out += chunk.toString('utf8')
+        const newline = out.indexOf('\n')
+        if (newline >= 0) resolve(JSON.parse(out.slice(0, newline)) as { url: string; pid: number })
+      })
+      holder.once('exit', (code) => reject(new Error(`the holder exited (${code}): ${errors}`)))
+    })
+    const alive = (id: number) => {
+      try {
+        process.kill(id, 0)
+        return true
+      } catch {
+        return false
+      }
+    }
+    expect(alive(pid)).toBe(true)
+    // As a crash would: no clean shutdown, nothing closes the pipe on purpose.
+    holder.kill('SIGKILL')
+    const deadline = Date.now() + 20_000
+    while (alive(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(alive(pid)).toBe(false)
+    await expect(fetch(`${url}/api/model`, { signal: AbortSignal.timeout(2_000) })).rejects.toBeTruthy()
   }, TIMEOUT)
 
   it('a failed one-shot request is not retried', async () => {

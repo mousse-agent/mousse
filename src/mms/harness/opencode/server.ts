@@ -30,6 +30,8 @@ export interface StartedServer {
   close(): void
   /** Settles when the server exited. */
   exited: Promise<void>
+  /** The server's process id, when Mousse spawned it. */
+  pid?: number
 }
 
 export interface OpencodeServerOptions {
@@ -102,7 +104,7 @@ export function spawnOpencodeServer(env: InstanceEnv, launch: OpencodeLaunch, si
       }
       settled = true
       clearTimeout(timer)
-      resolve({ endpoint: { url: url.replace(/\/$/, ''), password }, close, exited })
+      resolve({ endpoint: { url: url.replace(/\/$/, ''), password }, close, exited, ...(child.pid !== undefined ? { pid: child.pid } : {}) })
     })
     child.once('error', (error) => fail(error))
     child.once('exit', (code) => fail(new Error(`OpenCode's server exited (${code ?? 'signal'}) before it was ready.${stderr.trim() ? ` ${stderr.trim().split('\n').at(-1)}` : ''}`)))
@@ -187,6 +189,9 @@ export class OpencodeServer {
     void started.exited.then(() => {
       if (this.current?.started === started) this.stop()
     })
+    // Every caller may have left while it started (a turn stopped before the server was ready): with nobody holding
+    // it, it closes once idle like any other.
+    this.touch()
     return client
   }
 
