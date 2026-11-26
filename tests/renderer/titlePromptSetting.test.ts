@@ -230,3 +230,38 @@ describe('a title request with a title prompt', () => {
     expect(oneShot.mock.calls[0]![0].system).toBe(TITLE_SYSTEM_PROMPT)
   })
 })
+
+describe('the Thread titles row with Antigravity connected', () => {
+  const ANTIGRAVITY = { id: 'antigravity', instanceId: 'antigravity', label: 'Antigravity', oneShot: true, models: [{ id: 'gemini-flash', label: 'Gemini Flash' }] } as LlmProviderOption
+  let root: Root
+  let host: HTMLElement
+  beforeEach(() => {
+    host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+  })
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+  })
+  const note = (providers: LlmProviderOption[], title: Partial<ReturnType<typeof getDefaultSettings>['title']> = {}) => {
+    const settings = getDefaultSettings()
+    act(() => root.render(createElement(AgentsSettings, {
+      settings: { ...settings, title: { ...settings.title, ...title } },
+      options: { ...OPTIONS, llmProviders: providers },
+      updateSettings: async () => {}
+    })))
+    return [...host.querySelectorAll<HTMLElement>('[data-settings-anchor="agents-title-model"] span[title]')].find((span) => span.textContent?.includes('best-effort'))
+  }
+
+  it('says Antigravity naming is best-effort, with why in its tooltip, when Automatic may pick it or it is chosen', () => {
+    expect(note([CLAUDE, ANTIGRAVITY])?.title).toContain('could still run')
+    expect(note([CLAUDE, ANTIGRAVITY], { llmProvider: 'antigravity', instanceId: 'antigravity', model: 'gemini-flash' })).toBeDefined()
+  })
+
+  it('says nothing of it when Antigravity cannot name threads: not connected, another model chosen, or First line only', () => {
+    expect(note([CLAUDE])).toBeUndefined()
+    expect(note([CLAUDE, ANTIGRAVITY], { llmProvider: 'claude-subscription', instanceId: 'claude', model: 'haiku' })).toBeUndefined()
+    expect(note([CLAUDE, ANTIGRAVITY], { mode: 'off' })).toBeUndefined()
+  })
+})

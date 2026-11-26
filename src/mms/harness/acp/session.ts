@@ -14,7 +14,7 @@ import type { ContinuationInfo, LiveProcessHost } from '../driver'
 import { interruptWithDeadline, loadWithDeadline, SessionLoadTimeoutError } from '../supervise'
 import { isAuthRequired } from './auth'
 import { initializeAgent, sessionCapability, type AcpAgentInfo } from './capabilities'
-import { closeAcpConnection, type AcpClientHandlers, type AcpConnection, type AcpConnectionFactory, type AcpPurpose } from './connection'
+import { ACP_TERMINAL_METHODS, closeAcpConnection, type AcpClientHandlers, type AcpConnection, type AcpConnectionFactory, type AcpPurpose } from './connection'
 import { answerFormElicitation } from './elicitation'
 import { LoadGate } from './loadGate'
 import { sessionMcpServers } from './mcp'
@@ -249,9 +249,11 @@ export interface AcpProcess extends AcpConnection {
   nativeSteerRefused?: boolean
   /**
    * Set on a one-shot's process (`AcpSessions.oneShot`): every request of the agent to use a tool (a permission, a
-   * file read or write) is refused, and ends the request.
+   * file read or write, a terminal, a question, an unknown request) is refused, and ends the request.
    */
   refuseTools?: (what: string) => void
+  /** Settles once the process has ended (its factory's `onExit`). */
+  exited?: Promise<void>
   /** Background commands/subagents still running in the agent process after a turn settled (`quirks.backgroundWork`). */
   backgroundTasks?: Map<string, AcpBackgroundTask>
   /** Background tasks that ended between turns before the reactive wakeup began. */
@@ -311,6 +313,45 @@ function botFileCheck(process: AcpProcess, bot: Pick<BotAuthority, 'check'>, acc
 function refuseFile(refuse: (what: string) => void, what: string): Promise<never> {
   refuse(what)
   return Promise.reject(new Error('This request runs no tools.'))
+}
+
+/** The first line of every one-shot prompt (`AcpSessions.oneShot`). */
+export const ONE_SHOT_INSTRUCTION = 'Use only the input below. Do not use tools, read or write files, run commands, or ask questions. Reply with only the requested text.'
+/** A one-shot ends past this, whatever the agent still sends (the gateway's inactivity bound comes first when it goes quiet). */
+export const ONE_SHOT_DEADLINE_MS = 180_000
+/** A one-shot's answer ends once it is longer than this many characters. */
+export const ONE_SHOT_OUTPUT_CAP = 128_000
+/** The agent mode a one-shot selects when the agent lists it: the one that asks before every edit. */
+const ONE_SHOT_MODE = 'default'
+/** How long a one-shot waits for its ended process to go (a kill follows the polite signal after 3 s). */
+const ONE_SHOT_REAP_MS = 8_000
+
+/** `AcpSessions.oneShot`. */
+export interface OneShotInput {
+  /** An empty folder of the request's own: the session's workspace and the process's working folder. */
+  cwd: string
+  model: string
+  system: string
+  prompt: string
+  signal: AbortSignal
+  onActivity(): void
+  /** The session the agent opened, once it has: its files are this request's (`AntigravityProviderService.oneShot`). */
+  onSession?(sessionId: string): void
+  /** Tests: {@link ONE_SHOT_DEADLINE_MS} and {@link ONE_SHOT_OUTPUT_CAP}. */
+  deadlineMs?: number
+  outputCap?: number
+}
+
+/** Waits for `process` to end; one still running after {@link ONE_SHOT_REAP_MS} fails the request. */
+async function reaped(process: AcpProcess): Promise<void> {
+  if (!process.exited) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const gone = await Promise.race([
+    process.exited.then(() => true),
+    new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), ONE_SHOT_REAP_MS) })
+  ])
+  clearTimeout(timer)
+  if (!gone) throw harnessAppError({ code: 'protocol', message: 'The agent process did not end after its request.' })
 }
 
 /** Session updates that show the agent working on the prompt in flight (not session bookkeeping). */
@@ -962,8 +1003,11 @@ export class AcpSessions {
     }
   }
 
-  /** Opens a connection to the agent. `onAuthUrl` receives sign-in links; without it a link means the sign-in is gone. */
-  launch(purpose: AcpPurpose, onAuthUrl?: (url: string) => void, bot?: true): AcpProcess {
+  /**
+   * Opens a connection to the agent. `onAuthUrl` receives sign-in links; without it a link means the sign-in is gone.
+   * `cwd`: a one-shot's own folder, where its process starts.
+   */
+  launch(purpose: AcpPurpose, onAuthUrl?: (url: string) => void, bot?: true, cwd?: string): AcpProcess {
     const { label, questions, quirks } = this.options
     if (this.stopped) throw new Error(`${label} provider is stopped`)
     let active: AcpProcess | undefined
@@ -1117,9 +1161,21 @@ export class AcpSessions {
         onOutsideTurn: stopIdle
       }) : {})
     }
+    let markExited = () => {}
+    const exited = new Promise<void>((resolve) => { markExited = resolve })
+    if (purpose === 'one_shot') {
+      // A one-shot asks nobody and runs nothing: a question is declined, a terminal or unknown request refused, and
+      // each ends the request (`AcpProcess.refuseTools`, set before `initialize`).
+      handlers.createElicitation = async () => {
+        active?.refuseTools?.('a question')
+        return { action: 'decline' }
+      }
+      handlers.refuseRequest = (method) => refuseFile(active?.refuseTools ?? (() => undefined), ACP_TERMINAL_METHODS.includes(method) ? `a terminal (${method})` : `an unknown request (${method})`)
+    }
     const connection = this.options.connect({
       purpose,
       ...(bot ? { bot } : {}),
+      ...(cwd ? { cwd } : {}),
       handlers: attended(handlers, {
         begin: () => {
           if (!active) return
@@ -1140,6 +1196,7 @@ export class AcpSessions {
         active.connection.close(new Error(this.options.signInRequiredMessage))
       }),
       onExit: () => {
+        markExited()
         if (!active) return
         this.processes.delete(active)
         this.clearBackgroundState(active)
@@ -1150,7 +1207,7 @@ export class AcpSessions {
         if (active.threadId && this.sessions.get(active.threadId) === active) this.sessions.delete(active.threadId)
       }
     })
-    active = Object.assign(connection, { generation: this.options.launchGeneration(), signInGeneration: this.options.signInGeneration() })
+    active = Object.assign(connection, { generation: this.options.launchGeneration(), signInGeneration: this.options.signInGeneration(), exited })
     // Between turns, and while a session opens, keep the agent's command list and watch for background completions/wakeups.
     const resting = active
     resting.onUpdate = (update, sessionId) => this.handleRestingUpdate(resting, update, sessionId)
@@ -2334,34 +2391,61 @@ export class AcpSessions {
 
   /**
    * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a commit message. A
-   * fresh agent process and session of its own in `cwd` (an empty folder the caller made for it), with no MCP
-   * server and no client file system; the system text and the prompt go as one prompt. Every permission or file
-   * request is refused, and any tool call the agent reports ends the request as refused. The answer is the agent's
-   * text. One attempt, never saved or resumed; `signal` stops it, and the process ends afterwards.
+   * fresh agent process and session of its own in `cwd` (an empty folder the caller made for it), where the process
+   * also starts, with no MCP server and no client file system, in the agent's `default` mode when it has one. The
+   * prompt is {@link ONE_SHOT_INSTRUCTION}, the system text and the prompt. Every permission, file, terminal or
+   * unknown request and every question is refused, and so is any tool call the agent reports; each ends the request
+   * as `one_shot_tool_refused`. The answer is the agent's text, ended past {@link ONE_SHOT_OUTPUT_CAP} characters or
+   * {@link ONE_SHOT_DEADLINE_MS}. One attempt, never saved or resumed; `signal` stops it. The process is ended and
+   * waited for before this returns or throws.
    */
-  async oneShot(input: { cwd: string; model: string; system: string; prompt: string; signal: AbortSignal; onActivity(): void }): Promise<string> {
+  async oneShot(input: OneShotInput): Promise<string> {
     const { label, quirks } = this.options
     input.signal.throwIfAborted()
     // xAI's tagged prompts end on a notice this request does not wait for.
     if (quirks.xaiExtensions) throw harnessAppError({ code: 'unsupported', message: `${label} cannot run a single request.` })
     await this.options.beforeLaunch?.('one_shot')
     input.signal.throwIfAborted()
-    const active = this.launch('one_shot')
+    const active = this.launch('one_shot', undefined, undefined, input.cwd)
     active.cwd = input.cwd
-    let refused: Error | undefined
-    active.refuseTools = (what) => {
-      refused ??= harnessAppError({ code: 'policy_unenforceable', message: `${label} tried to use a tool (${what}) in a request that runs none, so Mousse stopped it.` })
+    let failed: Error | undefined
+    const fail = (error: Error) => {
+      failed ??= error
       closeAcpConnection(active)
+    }
+    // Set before `initialize`: whatever the agent asks for from its start is refused.
+    active.refuseTools = (what) => fail(harnessAppError({ code: 'one_shot_tool_refused', message: `${label} tried to use a tool (${what}) in a request that runs none, so Mousse stopped it.` }))
+    const deadlineMs = input.deadlineMs ?? ONE_SHOT_DEADLINE_MS
+    const deadline = setTimeout(() => fail(harnessAppError({ code: 'timeout', message: `${label} did not answer within ${Math.round(deadlineMs / 1000)} seconds.` })), deadlineMs)
+    deadline.unref?.()
+    const cap = input.outputCap ?? ONE_SHOT_OUTPUT_CAP
+    let text = ''
+    let prompting = false
+    // From the start too: a tool call before any prompt is refused like one during it.
+    active.onUpdate = (update) => {
+      if (!update || typeof update !== 'object' || failed) return
+      const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; title?: string; name?: string }
+      // A tool is refused before anything else runs, a slow activity callback included.
+      if (event.sessionUpdate === 'tool_call' || event.sessionUpdate === 'tool_call_update') {
+        active.refuseTools?.(event.title ?? event.name ?? 'a tool')
+        return
+      }
+      if (!prompting) return
+      input.onActivity()
+      if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') {
+        text += event.content.text ?? ''
+        if (text.length > cap) fail(harnessAppError({ code: 'protocol', message: `${label} wrote more than ${cap.toLocaleString('en-US')} characters, so Mousse stopped it.` }))
+      }
     }
     const abort = () => closeAcpConnection(active)
     input.signal.addEventListener('abort', abort, { once: true })
-    let text = ''
     try {
       await this.initialize(active)
       input.signal.throwIfAborted()
       input.onActivity()
       const session = await active.connection.agent.request(methods.agent.session.new, { cwd: input.cwd, mcpServers: [] })
       active.sessionId = session.sessionId
+      input.onSession?.(session.sessionId)
       input.signal.throwIfAborted()
       input.onActivity()
       // The session's model control, read without recording anything: this session is not the profile's.
@@ -2369,36 +2453,36 @@ export class AcpSessions {
       if (!quirks.modelConfigId) active.modelControl = agentModels(session, active.info?.meta).control
       await this.selectModel(active, input.model)
       input.signal.throwIfAborted()
-      active.onUpdate = (update) => {
-        if (!update || typeof update !== 'object' || refused) return
-        const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; title?: string; name?: string }
-        // A tool is refused before anything else runs, a slow activity callback included.
-        if (event.sessionUpdate === 'tool_call' || event.sessionUpdate === 'tool_call_update') {
-          active.refuseTools?.(event.title ?? event.name ?? 'a tool')
-          return
-        }
-        input.onActivity()
-        if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') text += event.content.text ?? ''
+      // The agent's `default` mode, where one is listed: it asks before it edits, and every ask is refused.
+      const modes = agentModes(session)
+      if (modes.current !== ONE_SHOT_MODE && modes.modes.some((mode) => mode.id === ONE_SHOT_MODE)) {
+        await active.connection.agent.request(methods.agent.session.setMode, { sessionId: active.sessionId, modeId: ONE_SHOT_MODE })
+        input.signal.throwIfAborted()
       }
-      const prompt = [input.system, input.prompt].filter((part) => part.trim()).join('\n\n')
+      if (failed) throw failed
+      const prompt = [ONE_SHOT_INSTRUCTION, input.system, input.prompt].filter((part) => part.trim()).join('\n\n')
+      prompting = true
       const outcome = await active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId, prompt: [{ type: 'text', text: prompt }] })
       // What the agent wrote just before it answered is still on its way (see `chat`).
       await new Promise<void>((resolve) => setImmediate(resolve))
-      if (refused) throw refused
+      if (failed) throw failed
       input.signal.throwIfAborted()
       const ended = promptStopOutcome(label, outcome)
       if (ended === 'cancelled') throw agentCancelledError(label)
       if (ended) throw ended
       return text
     } catch (error) {
-      if (refused) throw refused
+      if (failed) throw failed
       if (input.signal.aborted) throw error
       throw this.authRequiredError(active, error) ?? acpAgentError(error) ?? error
     } finally {
+      clearTimeout(deadline)
       // `refuseTools` stays: a request that arrives while the process ends is refused too.
       input.signal.removeEventListener('abort', abort)
       active.onUpdate = undefined
       this.close(active)
+      // Ended and gone before the caller looks at the folder it ran in (`ONE_SHOT_REAP_MS`).
+      await reaped(active)
     }
   }
 

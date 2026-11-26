@@ -15,7 +15,7 @@ import { isAuthRequired } from '../../auth'
 import { initializeAgent } from '../../capabilities'
 import { closeAcpConnection, type AcpConnectionFactory } from '../../connection'
 import { hasAvailableModelList, mergeModelOptions, modelOptions, thoughtConfigOption } from '../../models'
-import { ANTIGRAVITY_APP_DATA_DIR, ANTIGRAVITY_AUTH_METHOD, ANTIGRAVITY_LABEL, ANTIGRAVITY_QUIRKS, antigravityConnectionFactory, forwardAntigravityCallback, privateSignInEnv, scrubbedAntigravityEnv, type AntigravityRuntimeChoice } from '../antigravity'
+import { ANTIGRAVITY_APP_DATA_DIR, ANTIGRAVITY_AUTH_METHOD, ANTIGRAVITY_LABEL, ANTIGRAVITY_ONE_SHOT_DIR, ANTIGRAVITY_QUIRKS, antigravityConnectionFactory, antigravityGeminiHome, readAgyAcpFlags, forwardAntigravityCallback, privateSignInEnv, scrubbedAntigravityEnv, type AntigravityRuntimeChoice } from '../antigravity'
 import { keepOption } from '../../permissions'
 import { AcpSessions, type AcpChatInput, type AcpProcess, type SavedAcpSession } from '../../session'
 import { quotaNotice } from '../../stopReason'
@@ -26,12 +26,15 @@ import { directLaunch } from '../../../resolveWindowsShim'
 import { ANTIGRAVITY_RELEASE, antigravityInstallState, cancelAntigravityInstall, installedAntigravityBinary, manualAntigravityRuntime, onAntigravityInstallEvent, runSharedAntigravityInstall, type AntigravityInstallProgress } from './installation'
 import { activeNativeRuntime, installNativeAntigravity, readVendorFeed, type NativeRuntime, type NativeVerifier } from './nativeInstall'
 import { NATIVE_FEED_BASE, NATIVE_MIN_VERSION, WITHDRAWN_NATIVE_VERSIONS, nativeReleaseRefusal, nativeTarget, parseVendorFeed, type NativeRelease, type NativeTarget } from './nativeRelease'
+import { antigravityOneShotRefusal, leftInScratch, removeOneShotFiles, sweepOneShotLeftovers } from './oneShotGuards'
 import { AgyUsageTurnError, agyUsageRefusal, parseAgyUsage, runAgy, type AgyRunner } from './usage'
 
 /** The 1.1.1 ACP server's version, as Mousse reports it. */
 const LEGACY_VERSION = ANTIGRAVITY_RELEASE.replace(/^agy_acp_server_/, '')
 /** Google's update feed is read at most this often (the pace of other agents' version checks). */
 const FEED_TTL_MS = 6 * 60 * 60_000
+/** How long after an entry's first one-shot the folders an ended Mousse left are swept (`sweepOneShotLeftovers`). */
+const ONE_SHOT_SWEEP_DELAY_MS = 60_000
 /** How long a lookup of the user's own `agy` is reused: it is asked for on every status read. */
 const USER_AGY_TTL_MS = 15_000
 
@@ -617,24 +620,58 @@ export class AntigravityProviderService {
   }
 
   /**
-   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a commit message. Its
-   * own agent process and session in a new empty folder, removed afterwards (`AcpSessions.oneShot`).
+   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a commit message, on a
+   * best-effort guard. Refused while the home sets hooks or MCP servers (`antigravityOneShotRefusal`). Its own agent
+   * process and session in a new empty folder (`AcpSessions.oneShot`), on `agy`'s one-shot launch
+   * (`antigravityConnectionFactory`). Once the process has ended, anything but empty folders left in that folder fails
+   * the request; the folder, and on `agy` the session's files, are removed afterwards (`removeOneShotFiles`).
    */
   async oneShot(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
     signal.throwIfAborted()
     if (!this.configured()) throw harnessAppError({ code: 'signed_out', message: SIGN_IN_REQUIRED_MESSAGE })
-    const cwd = join(this.profileDir, 'one-shot', randomUUID())
+    const geminiHome = antigravityGeminiHome(this.geminiRoot)
+    const refusal = antigravityOneShotRefusal(geminiHome)
+    if (refusal) throw harnessAppError({ code: 'wont_run', message: refusal, instanceId: this.instanceId })
+    const runtime = this.runtime()
+    const native = runtime?.kind === 'native'
+    // Its own launch reads which flags this `agy` takes, once per executable (`antigravityOneShotArgs`).
+    if (native && !this.options.connect && !this.options.connectIn) await readAgyAcpFlags(runtime.binary)
+    signal.throwIfAborted()
+    this.scheduleOneShotSweep()
+    const cwd = join(this.profileDir, ANTIGRAVITY_ONE_SHOT_DIR, randomUUID())
     mkdirSync(cwd, { recursive: true, mode: 0o700 })
+    let sessionId: string | undefined
     try {
-      const text = await this.acp.oneShot({ cwd, model: spec.model, system: spec.system, prompt: spec.prompt, signal, onActivity: () => spec.onActivity() })
+      const text = await this.acp.oneShot({
+        cwd, model: spec.model, system: spec.system, prompt: spec.prompt, signal,
+        onActivity: () => spec.onActivity(),
+        onSession: (id) => { sessionId = id }
+      })
+      // The process has ended (`AcpSessions.oneShot`): what it left now stays.
+      const left = leftInScratch(cwd)
+      if (left) throw harnessAppError({ code: 'one_shot_tool_refused', message: `Antigravity left ${left} in the empty folder of a request that runs no tools, so Mousse did not use its answer.` })
       // `agy` answers a model whose quota is used up with a notice as the reply ("⚠ Individual quota reached. …"): never an answer.
       const notice = quotaNotice(text)
       if (notice) throw harnessAppError({ code: 'rate_limited', scope: 'model', message: `Antigravity's quota for this model is used up: ${notice}` })
       return { text }
     } finally {
-      // The ended process may hold the folder a moment longer on Windows: a leftover empty folder is harmless.
-      try { rmSync(cwd, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }) } catch { /* kept */ }
+      if (native) {
+        const kept = removeOneShotFiles(geminiHome, cwd, sessionId)
+        if (kept) console.warn('[antigravity] a single request\'s session files were kept', { reason: kept })
+      }
+      // The ended process may hold the folder a moment longer on Windows: the sweep removes what stays.
+      try { rmSync(cwd, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }) } catch { /* swept later */ }
     }
+  }
+
+  /** The sweep of one-shot folders an ended Mousse left (`sweepOneShotLeftovers`): once, a minute after the first one-shot. */
+  private oneShotSweep?: ReturnType<typeof setTimeout>
+  private scheduleOneShotSweep(): void {
+    if (this.oneShotSweep || this.stopped) return
+    this.oneShotSweep = setTimeout(() => {
+      if (!this.stopped) void sweepOneShotLeftovers(this.profileDir, antigravityGeminiHome(this.geminiRoot)).catch(() => undefined)
+    }, ONE_SHOT_SWEEP_DELAY_MS)
+    this.oneShotSweep.unref?.()
   }
 
   /** Explicit model-picker refresh; never run this from background health checks. */
@@ -1018,6 +1055,7 @@ export class AntigravityProviderService {
   closeAll(): void { this.acp.closeAll() }
   stop(): void {
     this.stopped = true
+    if (this.oneShotSweep) clearTimeout(this.oneShotSweep)
     this.installing?.abort()
     this.unsubscribeInstall()
     for (const session of this.loginSessions) session.abort.abort()

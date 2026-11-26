@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -8,7 +8,7 @@ import { methods, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sd
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { AntigravityProviderService } from '../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
-import { antigravityConnectionFactory } from '../src/mms/harness/acp/presets/antigravity'
+import { antigravityConnectionFactory, readAgyAcpFlags } from '../src/mms/harness/acp/presets/antigravity'
 import { antigravityDriver } from '../src/mms/harness/drivers/antigravity'
 import { NATIVE_AGENT_NAME } from '../src/mms/harness/acp/presets/antigravity/nativeRelease'
 import { CliVersionCache } from '../src/mms/harness/cliConfig'
@@ -23,16 +23,20 @@ vi.mock('../src/mms/harness/acp/presets/antigravity/installation', async (import
 }))
 
 // Only the agent process is replaced, to read what Mousse starts it with.
-const spawned = vi.hoisted(() => ({ calls: [] as Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv; stderr: import('node:stream').PassThrough }> }))
+const spawned = vi.hoisted(() => ({ calls: [] as Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv; cwd?: string; stdin: import('node:stream').PassThrough; stdout: import('node:stream').PassThrough; stderr: import('node:stream').PassThrough }>, help: '' }))
 vi.mock('node:child_process', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:child_process')>()
   return {
     ...original,
-    spawn: vi.fn((file: string, args: string[], options: { env: NodeJS.ProcessEnv }) => {
+    spawn: vi.fn((file: string, args: string[], options: { env: NodeJS.ProcessEnv; cwd?: string }) => {
+      const stdin = new PassThrough()
+      const stdout = new PassThrough()
       const stderr = new PassThrough()
-      spawned.calls.push({ file, args, env: options.env, stderr })
-      return Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr, exitCode: null, signalCode: null, kill: vi.fn() })
+      spawned.calls.push({ file, args, env: options.env, cwd: options.cwd, stdin, stdout, stderr })
+      return Object.assign(new EventEmitter(), { stdin, stdout, stderr, exitCode: null, signalCode: null, kill: vi.fn() })
     }),
+    // `agy acp --help`, as `spawned.help` says.
+    execFile: vi.fn((_file: string, _args: string[], _options: unknown, done: (error: Error | null, stdout: string, stderr: string) => void) => done(null, '', spawned.help)),
     spawnSync: vi.fn((_file: string, args: string[]) => ({ status: 0, stdout: '', stderr: `__MOUSSE_ANTIGRAVITY_AUTH_URL__${args[0]}\n` }))
   }
 })
@@ -331,6 +335,71 @@ describe('launching each runtime', () => {
     // Settings only the 1.1.1 server reads are not passed on.
     expect(call.env.AGY_ACP_FORCE_FILE_STORAGE).toBeUndefined()
     expect(call.env.ANTIGRAVITY_HARNESS_PATH).toBeUndefined()
+  })
+
+  describe('a one-shot', () => {
+    const HELP = 'Flags:\n  --cli_dir_name   Subdirectory under app_data_dir\n  --include-default-customizations  Include default customizations (default true)\n'
+    /** A one-shot launched on `kind`, its scratch folder made as the service makes it, with `agy acp --help` printing `help`. */
+    const launchOneShot = async (kind: 'legacy' | 'native', help = HELP, handlers: Record<string, unknown> = {}) => {
+      const dir = mkdtempSync(join(tmpdir(), 'mousse-agy-launch-'))
+      homes.push(dir)
+      const binary = join(dir, 'agy.exe')
+      writeFileSync(binary, `agy ${help.length}`)
+      spawned.help = help
+      await readAgyAcpFlags(binary)
+      const cwd = join(dir, 'one-shot', 'request-1')
+      mkdirSync(cwd, { recursive: true })
+      process.env.MOUSSE_TEST_USER_SECRET = 'kept out'
+      try {
+        const env = vi.fn((base: NodeJS.ProcessEnv) => ({ ...base, USER_VAR: '1' }))
+        const connection = antigravityConnectionFactory({ profileDir: dir, profileHome: dir, runtime: () => ({ kind, binary, source: 'user' }), args: () => ['--user-flag'], env })(
+          { purpose: 'one_shot', cwd, handlers: { requestPermission: vi.fn(), ...handlers } } as never)
+        return { dir, cwd, call: spawned.calls.at(-1)!, env, connection }
+      } finally {
+        delete process.env.MOUSSE_TEST_USER_SECRET
+      }
+    }
+
+    it("starts agy in its own folder with its own settings, an allowlisted environment, and none of the user's flags, variables or skill links", async () => {
+      const { dir, cwd, call, env } = await launchOneShot('native')
+      const geminiHome = join(dir, 'gemini-home')
+      expect(call.cwd).toBe(cwd)
+      expect(call.args).toEqual(['acp', '--gemini-dir', geminiHome, '--app-data-dir', 'antigravity-acp', '--cli_dir_name', 'one-shot-request-1', '--include-default-customizations=false'])
+      expect(env).not.toHaveBeenCalled()
+      expect(call.env.MOUSSE_TEST_USER_SECRET).toBeUndefined()
+      expect(call.env.USER_VAR).toBeUndefined()
+      expect(call.env.GEMINI_HOME).toBe(geminiHome)
+      expect(call.env.PATH ?? call.env.Path).toBeDefined()
+      const settings = JSON.parse(readFileSync(join(geminiHome, 'antigravity-acp', 'one-shot-request-1', 'settings.json'), 'utf8')) as Record<string, unknown>
+      expect(settings).toMatchObject({ toolPermission: 'strict', allowNonWorkspaceAccess: false, agentMode: '', permissions: { deny: expect.arrayContaining(['command(*)', 'write_file(*)', 'read_file(*)', 'mcp(*)']) } })
+      // The home's own settings and skill links are left as they are.
+      expect(existsSync(join(geminiHome, 'antigravity-acp', 'settings.json'))).toBe(false)
+      expect(existsSync(join(geminiHome, 'config', 'skills'))).toBe(false)
+    })
+
+    it('leaves out default customizations only where agy lists the flag, and refuses an agy that cannot keep its settings apart', async () => {
+      const older = await launchOneShot('native', 'Flags:\n  --cli_dir_name   Subdirectory under app_data_dir\n')
+      expect(older.call.args).not.toContain('--include-default-customizations=false')
+      await expect(launchOneShot('native', 'Flags:\n  --gemini-dir  Path\n')).rejects.toMatchObject({ code: 'wont_run' })
+    })
+
+    it("keeps the 1.1.1 server's ordinary launch", async () => {
+      const { call } = await launchOneShot('legacy')
+      expect(call.args).toContain('--user-flag')
+      expect(call.cwd).toBeUndefined()
+    })
+
+    it('refuses a terminal or unknown request that arrives on the wire, and answers it as not found', async () => {
+      const refuseRequest = vi.fn(async () => { throw new Error('This request runs no tools.') })
+      const { call } = await launchOneShot('native', HELP, { refuseRequest })
+      const answers: string[] = []
+      call.stdin.on('data', (chunk: Buffer) => answers.push(chunk.toString()))
+      call.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: '_google/run_workflow', params: {} })}\n`)
+      call.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'terminal/create', params: { sessionId: 's', command: 'ls' } })}\n`)
+      await vi.waitFor(() => expect(answers.join('')).toContain('"id":2'))
+      expect(refuseRequest.mock.calls).toEqual([['_google/run_workflow'], ['terminal/create']])
+      expect(answers.join('')).toContain('"id":1')
+    })
   })
 
   it('takes the Google sign-in link agy prints on stderr, and no other link', async () => {

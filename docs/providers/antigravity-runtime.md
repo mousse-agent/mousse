@@ -106,6 +106,32 @@ nothing in it is moved or deleted.
 Closing an agent ends its whole process tree (the agent and its helpers), not only the process
 Mousse started.
 
+## Thread titles and other single requests
+
+Thread titles, branch names, pull request drafts, commit messages and a bot's name and digest are
+single requests. On `agy` each one runs on a launch of its own, and it is labelled best-effort:
+`agy` may run a native action before Mousse sees it and stops the request.
+
+- **Before:** refused when the entry's `gemini-home/config/hooks.json` or `mcp_config.json` sets
+  hooks or MCP servers, or can't be read or parsed. A missing, blank or empty file is fine.
+- **Launch:** a new empty folder is both the process's working folder and the session's workspace.
+  The process gets only system, locale and proxy variables, none of the user's arguments, variables
+  or skill links, and `--include-default-customizations=false` where `agy acp --help` lists it.
+  Its settings go in a folder of their own (`--cli_dir_name one-shot-<id>`, beside the sign-in in
+  `gemini-home/antigravity-acp`): `default` agent mode, `strict` tool permission, no access outside
+  the workspace, and a rule denying every action `agy` names. An `agy` without `--cli_dir_name` is
+  refused.
+- **During:** permission requests are cancelled and questions declined; file, terminal and unknown
+  requests are refused. Each of these, and any tool call `agy` reports, ends the request as
+  `one_shot_tool_refused`, and Automatic naming moves on to its next model. The request ends after
+  180 s, or once the answer passes 128,000 characters.
+- **After:** the process is ended and waited for. Anything but empty folders left in the workspace
+  fails the request. The settings folder is removed, and so are the session's saved conversation,
+  notes and annotations once the saved conversation names this request's folder. Folders an ended
+  Mousse left are swept a minute after the entry's next single request.
+
+The 1.1.1 server keeps the ordinary launch for single requests; that launch is not checked.
+
 ## Start-up time
 
 Measured on Windows 11 x64 on 20 November 2026: `agy acp` 1.5.13 answered `initialize` in about
