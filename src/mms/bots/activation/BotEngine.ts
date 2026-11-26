@@ -59,7 +59,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
-import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_AUTOMATIONS_SWITCH, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_DROPPED_PERMISSIONS, BOT_IMAGE_TOOL, BOT_MCP_SERVER_SWITCH, BOT_MCP_SWITCH, BOT_SKILLS_SWITCH, BOT_THREADS_PERMISSION, BOT_CHAT_NATIVE_OFF, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, isBotDefaultSwitch, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_AUTOMATIONS_SWITCH, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_DROPPED_PERMISSIONS, BOT_IMAGE_TOOL, BOT_RETIRED_APP_TOOLS, BOT_MCP_SERVER_SWITCH, BOT_MCP_SWITCH, BOT_SKILLS_SWITCH, BOT_THREADS_PERMISSION, BOT_CHAT_NATIVE_OFF, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, isBotDefaultSwitch, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -1498,12 +1498,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * dispatch is stopped (its authority refuses every call from now on, since it checks the grant on each one). The asks
    * of what waited are withdrawn, so no card can bring it back and its chat slot is free, and its chat says why it stopped.
    * Every narrowing ends here: `approve` of a narrower grant, and About's Remove and Allow everything off (`narrowGrant`),
-   * whose running turns go on (`runningGoesOn`; each of their calls is checked against the narrower grant).
+   * whose running turns go on (`runningGoesOn`; each of their calls is checked against the narrower grant), and a chat
+   * turn that ran on and reached its cards after such a narrowing (`waitsUnderActiveGrant`; `only` that one).
    */
-  private endUnderGrant(botId: string, reason: string, keep?: string, options: { runningGoesOn?: boolean } = {}): void {
+  private endUnderGrant(botId: string, reason: string, keep?: string, options: { runningGoesOn?: boolean; only?: string } = {}): void {
     const waited = (row: BotActivationRow) => row.status === 'waiting_grant' || row.status === 'blocked'
     const ended = this.store.db.transaction(() => {
-      const rows = this.store.activationsIn(botId, options.runningGoesOn ? ['queued', 'waiting_grant', 'blocked'] : ['queued', 'running', 'waiting_grant', 'blocked']).filter((row) => row.grantDigest !== keep && (row.status !== 'blocked' || workWaits(row)))
+      const rows = this.store.activationsIn(botId, options.runningGoesOn ? ['queued', 'waiting_grant', 'blocked'] : ['queued', 'running', 'waiting_grant', 'blocked'])
+        .filter((row) => row.grantDigest !== keep && (row.status !== 'blocked' || workWaits(row)) && (options.only === undefined || row.id === options.only))
       return rows.filter((row) => {
         if (!this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason: reason })) return false
         if (waited(row)) this.store.withdrawActivationAsks(row.id)
@@ -1525,6 +1527,31 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       } else this.cleanup({ ...row, status: 'cancelled' })
       this.changed({ botId, activationId: row.id })
     }
+  }
+
+  /**
+   * Whether a chat turn that has just stopped at its cards may wait there. Under the grant it ran with, it may. A turn
+   * runs on when About narrows the grant (`narrowGrant`), so it can reach its cards under another: it waits only when that
+   * one gives all its own did, as a widening does (`holdsWithin`, as `approve` compares them), and then moves onto it, so
+   * the answer continues it there. Otherwise its cards were asked under more than the bot has now, and it ends.
+   */
+  private waitsUnderActiveGrant(row: BotActivationRow): boolean {
+    const grant = this.store.activeGrant(row.botId)
+    if (!grant) return false
+    if (grant.digest === row.grantDigest) return true
+    const own = this.store.grantByDigest(row.botId, row.grantDigest)
+    let revision: string | undefined
+    try {
+      revision = this.entry(row.botId).published?.revision
+    } catch {
+      revision = undefined
+    }
+    if (!own || !revision || !this.holdsWithin(row.botId, own.manifest, grant.manifest)) return false
+    this.store.db.transaction(() => {
+      this.store.regrant(row.botId, row.grantDigest, grant.digest, revision)
+      this.raiseLimits(row.botId, grant)
+    })
+    return true
   }
 
   private published(botId: string): BotDefinition {
@@ -3609,12 +3636,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * overlay adds back what is switched off.
    */
   private effectiveManifest(row: BotActivationRow, revision: BotManifest, granted: BotManifest): BotManifest {
+    return this.revisionGives(row.botId, revision, granted, { overlays: this.store.overlays(row.id), defaults: true })
+  }
+
+  /**
+   * What `revision` gets under `granted`: the runtime's reading (`effectiveManifest`), which adds an activation's overlays
+   * and the defaults. Without them it is what the bot itself holds, so an open card is Allowed only when this gives it
+   * (`settleHeldAsks`): a revision narrower than an "Allow everything" grant leaves out what it does not name.
+   */
+  private revisionGives(botId: string, revision: BotManifest, granted: BotManifest, more: { overlays?: ReadonlyArray<{ permission: BotPermissionRequest; amount: number | null }>; defaults?: boolean } = {}): BotManifest {
     // The revision is held inside what the grant gives, "Allow everything" expanded, as approval compares them
     // (`holdsWithin`): a revision that names a tool only Allow everything gives still gets it.
     let manifest = intersectManifest(revision, withFullTrust(granted))
-    for (const overlay of this.store.overlays(row.id)) manifest = withPermission(manifest, overlay.permission, overlay.amount ?? undefined)
+    for (const overlay of more.overlays ?? []) manifest = withPermission(manifest, overlay.permission, overlay.amount ?? undefined)
     // "Allow everything" adds every grantable tool here, before the owner's switches take theirs away again.
-    return this.lessSwitchedOff(row.botId, this.withDefaults(row.botId, withFullTrust(manifest)))
+    manifest = withFullTrust(manifest)
+    return this.lessSwitchedOff(botId, more.defaults ? this.withDefaults(botId, manifest) : manifest)
   }
 
   /** `manifest` less every permission the owner switched off for the bot in About (a default's switch is `withDefaults`'). */
@@ -3651,11 +3688,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * What the active grant gives, as a key: the same for two grants that give the same (a tool listed again under "Allow
-   * everything" changes the digest, not this), and with the default switches. The repeat guard compares it.
+   * everything" changes the digest, not this), and with the default switches. What a grant keeps but nothing reads (an
+   * older grant's work time and folders, a retired app tool) is left out, so dropping it changes the digest, not this.
+   * The repeat guard compares it.
    */
   private givenKey(botId: string): string {
     const grant = this.store.activeGrant(botId)
-    return grant ? `${botManifestDigest(this.grantGives(botId, grant.manifest))}${this.defaultsKey(botId)}` : ''
+    if (!grant) return ''
+    const given = this.grantGives(botId, grant.manifest)
+    const { maxActiveMs: _unread, ...budget } = given.budget
+    const read: BotManifest = { ...given, appTools: given.appTools.filter((tool) => !BOT_RETIRED_APP_TOOLS.has(tool)), workspace: null, budget }
+    return `${botManifestDigest(read)}${this.defaultsKey(botId)}`
   }
 
   /**
@@ -5255,14 +5298,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private settleHeldAsks(botId: string): string[] {
     const grant = this.store.activeGrant(botId)
-    if (!grant) return []
-    const given = this.grantGives(botId, grant.manifest)
+    const published = this.entry(botId).published
+    if (!grant || !published) return []
     const walls = new Set<string>()
     for (const ask of this.store.openAsks(botId)) {
       if (isSpecialAsk(ask.permission) || 'budget' in ask.permission) continue
       // An MCP ask waiting for its server's tools grants nothing yet, so the grant "holds" it trivially: it stays open.
       if (waitsForTools(ask.permission)) continue
-      // Allowed only when the grant gives it now: Allow everything expanded, and never what the owner switched off.
+      // Allowed only when the bot gets it now, read as the runtime reads it (`revisionGives`): its revision inside the
+      // grant, Allow everything expanded, and never what the owner switched off. A turn that waits goes on with its own
+      // revision; anything else runs on the published one.
+      const activation = this.store.activation(ask.activationId)
+      const revision = activation && !ENDED_ACTIVATION_STATUSES.has(activation.status) ? this.host.definitions.revision(botId, activation.revision) ?? published : published
+      const given = this.revisionGives(botId, revision.permissions, grant.manifest)
       if (this.permissionOff(botId, ask.permission) || !manifestSubset(withPermission(given, ask.permission), given)) continue
       if (!this.store.answerEscalation(ask.id, 'allowed_bot')) continue
       if (ask.mode === 'wall') walls.add(ask.activationId)
@@ -5476,10 +5524,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.store.db.transaction(() => {
       if (enabled) {
         this.store.forgetDisabledPermission(botId, id)
-        this.allowForBot(botId, permission, undefined, off!.manifest)
+        // One only "Allow everything" gave (the grant it was switched off under does not name it): forgetting the switch-off
+        // is all, so it never becomes an entry of the grant that would outlast Allow everything.
+        if (grantedPermissions(off!.manifest).some((item) => permissionId(item) === id)) this.allowForBot(botId, permission, undefined, off!.manifest)
       } else {
-        // Kept with Allow everything expanded, so the row names the permission even when only Allow everything gave it.
-        this.store.keepDisabledPermission(botId, id, withFullTrust(grant.manifest))
+        // The grant as it is, Allow everything not expanded: the row still names a permission only Allow everything gave
+        // (`switchedOffPermission` expands it), and switching it on can tell it from one the grant names.
+        this.store.keepDisabledPermission(botId, id, grant.manifest)
         this.narrowGrant(botId, (held) => withoutPermission(held, permission), true)
       }
     })
@@ -5808,6 +5859,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return
       }
       if (next.status === 'waiting_grant') {
+        // The grant changed while this turn was still finishing (`narrowGrant` lets a running turn go on, under the grant
+        // it started with): it waits at its cards only under a grant that gives all its own did.
+        if (!this.waitsUnderActiveGrant(next)) return this.endUnderGrant(row.botId, 'grant_replaced', undefined, { only: row.id })
         this.changed({ botId: row.botId, activationId: row.id })
         try { for (const wall of openWalls) this.events.emit('escalation', this.escalationSummary(wall)) } catch { /* listeners never undo it */ }
         return
@@ -9586,7 +9640,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch {
       return false
     }
-    return this.lessSwitchedOff(botId, withFullTrust(intersectManifest(published.permissions, withFullTrust(grant.manifest)))).tools.includes('shell')
+    return this.revisionGives(botId, published.permissions, grant.manifest).tools.includes('shell')
   }
 
   /**
