@@ -7,16 +7,17 @@
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { UpdateState } from '../../src/shared/updates'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const { DownloadsIndicator } = await import('../../src/renderer/components/downloads/DownloadsIndicator')
-const { applyUpdateState, downloadsActions, receiveComputers, resetDownloadsStore, summarizeDownloads, useDownloadsStore } =
+const { applyUpdateState, downloadsActions, receiveComputers, resetDownloadsStore, subscribeToDownloads, summarizeDownloads, useDownloadsStore } =
   await import('../../src/renderer/stores/downloadsStore')
 const { useUpdateStore } = await import('../../src/renderer/stores/updateStore')
-const { useComputersStore, NO_COMPUTERS } = await import('../../src/renderer/lib/computers')
+const { useComputersStore, NO_COMPUTERS, COMPUTERS_FIRST_READ_MS } = await import('../../src/renderer/lib/computers')
+const { useAppStore } = await import('../../src/renderer/stores/appStore')
 type Device = import('../../src/renderer/lib/netDevices').Device
 
 const appState = (patch: Partial<UpdateState> = {}): UpdateState => ({
@@ -128,5 +129,32 @@ describe('the update button and the computers behind this one', () => {
     useUpdateStore.setState(appState({ phase: 'available', availableVersion: '0.9.4' }), true)
     receiveComputers()
     expect(computersRow()?.label).toBe('2 computers behind')
+  })
+
+  it('finds the computers already connected when the window opened, after it is idle, and only the profile’s own', async () => {
+    vi.useFakeTimers()
+    try {
+      useAppStore.setState({ profileId: 'work' })
+      // The work profile has a computer behind; the home profile has none.
+      const nodes = () => useAppStore.getState().profileId === 'work' ? [computer('b', 'Laptop', { olderThanThis: true })] : []
+      const request = vi.fn(async (method: string) =>
+        method === 'netEngine.status' ? { on: true } : method === 'bridge.nodes' ? { nodes: nodes() } : { enabled: false }
+      )
+      ;(window as unknown as { mousse: unknown }).mousse = { platformRequest: { request } }
+      subscribeToDownloads()
+      await vi.advanceTimersByTimeAsync(0)
+      // Nothing is read as the window opens.
+      expect(request).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(COMPUTERS_FIRST_READ_MS)
+      expect(computersRow()?.label).toBe('1 computer behind')
+      // Another profile: its own list, never the last one's.
+      useAppStore.setState({ profileId: 'home' })
+      expect(computersRow()).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(request.mock.calls.filter(([method]) => method === 'bridge.nodes')).toHaveLength(2)
+      expect(computersRow()).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

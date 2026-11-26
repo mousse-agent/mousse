@@ -1,6 +1,6 @@
 import type { NodeId } from '../../shared/net'
 import { compareVersions } from '../../shared/net/version'
-import { parseSelfUpdateReport, type SelfUpdateReport } from '../../shared/updates'
+import { channelForVersion, parseSelfUpdateReport, type SelfUpdateReport } from '../../shared/updates'
 import type { NetDatabase } from './store/database'
 import type { Clock } from './contracts'
 
@@ -57,16 +57,23 @@ export function ensurePresenceTable(db: NetDatabase, table: PresenceTable = PEER
   })
 }
 
+/** A build from a checkout, with no release version; never compared with a release. */
+const isDevBuild = (version: string): boolean => /^0\.0\.0(?:$|[-+])/.test(version)
+
 /**
- * Where a computer's version stands against this one's: `behind`, `newer`, or undefined when they match or either is
- * unknown. A computer that reported no version is never called behind; one too old to answer at all (`legacy`) is.
+ * Where a computer's version stands against this one's: `behind`, `newer`, `channel` when the two follow different
+ * update channels (nightly and stable, where neither is simply ahead), or undefined when they match or either is
+ * unknown or a development build. A computer that reported no version is never called behind; one too old to answer
+ * at all (`legacy`) is.
  */
 export function versionStanding(
-  row: Pick<PeerPresenceRow, 'version' | 'legacy'> | undefined,
+  row: Pick<PeerPresenceRow, 'version' | 'legacy' | 'update'> | undefined,
   current: string
-): 'behind' | 'newer' | undefined {
-  if (!row || current === '0.0.0') return undefined
+): 'behind' | 'newer' | 'channel' | undefined {
+  if (!row || isDevBuild(current)) return undefined
   if (row.legacy) return 'behind'
+  if (!row.version || isDevBuild(row.version)) return undefined
+  if ((row.update?.channel ?? channelForVersion(row.version)) !== channelForVersion(current)) return 'channel'
   const order = compareVersions(row.version, current)
   return order === -1 ? 'behind' : order === 1 ? 'newer' : undefined
 }
@@ -127,6 +134,12 @@ export class PeerPresence {
         )
         .run(node, info.version, info.platform || null, info.arch || null, info.update ? JSON.stringify(info.update) : null)
     })
+  }
+  /** The device could not be asked: what it said before may be out of date, so nothing is claimed of it. */
+  unknown(node: NodeId): void {
+    this.db.database
+      .prepare(`UPDATE ${this.table} SET version=NULL,platform=NULL,arch=NULL,legacy=0,updater=NULL WHERE node=?`)
+      .run(node)
   }
   /** Forgets a "too old to answer" verdict that was never earned (the device could not be asked). */
   clearLegacy(node: NodeId): void {

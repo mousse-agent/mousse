@@ -35,6 +35,8 @@ export interface PeerRow {
   /** Its version is older or newer than this computer's; false when either is unknown. */
   olderThanThis?: boolean
   newerThanThis?: boolean
+  /** It follows another update channel (nightly or stable), so neither is simply behind. */
+  otherChannel?: boolean
 }
 
 /** The engine half of the directory (`NetEngineService`). */

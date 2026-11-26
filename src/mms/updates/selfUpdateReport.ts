@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { atomicWriteJsonSync } from '../data/AtomicFs'
+import { atomicWriteFile } from '../integrations/atomicWrite'
 import { channelForVersion, parseSelfUpdateReport, type SelfUpdateReport, type UpdateState } from '../../shared/updates'
 import { mousseVersion } from '../appVersion'
 
@@ -37,25 +38,48 @@ export function readSelfUpdateReport(home: string, version = mousseVersion()): S
 
 /**
  * Keeps the file in step with the desktop updater: it is written only when the report differs from what the file
- * holds, so a launch with nothing new writes nothing. A failed write leaves the last report; it never stops updates.
+ * holds, so a launch with nothing new writes nothing. Reads and writes are asynchronous and wait for `after` (the
+ * app's window showing), so opening the app never waits on them; the latest state wins. A failed write leaves the
+ * last report; it never stops updates. `settled()` resolves once nothing is left to write.
  */
-export function selfUpdateReporter(home: string): (state: Pick<UpdateState, 'phase' | 'channel' | 'disabledReason'>) => void {
+export function selfUpdateReporter(
+  home: string,
+  options: { after?: Promise<unknown> } = {}
+): ((state: Pick<UpdateState, 'phase' | 'channel' | 'disabledReason'>) => void) & { settled(): Promise<void> } {
+  const path = selfUpdateReportPath(home)
   let written: string | undefined
-  return (state) => {
-    const report = selfUpdateReportOf(state)
-    const text = JSON.stringify(report)
-    if (text === written) return
-    try {
-      written ??= JSON.stringify(parseSelfUpdateReport(JSON.parse(readFileSync(selfUpdateReportPath(home), 'utf8'))))
-    } catch {
-      written = ''
-    }
-    if (text === written) return
-    try {
-      atomicWriteJsonSync(selfUpdateReportPath(home), report)
-      written = text
-    } catch (error) {
-      console.warn('The update report could not be written:', error instanceof Error ? error.message : String(error))
+  let wanted: SelfUpdateReport | undefined
+  let running: Promise<void> | undefined
+  const drain = async (): Promise<void> => {
+    await options.after
+    while (wanted) {
+      const text = JSON.stringify(wanted)
+      wanted = undefined
+      if (written === undefined) {
+        try {
+          written = JSON.stringify(parseSelfUpdateReport(JSON.parse(await readFile(path, 'utf8'))))
+        } catch {
+          written = ''
+        }
+      }
+      if (text === written) continue
+      try {
+        await atomicWriteFile(path, text)
+        written = text
+      } catch (error) {
+        console.warn('The update report could not be written:', error instanceof Error ? error.message : String(error))
+      }
     }
   }
+  const start = (): void => {
+    running = drain().finally(() => {
+      running = undefined
+      if (wanted) start()
+    })
+  }
+  const report = (state: Pick<UpdateState, 'phase' | 'channel' | 'disabledReason'>): void => {
+    wanted = selfUpdateReportOf(state)
+    if (!running) start()
+  }
+  return Object.assign(report, { settled: async () => { while (running) await running } })
 }

@@ -15,6 +15,7 @@ import { EnginePairing } from '../../src/mms/netEngine/pairing'
 import { EngineSessions } from '../../src/mms/netEngine/sessions'
 import { Channel, type EngineConnection } from '../../src/mms/netEngine/session/transport'
 import { EnginePeerStore } from '../../src/mms/netEngine/store'
+import { ENGINE_PRESENCE_TABLE, ensurePresenceTable, PeerPresence } from '../../src/mms/net/presence'
 import { readTicket } from '../../src/mms/netEngine/ticket'
 import { fakeLink } from './fakeLink'
 import { Fabric } from './checks/harness'
@@ -200,7 +201,10 @@ describe('removal rows', () => {
     const gone = row('gone'),
       kept = row('kept')
     const now = Date.now()
+    ensurePresenceTable(db, ENGINE_PRESENCE_TABLE)
+    const presence = new PeerPresence(db, { now: () => now }, ENGINE_PRESENCE_TABLE)
     for (const node of [gone.localId, kept.localId]) {
+      presence.info(node, { v: 1, version: '0.9.0', platform: 'linux', arch: 'x64', protoMinor: 0 })
       db.database
         .prepare(
           'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,work,created_at) VALUES(?,0,?,1,0,1,?,1,?)'
@@ -229,6 +233,9 @@ describe('removal rows', () => {
       count(db, 'SELECT COUNT(*) AS n FROM net_engine_streams WHERE peer_local_id=?', gone.localId)
     ).toBe(0)
     expect(count(db, 'SELECT COUNT(*) AS n FROM net_streams')).toBe(1)
+    // What it said of its version goes with it; the other pairing's stays.
+    expect(presence.get(gone.localId)).toBeUndefined()
+    expect(presence.get(kept.localId)?.version).toBe('0.9.0')
     expect(count(db, 'SELECT COUNT(*) AS n FROM net_node_policy WHERE node=?', kept.localId)).toBe(
       1
     )

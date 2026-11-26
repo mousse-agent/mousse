@@ -2,6 +2,7 @@ import { NetError } from '../../shared/net/errors'
 import { newId, type NodeId, type StreamId } from '../../shared/net'
 import { parsePrivateKey } from '../bridge/remote/privateStreams'
 import type { NetDatabase } from '../net/store/database'
+import { ENGINE_PRESENCE_TABLE } from '../net/presence'
 
 /**
  * Where a pairing is in its life. Only the serving states may call, be served or be read from disk. The `ssh_*`
@@ -496,6 +497,9 @@ export class EnginePeerStore {
     const streams = new Set<string>()
     if (has('net_node_policy'))
       database.prepare('DELETE FROM net_node_policy WHERE node=?').run(localId)
+    // What the pairing said of itself (its version, whether it updates itself).
+    if (has(ENGINE_PRESENCE_TABLE))
+      database.prepare(`DELETE FROM ${ENGINE_PRESENCE_TABLE} WHERE node=?`).run(localId)
     for (const row of database
       .prepare('SELECT stream FROM net_engine_streams WHERE peer_local_id=?')
       .all(localId))

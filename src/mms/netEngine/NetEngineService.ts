@@ -2226,7 +2226,8 @@ export class NetEngineService implements EngineDirectoryPort {
           ...(seen?.update ? { update: seen.update } : {}),
           ...(lastSeenAt !== undefined ? { lastSeenAt } : {}),
           olderThanThis: standing === 'behind',
-          newerThanThis: standing === 'newer'
+          newerThanThis: standing === 'newer',
+          ...(standing === 'channel' ? { otherChannel: true } : {})
         }
       })
   }
@@ -2252,7 +2253,7 @@ export class NetEngineService implements EngineDirectoryPort {
   }
   /**
    * A pairing's client is up: note when, and ask the computer its version and whether it updates itself (`net.info`).
-   * A computer that can't be asked, or answers without a field, keeps what was known; nothing is assumed of it.
+   * When it can't be asked, what it said before is dropped, so a computer updated since is never left called behind.
    */
   private async askPeerInfo(node: NodeId): Promise<void> {
     const started = this.started
@@ -2266,14 +2267,10 @@ export class NetEngineService implements EngineDirectoryPort {
           .rpc('net.info', {}, { id: newId('rpc'), deadlineMs: engineLimits().peerInfoDeadlineMs })
       )
     } catch {
-      return
+      info = undefined
     }
-    if (!info || this.started !== started) return
-    this.notePeer((presence) => {
-      presence.info(node, info)
-      // A removed pairing's row goes; a re-pair gets a new id.
-      presence.prune(new Set(started.peers.all().map((row) => row.localId)))
-    })
+    if (this.started !== started) return
+    this.notePeer((presence) => (info ? presence.info(node, info) : presence.unknown(node)))
     this.changed()
   }
   isEngine(node: NodeId): boolean {

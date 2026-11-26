@@ -498,8 +498,8 @@ export function subscribeToDownloads(): void {
     receiveUpdateState(state)
     receiveComputers()
   })
-  // The other computers behind this one join the list. Their list is read when a computer connects or drops, or the
-  // window gains focus, never on a timer: a window of one computer reads nothing.
+  // The other computers behind this one join the list. Their list is read once when the window is idle after opening,
+  // then when a computer connects or drops or the window gains focus with some known, and again for a new profile.
   followComputerChanges()
   useComputersStore.subscribe(() => receiveComputers())
   useAppStore.subscribe((state, previous) => {

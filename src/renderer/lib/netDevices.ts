@@ -6,7 +6,7 @@ import { formatAgo } from './formatAgo'
 import { serviceFailureLine } from './errorText'
 import { describePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { accessPreset, accessPresetOf } from '../../shared/net/accessPresets'
-import type { SelfUpdateReport } from '../../shared/updates'
+import { channelForVersion, type SelfUpdateReport } from '../../shared/updates'
 
 /** One route this computer knows for a device and how its last attempt went. */
 export interface DeviceRouteHealth {
@@ -47,6 +47,8 @@ export interface Device {
   olderThanThis?: boolean
   /** True for a device on a newer version than this computer. */
   newerThanThis?: boolean
+  /** On another update channel (nightly or stable) than this computer, so neither is simply behind. */
+  otherChannel?: boolean
   /** Its update channel and whether it updates itself; absent from a computer that does not say. */
   update?: SelfUpdateReport
   /** A route over SSH this device advertises and this computer has not approved yet. */
@@ -188,14 +190,23 @@ export function isIncompatible(device: Device): boolean {
 }
 
 /**
- * "Behind" or "Newer" for a computer whose Mousse differs from this computer's, with the details for its tooltip:
- * both versions, its channel, and whether it updates itself. Undefined when they match or either is unknown.
+ * "Behind" or "Newer" for a computer whose Mousse differs from this computer's, or its channel ("Nightly", "Stable")
+ * when it follows another one, with the details for its tooltip: both versions, its channel, and whether it updates
+ * itself. Undefined when they match or either is unknown.
  */
 export function versionTag(
-  device: Pick<Device, 'name' | 'version' | 'olderThanThis' | 'newerThanThis' | 'update'>,
+  device: Pick<Device, 'name' | 'version' | 'olderThanThis' | 'newerThanThis' | 'otherChannel' | 'update'>,
   current?: string
-): { label: 'Behind' | 'Newer'; detail: string } | undefined {
-  const label = device.olderThanThis ? 'Behind' : device.newerThanThis ? 'Newer' : undefined
+): { label: 'Behind' | 'Newer' | 'Nightly' | 'Stable'; detail: string } | undefined {
+  const label = device.otherChannel
+    ? (device.update?.channel ?? (device.version ? channelForVersion(device.version) : undefined)) === 'nightly'
+      ? 'Nightly'
+      : 'Stable'
+    : device.olderThanThis
+      ? 'Behind'
+      : device.newerThanThis
+        ? 'Newer'
+        : undefined
   if (!label) return undefined
   const runs = device.version
     ? `${device.name} runs ${device.version}${device.update ? ` (${device.update.channel})` : ''}`
@@ -214,7 +225,7 @@ export function versionTag(
 export function computersBehind(devices: readonly Device[]): Device[] {
   const seen = new Set<string>()
   return devices.filter((device) => {
-    if (device.self || device.revoked || device.kind === 'phone' || device.state !== 'open' || !device.olderThanThis)
+    if (device.self || device.revoked || device.kind === 'phone' || device.state !== 'open' || !device.olderThanThis || device.otherChannel)
       return false
     if (seen.has(device.node)) return false
     seen.add(device.node)

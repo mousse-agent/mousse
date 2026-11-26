@@ -116,6 +116,27 @@ function isChannel(value: unknown): value is UpdateChannel {
   return value === 'stable' || value === 'nightly'
 }
 
+/** How long the update report waits for a window to show before it is written anyway (a start with no window). */
+const REPORT_WITHOUT_WINDOW_MS = 30_000
+
+/** Resolves once the app's first window shows, or after `REPORT_WITHOUT_WINDOW_MS` when none does. */
+function firstWindowShown(): Promise<void> {
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer)
+      app.removeListener('browser-window-created', created)
+      resolve()
+    }
+    const created = (_event: unknown, window: BrowserWindow): void => {
+      window.once('show', done)
+    }
+    const timer = setTimeout(done, REPORT_WITHOUT_WINDOW_MS)
+    timer.unref?.()
+    if (BrowserWindow.getAllWindows().some((window) => !window.isDestroyed() && window.isVisible())) return done()
+    app.on('browser-window-created', created)
+  })
+}
+
 /** Creates the updater, registers its IPC and schedules the first check. */
 export function startDesktopUpdates(hooks: {
   /** The Mousse home: the background service there tells other computers whether this app updates itself. */
@@ -127,7 +148,7 @@ export function startDesktopUpdates(hooks: {
   // Every start of an installed AppImage keeps its launcher and icon current, updates or not.
   if (process.platform === 'linux' && app.isPackaged && process.env.APPIMAGE) syncLauncher(process.env.APPIMAGE)
   const disabledReason = updatesDisabledReason()
-  const report = hooks.home ? selfUpdateReporter(hooks.home) : undefined
+  const report = hooks.home ? selfUpdateReporter(hooks.home, { after: firstWindowShown() }) : undefined
   const updater = new DesktopUpdater({
     currentVersion: app.getVersion(),
     repositoryUrl: REPOSITORY_URL,

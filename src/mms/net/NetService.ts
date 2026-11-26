@@ -799,7 +799,7 @@ export class NetService {
             throw new NetError('bad_request')
           return params
         },
-        handle: async () => ({
+        handle: async (_params, context) => ({
           v: 1,
           version: mousseVersion(),
           platform: process.platform,
@@ -816,8 +816,8 @@ export class NetService {
           // `bridge.access.mine` is here, so a refusal of it is a refusal, not an older build.
           access: 1,
           // Its channel and whether it updates itself, so another computer can say how to update it. Absent: an
-          // older computer, which is never assumed either way.
-          ...(this.options.selfUpdate ? { update: this.options.selfUpdate() } : {})
+          // older computer, which is never assumed either way, and a caller this computer blocks.
+          ...(this.options.selfUpdate && !policy.isBlocked(context.caller.node) ? { update: this.options.selfUpdate() } : {})
         })
       })
       // What this computer lets the caller do here, for the caller's Settings, Devices. No family, so a blocked caller
@@ -4928,7 +4928,8 @@ export class NetService {
       // A build with no version has nothing to compare with, so it never calls a peer old. A
       // "too old to answer" verdict only counts for a device this one is allowed to ask.
       olderThanThis: standing === 'behind',
-      newerThanThis: standing === 'newer'
+      newerThanThis: standing === 'newer',
+      ...(standing === 'channel' ? { otherChannel: true } : {})
     }
   }
   /** Notes an open session with one of the user's own devices and asks it for its version. */

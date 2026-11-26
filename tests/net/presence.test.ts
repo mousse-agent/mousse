@@ -151,7 +151,8 @@ it('compares the version a peer reports with this device', async () => {
   await vi.waitFor(async () =>
     expect((await rowFor(nightly.b.net, nightly.authority)).version).toBe('0.1.3-nightly.20261022.17')
   )
-  expect((await rowFor(nightly.b.net, nightly.authority)).olderThanThis).toBe(true)
+  // Another channel: neither is simply behind.
+  expect(await rowFor(nightly.b.net, nightly.authority)).toMatchObject({ olderThanThis: false, newerThanThis: false, otherChannel: true })
 
   const newer = await pair(report('0.2.0'))
   await vi.waitFor(async () => expect((await rowFor(newer.b.net, newer.authority)).version).toBe('0.2.0'))
@@ -201,9 +202,15 @@ it('adds the update column to a presence table from an older build, keeping its 
 })
 
 it('calls a computer behind or newer only from versions it can read', () => {
-  const rows: Array<[{ version?: string; legacy: boolean } | undefined, string, 'behind' | 'newer' | undefined]> = [
+  const rows: Array<
+    [{ version?: string; legacy: boolean; update?: SelfUpdateReport } | undefined, string, 'behind' | 'newer' | 'channel' | undefined]
+  > = [
     [{ version: '0.1.1', legacy: false }, '0.1.3', 'behind'],
-    [{ version: '0.1.3-nightly.20261022.17', legacy: false }, '0.1.3', 'behind'],
+    [{ version: '0.1.2-nightly.20261022.17', legacy: false }, '0.1.3-nightly.20261101.2', 'behind'],
+    // Nightly and stable: another channel, whichever version is higher, by its version or by what it reports.
+    [{ version: '0.1.3-nightly.20261022.17', legacy: false }, '0.1.3', 'channel'],
+    [{ version: '0.1.1', legacy: false }, '0.1.3-nightly.20261022.17', 'channel'],
+    [{ version: '0.1.1', legacy: false, update: { channel: 'nightly', self: true } }, '0.1.3', 'channel'],
     [{ version: '0.2.0', legacy: false }, '0.1.3', 'newer'],
     [{ version: '0.1.3', legacy: false }, '0.1.3', undefined],
     // A computer that said no version, or nothing at all, is never behind.
@@ -211,8 +218,9 @@ it('calls a computer behind or newer only from versions it can read', () => {
     [undefined, '0.1.3', undefined],
     // Too old to answer at all is behind.
     [{ legacy: true }, '0.1.3', 'behind'],
-    // A development build compares with nothing.
-    [{ version: '0.1.1', legacy: false }, '0.0.0', undefined]
+    // A development build compares with nothing, on either side.
+    [{ version: '0.1.1', legacy: false }, '0.0.0', undefined],
+    [{ version: '0.0.0', legacy: false }, '0.1.3', undefined]
   ]
   for (const [row, current, standing] of rows) expect(versionStanding(row, current), JSON.stringify([row, current])).toBe(standing)
 })
