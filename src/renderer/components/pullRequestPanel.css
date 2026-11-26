@@ -639,6 +639,36 @@ button.pr-panel-line:hover {
   padding-left: 20px;
 }
 
+.pr-panel-markdown ul {
+  list-style: disc;
+}
+
+.pr-panel-markdown ol {
+  list-style: decimal;
+}
+
+.pr-panel-markdown li + li {
+  margin-top: 2px;
+}
+
+/* Headings in a remark: one step above the text, never page-sized. */
+.pr-panel-markdown h1,
+.pr-panel-markdown h2,
+.pr-panel-markdown h3,
+.pr-panel-markdown h4,
+.pr-panel-markdown h5,
+.pr-panel-markdown h6 {
+  margin: 12px 0 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.pr-panel-markdown h1,
+.pr-panel-markdown h2 {
+  font-size: 13.5px;
+}
+
 .pr-panel-markdown a {
   color: var(--accent);
   text-decoration: none;
