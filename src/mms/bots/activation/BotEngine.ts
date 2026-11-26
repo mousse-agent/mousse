@@ -19,7 +19,7 @@ import { tellingClass } from '../chat/telling'
 import { hasToolImages } from '../chat/toolImages'
 import { extractAppletParts } from '../../../shared/applets'
 import { pullRequestWakeEvent, threadWakeEvent, type WakePullRequestState } from '../wakeSources'
-import { WakeDetector } from '../../wakes/wakeDetector'
+import { WakeDetector, type WakeCheckOnly } from '../../wakes/wakeDetector'
 import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
@@ -956,10 +956,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // that fired is due now: the delivery timer is armed for it at once, not after pull requests still being read.
       fire: (wake, fired, at) => {
         if (!this.store.fireWake(wake.id, fired, new Date(at).toISOString())) return false
-        this.changed({ botId: wake.botId })
-        this.armDue()
+        this.reminderRetryAt.delete(wake.id)
+        try { this.changed({ botId: wake.botId }) } finally { this.armDue() }
         return true
       },
+      // Read past its deadline with nothing that happened by then: delivered now as given up (`deliverWake`).
+      expire: (wake) => { this.reminderRetryAt.delete(wake.id); this.armDue(); return true },
       now: () => this.now()
     })
     this.watchers = new BotWatchers({
@@ -10099,14 +10101,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * was closed. A fired wake is due now. `threadId`: only the wakes on that
    * thread (its run just ended). Every scheduler tick looks at all of them, so one missed while Mousse was off fires.
    */
-  async checkWakeEvents(now: Date = new Date(this.now()), only?: { threadId: string }): Promise<void> {
+  async checkWakeEvents(now: Date = new Date(this.now()), only?: WakeCheckOnly): Promise<void> {
     if (!this.startupPassed || this.closed) return
     await this.wakeEvents.check(only, now.getTime())
   }
 
-  /** A thread's run ended: the wakes waiting on that thread look now, not at the next tick. */
-  threadRunEnded(threadId: string): void {
-    void this.checkWakeEvents(new Date(this.now()), { threadId }).catch(() => {})
+  /** A thread's run ended (`ended`: its outcome, from its terminal event): the wakes waiting on that thread look now. */
+  threadRunEnded(threadId: string, ended?: WakeCheckOnly['ended']): void {
+    void this.checkWakeEvents(new Date(this.now()), { threadId, ...(ended ? { ended } : {}) }).catch(() => {})
     this.checkJobs(threadId)
   }
 
@@ -10275,6 +10277,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         for (const id of this.reminderRetryAt.keys()) if (this.store.reminder(id)?.status !== 'waiting') this.reminderRetryAt.delete(id)
         for (const reminder of this.store.dueReminders(now.toISOString())) {
           if ((this.reminderRetryAt.get(reminder.id) ?? 0) > now.getTime()) continue
+          // A wake whose pull request is being read waits for the read: what it shows may have happened by the deadline.
+          if (this.wakeEvents.isReading(reminder.id)) { this.reminderRetryAt.set(reminder.id, now.getTime() + REMINDER_RETRY_MS); continue }
           try {
             await this.deliverReminder(reminder, now)
             this.reminderRetryAt.delete(reminder.id)

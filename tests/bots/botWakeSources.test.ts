@@ -3,7 +3,7 @@
  * a pull request through the owner's project of that repository, and how a bot names a pull request.
  */
 import { describe, expect, it } from 'vitest'
-import { pullRequestStateOf, wakeThreadState, type WakeThreadDeps } from '../../src/mms/bots/wakeSources'
+import { pullRequestStateOf, pullRequestWakeHappened, wakeThreadState, type WakePullRequestState, type WakeThreadDeps } from '../../src/mms/bots/wakeSources'
 import { pullRequestOf } from '../../src/shared/bots/personal/wakes'
 
 describe('a thread as a wake sees it', () => {
@@ -30,7 +30,7 @@ describe('a thread as a wake sees it', () => {
 
 describe('a pull request through the owner\'s projects', () => {
   const projects = { '/work/app': 'Acme/App', '/work/site': 'acme/site', '/tmp/plain': null as string | null }
-  const read = (pull: (folder: string, number: number) => Promise<{ state: 'open' | 'closed' | 'merged'; title?: string }>) => ({
+  const read = (pull: (folder: string, number: number) => Promise<WakePullRequestState>) => ({
     folders: () => Object.keys(projects),
     repository: async (folder: string) => {
       const name = projects[folder as keyof typeof projects]
@@ -41,13 +41,31 @@ describe('a pull request through the owner\'s projects', () => {
   })
   it('reads it through the project of that repository, whatever the case of its name', async () => {
     const seen: string[] = []
-    const state = await pullRequestStateOf(read(async (folder, number) => { seen.push(`${folder}#${number}`); return { state: 'merged', title: 'Fix login' } }), 'acme/app', 12)
-    expect(state).toEqual({ state: 'merged', title: 'Fix login' })
+    const state = await pullRequestStateOf(read(async (folder, number) => { seen.push(`${folder}#${number}`); return { state: 'merged', title: 'Fix login', mergedAt: '2026-11-20T10:05:00Z', closedAt: '2026-11-20T10:05:00Z' } }), 'acme/app', 12)
+    expect(state).toEqual({ state: 'merged', title: 'Fix login', mergedAt: '2026-11-20T10:05:00Z', closedAt: '2026-11-20T10:05:00Z' })
     expect(seen).toEqual(['/work/app#12'])
   })
   it('says none when no project is that repository, and the host\'s words when the read fails', async () => {
     expect(await pullRequestStateOf(read(async () => ({ state: 'open' })), 'other/app', 1)).toEqual({ none: true })
     expect(await pullRequestStateOf(read(async () => { throw new Error('gh: not signed in') }), 'acme/site', 3)).toEqual({ problem: 'gh: not signed in' })
+  })
+})
+
+describe('when what a pull request wake waits for happened, by the host clock', () => {
+  const at = (iso: string) => Date.parse(iso)
+  const checks = (...completedAt: Array<string | undefined>) => completedAt.map((time, index) => ({ name: `c${index}`, state: 'passing' as const, ...(time ? { completedAt: time } : {}) }))
+  it.each<[string, 'merged' | 'checks' | 'review' | undefined, WakePullRequestState, number | undefined]>([
+    ['merged: its merge', undefined, { state: 'merged', mergedAt: '2026-11-20T10:05:00Z' }, at('2026-11-20T10:05:00Z')],
+    ['merged while it waited on checks: its merge', 'checks', { state: 'merged', mergedAt: '2026-11-20T10:05:00Z' }, at('2026-11-20T10:05:00Z')],
+    ['closed: its close', undefined, { state: 'closed', closedAt: '2026-11-20T10:06:00Z' }, at('2026-11-20T10:06:00Z')],
+    ['checks: the last to finish', 'checks', { state: 'open', headSha: 'abc1234', checkRuns: checks('2026-11-20T10:01:00Z', '2026-11-20T10:04:00Z') }, at('2026-11-20T10:04:00Z')],
+    ['checks with one of no time: none', 'checks', { state: 'open', headSha: 'abc1234', checkRuns: checks('2026-11-20T10:01:00Z', undefined) }, undefined],
+    ['review: when it was submitted', 'review', { state: 'open', reviews: [{ id: 'r1', state: 'approved', author: 'kim', submittedAt: '2026-11-20T10:03:00Z' }] }, at('2026-11-20T10:03:00Z')],
+    ['merged by an older host with no time: none', undefined, { state: 'merged' }, undefined]
+  ])('%s', (_name, on, read, expected) => {
+    const happened = pullRequestWakeHappened({ kind: 'pr', repo: 'acme/app', number: 12, ...(on ? { on } : {}), ...(on === 'review' ? { reviewAfter: { at: null, ids: [] } } : {}) }, read, '2026-11-20T10:00:00Z')
+    expect(happened).toBeDefined()
+    expect(happened!.at).toBe(expected)
   })
 })
 

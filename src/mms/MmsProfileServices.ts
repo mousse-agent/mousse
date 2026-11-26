@@ -1683,11 +1683,15 @@ export class MmsProfileServices {
         return () => { this.orchestrator.off('run-event', handler) }
       }
     })
-    // A bot's wakes on a thread look when its run ends or it is archived, not only at the next tick.
+    // A bot's wakes on a thread look when its run ends or it is archived, not only at the next tick. The run's end is
+    // told before its turn lets go of the thread, and its next run may start at once: the wakes take the outcome from
+    // this event, not from how the thread stands.
     this.orchestrator.on('run-event', (event: ThreadEvent) => {
-      if (event.type !== 'run.status' || !TERMINAL_RUN_STATUSES.has((event.payload as RunRecord).status)) return
-      this.personalBots?.threadRunEnded(event.threadId)
-      this.threadWakes.threadRunEnded(event.threadId)
+      const run = event.payload as RunRecord
+      if (event.type !== 'run.status' || !TERMINAL_RUN_STATUSES.has(run.status)) return
+      const ended = { status: run.status, ...(run.completedAt ? { endedAt: run.completedAt } : {}) }
+      this.personalBots?.threadRunEnded(event.threadId, ended)
+      this.threadWakes.threadRunEnded(event.threadId, ended)
     })
     this.orchestrator.on('thread-archived', (payload: { threadId: string }) => {
       this.personalBots?.threadRunEnded(payload.threadId)

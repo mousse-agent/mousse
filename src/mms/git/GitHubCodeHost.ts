@@ -288,7 +288,8 @@ export function parseCheckRuns(rollup: unknown): PullRequestCheck[] {
     const name = text(item.name) || text(item.context) || 'Check'
     const url = text(item.detailsUrl) || text(item.targetUrl)
     const workflowName = text(item.workflowName)
-    checks.push({ name, state: checkItemState(item), url: url || null, ...(workflowName ? { workflowName } : {}) })
+    const completedAt = text(item.completedAt)
+    checks.push({ name, state: checkItemState(item), url: url || null, ...(workflowName ? { workflowName } : {}), ...(completedAt && !completedAt.startsWith('0001-') ? { completedAt } : {}) })
   }
   return checks
 }

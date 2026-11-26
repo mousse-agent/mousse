@@ -120,6 +120,14 @@ describe('parseCheckRuns', () => {
     ])
   })
 
+  it('keeps when a check run finished, by the host clock, and no time for one still running', () => {
+    expect(parseCheckRuns([
+      { __typename: 'CheckRun', name: 'build', status: 'COMPLETED', conclusion: 'SUCCESS', completedAt: '2026-11-20T10:05:00Z' },
+      { __typename: 'CheckRun', name: 'test', status: 'IN_PROGRESS', conclusion: '', completedAt: '0001-01-01T00:00:00Z' },
+      { __typename: 'StatusContext', context: 'ci/a', state: 'SUCCESS' }
+    ]).map((check) => [check.name, check.completedAt])).toEqual([['build', '2026-11-20T10:05:00Z'], ['test', undefined], ['ci/a', undefined]])
+  })
+
   it('is empty without checks', () => {
     expect(parseCheckRuns([])).toEqual([])
     expect(parseCheckRuns(null)).toEqual([])
