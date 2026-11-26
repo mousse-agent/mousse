@@ -4,7 +4,7 @@
  * runs may ask the owner to set up computer use (`computer_use_request`).
  */
 import { afterEach, expect, it } from 'vitest'
-import { botFixture, createBot, start, type BotFixture } from './botFixture'
+import { botFixture, createBot, start, type BotFixture, startSubagent, subagentRuns } from './botFixture'
 
 let f: BotFixture
 afterEach(() => f?.close())
@@ -20,8 +20,7 @@ it("is set for the work the owner's chat message started, and for nothing else",
   const run = await start(f, work.workId)
   expect(run.prepared.authority.ownerRequested).toBe(true)
   await run.prepared.authority.subagents!.start({ title: 'Look', brief: 'Find the file' })
-  const subagent = f.store.dispatches(work.workId).find((row) => row.kind === 'subagent')!
-  expect((await start(f, work.workId, subagent.n)).prepared.authority.ownerRequested).toBeUndefined()
+  expect((await startSubagent(f, subagentRuns(f, work.workId)[0]!)).prepared.authority.ownerRequested).toBeUndefined()
 
   const manual = await f.bots.activate({ botId, input: 'Export the logo', clientRequestId: 'manual' })
   expect((await start(f, manual.id)).prepared.authority.ownerRequested).toBeUndefined()

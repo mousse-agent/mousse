@@ -51,4 +51,6 @@ export interface RelayAdmission {
 /** The registry's admission step, as the relay handler uses it. */
 export interface RelayAdmitter {
   admit(rawArgs: Record<string, unknown>, request: McpCallRequest): Promise<RelayAdmission>
+  /** `ToolRegistry.ceilingNow`: a ceiling narrowed by what is above the thread now, read again once an approval came back. */
+  ceilingNow?(threadId: string, ceiling: McpCaller['modeCeiling']): McpCaller['modeCeiling']
 }

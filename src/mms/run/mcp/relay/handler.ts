@@ -94,15 +94,16 @@ export class RelayHandler {
    */
   async call(name: string, rawArgs: Record<string, unknown>, request: McpCallRequest): Promise<ToolOutcome> {
     const { credential } = request
-    const { threadId, active, turn, args } = await this.host.registry.admit(rawArgs, request)
+    const { threadId, active, turn, args, caller } = await this.host.registry.admit(rawArgs, request)
     const grant = credential.relay
     if (!grant) throw unknownTool(name)
     // A bot's turn: its grant decides, on every call, before the server sees anything; nobody is asked.
     if (turn.bot) return this.callForBot(turn.bot, name, args, active, request, turn.toolImages === true)
     if (turn.definition) throw new McpToolError('mousse_scope_denied', 'A definition run cannot call relayed MCP tools.')
     if (this.host.readOnlyThread?.(threadId)) throw new McpToolError('mousse_read_only', `${name} is a relayed MCP tool; a read-only subagent cannot call it.`)
-    if (turn.modeCeiling === 'plan' || credential.modeCeiling === 'plan')
-      throw new McpToolError('mousse_ceiling_exceeded', `${name} is a relayed MCP tool, whose effects are unknown; a plan ceiling cannot call it.`)
+    // The caller's ceiling is the credential's narrowed by what is above the thread now (`ToolRegistry.admit`): a thread
+    // above that switched to Plan holds this call to Plan too.
+    if (turn.modeCeiling === 'plan' || caller.modeCeiling === 'plan') throw planCeiling(name)
     const tool = this.host.catalog.resolve(this.host.projectPathFor(threadId), name)
     if (!tool) throw unknownTool(name)
     const allowed = await this.host.manager.isToolCallAllowed(tool.providerName, turn.projectPath, turn.actor)
@@ -115,6 +116,8 @@ export class RelayHandler {
         if (turn.approvals === 'never') return { text: APPROVALS_REFUSED_MESSAGE, isError: true }
         const refusal = await this.askBeforeRunning(threadId, tool, args, turn.projectPath, request)
         if (refusal) return refusal
+        // Asking took time: a thread above that switched to Plan while the person answered holds the call to Plan.
+        if (this.host.registry.ceilingNow?.(threadId, credential.modeCeiling) === 'plan') throw planCeiling(name)
       }
     }
 
@@ -193,6 +196,10 @@ export class RelayHandler {
       return rejected
     }
   }
+}
+
+function planCeiling(name: string): McpToolError {
+  return new McpToolError('mousse_ceiling_exceeded', `${name} is a relayed MCP tool, whose effects are unknown; a plan ceiling cannot call it.`)
 }
 
 function unknownTool(name: string): McpToolError {

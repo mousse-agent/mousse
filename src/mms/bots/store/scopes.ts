@@ -70,6 +70,21 @@ export class BotSpendScope implements SpendScope {
   }
 
   reserve(request: SpendRequest, limits: SpendLimits): ReserveResult {
+    return this.reserveAs(`bs_${randomUUID()}`, request, limits)
+  }
+
+  /**
+   * A reservation under the fixed id `id`, made once: a second call with the same id answers what the first made (a
+   * refused one is tried again). How a work holds room for a subagent before it runs, settled by the same id.
+   */
+  hold(id: string, request: SpendRequest, limits: SpendLimits = {}): ReserveResult {
+    return this.store.db.transaction((): ReserveResult => {
+      const held = this.store.get('SELECT wire_cap FROM bot_spend_reservations WHERE id = ? AND activation_id = ?', id, this.activationId)
+      return held ? { ok: true, id, cap: Number(held.wire_cap) } : this.reserveAs(id, request, limits)
+    })
+  }
+
+  private reserveAs(id: string, request: SpendRequest, limits: SpendLimits): ReserveResult {
     return this.store.db.transaction((): ReserveResult => {
       const row = this.store.get('SELECT * FROM bot_spend WHERE activation_id = ?', this.activationId)
       const own = this.ownLimits()
@@ -92,7 +107,6 @@ export class BotSpendScope implements SpendScope {
       })
       const granted = ledger.reserve(request, effective)
       if (!granted.ok) return granted
-      const id = `bs_${randomUUID()}`
       const usd = request.inputBound * request.price.input + granted.cap * request.price.output
       this.store.run(
         'INSERT INTO bot_spend_reservations(id, activation_id, run_id, input_bound, wire_cap, usd_micros, cost_limited, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)',

@@ -19,7 +19,7 @@ import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors
 import type { CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
-import { botFixture, createBot, start, type BotFixture } from './botFixture'
+import { botFixture, createBot, start, type BotFixture, startSubagent, subagentRuns } from './botFixture'
 
 const dirs: string[] = []
 const tempDir = (prefix: string) => {
@@ -104,7 +104,7 @@ describe('a subagent on another runtime, through the real drivers', () => {
     f.store.putOverlay(activation.id, `once-shell-${id}`, { tool: 'shell' })
     return { id: activation.id, ...(await start(f, activation.id)) }
   }
-  const lastSubagent = (activationId: string) => f.store.dispatches(activationId).filter((dispatch) => dispatch.kind === 'subagent').at(-1)!.n
+  const lastSubagent = (activationId: string) => subagentRuns(f, activationId).at(-1)!
 
   it('the drivers say how they hold a bot here: Claude Code in its sandbox on macOS, Codex with its search off without the web', () => {
     expect(harness.botHold('claude')).toEqual({ runtime: 'claude', sandbox: 'available' })
@@ -116,7 +116,7 @@ describe('a subagent on another runtime, through the real drivers', () => {
     const job = await work('w1', CLAUDE)
     expect(job.prepared.policy.tools!.allow).toContain('Bash')
     expect(await job.prepared.authority.subagents!.start({ title: 'Build', brief: 'Run the build.', model: on(CODEX, 'Codex', 'GPT-5.5') })).not.toHaveProperty('lacks')
-    const child = await start(f, job.id, lastSubagent(job.id))
+    const child = await startSubagent(f, lastSubagent(job.id))
     expect(child.prepared.selection).toEqual(CODEX)
     expect(child.prepared.policy.tools!.allow).toContain('commandExecution')
     expect(child.prepared.policy.tools!.allow).not.toContain('Bash')
@@ -126,7 +126,7 @@ describe('a subagent on another runtime, through the real drivers', () => {
   it('work on Codex, a subagent on Claude Code: compiled with Claude Code\'s names, without Bash, which Claude Code\'s sandbox on macOS holds less tightly', async () => {
     const job = await work('w1', CODEX)
     expect(await job.prepared.authority.subagents!.start({ title: 'Build', brief: 'Run the build.', model: on(CLAUDE, 'Claude Code', 'Sonnet') })).toMatchObject({ lacks: ['run commands'] })
-    const child = await start(f, job.id, lastSubagent(job.id))
+    const child = await startSubagent(f, lastSubagent(job.id))
     expect(child.prepared.selection).toEqual(CLAUDE)
     expect(child.prepared.policy.tools!.allow).toContain('Read')
     expect(child.prepared.policy.tools!.allow).not.toContain('Bash')

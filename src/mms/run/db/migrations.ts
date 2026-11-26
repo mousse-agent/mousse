@@ -791,6 +791,8 @@ ALTER TABLE delegations ADD COLUMN root_activation_id TEXT;
 ALTER TABLE delegations ADD COLUMN bot_access TEXT;
 ALTER TABLE delegations ADD COLUMN bot_read_only INTEGER;
 CREATE INDEX delegations_by_root_activation ON delegations(root_activation_id) WHERE root_activation_id IS NOT NULL;
+-- A run's delegation by its child run: read when any delegated run ends (whether a bot's subagent did).
+CREATE INDEX delegations_child_run ON delegations(child_run_id);
 `
   }
 ]

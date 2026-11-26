@@ -352,6 +352,9 @@ export class BotActions {
     const action = this.forWork(activationId)
     if (!action) return undefined
     const dispatchId = JSON.parse(action.call_key)[1]
+    // A work subagent's call is keyed by its child run (`sub:<childRunId>`); its turn is the main dispatch it started from.
+    if (typeof dispatchId === 'string' && dispatchId.startsWith('sub:'))
+      return this.host.store.subagentRun(activationId, dispatchId.slice('sub:'.length))?.mainN === mainN ? action : undefined
     const dispatch = this.host.store.dispatches(activationId).find(d => d.clientRequestId === dispatchId)
     return dispatch && (dispatch.n === mainN || dispatch.mainN === mainN) ? action : undefined
   }

@@ -8,7 +8,7 @@ import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreErro
 import { inheritedAgentHops } from './agentHops'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
-import { deliverBotResults, type BotExecutionPort } from './delegation/botPort'
+import { deliverBotResults, withoutBotParentRows, type BotExecutionPort } from './delegation/botPort'
 import { RemoteLaunchRecords } from './delegation/remoteLaunches'
 import { RemoteSubagentRecords } from './delegation/remoteSubagents'
 import { RemoteExpiryRecords } from './delegation/remoteExpiry'
@@ -1156,6 +1156,30 @@ un_time_limits). */
   }
 
   /**
+   * When the daemon that ran `run` was last known alive, for a run a restart cut off (`interruptedBy: 'daemon_restart'`, or
+   * `uncertain` with a tool in flight at a crash):
+   * its daemon's last heartbeat (a clean end writes one), or the run's own when later. The boot after a crash ends such a
+   * run at the boot's time, which counts the downtime as running; this does not. Undefined for any other run.
+   */
+  lastAliveAt(run: Pick<RunRecord, 'status' | 'outcome' | 'startedAt' | 'heartbeatAt'>): string | undefined {
+    const cutOff = (run.status === 'interrupted' && run.outcome?.interruptedBy === 'daemon_restart') || (run.status === 'uncertain' && run.outcome?.uncertainReason === 'non_idempotent_tool_in_flight')
+    if (!cutOff || !run.startedAt) return undefined
+    const row = this.store.db.statement('SELECT heartbeat_at FROM daemon_epochs WHERE started_at <= ? ORDER BY epoch DESC LIMIT 1').get(run.startedAt)
+    const daemon = row ? String(row.heartbeat_at) : undefined
+    const latest = [daemon, run.heartbeatAt ?? undefined].filter((at): at is string => Boolean(at)).sort().at(-1)
+    return latest ?? run.startedAt
+  }
+
+  /** `deliverBotResults` after a command committed: a failure leaves the rows pending for the next pass. */
+  private deliverBotResultsSafely(): void {
+    try {
+      this.deliverBotResults()
+    } catch (error) {
+      console.warn('[run-engine] bot subagent results could not be delivered now; they stay pending', { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
    * The effect worker's `cancelInFlight`, so a cancel can abort a `turn.start` that is already
    * claimed (provisioning its workspace) before it reaches the provider.
    */
@@ -1279,10 +1303,15 @@ un_time_limits). */
         this.delegations.setStatus({ delegationId: delegation.delegationId, from: 'running', to: 'cancelled', completedAt: now })
       }
 
-      // Nothing in the subtree is woken afterwards; a result already published keeps its delegation row.
+      // Nothing in the subtree is woken afterwards; a result already published keeps its delegation row. A bot
+      // subagent's end is the bot port's to deliver: it stays pending here and is handed over once this commits
+      // (`deliverBotResults`), acknowledged only after the bots recorded it.
       const acknowledgedRows: string[] = []
+      let botRows = false
       for (const id of threads) {
-        const rows = [...this.inbox.listByStatus(id, 'pending'), ...this.inbox.listByStatus(id, 'delivered')]
+        const listed = [...this.inbox.listByStatus(id, 'pending'), ...this.inbox.listByStatus(id, 'delivered')]
+        const rows = withoutBotParentRows(this.store, listed)
+        if (rows.length !== listed.length) botRows = true
         this.inbox.markAcknowledged(rows.map((row) => row.inboxId))
         acknowledgedRows.push(...rows.map((row) => row.inboxId))
         cancelAcknowledgedWakes(this.store, this.outbox, now, id)
@@ -1342,6 +1371,7 @@ un_time_limits). */
         })
       this.putStopReceipt(key, commandKind, threadId, stopped)
       for (const run of activeRuns) this.store.db.afterCommit(() => this.emit('stop-requested', run))
+      if (botRows) this.store.db.afterCommit(() => this.deliverBotResultsSafely())
       return stopped
     })
     this.cancelInFlight(claimed)

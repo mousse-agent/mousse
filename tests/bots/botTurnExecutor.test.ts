@@ -56,6 +56,8 @@ beforeEach(() => {
     ownerOf: (threadId) => (threadId.startsWith('bot-') ? 'Site editor' : undefined)
   }
   orch.setBotDispatcher(dispatcher)
+  // The bots' port, as the profile attaches it beside the dispatcher: without one every bot turn is cancelled.
+  engine.setBotPort({ authorizeSubagent: () => ({ ok: true }), reserveSubagent: () => {}, onSubagentSettled: () => true })
 })
 
 afterEach(() => {

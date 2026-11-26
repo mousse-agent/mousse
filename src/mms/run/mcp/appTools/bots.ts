@@ -225,8 +225,8 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'subagent_send',
-    description: 'Give a subagent that has finished more work, by its title: it carries on in its own thread with what it already did, and you are told when it finishes.',
-    parameters: Type.Object({ subagent: Type.String({ description: 'Its title.' }), message: Type.String({ description: 'What to do next, standing on its own.' }) })
+    description: 'Send one of your subagents a message, by its title. One that has finished takes it as more work: it carries on in its own thread with what it already did, and you are told when it finishes. One still working takes it in at its next step, to correct or add to what it does.',
+    parameters: Type.Object({ subagent: Type.String({ description: 'Its title.' }), message: Type.String({ description: 'What to do next, or what changed, standing on its own.' }) })
   },
   {
     name: 'subagent_wait',
@@ -1452,7 +1452,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
     }),
     subagentTool(byName.get('subagent_send')!, {
       class: 'mutation',
-      describe: () => 'Give a subagent more work',
+      describe: () => 'Send a subagent a message',
       handler: async (args, ctx) => {
         const subagents = ctx.turn.bot?.subagents
         if (!subagents) return error(SUBAGENTS_WORK_ONLY)

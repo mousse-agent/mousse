@@ -521,6 +521,7 @@ CREATE TABLE bot_subagent_runs(
   outcome TEXT CHECK(outcome IN ('done','failed','stopped')),
   why TEXT,
   delivered_at TEXT,
+  told_at TEXT,
   child_pid INTEGER,
   child_group INTEGER,
   child_token TEXT,
@@ -1256,6 +1257,11 @@ export interface BotSubagentRunRow {
   outcome: 'done' | 'failed' | 'stopped' | null
   why: string | null
   deliveredAt: string | null
+  /**
+   * When its work was told it ended: its running turn took the notice in, it read it (`subagent_result`, `subagent_wait`),
+   * or a continuation of the work carried it. Null while delivered but untold, so a crash never loses the notice.
+   */
+  toldAt: string | null
 }
 
 function subagentRunOf(row: Row): BotSubagentRunRow {
@@ -1272,7 +1278,8 @@ function subagentRunOf(row: Row): BotSubagentRunRow {
     chargedAt: str(row.charged_at),
     outcome: row.outcome === 'done' || row.outcome === 'failed' || row.outcome === 'stopped' ? row.outcome : null,
     why: str(row.why),
-    deliveredAt: str(row.delivered_at)
+    deliveredAt: str(row.delivered_at),
+    toldAt: str(row.told_at)
   }
 }
 
@@ -1764,9 +1771,28 @@ export class BotStore {
     })
   }
 
-  /** Its end, as its work hears it, recorded once; true when this call recorded it (a repeat is recorded already). */
-  recordSubagentDelivery(activationId: string, childRunId: string, outcome: 'done' | 'failed' | 'stopped', why: string | null): boolean {
-    return this.run('UPDATE bot_subagent_runs SET outcome = ?, why = ?, delivered_at = ? WHERE activation_id = ? AND child_run_id = ? AND delivered_at IS NULL', outcome, why, this.now(), activationId, childRunId) > 0
+  /**
+   * Its end, as its work hears it, recorded once; true when this call recorded it (a repeat is recorded already). `told`:
+   * its work needs no word of it (it stopped the subagent itself).
+   */
+  recordSubagentDelivery(activationId: string, childRunId: string, outcome: 'done' | 'failed' | 'stopped', why: string | null, told = false): boolean {
+    const now = this.now()
+    // A continuation may have told the work already, before the run database handed the end over: that stays told.
+    return this.run('UPDATE bot_subagent_runs SET outcome = ?, why = ?, delivered_at = ?, told_at = COALESCE(told_at, ?) WHERE activation_id = ? AND child_run_id = ? AND delivered_at IS NULL', outcome, why, now, told ? now : null, activationId, childRunId) > 0
+  }
+
+  /** A work's subagent turns that ended and were recorded, but that it has not been told of yet, oldest first. */
+  untoldSubagentRuns(activationId: string): BotSubagentRunRow[] {
+    return this.all('SELECT * FROM bot_subagent_runs WHERE activation_id = ? AND delivered_at IS NOT NULL AND told_at IS NULL ORDER BY delivered_at, rowid', activationId).map(subagentRunOf)
+  }
+
+  /** Its work was told these subagent turns ended (`untoldSubagentRuns`). */
+  markSubagentsTold(activationId: string, childRunIds: readonly string[]): void {
+    if (!childRunIds.length) return
+    const now = this.now()
+    this.db.transaction(() => {
+      for (const childRunId of childRunIds) this.run('UPDATE bot_subagent_runs SET told_at = ? WHERE activation_id = ? AND child_run_id = ? AND told_at IS NULL', now, activationId, childRunId)
+    })
   }
 
   // -- Dispatches ------------------------------------------------------------------------------

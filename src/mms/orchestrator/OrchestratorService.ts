@@ -6968,8 +6968,10 @@ export class OrchestratorService extends EventEmitter {
       dispatcher?.settle(payload, {})
     }
     if (!dispatcher) return cancel('bots_unavailable')
-    // A work subagent's turn runs only through the bot port, which reserves and settles it: without one it fails closed.
-    if (payload.delegationId !== undefined && !engine.botPort) return cancel('bot_port_missing')
+    // Every bot turn runs only through the bot port (a main turn, a consult, a continuation recovered at startup, a work
+    // subagent): the port reserves, settles and delivers what the turn starts. Without one it fails closed, before the
+    // bots prepare anything.
+    if (!engine.botPort) return cancel('bot_port_missing')
     const session = this.getOrCreateSession(payload.threadId)
     // A continuation can be sent while the walled turn is still letting go of the thread: wait for
     // it (briefly) before anything is prepared, so no time is charged to a turn that cannot start.
@@ -15869,12 +15871,16 @@ export class OrchestratorService extends EventEmitter {
       })
       if (handoffs) this.recordHandoffMarkers(session, handoffs, switchMarker, turnId, selectedModel)
       turnTimingMark(session.threadId, 'handoffs')
+      // A bot's subagent is checked again now that its runtime is set up: a grant narrowed or a work ended meanwhile
+      // fails it before it binds, and it binds to the policy compiled now, never the one captured before.
+      const botNow = opts?.bot?.beforeBind?.()
+      if (botNow && 'refused' in botNow) throw new AppError({ code: botNow.code, message: botNow.refused, errorInfo: { category: 'unavailable', retryable: false } })
       // The attempt's immutable binding; a retry of the same run keeps the one it already has.
       const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, () => opts?.origin ?? this.turnOrigin(session.threadId, request.workflowInvocationId), {
         permissionMode: this.requestedPermissionMode(session.threadId, this.limitedByJob(this.limitedByContinuation(opts?.permissionMode, engineRunId, session.threadId), opts?.schedule)),
         cwd: opts?.bot ? opts.bot.scratch : session.projectCwd,
         ...this.turnApprovals(session.threadId, engineRunId, opts)
-      }, opts?.bot?.policy)
+      }, botNow?.policy ?? opts?.bot?.policy)
       turnTimingMark(session.threadId, 'bind')
       // Every runtime owns its loop, context and tools and receives prior turns as a prompt preamble.
       const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
