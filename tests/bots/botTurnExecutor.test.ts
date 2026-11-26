@@ -116,6 +116,23 @@ describe('a prepared bot turn', () => {
   const session = (threadId = 'bot-thread') => (orch as unknown as { getOrCreateSession(threadId: string): Session }).getOrCreateSession(threadId)
   const old = () => createNativeContext([{ role: 'user', content: 'ZEBRA-7731', timestamp: 0 } as never])
 
+  it.each([
+    ['its main turn', 1],
+    ['a continuation recovered at startup', 2]
+  ] as const)('without the bot port, %s is cancelled before the bots prepare anything, and never runs', async (_name, dispatchN) => {
+    const prepareSpy = vi.fn(prepare())
+    orch.setBotDispatcher({ prepare: prepareSpy, settle: (payload, outcome) => { settled.push({ payload, outcome }) }, ownerOf: () => 'Site editor' })
+    engine.setBotPort(null)
+    const sent = await engine.sendWithStart({ kind: 'send', threadId: 'bot-thread', clientRequestId: `bot-thread:d${dispatchN}`, source: 'bot' },
+      (runId): BotTurnPayload => ({ kind: 'bot', runId, threadId: 'bot-thread', activationId: 'act-1', dispatchN }))
+    if (sent.status !== 'accepted') throw new Error('rejected')
+    await execute(outbox.listForRun(sent.runId).find((effect) => effect.kind === 'turn.start')!)
+    expect(prepareSpy).not.toHaveBeenCalled()
+    expect(runTurn).not.toHaveBeenCalled()
+    expect(engine.getRun(sent.runId)).toMatchObject({ status: 'cancelled', outcome: { error: 'bot_port_missing' } })
+    expect(settled.map((entry) => entry.payload.runId)).toEqual([sent.runId])
+  })
+
   it('runs as a bot turn on the activation thread, and settles with the final message', async () => {
     orch.setBotDispatcher({ prepare: prepare(), settle: (payload, outcome) => { settled.push({ payload, outcome }) }, ownerOf: () => 'Site editor' })
     runTurn.mockImplementation(async () => ({ message: 'Footer fixed.', actions: [] }))

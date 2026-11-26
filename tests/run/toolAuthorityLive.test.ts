@@ -39,6 +39,35 @@ function registryFor(options: { liveCeiling?: (threadId: string) => ModeCeiling 
 }
 
 describe('narrowing from above', () => {
+  it.each([
+    ['a thread above switched to Plan while the person answered: refused as taken away, and its handler never runs', 'plan', false],
+    ['nothing changed while it asked: the approved call runs', undefined, true]
+  ] as const)('a call that asked first: %s', async (_name, after, runs) => {
+    let above: ModeCeiling | undefined
+    let ran = 0
+    const turns = new AppToolTurns()
+    turns.register(appTurn({ threadId: 'child', runId: 'run-child' }))
+    const registry = new ToolRegistry({
+      activeRunId: (threadId) => `run-${threadId}`,
+      turns,
+      permissionModeFor: () => 'ask',
+      liveCeiling: () => above,
+      // The person answers; meanwhile the thread above changed (or did not).
+      askApproval: async () => {
+        above = after
+        return { permission: 'allow' }
+      }
+    }).register(tool('settings', 'changesSettings', { handler: () => { ran += 1; return { text: 'ok' } } }))
+    const outcome = registry.call('settings', {}, {
+      credential: { threadId: 'child', runId: 'run-child', provider: 'codex', modeCeiling: 'default', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
+      toolCallId: 'c',
+      signal: new AbortController().signal
+    })
+    if (runs) await expect(outcome).resolves.toMatchObject({ text: 'ok' })
+    else expect(await denied(outcome)).toMatchObject({ refused: { code: 'revoked', lacks: 'settings' } })
+    expect(ran).toBe(runs ? 1 : 0)
+  })
+
   it('a parent switching to Plan narrows its running child at the next call, with the credential minted before', async () => {
     let above: ModeCeiling | undefined
     const { registry, call, turn } = registryFor({ liveCeiling: () => above })
