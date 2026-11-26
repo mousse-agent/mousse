@@ -20,7 +20,7 @@ vi.mock('../../src/renderer/dictation/useDictation', () => ({
   useDictation: () => ({ isRecording: false, recordingPending: false, transcribing: false, recordingDuration: 0, levels: null, error: undefined, dismissError: () => {}, notice: null, start: () => {}, stop: () => {}, cancel: () => {} })
 }))
 
-const NORMAL_PLACEHOLDER = 'Ask anything · @ files · / commands'
+const NORMAL_PLACEHOLDER = 'Ask anything · / commands and skills · @ files'
 
 let root: Root
 let host: HTMLElement
