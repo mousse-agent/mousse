@@ -26,7 +26,8 @@ async function main() {
   await app.whenReady()
   app.dock?.hide()
   const window = new BrowserWindow({ show: false, width: 1000, height: 800, useContentSize: true, webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } })
-  await window.loadURL('data:text/html,<!doctype html><title>host</title>')
+  // The host page records the real wheel input it receives, as the conversation under an applet would.
+  await window.loadURL('data:text/html,' + encodeURIComponent('<!doctype html><title>host</title><body style="margin:0;height:4000px"><script>window.wheels=[];addEventListener("wheel",(e)=>{if(e.isTrusted)wheels.push({deltaY:e.deltaY,x:e.clientX,y:e.clientY,ctrl:e.ctrlKey})})</script>'))
   window.show()
   const events: AppletRuntimeEvent[] = []
   const manager = new AppletRuntimeManager(window, (event) => events.push(event))
@@ -65,13 +66,15 @@ async function main() {
       if (setup) await wheel.executeJavaScript(setup)
       await delay(50)
       const at = await centre(id)
-      const from = events.length
+      await window.webContents.executeJavaScript('wheels.length=0;scrollTo(0,0)')
       // Electron's wheel delta follows the legacy wheel sign: negative scrolls down.
       wheel.sendInputEvent({ type: 'mouseWheel', ...at, deltaX: 0, deltaY: down ? -120 : 120, canScroll: true, modifiers })
       await delay(250)
-      const forwarded = events.slice(from).filter((event) => event.runtimeId === 'wheel' && event.type === 'wheel').map((event) => (event.payload as { deltaY: number }).deltaY)
+      const host = (await window.webContents.executeJavaScript('({wheels:wheels.slice(),top:scrollY})')) as { wheels: Array<{ deltaY: number; x: number; y: number; ctrl: boolean }>; top: number }
+      const forwarded = host.wheels.map((entry) => entry.deltaY)
+      const inside = host.wheels.every((entry) => entry.x === at.x && entry.y === at.y && !entry.ctrl)
       const scrolled = await wheel.executeJavaScript(`({box:document.getElementById('box').scrollTop,contain:document.getElementById('contain').scrollTop,root:document.scrollingElement.scrollTop})`)
-      return { forwarded, scrolled }
+      return { forwarded, inside, hostTop: host.top, scrolled }
     }
     evidence.wheel = {
       body: await turn('top', true),

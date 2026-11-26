@@ -18,11 +18,7 @@ export function appletFrameHeight(reported: unknown): number | null {
 export interface AppletIdentity { threadId: string; appletId: string; revisionId: string }
 export interface AppletMountRequest extends AppletIdentity { sourceHash: string; title?: string; description?: string; bounds: AppletBounds; clip: AppletBounds; appearance?:AppletAppearance }
 export interface AppletLayoutRequest { runtimeId: string; bounds: AppletBounds; clip: AppletBounds; visible?: boolean }
-/**
- * `wheel`: a wheel turn over the applet that nothing in it could scroll, in CSS pixels (`deltaY`), for the host to
- * scroll the conversation with. `discrete` marks a notched mouse wheel step, which the host eases like a native one.
- */
-export interface AppletUiEvent { runtimeId: string; type: 'ready' | 'resize' | 'error' | 'conversation-input' | 'state-changed' | 'visual-changed' | 'released' | 'wheel'; height?: number; message?: string; text?: string; deltaY?: number; discrete?: boolean }
+export interface AppletUiEvent { runtimeId: string; type: 'ready' | 'resize' | 'error' | 'conversation-input' | 'state-changed' | 'visual-changed' | 'released'; height?: number; message?: string; text?: string }
 export interface AppletApi {
   get(input: AppletIdentity): Promise<AppletBundle>
   mount(input: AppletMountRequest): Promise<{runtimeId: string}>

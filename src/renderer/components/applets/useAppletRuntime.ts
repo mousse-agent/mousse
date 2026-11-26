@@ -3,7 +3,6 @@ import { flushSync } from 'react-dom'
 import type { AppletReference } from '../../../shared/applets'
 import { readAppletAppearance, subscribeAppletAppearance } from './appearance'
 import { subscribeAppletScroll } from './scrollPresentation'
-import { forwardAppletWheel } from './wheelForward'
 import { appletHostBlocked, appletHostShown, appletUncoveredClip, subscribeAppletHostVisibility, type ScreenRect } from './hostVisibility'
 import { appletHeightKey, rememberAppletHeight, rememberedAppletHeight } from './appletHeights'
 import type { AppletUiEvent } from '../../../shared/appletRuntime'
@@ -273,12 +272,7 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     document.addEventListener('visibilitychange', schedule)
     const receive = (event: AppletUiEvent) => {
       if (event.runtimeId !== runtime.current) {
-        if (mounting && !runtime.current && early.length < 32 && event.type !== 'wheel') early.push(event)
-        return
-      }
-      // A wheel turn the applet could not use scrolls the conversation it sits in; the side panel's stage does not scroll.
-      if (event.type === 'wheel') {
-        if (scroller && typeof event.deltaY === 'number') forwardAppletWheel(scroller, node, event.deltaY, event.discrete === true)
+        if (mounting && !runtime.current && early.length < 32) early.push(event)
         return
       }
       if (event.type === 'released') {

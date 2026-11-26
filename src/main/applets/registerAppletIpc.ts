@@ -41,8 +41,7 @@ export function registerAppletIpc(register:Register, gui:GuiMmsController, allow
         return
       }
       const result:AppletUiEvent={runtimeId:eventData.runtimeId,type:eventData.type==='conversation-input'?'conversation-input':eventData.type,
-        ...(eventData.type==='resize'?{height:Number(eventData.payload)}:{}),...(eventData.type==='error'?{message:String(eventData.payload)}:{}),...(eventData.type==='conversation-input'?{text:String(eventData.payload)}:{}),
-        ...(eventData.type==='wheel'?{deltaY:Number((eventData.payload as {deltaY:number}).deltaY),discrete:(eventData.payload as {discrete:boolean}).discrete===true}:{})}
+        ...(eventData.type==='resize'?{height:Number(eventData.payload)}:{}),...(eventData.type==='error'?{message:String(eventData.payload)}:{}),...(eventData.type==='conversation-input'?{text:String(eventData.payload)}:{})}
       win.webContents.send('applets:event',result)
     })
     owners.set(event.sender.id,value)

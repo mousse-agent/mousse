@@ -28,8 +28,8 @@ export const APPLET_EVENT_PREFIX = '__MOUSSE_APPLET_EVENT__'
  * the browser throttles (covered, hidden) stays alive and a page stuck in a loop does not. The page runs no heartbeat.
  *
  * Wheel: a wheel turn that nothing in the page can scroll (no scroller under the pointer with room left that way, and
- * none that sets `overscroll-behavior` to stop it) is reported, and the host scrolls the conversation instead, as it
- * would over any other part of a reply. Once an inner scroller reaches its end the rest of the turn goes on to the
+ * none that sets `overscroll-behavior` to stop it) is reported with the pointer position, and the host replays it as
+ * real wheel input on the window's own page at that point, so the conversation scrolls as over any other part of a reply. Once an inner scroller reaches its end the rest of the turn goes on to the
  * conversation. Pinch and ctrl+wheel are left alone. Wheel reports have their own budget, so they never starve others.
  *
  * Backdrop: `transparent` (the app) leaves the page itself unpainted, so the chat or panel behind it shows through,
@@ -67,7 +67,7 @@ export function appletDocument(
   let sideways=false;for(const node of event.composedPath()){if(!(node instanceof Element))continue;const own=scrolls(node,true,dy);if(own)return;if(dx&&!sideways&&scrolls(node,false,dx)===1)sideways=true}
   if(!sideways)event.preventDefault();
   wheelCarry=Math.max(-10000,Math.min(10000,wheelCarry+dy));const now=clock();if(now-wheelEpoch>=1000){wheelEpoch=now;wheelCount=0}if(++wheelCount>120)return;
-  post('wheel',{deltaY:Math.round(wheelCarry*100)/100,discrete:event.deltaMode!==0||event.wheelDeltaY!==0&&event.wheelDeltaY%120===0});wheelCarry=0
+  post('wheel',{deltaY:Math.round(wheelCarry*100)/100,discrete:event.deltaMode!==0||event.wheelDeltaY!==0&&event.wheelDeltaY%120===0,x:Math.round(event.clientX),y:Math.round(event.clientY)});wheelCarry=0
  },{passive:false});
  const appearanceTokens=${json(APPLET_APPEARANCE_TOKENS)},defaultAppearance=${json(DEFAULT_APPLET_APPEARANCE)};let currentAppearance;
  const applyAppearance=value=>{

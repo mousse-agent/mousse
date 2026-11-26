@@ -6,7 +6,8 @@ import { build } from 'esbuild'
 import electron from 'electron'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-interface Turn { forwarded: number[]; scrolled: { box: number; contain: number; root: number } }
+/** `forwarded`: the deltas of the real wheel events the window's own page received; `inside`: all at the pointer, none with ctrl. */
+interface Turn { forwarded: number[]; inside: boolean; hostTop: number; scrolled: { box: number; contain: number; root: number } }
 interface Evidence {
   layout: {
     row: { left: number; width: number; padding: string; justify: string; background: string; radius: string; border: string }
@@ -75,10 +76,12 @@ describe('buttons in an applet', () => {
 })
 
 describe('a wheel turn over an applet', () => {
-  it('that nothing in the applet can scroll is handed to the conversation', () => {
+  it('that nothing in the applet can scroll reaches the page under it as real wheel input, which scrolls', () => {
     const { body } = evidence.wheel
     expect(body.forwarded.length).toBe(1)
     expect(body.forwarded[0]).toBeGreaterThan(0)
+    expect(body.inside).toBe(true)
+    expect(body.hostTop).toBeGreaterThan(0)
     expect(body.scrolled.root).toBe(0)
   })
 
