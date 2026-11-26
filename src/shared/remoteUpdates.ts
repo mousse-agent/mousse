@@ -9,7 +9,7 @@ export const UPDATE_NET_METHODS = ['update.prepare', 'update.status', 'update.in
 export type UpdateNetMethod = (typeof UPDATE_NET_METHODS)[number]
 
 /** The local method a window calls to ask another computer (`net.update.there`), by step. */
-export const UPDATE_THERE_STEPS = ['refresh', 'prepare', 'status', 'install', 'cancel'] as const
+export const UPDATE_THERE_STEPS = ['refresh', 'version', 'prepare', 'status', 'install', 'cancel'] as const
 export type UpdateThereStep = (typeof UPDATE_THERE_STEPS)[number]
 
 /**
@@ -77,6 +77,8 @@ export interface RemoteUpdateJob {
   installAt?: number
   /** Turns running when the asking computer confirmed. */
   consentedTurns?: number
+  /** Asked by this computer itself (Update everywhere): no countdown toast. */
+  local?: true
 }
 
 /** Daemon methods the desktop app's main process calls on its own service. */
@@ -127,6 +129,12 @@ export interface RemoteUpdateLimits {
   busyRetryMs: number
   /** A lock on the install folder older than this, whose process is gone, is taken over. */
   lockStaleMs: number
+  /** Update everywhere: how long every computer gets to download before the ready ones install without the rest. */
+  rolloutPrepareMs: number
+  /** Update everywhere: how long a computer gets to come back on the new version before it shows "Couldn't verify". */
+  rolloutReconnectMs: number
+  /** Update everywhere: a "Couldn't verify" computer is asked its version again at most this often while its results show. */
+  rolloutRecheckMs: number
 }
 
 export const REMOTE_UPDATE_LIMITS: RemoteUpdateLimits = Object.freeze({
@@ -136,7 +144,10 @@ export const REMOTE_UPDATE_LIMITS: RemoteUpdateLimits = Object.freeze({
   returnMs: 10 * 60_000,
   pollMs: 1_000,
   busyRetryMs: 15_000,
-  lockStaleMs: 10 * 60_000
+  lockStaleMs: 10 * 60_000,
+  rolloutPrepareMs: 20 * 60_000,
+  rolloutReconnectMs: 10 * 60_000,
+  rolloutRecheckMs: 60_000
 })
 
 const ENV: Record<keyof RemoteUpdateLimits, string> = {
@@ -146,7 +157,10 @@ const ENV: Record<keyof RemoteUpdateLimits, string> = {
   returnMs: 'MOUSSE_NET_UPDATE_RETURN_MS',
   pollMs: 'MOUSSE_NET_UPDATE_POLL_MS',
   busyRetryMs: 'MOUSSE_NET_UPDATE_BUSY_RETRY_MS',
-  lockStaleMs: 'MOUSSE_NET_UPDATE_LOCK_STALE_MS'
+  lockStaleMs: 'MOUSSE_NET_UPDATE_LOCK_STALE_MS',
+  rolloutPrepareMs: 'MOUSSE_NET_UPDATE_ROLLOUT_PREPARE_MS',
+  rolloutReconnectMs: 'MOUSSE_NET_UPDATE_ROLLOUT_RECONNECT_MS',
+  rolloutRecheckMs: 'MOUSSE_NET_UPDATE_ROLLOUT_RECHECK_MS'
 }
 
 /** The limits, each overridable by its `MOUSSE_NET_UPDATE_*` variable (a positive whole number of ms). */

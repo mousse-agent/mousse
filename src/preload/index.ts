@@ -1622,7 +1622,13 @@ const api = {
       ipcRenderer.on(REMOTE_UPDATE_IPC.toast, handler)
       return () => ipcRenderer.removeListener(REMOTE_UPDATE_IPC.toast, handler)
     },
-    cancelRemote: (job: string): Promise<void> => ipcRenderer.invoke(REMOTE_UPDATE_IPC.cancel, job)
+    cancelRemote: (job: string): Promise<void> => ipcRenderer.invoke(REMOTE_UPDATE_IPC.cancel, job),
+    /** Update everywhere of a profile changed: read `updates.rollout.get` again. */
+    onRolloutChanged: (cb: (change: { profileId?: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, change: { profileId?: string }) => cb(change)
+      ipcRenderer.on('updates:rollout-changed', handler)
+      return () => ipcRenderer.removeListener('updates:rollout-changed', handler)
+    }
   },
   mousseId: {
     /** Runtime service origin from `MOUSSE_ID_ORIGIN`; empty when unset. */

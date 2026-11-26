@@ -1,3 +1,4 @@
+import { ROLLOUT_METHOD_LIST } from '../../shared/updateRollout'
 import type { BotTelling } from '../../shared/bots/personal/telling'
 import { registerAppletIpc } from '../applets/registerAppletIpc'
 import { registerMemoryDiagnosticsIpc } from '../diagnostics/memoryIpc'
@@ -266,6 +267,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...CHAT_NETWORK_METHODS,
   ...NET_LOCAL_METHODS.filter(method => !['net.plus.bind','net.plus.connect'].includes(method)),
   ...NET_ENGINE_LOCAL_METHODS,
+  ...ROLLOUT_METHOD_LIST,
   ...BRIDGE_HUB_LOCAL_METHODS,
   ...BRIDGE_ACTIVITY_METHODS,
   ...SPACES_LOCAL_METHODS,

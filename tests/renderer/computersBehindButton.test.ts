@@ -80,6 +80,17 @@ describe('the update button and the computers behind this one', () => {
     expect(computersRow()).toBeUndefined()
   })
 
+  it('counts a computer between this version and the one offered here: behind the version this computer updates to', () => {
+    useUpdateStore.setState(appState({ phase: 'available', availableVersion: '0.9.4' }), true)
+    setComputers([
+      computer('m', 'Mini', { version: '0.9.3', newerThanThis: true }),
+      computer('n', 'Studio', { version: '0.9.4' }),
+      // Another channel keeps its own updates.
+      computer('o', 'Nightly box', { version: '0.9.3-nightly.20261120.1', otherChannel: true })
+    ])
+    expect(computersRow()).toMatchObject({ label: '1 computer behind', computers: [{ node: 'm', name: 'Mini', version: '0.9.3' }] })
+  })
+
   it('shows while this computer is up to date and opens Settings → Devices', async () => {
     setComputers([computer('b', 'Laptop', { version: '0.9.0', olderThanThis: true })])
     expect(summarizeDownloads(useDownloadsStore.getState().entries)).toMatchObject({ status: 'available', label: '1 computer behind' })

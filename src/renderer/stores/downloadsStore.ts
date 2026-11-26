@@ -11,6 +11,8 @@ import { computersBehind } from '../lib/netDevices'
 import { useAppStore } from './appStore'
 import { ipcErrorLine } from '../lib/errorText'
 import { subscribeToUpdates, updateActions, useUpdateStore } from './updateStore'
+import type { Rollout } from '../../shared/updateRollout'
+import { followRollout, rolloutActions, rolloutSummary, useRolloutStore } from '../lib/updateRollout'
 
 /**
  * Every download Mousse runs, in one list for the downloads indicator (navigation rail and the
@@ -20,8 +22,11 @@ import { subscribeToUpdates, updateActions, useUpdateStore } from './updateStore
  * dialog started a download and whether or not it is still open.
  */
 
-/** `computers`: the user's other computers that are online and behind this one, as one row. */
-export type DownloadKind = 'update' | 'dictation-model' | 'voice-model' | 'agent' | 'computers'
+/**
+ * `computers`: the user's other computers that are online and behind this one, as one row. `rollout`: Update
+ * everywhere under way or finished, with a row per computer, until dismissed.
+ */
+export type DownloadKind = 'update' | 'dictation-model' | 'voice-model' | 'agent' | 'computers' | 'rollout'
 
 /** The local speech model kinds, each with its own IPC group. */
 type LocalModelKind = 'dictation-model' | 'voice-model'
@@ -62,7 +67,9 @@ export interface DownloadEntry {
   /** The agent CLI's update: driver for the icon, and the note and command it carries. */
   offer?: ProviderUpdateOffer
   /** The computers row: each computer behind, by name, with the version it runs. */
-  computers?: Array<{ node: string; name: string; version?: string }>
+  computers?: Array<{ node: string; name: string; version?: string; requests?: true }>
+  /** The rollout row: Update everywhere as the service keeps it. */
+  rollout?: Rollout
 }
 
 /** An agent CLI on this computer with a newer version published (`InstanceSnapshot.update`). */
@@ -271,7 +278,7 @@ export interface BehindDismissal {
 
 /** The computers row, or null when none is behind or the row was dismissed for these computers and this release. */
 export function computersEntry(
-  behind: ReadonlyArray<{ node: string; name: string; version?: string }>,
+  behind: ReadonlyArray<{ node: string; name: string; version?: string; update?: { requests?: true } }>,
   release: string,
   dismissed?: BehindDismissal
 ): DownloadEntry | null {
@@ -280,17 +287,34 @@ export function computersEntry(
     return null
   return {
     id: 'computers', kind: 'computers', sourceId: release, label: behindLabel(behind.length), phase: 'available',
-    computers: behind.map(({ node, name, version }) => ({ node, name, ...(version ? { version } : {}) }))
+    computers: behind.map(({ node, name, version, update }) => ({ node, name, ...(version ? { version } : {}), ...(update?.requests ? { requests: true as const } : {}) }))
   }
+}
+
+/** The rollout row, or null with none to show. */
+export function rolloutEntry(rollout: Rollout | null): DownloadEntry | null {
+  if (!rollout) return null
+  const { status, label } = rolloutSummary(rollout)
+  const phase: DownloadPhase = status === 'done' ? 'done' : status === 'failed' ? 'failed' : status === 'installing' ? 'installing' : 'downloading'
+  return { id: 'rollout', kind: 'rollout', sourceId: rollout.id, label, phase, toVersion: rollout.version, rollout }
 }
 
 /** One line for the indicator: the most urgent state across all entries, with the computers behind added to it. */
 export function summarizeDownloads(entries: readonly DownloadEntry[]): DownloadsSummary {
   const computers = entries.find((entry) => entry.kind === 'computers')
-  if (!computers) return summarizeOwn(entries)
-  const own = summarizeOwn(entries.filter((entry) => entry !== computers))
-  if (own.status === 'idle') return { status: 'available', active: 0, label: computers.label }
-  return { ...own, label: `${own.label} · ${computers.label}` }
+  const rollout = entries.find((entry) => entry.kind === 'rollout')
+  const own = summarizeOwn(entries.filter((entry) => entry !== computers && entry !== rollout))
+  // Update everywhere stands for the computers while it shows.
+  const others = rollout ?? computers
+  if (!others) return own
+  const status: DownloadsStatus = rollout
+    ? rollout.phase === 'downloading' ? 'downloading' : rollout.phase === 'installing' ? 'installing' : rollout.phase === 'failed' ? 'failed' : 'done'
+    : 'available'
+  if (own.status === 'idle') return { status, active: 0, label: others.label }
+  // The more urgent of the two leads; both are named.
+  const rank: DownloadsStatus[] = ['downloading', 'installing', 'failed', 'ready', 'available', 'done', 'idle']
+  const lead = rank.indexOf(status) < rank.indexOf(own.status) ? status : own.status
+  return { ...own, status: lead, label: `${own.label} · ${others.label}` }
 }
 
 function summarizeOwn(entries: readonly DownloadEntry[]): DownloadsSummary {
@@ -480,10 +504,22 @@ function saveDismissal(dismissal: BehindDismissal): void {
 export function receiveComputers(): void {
   const { currentVersion, availableVersion } = useUpdateStore.getState()
   const release = availableVersion ?? currentVersion
-  const next = computersEntry(computersBehind(useComputersStore.getState().devices), release, readDismissal())
+  // An Update everywhere row stands for the computers while it shows.
+  const next = useRolloutStore.getState().rollout
+    ? null
+    : computersEntry(computersBehind(useComputersStore.getState().devices, release), release, readDismissal())
   const current = useDownloadsStore.getState().entries.find((entry) => entry.id === 'computers')
   if (JSON.stringify(next ?? null) === JSON.stringify(current ?? null)) return
   setEntries((entries) => (next ? [...without(entries, 'computers'), next] : without(entries, 'computers')))
+}
+
+/** Mirrors the rollout into its row. */
+export function receiveRollout(): void {
+  const next = rolloutEntry(useRolloutStore.getState().rollout)
+  const current = useDownloadsStore.getState().entries.find((entry) => entry.id === 'rollout')
+  if (JSON.stringify(next ?? null) !== JSON.stringify(current ?? null))
+    setEntries((entries) => (next ? [...without(entries, 'rollout'), next] : without(entries, 'rollout')))
+  receiveComputers()
 }
 
 let subscribed = false
@@ -506,6 +542,9 @@ export function subscribeToDownloads(): void {
     if (state.profileId !== previous.profileId) receiveComputers()
   })
   receiveComputers()
+  // Update everywhere, read when the window is idle after opening and when the service says it changed.
+  followRollout()
+  useRolloutStore.subscribe(() => receiveRollout())
   window.mousse.providers?.onOperation?.((event) => receiveProviderOperation(event))
   // Only this computer's agents: remote computers keep their own.
   if (window.mousse.providers) watchDeviceSnapshots((snapshots) => receiveProviderOffers(providerUpdateOffers(snapshots)))
@@ -526,7 +565,7 @@ export function subscribeToDownloads(): void {
 }
 
 const modelIpc = (entry: DownloadEntry): LocalModelIpc | undefined =>
-  entry.kind === 'update' || entry.kind === 'agent' || entry.kind === 'computers' ? undefined : MODEL_SOURCES[entry.kind].ipc()
+  entry.kind === 'update' || entry.kind === 'agent' || entry.kind === 'computers' || entry.kind === 'rollout' ? undefined : MODEL_SOURCES[entry.kind].ipc()
 
 const agentInstanceId = (entry: DownloadEntry): string => entry.id.slice('agent:'.length)
 
@@ -555,7 +594,7 @@ export const downloadsActions = {
       return
     }
     const kind = entry.kind
-    if (kind === 'computers') return
+    if (kind === 'computers' || kind === 'rollout') return
     void modelIpc(entry)?.downloadLocalModel(entry.sourceId).catch((cause: unknown) => {
       receiveLocalModelStatus(kind, { modelId: entry.sourceId, state: { status: 'error', message: cause instanceof Error ? cause.message : String(cause) } })
     })
@@ -572,6 +611,10 @@ export const downloadsActions = {
   },
   dismiss(id: string): void {
     if (id === 'update') return
+    if (id === 'rollout') {
+      void rolloutActions.dismiss()
+      return
+    }
     if (id === 'computers') {
       const entry = useDownloadsStore.getState().entries.find((item) => item.id === id)
       if (entry) saveDismissal({ release: entry.sourceId, nodes: (entry.computers ?? []).map((computer) => computer.node) })

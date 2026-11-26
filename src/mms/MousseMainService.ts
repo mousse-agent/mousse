@@ -1,3 +1,4 @@
+import { registerUpdateRolloutMethods } from './updates/registerRollout'
 import { registerChatMethods } from './chats/registerMethods'
 import { registerChatNetworkMethods } from './chats/network/registerMethods'
 import { registerChatResourceMethods } from './chats/resources/registerMethods'
@@ -309,6 +310,7 @@ export class MousseMainService extends MmsProfileServices {
     )
     registerEditorTunnelMethods(this.domains, async profileId => (await profile(profileId)).net)
     registerNetEngineMethods(this.domains, async profileId => (await profile(profileId)).netEngine)
+    registerUpdateRolloutMethods(this.domains, async profileId => (await profile(profileId)).updateRollouts())
     registerNetEngineSshServe(this.domains, () => this.sshRemote())
     registerBridgeMethods(this.domains, async profileId => (await profile(profileId)).bridge)
     this.domainCleanupSubscriptions.push(
