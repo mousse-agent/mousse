@@ -2725,11 +2725,15 @@ export class BotStore {
 
   /** The soonest reminder still to come, of any bot. */
   nextReminder(botId?: string): BotReminderRow | undefined {
-    const row = this.get(`SELECT * FROM bot_reminders WHERE status = 'waiting'
+    return this.nextReminders(botId, 1)[0]
+  }
+
+  /** The `limit` soonest reminders still to come, of any bot, soonest first. */
+  nextReminders(botId: string | undefined, limit: number): BotReminderRow[] {
+    return this.all(`SELECT * FROM bot_reminders WHERE status = 'waiting'
       AND bot_id IN (SELECT bot_id FROM bot_registry WHERE deleted_at IS NULL)
       AND (work_id IS NULL OR due_at > ? OR work_id IN (SELECT id FROM bot_activations WHERE status = 'blocked' AND end_reason = 'waiting'))
-      ${botId === undefined ? '' : 'AND bot_id = ?'} ORDER BY due_at, id LIMIT 1`, this.now(), ...(botId === undefined ? [] : [botId]))
-    return row ? reminderOf(row) : undefined
+      ${botId === undefined ? '' : 'AND bot_id = ?'} ORDER BY due_at, id LIMIT ?`, this.now(), ...(botId === undefined ? [] : [botId]), limit).map(reminderOf)
   }
 
   /** Moves a waiting reminder on; false when it was not waiting (delivered or cancelled meanwhile). */

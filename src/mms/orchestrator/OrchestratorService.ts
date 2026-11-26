@@ -13494,6 +13494,15 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * The run the thread's live turn executes, though that run may already have ended (the turn still saves its reply and
+   * checkpoint); undefined with no live turn, or one with no run.
+   */
+  activeTurnRunId(threadId: string): string | undefined {
+    const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
+    return session?.isTurnActive() ? session.activeTurn?.runId : undefined
+  }
+
+  /**
    * Abort the active GUI/CLI orchestrator turn for a thread (defaults to bound thread).
    * Does not clear the durable normal message queue unless clearQueue is true. With `runId` only that
    * run's turn is aborted: a Stop of a run must not reach a later turn of the thread (a fresh message

@@ -35,6 +35,8 @@ export interface PullRequestCheck {
   state: PullRequestCheckState | 'skipped' | 'waiting'
   url: string | null
   workflowName?: string
+  /** When a check run finished, by the host's clock; absent for a status and for one still running. */
+  completedAt?: string
 }
 
 /** The branches a pull request can target, the repository's default branch first. */

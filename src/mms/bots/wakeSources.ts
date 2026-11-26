@@ -7,7 +7,8 @@ import { wakeCheckNames, type BotWakeEvent, type BotWakeFired } from '../../shar
  * wires the reads; these only decide.
  */
 
-export type WakeThreadState = { state: 'running' | 'idle' | 'archived' | 'deleted' | 'unreachable'; title?: string; lastRun?: { status: string; endedAt?: string } }
+/** `runId`: the run it works on now, when running; a wake set then waits for that run's end. */
+export type WakeThreadState = { state: 'running' | 'idle' | 'archived' | 'deleted' | 'unreachable'; title?: string; runId?: string; lastRun?: { status: string; endedAt?: string } }
 
 export interface WakeThreadDeps {
   /** The thread's record; undefined when it is gone. */
@@ -20,16 +21,33 @@ export interface WakeThreadDeps {
   working(threadId: string): boolean
   /** The thread's newest run. */
   lastRun(threadId: string): { status: string; endedAt?: string | null } | undefined
+  /**
+   * The run the thread works on now (live, paused, the one its turn still saves though it ended, or the first waiting
+   * its turn); undefined when none.
+   */
+  currentRun?(threadId: string): string | undefined
+  /** One run of the thread, and whether it has ended; undefined when it is unknown. */
+  run?(threadId: string, runId: string): { status: string; endedAt?: string | null; ended: boolean } | undefined
 }
 
-/** A thread as a wake sees it. Deleted (or trashed) and archived come before reach: a gone thread is gone for anyone. */
-export function wakeThreadState(deps: WakeThreadDeps, from: string, threadId: string): WakeThreadState {
+/**
+ * A thread as a wake sees it. Deleted (or trashed) and archived come before reach: a gone thread is gone for anyone.
+ * `runId`: the run a wake waits for. Once it has ended the thread is done for that wake, with that run's outcome, though
+ * a later run works now; while it works the thread is running, though another run of it just ended.
+ */
+export function wakeThreadState(deps: WakeThreadDeps, from: string, threadId: string, runId?: string): WakeThreadState {
   const thread = deps.thread(threadId)
   if (!thread || deps.trashed(threadId)) return { state: 'deleted' }
   if (!deps.reachable(from, threadId)) return { state: 'unreachable' }
   const title = thread.name?.trim() || undefined
   if (thread.archivedAt) return { state: 'archived', ...(title ? { title } : {}) }
-  if (deps.working(threadId)) return { state: 'running', ...(title ? { title } : {}) }
+  const awaited = runId ? deps.run?.(threadId, runId) : undefined
+  if (awaited?.ended) return { state: 'idle', ...(title ? { title } : {}), lastRun: { status: awaited.status, ...(awaited.endedAt ? { endedAt: awaited.endedAt } : {}) } }
+  if (awaited) return { state: 'running', ...(title ? { title } : {}), runId: runId! }
+  if (deps.working(threadId)) {
+    const current = deps.currentRun?.(threadId)
+    return { state: 'running', ...(title ? { title } : {}), ...(current ? { runId: current } : {}) }
+  }
   const last = deps.lastRun(threadId)
   return { state: 'idle', ...(title ? { title } : {}), ...(last ? { lastRun: { status: last.status, ...(last.endedAt ? { endedAt: last.endedAt } : {}) } } : {}) }
 }
@@ -39,8 +57,11 @@ export interface WakePullRequestState {
   state: 'open' | 'closed' | 'merged'
   title?: string
   headSha?: string
-  checkRuns?: Array<Pick<PullRequestCheck, 'name' | 'state'>>
+  checkRuns?: Array<Pick<PullRequestCheck, 'name' | 'state' | 'completedAt'>>
   reviews?: Array<Pick<PullRequestReview, 'id' | 'state' | 'author' | 'submittedAt'>>
+  /** When it merged or closed, by the host's clock. */
+  mergedAt?: string | null
+  closedAt?: string | null
 }
 
 export interface PullRequestStateDeps {
@@ -48,15 +69,15 @@ export interface PullRequestStateDeps {
   folders(): string[]
   /** "owner/name" of a folder's repository (its code host's identity); throws when it has none. */
   repository(folder: string): Promise<string>
-  /** A pull request of the folder's repository: its state and title. */
-  pullRequest(folder: string, number: number): Promise<WakePullRequestState>
+  /** A pull request of the folder's repository: its state and title; with `notBefore`, as read from then on. */
+  pullRequest(folder: string, number: number, fresh?: { notBefore: number }): Promise<WakePullRequestState>
 }
 
 /**
  * A pull request's state, read through the first of the owner's projects whose repository is `repo` (compared without
  * case, as GitHub names them). `none` when no project is that repository; `problem` when the read failed.
  */
-export async function pullRequestStateOf(deps: PullRequestStateDeps, repo: string, number: number): Promise<WakePullRequestState | { none: true } | { problem: string }> {
+export async function pullRequestStateOf(deps: PullRequestStateDeps, repo: string, number: number, fresh?: { notBefore: number }): Promise<WakePullRequestState | { none: true } | { problem: string }> {
   const wanted = repo.trim().toLowerCase()
   for (const folder of deps.folders()) {
     let name: string
@@ -67,8 +88,8 @@ export async function pullRequestStateOf(deps: PullRequestStateDeps, repo: strin
     }
     if (name.toLowerCase() !== wanted) continue
     try {
-      const read = await deps.pullRequest(folder, number)
-      return { state: read.state, ...(read.title ? { title: read.title } : {}), ...(read.headSha ? { headSha: read.headSha } : {}), ...(read.checkRuns ? { checkRuns: read.checkRuns } : {}), ...(read.reviews ? { reviews: read.reviews } : {}) }
+      const read = await deps.pullRequest(folder, number, fresh)
+      return { state: read.state, ...(read.title ? { title: read.title } : {}), ...(read.headSha ? { headSha: read.headSha } : {}), ...(read.checkRuns ? { checkRuns: read.checkRuns } : {}), ...(read.reviews ? { reviews: read.reviews } : {}), ...(read.mergedAt ? { mergedAt: read.mergedAt } : {}), ...(read.closedAt ? { closedAt: read.closedAt } : {}) }
     } catch (error) {
       return { problem: error instanceof Error ? error.message : String(error) }
     }
@@ -96,7 +117,7 @@ export function threadWakeEvent(event: Pick<ThreadWakeEvent, 'threadId'>, seen: 
   if (seen.state === 'unreachable') return { problem: `Thread ${event.threadId} is not available to you.` }
   if (seen.state === 'archived' || seen.state === 'deleted') return { problem: `Thread ${event.threadId} is ${seen.state}.` }
   if (seen.state === 'idle') return { problem: `Thread ${event.threadId} isn't working now${seen.lastRun ? `: its last turn ended ${seen.lastRun.status}${seen.lastRun.endedAt ? ` at ${clock(seen.lastRun.endedAt)}` : ''}` : ''}. Read it instead of waiting for it.` }
-  return { kind: 'thread', threadId: event.threadId, ...(seen.title ? { title: seen.title.slice(0, 120) } : {}) }
+  return { kind: 'thread', threadId: event.threadId, ...(seen.title ? { title: seen.title.slice(0, 120) } : {}), ...(seen.runId ? { runId: seen.runId } : {}) }
 }
 
 /**
@@ -132,18 +153,49 @@ export function threadWakeOutcome(event: ThreadWakeEvent, seen: WakeThreadState 
  * wake that has no GitHub cursor.
  */
 export function pullRequestWakeOutcome(event: PullRequestWakeEvent, read: WakePullRequestState | { none: true } | { problem: string } | undefined, setAt: string): BotWakeFired | undefined {
+  return pullRequestWakeHappened(event, read, setAt)?.fired
+}
+
+/**
+ * As `pullRequestWakeOutcome`, with when it happened by the host's own clock (`at`, ms): the merge, the close, the last
+ * check to finish, the review. No `at` when the read gives no time for it (a status check, an older code host).
+ */
+export function pullRequestWakeHappened(event: PullRequestWakeEvent, read: WakePullRequestState | { none: true } | { problem: string } | undefined, setAt: string): { fired: BotWakeFired; at?: number } | undefined {
   if (!read || 'none' in read || 'problem' in read) return undefined
-  if (read.state === 'merged' && event.on && event.on !== 'merged') return { kind: 'ended', reason: 'pr_merged' }
-  if (read.state === 'merged') return { kind: 'pr', repo: event.repo, number: event.number, state: 'merged', ...(read.title ? { title: read.title.slice(0, 120) } : {}) }
-  if (read.state === 'closed') return { kind: 'ended', reason: 'pr_closed' }
+  const timed = (fired: BotWakeFired, iso: string | null | undefined) => {
+    const at = iso ? Date.parse(iso) : Number.NaN
+    return Number.isFinite(at) ? { fired, at } : { fired }
+  }
   const pr = { kind: 'pr' as const, repo: event.repo, number: event.number, ...(read.title ? { title: read.title.slice(0, 120) } : {}) }
+  const ending = read.state === 'merged'
+    ? timed(event.on && event.on !== 'merged' ? { kind: 'ended', reason: 'pr_merged' } : { ...pr, state: 'merged' }, read.mergedAt)
+    : read.state === 'closed' ? timed({ kind: 'ended', reason: 'pr_closed' }, read.closedAt) : undefined
+  if (!event.on || event.on === 'merged') return ending
+  const awaited = awaitedPullRequestEvent(event, read, setAt, pr, timed)
+  // The checks or the review, and the merge or the close: the one that happened first by the host's own times wins, so a
+  // review submitted before a merge both seen in one read still counts. One with no time comes after one with a time.
+  if (!ending || !awaited) return ending ?? awaited
+  return (awaited.at ?? Number.POSITIVE_INFINITY) < (ending.at ?? Number.POSITIVE_INFINITY) ? awaited : ending
+}
+
+/** The finished checks of a checks wake, or the first review after its cutoff of a review wake, whatever the state. */
+function awaitedPullRequestEvent(
+  event: PullRequestWakeEvent,
+  read: WakePullRequestState,
+  setAt: string,
+  pr: { kind: 'pr'; repo: string; number: number; title?: string },
+  timed: (fired: BotWakeFired, iso: string | null | undefined) => { fired: BotWakeFired; at?: number }
+): { fired: BotWakeFired; at?: number } | undefined {
   if (event.on === 'checks') {
     const checks = read.checkRuns
     // Missing/unknown checks cannot prove completion; skipped checks are complete but neither passed nor failed.
     if (!read.headSha || !checks?.length || checks.some((check) => !['passing', 'failing', 'skipped', 'waiting'].includes(check.state))) return undefined
     const failedNames = checks.filter((check) => check.state === 'failing').map((check) => check.name)
     const waitingNames = checks.filter((check) => check.state === 'waiting').map((check) => check.name)
-    return { ...pr, state: 'checks', headSha: read.headSha.slice(0, 7), waiting: waitingNames.length, waitingNames: wakeCheckNames(waitingNames), passed: checks.filter((check) => check.state === 'passing').length, failed: failedNames.length, failedNames: wakeCheckNames(failedNames) }
+    // They finished when the last of them did; one with no time leaves it unknown.
+    const ends = checks.map((check) => check.completedAt ? Date.parse(check.completedAt) : Number.NaN)
+    const last = ends.every(Number.isFinite) ? new Date(Math.max(...ends)).toISOString() : undefined
+    return timed({ ...pr, state: 'checks', headSha: read.headSha.slice(0, 7), waiting: waitingNames.length, waitingNames: wakeCheckNames(waitingNames), passed: checks.filter((check) => check.state === 'passing').length, failed: failedNames.length, failedNames: wakeCheckNames(failedNames) }, last)
   }
   if (event.on === 'review') {
     const review = read.reviews?.filter((review) => {
@@ -157,7 +209,7 @@ export function pullRequestWakeOutcome(event: PullRequestWakeEvent, read: WakePu
       .sort((a, b) => Date.parse(a.submittedAt!) - Date.parse(b.submittedAt!))
       .find((review) => ['approved', 'changes_requested', 'commented'].includes(review.state))
     if (review && (review.state === 'approved' || review.state === 'changes_requested' || review.state === 'commented'))
-      return { ...pr, state: 'review', reviewState: review.state, reviewer: review.author }
+      return timed({ ...pr, state: 'review', reviewState: review.state, reviewer: review.author }, review.submittedAt)
   }
   return undefined
 }
