@@ -30,23 +30,25 @@ function indexThreads(threads: readonly Thread[]): ThreadIndex {
 
 /**
  * The thread `thread` sits below, wherever either runs: a subagent's parent; for the thread another computer
- * runs for a subagent of this one, the parent of this computer's stand-in for it (`runsOn.ref`); or the thread
- * whose agent on another computer started it (`startedFrom.agent`). That thread is named there by its id on
- * its own computer: qualified here, or plain when its computer is this one and the row is another's.
+ * runs for a subagent of this one, the parent of this computer's stand-in for it (`runsOn.ref`); or, for the
+ * thread this computer runs for a subagent of another computer, the thread whose agent started it there
+ * (`startedFrom.agent` with `subagent`). That thread is named there by its id on its own computer: qualified here,
+ * or plain when its computer is this one and the row is another's. A thread an agent started with `thread_create`,
+ * on this computer or another, sits below none, as one started by `createdByThreadId` does.
  */
 function parentOf(thread: Thread, { byId, standIns }: ThreadIndex): Thread | undefined {
   if (isSubagentThread(thread)) return byId.get(thread.lineage!.parentThreadId)
   const standIn = standIns.get(thread.id)
   if (standIn) return byId.get(standIn.lineage!.parentThreadId)
   const from = thread.startedFrom
-  if (!from?.agent) return undefined
+  if (!from?.agent?.subagent) return undefined
   return byId.get(qualifyId(from.node, from.agent.thread)) ?? (thread.node && thread.node !== from.node ? byId.get(from.agent.thread) : undefined)
 }
 
 /**
  * The path to `threadId`: its project (when it has one that is listed), the threads above it, top first,
- * and the thread. A thread is below the one that started it as a subagent, on this computer or another, or
- * whose agent started it on another computer; a fork names no thread it came from. Empty for an unknown thread.
+ * and the thread. A thread is below the one that started it as a subagent, on this computer or another; a thread
+ * an agent started as its own and a fork name no thread they came from. Empty for an unknown thread.
  */
 export function threadPath(threadId: string | null, threads: readonly Thread[], projects: readonly Pick<Project, 'id' | 'name'>[]): PathSegment[] {
   if (!threadId) return []
@@ -96,7 +98,7 @@ export interface SiblingMenu {
 
 /**
  * The threads beside `threadId` at its level, itself included, for the menu its path segment opens: a
- * thread below another (`parentOf`) the others below it, or a top thread's fellow threads in its project (or,
+ * subagent (`parentOf`) the other subagents of its parent, or a top thread's fellow threads in its project (or,
  * without one, the other threads without a project), in sidebar order. Archived, unstarted and Chats
  * threads are left out, except the thread itself.
  */
@@ -115,7 +117,7 @@ export function siblingThreads(
     // A stand-in whose thread on the other computer is listed gives way to it: that is the one the path opens.
     const standInShown = (entry: Thread) => Boolean(entry.runsOn?.ref && index.byId.has(entry.runsOn.ref))
     const children = threads.filter((entry) => listed(entry) && parentOf(entry, index)?.id === parent.id && (entry.id === threadId || !standInShown(entry)))
-    return { label: `${isSubagentThread(thread) || index.standIns.has(thread.id) ? 'Subagents of' : 'Started from'} ${threadName(parent)}`, threads: sortSidebarThreads(children).map((entry) => ({ id: entry.id, name: threadName(entry) })) }
+    return { label: `Subagents of ${threadName(parent)}`, threads: sortSidebarThreads(children).map((entry) => ({ id: entry.id, name: threadName(entry) })) }
   }
   const projectKnown = (id: string | undefined) => Boolean(id && projects.some((project) => project.id === id))
   const project = projectKnown(thread.projectId) ? projects.find((entry) => entry.id === thread.projectId) : undefined

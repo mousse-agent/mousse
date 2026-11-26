@@ -56,6 +56,11 @@ export interface InstanceConfig {
   env?: Record<string, string>
   /** Where an ACP agent comes from (the `acp` driver); derived from the fields above when absent. */
   source?: AcpSource
+  /**
+   * OpenCode: the ACP registry id its managed copy was installed under, when not `opencode` (an entry
+   * moved from the ACP list that came from the registry's `opencode-v2` alias).
+   */
+  registryAgentId?: string
   /** The entry this one moved to (`instances.move`): turned off, and its threads continue there. */
   movedTo?: string
   /**

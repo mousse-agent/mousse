@@ -61,6 +61,12 @@ export interface RemoteSubagentRecord {
    * from before it, whose create sends none, as it did then, so a retry repeats the very same create.
    */
   hidden: boolean | null
+  /**
+   * The `subagent` the far thread's create sends: true, so that computer records the thread as this one's subagent
+   * (`ThreadStartedFrom.agent.subagent`). Null for a task from before it, or once that computer did not take it on the
+   * first attempt: its create sends none, so a retry repeats the very same create.
+   */
+  subagent: boolean | null
   createdAt: string
   updatedAt: string
 }
@@ -107,6 +113,7 @@ function fromRow(row: Row): RemoteSubagentRecord {
     lastSeenAt: str(row.last_seen_at),
     marked: row.marked === null || row.marked === undefined ? null : int(row.marked) === 1,
     hidden: row.hidden === null || row.hidden === undefined ? null : int(row.hidden) === 1,
+    subagent: row.subagent === null || row.subagent === undefined ? null : int(row.subagent) === 1,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   }
@@ -114,7 +121,7 @@ function fromRow(row: Row): RemoteSubagentRecord {
 
 /** What a caller may change on a row; `undefined` keeps a field, `null` clears a nullable one. */
 export type RemoteSubagentPatch = Partial<
-  Pick<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'deadlineAt' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'marked' | 'hidden'>
+  Pick<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'deadlineAt' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'marked' | 'hidden' | 'subagent'>
 >
 
 const COLUMNS: Record<keyof RemoteSubagentPatch, string> = {
@@ -126,14 +133,15 @@ const COLUMNS: Record<keyof RemoteSubagentPatch, string> = {
   lastError: 'last_error',
   lastSeenAt: 'last_seen_at',
   marked: 'marked',
-  hidden: 'hidden'
+  hidden: 'hidden',
+  subagent: 'subagent'
 }
 
 /** The rows of `remote_subagents`. Synchronous; every write joins the caller's transaction. */
 export class RemoteSubagentRecords {
   constructor(private readonly store: RunStore) {}
 
-  create(input: Omit<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'limitMinutes' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'marked' | 'hidden' | 'createdAt' | 'updatedAt'> & {
+  create(input: Omit<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'limitMinutes' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'marked' | 'hidden' | 'subagent' | 'createdAt' | 'updatedAt'> & {
     limitMinutes?: number | null
     /** A follow-up on a subagent whose far thread already exists. */
     remoteThreadId?: string | null
@@ -142,8 +150,8 @@ export class RemoteSubagentRecords {
     this.store.db
       .statement(
         `INSERT INTO remote_subagents(delegation_id, child_thread_id, child_run_id, node, prompt, permission_mode,
-           chat_mode, worktree, project_id, instance_id, model, remote_thread_id, deadline_at, limit_minutes, hidden, state, created_at, updated_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'starting', ?, ?)`
+           chat_mode, worktree, project_id, instance_id, model, remote_thread_id, deadline_at, limit_minutes, hidden, subagent, state, created_at, updated_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 'starting', ?, ?)`
       )
       .run(
         input.delegationId,

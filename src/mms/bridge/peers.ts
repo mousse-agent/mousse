@@ -1,6 +1,7 @@
 import { NetError } from '../../shared/net/errors'
 import type { NodeDelegation, NodeId, Roster, StoredRecord, StreamId } from '../../shared/net'
 import type { BridgeNodePolicy } from '../../shared/net/local'
+import type { SelfUpdateReport } from '../../shared/updates'
 import type { NetService } from '../net/NetService'
 import { engineControl } from '../netEngine/limits'
 import type { BridgeClient } from '../netEngine/session/client'
@@ -25,6 +26,17 @@ export interface PeerRow {
   revoked: boolean
   state: string
   source?: 'engine'
+  /** What the computer last said of itself; absent until it did, and from one too old to say. */
+  version?: string
+  platform?: string
+  arch?: string
+  update?: SelfUpdateReport
+  lastSeenAt?: number
+  /** Its version is older or newer than this computer's; false when either is unknown. */
+  olderThanThis?: boolean
+  newerThanThis?: boolean
+  /** It follows another update channel (nightly or stable), so neither is simply behind. */
+  otherChannel?: boolean
 }
 
 /** The engine half of the directory (`NetEngineService`). */

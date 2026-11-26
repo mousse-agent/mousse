@@ -3,6 +3,7 @@ import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import {
   instanceIdForLegacyProvider,
   legacyProviderForInstance,
+  readProviderInstances,
   seedProviderInstances
 } from '../../src/shared/providerInstances'
 
@@ -83,6 +84,58 @@ describe('instance seeding', () => {
     expect(instances).toEqual({ codex: { driver: 'codex', enabled: true }, 'pi:openai': { driver: 'pi', enabled: true } })
     expect(added).toEqual(['pi:openai'])
     expect(seedVersion).toBe(1)
+  })
+})
+
+describe('OpenCode added as an ACP agent', () => {
+  const registry = (agentId: string) => ({ driver: 'acp', enabled: false, config: { displayName: 'OpenCode', source: { kind: 'registry', agentId, version: '2.0.20', distribution: 'binary' }, telemetry: 'off', signedOutInMousse: true } })
+  const local = { driver: 'acp', enabled: true, config: { source: { kind: 'local', command: 'C:\\Tools\\opencode.exe', args: ['acp', '--print-logs'], env: { OPENCODE_CONFIG: '/a.json' } } } }
+  const plain = { driver: 'acp', enabled: true, config: { binaryPath: '/usr/local/bin/opencode', args: ['acp'] } }
+  const stored = () => ({ 'acp:opencode': registry('opencode'), 'acp:oc2': registry('opencode-v2'), 'acp:local': local, 'acp:plain': plain })
+  const store = (value: unknown) => {
+    const state = { value, writes: 0 }
+    const instances = new ProviderInstanceService({
+      store: { read: () => ({ instances: state.value, seedVersion: 1 }), write: (next) => { state.value = next.instances; state.writes += 1 } }
+    })
+    return { instances, state }
+  }
+
+  it('reads as an OpenCode entry with its id, name, switches, arguments after `acp` and variables, and is never rewritten for it', () => {
+    const { instances, state } = store(stored())
+    const listed = instances.list()
+    expect(listed['acp:opencode']).toEqual({ driver: 'opencode', enabled: false, config: { displayName: 'OpenCode', telemetry: 'off', signedOutInMousse: true, registryAgentId: 'opencode' } })
+    expect(listed['acp:oc2']).toMatchObject({ driver: 'opencode', config: { registryAgentId: 'opencode-v2' } })
+    expect(listed['acp:local']).toEqual({ driver: 'opencode', enabled: true, config: { binaryPath: 'C:\\Tools\\opencode.exe', args: ['--print-logs'], env: { OPENCODE_CONFIG: '/a.json' } } })
+    expect(listed['acp:plain']).toEqual({ driver: 'opencode', enabled: true, config: { binaryPath: '/usr/local/bin/opencode', args: [] } })
+    expect(state.writes).toBe(0)
+    expect(state.value).toEqual(stored())
+  })
+
+  it('a change made on the OpenCode entry is stored on the ACP entry, which an older build reads as before', () => {
+    const { instances, state } = store(stored())
+    const listed = instances.list()
+    // Turned on, renamed, an argument added: as Settings → Providers saves them.
+    for (const id of ['acp:opencode', 'acp:oc2', 'acp:local', 'acp:plain']) {
+      const entry = listed[id]!
+      instances.setEntry(id, { ...entry, enabled: true, config: { ...entry.config, displayName: 'Mine', args: [...((entry.config?.args as string[] | undefined) ?? []), '--x'] } })
+    }
+    const after = state.value as Record<string, { driver: string; enabled: boolean; config: Record<string, unknown> }>
+    expect(after['acp:opencode']).toEqual({ driver: 'acp', enabled: true, config: { displayName: 'Mine', telemetry: 'off', signedOutInMousse: true, args: ['--x'], source: registry('opencode').config.source } })
+    expect(after['acp:oc2']!.config.source).toEqual(registry('opencode-v2').config.source)
+    expect(after['acp:local']).toEqual({ driver: 'acp', enabled: true, config: { displayName: 'Mine', source: { kind: 'local', command: 'C:\\Tools\\opencode.exe', args: ['acp', '--print-logs', '--x'], env: { OPENCODE_CONFIG: '/a.json' } } } })
+    expect(after['acp:plain']).toEqual({ driver: 'acp', enabled: true, config: { displayName: 'Mine', binaryPath: '/usr/local/bin/opencode', args: ['acp', '--x'] } })
+    // And this build still reads them as OpenCode, with the change.
+    expect(instances.list()['acp:local']).toEqual({ driver: 'opencode', enabled: true, config: { displayName: 'Mine', binaryPath: 'C:\\Tools\\opencode.exe', args: ['--print-logs', '--x'], env: { OPENCODE_CONFIG: '/a.json' } } })
+  })
+
+  it('leaves every other ACP agent alone, an `opencode` that does not run `acp` included', () => {
+    const others = {
+      'acp:goose': { driver: 'acp', enabled: true, config: { source: { kind: 'registry', agentId: 'goose', version: '1', distribution: 'binary' } } },
+      'acp:fork': { driver: 'acp', enabled: true, config: { source: { kind: 'local', command: '/bin/opencode-fork', args: ['acp'] } } },
+      'acp:serve': { driver: 'acp', enabled: true, config: { source: { kind: 'local', command: '/bin/opencode', args: ['serve'] } } }
+    }
+    expect(readProviderInstances(others)).toEqual(others)
+    expect(seedProviderInstances(others, [], 1)).toMatchObject({ instances: others, upgraded: [] })
   })
 })
 

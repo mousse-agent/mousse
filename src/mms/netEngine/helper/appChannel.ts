@@ -376,7 +376,10 @@ export class AppChannel {
       stream.credit -= next.bytes.byteLength
       stream.bytes -= next.bytes.byteLength
       if (stream.queue.length) turns.push(handle)
-      else if (!this.sending.has(handle)) this.queued.delete(handle)
+      else if (!this.sending.has(handle)) {
+        this.queued.delete(handle)
+        if (this.receiving.get(handle)?.finished) this.receiving.delete(handle)
+      }
       if (stream.bytes < engineLimits().appStreamQueueBytes) this.wakeRoom(handle)
       return dataFrame(handle, next.bytes, next.fin)
     }

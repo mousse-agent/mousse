@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
-import { ArrowUp, Check, CircleAlert, CircleCheck, Copy, Download, Info, Loader2, Mic, RotateCcw, Settings, VolumeHigh, X, type LucideIcon } from '../../lib/icons'
+import { ArrowUp, Check, CircleAlert, CircleCheck, Copy, Download, Info, Laptop, Loader2, Mic, RotateCcw, Settings, VolumeHigh, X, type LucideIcon } from '../../lib/icons'
 import { FloatingPortal, useFloatingPosition, type FloatingPlacement } from '../../lib/floatingLayer'
 import { ProviderIcon } from '../../lib/providerIcons'
 import { turnable } from '../../lib/turning'
@@ -75,6 +75,12 @@ export function DownloadsIndicator({ variant }: { variant: DownloadsIndicatorVar
     setOpen(next)
     downloadsActions.setPinned(next)
   }
+  // Only other computers are behind: the button goes straight to Settings → Devices.
+  const onlyComputers = entries.length > 0 && entries.every((entry) => entry.kind === 'computers')
+  const press = (): void => {
+    if (onlyComputers && !open) openSettingsSection('connections')
+    else toggle(!open)
+  }
   // An open popover holds finished entries; release them if this indicator goes away.
   const openRef = useRef(open)
   openRef.current = open
@@ -95,9 +101,9 @@ export function DownloadsIndicator({ variant }: { variant: DownloadsIndicatorVar
           data-status={summary.status}
           aria-label={label}
           title={label}
-          aria-haspopup="dialog"
-          aria-expanded={open}
-          onClick={() => toggle(!open)}
+          aria-haspopup={onlyComputers ? undefined : 'dialog'}
+          aria-expanded={onlyComputers ? undefined : open}
+          onClick={press}
         >
           {rail ? (
             <>
@@ -175,9 +181,9 @@ function DownloadsPopover({ anchorRef, placement, entries, onClose, onInstall }:
           notesOpen={notesOpen}
           onToggleNotes={() => setNotesOpen((value) => !value)}
           onInstall={onInstall}
-          onOpen={() => {
+          onOpen={(section) => {
             onClose(false)
-            openSettingsSection('speech')
+            openSettingsSection(section)
           }}
         />
       </div>
@@ -191,7 +197,8 @@ export function DownloadsList({ entries, notesOpen, onToggleNotes, onInstall, on
   notesOpen: boolean
   onToggleNotes: () => void
   onInstall: () => void
-  onOpen: () => void
+  /** Opens the Settings section an entry belongs to (`speech` for a model, `connections` for computers). */
+  onOpen: (section: 'speech' | 'connections') => void
 }) {
   if (entries.length === 0) return <p className="downloads-empty">No downloads</p>
   // "Update all": the app's download (its restart stays separate) and every agent Mousse can update.
@@ -199,9 +206,10 @@ export function DownloadsList({ entries, notesOpen, onToggleNotes, onInstall, on
   return (
     <>
       <ul className="downloads-list">
-        {entries.map((entry) => (
-          <DownloadRow key={entry.id} entry={entry} notesOpen={notesOpen} onToggleNotes={onToggleNotes} onInstall={onInstall} onOpen={onOpen} />
-        ))}
+        {entries.map((entry) => entry.kind === 'computers'
+          ? <ComputersRow key={entry.id} entry={entry} onOpen={() => onOpen('connections')} />
+          : <DownloadRow key={entry.id} entry={entry} notesOpen={notesOpen} onToggleNotes={onToggleNotes} onInstall={onInstall} onOpen={onOpen} />
+        )}
       </ul>
       {updates > 1 && (
         <div className="downloads-footer">
@@ -213,8 +221,8 @@ export function DownloadsList({ entries, notesOpen, onToggleNotes, onInstall, on
   )
 }
 
-const KIND_ICON: Record<DownloadKind, LucideIcon> = { update: ArrowUp, 'dictation-model': Mic, 'voice-model': VolumeHigh, agent: Download }
-const KIND_LABEL: Record<DownloadKind, string> = { update: 'App update', 'dictation-model': 'Dictation model', 'voice-model': 'Read-aloud voice', agent: 'Coding agent' }
+const KIND_ICON: Record<DownloadKind, LucideIcon> = { update: ArrowUp, 'dictation-model': Mic, 'voice-model': VolumeHigh, agent: Download, computers: Laptop }
+const KIND_LABEL: Record<DownloadKind, string> = { update: 'App update', 'dictation-model': 'Dictation model', 'voice-model': 'Read-aloud voice', agent: 'Coding agent', computers: 'Your other computers' }
 
 /** "57 of 136 MB", in KB below a megabyte. */
 export function formatDownloadBytes(received: number, total: number): string {
@@ -295,7 +303,7 @@ function DownloadRow({ entry, notesOpen, onToggleNotes, onInstall, onOpen }: {
   notesOpen: boolean
   onToggleNotes: () => void
   onInstall: () => void
-  onOpen: () => void
+  onOpen: (section: 'speech' | 'connections') => void
 }) {
   const update = entry.kind === 'update'
   const notApplied = useUpdateStore((s) => Boolean(update && s.notAppliedVersion && s.notAppliedVersion === s.availableVersion))
@@ -359,7 +367,7 @@ function DownloadRow({ entry, notesOpen, onToggleNotes, onInstall, onOpen }: {
     actions.push(<IconAction key="retry" label="Try again" onClick={() => downloadsActions.retry(entry)}><RotateCcw size={14} /></IconAction>)
     actions.push(<IconAction key="dismiss" label="Dismiss" onClick={() => downloadsActions.dismiss(entry.id)}><X size={14} /></IconAction>)
   } else if (entry.phase === 'done' && !offer) {
-    actions.push(<IconAction key="open" label="Open Speech settings" onClick={onOpen}><Settings size={14} /></IconAction>)
+    actions.push(<IconAction key="open" label="Open Speech settings" onClick={() => onOpen('speech')}><Settings size={14} /></IconAction>)
   } else if (entry.phase === 'cancelled') {
     actions.push(<IconAction key="again" label="Download again" onClick={() => downloadsActions.retry(entry)}><Download size={14} /></IconAction>)
   }
@@ -380,6 +388,27 @@ function DownloadRow({ entry, notesOpen, onToggleNotes, onInstall, onOpen }: {
       </div>
       {offer?.manual && offer.command && entry.phase === 'available' && <CommandLine command={offer.command} />}
       {update && notesOpen && notes && <ReleaseNotes state={{ releaseNotes: notes, omittedReleaseCount: omitted }} />}
+    </li>
+  )
+}
+
+/** The other computers behind this one: their names, each one's version in the tooltip, Devices and Dismiss. */
+function ComputersRow({ entry, onOpen }: { entry: DownloadEntry; onOpen: () => void }) {
+  const computers = entry.computers ?? []
+  const versions = computers.map((computer) => `${computer.name} runs ${computer.version ?? 'an older version'}`).join('\n')
+  return (
+    <li className="downloads-row-item">
+      <div className="downloads-row" data-phase={entry.phase}>
+        <span className="downloads-row-glyph"><Laptop size={15} strokeWidth={1.8} aria-hidden="true" /></span>
+        <span className="downloads-row-text" title={versions}>
+          <span className="downloads-row-name">{entry.label}</span>
+          <span className="downloads-row-detail">{computers.map((computer) => computer.name).join(', ')}</span>
+        </span>
+        <span className="downloads-row-actions">
+          <button type="button" className="downloads-btn" onClick={onOpen}>Devices</button>
+          <IconAction label="Dismiss" onClick={() => downloadsActions.dismiss(entry.id)}><X size={14} /></IconAction>
+        </span>
+      </div>
     </li>
   )
 }

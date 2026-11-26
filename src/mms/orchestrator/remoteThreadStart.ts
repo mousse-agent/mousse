@@ -53,6 +53,11 @@ export interface RemoteThreadStart {
    * dropped for a computer from before it (`ROUTED_DROPPABLE_KEYS`).
    */
   hidden?: boolean
+  /**
+   * The thread is the marking agent's subagent (`ThreadStartedFrom.agent.subagent` there); sent only when true and with
+   * the mark, and dropped for a computer from before it (`ROUTED_DROPPABLE_KEYS`).
+   */
+  subagent?: true
   /** The model chosen with the thread (both, or neither: that computer's default). */
   instanceId: string | null
   model: string | null
@@ -117,7 +122,33 @@ export function sendRefusal(sent: unknown, name: string, what = 'the task'): { c
  * thread exists there; a port that cannot tell the versions keeps the stored choice.
  */
 export async function hiddenOnTheWire(
-  port: { versions?(node: string, signal?: AbortSignal): Promise<Record<string, number> | undefined> },
+  port: VersionsPort,
+  node: string,
+  stored: boolean | null,
+  created: boolean,
+  drop: () => void,
+  signal?: AbortSignal
+): Promise<boolean | null> {
+  return createKeyOnTheWire('hidden', port, node, stored, created, drop, signal)
+}
+
+/** The same as `hiddenOnTheWire`, for `subagent`: the create of a remote subagent's thread says it is one. */
+export async function subagentOnTheWire(
+  port: VersionsPort,
+  node: string,
+  stored: boolean | null,
+  created: boolean,
+  drop: () => void,
+  signal?: AbortSignal
+): Promise<boolean | null> {
+  return createKeyOnTheWire('subagent', port, node, stored, created, drop, signal)
+}
+
+type VersionsPort = { versions?(node: string, signal?: AbortSignal): Promise<Record<string, number> | undefined> }
+
+async function createKeyOnTheWire(
+  key: 'hidden' | 'subagent',
+  port: VersionsPort,
   node: string,
   stored: boolean | null,
   created: boolean,
@@ -126,7 +157,7 @@ export async function hiddenOnTheWire(
 ): Promise<boolean | null> {
   if (stored === null || created || !port.versions) return stored
   const versions = await port.versions(node, signal)
-  if ((versions?.['threads.create'] ?? 0) >= (ROUTED_METHODS['threads.create']?.since?.hidden ?? 1)) return stored
+  if ((versions?.['threads.create'] ?? 0) >= (ROUTED_METHODS['threads.create']?.since?.[key] ?? 1)) return stored
   drop()
   return null
 }
@@ -145,6 +176,7 @@ export async function runRemoteThreadStart(start: RemoteThreadStart, io: RemoteT
       ...(start.projectId ? { projectId: start.projectId } : {}),
       worktreeEnabled: start.worktree,
       ...(start.hidden !== undefined ? { hidden: start.hidden } : {}),
+      ...(start.subagent && Object.keys(start.mark).length > 0 ? { subagent: true } : {}),
       ...start.mark
     }, keys.create)
     const thread = isRecord(created) && isRecord(created.thread) ? created.thread : undefined

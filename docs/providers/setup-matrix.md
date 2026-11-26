@@ -54,7 +54,7 @@ works and [compatibility.md](compatibility.md) for the agent versions.
 
 | Source | Sign-in | OS | State |
 |---|---|---|---|
-| On PATH | Account in the agent's home | Windows x64, Windows arm64, macOS arm64, Linux x64, Linux arm64 | Untested: Finding opencode on PATH and in its installer's folders was tested with a fake opencode; no run of the real agent through Mousse. |
+| On PATH | Account in the agent's home | Windows x64, Windows arm64, macOS arm64, Linux x64, Linux arm64 | Untested: Turns, approvals and single requests were run on the real OpenCode 2.0.20 server with a loopback model on Windows x64 (tests/live/opencodeServer.test.ts); no run with a real sign-in. |
 | Installed by Mousse | Account in the agent's home | Windows x64, Windows arm64, macOS arm64, Linux x64, Linux arm64 | Untested: Install from the ACP registry's opencode entry was tested with a fake registry and download; no live install or sign-in. |
 | Custom command or executable | Account in the agent's home | Windows x64, Windows arm64, macOS arm64, Linux x64, Linux arm64 | Untested: An executable set in Settings starts like the one on PATH; it was not run separately. |
 

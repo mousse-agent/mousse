@@ -1,5 +1,5 @@
 /**
- * A bot's work subagents run as delegations of the run database (Run DB v28), through the bot port: the run database owns
+ * A bot's work subagents run as delegations of the run database (Run DB v29), through the bot port: the run database owns
  * their lifecycle and lineage, bots.db their place on the work's counts and spend (`bot_subagent_runs`, v15). Each
  * holds room on the work's spend before its turn can be dispatched, is charged once (up to when it was last known alive)
  * whatever crashes in between, reaches its work only through the bot port (acknowledged once recorded, told to the work's
@@ -311,7 +311,7 @@ describe('a bot\'s work subagents as delegations', () => {
     expect(f.store.dispatch(job.id, 2)!.usedMs).toBe(3_000)
   })
 
-  it('an upgrade from Run DB v27 and bots.db v14 with work in flight: both migrate, the older subagent settles once, and new subagents run as delegations', async () => {
+  it('an upgrade from Run DB v28 and bots.db v14 with work in flight: both migrate, the older subagent settles once, and new subagents run as delegations', async () => {
     const job = await work('w1')
     const spec = { title: 'Prices', brief: 'Find the prices.', selection: { instanceId: 'pi:openrouter', model: 'some/model' } }
     f.store.insertDispatch({ activationId: job.id, n: 2, kind: 'subagent', mainN: 1, clientRequestId: `${job.id}:s2`, threadId: 'legacy-sub', prompt: { text: 'Find the prices.', subagent: spec } as never, policyDigest: f.store.activation(job.id)!.grantDigest })
@@ -322,9 +322,9 @@ describe('a bot\'s work subagents as delegations', () => {
     f.store.run('UPDATE bot_dispatches SET run_id = ?, started_at = ? WHERE activation_id = ? AND n = 2', sent.runId, f.clock.now, job.id)
     f.clock.now += 2_000
     f.runs.heartbeat(sent.runId)
-    // The files as the previous build left them: Run DB v27 (no bot columns on delegations) and bots.db v14.
-    const v27 = new DatabaseSync(':memory:')
-    for (const migration of RUN_MIGRATIONS.filter((entry) => entry.version <= 27)) v27.exec(migration.sql)
+    // The files as the previous build left them: Run DB v28 (no bot columns on delegations) and bots.db v14.
+    const previous = new DatabaseSync(':memory:')
+    for (const migration of RUN_MIGRATIONS.filter((entry) => entry.version <= 28)) previous.exec(migration.sql)
     const shape = (db: DatabaseSync) => ({
       columns: db.prepare('SELECT name, type, "notnull", dflt_value FROM pragma_table_info(\'delegations\') ORDER BY cid').all(),
       indexes: db.prepare('SELECT name FROM sqlite_master WHERE type = \'index\' AND tbl_name = \'delegations\' ORDER BY name').all()
@@ -336,15 +336,15 @@ describe('a bot\'s work subagents as delegations', () => {
         run.exec(`DROP INDEX delegations_by_root_activation; DROP INDEX delegations_child_run;
           ALTER TABLE delegations DROP COLUMN bot_id; ALTER TABLE delegations DROP COLUMN root_activation_id;
           ALTER TABLE delegations DROP COLUMN bot_access; ALTER TABLE delegations DROP COLUMN bot_read_only;
-          DELETE FROM run_schema_migrations WHERE version = 28; PRAGMA user_version = 27;`)
-        expect(shape(run)).toEqual(shape(v27))
+          DELETE FROM run_schema_migrations WHERE version = 29; PRAGMA user_version = 28;`)
+        expect(shape(run)).toEqual(shape(previous))
         run.close()
         const bots = new DatabaseSync(paths.botsDb)
         bots.exec('DROP TABLE bot_subagent_runs; DELETE FROM run_schema_migrations WHERE version = 15; PRAGMA user_version = 14;')
         bots.close()
       }
     })
-    v27.close()
+    previous.close()
     expect(f.runs.store.db.statement('PRAGMA user_version').get()).toEqual({ user_version: RUN_MIGRATIONS.at(-1)!.version })
     expect(f.store.get('PRAGMA user_version')).toEqual({ user_version: BOTS_MIGRATIONS.at(-1)!.version })
     // The older subagent: its run ended at the boot, charged once up to its last heartbeat.

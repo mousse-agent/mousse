@@ -1,4 +1,5 @@
 import { workWaits } from './bots/store/BotStore'
+import { readSelfUpdateReport } from './updates/selfUpdateReport'
 import { tellMeOf } from '../shared/types'
 import { onSettingsSaved } from './settings/SettingsStore'
 import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
@@ -1457,6 +1458,7 @@ export class MmsProfileServices {
     this.net = new NetService({
       profileDir: this.homeDir,
       editorSsh: { home: homedir(), mousseHome: this.installationHome, profile: this.profileId },
+      selfUpdate: () => readSelfUpdateReport(this.installationHome),
       hosted: mousseIdNetModule,
       // Settings → Labs → Mousse ID (legacy); a later change applies at once (below).
       plusLegacyOff: !normalizeExperimentalSettings(this.settings.get().experimental).plusLegacy,

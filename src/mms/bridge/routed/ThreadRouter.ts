@@ -26,6 +26,7 @@ import type { BridgeHub } from '../hub'
 import { isListedComputer } from './listRows'
 import type { MergedLists } from './mergedLists'
 import {
+  computerOffline,
   mixedComputers,
   notAvailableRemotely,
   translateNetError,
@@ -197,7 +198,7 @@ export class ThreadRouter implements ThreadRouterPort {
   ): Promise<{ result: unknown } | undefined> {
     // `threads.focus` is the router's own method: the handler calls `focus` below. Reordering is an overlay
     // this computer keeps for itself: the handler places the rows of other computers among its own.
-    if (method === 'threads.focus' || !this.enabled() || !isRecord(params)) return undefined
+    if (method === 'threads.focus' || !isRecord(params)) return undefined
     // A CLI that names a qualified id is still refused below; a window's drag is the handler's to place.
     if ((method === 'threads.reorder' || method === 'projects.reorder') && ctx.connection?.clientType === 'gui')
       return undefined
@@ -210,6 +211,8 @@ export class ThreadRouter implements ThreadRouterPort {
     else if (ROUTED_JOB_METHODS.includes(method) && typeof params.id === 'string') split.hasLocal = true
     const nodes = [...new Set([...split.nodes, ...(target ? [target] : []), ...(job ? [job.node] : [])])]
     if (!nodes.length) return undefined
+    // Networking or thread routing is off: refuse qualified remote ids cleanly instead of letting them fall into local stores.
+    if (!this.enabled()) throw computerOffline(this.computer(nodes[0] as NodeId))
     // Only a window routes. The CLI and the agents' shells reach the daemon as other kinds of connection.
     if (ctx.connection?.clientType !== 'gui')
       throw new DomainRpcError(

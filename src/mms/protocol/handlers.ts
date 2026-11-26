@@ -117,6 +117,7 @@ import { localOnlyThreadIds, threadFolderIsLocalOnly } from '../data/localOnlyTh
 import { threadFolderExpired } from '../data/expiredThreads'
 import { isLocalOnlyThread, isSideChatThread } from '../../shared/threadLineage'
 import { isQualifiedId, parseQualifiedId } from '../../shared/threadRef'
+import { unqualifyRoutedParams } from '../../shared/bridge/routedIds'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { PROJECT_FOLDER_PUBLISH_REASON, PROJECT_FOLDER_REASON, threadPlacement } from '../workspace/threadPlacement'
@@ -2179,6 +2180,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
   if (ctx.mms.threadRouter) {
     const routed = await ctx.mms.threadRouter.dispatch(ctx, method, params)
     if (routed) return routed.result
+  } else if (
+    method !== 'threads.focus' &&
+    isObject(params) &&
+    !((method === 'threads.reorder' || method === 'projects.reorder') && ctx.connection?.clientType === 'gui')
+  ) {
+    const split = unqualifyRoutedParams(params)
+    if (split.nodes.length) {
+      throw new DomainRpcError(
+        'computer_offline',
+        'Your other computers are not connected. Turn on networking in Settings, Devices.',
+        { node: split.nodes[0] }
+      )
+    }
   }
   if (method !== 'git.heads') checkGitReadParams(method, params)
   if (isObject(params) && typeof params.threadId === 'string' &&

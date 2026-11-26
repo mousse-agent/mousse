@@ -1,5 +1,5 @@
 /**
- * A bot's work subagent is a delegation in the run database (Run DB v28): the run engine writes its lineage, its run, its
+ * A bot's work subagent is a delegation in the run database (Run DB v29): the run engine writes its lineage, its run, its
  * `running` row with the bot, the root activation and the narrowing it inherits, and its bot `turn.start` in one
  * transaction, and asks the bots through their port (`BotExecutionPort`). Its result is the port's to deliver: rule 4,
  * boundary delivery and a wake turn never take it, and its inbox row is acknowledged only once the port recorded it.
