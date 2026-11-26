@@ -131,28 +131,49 @@ export class GitHubAccount {
    * manager can, then signs in. The answer comes at once; `status` follows the operation.
    */
   async connect(userRequested: UserAction): Promise<SourceControlProviderStatus> {
-    if (this.operation) return this.status()
-    const before = await this.status(true)
-    if (before.state === 'connected') return before
-    if (before.state === 'missing' && !before.install?.automatic) {
-      throw new Error('Install GitHub CLI first, then connect again.')
+    const running = this.operation
+    if (running) {
+      // Cancelled while gh installs: connecting again goes on to the sign-in once the install ends.
+      if (running.cancelled && running.phase === 'installing') running.cancelled = false
+      return this.status()
     }
-    const operation: Operation = { id: randomUUID(), phase: before.state === 'missing' ? 'installing' : 'starting', cancelled: false }
+    // Claimed before anything is awaited, so a second Connect joins this one instead of starting its own.
+    const operation: Operation = { id: randomUUID(), phase: 'starting', cancelled: false }
     this.operation = operation
     this.lastError = undefined
+    let before: SourceControlProviderStatus
+    try {
+      this.cached = null
+      before = await this.read()
+    } catch (error) {
+      this.end(operation)
+      throw error
+    }
+    if (operation.cancelled) return this.status()
+    if (before.state === 'connected' || (before.state === 'missing' && !before.install?.automatic)) {
+      this.end(operation)
+      if (before.state === 'connected') return this.status()
+      throw new Error('Install GitHub CLI first, then connect again.')
+    }
+    if (before.state === 'missing') operation.phase = 'installing'
     void this.runConnect(operation, before, userRequested)
     return this.status()
   }
 
-  /** Stops a Connect that is running; whatever it installed stays. */
+  /**
+   * Stops a Connect that is running; whatever it installed stays. An install in progress is left to finish (stopping a
+   * package manager halfway can leave gh half installed) and nothing follows it; until it ends, `status` says so.
+   */
   cancel(): Promise<SourceControlProviderStatus> {
     const operation = this.operation
     if (operation) {
       operation.cancelled = true
-      operation.process?.kill()
-      this.end(operation)
+      if (operation.phase !== 'installing') {
+        operation.process?.kill()
+        this.end(operation)
+      }
     }
-    return this.status(true)
+    return this.status(operation?.phase === 'installing' ? false : true)
   }
 
   async signOut(userRequested: UserAction): Promise<SourceControlProviderStatus> {
@@ -225,7 +246,7 @@ export class GitHubAccount {
     const error = status.state === 'connected' ? undefined : this.lastError ?? status.error
     return {
       ...status,
-      ...(operation ? { operation: { id: operation.id, phase: operation.phase, ...(operation.code ? { code: operation.code } : {}), ...(operation.url ? { url: operation.url } : {}) } } : {}),
+      ...(operation ? { operation: { id: operation.id, phase: operation.phase, ...(operation.code ? { code: operation.code } : {}), ...(operation.url ? { url: operation.url } : {}), ...(operation.cancelled ? { stopping: true as const } : {}) } } : {}),
       ...(error && !operation ? { error } : {})
     }
   }
@@ -322,7 +343,12 @@ export class GitHubAccount {
         } catch (error) {
           throw new Error(`Installing GitHub CLI failed: ${failure(processMessage(error), 'the installer stopped')}`)
         }
-        if (operation.cancelled) return
+        if (operation.cancelled) {
+          // Cancelled during the install: it is over now, and nothing follows it.
+          this.end(operation)
+          await this.status(true).catch(() => undefined)
+          return
+        }
         operation.phase = 'starting'
       }
       const gh = await this.locate()
@@ -337,7 +363,11 @@ export class GitHubAccount {
       this.end(operation)
       await this.status(true)
     } catch (error) {
-      if (operation.cancelled) return
+      if (operation.cancelled) {
+        // A cancelled install that failed: it ended all the same.
+        this.end(operation)
+        return
+      }
       this.end(operation)
       this.lastError = error instanceof Error ? error.message : String(error)
       await this.status(true).catch(() => undefined)

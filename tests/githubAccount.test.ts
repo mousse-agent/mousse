@@ -14,7 +14,7 @@ const failed = (stderr: string) => Object.assign(new Error('exit 1'), { stderr }
 const action = { via: 'button', label: 'Connect GitHub' } as const
 
 /** A computer's programs: which exist, and what gh answers. */
-function computer(options: { gh?: 'path' | 'program-files' | 'none'; signedIn?: boolean; winget?: boolean; brew?: boolean; platform?: NodeJS.Platform } = {}) {
+function computer(options: { gh?: 'path' | 'program-files' | 'none'; signedIn?: boolean; winget?: boolean; brew?: boolean; platform?: NodeJS.Platform; install?: Promise<void> } = {}) {
   const state = { gh: options.gh ?? 'path', signedIn: options.signedIn ?? false }
   const calls: string[] = []
   const programFiles = 'C:\\Program Files\\GitHub CLI\\gh.exe'
@@ -23,7 +23,10 @@ function computer(options: { gh?: 'path' | 'program-files' | 'none'; signedIn?: 
     const isGh = (executable === 'gh' && state.gh === 'path') || (executable === programFiles && state.gh === 'program-files')
     if (executable === 'winget') {
       if (!options.winget) throw missing()
-      if (args[0] === 'install') state.gh = 'program-files'
+      if (args[0] === 'install') {
+        await options.install
+        state.gh = 'program-files'
+      }
       return { stdout: 'v1.9', stderr: '' }
     }
     if (executable === 'brew' || executable.endsWith('/brew')) {
@@ -172,6 +175,49 @@ describe('GitHub account', () => {
     expect(logins[1]!.killed).toBe(true)
     expect(cancelled.operation).toBeUndefined()
     expect(cancelled.error).toBeUndefined()
+  })
+
+  it('starts one Connect when two arrive at once, and Cancel stops it', async () => {
+    const { account, logins } = computer()
+    const [first, second] = await Promise.all([account.connect(action), account.connect(action)])
+    expect(second.operation?.id).toBe(first.operation?.id)
+    await settle()
+    expect(logins).toHaveLength(1)
+    await account.cancel()
+    expect(logins[0]!.killed).toBe(true)
+    expect((await account.status()).operation).toBeUndefined()
+  })
+
+  it('lets an install finish after Cancel, then stops; Connect again during it joins the same install', async () => {
+    let release = () => {}
+    const { account, logins, calls } = computer({ gh: 'none', winget: true, install: new Promise<void>((resolve) => { release = resolve }) })
+    await account.connect(action)
+    await settle()
+    const installs = () => calls.filter((call) => call.startsWith('winget install')).length
+    expect((await account.connect(action)).operation).toMatchObject({ phase: 'installing' })
+    expect(installs()).toBe(1)
+    // Cancelled mid-install: the installer is left to finish, and the row says so.
+    expect((await account.cancel()).operation).toMatchObject({ phase: 'installing', stopping: true })
+    release()
+    await settle()
+    await settle()
+    expect(logins).toHaveLength(0)
+    expect((await account.status()).operation).toBeUndefined()
+    expect(installs()).toBe(1)
+  })
+
+  it('goes on to the sign-in when Connect is pressed again before a cancelled install ends', async () => {
+    let release = () => {}
+    const { account, logins, calls } = computer({ gh: 'none', winget: true, install: new Promise<void>((resolve) => { release = resolve }) })
+    await account.connect(action)
+    await settle()
+    await account.cancel()
+    expect((await account.connect(action)).operation?.stopping).toBeUndefined()
+    release()
+    await settle()
+    await settle()
+    expect(logins).toHaveLength(1)
+    expect(calls.filter((call) => call.startsWith('winget install'))).toHaveLength(1)
   })
 
   it('signs out the account it shows', async () => {

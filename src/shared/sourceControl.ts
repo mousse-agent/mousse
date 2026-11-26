@@ -53,6 +53,11 @@ export interface SourceControlOperation {
   /** The one-time code to enter at `url`, in `code`. */
   code?: string
   url?: string
+  /**
+   * Cancelled while GitHub CLI installs: an installer is not stopped halfway, so it finishes and nothing follows it.
+   * Connect again before it ends and the sign-in follows after all.
+   */
+  stopping?: true
 }
 
 export interface SourceControlProviderStatus {

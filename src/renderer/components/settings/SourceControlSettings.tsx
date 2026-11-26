@@ -19,6 +19,7 @@ const PHASE_TEXT = {
   code: 'Enter this code on GitHub',
   finishing: 'Finishing…'
 } as const
+const STOPPING_TEXT = 'Finishing the install, then stopping…'
 
 /**
  * Settings → Source control: the code hosts this computer is signed in to, and Add for the others (GitHub for now).
@@ -145,8 +146,13 @@ function GitHubRow({ status, busy, copied, onAct, onCopy }: {
   let control: ReactNode
   let body: ReactNode = null
   if (operation) {
-    description = <span className="source-control-phase">{operation.phase !== 'code' && <Spinner size={13} />}{PHASE_TEXT[operation.phase]}</span>
-    control = cancel
+    // Cancelled while gh installs: the installer finishes first; Connect goes on to the sign-in after it.
+    description = (
+      <span className="source-control-phase" title={operation.stopping ? 'An install is not stopped halfway. Nothing follows it.' : undefined}>
+        {operation.phase !== 'code' && <Spinner size={13} />}{operation.stopping ? STOPPING_TEXT : PHASE_TEXT[operation.phase]}
+      </span>
+    )
+    control = operation.stopping ? connect('Connect') : cancel
     if (operation.phase === 'code' && operation.code) {
       const url = operation.url ?? 'https://github.com/login/device'
       body = (
