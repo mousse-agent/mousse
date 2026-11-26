@@ -224,6 +224,13 @@ const changed = () => new BotActionChanged('This changed since you saw it. Check
 export class BotActions {
   private warming?: Promise<void>
   private readonly executing = new Set<string>()
+  /** Sending calls past their last check (`assertRunning`): from then on the server may see them, so nothing retires them. */
+  private readonly dispatched = new Set<string>()
+  /**
+   * Sending calls a pause or `/clear` retired before they reached the server: their last check refuses them, whatever
+   * happens after (a Resume while they still connect never lets them through).
+   */
+  private readonly retired = new Map<string, BotActionChanged>()
   private readonly answering = new Set<string>()
   constructor(private readonly host: Host) {
     registerHeldCalls(host.store.db, {
@@ -284,6 +291,15 @@ export class BotActions {
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE bot_id = ? AND lane = 'chat' AND status IN ('open', 'approved')", botId))
       if (this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'Your owner cleared the chat, so nothing was sent.' }, 'bot_action_owner_removed'))
         this.host.store.db.afterCommit(() => this.finish(action as unknown as ActionRow))
+    // One sent but still connecting: its last check refuses it. One the server may have seen already finishes.
+    this.retireSending(botId, 'chat', new BotActionChanged('Your owner cleared the chat, so nothing was sent.', 'bot_action_owner_removed'))
+  }
+  /** Marks the bot's calls (of `lane`, or every lane) that are sending but not yet past their last check as retired. */
+  private retireSending(botId: string, lane: 'chat' | undefined, refusal: BotActionChanged): void {
+    for (const action of this.host.store.all("SELECT id FROM bot_actions WHERE bot_id = ? AND status = 'running' AND (? IS NULL OR lane = ?)", botId, lane ?? null, lane ?? null)) {
+      const id = String(action.id)
+      if (this.executing.has(id) && !this.dispatched.has(id) && !this.retired.has(id)) this.retired.set(id, refusal)
+    }
   }
   /** Rollback retires all unstarted calls together; an already dispatched call finishes. */
   withdrawDisabled(): void {
@@ -301,6 +317,8 @@ export class BotActions {
       if (this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This bot was paused, so nothing was sent. Carry on without it when resumed.' }, 'bot_action_owner_paused'))
         this.host.store.db.afterCommit(() => this.finish(action as unknown as ActionRow))
     }
+    // One sent but still connecting is not sent either, even when the owner resumes the bot before it connects.
+    this.retireSending(botId, undefined, new BotActionChanged('This bot was paused, so nothing was sent. Carry on without it when resumed.', 'bot_action_owner_paused'))
   }
   private approvedDeadline(action: Pick<ActionRow, 'answered_at'>): number {
     return action.answered_at ? Date.parse(action.answered_at) + APPROVED_SEND_WINDOW_MS : 0
@@ -480,8 +498,12 @@ export class BotActions {
       throw new BotActionChanged(botActionRefusalText('bot_action_gone'), 'bot_action_gone')
     }
     if (!action || action.status !== 'running' || !this.valid(action)) throw changed()
-    // Paused after Send marked it running, before it reached the server: it is not sent (it settles failed).
+    // Paused (or its chat cleared) after Send marked it running, before it reached the server: it is not sent (it settles
+    // failed), even if the bot was resumed since.
+    const retired = this.retired.get(id)
+    if (retired) throw retired
     if (this.host.store.registry(action.bot_id)?.pausedReason === 'owner') throw new BotActionChanged('This bot was paused, so nothing was sent. Carry on without it when resumed.', 'bot_action_owner_paused')
+    this.dispatched.add(id)
   }
   /** Admission may retire stale lifecycle state; it never approves or dispatches the call. */
   check(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): void {
@@ -577,6 +599,8 @@ export class BotActions {
       this.transition(id, 'running', error instanceof BotActionChanged ? 'failed' : 'uncertain', { text: error instanceof BotActionChanged ? error.message : 'It could not be confirmed whether this went through: check before trying again.' })
     } finally {
       this.executing.delete(id)
+      this.dispatched.delete(id)
+      this.retired.delete(id)
     }
     if (action.card_json === null) this.host.sentAlone?.()
     this.finish(action)

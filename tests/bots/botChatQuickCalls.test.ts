@@ -19,14 +19,17 @@ import type { McpToolDescriptor } from '../../src/shared/integrations'
 import { defaultIntegrationActor } from '../../src/shared/integrations/actor'
 import { BOT_MCP_SERVER_SWITCH } from '../../src/shared/bots/personal/manifest'
 import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from '../run/appToolsFixture'
-import { botFixture, createBot, finish, flush, start, type BotFixture } from './botFixture'
+import { botTools } from '../../src/mms/run/mcp/appTools/bots'
+import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
+import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
 let botId: string
 
 const tool = (server: string, serverName: string, name: string, readOnlyHint: boolean): McpToolDescriptor => ({
   id: `${server}:${name}`, serverId: `mousse:${server}`, installationId: server, serverName, toolName: name,
-  providerName: `mcp__${serverName}__${name}`, description: `${name} of ${serverName}`, inputSchema: { type: 'object', properties: {} }, readOnlyHint
+  providerName: `mcp__${serverName}__${name}`, description: `${name} of ${serverName}`, inputSchema: { type: 'object', properties: {} }, readOnlyHint,
+  configRevision: 'revision-1'
 })
 const SERVERS = [
   { installationId: 'srv-github', serverName: 'GitHub', tools: [tool('srv-github', 'GitHub', 'list_issues', true), tool('srv-github', 'GitHub', 'create_issue', false)] },
@@ -41,6 +44,8 @@ let waiting: Map<string, { signal: AbortSignal; answer(text: string): void }>
 /** What does not answer by itself. */
 let hangs: Set<string>
 let mcp: BotMcp
+/** Resolves when the owner's connection is ready; a test holds it to change things while a call connects. */
+let connected: () => Promise<void>
 
 function reply<T>(name: string, signal: AbortSignal | undefined, value: (text: string) => T, text: string): Promise<T> {
   sent.push(name)
@@ -62,6 +67,7 @@ beforeEach(async () => {
   sent = []
   waiting = new Map()
   hangs = new Set()
+  connected = async () => undefined
   mcp = new BotMcp({
     catalog: {
       ensure: async () => undefined,
@@ -71,7 +77,14 @@ beforeEach(async () => {
         installationId: server.installationId, serverName: server.serverName, toolName: entry.toolName, providerName: entry.providerName
       })))
     },
-    manager: { callTool: (providerName, _args, _project, signal) => reply(providerName, signal, (text) => ({ content: [{ type: 'text', text }] }) as never, `result of ${providerName}`) },
+    manager: {
+      callTool: async (providerName, _args, _project, signal, _actor, expected) => {
+        // As the manager does once connected: the pin's last check, right before the server sees the call.
+        await connected()
+        expected?.assertDispatchActive?.()
+        return reply(providerName, signal, (text) => ({ content: [{ type: 'text', text }] }) as never, `result of ${providerName}`)
+      }
+    },
     enabled: () => true
   })
   f.host.mcp = mcp
@@ -219,6 +232,32 @@ describe('budgets, deadlines and the owner writing', () => {
     expect(waiting.get(WRITE)!.signal.aborted).toBe(false)
     waiting.get(WRITE)!.answer('Issue #12 filed.')
     expect((await writing).text).toContain('Issue #12 filed.')
+  })
+
+  it("the owner's answer to a work's question, written on its bubble, still stops the chat's running call that only reads", async () => {
+    f.host.chatCallLimits = { callMs: 5_000, turnMs: 10_000 }
+    // Work that asked its owner a question and waits for the answer.
+    const asking = await chat('Find me a flat.', 'm1')
+    const { workId } = await f.bots.tools.work.start(botId, asking.activation.id, { title: 'Flat hunt', brief: 'Find two flats.', key: 'w1' })
+    await finish(f, asking.payload, 'completed', { text: 'On it.' })
+    const work = await start(f, workId)
+    const askOwner = botTools(() => ({ host: f.bots.tools })).find((entry) => entry.name === 'ask_owner') as MousseTool
+    await askOwner.handler({ question: 'Which flat?', choices: ['Flat A', 'Flat B'] }, {
+      caller: { threadId: work.payload.threadId, runId: 'r', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+      turn: { threadId: work.payload.threadId, bot: work.prepared.authority }, toolCallId: 'ask-1', signal: new AbortController().signal, transport: 'mcp'
+    } as unknown as ToolCallContext)
+    await finish(f, work.payload, 'completed', { text: 'I asked which flat.' })
+    const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === workId)!
+    // The chat reads a note while the owner answers the work in their own words, on the question's bubble.
+    const talk = await chat('Read my trip note.', 'm2')
+    const call = registryFor(talk)
+    hangs = new Set([READ])
+    const reading = use(call, READ)
+    await flush()
+    await f.bots.service.chatSend({ botId, text: 'Flat A, please.', clientRequestId: 'm3', replyTo: bubble.id })
+    expect(f.store.question(bubble.question!.questionId)?.status).toBe('answered')
+    expect(refusalOf(await reading)?.refused).toMatchObject({ code: 'cancelled' })
+    expect(waiting.get(READ)!.signal.aborted).toBe(true)
   })
 
   it('a tool whose server drops its read-only hint while it runs is never stopped by the owner, and its deadline is uncertain', async () => {

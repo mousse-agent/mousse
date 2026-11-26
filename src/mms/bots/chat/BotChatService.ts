@@ -565,6 +565,8 @@ export class BotChatService {
           ? this.engine.answerWorkInTx(current.id, choice !== undefined ? { choice, by: 'owner', tapped: true } : { text: input.text, by: 'owner' }, posted.id)
           : this.engine.lateWorkAnswerInTx(current.id, choice !== undefined ? { choice, tapped: true } : { text: input.text }, posted.id)
         if (!answered) throw closed
+        // The owner wrote: the chat turn running now stops its calls known to only read, as for any of their messages.
+        this.engine.ownerWroteInTx(input.botId, undefined)
         return posted.id
       })
     } catch (error) {

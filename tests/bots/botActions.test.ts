@@ -29,6 +29,7 @@ import { ToolRegistry, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools/reg
 import { AppToolTurns } from '../../src/mms/run/mcp/appTools/turns'
 import { botCatalogueTools } from '../../src/mms/run/mcp/appTools/botCatalogue'
 import { refused } from '../../src/mms/run/mcp/appTools/refusal'
+import { toolArgsDigest } from '../../src/mms/run/tools/argsDigest'
 import { appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { toolNeeds } from '../../src/mms/run/mcp/appTools/authority'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
@@ -3733,6 +3734,32 @@ it('a chat card that runs past its 60-second timer settles uncertain, and its re
   expect(resultTurns(t.botId)[0]!.trigger).toMatchObject({ input: expect.stringContaining('could not be confirmed') })
 })
 
+it("a chat card's call that finishes while the bot is paused starts its result turn only after Resume", async () => {
+  const t = await setup(true)
+  const { talk, action } = await chatHold(t)
+  await finish(f, talk.payload)
+  // Paused while the server works on the call: it finishes, and its result turn waits.
+  vi.mocked(t.manager.callTool).mockImplementationOnce(async (_name, args) => {
+    f.bots.pauseBot(t.botId)
+    t.calls.push(structuredClone(args))
+    return { content: [{ type: 'text', text: 'delivered' }] } as never
+  })
+  await f.bots.actions.answer({ actionId: action.id, digest: action.args_digest, answer: 'send' })
+  await flush()
+  expect(f.bots.actions.get(action.id)!.status).toBe('done')
+  expect(resultTurns(t.botId).map(row => row.status)).toEqual(['queued'])
+  // The owner's own message still gets its turn while paused; the result turn still waits behind nothing.
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Still there?', clientRequestId: 'while-paused' })
+  const owner = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  expect(owner.idempotencyKey.startsWith('action:')).toBe(false)
+  await finish(f, (await start(f, owner.id)).payload)
+  await flush()
+  expect(resultTurns(t.botId).map(row => row.status)).toEqual(['queued'])
+  await f.bots.resumeBot(t.botId)
+  await flush()
+  expect(resultTurns(t.botId).map(row => row.status)).toEqual(['running'])
+})
+
 it('Not now on a chat card records the answer and starts no turn', async () => {
   const t = await setup(true)
   const { talk, action } = await chatHold(t)
@@ -3802,7 +3829,33 @@ it.each(['nothing', 'server switch', 'MCP off'] as const)("a chat turn's call th
   expect(t.calls).toEqual([])
 })
 
-it('a bot paused after Send marked its call running, before it reached the server, sends nothing and settles failed', async () => {
+it.each(['its stored level', 'its server dropping the read-only hint'] as const)("a chat turn's call that starts to ask first while it connects, by %s, is not sent; called again, it is held", async change => {
+  // Granted with no stored level, on a tool that says it only reads: called straight from the chat, never held.
+  const t = await setup(true, true, false, false, false, false, 'send', true, true)
+  await finish(f, t.work.payload)
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Send it from here.', clientRequestId: 'chat-quick' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const talk = await start(f, row.id)
+  const gate = connecting(t.manager)
+  const sending = callForBot({ bot: talk.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'quick-1', signal: new AbortController().signal })
+  await gate.reached
+  if (change === 'its stored level') {
+    const grant = f.store.activeGrant(t.botId)!
+    const manifest = { ...grant.manifest, mcp: grant.manifest.mcp.map(pair => ({ ...pair, level: 'asks_first' as const })) }
+    f.store.approve(t.botId, botManifestDigest(manifest), manifest)
+  } else t.descriptor.readOnlyHint = false
+  gate.release()
+  expect(await sending).toMatchObject({ isError: true, text: expect.stringContaining('now asks your owner first, so nothing was sent') })
+  expect(t.calls).toEqual([])
+  expect(f.bots.actions.forWork(row.id)).toBeUndefined()
+  // Called again, it is held for the owner with a card, as any call that asks first.
+  const again = await callForBot({ bot: talk.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'quick-2', signal: new AbortController().signal })
+  expect(again.text).toBe('This call is held for your owner. End your turn now.')
+  expect(f.bots.actions.forWork(row.id)).toMatchObject({ lane: 'chat', status: 'open' })
+  expect(t.calls).toEqual([])
+})
+
+it.each(['paused', 'paused, then resumed'] as const)('a bot %s after Send marked its call running, before it reached the server, sends nothing and settles failed', async path => {
   const t = await setup(true, true)
   await t.call()
   await finish(f, t.work.payload)
@@ -3812,11 +3865,36 @@ it('a bot paused after Send marked its call running, before it reached the serve
   await gate.reached
   expect(f.bots.actions.get(a.id)!.status).toBe('running')
   f.bots.pauseBot(t.botId)
+  // Resumed before the connection is ready: the pause still retired the call.
+  if (path === 'paused, then resumed') await f.bots.resumeBot(t.botId)
   gate.release()
   await sending
   expect(f.bots.actions.get(a.id)!.status).toBe('failed')
   expect(JSON.parse(f.bots.actions.get(a.id)!.result_json!).text).toContain('paused, so nothing was sent')
   expect(t.calls).toEqual([])
+})
+
+it.each([false, true])("/clear while a chat card's approved call connects sends nothing; one already past its last check finishes (%s)", async sent => {
+  const t = await setup(true, true)
+  const { talk, action } = await chatHold(t)
+  await finish(f, talk.payload)
+  const gate = connecting(t.manager)
+  let clearing: Promise<void> | undefined
+  if (sent) vi.spyOn(t.manager as McpManager, 'callTool').mockImplementationOnce(async function (this: McpManager, ...args: Parameters<McpManager['callTool']>) {
+    // Cleared while the server works on it: past its last check, it finishes.
+    const [name, callArgs, project, signal, actor, expected, options] = args
+    return McpManager.prototype.callTool.call(this, name, callArgs, project, signal, actor, expected ? { ...expected, assertDispatchActive: () => { expected.assertDispatchActive?.(); clearing = f.bots.clearChat(t.botId) } } : expected, options)
+  })
+  const sending = f.bots.actions.answer({ actionId: action.id, digest: action.args_digest, answer: 'send' })
+  await gate.reached
+  expect(f.bots.actions.get(action.id)!.status).toBe('running')
+  if (!sent) await f.bots.clearChat(t.botId)
+  gate.release()
+  await sending
+  await clearing
+  expect(f.bots.actions.get(action.id)!.status).toBe(sent ? 'done' : 'failed')
+  expect(t.calls).toEqual(sent ? [t.args] : [])
+  expect(f.store.message(action.message_id)).toBeUndefined()
 })
 
 it('/clear withdraws a chat card that outlived its turn: a stale Send sends nothing, and the same request gets a card again', async () => {
@@ -3863,24 +3941,70 @@ it('a chat turn a restart cut off once it held a call ends done, keeps its card,
   expect(t.calls).toEqual([t.args])
 })
 
-it("a chat card's result no turn can carry (its grant revoked while it ran) is told once in the chat, and never later", async () => {
+// The crash comes after the hold wrote its card, before the relay settled the call's ledger row (it stays started, and the
+// run is uncertain). Only that call unsettled is a known outcome; any other call left unsettled still pauses the turn.
+it.each(['only the held call', 'another call too'] as const)('a chat turn a crash cut off with %s unsettled in the ledger', async unsettled => {
+  const t = await setup(true)
+  Object.assign(t.args, { token: 'private-call-secret' })
+  await finish(f, t.work.payload)
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Send it from here.', clientRequestId: 'chat-hold' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  await flush()
+  const talk = await start(f, row.id)
+  const { runId, threadId } = talk.payload
+  const started = (id: string, tool: string, args: unknown) => f.runs.tools.start({ invocationId: id, runId, attemptId: f.runs.getRun(runId)!.activeAttemptId!, tool, argsDigest: toolArgsDigest(args), now: f.store.now(), idempotent: false }).invocationId
+  // The relay's ledger as Mousse writes it (`toolLedgerFor`), and never settled.
+  let n = 0
+  const ledger = { start: (call: { name: string; arguments: unknown }) => started(`call-${++n}`, call.name, call.arguments), commit: () => undefined, failed: () => undefined }
+  const bot = talk.prepared.authority
+  const turn = appTurn({ threadId, runId, turnToken: 'tt', bot })
+  const handler = new RelayHandler({
+    catalog: {} as never, manager: {} as never, botMcp: t.mcp, botOf: () => bot, projectPathFor: () => undefined, toolLedger: () => ledger as never,
+    registry: { admit: async rawArgs => ({ threadId, active: runId, turn, args: rawArgs, caller: { threadId, runId, provider: 'claude', modeCeiling: 'default', accessLevel: 'lineage' as const }, boundToken: 'tt' }) }
+  })
+  await handler.call('Mail__send', t.args, { credential: { threadId, runId, provider: 'claude', modeCeiling: 'default', accessLevel: 'lineage', binding: 'rotate', relay: { approvals: 'runtime' }, current: () => true }, toolCallId: 'chat-call', signal: new AbortController().signal } as never)
+  const action = f.bots.actions.forWork(row.id)!
+  expect(action).toMatchObject({ lane: 'chat', status: 'open' })
+  if (unsettled === 'another call too') started('edit-call', 'Edit', { file_path: 'notes.md' })
+  f.runs.markTerminal(runId, 'uncertain', { uncertainReason: 'non_idempotent_tool_in_flight' })
+  f.bots.close(); f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup(); await flush()
+  if (unsettled === 'another call too') {
+    expect(f.store.activation(row.id)).toMatchObject({ status: 'paused', endReason: 'unknown_calls' })
+    return
+  }
+  expect(f.store.activation(row.id)).toMatchObject({ status: 'done', endReason: null })
+  expect(f.store.unknownCalls(row.id)).toEqual([])
+  expect(f.bots.actions.get(action.id)).toMatchObject({ status: 'open', exec_args: JSON.stringify(t.args) })
+  expect(f.store.message(action.message_id)).toBeDefined()
+  await f.bots.actions.answer({ actionId: action.id, digest: action.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+})
+
+// How the call ended, its grant revoked while it ran: the notice says what happened, by how it settled.
+it.each([
+  ['done', 'done', / was sent\. /, async () => ({ content: [{ type: 'text', text: 'delivered' }] })],
+  ['a tool error', 'failed', / was sent; the tool reported an error\. /, async () => ({ content: [{ type: 'text', text: 'Half the list was updated.' }], isError: true })],
+  ['a lost connection', 'uncertain', /: Mousse couldn't tell if it went through\. /, async () => { throw new Error('socket hang up') }],
+  ['a refusal before it was sent', 'failed', / was not sent\. /, async () => { throw Object.assign(new Error('MCP dependency changed since admission.'), { code: 'stale_revision', mcpNotDispatched: true }) }]
+] as const)("a chat card's result no turn can carry (its grant revoked while it ran, ending in %s) is told once in the chat, and never later", async (_case, status, says, answer) => {
   const t = await setup(true)
   const { talk, action } = await chatHold(t)
   await finish(f, talk.payload)
   const grant = f.store.activeGrant(t.botId)!
-  vi.mocked(t.manager.callTool).mockImplementationOnce(async (_name, args) => {
+  vi.mocked(t.manager.callTool).mockImplementationOnce(async () => {
     f.bots.revoke(t.botId)
-    t.calls.push(structuredClone(args))
-    return { content: [{ type: 'text', text: 'delivered' }] } as never
+    return await answer() as never
   })
   await f.bots.actions.answer({ actionId: action.id, digest: action.args_digest, answer: 'send' })
-  expect(f.bots.actions.get(action.id)!.status).toBe('done')
+  expect(f.bots.actions.get(action.id)!.status).toBe(status)
   expect(resultTurns(t.botId)).toEqual([])
   const notices = () => f.store.all("SELECT text FROM bot_messages WHERE bot_id = ? AND id = ?", t.botId, `bm_${action.id}_result`)
-  expect(notices()).toEqual([{ text: expect.stringMatching(/^Mail · .+ was sent\. .+ can't follow up on it now\.$/) }])
+  expect(notices()).toEqual([{ text: expect.stringMatching(/^Mail · .+ can't follow up on it now\.$/) }])
+  expect(String(notices()[0]!.text)).toMatch(says)
   // Approved again: still no turn for it, and the notice is not repeated.
   f.store.approve(t.botId, grant.digest, grant.manifest)
-  f.bots.actions.transition(action.id, 'done', 'done', { text: 'delivered' })
+  f.bots.actions.transition(action.id, status, status, { text: 'delivered' })
   await flush()
   expect(resultTurns(t.botId)).toEqual([])
   expect(notices()).toHaveLength(1)

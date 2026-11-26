@@ -9,6 +9,7 @@ import { PageChecks, pageSetting, type PageSetting } from '../pageChecks'
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
 import { BOT_RELAY_OWNER_ONLY_TEXT, BOT_TURN_KINDS, turnRefusals, turnRights, type BotTurnRights } from './turnKinds'
 import { fastNotice, noticeClass, unattendedChatTurn, type NoticeClass } from './unattended'
+import { toolArgsDigest } from '../../run/tools/argsDigest'
 import { BOT_CHAT_ACTION_MS, BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData, readableActionTitle, type ActionRow } from '../actions/BotActions'
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
 import { settingCompactionPoint } from '../../../shared/settings'
@@ -2247,7 +2248,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * when the notices that wait settle, when none may start yet. Times come from `createdAt`, so a restart keeps them.
    */
   private nextChat(botId: string): { row?: BotActivationRow; at?: number } {
-    const queued = this.store.laneActivations(botId, 'chat', ['queued'])
+    // A held call's result turn waits for Resume while the bot is paused (Resume pumps the chat again).
+    const paused = Boolean(this.store.registry(botId)?.pausedReason)
+    const queued = this.store.laneActivations(botId, 'chat', ['queued']).filter((row) => !(paused && provenanceOf(row) === 'action_result'))
     const first = queued.find(ownerChatTurn) ?? queued.find((row) => !unattendedChatTurn(row))
     if (first) return { row: first }
     const now = this.now()
@@ -3478,6 +3481,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     live.controller.abort(new BotWallAbort())
   }
 
+  /** Whether a call of `tool` is held for the owner now: as the bot holds it (granted with the level its ask stored, or a default server's), at its level as listed now. */
+  private mcpAsksFirstNow(botId: string, tool: BotMcpTool): boolean {
+    if (!botAsksFirst(this.host.settings?.get())) return false
+    const grant = this.store.activeGrant(botId)
+    const pair = grant && this.heldPair(botId, grant.manifest, tool.server, tool.tool)
+    return Boolean(pair && this.actionLevel(tool, pair.level, true) === 'asks_first')
+  }
+
   private actionLevel(tool: { server: string; tool: string; serverName?: string; readOnlyHint?: boolean }, storedLevel?: string, offered = false): 'asks_first' | 'allowed' {
     const server = findServer(this.host.mcp?.servers() ?? [], tool.server)
     const listed = server?.tools.find(t => t.tool === tool.tool)
@@ -4178,11 +4189,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...(input.role === 'activation' && ownerRequestedWork(row, (id) => this.store.activation(id)) ? { ownerRequested: true } : {}),
       ...(botAsksFirst(this.host.settings?.get()) ? {
         maskMcpArguments: (args: Record<string, unknown>) => maskedActionData(args) as Record<string, unknown>,
+        mcpHeldNow: (tool: import('../../../shared/bots/personal/authority').BotMcpTool) => this.mcpAsksFirstNow(row.botId, tool),
         holdMcp: (tool: import('../../../shared/bots/personal/authority').BotMcpTool, args: Record<string, unknown>, toolCallId?: string) => {
-          // As the bot holds it now: granted (with the level its ask stored), or a default server's.
-          const grant = this.store.activeGrant(row.botId)
-          const pair = grant && this.heldPair(row.botId, grant.manifest, tool.server, tool.tool)
-          if (!pair || this.actionLevel(tool, pair.level, true) !== 'asks_first') return undefined
+          if (!this.mcpAsksFirstNow(row.botId, tool)) return undefined
           if (row.lane === 'run' && row.trigger.kind !== 'work' && row.trigger.kind !== 'schedule') return { text: "A run started by hand can't wait for your owner. Say in your report what you would have sent.", isError: true }
           if (row.trigger.kind === 'schedule' && !this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return { text: "This schedule has ended, so this can't wait for your owner. Say in your report what you would have sent.", isError: true }
           const existing = toolCallId && this.store.get('SELECT id FROM bot_actions WHERE call_key = ?', JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, toolCallId]))
@@ -7970,6 +7979,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
+  /**
+   * Whether the only calls of chat turn `row` whose outcome is unknown are its held call (`mainN`'s card, written and
+   * still pending): the hold wrote the card and sent nothing, so that call's ledger row is dropped from the unknown ones.
+   * Matched by the arguments the ledger recorded (masked as `maskMcpArguments` masks them).
+   */
+  private onlyHeldCallUnsettled(row: BotActivationRow, mainN: number, runs: RunEngine): boolean {
+    const action = this.actions.pendingInTurn(row.id, mainN)
+    if (!action || action.card_json === null || !action.exec_args) return false
+    let digest: string
+    try { digest = toolArgsDigest(maskedActionData(JSON.parse(action.exec_args))) } catch { return false }
+    const unknown = this.store.unknownCalls(row.id).filter((call) => !call.acknowledged)
+    if (!unknown.length || unknown.length > 1) return false
+    const [call] = unknown
+    if (runs.tools.listForRun(call!.runId).find((entry) => entry.invocationId === call!.invocationId)?.argsDigest !== digest) return false
+    this.store.dropUnknownCall(row.id, call!.invocationId)
+    return true
+  }
+
   private async reconcileActivation(row: BotActivationRow, runs: RunEngine): Promise<void> {
     if (row.trigger.kind === 'work') {
       for (const dispatch of this.store.dispatches(row.id))
@@ -8059,6 +8086,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const run = main.runId ? runs.getRun(main.runId) : undefined
     // Row 4: the owner's Stop.
     if (run && (run.status === 'cancelled' || run.status === 'interrupted') && run.outcome?.interruptedBy === 'user') return end('cancelled', 'stopped')
+    // A chat turn cut off right after it held a call, before the call's own ledger row settled: its card was written and
+    // nothing was sent, a known outcome. It ends done with its card kept (as below), never paused as uncertain.
+    if (row.lane === 'chat' && this.onlyHeldCallUnsettled(row, main.n, runs)) {
+      const ended = this.store.db.transaction(() => this.store.moveActivation(row.id, ['running'], 'done', { endReason: null }) ? this.store.activation(row.id) : undefined)
+      if (ended) this.afterEnd(ended)
+      return
+    }
     // Row 5: unacknowledged unknown calls (main or consult), or an `uncertain` main run.
     const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
     if (unknown || run?.status === 'uncertain') {
@@ -8878,13 +8912,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** What a held call's result turn would have carried, as a notice in the chat when no turn can (`actionResultInTx`). */
   private actionResultNoticeInTx(action: ActionRow, origin: BotActivationRow): void {
-    const settled = this.store.get('SELECT status, card_json FROM bot_actions WHERE id = ?', action.id)
-    const card = JSON.parse(String(settled?.card_json ?? '{}')) as { serverName?: string; actionTitle?: string }
+    const settled = this.store.get('SELECT status, card_json, result_json FROM bot_actions WHERE id = ?', action.id)
+    const card = JSON.parse(String(settled?.card_json ?? '{}')) as { serverName?: string; actionTitle?: string; toolReportedError?: boolean }
+    const result = JSON.parse(String(settled?.result_json ?? '{}')) as { toolReportedError?: boolean }
     const what = [card.serverName, card.actionTitle].filter(Boolean).join(' · ') || 'The held action'
-    const outcome = settled?.status === 'done' ? 'was sent' : settled?.status === 'uncertain' ? "may or may not have gone through" : 'was not sent'
+    // What happened, by how it settled: a tool error came from the server, so the call was sent.
+    const outcome = settled?.status === 'done' ? ' was sent'
+      : settled?.status === 'uncertain' ? ": Mousse couldn't tell if it went through"
+        : result.toolReportedError || card.toolReportedError ? ' was sent; the tool reported an error' : ' was not sent'
     this.chat.post({
       id: `bm_${action.id}_result`, botId: action.bot_id, author: 'bot', kind: 'notice', external: true, activationId: origin.id, lane: 'chat',
-      text: `${what} ${outcome}. ${this.botName(action.bot_id) ?? 'The bot'} can't follow up on it now.`
+      text: `${what}${outcome}. ${this.botName(action.bot_id) ?? 'The bot'} can't follow up on it now.`
     })
   }
 
