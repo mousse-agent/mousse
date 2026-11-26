@@ -147,23 +147,6 @@
       "expiresAt": "2026-11-25T20:09:20.891Z"
     },
     {
-      "task": "local-models-connect",
-      "session": "Animatrix-f8ad57",
-      "machine": "Animatrix",
-      "branch": "local-models-connect",
-      "paths": [
-        "src/mms/providers/local",
-        "src/mms/providers/ProviderAuthService.ts",
-        "src/mms/harness/drivers/pi",
-        "src/mms/harness/pi/extension",
-        "src/renderer/components/providers",
-        "src/shared/modelVariants.ts",
-        "src/mms/orchestrator/TitleModelIndex.ts"
-      ],
-      "claimedAt": "2026-11-26T14:07:43.071Z",
-      "expiresAt": "2026-11-26T16:07:43.071Z"
-    },
-    {
       "task": "macos-signing-notarization",
       "session": "Animatrix-7dc63c",
       "machine": "Animatrix",
