@@ -631,6 +631,28 @@ describe('composer model picker', () => {
     expect(modelButton().disabled).toBe(true)
     expect(host.querySelector('.composer-permission-chip')).toBeNull()
   })
+
+  it('hides the permission chip and closes its menu while running or stoppable, then shows it again when idle', () => {
+    render({ mode: 'ask', open: false })
+    expect(host.querySelector('.composer-permission-chip')).not.toBeNull()
+    openPermissions()
+    expect(permissionMenu()).not.toBeNull()
+
+    // Running: chip and open menu go away; the model button stays.
+    render({ mode: 'ask', open: false, footer: { loading: true } })
+    expect(host.querySelector('.composer-permission-chip')).toBeNull()
+    expect(permissionMenu()).toBeNull()
+    expect(modelButton()).not.toBeNull()
+
+    // Waiting on an approval or question (stoppable without loading): still hidden.
+    render({ mode: 'ask', open: false, footer: { loading: false, stoppable: true } })
+    expect(host.querySelector('.composer-permission-chip')).toBeNull()
+
+    // Stopped or finished: chip comes back with its menu closed.
+    render({ mode: 'ask', open: false, footer: { loading: false, stoppable: false } })
+    expect(host.querySelector('.composer-permission-chip')).not.toBeNull()
+    expect(permissionMenu()).toBeNull()
+  })
 })
 
 describe('composer send slot', () => {

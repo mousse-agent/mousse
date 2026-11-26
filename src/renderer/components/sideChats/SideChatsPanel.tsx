@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { UIMessage } from 'ai'
 import type { Thread } from '../../../shared/types'
-import { isTurnActivePhase, type TurnPhase } from '../../../shared/types'
+import { isTurnActivePhase, isTurnStoppable, type TurnPhase } from '../../../shared/types'
 import { sideChatsOf } from '../../../shared/threadLineage'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import { openSettingsSection } from '../../lib/settingsNavigation'
@@ -326,7 +326,7 @@ function SideChatColumn({ thread }: { thread: Thread }) {
                 slashCommands={false}
                 placeholder="Ask in this side chat"
                 loading={busy}
-                stoppable={busy}
+                stoppable={busy || isTurnStoppable(turnState)}
                 onSend={() => void send()}
                 onStop={stop}
                 run={{

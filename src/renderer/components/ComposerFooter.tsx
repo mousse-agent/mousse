@@ -130,7 +130,7 @@ export interface ComposerFooterProps {
   recordingLevels?: AudioLevels | null
   /** When true, file attach stays enabled during an active turn (queued sends). */
   allowAttachWhileLoading?: boolean
-  /** The thread's permission mode and how to change it; without it (or `run`) the footer has no such control. */
+  /** The thread's permission mode and how to change it; hidden while a run is active or stoppable, and absent without it or `run`. */
   permission?: ComposerPermissionProps
   /**
    * The thread's send mode, while a reply runs and Enter can either queue or steer. Without it there is no mode
@@ -497,11 +497,13 @@ export function ComposerFooter({
 
   // While connecting the controls stay laid out, so the row keeps its height, but are hidden and out of reach.
   const away = connecting ? { inert: true, 'aria-hidden': true } as const : {}
+  // Changing the permission mode does not affect an active run or pending approval: hide the chip until it stops or finishes.
+  const permissionShown = loading || stoppable ? undefined : permission
   return (
     <div className="composer-footer" data-connecting={connecting ? '' : undefined}>
       {connecting && connectingNote ? <span className="composer-connecting-note" role="status">{connectingNote}</span> : null}
       <div className="composer-footer-left" {...away}>
-        {run ? <ComposerRunControls run={run} permission={permission} /> : null}
+        {run ? <ComposerRunControls run={run} permission={permissionShown} /> : null}
       </div>
 
       <div className="composer-footer-right" {...away}>

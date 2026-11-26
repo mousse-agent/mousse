@@ -2323,7 +2323,7 @@ export function OrchestratorChat() {
               </>}
               searchMentions={searchMentions}
               mentionScope={mentionScope}
-              permission={{ mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}
+              permission={firstSendShown ? undefined : { mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}
               sendModeThreadId={activeThreadId ?? undefined}
 
             />

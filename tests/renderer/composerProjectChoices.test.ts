@@ -668,3 +668,54 @@ describe('a new chat on another computer gets its settings in the same send, or 
     expect(permissionChip()).toBe('Permissions: Ask before acting')
   })
 })
+
+describe('permission chip visibility during a run', () => {
+  it('hides the permission chip while the thread is running or awaiting input, and shows it again when stopped or finished', async () => {
+    const abort = vi.fn(async () => true)
+    bridge.orchestrator = { abort }
+    stubBridge()
+    await listModels(['remembers'])
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const started = threadRow('run-1', { permissionMode: 'ask', worktreeEnabled: true, modelOverride: OPUS })
+    useAppStore.setState({
+      projects: [project('remembers', { permissionMode: 'ask' })],
+      threads: [started],
+      activeThreadId: 'run-1',
+      messages: [{ id: 'u1', role: 'user', content: 'Check the build', timestamp: '2026-11-10T00:00:01Z' }],
+      turnStates: {},
+      threadActivity: {}
+    })
+    await mountComposer()
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+
+    // Turn running: permission chip hides and Stop shows.
+    act(() => useAppStore.setState({
+      turnStates: { 'run-1': { threadId: 'run-1', turnId: 't1', phase: 'streaming', updatedAt: '2026-11-10T00:00:02Z' } }
+    }))
+    expect(permissionChip()).toBeUndefined()
+    const stopButton = host.querySelector<HTMLButtonElement>('button[aria-label="Stop run"]')
+    expect(stopButton).not.toBeNull()
+
+    // Waiting on an approval or question: still stoppable, still hidden.
+    act(() => useAppStore.setState({
+      turnStates: { 'run-1': { threadId: 'run-1', turnId: 't1', phase: 'awaiting_input', updatedAt: '2026-11-10T00:00:03Z' } }
+    }))
+    expect(permissionChip()).toBeUndefined()
+
+    // Stopping the agent brings the permission chip back right away.
+    await act(async () => { host.querySelector<HTMLButtonElement>('button[aria-label="Stop run"]')!.click() })
+    await settle()
+    expect(abort).toHaveBeenCalledWith('run-1')
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+
+    // A later turn that finishes normally also restores the permission chip.
+    act(() => useAppStore.setState({
+      turnStates: { 'run-1': { threadId: 'run-1', turnId: 't2', phase: 'thinking', updatedAt: '2026-11-10T00:00:04Z' } }
+    }))
+    expect(permissionChip()).toBeUndefined()
+    act(() => useAppStore.setState({
+      turnStates: { 'run-1': { threadId: 'run-1', turnId: 't2', phase: 'completed', updatedAt: '2026-11-10T00:00:05Z' } }
+    }))
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+  })
+})

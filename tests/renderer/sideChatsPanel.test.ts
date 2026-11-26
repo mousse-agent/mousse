@@ -140,4 +140,21 @@ describe('the Side chats panel', () => {
     })
     expect(text(host.querySelector('[role="alert"]'))).toBe('Nothing to fork yet: send this thread a message first.')
   })
+
+  it('hides the permission chip while a side chat turn is running or awaiting input, and restores it when stopped', () => {
+    useSideChatsStore.setState({ openByParent: { parent: 'mine' }, transcripts: { mine: [ASKED] } })
+    render()
+    expect(host.querySelector('.composer-permission-chip')).not.toBeNull()
+
+    act(() => useAppStore.setState({ turnStates: { mine: { threadId: 'mine', turnId: 't1', phase: 'streaming', updatedAt: '' } } }))
+    expect(host.querySelector('.composer-permission-chip')).toBeNull()
+    expect(host.querySelector('button[aria-label="Stop run"]')).not.toBeNull()
+
+    act(() => useAppStore.setState({ turnStates: { mine: { threadId: 'mine', turnId: 't1', phase: 'awaiting_input', updatedAt: '' } } }))
+    expect(host.querySelector('.composer-permission-chip')).toBeNull()
+    expect(host.querySelector('button[aria-label="Stop run"]')).not.toBeNull()
+
+    act(() => useAppStore.setState({ turnStates: { mine: { threadId: 'mine', turnId: 't1', phase: 'stopped', updatedAt: '' } } }))
+    expect(host.querySelector('.composer-permission-chip')).not.toBeNull()
+  })
 })
