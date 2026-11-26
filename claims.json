@@ -90,6 +90,20 @@
       "expiresAt": "2026-11-25T17:27:21.463Z"
     },
     {
+      "task": "fold-finished-subagent-cards",
+      "session": "Animatrix-7a7b6d",
+      "machine": "Animatrix",
+      "branch": "fold-finished-subagent-cards",
+      "paths": [
+        "src/renderer/chat/components/agent-elements/utils/assistant-blocks.ts",
+        "src/renderer/chat/components/agent-elements/message-list.tsx",
+        "src/renderer/chat/components/agent-elements/tools/SubagentCard.tsx",
+        "src/renderer/styles/global.css"
+      ],
+      "claimedAt": "2026-11-26T08:11:48.252Z",
+      "expiresAt": "2026-11-26T10:11:48.252Z"
+    },
+    {
       "task": "lists-attach-retention",
       "session": "Avarnics-Mac-mini.local-28e6be",
       "machine": "Avarnics-Mac-mini.local",
