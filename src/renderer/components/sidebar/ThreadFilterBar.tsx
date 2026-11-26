@@ -444,6 +444,8 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
                 </button>
               ))}
             </div>
+            {/* Ends the "Projects" group, so Bot and Computer below do not read as part of it. */}
+            <div className="threads-context-menu-separator thread-filter-menu-separator" role="separator" />
           </>
         ) : subTrigger('project', 'Project', projectOption?.name ?? 'All')}
         {subTrigger('bot', 'Bot', botOption?.name ?? 'Any')}
