@@ -1,5 +1,6 @@
 import type { ChildProcess, ChildProcessWithoutNullStreams } from 'node:child_process'
 import { Readable, Writable, type Transform } from 'node:stream'
+import { StringDecoder } from 'node:string_decoder'
 import { killTree } from '../spawn'
 import {
   client,
@@ -59,7 +60,16 @@ export interface AcpClientHandlers {
    * as the SDK does.
    */
   refuseRequest?(method: string): Promise<never>
+  /**
+   * A one-shot's view of every message the agent writes, read from its output beside the SDK: a message sent while
+   * the process ends is still seen after the SDK's connection has closed. Set, the process counts as ended
+   * (`AcpWiring.onExit`) only once its output has closed too, or {@link ACP_DRAIN_MS} after it exited.
+   */
+  observe?(message: unknown): void
 }
+
+/** How long an observed process's output may stay open after it exits (`AcpClientHandlers.observe`). */
+export const ACP_DRAIN_MS = 2_000
 
 /** The terminal requests an agent may send. Mousse offers no terminal; a one-shot refuses them (`refuseRequest`). */
 export const ACP_TERMINAL_METHODS: readonly string[] = Object.values(methods.client.terminal)
@@ -122,12 +132,37 @@ export function connectAcpProcess(child: ChildProcessWithoutNullStreams, handler
     if (!wiring.stderrLine) return
     for (const raw of lines) wiring.stderrLine(raw.trimEnd())
   })
+  let ended = false
+  const end = () => {
+    if (ended) return
+    ended = true
+    wiring.onExit?.()
+  }
+  if (handlers.observe) observeOutput(output, handlers.observe)
   child.on('exit', () => {
     connection.close()
-    wiring.onExit?.()
+    if (!handlers.observe) end()
+    else setTimeout(end, ACP_DRAIN_MS).unref?.()
   })
+  // Every line the observer could see has been read once the output has closed.
+  if (handlers.observe) child.on('close', end)
   child.on('error', (error) => connection.close(error))
   return active
+}
+
+/** Each complete NDJSON message of `output` to `observe`, as it is read; a line that is not JSON is skipped. */
+function observeOutput(output: NodeJS.ReadableStream, observe: (message: unknown) => void): void {
+  let pending = ''
+  const decoder = new StringDecoder('utf8')
+  output.on('data', (chunk: Buffer | string) => {
+    const lines = `${pending}${typeof chunk === 'string' ? chunk : decoder.write(chunk)}`.split('\n')
+    pending = lines.pop() ?? ''
+    if (pending.length > 16 * 1024 * 1024) pending = ''
+    for (const line of lines) {
+      if (!line.trim()) continue
+      try { observe(JSON.parse(line)) } catch { /* not a message */ }
+    }
+  })
 }
 
 /** Mousse's side of an ACP connection: `handlers` answer the agent; updates go to `active.onUpdate`. */

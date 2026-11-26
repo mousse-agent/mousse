@@ -2,7 +2,7 @@ import { execFile, spawn, spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative } from 'node:path'
 import { Transform } from 'node:stream'
 import { harnessAppError } from '../../../../shared/harness/types'
 import type { ProviderCapabilities } from '../../adapter'
@@ -177,8 +177,8 @@ export interface AntigravityLaunchOptions {
  * sign-in with a loopback callback this process owns.
  *
  * A one-shot on `agy` (`request.purpose === 'one_shot'`) gets a launch of its own (`antigravityOneShotArgs`): its
- * scratch folder as working folder, {@link oneShotAntigravityEnv}, its own settings, none of the user's arguments,
- * variables or skill links. On the 1.1.1 server a one-shot keeps the ordinary launch, which is not checked.
+ * scratch folder as working folder, an empty home of its own as gemini dir ({@link antigravityOneShotHome}),
+ * {@link oneShotAntigravityEnv}, its own settings, none of the user's arguments, variables or skill links. On the 1.1.1 server a one-shot keeps the ordinary launch, which is not checked.
  */
 export function antigravityConnectionFactory(options: AntigravityLaunchOptions): AcpConnectionFactory {
   return (request) => {
@@ -210,7 +210,10 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
       writeFileSync(browserHelper, `#!/bin/sh\nprintf '${BROWSER_MARKER}%s\\n' "$1" >&2\n`, { mode: 0o700 })
       chmodSync(browserHelper, 0o700)
     }
-    env.GEMINI_HOME = geminiHome
+    // A one-shot reads its `config` (hooks, MCP servers, plugins) from an empty home of its own (`antigravityOneShotHome`).
+    const oneShotHome = oneShot ? antigravityOneShotHome(geminiHome, request.cwd!) : undefined
+    if (oneShotHome) mkdirSync(oneShotHome, { recursive: true, mode: 0o700 })
+    env.GEMINI_HOME = oneShotHome ?? geminiHome
     if (kind === 'legacy') {
       env.AGY_ACP_FORCE_FILE_STORAGE = '1'
       env.ANTIGRAVITY_HARNESS_PATH = join(dirname(binary), process.platform === 'win32' ? 'localharness_external.exe' : 'localharness_external')
@@ -230,8 +233,8 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
     if (process.platform === 'win32') { env.TEMP = tempDir; env.TMP = tempDir }
     else env.TMPDIR = tempDir
     // Bot turns must use ACP approvals and the MCP servers Mousse supplies for their grant; a one-shot runs nothing.
-    const args = [...antigravityRuntimeArgs(kind, geminiHome),
-      ...(oneShot ? antigravityOneShotArgs(binary, acpDir, request.cwd!) : request.bot ? ['--include-default-customizations=false'] : options.args())]
+    const args = oneShotHome ? antigravityOneShotArgs(binary, oneShotHome, acpDir, request.cwd!)
+      : [...antigravityRuntimeArgs(kind, geminiHome), ...(request.bot ? ['--include-default-customizations=false'] : options.args())]
     const launchEnv = request.bot || oneShot ? env : options.env(env)
     if (options.privateHome) privateSignInEnv(launchEnv, kind)
     // A process group on POSIX, so Stop ends the agent's helpers with it (`treeKilledChild`).
@@ -296,19 +299,37 @@ export const ANTIGRAVITY_ONE_SHOT_SETTINGS = Object.freeze({
   permissions: { deny: ['read_file(*)', 'write_file(*)', 'read_url(*)', 'execute_url(*)', 'command(*)', 'unsandboxed(*)', 'mcp(*)'] }
 })
 
+/** Where an entry's one-shot homes are, beside its `gemini-home` (`antigravityOneShotHome`). */
+export const ANTIGRAVITY_ONE_SHOT_HOMES_DIR = 'one-shot-homes'
+
 /**
- * The arguments that make an `agy acp` launch a one-shot's, after the runtime's own, with its settings written: a
- * settings folder of its own, and none of Google's default customizations where this `agy` can leave them out.
- * Refused when this `agy`'s flags were not read ({@link readAgyAcpFlags}) or it cannot keep the settings apart.
+ * The empty home a one-shot passes as `--gemini-dir`, beside the entry's `geminiHome` and named after its scratch
+ * folder `cwd`. `agy` reads the global hooks and MCP servers from `<gemini-dir>/config` (`hooks.json`,
+ * `mcp_config.json`); neither `--cli_dir_name` nor `--include-default-customizations=false` keeps them out (seen on
+ * agy 1.5.18), so a one-shot's home has none. It also holds the request's record (`oneShotGuards`).
  */
-function antigravityOneShotArgs(binary: string, acpDir: string, cwd: string): string[] {
+export function antigravityOneShotHome(geminiHome: string, cwd: string): string {
+  return join(dirname(geminiHome), ANTIGRAVITY_ONE_SHOT_HOMES_DIR, basename(cwd))
+}
+
+/**
+ * A one-shot's whole `agy acp` argument list, with its settings written: the empty home `home` as `--gemini-dir`, the
+ * entry's own app data `acpDir` (its sign-in and sessions) as `--app-data-dir`, a settings folder of its own, and none
+ * of Google's default customizations where this `agy` can leave them out. `agy` refuses an absolute app data path and
+ * reads a relative one from the gemini dir. Refused when this `agy`'s flags were not read ({@link readAgyAcpFlags}),
+ * it cannot keep the settings apart, or the app data has no relative path from `home`.
+ */
+function antigravityOneShotArgs(binary: string, home: string, acpDir: string, cwd: string): string[] {
   const flags = knownAgyAcpFlags(binary)
   if (!flags?.cliDir) throw harnessAppError({ code: 'wont_run', message: 'This agy cannot keep a single request apart from its other sessions. Update agy.' })
+  const appData = relative(home, acpDir)
+  if (!appData || isAbsolute(appData)) throw harnessAppError({ code: 'wont_run', message: `Antigravity's app data ${acpDir} has no relative path from ${home}.` })
   const cliDir = antigravityOneShotCliDir(cwd)
   const settingsDir = join(acpDir, cliDir)
   mkdirSync(settingsDir, { recursive: true, mode: 0o700 })
   writeFileSync(join(settingsDir, 'settings.json'), JSON.stringify(ANTIGRAVITY_ONE_SHOT_SETTINGS), { mode: 0o600 })
-  return ['--cli_dir_name', cliDir, ...(flags.customizations ? ['--include-default-customizations=false'] : [])]
+  return ['acp', '--gemini-dir', home, '--app-data-dir', appData, '--cli_dir_name', cliDir,
+    ...(flags.customizations ? ['--include-default-customizations=false'] : [])]
 }
 
 /** What an `agy acp` takes: `--cli_dir_name` (a settings folder of its own) and `--include-default-customizations`. */

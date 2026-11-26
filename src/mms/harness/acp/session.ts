@@ -337,6 +337,19 @@ export interface OneShotInput {
   onActivity(): void
   /** The session the agent opened, once it has: its files are this request's (`AntigravityProviderService.oneShot`). */
   onSession?(sessionId: string): void
+  /** The agent process started, with its id when it has one. */
+  onStarted?(pid: number | undefined): void
+  /**
+   * Called once: the process tree has ended and its output is read (`AcpProcess.exited`), whenever that is (before
+   * this returns, or later when it outlived {@link ONE_SHOT_REAP_MS}), or no process started. Only then may the caller
+   * touch the request's files.
+   */
+  onEnded?(): void
+  /**
+   * The launch reads its sign-in somewhere turns do not (an added Antigravity entry's one-shot home): an
+   * "authentication required" answer fails the request without marking the profile signed out.
+   */
+  signInUnverified?: boolean
   /** Tests: {@link ONE_SHOT_DEADLINE_MS} and {@link ONE_SHOT_OUTPUT_CAP}. */
   deadlineMs?: number
   outputCap?: number
@@ -1170,6 +1183,13 @@ export class AcpSessions {
         active?.refuseTools?.('a question')
         return { action: 'decline' }
       }
+      // From its output, beside the SDK: a tool reported while the process ends still refuses the answer.
+      handlers.observe = (message) => {
+        const sent = message as { method?: unknown; params?: { update?: { sessionUpdate?: unknown; title?: unknown } } } | null
+        const update = sent?.method === methods.client.session.update ? sent.params?.update : undefined
+        if (update?.sessionUpdate === 'tool_call' || update?.sessionUpdate === 'tool_call_update')
+          active?.refuseTools?.(typeof update.title === 'string' ? update.title : 'a tool')
+      }
       handlers.refuseRequest = (method) => refuseFile(active?.refuseTools ?? (() => undefined), ACP_TERMINAL_METHODS.includes(method) ? `a terminal (${method})` : `an unknown request (${method})`)
     }
     const connection = this.options.connect({
@@ -1196,6 +1216,8 @@ export class AcpSessions {
         active.connection.close(new Error(this.options.signInRequiredMessage))
       }),
       onExit: () => {
+        // Nothing more is read from a process that has gone (a replay's connection may still be open).
+        active?.connection.close()
         markExited()
         if (!active) return
         this.processes.delete(active)
@@ -2404,10 +2426,21 @@ export class AcpSessions {
     input.signal.throwIfAborted()
     // xAI's tagged prompts end on a notice this request does not wait for.
     if (quirks.xaiExtensions) throw harnessAppError({ code: 'unsupported', message: `${label} cannot run a single request.` })
-    await this.options.beforeLaunch?.('one_shot')
-    input.signal.throwIfAborted()
-    const active = this.launch('one_shot', undefined, undefined, input.cwd)
+    let active: AcpProcess
+    try {
+      await this.options.beforeLaunch?.('one_shot')
+      input.signal.throwIfAborted()
+      active = this.launch('one_shot', undefined, undefined, input.cwd)
+    } catch (error) {
+      // Nothing started: nothing of this request runs on.
+      input.onEnded?.()
+      throw error
+    }
     active.cwd = input.cwd
+    input.onStarted?.(active.child.pid)
+    // Registered first, so the caller hears of the end before this request settles on it (`reaped`).
+    if (active.exited) void active.exited.then(() => input.onEnded?.())
+    else input.onEnded?.()
     let failed: Error | undefined
     const fail = (error: Error) => {
       failed ??= error
@@ -2474,15 +2507,25 @@ export class AcpSessions {
     } catch (error) {
       if (failed) throw failed
       if (input.signal.aborted) throw error
+      if (input.signInUnverified && isAuthRequired(error)) throw harnessAppError({ code: 'signed_out', message: `${label} answered that this request is not signed in.` })
       throw this.authRequiredError(active, error) ?? acpAgentError(error) ?? error
     } finally {
       clearTimeout(deadline)
-      // `refuseTools` stays: a request that arrives while the process ends is refused too.
       input.signal.removeEventListener('abort', abort)
+      // The tree ends first, while the connection still listens: `refuseTools` and `onUpdate` stay until it has gone,
+      // so a tool reported or requested while it ends still refuses the answer.
+      if (active.child.exitCode === null && active.child.signalCode === null) active.child.kill()
+      let gone: unknown
+      try {
+        await reaped(active)
+      } catch (error) {
+        gone = error
+        closeAcpConnection(active)
+      }
       active.onUpdate = undefined
-      this.close(active)
-      // Ended and gone before the caller looks at the folder it ran in (`ONE_SHOT_REAP_MS`).
-      await reaped(active)
+      // A refusal seen while the process ended outranks the answer, and a process that did not end (`ONE_SHOT_REAP_MS`).
+      if (failed) throw failed
+      if (gone) throw gone
     }
   }
 
