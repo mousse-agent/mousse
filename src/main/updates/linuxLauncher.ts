@@ -224,6 +224,7 @@ function installIcons(iconThemeDir: string, iconName: string, icons: LauncherIco
 function run(command: string, args: string[]): Promise<boolean> {
   return new Promise((resolve) => {
     try {
+      // eslint-disable-next-line mousse/no-console-window -- Linux only.
       const child = spawn(command, args, { stdio: 'ignore', detached: true })
       child.on('error', () => resolve(false))
       child.on('exit', (code) => resolve(code === 0))

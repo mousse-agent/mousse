@@ -134,6 +134,7 @@ export function createUnixHost(options: UnixHostOptions = {}): ProcessHost {
       env,
       argv0: line.argv0,
       // A program of its own session and process group, as under sshd: a signal to it does not reach the daemon.
+      // eslint-disable-next-line mousse/no-console-window -- POSIX only.
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe']
     })
