@@ -34,7 +34,7 @@ import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { ArrowShrink, CircleCheck, GitFork, History, ThinkingIcon, IconChevronDown, IconChevronRight, IconInfoCircle, IconX, MessageSquare, RefreshCw, RowTools, Square } from "../../../lib/icons";
+import { ArrowShrink, CircleCheck, GitFork, History, ThinkingIcon, IconChevronDown, IconChevronRight, IconInfoCircle, IconX, MessageSquare, RefreshCw, RowSubagent, RowTools, Square } from "../../../lib/icons";
 import {
   formatResponseTime,
   formatTokens,
@@ -53,6 +53,8 @@ import {
   isWaitingPermissionRequest,
 } from "./tools/permission-request";
 import { SubagentCardGroup } from "./tools/SubagentCard";
+import { isCardRunning } from "./tools/subagent-card-logic";
+import type { SubagentCardModel } from "../../adapters/subagentCards";
 import { SecretRequestInline, isSecretRequestPart, isWaitingSecretRequest } from "../../../components/secrets/secretRequestPart";
 import { BackgroundNotice, SettleNotice, SubagentNotice } from "./tools/SubagentNotice";
 import { SteerGroup } from "./steer-group";
@@ -293,6 +295,7 @@ function TurnWorkStatus({
   endYieldsToNotice = false,
   fold,
   foldedReplies = 0,
+  foldedSubagents = 0,
   waits,
   continued = false,
 }: {
@@ -312,6 +315,8 @@ function TurnWorkStatus({
   fold?: { open: boolean; onToggle: () => void; hiddenRuns?: readonly string[] };
   /** How many replies with text the fold hides, said on a finished turn's line so an earlier answer is not missed. */
   foldedReplies?: number;
+  /** How many distinct subagents the fold hides, said on a finished turn's line beside the reply count. */
+  foldedSubagents?: number;
   /** While the turn runs: when it waited on the person, which its time does not count. */
   waits?: readonly WaitSpan[];
   /** The line after a steered message: "Continued for …", the time of the work that answered it. */
@@ -352,6 +357,7 @@ function TurnWorkStatus({
         >
           {finished}
           {foldedReplies > 0 ? <FoldedRepliesCount count={foldedReplies} /> : null}
+          {foldedSubagents > 0 ? <FoldedSubagentsCount count={foldedSubagents} /> : null}
           <IconChevronRight className="turn-work-chevron" data-open={fold.open || undefined} aria-hidden="true" />
         </button>
       ) : (
@@ -407,6 +413,22 @@ function FoldedRepliesCount({ count }: { count: number }) {
     <span className="turn-work-replies" title={label}>
       <span aria-hidden="true">·</span>
       <MessageSquare className="turn-work-replies-icon" aria-hidden="true" />
+      <span aria-hidden="true">{count}</span>
+      <span className="sr-only">, {label}</span>
+    </span>
+  );
+}
+
+/**
+ * " · (subagent icon) 4" after a finished turn's time: how many distinct subagents its fold hides. Only the icon and
+ * number show; the tooltip and screen readers get "4 subagents inside".
+ */
+function FoldedSubagentsCount({ count }: { count: number }) {
+  const label = `${count} ${count === 1 ? "subagent" : "subagents"} inside`;
+  return (
+    <span className="turn-work-replies" title={label}>
+      <span aria-hidden="true">·</span>
+      <RowSubagent className="turn-work-replies-icon" aria-hidden="true" />
       <span aria-hidden="true">{count}</span>
       <span className="sr-only">, {label}</span>
     </span>
@@ -2123,13 +2145,37 @@ export const MessageList = memo(function MessageList({
     const rows = rowsRef.current;
     const virtualization = virtualizationRef.current;
     if (index < 0 || !messageId || !container || !rows || !virtualization) return;
+    const turnKey = resolveTurnKey(turns[index]!, index, turnKeyAliasRef.current);
+    const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(toolCallId) : toolCallId.replace(/["\\]/g, "\\$&");
+    // A finished turn folds settled subagent cards behind "Worked for": open that part's fold first so the card mounts.
+    if (!rows.querySelector(`[data-native-subagent="${escaped}"]`)) {
+      let part = 0;
+      let seen = false;
+      for (const message of turns[index]!.assistantMsgs) {
+        if (message.id === messageId) break;
+        if (readSteerGroup(message)) {
+          if (seen) part += 1;
+        } else if (!isResultNotice(message)) {
+          seen = true;
+        }
+      }
+      const key = foldKey(turnKey, part);
+      if (!openWorkRef.current.has(key)) {
+        openMemory.folds.add(key);
+        setOpenWork((current) => {
+          const next = new Set(current);
+          next.add(key);
+          return next;
+        });
+        return;
+      }
+    }
     takenSubagentRef.current = seq;
     dispatchFollow({ type: "navigate" });
     const navigation = virtualization.beginNavigation();
-    const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(toolCallId) : toolCallId.replace(/["\\]/g, "\\$&");
     void revealMessage(
       {
-        turnKey: resolveTurnKey(turns[index]!, index, turnKeyAliasRef.current),
+        turnKey,
         messageId,
         element: (root) => root.querySelector<HTMLElement>(`[data-native-subagent="${escaped}"]`),
       },
@@ -2146,7 +2192,7 @@ export const MessageList = memo(function MessageList({
       flashLocated(element);
       element.querySelector<HTMLButtonElement>("button.subagent-card")?.focus({ preventScroll: true });
     });
-  }, [subagentRequest, turns, windowed, dispatchFollow, markProgrammaticScroll]);
+  }, [subagentRequest, turns, windowed, dispatchFollow, markProgrammaticScroll, openMemory, openWork]);
 
   const showPlanning = useMemo(() => {
     if (!isStreaming) return false;
@@ -2270,6 +2316,7 @@ export const MessageList = memo(function MessageList({
                 suppressQuestionTool={suppressQuestionTool}
                 cardedSubagents={cardedSubagents}
                 cardedThreads={cardedThreads}
+                subagentCards={subagentCards}
                 subagentCardIds={subagentCardIds}
                 spawningCardIds={spawningCardIds}
                 openFolds={openFoldsOf(openWork, turnKey)}
@@ -2406,6 +2453,7 @@ type TurnRowProps = {
   suppressQuestionTool: boolean;
   cardedSubagents: Set<string>;
   cardedThreads: Set<string>;
+  subagentCards: ReadonlyMap<string, SubagentCardModel>;
   subagentCardIds: Set<string>;
   spawningCardIds: Set<string>;
   /** Which parts of this finished turn (see `turnFoldParts`) have their work open, as part numbers ("0,2"). */
@@ -2413,6 +2461,17 @@ type TurnRowProps = {
   /** Opens or closes the work of a finished turn's part, by turn key and part number. */
   onToggleWork: (turnKey: string, part: number) => void;
 };
+
+/** A subagent card that stays visible outside a finished turn's fold: still going, or failed without being continued. */
+function cardStaysOut(card: SubagentCardModel | undefined): boolean {
+  if (!card) return false;
+  return isCardRunning(card) || (card.state === "failed" && !card.continued);
+}
+
+/** Stable identity of a subagent across tasks so continuations count once in a fold's summary. */
+function subagentIdentity(card: SubagentCardModel): string {
+  return card.childThreadId ?? card.removedThreadId ?? card.native?.taskId ?? card.delegationId ?? card.toolCallId;
+}
 
 /** A failed call the agent did not get past: it stays in view when the turn's work folds. */
 function isUnrecoveredFailure(part: unknown): boolean {
@@ -2492,6 +2551,7 @@ const TurnRow = memo(function TurnRow({
   suppressQuestionTool,
   cardedSubagents,
   cardedThreads,
+  subagentCards,
   subagentCardIds,
   spawningCardIds,
   openFolds,
@@ -2776,20 +2836,24 @@ const TurnRow = memo(function TurnRow({
               rows: liveRunItems.map((item, k) => renderTool(item.part, item.nestedTools, keyOf(item, k))),
             };
           })();
-          const rows = segments.map((segment, segmentIndex): { node: React.ReactNode; fold: FoldRow } => {
+          const rows = segments.map((segment, segmentIndex): { node: React.ReactNode; fold: FoldRow; subagentIds?: string[] } => {
             if (segment.kind === "cards") {
               // A card still starting is not drawn: the progress line says "Starting subagent…".
               const cardParts = segment.msgIndices.flatMap(
                 (msgIndex) => analyses[msgIndex]!.cardParts,
               ).filter((part) => !spawningCardIds.has(part.toolCallId!));
               if (cardParts.length === 0) return { node: null, fold: { kind: "cards" } };
+              const models = cardParts.map((part) => subagentCards.get(part.toolCallId!));
+              const keep = models.some(cardStaysOut);
+              const subagentIds = models.filter((card): card is SubagentCardModel => card !== undefined).map(subagentIdentity);
               const cardNested = new Map(
                 segment.msgIndices.flatMap((msgIndex) => [
                   ...(analyses[msgIndex]!.cardNestedTools ?? new Map()),
                 ]),
               );
               return {
-                fold: { kind: "cards" },
+                fold: { kind: "cards", keep },
+                subagentIds,
                 node: (
                   <SubagentCardGroup
                     key={`${answerMsgs[segment.msgIndices[0]!]!.id}-subagents`}
@@ -2925,13 +2989,15 @@ const TurnRow = memo(function TurnRow({
           const partFolds = parts.map(({ from, to }) => {
             let has = false;
             let replies = 0;
+            const subagents = new Set<string>();
             for (let index = from; index < to; index += 1) {
               if (!folded[index] || rows[index]!.node == null) continue;
               has = true;
               // Replies the fold hides, narration as well as answers that closed an earlier run, so none is missed.
               if (rows[index]!.fold.text) replies += 1;
+              for (const id of rows[index]!.subagentIds ?? []) subagents.add(id);
             }
-            return { has, replies };
+            return { has, replies, subagents: subagents.size };
           });
           // Each part's own time: from its prompt or steered message to where its last message ended.
           const msgsOfRow = (index: number) => {
@@ -3021,6 +3087,7 @@ const TurnRow = memo(function TurnRow({
                     endYieldsToNotice={isLastTurn && Boolean(turn.userMsg)}
                     fold={foldOf(k)}
                     foldedReplies={partFolds[k]!.replies}
+                    foldedSubagents={partFolds[k]!.subagents}
                   />,
                 );
               }
@@ -3047,6 +3114,7 @@ const TurnRow = memo(function TurnRow({
                 endYieldsToNotice={isLastTurn && Boolean(turn.userMsg)}
                 fold={foldOf(0)}
                 foldedReplies={partFolds[0]!.replies}
+                foldedSubagents={partFolds[0]!.subagents}
               />
               <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
                 <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>

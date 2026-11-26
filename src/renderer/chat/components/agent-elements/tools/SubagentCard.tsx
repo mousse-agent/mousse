@@ -347,7 +347,7 @@ export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: read
     setChosenOpen(true);
   }
   if (models.length < 2) return <div className="subagent-cards">{children}</div>;
-  // Open until the user folds it, so every subagent stays in sight after the turn ends.
+  // Open until the user folds it, so every subagent in a burst stays readable live and when "Worked for" is opened.
   const open = chosenOpen ?? true;
   const { title, parts } = cardGroupSummary(models);
   const folded = cardGroupFoldedTitle(models);
