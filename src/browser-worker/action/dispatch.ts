@@ -361,6 +361,8 @@ export interface NavigationOptions {
   untilCommit?: boolean
   /** `navigateTab` only: retry once a connection the site closed before answering (default on; tests turn it off). */
   retryTransient?: boolean
+  /** The time (epoch ms) the navigation answers "still loading" by, however long its setup took; overrides `ceilingMs`. */
+  deadline?: number
 }
 
 /** Chromium's codes for a connection dropped before any answer: on a cold start, often gone a moment later. */
@@ -385,25 +387,56 @@ function isTransientConnectionFailure(error: unknown): boolean {
 export async function navigateTab(cdp: CdpTransport, cdpSessionId: string, url: string, options: NavigationOptions = {}): Promise<BrowserNavigation> {
   const targetUrl = browserNavigationUrl(url)
   // The command answers with this navigation's own loader: only that one counts.
-  const attempt = (attemptOptions: NavigationOptions) => followNavigation(cdp, cdpSessionId, targetUrl, attemptOptions, false, async () => {
+  const attempt = (attemptOptions: NavigationOptions, before?: () => void) => followNavigation(cdp, cdpSessionId, targetUrl, attemptOptions, false, async () => {
+    before?.()
     const result = await cdp.send<{ frameId: string; loaderId?: string; errorText?: string }>('Page.navigate', { url: targetUrl }, { sessionId: cdpSessionId, timeoutMs: 120_000, signal: options.signal })
     return result
   })
   if (options.retryTransient === false) return attempt(options)
   // On a cold start Chromium sometimes reports a connection closed or reset before any answer, and
-  // the same address opens a moment later: that one failure is retried once, within the same ceiling.
-  const ceilingMs = options.ceilingMs ?? (options.pace ?? navigationPace).ceilingMs()
-  const startedAt = Date.now()
+  // the same address opens a moment later: that one failure is retried once, under one deadline for
+  // both tries, and only while no other navigation has committed in the tab since this one started.
+  const deadline = options.deadline ?? Date.now() + (options.ceilingMs ?? (options.pace ?? navigationPace).ceilingMs())
+  let replacedBy: string | undefined
+  const onCommit = (params: unknown, sessionId?: string) => {
+    if (sessionId !== cdpSessionId) return
+    const frame = (params as { frame?: { parentId?: string; url?: string; unreachableUrl?: string } })?.frame
+    if (!frame || frame.parentId) return
+    // Chromium's error page for this very address is this navigation's own failure, not another navigation.
+    if (frame.unreachableUrl && sameAddress(frame.unreachableUrl, targetUrl)) return
+    replacedBy ??= frame.url ?? ''
+  }
+  cdp.on('Page.frameNavigated', onCommit)
   try {
-    return await attempt({ ...options, ceilingMs })
-  } catch (error) {
-    if (!isTransientConnectionFailure(error) || options.signal?.aborted) throw error
-    const leftMs = ceilingMs - (Date.now() - startedAt) - TRANSIENT_RETRY_DELAY_MS
-    if (leftMs <= TRANSIENT_RETRY_MIN_LEFT_MS) throw error
-    await sleep(TRANSIENT_RETRY_DELAY_MS, options.signal).catch(() => {
-      throw new BrowserWorkerError('cancelled', 'Navigation cancelled')
-    })
-    return attempt({ ...options, ceilingMs: leftMs })
+    try {
+      return await attempt({ ...options, deadline })
+    } catch (error) {
+      if (!isTransientConnectionFailure(error) || options.signal?.aborted) throw error
+      if (deadline - Date.now() - TRANSIENT_RETRY_DELAY_MS <= TRANSIENT_RETRY_MIN_LEFT_MS) throw error
+      await sleep(TRANSIENT_RETRY_DELAY_MS, options.signal).catch(() => {
+        throw new BrowserWorkerError('cancelled', 'Navigation cancelled')
+      })
+      if (replacedBy !== undefined) throw error
+      // Checked again as the retry is sent: its setup may take a moment, and a navigation then is not replaced either.
+      return await attempt({ ...options, deadline }, () => {
+        if (replacedBy !== undefined) throw error
+      })
+    }
+  } finally {
+    cdp.off('Page.frameNavigated', onCommit)
+  }
+}
+
+/** Whether two addresses are the same page (a fragment aside). */
+function sameAddress(a: string, b: string): boolean {
+  const strip = (value: string) => {
+    const hash = value.indexOf('#')
+    return hash >= 0 ? value.slice(0, hash) : value
+  }
+  try {
+    return strip(new URL(a).href) === strip(new URL(b).href)
+  } catch {
+    return strip(a) === strip(b)
   }
 }
 
@@ -469,7 +502,8 @@ const DOWNLOAD_WAIT_MS = 600
 
 async function followNavigation(cdp: CdpTransport, cdpSessionId: string, url: string, options: NavigationOptions, commitByEvent: boolean, start: () => Promise<StartedNavigation | undefined>): Promise<BrowserNavigation> {
   const pace = options.pace ?? navigationPace
-  const ceilingMs = options.ceilingMs ?? pace.ceilingMs()
+  // One deadline from the call (or the caller's): the time setting up below is spent from it, not added to it.
+  const deadline = options.deadline ?? Date.now() + (options.ceilingMs ?? pace.ceilingMs())
   const graceMs = options.loadGraceMs ?? LOAD_GRACE_MS
   const startedAt = Date.now()
   await cdp.send('Page.setLifecycleEventsEnabled', { enabled: true }, { sessionId: cdpSessionId, signal: options.signal })
@@ -586,7 +620,7 @@ async function followNavigation(cdp: CdpTransport, cdpSessionId: string, url: st
     }
     const onAbort = () => finish(undefined, new BrowserWorkerError('cancelled', 'Navigation cancelled'))
     // The site has not answered, or the document is not ready, by the ceiling: it is still loading.
-    const ceiling = setTimeout(() => finish({ url: committed?.url ?? url, state: 'loading', ...(committed ? { frameId: committed.frameId } : {}) }), ceilingMs)
+    const ceiling = setTimeout(() => finish({ url: committed?.url ?? url, state: 'loading', ...(committed ? { frameId: committed.frameId } : {}) }), Math.max(0, deadline - Date.now()))
     cdp.on('Page.lifecycleEvent', onLifecycle)
     cdp.on('Page.frameNavigated', onNavigated)
     cdp.on('Page.navigatedWithinDocument', onWithinDocument)

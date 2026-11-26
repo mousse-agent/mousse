@@ -14,8 +14,11 @@ class NavigationTransport extends EventEmitter implements CdpTransport {
   connected = true
   navigate = vi.fn<() => Promise<unknown>>(() => Promise.resolve({ frameId: 'main', loaderId: 'new' }))
   sent: string[] = []
+  /** Holds a command back before Chromium answers it (a slow setup step). */
+  hold?: (method: string) => Promise<void> | undefined
   async send<T>(method: string): Promise<T> {
     this.sent.push(method)
+    await this.hold?.(method)
     return (method === 'Page.navigate' ? await this.navigate() : {}) as T
   }
   lifecycle(name: string, frameId = 'main', loaderId = 'new', sessionId = 'tab'): void {
@@ -312,6 +315,56 @@ describe('a connection the site dropped before answering is tried once more', ()
     const failing = navigateTab(cdp, 'tab', 'https://fixture.test', quick).catch((error: unknown) => error)
     await vi.advanceTimersByTimeAsync(1_000)
     expect(await failing).toMatchObject({ code: 'site_unreachable', problem: { code: 'net::ERR_CONNECTION_RESET' } })
+    expect(cdp.navigate).toHaveBeenCalledTimes(2)
+  })
+
+  it('both tries share the first one\'s ceiling: a slow setup of the retry is spent from it, not added to it', async () => {
+    vi.useFakeTimers()
+    const cdp = new NavigationTransport()
+    // The retry's setup takes 400ms and the site then never answers: still loading at the 1,000ms ceiling, not at 1,400.
+    let setups = 0
+    cdp.hold = (method) => method === 'Page.setLifecycleEventsEnabled' && ++setups === 2 ? new Promise((resolve) => setTimeout(resolve, 400)) : undefined
+    cdp.navigate.mockResolvedValueOnce({ frameId: 'main', loaderId: 'dropped', errorText: 'net::ERR_CONNECTION_CLOSED' }).mockImplementationOnce(() => new Promise(() => undefined))
+    let outcome: unknown
+    void navigateTab(cdp, 'tab', 'https://fixture.test', quick).then((value) => { outcome = value })
+    await vi.advanceTimersByTimeAsync(990)
+    expect(cdp.navigate).toHaveBeenCalledTimes(2)
+    expect(outcome).toBeUndefined()
+    await vi.advanceTimersByTimeAsync(20)
+    expect(outcome).toEqual({ url: 'https://fixture.test/', state: 'loading' })
+    expect(cdp.listeners()).toBe(0)
+  })
+
+  it.each([
+    ['during the wait before the retry', 100, false],
+    ['while the retry is being set up', 300, true]
+  ])('a navigation that commits in the tab %s is never replaced by the retry', async (_case, commitAtMs, slowSetup) => {
+    vi.useFakeTimers()
+    const cdp = new NavigationTransport()
+    let setups = 0
+    if (slowSetup) cdp.hold = (method) => method === 'Page.setLifecycleEventsEnabled' && ++setups === 2 ? new Promise((resolve) => setTimeout(resolve, 200)) : undefined
+    cdp.navigate.mockResolvedValue({ frameId: 'main', loaderId: 'dropped', errorText: 'net::ERR_CONNECTION_CLOSED' })
+    const failing = navigateTab(cdp, 'tab', 'https://fixture.test', quick).catch((error: unknown) => error)
+    // Chromium's own error page for the dropped address does not count as another navigation.
+    cdp.committed({ loaderId: 'error-page', url: 'chrome-error://chromewebdata/', unreachableUrl: 'https://fixture.test/' })
+    await vi.advanceTimersByTimeAsync(commitAtMs)
+    cdp.committed({ loaderId: 'person', url: 'https://elsewhere.test/' })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(await failing).toMatchObject({ code: 'site_unreachable', problem: { code: 'net::ERR_CONNECTION_CLOSED' } })
+    expect(cdp.navigate).toHaveBeenCalledTimes(1)
+    expect(cdp.listeners()).toBe(0)
+  })
+
+  it('Chromium\'s error page for the dropped address alone does not stop the retry', async () => {
+    vi.useFakeTimers()
+    const cdp = new NavigationTransport()
+    cdp.navigate.mockImplementationOnce(async () => {
+      cdp.committed({ loaderId: 'error-page', url: 'chrome-error://chromewebdata/', unreachableUrl: 'https://fixture.test/' })
+      return { frameId: 'main', loaderId: 'dropped', errorText: 'net::ERR_CONNECTION_RESET' }
+    }).mockImplementationOnce(opens(cdp))
+    const waiting = navigateTab(cdp, 'tab', 'https://fixture.test', quick)
+    await vi.advanceTimersByTimeAsync(250)
+    await expect(waiting).resolves.toEqual({ url: 'https://fixture.test/', state: 'ready' })
     expect(cdp.navigate).toHaveBeenCalledTimes(2)
   })
 
