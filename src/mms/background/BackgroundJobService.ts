@@ -539,7 +539,7 @@ export class BackgroundJobService {
 
   /**
    * Mousse is closing: the jobs `which` picks end and nobody is told (their callers tell their owners at the next start).
-   * Their kept output goes too.
+   * Their kept output goes too, and with nothing left kept, so does the timer that would drop it.
    */
   closeWhere(which: (owner: JobOwner) => boolean): void {
     for (const job of [...this.running.values()]) {
@@ -551,6 +551,7 @@ export class BackgroundJobService {
       this.kill(job)
     }
     this.ended = this.ended.filter((entry) => !which(entry.info.owner))
+    this.pruneEnded()
   }
 
   // ---------------------------------------------------------------- reading

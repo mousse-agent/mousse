@@ -8,7 +8,7 @@
  * kept output, retention per owner, stop), each beside the others on the same service; a command without an environment;
  * a bot job asking to hold its owner; how each owner's command ends when it exits by itself (output after the exit,
  * what it left in its group); which process ids are signalled on macOS and Linux; kept output dropped on time with
- * nothing read.
+ * nothing read, and on close with no timer left.
  */
 import { EventEmitter } from 'node:events'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
@@ -275,5 +275,24 @@ describe('kept output of ended jobs', () => {
     expect(s.jobs.keptOutput().jobs).toBe(1)
     vi.advanceTimersByTime(60_000)
     expect(s.jobs.keptOutput()).toEqual({ jobs: 0, chars: 0 })
+  })
+
+  it('goes with the profile as it closes, and no timer is left holding the service', () => {
+    const s = setup()
+    s.watchers.start(s.watcher('rem_1'))
+    s.children[0]!.print('built\n')
+    s.children[0]!.exit(0)
+    s.monitors.startBackground({ threadId: 't1', description: 'build', command: 'make', cwd: '/work' })
+    s.children[1]!.print('done\n')
+    s.children[1]!.exit(0)
+    vi.advanceTimersByTime(10_000)
+    expect(s.jobs.keptOutput().jobs).toBe(2)
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    // The profile closes: its bots' commands, then its threads' monitors.
+    s.watchers.close()
+    expect(s.jobs.keptOutput().jobs).toBe(1)
+    s.monitors.close()
+    expect(s.jobs.keptOutput()).toEqual({ jobs: 0, chars: 0 })
+    expect(vi.getTimerCount()).toBe(0)
   })
 })
