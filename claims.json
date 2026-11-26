@@ -89,6 +89,17 @@
       "expiresAt": "2026-11-25T20:09:20.891Z"
     },
     {
+      "task": "net-helper-key-files",
+      "session": "Avarnics-Mac-mini.local-b65610",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "net-helper-key-files",
+      "paths": [
+        "native/net-helper/ENGINE_COMMIT"
+      ],
+      "claimedAt": "2026-11-26T04:44:02.483Z",
+      "expiresAt": "2026-11-26T06:44:02.483Z"
+    },
+    {
       "task": "paste-image-names",
       "session": "Avarnics-Mac-mini.local-43e057",
       "machine": "Avarnics-Mac-mini.local",
