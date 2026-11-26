@@ -1,43 +1,105 @@
-/* Top of the composer: what the thread waits on in the background. Nothing on it moves. */
+/*
+ * Top of the composer: what the thread waits on in the background. Its subagents show as the provider circles and
+ * status dots their chat cards use; everything else gets a small mark for its kind. Nothing on the closed row moves.
+ */
 
-.background-work .composer-banner-row {
-  gap: 4px;
+.background-work {
+  gap: 2px;
+  padding: 4px;
 }
 
-.background-work-text {
-  color: var(--text-primary);
-}
-
-.background-work-latest {
-  color: var(--text-secondary);
-}
-
-.background-work-list {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  margin: 2px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.background-work-line {
+.background-work-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 2px;
   min-width: 0;
-  min-height: 26px;
-  padding: 2px 4px 2px 8px;
-  border-radius: 8px;
-  font-size: 12.5px;
 }
 
-.background-work-line:hover,
-.background-work-line:focus-within {
+/* The closed row is one button: marks, the line, and "Details" with its chevron. */
+.background-work-summary {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 3px 8px 3px 6px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.background-work-summary:hover {
   background: var(--ui-hover);
 }
 
-.background-work-title {
+.background-work-summary:active {
+  background: var(--ui-pressed);
+}
+
+.background-work-summary:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
+/* Something runs: an accent dot in a soft accent ring. Only wake-ups set: the same dot, faint. */
+.background-work-pulse {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin: 0 5px 0 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.background-work-pulse[data-idle] {
+  background: var(--ui-faint);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+/* Up to three provider circles, overlapping, each ringed in the composer's own surface. */
+.background-work-stack {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding-left: 2px;
+}
+
+.background-work-stack > .subagent-avatar.is-chip,
+.background-work-more {
+  width: 22px;
+  height: 22px;
+  box-shadow: 0 0 0 2px var(--surface-strong);
+}
+
+.background-work-stack > * + * {
+  margin-left: -6px;
+}
+
+/* Earlier circles sit on top, so each one's status dot stays visible over its neighbour. */
+.background-work-stack > :nth-child(1) { z-index: 3; }
+.background-work-stack > :nth-child(2) { z-index: 2; }
+.background-work-stack > :nth-child(3) { z-index: 1; }
+
+.background-work-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-primary) 8%, var(--surface-strong));
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.background-work-text {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -46,32 +108,206 @@
   white-space: nowrap;
 }
 
-.background-work-kind {
-  flex: 0 0 auto;
+.background-work-latest {
   color: var(--text-secondary);
 }
 
-.background-work-stop {
+.background-work-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.background-work-summary:hover .background-work-toggle {
+  color: var(--text-primary);
+}
+
+.background-work-chevron {
+  transition: transform 0.18s ease;
+}
+
+.background-work[data-open] .background-work-chevron {
+  transform: rotate(180deg);
+}
+
+/* Icon buttons: Stop all on the row, Stop on a line. Neutral until hovered; Stop then shows its danger. */
+.background-work-icon-btn {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: 9px;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
+  transition: background 0.15s, color 0.15s;
 }
 
-.background-work-stop:hover {
-  background: var(--ui-pressed);
-  color: var(--text-primary);
+.background-work-icon-btn.is-line {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  color: var(--ui-faint);
 }
 
-.background-work-stop:focus-visible {
+.background-work-icon-btn.is-blank {
+  visibility: hidden;
+}
+
+.background-work-icon-btn:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+
+.background-work-icon-btn:active {
+  background: color-mix(in srgb, var(--danger) 20%, transparent);
+}
+
+.background-work-icon-btn:focus-visible {
   outline: none;
   background-image: var(--ui-focus-layer);
+}
+
+/* Details: one line per thing that runs. */
+.background-work-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 4px 0 2px;
+  border-top: 1px solid var(--ui-line);
+  list-style: none;
+}
+
+.background-work-line {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.background-work-open {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 34px;
+  padding: 4px 8px 4px 6px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+}
+
+button.background-work-open {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+button.background-work-open:hover {
+  background: var(--ui-hover);
+}
+
+button.background-work-open:active {
+  background: var(--ui-pressed);
+}
+
+button.background-work-open:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
+.background-work-line > .background-work-open.is-static {
+  padding-right: 8px;
+}
+
+.background-work-open > .subagent-avatar.is-chip,
+.background-work-mark {
+  width: 24px;
+  height: 24px;
+}
+
+.background-work-mark {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-primary) 7%, var(--surface-strong));
+  color: var(--text-secondary);
+}
+
+/* A monitor listens for something: the accent, in a small dose, on its mark. */
+.background-work-mark[data-kind="monitor"] {
+  color: var(--accent);
+}
+
+.background-work-body {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.background-work-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.background-work-detail {
+  flex: 0 1 auto;
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.background-work-kind,
+.background-work-elapsed {
+  flex: 0 0 auto;
+  color: var(--ui-faint);
+  font-size: 11.5px;
+}
+
+.background-work-elapsed {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.background-work-go {
+  flex: 0 0 auto;
+  margin-right: -2px;
+  color: var(--ui-faint);
+  transition: transform 0.15s, color 0.15s;
+}
+
+button.background-work-open:hover .background-work-go {
+  color: var(--text-primary);
+  transform: translateX(2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .background-work-chevron,
+  .background-work-go {
+    transition: none;
+  }
 }
