@@ -61,6 +61,7 @@ function setup(extra: Partial<ThreadMonitorsDeps> = {}) {
   const working: Array<[string, boolean]> = []
   const spawned: Array<{ command: string; cwd: unknown }> = []
   const monitors = new ThreadMonitors({
+    env: () => ({ PATH: '/usr/bin' }),
     post: (threadId, payload, key) => { posted.push({ threadId, payload: structuredClone(payload), key }) },
     working: (threadId, active) => { working.push([threadId, active]) },
     spawn: (command, options) => {

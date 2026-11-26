@@ -40,7 +40,7 @@ describe('thread monitors with real scripts', () => {
   const start = () => {
     dir = mkdtempSync(join(tmpdir(), 'mousse-monitor-run-'))
     const posted: MonitorEventPayload[] = []
-    monitors = new ThreadMonitors({ post: (_threadId, payload) => { posted.push(structuredClone(payload)) } })
+    monitors = new ThreadMonitors({ env: () => process.env, post: (_threadId, payload) => { posted.push(structuredClone(payload)) } })
     return { posted, monitors, cwd: dir }
   }
 
@@ -86,7 +86,7 @@ describe.skipIf(process.platform === 'win32')('thread monitors on macOS and Linu
   it('a script that exits leaving a process behind ends at once, and what it left ends with it', async () => {
     dir = mkdtempSync(join(tmpdir(), 'mousse-monitor-group-'))
     const posted: MonitorEventPayload[] = []
-    monitors = new ThreadMonitors({ post: (_threadId, payload) => { posted.push(structuredClone(payload)) } })
+    monitors = new ThreadMonitors({ env: () => process.env, post: (_threadId, payload) => { posted.push(structuredClone(payload)) } })
     // The sleep keeps the script's output open: without the exit drain the end would wait for the timeout.
     monitors.startMonitor({ threadId: 't1', description: 'leftover', cwd: dir, command: 'sleep 300 & echo "left $!"; exit 4' })
     await until(() => posted.some((payload) => payload.end), 'the end notice', 5_000)

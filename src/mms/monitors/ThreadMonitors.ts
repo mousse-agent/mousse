@@ -1,12 +1,23 @@
-import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
-import WebSocket from 'ws'
+import { BackgroundJobService, JobInputError, type JobEnd, type JobFinal, type JobInfo, type JobOwner, type JobSocket } from '../background/BackgroundJobService'
 import { MAX_WATCHER_MINUTES } from '../bots/watchers'
-import { trackChildProcess } from '../diagnostics/liveCounts'
-import { killProcessTree } from '../execution/processTree'
 import { atomicWriteFile } from '../integrations/atomicWrite'
 import type { MonitorEnd, MonitorEventPayload, MonitorKind } from '../run/types'
+
+export {
+  MONITOR_BATCH_MAX_MS,
+  MONITOR_BATCH_MS,
+  MONITOR_CHATTY_EVENTS_PER_MINUTE,
+  MONITOR_CHATTY_NOTICES_PER_MINUTE,
+  MONITOR_CONNECT_TIMEOUT_MS,
+  MONITOR_EVENT_CHARS,
+  MONITOR_EXIT_DRAIN_MS,
+  MONITOR_KILL_GRACE_MS,
+  MONITOR_MESSAGE_BYTES,
+  MONITOR_NOTICE_CHARS,
+  JOB_TAIL_CHARS as BACKGROUND_TAIL_CHARS
+} from '../background/BackgroundJobService'
 
 /**
  * What a thread's agent leaves running in the background while it keeps working (issue #1605):
@@ -21,7 +32,9 @@ import type { MonitorEnd, MonitorEventPayload, MonitorKind } from '../run/types'
  * or the socket closed (with the code), it could not start, its time ran out, it printed too much, the agent stopped
  * it, its thread was stopped, or the daemon restarted (told on the next start, from a small record kept per profile).
  * A hold ends quietly unless its time runs out. Notices go to the thread's inbox (`post`), the path agents' notes take.
- * Every limit below is named; nothing caps how many run at once.
+ * Every limit is named; nothing caps how many run at once. The processes, sockets, batches and output are the shared
+ * `BackgroundJobService`'s (a bot's background commands run there too); this keeps what is a thread's: its tools'
+ * input, its Working state, its notices and the record a restart reads.
  */
 
 /** A monitor's time limit unless the agent sets one, and the most it may set. */
@@ -33,37 +46,19 @@ export const BACKGROUND_MAX_MINUTES = MAX_WATCHER_MINUTES
 /** A `keep_working` hold's. */
 export const KEEP_WORKING_DEFAULT_MINUTES = 30
 export const KEEP_WORKING_MAX_MINUTES = 6 * 60
-/** Events this close to each other are one notice; a stream that never pauses is still told this often. */
-export const MONITOR_BATCH_MS = 200
-export const MONITOR_BATCH_MAX_MS = 2_000
 /** How often at most a new latest line alone tells the app (the composer's status row); a start or an end tells it at once. */
 export const MONITOR_CHANGE_THROTTLE_MS = 2_000
-/** Characters of one event (a line or a message), and of all events in one notice; the rest are counted, not shown. */
-export const MONITOR_EVENT_CHARS = 1_000
-export const MONITOR_NOTICE_CHARS = 4_000
-/** A monitor is over-chatty, and stopped, past this many events or notices in a minute. */
-export const MONITOR_CHATTY_EVENTS_PER_MINUTE = 600
-export const MONITOR_CHATTY_NOTICES_PER_MINUTE = 30
-/** The end of a background command's output its end notice shows. */
-export const BACKGROUND_TAIL_CHARS = 4_000
 /** Most characters of a description, a command and a URL. */
 export const MONITOR_DESCRIPTION_CHARS = 120
 export const MONITOR_COMMAND_CHARS = 8_000
 export const MONITOR_URL_CHARS = 2_000
-/** How long a WebSocket may take to open, and the largest message it takes. */
-export const MONITOR_CONNECT_TIMEOUT_MS = 15_000
-export const MONITOR_MESSAGE_BYTES = 1_000_000
-/** How long a stopped script has to end before its tree is killed outright. */
-export const MONITOR_KILL_GRACE_MS = 3_000
-/** How long after a script exits its output may still arrive before it counts as ended (something it left holds the pipe). */
-export const MONITOR_EXIT_DRAIN_MS = 1_000
-
-const CHATTY_WINDOW_MS = 60_000
-const LATEST_CHARS = 200
 /** Request keys remembered for retries (`clientRequestId`). */
 const REMEMBERED_REQUESTS = 500
 
 export class MonitorInputError extends Error {}
+
+/** How a thread's monitors end on a stop: `silent` tells nobody (the thread is gone, or the agent stopped it). */
+type Attention = MonitorEventPayload['attention'] | 'silent'
 
 /** One thing a thread runs in the background, as the tools and the running list show it. */
 export interface MonitorView {
@@ -91,12 +86,7 @@ export interface MonitorSummary {
 }
 
 /** What a socket must do for a URL monitor: `ws`'s client. */
-export interface MonitorSocket {
-  on(event: 'message', listener: (data: unknown, isBinary: boolean) => void): unknown
-  on(event: 'close', listener: (code: number, reason: Buffer) => void): unknown
-  on(event: 'error', listener: (error: Error) => void): unknown
-  terminate(): void
-}
+export type MonitorSocket = JobSocket
 
 export interface ThreadMonitorsDeps {
   /** Puts a notice in the thread's inbox; `key` names it, so the same notice is never posted twice. */
@@ -109,42 +99,14 @@ export interface ThreadMonitorsDeps {
   recordFile?: string
   /** Whether a thread still exists (a leftover of a deleted one gets no notice). */
   threadExists?(threadId: string): boolean
-  /** A script's environment; default this process's. */
-  env?: () => NodeJS.ProcessEnv
+  /** A script's whole environment, chosen by the caller: nothing is taken from this process. */
+  env: () => NodeJS.ProcessEnv
+  /** The shared background jobs; tests and a lone caller get their own. */
+  jobs?: BackgroundJobService
   spawn?: (command: string, options: SpawnOptions) => ChildProcess
   connect?: (url: string) => MonitorSocket
   kill?: (pid: number, signal: NodeJS.Signals) => void
   platform?: NodeJS.Platform
-}
-
-interface Entry {
-  id: string
-  threadId: string
-  kind: MonitorKind
-  description: string
-  command?: string
-  url?: string
-  cwd?: string
-  startedAt: number
-  minutes: number
-  child?: ChildProcess
-  socket?: MonitorSocket
-  /** An unfinished last line of each stream. */
-  partial: { out: string; err: string }
-  /** A background command's last output. */
-  tail: string
-  batch: string[]
-  batchChars: number
-  dropped: number
-  batchStarted: number
-  batchTimer?: ReturnType<typeof setTimeout>
-  eventTimes: number[]
-  noticeTimes: number[]
-  timer?: ReturnType<typeof setTimeout>
-  ended: boolean
-  seq: number
-  events: number
-  latest?: { line: string; at: number }
 }
 
 interface RecordRow {
@@ -194,17 +156,10 @@ export function monitorUrlProblem(raw: string): string | undefined {
   return 'url must start with wss:// (or ws:// for localhost).'
 }
 
-function messageText(data: unknown, isBinary: boolean): string {
-  const buffer = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data as Buffer[]) : data instanceof ArrayBuffer ? Buffer.from(data) : Buffer.from(String(data))
-  return isBinary ? `[binary message, ${buffer.length} bytes]` : buffer.toString('utf8')
-}
-
-function defaultConnect(url: string): MonitorSocket {
-  return new WebSocket(url, { handshakeTimeout: MONITOR_CONNECT_TIMEOUT_MS, maxPayload: MONITOR_MESSAGE_BYTES, followRedirects: false })
-}
-
 export class ThreadMonitors {
-  private readonly entries = new Map<string, Entry>()
+  private readonly jobs: BackgroundJobService
+  /** What this keeps of each job running: the thread's own ones of the shared service. */
+  private readonly entries = new Set<string>()
   private readonly requests = new Map<string, MonitorView>()
   /** Threads whose latest line changed and whose app update waits for the throttle. */
   private readonly changeTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -215,6 +170,12 @@ export class ThreadMonitors {
   private closed = false
 
   constructor(private readonly deps: ThreadMonitorsDeps) {
+    this.jobs = deps.jobs ?? new BackgroundJobService({
+      ...(deps.spawn ? { spawn: deps.spawn } : {}),
+      ...(deps.connect ? { connect: deps.connect } : {}),
+      ...(deps.kill ? { kill: deps.kill } : {}),
+      ...(deps.platform ? { platform: deps.platform } : {})
+    })
     // Read now, without waiting: a write never runs before it, so it never drops what the last run left.
     this.loaded = deps.recordFile
       ? readFile(deps.recordFile, 'utf8').then((text) => { this.leftovers = parseRecord(text) }, () => undefined)
@@ -236,13 +197,11 @@ export class ThreadMonitors {
     if (command) {
       if (command.length > MONITOR_COMMAND_CHARS) throw new MonitorInputError(`Keep command to ${MONITOR_COMMAND_CHARS} characters.`)
       if (!input.cwd) throw new MonitorInputError('A command monitor needs a project folder, and this thread has none.')
-      const entry = this.entry({ threadId: input.threadId, kind: 'command', description, command, cwd: input.cwd, minutes })
-      return this.started(entry, input.requestKey, () => this.spawn(entry))
+      return this.start({ threadId: input.threadId, kind: 'command', description, command, cwd: input.cwd, minutes }, input.requestKey)
     }
     const problem = monitorUrlProblem(url!)
     if (problem) throw new MonitorInputError(problem)
-    const entry = this.entry({ threadId: input.threadId, kind: 'url', description, url: url!, minutes })
-    return this.started(entry, input.requestKey, () => this.connect(entry))
+    return this.start({ threadId: input.threadId, kind: 'url', description, url: url!, minutes }, input.requestKey)
   }
 
   /** Runs a command in the background; the agent is told once, when it ends. */
@@ -255,8 +214,7 @@ export class ThreadMonitors {
     if (command.length > MONITOR_COMMAND_CHARS) throw new MonitorInputError(`Keep command to ${MONITOR_COMMAND_CHARS} characters.`)
     if (!input.cwd) throw new MonitorInputError('background_run needs a project folder, and this thread has none.')
     const minutes = monitorMinutes(input.timeoutMinutes, BACKGROUND_DEFAULT_MINUTES, BACKGROUND_MAX_MINUTES)
-    const entry = this.entry({ threadId: input.threadId, kind: 'background', description, command, cwd: input.cwd, minutes })
-    return this.started(entry, input.requestKey, () => this.spawn(entry))
+    return this.start({ threadId: input.threadId, kind: 'background', description, command, cwd: input.cwd, minutes }, input.requestKey)
   }
 
   /** Keeps the thread showing as Working for `minutes`, for `reason`. */
@@ -265,8 +223,7 @@ export class ThreadMonitors {
     if (replay) return replay
     const description = this.description(input.reason, 'reason')
     const minutes = monitorMinutes(input.minutes, KEEP_WORKING_DEFAULT_MINUTES, KEEP_WORKING_MAX_MINUTES)
-    const entry = this.entry({ threadId: input.threadId, kind: 'keep_working', description, minutes })
-    return this.started(entry, input.requestKey, () => undefined)
+    return this.start({ threadId: input.threadId, kind: 'keep_working', description, minutes }, input.requestKey)
   }
 
   private description(value: string, name = 'description'): string {
@@ -278,203 +235,87 @@ export class ThreadMonitors {
   private replayed(requestKey: string | undefined): (MonitorView & { replayed: true }) | undefined {
     const known = requestKey ? this.requests.get(requestKey) : undefined
     if (!known) return undefined
-    const running = this.entries.get(known.id)
+    const running = this.jobs.get(known.id)
     return { ...(running ? this.view(running) : known), replayed: true }
   }
 
-  private entry(input: Pick<Entry, 'threadId' | 'kind' | 'description' | 'command' | 'url' | 'cwd' | 'minutes'>): Entry {
-    const prefix = input.kind === 'background' ? 'bg' : input.kind === 'keep_working' ? 'kw' : 'mon'
-    return {
-      ...input,
-      id: `${prefix}-${randomUUID().slice(0, 8)}`,
-      startedAt: Date.now(),
-      partial: { out: '', err: '' },
-      tail: '',
-      batch: [],
-      batchChars: 0,
-      dropped: 0,
-      batchStarted: 0,
-      eventTimes: [],
-      noticeTimes: [],
-      ended: false,
-      seq: 0,
-      events: 0
-    }
-  }
-
-  private started(entry: Entry, requestKey: string | undefined, run: () => void): MonitorView {
+  private start(input: { threadId: string; kind: MonitorKind; description: string; command?: string; url?: string; cwd?: string; minutes: number }, requestKey: string | undefined): MonitorView {
     if (this.closed) throw new MonitorInputError('Mousse is shutting down.')
-    this.entries.set(entry.id, entry)
+    let job: JobInfo
+    let ended = false
     try {
-      run()
+      job = this.jobs.start({
+        idPrefix: input.kind === 'background' ? 'bg' : input.kind === 'keep_working' ? 'kw' : 'mon',
+        owner: { kind: 'thread', threadId: input.threadId },
+        kind: input.kind,
+        label: input.description,
+        // The thread's environment, as its caller chose it; the service never falls back to this process's.
+        ...(input.command ? { command: input.command, cwd: input.cwd, env: this.deps.env?.() } : {}),
+        ...(input.url ? { url: input.url } : {}),
+        stream: input.kind === 'command' || input.kind === 'url',
+        limitMs: input.minutes * 60_000,
+        holdsOwner: true,
+        sink: {
+          events: (info, batch) => this.post(info, batch.events, batch.dropped, batch.notice, 'needed'),
+          latest: () => this.changedLater(input.threadId),
+          end: (info, end, final, tag) => {
+            ended = true
+            this.ended(info, end, final, (tag as Attention | undefined) ?? 'needed')
+          }
+        }
+      })
     } catch (error) {
-      this.entries.delete(entry.id)
-      throw new MonitorInputError(`It could not start: ${error instanceof Error ? error.message : String(error)}`)
+      if (error instanceof JobInputError) throw new MonitorInputError(error.message)
+      throw error
     }
-    if (entry.ended) return this.view(entry)
-    const timer = setTimeout(() => this.end(entry, { reason: 'timeout', minutes: entry.minutes }, 'needed'), entry.minutes * 60_000)
-    timer.unref?.()
-    entry.timer = timer
-    const view = this.view(entry)
+    if (ended) return this.view(job)
+    this.entries.add(job.id)
+    const view = this.view(job)
     if (requestKey) {
       this.requests.set(requestKey, view)
       if (this.requests.size > REMEMBERED_REQUESTS) this.requests.delete(this.requests.keys().next().value!)
     }
-    this.deps.working?.(entry.threadId, true)
-    this.changed(entry.threadId)
+    this.deps.working?.(input.threadId, true)
+    this.changed(input.threadId)
     this.persist()
     return view
   }
 
-  private spawn(entry: Entry): void {
-    const windows = (this.deps.platform ?? process.platform) === 'win32'
-    const child = (this.deps.spawn ?? nodeSpawn)(entry.command!, {
-      cwd: entry.cwd,
-      env: this.deps.env?.() ?? process.env,
-      shell: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-      // Its own process group, so a stop ends everything it started.
-      detached: !windows
-    })
-    entry.child = child
-    if (child.pid !== undefined) trackChildProcess(child, entry.kind === 'background' ? 'thread_background' : 'thread_monitor')
-    child.stdout?.setEncoding?.('utf8')
-    child.stderr?.setEncoding?.('utf8')
-    child.stdout?.on('data', (chunk: Buffer | string) => this.output(entry, 'out', String(chunk)))
-    child.stderr?.on('data', (chunk: Buffer | string) => this.output(entry, 'err', String(chunk)))
-    child.once('error', (error) => this.end(entry, { reason: 'failed', message: error.message }, 'needed'))
-    const exited = (code: number | null, signal: NodeJS.Signals | null): void => {
-      // A monitor's last line with no newline still counts.
-      for (const stream of ['out', 'err'] as const) {
-        if (entry.partial[stream] && entry.kind !== 'background') this.event(entry, entry.partial[stream])
-        entry.partial[stream] = ''
-      }
-      this.end(entry, { reason: 'exit', code, ...(signal ? { signal } : {}) }, 'needed')
-    }
-    child.once('close', exited)
-    // A process it left running (`tail -f x &`) keeps its output open, so `close` would wait for it: the script's exit
-    // counts once its last output had time to arrive, and the end then stops what it left.
-    child.once('exit', (code, signal) => {
-      const drain = setTimeout(() => exited(code, signal), MONITOR_EXIT_DRAIN_MS)
-      drain.unref?.()
-    })
-  }
+  // ---------------------------------------------------------------- notices
 
-  private connect(entry: Entry): void {
-    const socket = (this.deps.connect ?? defaultConnect)(entry.url!)
-    entry.socket = socket
-    socket.on('message', (data, isBinary) => this.event(entry, messageText(data, isBinary)))
-    socket.on('error', (error) => this.end(entry, { reason: 'failed', message: error.message || 'the connection failed' }, 'needed'))
-    socket.on('close', (code, reason) => {
-      const detail = reason?.length ? cut(reason.toString('utf8'), 200) : ''
-      this.end(entry, { reason: 'closed', code, ...(detail ? { detail } : {}) }, 'needed')
-    })
-  }
-
-  // ---------------------------------------------------------------- events
-
-  private output(entry: Entry, stream: 'out' | 'err', text: string): void {
-    if (entry.ended) return
-    if (entry.kind === 'background') {
-      entry.tail = (entry.tail + text).slice(-BACKGROUND_TAIL_CHARS)
-      const last = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).pop()
-      if (last) {
-        entry.latest = { line: cut(last, LATEST_CHARS), at: Date.now() }
-        this.changedLater(entry.threadId)
-      }
-      return
-    }
-    const lines = (entry.partial[stream] + text).split(/\r?\n/)
-    entry.partial[stream] = (lines.pop() ?? '').slice(-MONITOR_EVENT_CHARS * 4)
-    for (const line of lines) {
-      this.event(entry, line)
-      if (entry.ended) return
-    }
-  }
-
-  private event(entry: Entry, raw: string): void {
-    if (entry.ended || !raw.trim()) return
-    const now = Date.now()
-    const text = cut(raw.replace(/\s+$/, ''), MONITOR_EVENT_CHARS)
-    entry.events += 1
-    entry.latest = { line: cut(text.replace(/\s+/g, ' ').trim(), LATEST_CHARS), at: now }
-    this.changedLater(entry.threadId)
-    if (entry.batch.length === 0 && entry.dropped === 0) entry.batchStarted = now
-    if (entry.batch.length && entry.batchChars + text.length > MONITOR_NOTICE_CHARS) entry.dropped += 1
-    else {
-      entry.batch.push(text)
-      entry.batchChars += text.length + 1
-    }
-    if (overLimit(entry.eventTimes, now, MONITOR_CHATTY_EVENTS_PER_MINUTE)) {
-      this.end(entry, { reason: 'chatty', limit: `more than ${MONITOR_CHATTY_EVENTS_PER_MINUTE} events in a minute` }, 'needed')
-      return
-    }
-    if (entry.batchTimer) clearTimeout(entry.batchTimer)
-    entry.batchTimer = undefined
-    if (now - entry.batchStarted >= MONITOR_BATCH_MAX_MS) {
-      this.flush(entry)
-      return
-    }
-    entry.batchTimer = setTimeout(() => this.flush(entry), MONITOR_BATCH_MS)
-    entry.batchTimer.unref?.()
-  }
-
-  /** Sends what the monitor reported since its last notice. */
-  private flush(entry: Entry): void {
-    if (entry.batchTimer) clearTimeout(entry.batchTimer)
-    entry.batchTimer = undefined
-    if (entry.ended || (!entry.batch.length && !entry.dropped)) return
-    if (overLimit(entry.noticeTimes, Date.now(), MONITOR_CHATTY_NOTICES_PER_MINUTE)) {
-      this.end(entry, { reason: 'chatty', limit: `more than ${MONITOR_CHATTY_NOTICES_PER_MINUTE} notices in a minute` }, 'needed')
-      return
-    }
-    this.post(entry, 'needed')
-  }
-
-  private post(entry: Entry, attention: MonitorEventPayload['attention'], end?: MonitorEnd): void {
+  private post(job: JobInfo, events: string[], dropped: number, notice: number, attention: MonitorEventPayload['attention'], end?: MonitorEnd, tail?: string): void {
+    const threadId = threadOf(job)
     const payload: MonitorEventPayload = {
       kind: 'monitor_event',
-      monitorId: entry.id,
-      monitorKind: entry.kind,
-      description: entry.description,
-      events: entry.batch,
-      ...(entry.dropped ? { droppedEvents: entry.dropped } : {}),
+      monitorId: job.id,
+      monitorKind: job.kind as MonitorKind,
+      description: job.label,
+      events,
+      ...(dropped ? { droppedEvents: dropped } : {}),
       ...(end ? { end } : {}),
-      ...(end && entry.kind === 'background' ? { tail: entry.tail } : {}),
+      ...(end && job.kind === 'background' ? { tail: tail ?? '' } : {}),
       attention
     }
-    entry.batch = []
-    entry.batchChars = 0
-    entry.dropped = 0
-    entry.seq += 1
     try {
-      this.deps.post(entry.threadId, payload, `monitor:${entry.id}:${entry.seq}`)
+      this.deps.post(threadId, payload, `monitor:${job.id}:${notice}`)
     } catch (error) {
-      console.warn('a monitor notice could not be posted', { monitorId: entry.id, threadId: entry.threadId, error: error instanceof Error ? error.message : String(error) })
+      console.warn('a monitor notice could not be posted', { monitorId: job.id, threadId, error: error instanceof Error ? error.message : String(error) })
     }
   }
 
-  // ---------------------------------------------------------------- ending
-
   /**
-   * Ends it once. Its last notice carries what it reported since the one before and how it ended (`silent`: none, for a
-   * thread that is gone); a hold is told only when its time runs out.
+   * It ended, once. Its last notice carries what it reported since the one before and how it ended (`silent`: none, for
+   * a thread that is gone or a stop the agent made); a hold is told only when its time runs out.
    */
-  private end(entry: Entry, end: MonitorEnd, attention: MonitorEventPayload['attention'] | 'silent'): void {
-    if (entry.ended) return
-    entry.ended = true
-    if (entry.timer) clearTimeout(entry.timer)
-    if (entry.batchTimer) clearTimeout(entry.batchTimer)
-    entry.batchTimer = undefined
-    const wasRunning = this.entries.delete(entry.id)
-    const told = attention !== 'silent' && (entry.kind !== 'keep_working' || end.reason === 'timeout')
-    if (told) this.post(entry, attention, end)
-    // Even after a script exits on its own, what it left in its process group (`tail -f x &`) ends with it.
-    this.kill(entry)
+  private ended(job: JobInfo, end: JobEnd, final: JobFinal & { notice: number }, attention: Attention): void {
+    const threadId = threadOf(job)
+    const wasRunning = this.entries.delete(job.id)
+    // A thread's monitors carry no match, so their ends are a monitor's.
+    const told = attention !== 'silent' && (job.kind !== 'keep_working' || end.reason === 'timeout')
+    if (told) this.post(job, final.events, final.dropped, final.notice, attention, end as MonitorEnd, final.tail)
     if (!wasRunning) return
-    this.deps.working?.(entry.threadId, this.has(entry.threadId))
-    this.changed(entry.threadId)
+    this.deps.working?.(threadId, this.has(threadId))
+    this.changed(threadId)
     this.persist()
   }
 
@@ -501,28 +342,7 @@ export class ThreadMonitors {
     this.changeTimers.set(threadId, timer)
   }
 
-  private kill(entry: Entry): void {
-    if (entry.socket) {
-      try { entry.socket.terminate() } catch { /* closed already */ }
-    }
-    const child = entry.child
-    const pid = child?.pid
-    if (!child || pid === undefined) return
-    const running = (): boolean => child.exitCode === null && child.signalCode === null
-    // On macOS and Linux the script leads its own process group, which outlives it when it leaves something behind: the
-    // group is ended whatever ended the script, and sent SIGKILL after the grace (a group already gone is harmless). On
-    // Windows a tree is found from its live root only.
-    const group = (this.deps.platform ?? process.platform) !== 'win32'
-    if (!group && !running()) return
-    const kill = this.deps.kill ?? killProcessTree
-    try { kill(pid, 'SIGTERM') } catch { /* gone */ }
-    const timer = setTimeout(() => {
-      if (group || running()) {
-        try { kill(pid, 'SIGKILL') } catch { /* gone */ }
-      }
-    }, MONITOR_KILL_GRACE_MS)
-    timer.unref?.()
-  }
+  // ---------------------------------------------------------------- stopping
 
   /**
    * Stops one of the thread's own (`background_stop`). The agent learns it from the tool's result, so no notice follows:
@@ -530,17 +350,14 @@ export class ThreadMonitors {
    * is not running.
    */
   stop(threadId: string, id: string): (MonitorView & { unreported?: string[]; droppedEvents?: number; tail?: string }) | undefined {
-    const entry = this.entries.get(id)
-    if (!entry || entry.threadId !== threadId) return undefined
-    const view = this.view(entry)
-    const unreported = [...entry.batch]
-    const dropped = entry.dropped
-    this.end(entry, { reason: 'stopped' }, 'silent')
+    if (!this.entries.has(id)) return undefined
+    const stopped = this.jobs.stop({ kind: 'thread', threadId }, id, { tag: 'silent' })
+    if (!stopped) return undefined
     return {
-      ...view,
-      ...(unreported.length ? { unreported } : {}),
-      ...(dropped ? { droppedEvents: dropped } : {}),
-      ...(entry.kind === 'background' && entry.tail.trim() ? { tail: entry.tail } : {})
+      ...this.view(stopped.info),
+      ...(stopped.events.length ? { unreported: stopped.events } : {}),
+      ...(stopped.dropped ? { droppedEvents: stopped.dropped } : {}),
+      ...(stopped.info.kind === 'background' && stopped.tail.trim() ? { tail: stopped.tail } : {})
     }
   }
 
@@ -549,28 +366,24 @@ export class ThreadMonitors {
    * Undefined when it is not running.
    */
   stopByPerson(threadId: string, id: string): MonitorView | undefined {
-    const entry = this.entries.get(id)
-    if (!entry || entry.threadId !== threadId) return undefined
-    const view = this.view(entry)
-    this.end(entry, { reason: 'stopped' }, 'none')
-    return view
+    if (!this.entries.has(id)) return undefined
+    const stopped = this.jobs.stop({ kind: 'thread', threadId }, id, { tag: 'none' })
+    return stopped ? this.view(stopped.info) : undefined
   }
 
   /** Ends the thread's `keep_working` holds; how many. */
   release(threadId: string): number {
-    const holds = [...this.entries.values()].filter((entry) => entry.threadId === threadId && entry.kind === 'keep_working')
-    for (const hold of holds) this.end(hold, { reason: 'stopped' }, 'silent')
+    const holds = this.own(threadId).filter((job) => job.kind === 'keep_working')
+    for (const hold of holds) this.jobs.stop({ kind: 'thread', threadId }, hold.id, { tag: 'silent' })
     return holds.length
   }
 
   /**
    * The thread was stopped: everything it runs ends, and it is told with its next turn (never woken for it). `notify`
-   * false: the thread is gone, nobody is told.
+   * false: the thread is gone, nobody is told, and none of its output is kept.
    */
   stopThread(threadId: string, notify = true): number {
-    const own = [...this.entries.values()].filter((entry) => entry.threadId === threadId)
-    for (const entry of own) this.end(entry, { reason: 'thread_stopped' }, notify ? 'none' : 'silent')
-    return own.length
+    return this.jobs.stopOwner({ kind: 'thread', threadId }, { end: { reason: 'thread_stopped' }, tag: notify ? 'none' : 'silent', forget: !notify }).length
   }
 
   /** Mousse is closing: everything ends untold; the record stays, so the next start tells each thread. */
@@ -578,13 +391,8 @@ export class ThreadMonitors {
     this.closed = true
     for (const timer of this.changeTimers.values()) clearTimeout(timer)
     this.changeTimers.clear()
-    for (const entry of [...this.entries.values()]) {
-      entry.ended = true
-      if (entry.timer) clearTimeout(entry.timer)
-      if (entry.batchTimer) clearTimeout(entry.batchTimer)
-      this.entries.delete(entry.id)
-      this.kill(entry)
-    }
+    this.entries.clear()
+    this.jobs.closeWhere((owner) => owner.kind === 'thread')
   }
 
   /** After the daemon is ready: tells each thread whose monitors the last run left that they ended. */
@@ -609,55 +417,59 @@ export class ThreadMonitors {
 
   // ---------------------------------------------------------------- reading
 
+  /** The thread's (or every thread's) jobs running now, oldest first. */
+  private own(threadId?: string): JobInfo[] {
+    return this.jobs.list(threadId ? { kind: 'thread', threadId } : 'thread').filter((job) => this.entries.has(job.id))
+  }
+
   has(threadId: string): boolean {
-    for (const entry of this.entries.values()) if (entry.threadId === threadId) return true
-    return false
+    return this.own(threadId).length > 0
   }
 
   /** What runs now, of one thread or all, oldest first. */
   list(threadId?: string): MonitorView[] {
-    return [...this.entries.values()].filter((entry) => !threadId || entry.threadId === threadId).sort((a, b) => a.startedAt - b.startedAt).map((entry) => this.view(entry))
+    return this.own(threadId).map((job) => this.view(job))
   }
 
   /** The thread's background work at a glance: how many of each run, and the latest event of any. */
   summary(threadId: string): MonitorSummary {
-    const own = [...this.entries.values()].filter((entry) => entry.threadId === threadId)
-    const latest = own.filter((entry) => entry.latest).sort((a, b) => b.latest!.at - a.latest!.at)[0]
+    const own = this.own(threadId)
+    const latest = own.filter((job) => job.latest).sort((a, b) => b.latest!.at - a.latest!.at)[0]
     return {
-      monitors: own.filter((entry) => entry.kind === 'command' || entry.kind === 'url').length,
-      commands: own.filter((entry) => entry.kind === 'background').length,
-      keepWorking: own.filter((entry) => entry.kind === 'keep_working').length,
+      monitors: own.filter((job) => job.kind === 'command' || job.kind === 'url').length,
+      commands: own.filter((job) => job.kind === 'background').length,
+      keepWorking: own.filter((job) => job.kind === 'keep_working').length,
       ...(latest ? { latest: { id: latest.id, line: latest.latest!.line, at: new Date(latest.latest!.at).toISOString() } } : {})
     }
   }
 
   /** The scripts and commands that run now, with their process and folder: the running list (`RunningRegistry`). */
   processes(): Array<{ id: string; threadId: string; label: string; command: string; pid?: number; cwd: string; startedAt: number; output: string }> {
-    return [...this.entries.values()].filter((entry) => entry.child && entry.cwd).map((entry) => ({
-      id: entry.id,
-      threadId: entry.threadId,
-      label: `${entry.kind === 'background' ? 'Background command' : 'Monitor'} ${entry.id}: ${entry.description}`,
-      command: entry.command!,
-      ...(entry.child!.pid !== undefined ? { pid: entry.child!.pid } : {}),
-      cwd: entry.cwd!,
-      startedAt: entry.startedAt,
-      output: entry.kind === 'background' ? entry.tail : entry.latest?.line ?? ''
+    return this.own().filter((job) => job.command && job.cwd).map((job) => ({
+      id: job.id,
+      threadId: threadOf(job),
+      label: `${job.kind === 'background' ? 'Background command' : 'Monitor'} ${job.id}: ${job.label}`,
+      command: job.command!,
+      ...(job.pid !== undefined ? { pid: job.pid } : {}),
+      cwd: job.cwd!,
+      startedAt: job.startedAt,
+      output: job.kind === 'background' ? job.tail : job.latest?.line ?? ''
     }))
   }
 
-  private view(entry: Entry): MonitorView {
+  private view(job: JobInfo): MonitorView {
     return {
-      id: entry.id,
-      threadId: entry.threadId,
-      kind: entry.kind,
-      description: entry.description,
-      ...(entry.command ? { command: entry.command } : {}),
-      ...(entry.url ? { url: entry.url } : {}),
-      startedAt: new Date(entry.startedAt).toISOString(),
-      until: new Date(entry.startedAt + entry.minutes * 60_000).toISOString(),
-      events: entry.events,
-      ...(entry.latest ? { latest: entry.latest.line } : {}),
-      ...(entry.child?.pid !== undefined ? { pid: entry.child.pid } : {})
+      id: job.id,
+      threadId: threadOf(job),
+      kind: job.kind as MonitorKind,
+      description: job.label,
+      ...(job.command ? { command: job.command } : {}),
+      ...(job.url ? { url: job.url } : {}),
+      startedAt: new Date(job.startedAt).toISOString(),
+      until: new Date(job.startedAt + job.limitMs).toISOString(),
+      events: job.events,
+      ...(job.latest ? { latest: job.latest.line } : {}),
+      ...(job.pid !== undefined ? { pid: job.pid } : {})
     }
   }
 
@@ -669,7 +481,7 @@ export class ThreadMonitors {
     if (!file) return
     // What runs now, taken when asked: a write that waits behind another still writes what ran then, never what a
     // `close()` in between left (nothing), so a restart still tells those threads.
-    const running: RecordRow[] = [...this.entries.values()].filter((entry) => entry.kind !== 'keep_working').map((entry) => ({ id: entry.id, threadId: entry.threadId, kind: entry.kind, description: entry.description }))
+    const running: RecordRow[] = this.own().filter((job) => job.kind !== 'keep_working').map((job) => ({ id: job.id, threadId: threadOf(job), kind: job.kind as MonitorKind, description: job.label }))
     this.writing = this.writing.then(async () => {
       // The last run's leftovers are read only once the old record is loaded, which every write waits for.
       const rows: RecordRow[] = [...this.leftovers, ...running]
@@ -687,12 +499,7 @@ export class ThreadMonitors {
   }
 }
 
-/** Keeps `times` to the last minute, adds `now`, and says whether that is more than `limit`. */
-function overLimit(times: number[], now: number, limit: number): boolean {
-  times.push(now)
-  while (times.length && now - times[0]! >= CHATTY_WINDOW_MS) times.shift()
-  return times.length > limit
-}
+const threadOf = (job: JobInfo): string => (job.owner as Extract<JobOwner, { kind: 'thread' }>).threadId
 
 const KINDS: ReadonlySet<string> = new Set<MonitorKind>(['command', 'url', 'background'])
 
