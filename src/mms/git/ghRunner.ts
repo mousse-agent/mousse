@@ -59,12 +59,22 @@ export const execRunner: ExecutableRunner = async (executable, args, options) =>
   })
 }
 
-/** A packaged macOS app gets a minimal PATH, so Homebrew's gh is not found by name. */
+/**
+ * Where gh is when it is not found by name: a packaged macOS app gets a minimal PATH, so Homebrew's gh is missed, and a
+ * gh that winget just installed is not on the PATH Mousse started with.
+ */
+export function ghFallbackPaths(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): string[] {
+  if (platform === 'darwin' || platform === 'linux') return ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/home/linuxbrew/.linuxbrew/bin/gh']
+  if (platform !== 'win32') return []
+  const folders = [env.ProgramFiles ?? 'C:\\Program Files', env.LOCALAPPDATA ? `${env.LOCALAPPDATA}\\Programs` : null]
+  return folders.flatMap((folder) => (folder ? [`${folder}\\GitHub CLI\\gh.exe`] : []))
+}
+
 export function createGhFallbackRunner(
   base: ExecutableRunner,
   platform: NodeJS.Platform = process.platform
 ): ExecutableRunner {
-  const fallbacks = platform === 'darwin' || platform === 'linux' ? ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/home/linuxbrew/.linuxbrew/bin/gh'] : []
+  const fallbacks = ghFallbackPaths(platform)
   let remembered: string | null = null
   return async (executable, args, options) => {
     if (executable !== 'gh') return base(executable, args, options)

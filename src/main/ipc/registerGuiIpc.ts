@@ -23,6 +23,7 @@ import type { BotChatMessage } from '../../shared/bots/personal/chat'
 import { AUTOMATIONS_METHODS, type ScheduledRunEnded } from '../../shared/automations'
 import { SECRET_METHODS } from '../../shared/secretRequests'
 import { COMPUTER_USE_METHODS } from '../../shared/computerUse'
+import { SOURCE_CONTROL_METHODS } from '../../shared/sourceControl'
 import { BUG_REPORT_METHODS } from '../../shared/bugReports'
 import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
@@ -275,6 +276,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...AUTOMATIONS_METHODS,
   ...SECRET_METHODS,
   ...COMPUTER_USE_METHODS,
+  ...SOURCE_CONTROL_METHODS,
   ...BUG_REPORT_METHODS,
   ...SPACE_ARCHIVE_METHODS,
   ...SPEECH_HOST_METHODS,

@@ -20,6 +20,7 @@ import type { SpaceArchiveMethod } from './spaces/archive'
 import type { SpeechHostMethod } from './speechRelay'
 import type { SecretMethod } from './secretRequests'
 import type { ComputerUseMethod } from './computerUse'
+import type { SourceControlMethod } from './sourceControl'
 import type { BugReportMethod } from './bugReports'
 
 export type PlatformRequestMethod = ChatMethod | ChatResourceMethod | WorkflowRunMethod | BrowserGuiMethod | BrowserSetupMethod | BrowserAccessMethod
@@ -28,6 +29,7 @@ export type PlatformRequestMethod = ChatMethod | ChatResourceMethod | WorkflowRu
   | AutomationsMethod
   | SecretMethod
   | ComputerUseMethod
+  | SourceControlMethod
   | BugReportMethod
   | 'workflows.list' | 'workflows.get' | 'workflows.getRevision' | 'workflows.create'
   | 'workflows.saveDraft' | 'workflows.publish' | 'workflows.archive'

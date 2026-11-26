@@ -35,6 +35,8 @@ import { BotDefinitionError } from './bots/definitions/BotDefinitionStore'
 import { registerBotBrowserMethods } from './bots/browser/registerBotBrowserMethods'
 import { registerAutomationMethods } from './automations/registerMethods'
 import { registerComputerUseMethods } from './computerUse/registerMethods'
+import { registerSourceControlMethods } from './sourceControl/registerMethods'
+import { GitHubAccount } from './git/GitHubAccount'
 import { registerSecretMethods } from './secrets/registerMethods'
 import { registerBugReportMethods } from './bugReports/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
@@ -354,6 +356,9 @@ export class MousseMainService extends MmsProfileServices {
       const { orchestrator } = await profile(profileId)
       return { driver: orchestrator.computerUse(), setup: orchestrator.computerUseSetup() }
     })
+    // Settings → Source control and New project's Clone: this computer's GitHub account, shared by every profile.
+    let githubAccount: GitHubAccount | null = null
+    registerSourceControlMethods(this.domains, () => (githubAccount ??= new GitHubAccount()))
     registerAutomationMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)
       return {

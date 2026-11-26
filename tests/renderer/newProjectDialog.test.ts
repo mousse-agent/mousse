@@ -23,11 +23,19 @@ const { ToastHost, dismissToast } = await import('../../src/renderer/components/
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { useComputersStore } = await import('../../src/renderer/lib/computers')
 const { qualifyId } = await import('../../src/shared/threadRef')
+const { useSourceControl } = await import('../../src/renderer/lib/sourceControl')
 
 const project = (id: string, path: string, extra: Partial<Project> = {}): Project => ({ id, name: id, path, createdAt: '2026-10-01T00:00:00.000Z', order: 0, ...extra })
 
 let host: HTMLDivElement
 let root: Root
+/** What the daemon answers about GitHub: the account, and its repositories when connected. */
+const github: { status: Record<string, unknown>; repositories: { nameWithOwner: string; private: boolean }[] } = { status: {}, repositories: [] }
+const platform = vi.fn(async (method: string): Promise<unknown> => {
+  if (method === 'sourceControl.status') return { providers: [github.status] }
+  if (method === 'sourceControl.repositories') return { repositories: github.repositories, fetchedAt: Date.now() }
+  throw new Error(`unexpected ${method}`)
+})
 const api = {
   open: vi.fn(async (_target?: unknown): Promise<Project | null> => null),
   chooseFolder: vi.fn(async (): Promise<string | null> => null),
@@ -40,9 +48,12 @@ beforeEach(() => {
     mousse: {
       app: { setAttentionCount: vi.fn(async () => undefined) },
       projects: { open: api.open, chooseFolder: api.chooseFolder },
-      github: { cloneRepository: api.cloneRepository }
+      github: { cloneRepository: api.cloneRepository },
+      platformRequest: { request: platform }
     }
   })
+  useSourceControl.setState({ github: null, repositories: [], fetchedAt: 0 })
+  github.status = { id: 'github', name: 'GitHub', state: 'signed-out' }
   useComputersStore.setState({ loaded: true, byNode: {} })
   useAppStore.setState({
     sidebarMode: 'threads',
@@ -190,4 +201,38 @@ it('keeps the field focused after a failure, so typing goes on', async () => {
   await press('Enter')
   expect(dialog()!.querySelector('[role="alert"]')).not.toBeNull()
   expect(document.activeElement).toBe(input())
+})
+
+
+const clickRow = async (title: string) => {
+  const row = [...dialog()!.querySelectorAll<HTMLButtonElement>('[role="option"]')].find((option) => option.querySelector('.thread-search-result-title')?.textContent === title)!
+  await act(async () => row.click())
+}
+
+it("lists the signed-in account's repositories under Clone a repository, filters them as you type, and clones the one picked", async () => {
+  github.status = { id: 'github', name: 'GitHub', state: 'connected', account: 'me' }
+  github.repositories = [
+    { nameWithOwner: 'me/notes', private: true },
+    { nameWithOwner: 'acme/web-app', private: false },
+    { nameWithOwner: 'acme/api', private: false }
+  ]
+  await show()
+  await openDialog()
+  await clickRow('Clone a repository…')
+  expect(rowTitles().slice(0, 3)).toEqual(['me/notes', 'acme/web-app', 'acme/api'])
+  await type('web')
+  expect(rowTitles()).toContain('acme/web-app')
+  expect(rowTitles()).not.toContain('me/notes')
+  await clickRow('acme/web-app')
+  expect(api.cloneRepository).toHaveBeenCalledWith({ repository: 'acme/web-app', destination: 'C:\\dev\\web-app' })
+})
+
+it('offers to connect GitHub under Clone a repository when it is not connected, in Settings → Source control', async () => {
+  await show()
+  await openDialog()
+  await clickRow('Clone a repository…')
+  expect(rowTitles()[0]).toBe('Connect GitHub…')
+  await clickRow('Connect GitHub…')
+  expect(dialog()).toBeNull()
+  expect(useAppStore.getState().settingsOpen).toBe(true)
 })

@@ -1140,6 +1140,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'They use the computer’s own GitHub sign-in or take a raw folder path; they are not thread features.'
   },
   {
+    prefixes: ['sourceControl.'],
+    reason: 'The GitHub sign-in of a computer is added, used and removed from Settings → Source control on that computer.'
+  },
+  {
     methods: ['skills.refresh', 'skills.openFolderIntent'],
     reason: 'They rescan or open folders on the computer they run on.'
   },
