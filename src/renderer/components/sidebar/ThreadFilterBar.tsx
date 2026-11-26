@@ -63,8 +63,8 @@ const EMPTY_COMPUTERS: readonly ComputerOption[] = []
  * - Typing narrows the list by title, project, bot and computer, and suggests matching projects, bots and computers
  *   above it; picking one (click, or Enter on the highlighted one) makes it a filter.
  * - The button opens a short menu: Show, "Project ›", "Bot ›" and (when other computers exist) "Computer ›" (each a
- *   small searchable list beside it), and Archived. In the Projects tab the menu lists the projects instead, ticked;
- *   unticking one leaves it out of the tree.
+ *   small searchable list beside it), and Archived. In the Projects tab the menu ticks the projects instead (up to
+ *   five in place, more in a "Projects ›" list of checkboxes); unticking one leaves it out of the tree.
  *
  * The swap button after it switches the Threads tab between the Projects tree and the list of cards (`onSwapView`).
  */
@@ -246,7 +246,10 @@ export function ThreadFilterBar({ view, projects, bots, computers = EMPTY_COMPUT
   )
 }
 
-type SubKind = 'project' | 'bot' | 'computer'
+type SubKind = 'project' | 'shown' | 'bot' | 'computer'
+
+/** The Projects tab's menu ticks this many projects in place; with more, they move into "Projects ›". */
+const INLINE_PROJECTS = 5
 
 function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption, botOption, onClose }: {
   view: 'projects' | 'threads'
@@ -280,6 +283,7 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
   }, [anchorRef, onClose])
 
   const hidden = new Set(filter.hiddenProjects)
+  const hiddenCount = projects.filter((option) => hidden.has(option.id)).length
   const closeSub = () => {
     setSub(null)
     menuRef.current?.querySelector<HTMLElement>('[aria-expanded="true"][data-sub]')?.focus()
@@ -290,6 +294,7 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
     options: readonly FilterOption[]
     selected: readonly string[]
     multiple?: boolean
+    anyChecked?: boolean
     mark(option: FilterOption): ReactNode
     pick(id: string | null): void
   }> = {
@@ -300,6 +305,19 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
       selected: filter.projectId !== null ? [filter.projectId] : [],
       mark: (option) => <ProjectMark option={option as ProjectOption} />,
       pick: (id) => filter.setProject(id)
+    },
+    shown: {
+      anyLabel: 'All projects',
+      searchLabel: 'Search projects',
+      options: projects,
+      selected: projects.filter((option) => !hidden.has(option.id)).map((option) => option.id),
+      multiple: true,
+      anyChecked: hiddenCount === 0,
+      mark: (option) => <ProjectMark option={option as ProjectOption} />,
+      pick: (id) => {
+        if (id === null) filter.clearHiddenProjects()
+        else filter.setProjectHidden(id, !hidden.has(id))
+      }
     },
     bot: {
       anyLabel: 'Any bot',
@@ -359,6 +377,7 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
             options={config.options}
             selected={config.selected}
             multiple={config.multiple}
+            anyChecked={config.anyChecked}
             mark={config.mark}
             onPick={(id) => {
               config.pick(id)
@@ -406,7 +425,7 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
           </button>
         ))}
         <div className="threads-context-menu-separator thread-filter-menu-separator" role="separator" />
-        {view === 'projects' ? (
+        {view === 'projects' && projects.length > INLINE_PROJECTS ? subTrigger('shown', 'Projects', hiddenCount === 0 ? 'All' : `${projects.length - hiddenCount} of ${projects.length}`) : view === 'projects' ? (
           <>
             <div className="thread-filter-menu-label" role="presentation">Projects</div>
             <div className="thread-filter-menu-projects">
@@ -449,13 +468,15 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
  * "Project ›", "Bot ›" and "Computer ›": a search line, then "Recent" (the few used last) and the rest by name; it
  * scrolls. Arrows move from the search line into the list and back; Escape or the left arrow go back to the menu.
  */
-function FilterSubList({ label, anyLabel, searchLabel, options, selected, multiple = false, mark, onPick, onBack }: {
+function FilterSubList({ label, anyLabel, searchLabel, options, selected, multiple = false, anyChecked, mark, onPick, onBack }: {
   label: string
   anyLabel: string
   searchLabel: string
   options: readonly FilterOption[]
   selected: readonly string[]
   multiple?: boolean
+  /** Whether the first row ("All …") is ticked; by default, when nothing is selected. */
+  anyChecked?: boolean
   mark(option: FilterOption): ReactNode
   onPick(id: string | null): void
   onBack(): void
@@ -467,6 +488,7 @@ function FilterSubList({ label, anyLabel, searchLabel, options, selected, multip
   const { recent, rest } = useMemo(() => orderOptions(options, search), [options, search])
   const selectedSet = useMemo(() => new Set(selected), [selected])
   const itemRole = multiple ? 'menuitemcheckbox' : 'menuitemradio'
+  const anyTicked = anyChecked ?? selectedSet.size === 0
 
   useLayoutEffect(() => {
     const list = listRef.current
@@ -547,11 +569,11 @@ function FilterSubList({ label, anyLabel, searchLabel, options, selected, multip
         <button
           type="button"
           role={itemRole}
-          aria-checked={selectedSet.size === 0}
+          aria-checked={anyTicked}
           className="threads-context-menu-item thread-filter-menu-item"
           onClick={() => onPick(null)}
         >
-          <span className="thread-filter-check" aria-hidden="true">{selectedSet.size === 0 && <Check size={14} strokeWidth={2.2} />}</span>
+          <span className="thread-filter-check" aria-hidden="true">{anyTicked && <Check size={14} strokeWidth={2.2} />}</span>
           <span>{anyLabel}</span>
         </button>
         {recent.length > 0 && <div className="thread-filter-menu-label" role="presentation">Recent</div>}
