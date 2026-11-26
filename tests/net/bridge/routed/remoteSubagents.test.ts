@@ -117,6 +117,43 @@ describe('remote subagents over Bridge (issue #469)', () => {
     }
   }, 120_000)
 
+  it('delegate_task with computer: the task shows as the parent agent\'s on both computers, never as a person\'s', async () => {
+    const service = serviceOf(t.caller)
+    service.pause()
+    const ownerSend = vi.spyOn(t.owner.orchestrator, 'send').mockImplementation(async (_input, _reuse, opts) => {
+      const sent = await t.owner.runEngine.dispatch({ kind: 'send', threadId: opts!.threadId!, clientRequestId: opts!.clientRequestId!, source: opts!.source ?? 'gui', ...(opts!.agent ? { actor: opts!.agent } : {}) })
+      if (sent.status !== 'accepted') throw new Error('not accepted')
+      return { message: '', actions: [], runId: sent.runId, sequence: sent.sequence, accepted: true } as never
+    })
+    const access = t.caller.settings.get().agentAccess
+    t.caller.settings.set({ agentAccess: { ...access, remoteSubagents: true, computers: [t.node] } } as never)
+    // A remote task starts no turn here: the delegation tools only need the engine to say it can record one.
+    vi.spyOn(t.caller.orchestrator as unknown as { effectsEnabled(): boolean }, 'effectsEnabled').mockReturnValue(true)
+    try {
+      const parentThread = t.caller.threads.createThread('Tool parent')
+      const parent = await t.caller.runEngine.dispatch({ kind: 'send', threadId: parentThread.id, clientRequestId: 'tool-parent-send', source: 'gui' })
+      if (parent.status !== 'accepted') throw new Error('parent not accepted')
+      t.caller.runEngine.markStarting(parent.runId)
+      t.caller.runEngine.markRunning(parent.runId)
+      const orchestrator = t.caller.orchestrator as unknown as {
+        getOrCreateSession(threadId: string): unknown
+        delegationTools(session: unknown, runId: string): { delegateTask(input: Record<string, unknown>, call: { toolCallId: string }): Promise<Record<string, unknown>> }
+      }
+      const computer = portOf(t.caller)!.computers()[0]!.name
+      const started = await orchestrator.delegationTools(orchestrator.getOrCreateSession(parentThread.id), parent.runId)
+        .delegateTask({ title: 'Far reviewer', prompt: 'Review it there', computer, readOnly: true }, { toolCallId: 'far-1' })
+      expect(started, JSON.stringify(started)).toMatchObject({ computer })
+      // Here: the stand-in shows the task as the parent agent's, which opens the parent.
+      const [asked] = t.caller.orchestrator.getMessages(started.childThreadId as string).filter((message) => message.role === 'user')
+      expect(asked).toMatchObject({ content: 'Review it there', origin: { kind: 'agent', threadId: parentThread.id, runId: parent.runId, title: 'Tool parent' } })
+      // There: the task is an agent's message from this computer.
+      expect(ownerSend.mock.calls.at(-1)![2]).toMatchObject({ source: 'mcp', agent: { threadId: parentThread.id, remote: { title: 'Tool parent' } } })
+    } finally {
+      t.caller.settings.set({ agentAccess: access } as never)
+      vi.restoreAllMocks()
+    }
+  }, 120_000)
+
   // Issue #1160: no fixed cap. The owner's limit for this computer is the only one past the parent's run.
   it('runs in Full access there once the owner raised its limit for this computer to Full access', async () => {
     const service = serviceOf(t.caller)
