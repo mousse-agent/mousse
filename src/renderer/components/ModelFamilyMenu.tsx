@@ -24,7 +24,8 @@ import { findListedModel, modelLabelParts } from '../../shared/modelChoice'
 import { shortModelName } from '../../shared/modelNames'
 import { resolveModelChoice } from '../lib/modelChoice'
 import { ProviderIcon, providerIconKey, providerMakerId } from '../lib/providerIcons'
-import { instanceBadges } from '../lib/providerSnapshots'
+import { instanceBadges, useProviderSnapshotsStore } from '../lib/providerSnapshots'
+import { refreshLocalModels } from '../lib/localModels'
 import { listingKey, listingServes } from '../../shared/providerInstances'
 import { useAppStore } from '../stores/appStore'
 import { useCommandBindings, useCommandOverlay, useCommands } from '../commands/commandRegistry'
@@ -239,6 +240,8 @@ function ProfileModelFamilyMenu({
   closing = false,
   runSettings
 }: ModelFamilyMenuProps) {
+  // The menu mounts when it opens: local servers' lists are read again then (each at most every few seconds).
+  useEffect(() => refreshLocalModels(useProviderSnapshotsStore.getState().scopes.device?.snapshots), [])
   const favorites = useModelFavorites()
   const { hiddenOf } = favorites
   const groupedProviders = useMemo(

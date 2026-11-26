@@ -1296,3 +1296,72 @@ html[data-theme='high-contrast'] .prov-update-chip {
   font-size: var(--settings-fs-small);
   color: color-mix(in srgb, var(--text-primary) 60%, transparent);
 }
+
+/* Local models: a model's window chip opens its window field; an unknown window is the one chip that asks for attention. */
+.prov-model-caps:has(.prov-chip-btn, .prov-text-btn, .settings-input) {
+  align-items: center;
+  overflow: visible;
+}
+
+.prov-chip-btn {
+  border: 0;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.prov-chip-btn:hover {
+  color: var(--text-primary);
+  background: var(--ui-active, var(--ui-hover));
+}
+
+.prov-chip-btn:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
+.prov-chip-btn.is-attention {
+  color: var(--warning);
+}
+
+.prov-model-caps .prov-text-btn {
+  height: 20px;
+  font-size: 11px;
+}
+
+.settings-input.prov-local-window-input {
+  width: 88px;
+  height: 22px;
+  font-size: 11px;
+}
+
+.prov-local-note {
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.prov-local-note.is-error {
+  color: var(--danger);
+}
+
+/* Add provider → Local models: one line per server, its state quieter than its name. */
+.prov-local-detail {
+  color: var(--text-secondary);
+}
+
+.prov-local-done {
+  display: inline-flex;
+  color: var(--success);
+}
+
+.prov-local-loading {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-12);
+}
+
+.prov-local-empty {
+  margin: 0;
+  padding: var(--space-8) var(--space-12);
+}

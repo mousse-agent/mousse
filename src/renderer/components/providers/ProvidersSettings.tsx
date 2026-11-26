@@ -24,6 +24,7 @@ import {
 } from '../../lib/providerSnapshots'
 import { ProvidersComputerContext, providersApi, useProvidersComputer } from '../../lib/providersComputer'
 import { useComputers } from '../../lib/computers'
+import { refreshLocalModels } from '../../lib/localModels'
 import { isComputer, worksOnThreads, type Device } from '../../lib/netDevices'
 import { takePendingAddProvider, takePendingProvider } from '../../lib/settingsNavigation'
 import { Select } from '../ui/Select'
@@ -165,6 +166,13 @@ function ProvidersPage({
     return followRemoteProviders(node)
   }, [node, reload])
   useLegacyFavoritesImport()
+  // Local servers' lists are read again when the page opens (once its list is known), never on a timer.
+  const localRefreshed = useRef(false)
+  useEffect(() => {
+    if (localRefreshed.current || !snapshots) return
+    localRefreshed.current = true
+    refreshLocalModels(snapshots, node)
+  }, [snapshots, node])
   /** A snapshot a call returned, into the chosen computer's list. */
   const apply = (snapshot: InstanceSnapshot) => applySnapshot(snapshot, undefined, node)
 
@@ -390,6 +398,17 @@ function ProvidersPage({
       apply(snapshot)
       void loadProviderSnapshots(DEVICE_SCOPE, node)
       return snapshot.instanceId
+    },
+    // A local server is connected already (its key, if any, is saved): its entry is added and turned on.
+    connectLocal: async (providerId) => {
+      const added = await api.instances.add({ driver: 'pi', config: { provider: providerId } })
+      apply(added)
+      await loadProviderSnapshots(DEVICE_SCOPE, node)
+      const list = useProviderSnapshotsStore.getState().scopes[node ? computerKey(node) : 'device']?.snapshots
+      const instance = list?.find((entry) => entry.instanceId === added.instanceId)
+      if (instance && !instance.enabled.device) await setEnabled(instance, true)
+      else await reconcileSelection()
+      return added.instanceId
     },
     // A further entry of an agent signs in right after it is added, in the sign-in dialog.
     signIn: (instanceId, name) => void guard(() => startAgentSignIn(instanceId, name)),

@@ -33,6 +33,7 @@ function open(snapshots: InstanceSnapshot[]) {
   const handlers = {
     add: vi.fn(async (driver: string) => `${driver}:added`),
     connectApi: vi.fn(),
+    connectLocal: vi.fn(),
     signIn: vi.fn()
   } satisfies AddProviderHandlers
   const onFinished = vi.fn()
