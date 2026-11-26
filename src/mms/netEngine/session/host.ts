@@ -534,6 +534,12 @@ class HostSubscription {
     this.ended = true
     this.live = false
     this.forget()
+    // End this computer's half of the stream so neither side's helper keeps a half-closed stream open.
+    try {
+      this.channel.end()
+    } catch {
+      this.channel.reset('cancelled')
+    }
   }
 }
 

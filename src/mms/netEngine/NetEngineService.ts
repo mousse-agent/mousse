@@ -1556,7 +1556,7 @@ export class NetEngineService implements EngineDirectoryPort {
     ])
       console.warn(`network engine limit: ${problem}`)
     const { net } = this.options
-    const rt = net.runtime()
+    const rt = typeof net.ensureEngineRuntime === 'function' ? await net.ensureEngineRuntime() : net.runtime()
     if (!rt.identity.self()) await rt.identity.bootstrapAuthority(this.selfName())
     if (rt.identity.isKeeper()) this.renewOwn(rt)
     // A profile that joined another computer's network cannot renew its own delegation: v1 renews it through

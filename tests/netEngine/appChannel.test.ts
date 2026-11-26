@@ -2,7 +2,7 @@
  * The app's end of the helper channel (design §2): what it writes under the helper's credit, in what order, and
  * what closes it.
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   AppChannel,
   creditFrame,
@@ -17,10 +17,11 @@ import {
 } from '../../src/mms/netEngine/helper/appChannel'
 import { EngineHelper } from '../../src/mms/netEngine/helper/connections'
 import { engineLimits } from '../../src/mms/netEngine/limits'
+import { EngineClient } from '../../src/mms/netEngine/session/client'
 import { encodeMessage } from '../../src/mms/netEngine/session/frame'
 import { EngineHost } from '../../src/mms/netEngine/session/host'
 import type { EngineConnection, EngineStream } from '../../src/mms/netEngine/session/transport'
-import type { NodeId } from '../../src/shared/net'
+import type { NodeId, StreamId } from '../../src/shared/net'
 
 /** A pipe whose helper side is the test: frames the app wrote, and frames pushed to the app. */
 function pipe() {
@@ -357,5 +358,259 @@ describe('the helper, as the app sees it', () => {
     p.push(jsonFrame({ ev: 'net.paused', reason: 'disk' }))
     expect(helper.paused).toBe('disk')
     expect(seen).toEqual(['journal', undefined, 'disk'])
+  })
+
+  it('closes both halves on unsubscribe so repeated subscribe/unsubscribe never leaks past the stream cap', async () => {
+    const cap = engineLimits().appStreamsPerConnection
+    // Wire two real AppChannel/EngineHelper stacks through a strict helper pair that enforces `STREAMS_PER_CONNECTION`
+    // across both halves: a stream keeps its slot until BOTH sides send FIN (or either resets).
+    const clientPipe = pipe()
+    const hostPipe = pipe()
+    const clientChannel = new AppChannel(clientPipe.app)
+    const hostChannel = new AppChannel(hostPipe.app)
+    let clientConn!: EngineConnection
+    let hostConn!: EngineConnection
+    new EngineHelper(clientChannel, {
+      peers: { byIdentity: () => ({ node: 'host' as NodeId, grant: '1', endpoint: 'host' }) },
+      attach: async (connection) => void (clientConn = connection),
+      name: () => 'Client'
+    })
+    new EngineHelper(hostChannel, {
+      peers: { byIdentity: () => ({ node: 'client' as NodeId, grant: '1', endpoint: 'client' }) },
+      attach: async (connection) => void (hostConn = connection),
+      name: () => 'Host'
+    })
+    clientPipe.push(jsonFrame({ ev: 'conn.up', conn: 1, identity: 'host', dir: 'out' }))
+    hostPipe.push(jsonFrame({ ev: 'conn.up', conn: 1, identity: 'client', dir: 'in', grant: 1 }))
+
+    const head = { epoch: 1, seq: 0 }
+    const store = {
+      head: () => head,
+      cursor: () => head,
+      snapshotReason: () => undefined,
+      read: () => ({ records: [] }),
+      openSnapshot: () => ({ target: head, next: () => ({ records: [], done: true }), close: () => undefined })
+    }
+    new EngineHost(hostConn, {
+      caller: () => ({ node: 'client' as NodeId }) as never,
+      assertReadable: () => undefined,
+      store
+    } as never)
+    const client = new EngineClient(clientConn, { store: store as never, verify: () => undefined })
+
+    interface RelayStream {
+      handle: number
+      clientFin: boolean
+      hostFin: boolean
+    }
+    const open = new Map<number, RelayStream>()
+    let nextHandle = 1
+    let clientRead = 0
+    let hostRead = 0
+    let streamLimitErrors = 0
+
+    const releaseIfBothFin = (handle: number): void => {
+      const s = open.get(handle)
+      if (s && s.clientFin && s.hostFin) open.delete(handle)
+    }
+    const pump = (): void => {
+      let progressed = true
+      while (progressed) {
+        progressed = false
+        while (clientRead < clientPipe.written.length) {
+          progressed = true
+          const frame = clientPipe.written[clientRead++]!
+          if (frame.type === FRAME_JSON) {
+            const msg = JSON.parse(frame.body.toString('utf8')) as {
+              id: number
+              op: string
+              label?: string
+              class?: string
+              handle?: number
+            }
+            if (msg.op === 'stream.open') {
+              if (open.size >= cap) {
+                streamLimitErrors += 1
+                clientPipe.push(jsonFrame({ re: msg.id, error: 'stream_limit', reason: 'too many open streams' }))
+              } else {
+                const handle = nextHandle++
+                open.set(handle, { handle, clientFin: false, hostFin: false })
+                clientPipe.push(Buffer.concat([jsonFrame({ re: msg.id, handle }), creditFrame(handle, 256 * 1024)]))
+                hostPipe.push(
+                  jsonFrame({
+                    ev: 'stream.incoming',
+                    conn: 1,
+                    handle,
+                    label: msg.label,
+                    class: msg.class
+                  })
+                )
+              }
+            } else if (msg.op === 'stream.reset' && typeof msg.handle === 'number') {
+              if (open.delete(msg.handle)) {
+                hostPipe.push(jsonFrame({ ev: 'stream.reset', handle: msg.handle, code: 'cancelled' }))
+              }
+            }
+          } else if (frame.type === FRAME_DATA) {
+            const handle = frame.body.readUInt32BE(0)
+            const fin = (frame.body.readUInt8(4) & 1) === 1
+            const payload = frame.body.subarray(5)
+            const s = open.get(handle)
+            if (s) {
+              if (fin) s.clientFin = true
+              hostPipe.push(dataFrame(handle, payload, fin))
+              releaseIfBothFin(handle)
+            }
+          }
+        }
+        while (hostRead < hostPipe.written.length) {
+          progressed = true
+          const frame = hostPipe.written[hostRead++]!
+          if (frame.type === FRAME_JSON) {
+            const msg = JSON.parse(frame.body.toString('utf8')) as { id: number; op: string; handle?: number }
+            if (msg.op === 'stream.accept' && typeof msg.handle === 'number') {
+              hostPipe.push(Buffer.concat([jsonFrame({ re: msg.id }), creditFrame(msg.handle, 256 * 1024)]))
+            } else if (msg.op === 'stream.reset' && typeof msg.handle === 'number') {
+              if (open.delete(msg.handle)) {
+                clientPipe.push(jsonFrame({ ev: 'stream.reset', handle: msg.handle, code: 'cancelled' }))
+              }
+            }
+          } else if (frame.type === FRAME_DATA) {
+            const handle = frame.body.readUInt32BE(0)
+            const fin = (frame.body.readUInt8(4) & 1) === 1
+            const payload = frame.body.subarray(5)
+            const s = open.get(handle)
+            if (s) {
+              if (fin) s.hostFin = true
+              clientPipe.push(dataFrame(handle, payload, fin))
+              releaseIfBothFin(handle)
+            }
+          }
+        }
+      }
+    }
+
+    // Run well past `STREAMS_PER_CONNECTION` (32) subscribe → unsubscribe cycles.
+    for (let i = 0; i < cap + 12; i += 1) {
+      let caughtUp = false
+      const sub = client.subscribe(`str_sub_${i}` as StreamId, {
+        onRecord: () => undefined,
+        onCaughtUp: () => void (caughtUp = true),
+        onError: (code) => {
+          throw new Error(`unexpected subscription error: ${code}`)
+        }
+      })
+      for (let step = 0; step < 8 && !caughtUp; step += 1) {
+        pump()
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+      expect(caughtUp).toBe(true)
+      sub.close()
+      for (let step = 0; step < 8 && open.size > 0; step += 1) {
+        pump()
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+      expect(open.size).toBe(0)
+    }
+    expect(streamLimitErrors).toBe(0)
+    // Verify AppChannel did not retain finished receiving entries on either side.
+    expect((clientChannel as unknown as { receiving: Map<number, unknown> }).receiving.size).toBe(0)
+    expect((hostChannel as unknown as { receiving: Map<number, unknown> }).receiving.size).toBe(0)
+    clientChannel.close()
+    hostChannel.close()
+  })
+
+  it('does not underflow stream slots when queued opens are reset, and shares the cap across both directions', async () => {
+    const cap = engineLimits().appStreamsPerConnection
+    const p = pipe()
+    const channel = new AppChannel(p.app)
+    let outbound!: EngineConnection
+    let reverseInbound!: EngineConnection
+    new EngineHelper(channel, {
+      peers: { byIdentity: () => ({ node: 'node' as NodeId, grant: '1', endpoint: 'ab' }) },
+      attach: async (connection) => {
+        if (connection.reversed) reverseInbound = connection
+        else outbound = connection
+      },
+      name: () => 'Desk'
+    })
+    const opens = () =>
+      p.written
+        .filter((frame) => frame.type === FRAME_JSON)
+        .map((frame) => JSON.parse(frame.body.toString('utf8')) as { id: number; op: string; handle?: number })
+        .filter((message) => message.op === 'stream.open')
+
+    p.push(jsonFrame({ ev: 'conn.up', conn: 1, identity: 'ab', dir: 'out', both: true }))
+    // Fill half the connection's cap with reverse inbound streams from the peer.
+    const half = Math.floor(cap / 2)
+    for (let h = 1; h <= half; h += 1) {
+      p.push(jsonFrame({ ev: 'stream.incoming', conn: 1, handle: h, label: 'mousse.rpc', class: 'interactive', grant: 1 }))
+    }
+    expect(reverseInbound).toBeDefined()
+    // Fill the remaining slots with outbound streams, then queue 5 more past the shared cap.
+    const liveOut: EngineStream[] = []
+    for (let i = 0; i < cap - half; i += 1) liveOut.push(outbound.open('mousse.rpc'))
+    expect(opens()).toHaveLength(cap - half)
+    const queued: EngineStream[] = []
+    for (let i = 0; i < 5; i += 1) queued.push(outbound.open('mousse.rpc'))
+    expect(opens()).toHaveLength(cap - half)
+
+    // Cancelling all 5 queued streams must NOT decrement live slots or trigger any new `stream.open`.
+    for (const stream of queued) stream.reset('deadline_exceeded')
+    const extra = outbound.open('mousse.rpc')
+    expect(opens()).toHaveLength(cap - half)
+
+    // Bind the in-flight outbound opens, then reset one: exactly one waiting stream (`extra`) starts.
+    const inflight = opens()
+    for (let i = 0; i < inflight.length; i += 1) p.push(jsonFrame({ re: inflight[i]!.id, handle: 100 + i }))
+    await new Promise((resolve) => setImmediate(resolve))
+    liveOut[0]!.reset('cancelled')
+    expect(opens()).toHaveLength(cap - half + 1)
+    expect(extra).toBeDefined()
+    channel.close()
+  })
+
+  it('resets a closed subscription stream after linger if an older peer never sends FIN on unsubscribe', async () => {
+    vi.useFakeTimers()
+    try {
+      const resetsSeen: Array<string | undefined> = []
+      const endsSeen: number[] = []
+      let onEndListener: ((reason?: string) => void) | undefined
+      const stream: EngineStream = {
+        label: 'mousse.sub',
+        write: () => undefined,
+        end: () => void endsSeen.push(1),
+        reset: (reason) => void resetsSeen.push(reason),
+        onData: () => undefined,
+        onEnd: (listener) => void (onEndListener = listener)
+      }
+      const connection: EngineConnection = {
+        id: '1',
+        peer: 'node' as NodeId,
+        direction: 'outbound',
+        open: () => stream,
+        onStream: () => undefined,
+        onClose: () => undefined,
+        close: () => undefined,
+        isOpen: () => true
+      }
+      const client = new EngineClient(connection, {
+        store: { cursor: () => ({ epoch: 1, seq: 0 }) } as never,
+        verify: () => undefined
+      })
+      const sub = client.subscribe('str_old_peer' as StreamId, {
+        onRecord: () => undefined,
+        onCaughtUp: () => undefined,
+        onError: () => undefined
+      })
+      sub.close()
+      expect(endsSeen).toHaveLength(1)
+      expect(resetsSeen).toEqual([])
+      expect(onEndListener).toBeDefined()
+      vi.advanceTimersByTime(engineLimits().tunnelCloseLingerMs)
+      expect(resetsSeen).toEqual(['cancelled'])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
