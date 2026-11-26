@@ -43,7 +43,7 @@ import { prepareActionableTarget, readControlValue, type ActionableTarget } from
 import { dispatchAction, dispatchHumanInput, navigateHistory, navigateTab, navigationPace, readOpenedPageSigns, readPageSigns, readSelectedText, type DispatchedHumanInput, type NavigationOptions } from '../action/dispatch'
 import { BROWSER_PROBLEM_CODES, browserNoteForPerson, browserProblemMessage, classifyOpenedPage, hostOf, type BrowserNavigation, type BrowserProblem } from '../../shared/browser/navigation'
 import { ScopedActionJournal } from '../action/journal'
-import { CdpDisconnectedError } from '../cdp/connection'
+import { CdpDisconnectedError, isCdpTargetGoneError } from '../cdp/connection'
 import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl, sleep, workerWarning } from '../util'
 import { BrowserWorkerError, isBrowserWorkerError } from '../errors'
 import { browserWindowDisplay, type BrowserWindowDisplay, type BrowserWindowEnd, type BrowserWindowState } from '../../shared/browser/window'
@@ -1205,7 +1205,9 @@ export class ManagedSession {
           break
         }
       } catch (error) {
-        if (error instanceof CdpDisconnectedError) {
+        // The frame went away while it was read (removed from its page meanwhile): it is skipped and the
+        // reader told. A browser that is gone (the pipe closed) fails the observation.
+        if (isCdpTargetGoneError(error)) {
           skippedFrames += 1
           continue
         }
