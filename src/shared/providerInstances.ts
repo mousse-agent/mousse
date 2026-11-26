@@ -179,7 +179,9 @@ export function readProviderInstances(raw: unknown): ProviderInstanceMap {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return instances
   for (const [id, entry] of Object.entries(raw as Record<string, unknown>)) {
     if (!id || id === '__proto__' || id === 'constructor' || id === 'prototype') continue
-    if (isProviderInstanceConfig(entry)) instances[id] = { ...entry, ...(entry.config ? { config: { ...entry.config } } : {}) }
+    // An OpenCode added as an ACP agent reads as an OpenCode entry; it stays stored as it was (`acpEntryForOpencode`).
+    const read = opencodeEntryFromAcp(entry) ?? entry
+    if (isProviderInstanceConfig(read)) instances[id] = { ...read, ...(read.config ? { config: { ...read.config } } : {}) }
   }
   return instances
 }
@@ -256,12 +258,6 @@ export function seedProviderInstances(
       seed(id, { ...entry, ...(config ? { config } : {}) })
     }
   for (const providerId of credentialedPiProviders) if (providerId) seed(piInstanceId(providerId), { driver: 'pi', enabled: true })
-  for (const [id, entry] of Object.entries(instances)) {
-    const moved = opencodeEntryFromAcp(entry)
-    if (!moved) continue
-    instances[id] = moved
-    upgraded.push(id)
-  }
   return { instances, added, upgraded, seedVersion: Math.max(version, current) }
 }
 
@@ -278,8 +274,13 @@ function isOpencodeCommand(command: unknown): command is string {
 /**
  * An OpenCode added as an ACP agent (from the registry, or as a command running `opencode acp`), as an entry of the
  * OpenCode provider with the same name, executable, arguments, variables and switches. Undefined for any other entry.
- * The id stays, so its threads, its install and its saved native sessions stay with it. The registry `source` goes:
- * the OpenCode provider finds the install by the entry's id, and starts its own command (`serve`) from it.
+ * The id stays, so its threads, its install and its saved native sessions stay with it. The registry `source` becomes
+ * `registryAgentId`: the OpenCode provider finds the install by the entry's id and that registry id, and starts its own
+ * command (`serve`) from it.
+ *
+ * Applied when the map is read, never written: the stored entry stays an ACP entry (`acpEntryForOpencode` writes
+ * changes back in that form), so an older build that has no OpenCode provider, or one that finds managed copies only
+ * under `opencode`, still runs it over ACP from the same files.
  */
 export function opencodeEntryFromAcp(entry: unknown): ProviderInstanceConfig | undefined {
   if (!isProviderInstanceConfig(entry) || entry.driver !== 'acp') return undefined
@@ -309,6 +310,30 @@ export function opencodeEntryFromAcp(entry: unknown): ProviderInstanceConfig | u
   if (isOpencodeCommand(config.binaryPath) && Array.isArray(config.args) && config.args[0] === 'acp')
     return { ...entry, driver: 'opencode', config: { ...rest, args: config.args.slice(1).filter((arg): arg is string => typeof arg === 'string') } }
   return undefined
+}
+
+/**
+ * The stored form of `next`, an OpenCode entry that was read from the stored ACP entry `stored`
+ * (`opencodeEntryFromAcp`): that ACP entry with `next`'s changes, so every build reads it as before. Undefined when
+ * `stored` is not such an entry, or `next` no longer runs on the OpenCode provider.
+ */
+export function acpEntryForOpencode(stored: unknown, next: ProviderInstanceConfig): ProviderInstanceConfig | undefined {
+  if (next.driver !== 'opencode' || !isProviderInstanceConfig(stored) || !opencodeEntryFromAcp(stored)) return undefined
+  const before = stored.config ?? {}
+  const { registryAgentId: _registryAgentId, binaryPath, args, env, ...rest } = next.config ?? {}
+  const own = Array.isArray(args) ? args.filter((arg): arg is string => typeof arg === 'string') : []
+  const source = isRecordValue(before.source) ? before.source : undefined
+  const config: Record<string, unknown> = { ...rest }
+  if (source?.kind === 'registry') {
+    // Its arguments, variables and executable were read as they are stored.
+    Object.assign(config, { source }, binaryPath !== undefined ? { binaryPath } : {}, args !== undefined ? { args } : {}, env !== undefined ? { env } : {})
+  } else if (source) {
+    const { env: _env, ...kept } = source
+    config.source = { ...kept, command: typeof binaryPath === 'string' && binaryPath ? binaryPath : source.command, args: ['acp', ...own], ...(isRecordValue(env) && Object.keys(env).length ? { env } : {}) }
+  } else {
+    Object.assign(config, { binaryPath: typeof binaryPath === 'string' && binaryPath ? binaryPath : before.binaryPath, args: ['acp', ...own] }, env !== undefined ? { env } : {})
+  }
+  return { ...next, driver: 'acp', config }
 }
 
 function isRecordValue(value: unknown): value is Record<string, unknown> {

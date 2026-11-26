@@ -1,5 +1,6 @@
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all'
 import {
+  acpEntryForOpencode,
   instanceIdForLegacyProvider,
   legacyProviderForInstance,
   piInstanceId,
@@ -159,8 +160,10 @@ export class ProviderInstanceService {
     const seeded = this.seed(stored)
     // An explicit add writes a fresh entry: nothing of a stale one (an older build's re-seed) is kept.
     const previous = options.revive ? undefined : seeded.instances[instanceId]
-    const next: Record<string, unknown> = { ...(isRecord(previous) ? previous : {}), driver: entry.driver, enabled: entry.enabled }
-    if (entry.config && Object.keys(entry.config).length) next.config = { ...entry.config }
+    // An OpenCode added as an ACP agent is written back as an ACP entry (`acpEntryForOpencode`).
+    const written = acpEntryForOpencode(previous, entry) ?? entry
+    const next: Record<string, unknown> = { ...(isRecord(previous) ? previous : {}), driver: written.driver, enabled: written.enabled }
+    if (written.config && Object.keys(written.config).length) next.config = { ...written.config }
     else delete next.config
     this.writeExplicit({
       instances: { ...seeded.instances, [instanceId]: next },

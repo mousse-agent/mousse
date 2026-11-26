@@ -19,7 +19,7 @@ import type { RegistryAgent } from '../../src/mms/harness/agents/registry'
 import { installOwner, type DriverContext, type DriverRuntime, type HarnessDriver } from '../../src/mms/harness/driver'
 import { acpDriver } from '../../src/mms/harness/drivers/acp'
 import { OPENCODE_AGENT_ID, opencodeBrewFormulaOf, opencodeDriver, opencodeNpmPackageOf } from '../../src/mms/harness/drivers/opencode'
-import { opencodeEntryFromAcp } from '../../src/shared/providerInstances'
+import { acpEntryForOpencode, opencodeEntryFromAcp } from '../../src/shared/providerInstances'
 import { findOnPath, instanceEnv, opencodeStandalonePaths, type InstanceEnv } from '../../src/mms/harness/env'
 import { latestSourceFor, type HarnessGatewayEvent } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
@@ -521,7 +521,7 @@ describe('a managed OpenCode', () => {
     expect(shared.agents.reference(OPENCODE_AGENT_ID, 'opencode:opencode')).toBeUndefined()
   })
 
-  it.each(['opencode', 'opencode-v2'])('an OpenCode added from the ACP list (registry `%s`) becomes an OpenCode entry on the same installed files, and starts its server', async (agentId) => {
+  it.each(['opencode', 'opencode-v2'])('an OpenCode added from the ACP list (registry `%s`) runs as an OpenCode entry on the same installed files, and an older build still runs it over ACP', async (agentId) => {
     const shared = installation({ ...entry('2.4.1'), id: agentId })
     // An entry added through "More ACP agents…" before OpenCode had its own.
     const acp = acpDriver({ agents: shared.agents })
@@ -556,6 +556,16 @@ describe('a managed OpenCode', () => {
     expect(spawned.at(-1)).toMatchObject({ purpose: 'opencode-serve', command: files, args: ['--print-logs', ...SERVE] })
     expect(variableOf(spawned.at(-1)!.env, 'OPENCODE_X')).toBe('1')
     expect(autoupdateOf(spawned.at(-1)!.env)).toBe('1')
+
+    // A change saved on this build is stored on the ACP entry: an older build, which reads it with the ACP driver,
+    // still finds the copy it installed and starts it over ACP.
+    const written = acpEntryForOpencode(stored, { ...moved, config: { ...moved.config, displayName: 'Renamed' } })!
+    expect(written.driver).toBe('acp')
+    const older = acp.create(context(acp, acp.decodeConfig(written.config), 'acp'))
+    runtimes.push(older)
+    expect(older.managed!()!.path).toBe(files)
+    await older.handshake!(new AbortController().signal).catch(() => undefined)
+    expect(spawned.at(-1)).toMatchObject({ command: files, args: ['acp', '--print-logs'] })
   })
 
   describe('in Settings → Providers', () => {

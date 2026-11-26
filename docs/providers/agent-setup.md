@@ -128,9 +128,10 @@ OpenCode 1 has no server API.
   Reinstall does; a newer npm release the registry does not list yet offers nothing.
 - **More ACP agents…** does not list `opencode` or `opencode-v2` (the registry's legacy alias of
   the same release). An OpenCode added as an ACP agent before, from the registry or as a command
-  running `opencode acp`, becomes an OpenCode entry when Mousse starts: the same id, name,
-  executable, arguments (after `acp`), variables and managed copy, so its threads continue there and
-  resume their OpenCode sessions.
+  running `opencode acp`, runs as an OpenCode entry: the same id, name, executable, arguments
+  (after `acp`), variables and managed copy, so its threads continue there and resume their OpenCode
+  sessions. It stays stored as the ACP entry, and changes made to it are saved in that form, so an
+  older Mousse still runs it over ACP from the same files.
 - The model APIs OpenCode Zen and OpenCode Go (`pi:opencode`, `pi:opencode-go`) are separate: they
   run on the Mousse agent and stay offered after OpenCode is added.
 
