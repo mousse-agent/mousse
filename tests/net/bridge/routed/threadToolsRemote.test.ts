@@ -36,7 +36,8 @@ import { localized, RemoteLaunchedThreads, remoteReachRefusal } from '../../../.
 import type { RemoteSubagents } from '../../../../src/mms/orchestrator/RemoteSubagents'
 import type { AppToolHost } from '../../../../src/mms/run/mcp/appTools'
 import { appToolRegistry, appTurn, refusalOf, type ReadRefusal } from '../../../run/appToolsFixture'
-import { cleanups, cleanupAll, linked } from './routerFixture'
+import { MousseMainService } from '../../../../src/mms/MousseMainService'
+import { cleanups, cleanupAll, homeOf, linked } from './routerFixture'
 
 type Loose = Record<string, any>
 let t: Awaited<ReturnType<typeof linked>>
@@ -937,7 +938,7 @@ describe('archiving a subagent that runs on another computer, and a thread there
     expect(t.caller.runEngine.remoteArchive.get(sub.childThreadId)).toMatchObject({ state: 'sent' })
     // As an agent's archive, under the key of this change.
     expect(archiveCalls(sent)[0]![2]).toHaveProperty('agent')
-    expect(archiveCalls(sent)[0]![3]).toMatchObject({ idem: `remote-archive:${sub.childThreadId}:1` })
+    expect(archiveCalls(sent)[0]![3]).toMatchObject({ idem: `remote-archive:${sub.childThreadId}:1.0` })
   }, 120_000)
 
   it('a person\'s Archive of the stand-in, that computer older than the marked archive: archived here, its thread there left open and never sent unmarked', async () => {
@@ -954,6 +955,120 @@ describe('archiving a subagent that runs on another computer, and a thread there
     expect(archivedThere(sub.far)).toBe(false)
     expect(t.caller.runEngine.remoteArchive.get(sub.childThreadId)).toMatchObject({ state: 'left_open', lastError: expect.stringContaining('Update Mousse') })
     expect(archiveCalls(calls)).toHaveLength(0)
+  }, 120_000)
+
+  it('a person\'s Archive refused while its thread there still works is sent again as a new request, and archives it once the run there ended', async () => {
+    standInForTurns()
+    const { tool } = await launcher()
+    const sub = await farSubagent(tool)
+    await finish(sub)
+    const busy = await personRun(sub.far)
+    const calls = vi.spyOn(portOf(), 'call')
+    await t.caller.orchestrator.archiveThread(sub.childThreadId, true)
+    await service().pass()
+    expect(archivedThere(sub.far)).toBe(false)
+    expect(t.caller.runEngine.remoteArchive.get(sub.childThreadId)).toMatchObject({ state: 'pending', attempt: 1, lastError: expect.stringContaining('still working') })
+
+    await t.owner.orchestrator.stopThread(sub.far, 'user', { clientRequestId: `person-stop-${++seq}` })
+    await vi.waitFor(() => expect(isTerminal(busy)).toBe(true))
+    await service().pass()
+    expect(archivedThere(sub.far)).toBe(true)
+    expect(t.caller.runEngine.remoteArchive.get(sub.childThreadId)).toMatchObject({ state: 'sent' })
+    // That computer keeps its refusal under the first key: the second send is a request of its own.
+    expect(archiveCalls(calls).map(([, , , options]) => (options as Loose).idem)).toEqual([`remote-archive:${sub.childThreadId}:1.0`, `remote-archive:${sub.childThreadId}:1.1`])
+  }, 120_000)
+
+  it('a lost answer, then a retry with the same clientRequestId: the first answer comes back, and nothing is archived there again', async () => {
+    standInForTurns()
+    const { tool, launch } = await personLauncher()
+    const sub = await farSubagent(tool)
+    await finish(sub)
+    const launched = await launch()
+    const port = portOf()
+    const real = port.call.bind(port)
+    for (const [threadId, far] of [[sub.childThreadId, sub.far], [launched.id, launched.far]] as const) {
+      const lose = vi.spyOn(port, 'call').mockImplementation((async (node: string, method: string, params: Record<string, unknown>, options?: Loose) => {
+        const result = await real(node, method, params, options as never)
+        if (method === 'threads.archive') throw new DomainRpcError('computer_offline', 'The link dropped.')
+        return result
+      }) as never)
+      const clientRequestId = `archive-${++seq}`
+      const lost = await tool('thread_archive', { threadId, clientRequestId })
+      expect(lost.body, threadId).toMatchObject({ ok: false, status: 'uncertain', computer: nameOf() })
+      expect(archivedThere(far)).toBe(true)
+      if (threadId === sub.childThreadId) expect(archivedHere(sub.childThreadId)).toBe(false)
+      lose.mockRestore()
+
+      // A person there unarchives it before the retry: the retry learns the first answer and archives nothing again.
+      await t.owner.orchestrator.archiveThread(far, false)
+      const retry = await tool('thread_archive', { threadId, clientRequestId })
+      expect(retry.isError, retry.text).toBeUndefined()
+      expect(retry.body, threadId).toMatchObject({ archived: true })
+      expect(archivedThere(far)).toBe(false)
+      if (threadId === sub.childThreadId) expect(archivedHere(sub.childThreadId)).toBe(true)
+    }
+  }, 120_000)
+
+  it('a person\'s Archive on its way there while an agent unarchives the stand-in: the unarchive goes after it, and both computers end unarchived', async () => {
+    standInForTurns()
+    const { tool } = await personLauncher()
+    const sub = await farSubagent(tool)
+    await finish(sub)
+    const port = portOf()
+    const real = port.call.bind(port)
+    let reached!: () => void
+    const atGate = new Promise<void>((resolve) => (reached = resolve))
+    let open!: () => void
+    const gate = new Promise<void>((resolve) => (open = resolve))
+    const order: boolean[] = []
+    vi.spyOn(port, 'call').mockImplementation((async (node: string, method: string, params: Record<string, unknown>, options?: Loose) => {
+      if (method === 'threads.archive' && params.archived === true) {
+        reached()
+        await gate
+      }
+      const result = await real(node, method, params, options as never)
+      if (method === 'threads.archive') order.push(params.archived as boolean)
+      return result
+    }) as never)
+    await t.caller.orchestrator.archiveThread(sub.childThreadId, true)
+    const pass = service().pass()
+    await atGate
+    const unarchive = tool('thread_archive', { threadId: sub.childThreadId, archived: false })
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    open()
+    const [, out] = await Promise.all([pass, unarchive])
+    expect(out.isError, out.text).toBeUndefined()
+    expect(order).toEqual([true, false])
+    expect(archivedHere(sub.childThreadId)).toBe(false)
+    expect(archivedThere(sub.far)).toBe(false)
+    expect(t.caller.runEngine.remoteArchive.get(sub.childThreadId)).toMatchObject({ archived: false, state: 'sent' })
+  }, 120_000)
+
+  it('the request for that computer is kept before the archive here: one that cannot be kept archives nothing, and one whose archive here never happened is dropped', async () => {
+    standInForTurns()
+    const { tool } = await launcher()
+    const sub = await farSubagent(tool)
+    await finish(sub)
+    const want = vi.spyOn(t.caller.runEngine.remoteArchive, 'want').mockImplementation(() => {
+      throw new Error('disk full')
+    })
+    await expect(t.caller.orchestrator.archiveThread(sub.childThreadId, true)).rejects.toThrow('disk full')
+    expect(archivedHere(sub.childThreadId)).toBe(false)
+    want.mockRestore()
+
+    // The process ends between the two writes: the request is kept, the archive here never happens.
+    const store = t.caller.threads
+    const write = vi.spyOn(store, 'setThreadArchived').mockImplementationOnce(() => {
+      throw new Error('process ended')
+    })
+    await expect(t.caller.orchestrator.archiveThread(sub.childThreadId, true)).rejects.toThrow('process ended')
+    write.mockRestore()
+    expect(t.caller.runEngine.remoteArchive.get(sub.childThreadId)).toMatchObject({ archived: true, state: 'pending' })
+    const calls = vi.spyOn(portOf(), 'call')
+    await service().pass()
+    expect(archiveCalls(calls)).toHaveLength(0)
+    expect(archivedThere(sub.far)).toBe(false)
+    expect(t.caller.runEngine.remoteArchive.get(sub.childThreadId)).toMatchObject({ archived: false, state: 'sent' })
   }, 120_000)
 
   it('archiving a parent only stops its subagent there: its thread there stays open', async () => {
@@ -998,4 +1113,48 @@ describe('a refusal of that computer\'s agent reach, as the agent reads it (issu
     expect(refusal.message).toContain(reach === 'none' ? 'any thread there' : 'only the threads they started')
     expect(refusal.message).toContain('Settings → Devices')
   })
+})
+
+// Last in this file: it restarts the caller's daemon, and no test after it uses the linked pair.
+describe('the app\'s Archive of a stand-in across a real restart', () => {
+  it('kept while that computer is offline, it is sent by the restarted daemon once that computer answers', async () => {
+    standInForTurns()
+    vi.spyOn(t.caller.orchestrator as unknown as { effectsEnabled(): boolean }, 'effectsEnabled').mockReturnValue(true)
+    const service = (t.caller.orchestrator as unknown as { remoteSubagents: RemoteSubagents }).remoteSubagents
+    service.pause()
+    const { tool } = await launcher()
+    const started = await tool('delegate_task', { title: `Far worker ${++seq}`, prompt: 'Work there', workspace: 'isolated', computer: nameOf(), clientRequestId: `far-${seq}` })
+    if (started.isError) throw new Error(JSON.stringify(started.body))
+    const launched = await service.launch(started.body.delegationId)
+    if (launched.ok !== true) throw new Error(JSON.stringify(launched))
+    const childThreadId = started.body.childThreadId as string
+    const task = t.caller.runEngine.remoteSubagents.listForChildThread(childThreadId)[0]!
+    await t.caller.runEngine.settleRemoteRun(task.childRunId, 'completed', undefined, 'Done.')
+    await vi.waitFor(async () => {
+      await service.pass()
+      expect(t.caller.runEngine.remoteSubagents.listForChildThread(childThreadId).every((row) => row.state === 'done')).toBe(true)
+    }, { timeout: 20_000 })
+
+    const port = portOf()
+    vi.spyOn(port, 'versions').mockRejectedValue(new DomainRpcError('computer_offline', 'The other computer is offline.'))
+    vi.spyOn(port, 'call').mockRejectedValue(new DomainRpcError('computer_offline', 'The other computer is offline.'))
+    await t.caller.orchestrator.archiveThread(childThreadId, true)
+    await service.pass()
+    expect(t.caller.runEngine.remoteArchive.get(childThreadId)).toMatchObject({ state: 'pending' })
+    vi.restoreAllMocks()
+
+    const home = homeOf.get(t.caller)!
+    await t.caller.stop()
+    const restarted = await MousseMainService.create({ homeDir: home, repoRoot: home, headless: true, requireOwnership: false })
+    cleanups.push(() => restarted.stop())
+    // The fixture's daemons run Net without the rest of a daemon's start; the restarted one does the same.
+    await restarted.net.start()
+    await restarted.net.request('net.unlock', { passphrase: 'bridge-router-caller' })
+    ;(restarted.net as unknown as { config: { features: { netBridgeThreads: boolean } } }).config.features.netBridgeThreads = true
+    expect(restarted.threads.getThread(childThreadId)?.archivedAt).toBeTruthy()
+    expect(restarted.runEngine.remoteArchive.get(childThreadId)).toMatchObject({ archived: true, state: 'pending' })
+    // Its own passes send it, once the link is up again.
+    await vi.waitFor(() => expect(Boolean(t.owner.threads.getThread(launched.remoteThreadId)?.archivedAt)).toBe(true), { timeout: 60_000, interval: 500 })
+    expect(restarted.runEngine.remoteArchive.get(childThreadId)).toMatchObject({ state: 'sent' })
+  }, 180_000)
 })

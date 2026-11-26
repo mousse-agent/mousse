@@ -1287,9 +1287,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
    * computer's reach for this one (by default only the threads this computer's agents started there), refused while it
    * still works, and by a computer too old to take an agent's archive.
    */
-  const archiveOnComputer = (threadId: string, archived: boolean, ctx: ToolCallContext): Promise<ToolOutcome> => onComputer(async () => {
+  const archiveOnComputer = (threadId: string, archived: boolean, requestId: string, ctx: ToolCallContext): Promise<ToolOutcome> => onComputer(async () => {
     const target = remoteTarget(threadId, ctx, 'thread_archive')
-    const idem = `thread_archive:${ctx.caller.threadId}:${toolRequestId({}, ctx)}:${target.threadId}:${archived ? 1 : 0}`
+    const idem = `thread_archive:${ctx.caller.threadId}:${requestId}:${target.threadId}:${archived ? 1 : 0}`
     const result = await host.remoteThreads!.archive(target, archived, { actor: actorOf(ctx), idem })
     if (result.status === 'uncertain') return json({ ok: false, status: 'uncertain', computer: result.computer, message: result.message })
     return json({
@@ -2375,13 +2375,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_archive',
-      description: 'Archive a thread, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. Only when the user asks you to archive a thread once its work is done (merged, or dropped), never on your own. Without threadId it archives this thread when your turn ends: call it last, in the turn that finishes the work, and only when nothing is outstanding (no subagent, launched thread, background command, pending check or question to the user); a failed or stopped turn leaves the thread open. With threadId it archives that thread now, or unarchives it with archived: false; a thread that is still working is refused. A subagent that runs on another computer is archived or unarchived on that computer first, and here only once it said so. A qualified id (<computer id>:<thread id>) archives a thread on another computer, within the reach that computer gives this one\'s agents (by default only the threads this computer\'s agents started there; outside_agent_reach otherwise). Needs a turn the user started, in a thread that is not a subagent.',
+      description: 'Archive a thread, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. Only when the user asks you to archive a thread once its work is done (merged, or dropped), never on your own. Without threadId it archives this thread when your turn ends: call it last, in the turn that finishes the work, and only when nothing is outstanding (no subagent, launched thread, background command, pending check or question to the user); a failed or stopped turn leaves the thread open. With threadId it archives that thread now, or unarchives it with archived: false; a thread that is still working is refused. A subagent that runs on another computer is archived or unarchived on that computer first, and here only once it said so; status uncertain means that computer did not confirm it (call again with the same clientRequestId to get its first answer; it never acts twice). A qualified id (<computer id>:<thread id>) archives a thread on another computer, within the reach that computer gives this one\'s agents (by default only the threads this computer\'s agents started there; outside_agent_reach otherwise). Needs a turn the user started, in a thread that is not a subagent.',
       botDescription: 'Archive one of your owner\'s threads when its work is merged or dropped and your owner asks you to tidy it away, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. archived: false unarchives it again. A thread that is still working is refused: stop it first with thread_interrupt.',
       inputSchema: {
         type: 'object',
         properties: {
           threadId: { type: 'string', description: 'Another thread to archive now (a qualified id for a thread on another computer); omit to archive this thread when your turn ends.' },
-          archived: { type: 'boolean', description: 'Defaults to true; false unarchives the thread named by threadId.' }
+          archived: { type: 'boolean', description: 'Defaults to true; false unarchives the thread named by threadId.' },
+          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
         }
       },
       botInputSchema: {
@@ -2405,7 +2406,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         // A thread on another computer (a qualified id): archived there, as that computer lets this one's agents.
         if (typeof args.threadId === 'string' && isQualifiedId(args.threadId)) {
           if (args.archived !== undefined && typeof args.archived !== 'boolean') throw new Error('archived must be true or false')
-          return archiveOnComputer(args.threadId, args.archived !== false, ctx)
+          return archiveOnComputer(args.threadId, args.archived !== false, toolRequestId(args, ctx), ctx)
         }
         if (!bot && args.threadId !== undefined && args.threadId !== ctx.caller.threadId) {
           const threadId = requiredId(args, 'threadId')
@@ -2416,7 +2417,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           const actor = actorOf(ctx)
           // A subagent that runs on another computer is changed there first; that computer's refusal comes back with its code.
           return onComputer(async () => {
-            const result = await host.setThreadArchived!(threadId, archived, { actor })
+            const result = await host.setThreadArchived!(threadId, archived, { actor, clientRequestId: toolRequestId(args, ctx) })
             if (result.status === 'rejected')
               throw new McpToolError('mousse_conflict', `Thread ${threadId} is still working, so it was not archived. If the user wants it archived anyway, stop it first with thread_interrupt, then archive it.`, { conflict: result.reason, threadId })
             if (result.status === 'uncertain') return json({ ok: false, status: 'uncertain', threadId, computer: result.computer, message: result.message })
@@ -2466,7 +2467,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         requireBotReach(host, engine, ctx.caller.threadId, threadId)
         assertNotBotThread(host, threadId, 'thread_archive')
         const actor = actorOf(ctx)
-        const result = await host.setThreadArchived(threadId, archived, { actor })
+        const result = await host.setThreadArchived(threadId, archived, { actor, clientRequestId: toolRequestId(args, ctx) })
         if (result.status === 'rejected')
           throw new McpToolError('mousse_conflict', `Thread ${threadId} is still working, so it was not archived. If your owner wants it archived anyway, stop it first with thread_interrupt, then archive it.`, { conflict: result.reason, threadId })
         if (result.status === 'uncertain') return json({ ok: false, status: 'uncertain', threadId, computer: result.computer, message: result.message })

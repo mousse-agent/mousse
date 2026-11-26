@@ -638,7 +638,7 @@ export class RemoteLaunchedThreads {
       if (code === 'outcome_uncertain' || code === 'cancelled')
         return { status: 'uncertain', computer: target.computer, message: `${target.computer} has not confirmed ${what} of ${target.threadId}, so nothing was changed here. Call thread_archive again with the same clientRequestId to learn what became of it; it never acts twice there.` }
       if (code === 'thread_running')
-        throw new RemoteThreadRefusal('thread_running', `Thread ${target.threadId} on ${target.computer} is still working, so it was not archived there or here. If the user wants it archived anyway, stop it first with thread_interrupt, then archive it.`, target.computer)
+        throw new RemoteThreadRefusal('thread_running', `Thread ${target.threadId} on ${target.computer} is still working, so it was not archived there or here. If the user wants it archived anyway, stop it first with thread_interrupt, then archive it with a new clientRequestId (that computer keeps this answer under the old one).`, target.computer)
       throw remoteReachRefusal(error, target.computer, what)
     }
     const done = isRecord(result) ? result : {}

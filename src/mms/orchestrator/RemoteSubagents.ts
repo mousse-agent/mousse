@@ -64,6 +64,8 @@ export interface RemoteSubagentsDeps {
   changed: (childThreadId: string) => void
   /** Whether the subagent's stand-in thread still exists here; a gone one's expiry row goes once it was sent. */
   threadExists?: (childThreadId: string) => boolean
+  /** Whether the stand-in here is archived; undefined when there is no such thread here (any more). */
+  archivedHere?: (childThreadId: string) => boolean | undefined
   /** How often open tasks are read (default 4 s). */
   pollMs?: number
   now?: () => number
@@ -79,6 +81,12 @@ export type RemoteLaunch =
 
 /** A pass waits for one call at most this long, so one slow computer does not hold the others. */
 const CALL_TIMEOUT_MS = 20_000
+/**
+ * What became of the app's Archive of a stand-in still waiting to be sent, when its turn came: `none` (nothing waited),
+ * `sent` (that computer took it), `refused` (that computer answered no; nothing of it is on its way), `unsent` (not
+ * reached, or its answer lost: it may still land there).
+ */
+export type RemoteArchiveSend = 'none' | 'sent' | 'refused' | 'unsent'
 /** The soonest expiry sent to another computer: it takes none less than a minute away (`expiryRefusal`). */
 const EXPIRY_SOONEST_MS = 90_000
 /**
@@ -130,6 +138,8 @@ export class RemoteSubagents {
   private readonly offline = new Set<string>()
   /** Tasks a call is working on now (a launch, or a pass): one at a time each, so nothing is sent twice. */
   private readonly inFlight = new Set<string>()
+  /** Per stand-in, the archive change on its way there: each one waits for the one before it (`inArchiveOrder`). */
+  private readonly archiveQueue = new Map<string, Promise<unknown>>()
   /** Tasks whose run there ended while the thread there still works for them (`workAfterRun`). */
   private readonly waitingThere = new Set<string>()
 
@@ -284,54 +294,98 @@ export class RemoteSubagents {
   }
 
   /**
-   * Sends the archive (or unarchive) the app's Archive of a stand-in here wants for its thread there: an agent's archive,
-   * marked as the subagent's parent's, under one key per change (`generation`), so a resend never acts twice there. Never
-   * the plain `threads.archive` of a person: a computer from before the marked archive, or a subagent whose computer never
-   * took the mark, leaves its thread open there, and the row says why. Never throws.
+   * Runs `work` once every archive change of this stand-in before it is over there, and before any after it starts: so
+   * the last change asked here is the last one that computer takes. The app's Archive still waiting to be sent goes
+   * first; `work` (an agent's `thread_archive`) learns what became of it (`RemoteArchiveSend`).
    */
+  inArchiveOrder<T>(childThreadId: string, work: (queued: RemoteArchiveSend) => Promise<T>): Promise<T> {
+    return this.archiveSerial(childThreadId, async () => work(await this.sendArchiveNow(childThreadId)))
+  }
+
+  private archiveSerial<T>(childThreadId: string, work: () => Promise<T>): Promise<T> {
+    const before = this.archiveQueue.get(childThreadId) ?? Promise.resolve()
+    const next = before.then(work, work)
+    const settled = next.catch(() => undefined)
+    this.archiveQueue.set(childThreadId, settled)
+    void settled.then(() => {
+      if (this.archiveQueue.get(childThreadId) === settled) this.archiveQueue.delete(childThreadId)
+    })
+    return next
+  }
+
+  /** A pass's send of a stand-in's archive change, in its turn (`inArchiveOrder`). Never throws. */
   private async sendArchive(childThreadId: string): Promise<void> {
-    const key = `archive:${childThreadId}`
+    await this.archiveSerial(childThreadId, () => this.sendArchiveNow(childThreadId))
+  }
+
+  /**
+   * Sends the archive (or unarchive) the app's Archive of a stand-in here wants for its thread there: an agent's archive,
+   * marked as the subagent's parent's, under one key per change (`generation`), so a resend after a lost answer never
+   * acts twice there. A resend after that computer refused it for now (still working there) is a new request (`attempt`),
+   * since that computer keeps its refusal under the old key. Never the plain `threads.archive` of a person: a computer
+   * from before the marked archive, or a subagent whose computer never took the mark, leaves its thread open there, and
+   * the row says why. Called only in the stand-in's turn (`archiveSerial`). Never throws.
+   */
+  private async sendArchiveNow(childThreadId: string): Promise<RemoteArchiveSend> {
     const row = this.archives.get(childThreadId)
-    if (!row || row.state !== 'pending' || this.inFlight.has(key)) return
-    this.inFlight.add(key)
+    if (!row || row.state !== 'pending') return 'none'
+    // The change here never happened (the process ended between recording it and making it): nothing to send.
+    const here = this.deps.archivedHere?.(childThreadId)
+    if (here !== undefined && here !== row.archived) {
+      this.archives.superseded(childThreadId, row.generation, here)
+      return 'none'
+    }
     const name = this.computerName(row.node)
     const what = row.archived ? 'archive' : 'unarchive'
     const tasks = this.records.listForChildThread(childThreadId)
     try {
       const marked = tasks.find((task) => task.marked === true)
-      if (!marked) return this.archives.markLeftOpen(childThreadId, row.generation, `${name} took this subagent before agents could be marked there, so its thread was not ${what}d there.`)
+      if (!marked) {
+        this.archives.markLeftOpen(childThreadId, row.generation, `${name} took this subagent before agents could be marked there, so its thread was not ${what}d there.`)
+        return 'refused'
+      }
       const port = this.deps.port()
-      if (!port) return this.archives.noteError(childThreadId, row.generation, 'Connecting to your other computers is turned off on this computer.')
+      if (!port) {
+        this.archives.noteError(childThreadId, row.generation, 'Connecting to your other computers is turned off on this computer.')
+        return 'unsent'
+      }
       if (port.versions) {
         const versions = await port.versions(row.node, AbortSignal.timeout(CALL_TIMEOUT_MS))
-        if ((versions?.['threads.archive'] ?? 0) < ROUTED_AGENT_ARCHIVE_SINCE)
-          return this.archives.markLeftOpen(childThreadId, row.generation, `Update Mousse on ${name}: it is too old to ${what} a thread for an agent on this computer, so its thread was not ${what}d there.`)
+        if ((versions?.['threads.archive'] ?? 0) < ROUTED_AGENT_ARCHIVE_SINCE) {
+          this.archives.markLeftOpen(childThreadId, row.generation, `Update Mousse on ${name}: it is too old to ${what} a thread for an agent on this computer, so its thread was not ${what}d there.`)
+          return 'refused'
+        }
       }
       await this.call({ node: row.node, childThreadId }, 'threads.archive', {
         threadId: row.remoteThreadId,
         archived: row.archived,
         ...this.markOf(marked)
-      }, `remote-archive:${childThreadId}:${row.generation}`)
+      }, `remote-archive:${childThreadId}:${row.generation}.${row.attempt}`)
       this.archives.markSent(childThreadId, row.generation)
+      return 'sent'
     } catch (error) {
       const code = codeOf(error)
       // Not reached, or no answer that says what happened: tried again on a later pass, under the same key.
-      if (!(error instanceof DomainRpcError) || REMOTE_START_TRANSIENT.has(code) || code === 'bridge_off' || code === 'outcome_uncertain')
-        return this.archives.noteError(childThreadId, row.generation, messageOf(error))
+      if (!(error instanceof DomainRpcError) || REMOTE_START_TRANSIENT.has(code) || code === 'bridge_off' || code === 'outcome_uncertain') {
+        this.archives.noteError(childThreadId, row.generation, messageOf(error))
+        return 'unsent'
+      }
       // Gone there: nothing is left to change.
-      if (code === 'thread_not_found') return this.archives.markSent(childThreadId, row.generation)
+      if (code === 'thread_not_found') {
+        this.archives.markSent(childThreadId, row.generation)
+        return 'sent'
+      }
       if (code === 'thread_running') {
-        // Its Stop is on its way or the run there is ending: tried again for a while. Still working after that, a person
-        // there is working in it, and it is left as it is.
+        // Its Stop is on its way or the run there is ending: tried again for a while, as a new request. Still working
+        // after that, a person there is working in it, and it is left as it is.
         const stopping = tasks.some((task) => task.state !== 'done')
-        if (stopping || this.now() - Date.parse(row.updatedAt) < REMOTE_ARCHIVE_WAIT_MS)
-          return this.archives.noteError(childThreadId, row.generation, `It is still working on ${name}.`)
-        return this.archives.markLeftOpen(childThreadId, row.generation, `It is still working on ${name}, so it was not ${what}d there.`)
+        if (stopping || this.now() - Date.parse(row.updatedAt) < REMOTE_ARCHIVE_WAIT_MS) this.archives.noteRefused(childThreadId, row.generation, `It is still working on ${name}.`)
+        else this.archives.markLeftOpen(childThreadId, row.generation, `It is still working on ${name}, so it was not ${what}d there.`)
+        return 'refused'
       }
       // That computer's answer for good: too old, or its person does not let agents here change that thread.
       this.archives.markLeftOpen(childThreadId, row.generation, remoteReachRefusal(error, name, `the ${what}`).message)
-    } finally {
-      this.inFlight.delete(key)
+      return 'refused'
     }
   }
 

@@ -527,7 +527,7 @@ export interface AppToolHost extends DelegationToolsHost {
   /** Stops run `runId` of another thread and what is below it, as `actor`'s Stop (`thread_interrupt`). */
   stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** Archives (`archived`) or unarchives another thread through the app's own Archive, as a personal bot's call (`thread_archive`). */
-  setThreadArchived?(threadId: string, archived: boolean, options: { actor: AgentActor }): Promise<AgentArchiveResult>
+  setThreadArchived?(threadId: string, archived: boolean, options: { actor: AgentActor; clientRequestId: string }): Promise<AgentArchiveResult>
   /** Archives the caller's own thread once its running turn ends well (`thread_archive` from a thread's agent). */
   archiveOwnThreadAfterTurn?(options: { actor: AgentActor }): AgentArchiveOwnResult
   /**

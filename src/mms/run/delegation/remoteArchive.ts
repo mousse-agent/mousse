@@ -21,6 +21,8 @@ export interface RemoteArchiveRecord {
   archived: boolean
   /** Rises with each change, so a change is never mistaken for an older one already sent. */
   generation: number
+  /** Rises when that computer refused a send of this change for now (still working there): the next send is a new request. */
+  attempt: number
   state: RemoteArchiveState
   /** Why it is not so there yet (`pending`), or why that computer would not take it (`left_open`). */
   lastError: string | null
@@ -35,6 +37,7 @@ function fromRow(row: Row): RemoteArchiveRecord {
     remoteThreadId: String(row.remote_thread_id),
     archived: Number(row.archived) === 1,
     generation: Number(row.generation),
+    attempt: Number(row.attempt ?? 0),
     state: row.state === 'pending' ? 'pending' : row.state === 'left_open' ? 'left_open' : 'sent',
     lastError: str(row.last_error),
     createdAt: String(row.created_at),
@@ -74,7 +77,7 @@ export class RemoteArchiveRecords {
     if (current.archived === input.archived && current.state !== 'left_open') return current.state === 'pending'
     this.store.db
       .statement(
-        `UPDATE remote_archive SET archived = ?, remote_thread_id = ?, generation = generation + 1, state = 'pending', last_error = NULL, updated_at = ?
+        `UPDATE remote_archive SET archived = ?, remote_thread_id = ?, generation = generation + 1, attempt = 0, state = 'pending', last_error = NULL, updated_at = ?
          WHERE child_thread_id = ?`
       )
       .run(flag, input.remoteThreadId, now, input.childThreadId)
@@ -100,7 +103,7 @@ export class RemoteArchiveRecords {
     }
     this.store.db
       .statement(
-        `UPDATE remote_archive SET archived = ?, remote_thread_id = ?, generation = generation + 1, state = 'sent', last_error = NULL, updated_at = ?
+        `UPDATE remote_archive SET archived = ?, remote_thread_id = ?, generation = generation + 1, attempt = 0, state = 'sent', last_error = NULL, updated_at = ?
          WHERE child_thread_id = ?`
       )
       .run(flag, input.remoteThreadId, now, input.childThreadId)
@@ -133,6 +136,29 @@ export class RemoteArchiveRecords {
     this.store.db
       .statement('UPDATE remote_archive SET last_error = ? WHERE child_thread_id = ? AND generation = ?')
       .run(error, childThreadId, generation)
+  }
+
+  /**
+   * That computer refused `generation` for now (the thread still works there) and keeps that refusal under the key it was
+   * sent with: still pending, and the next send is a new request (`attempt`). `updated_at` stays the time of the wish.
+   */
+  noteRefused(childThreadId: string, generation: number, error: string): void {
+    this.store.db
+      .statement('UPDATE remote_archive SET last_error = ?, attempt = attempt + 1 WHERE child_thread_id = ? AND generation = ?')
+      .run(error, childThreadId, generation)
+  }
+
+  /**
+   * The stand-in here is not what `generation` asked of its thread there (its own change here never happened: the
+   * process ended between the two writes): nothing is sent, and the row says what it is here.
+   */
+  superseded(childThreadId: string, generation: number, archived: boolean): void {
+    this.store.db
+      .statement(
+        `UPDATE remote_archive SET archived = ?, generation = generation + 1, attempt = 0, state = 'sent', last_error = NULL, updated_at = ?
+         WHERE child_thread_id = ? AND generation = ?`
+      )
+      .run(archived ? 1 : 0, this.now(), childThreadId, generation)
   }
 
   private settle(childThreadId: string, generation: number, state: RemoteArchiveState, reason: string | null): void {
