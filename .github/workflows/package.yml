@@ -11,6 +11,22 @@ on:
         description: Version stamped into package.json before building, such as 0.1.2-nightly.20261022.17
         type: string
         required: true
+    secrets:
+      CSC_LINK:
+        description: Base64-encoded macOS Developer ID Application .p12 certificate
+        required: false
+      CSC_KEY_PASSWORD:
+        description: Password for the macOS Developer ID .p12 certificate
+        required: false
+      APPLE_API_KEY:
+        description: App Store Connect API private key (.p8 PEM or base64) for notarization
+        required: false
+      APPLE_API_KEY_ID:
+        description: App Store Connect API Key ID for notarization
+        required: false
+      APPLE_API_ISSUER:
+        description: App Store Connect API Issuer ID for notarization
+        required: false
 
 permissions:
   contents: read
@@ -319,8 +335,13 @@ jobs:
     timeout-minutes: 45
     env:
       ARCH: ${{ matrix.arch }}
-      # No Developer ID certificate: the app is ad-hoc signed, as Apple silicon requires.
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      # When signing secrets are set, scripts/package-mac.mjs signs with Developer ID + Hardened
+      # Runtime and notarizes the app and DMG; otherwise it falls back to ad-hoc signing.
+      CSC_LINK: ${{ secrets.CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -355,6 +376,17 @@ jobs:
         run: |
           app=$(echo release/mac*/Mousse.app)
           codesign --verify --deep --strict "$app"
+          if [ -n "$CSC_LINK" ]; then
+            info=$(codesign -dv --verbose=4 "$app" 2>&1)
+            echo "$info"
+            echo "$info" | grep -q 'Authority=Developer ID Application:'
+            echo "$info" | grep -q 'runtime'
+            if [ -n "$APPLE_API_KEY" ]; then
+              spctl --assess --type execute --verbose=4 "$app"
+              xcrun stapler validate "$app"
+              xcrun stapler validate "release/Mousse-$VERSION-$ARCH.dmg"
+            fi
+          fi
           out=$("$app/Contents/Resources/mousse-cli" --version)
           echo "$out"
           test "$out" = "mousse-cli $VERSION"
