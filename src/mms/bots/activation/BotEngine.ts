@@ -18,7 +18,8 @@ import { type TellMe } from '../../../shared/types'
 import { tellingClass } from '../chat/telling'
 import { hasToolImages } from '../chat/toolImages'
 import { extractAppletParts } from '../../../shared/applets'
-import { PR_WAKE_READ_MS, pullRequestWakeEvent, pullRequestWakeOutcome, threadWakeEvent, threadWakeOutcome, type WakePullRequestState } from '../wakeSources'
+import { pullRequestWakeEvent, threadWakeEvent, type WakePullRequestState } from '../wakeSources'
+import { WakeDetector } from '../../wakes/wakeDetector'
 import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
@@ -856,8 +857,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
   private followUpNudgeBudget: { at: number; times: Map<string, number[]> } | undefined
-  /** When each waiting wake on a pull request last read it (`PR_WAKE_READ_MS`). */
-  private readonly wakeReadAt = new Map<string, number>()
+  /** What each waiting wake on an event waits for, looked at as a thread agent's wakes are (`WakeDetector`). */
+  private readonly wakeEvents: WakeDetector<BotReminderRow & { setAt: string }>
   /** The bots' background commands (`watch_start`), each a wake on a `watcher` event; they end with this process. */
   private readonly watchers: BotWatchers
   private checkingWatchers = false
@@ -942,6 +943,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.actions = this.createActions()
     // A change to what a bot's turns start with (grant, revision, pause, deletion) closes the process its chat keeps warm.
     host.store.launchChanged = (botId) => this.releaseChatProcess(botId)
+    this.wakeEvents = new WakeDetector<BotReminderRow & { setAt: string }>({
+      waiting: () => this.store.waitingEventWakes().map((wake) => ({ ...wake, setAt: wake.createdAt })),
+      threadState: (wake, threadId) => {
+        const home = this.store.registry(wake.botId)?.homeThreadId
+        return home ? this.host.wakeThread?.(home, threadId) : undefined
+      },
+      pullRequestState: (_wake, repo, number) => this.host.pullRequestState?.(repo, number),
+      // A watcher fires from its process (`watcherEnded`); one that no longer runs here was ended by a restart.
+      otherEvent: (wake) => wake.event?.kind === 'watcher' && !this.watchers.has(wake.id) ? { kind: 'ended', reason: 'restart' } : undefined,
+      // Only a wake still waiting fires (`fireWake`): a Stop or cancel that lands while its event was read wins.
+      fire: (wake, fired, at) => {
+        if (!this.store.fireWake(wake.id, fired, new Date(at).toISOString())) return false
+        this.changed({ botId: wake.botId })
+        return true
+      },
+      now: () => this.now()
+    })
     this.watchers = new BotWatchers({
       onEnd: (spec, end, tail) => this.watcherEnded(spec, end, tail),
       ...(host.spawnWatcher ? { spawn: host.spawnWatcher } : {}),
@@ -10081,36 +10099,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   async checkWakeEvents(now: Date = new Date(this.now()), only?: { threadId: string }): Promise<void> {
     if (!this.startupPassed || this.closed) return
-    const waiting = this.store.waitingEventWakes()
-    for (const id of this.wakeReadAt.keys()) if (!waiting.some((wake) => wake.id === id)) this.wakeReadAt.delete(id)
-    let fired = false
-    for (const wake of waiting) {
-      const event = wake.event
-      if (!event || (only && (event.kind !== 'thread' || event.threadId !== only.threadId))) continue
-      try {
-        const happened = await this.wakeEventNow(wake, event, now)
-        if (happened && this.store.fireWake(wake.id, happened, now.toISOString())) {
-          fired = true
-          this.changed({ botId: wake.botId })
-        }
-      } catch (error) {
-        console.warn('a bot wake could not check its event; the next tick tries again', { wakeId: wake.id, error: error instanceof Error ? error.message : String(error) })
-      }
-    }
-    if (fired) this.armDue()
-  }
-
-  /** What happened to a wake's event by now, or undefined while it is still to come. */
-  private async wakeEventNow(wake: BotReminderRow, event: BotWakeEvent, now: Date): Promise<BotWakeFired | undefined> {
-    // A watcher fires from its process (`watcherEnded`); one that no longer runs here was ended by a restart.
-    if (event.kind === 'watcher') return this.watchers.has(wake.id) ? undefined : { kind: 'ended', reason: 'restart' }
-    if (event.kind === 'thread') {
-      const home = this.store.registry(wake.botId)?.homeThreadId
-      return threadWakeOutcome(event, home ? this.host.wakeThread?.(home, event.threadId) : undefined)
-    }
-    if (now.getTime() - (this.wakeReadAt.get(wake.id) ?? 0) < PR_WAKE_READ_MS) return undefined
-    this.wakeReadAt.set(wake.id, now.getTime())
-    return pullRequestWakeOutcome(event, await this.host.pullRequestState?.(event.repo, event.number), wake.createdAt)
+    if (await this.wakeEvents.check(only, now.getTime())) this.armDue()
   }
 
   /** A thread's run ended: the wakes waiting on that thread look now, not at the next tick. */
@@ -11148,7 +11137,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * next start carries its activation on with the time it really has left.
    */
   close(): void {
-    // Background commands end with this process; at the next start each one's bot is told (`wakeEventNow`).
+    // Background commands end with this process; at the next start each one's bot is told (`checkWakeEvents`).
     this.watchers.close()
     for (const [activationId, live] of this.live) {
       live.timer?.clear()
