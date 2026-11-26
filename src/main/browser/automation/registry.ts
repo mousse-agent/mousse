@@ -116,6 +116,24 @@ export class TrustedGuestRegistry {
     return this.descriptor(record)
   }
 
+  /**
+   * Moves a tab to another thread without revoking it: a tab kept in every thread that no session holds, taken by the
+   * agent that drives it next. The window host checks both before calling.
+   */
+  reassignThread(uiTabId: AttachedUiTabId, threadId: string): AttachedGuestDescriptor {
+    if (!/^[a-zA-Z0-9:_-]+$/.test(threadId)) fail('invalid_action', 'Attached thread identifier is invalid')
+    const record = this.requireUiTab(uiTabId)
+    record.thread = { kind: 'thread', threadId }
+    return this.descriptor(record)
+  }
+
+  /** A tab kept in every thread that an agent's refused open had taken: no thread holds it again. */
+  unassignThread(uiTabId: AttachedUiTabId): AttachedGuestDescriptor {
+    const record = this.requireUiTab(uiTabId)
+    record.thread = { kind: 'unbound' }
+    return this.descriptor(record)
+  }
+
   revokeUiTab(uiTabId: AttachedUiTabId): void {
     const record = this.byUiTab.get(uiTabId)
     if (record) this.drop(record, 'revoked')

@@ -56,7 +56,7 @@ describe('a bot\'s applet', () => {
     const { payload } = await start(f, firstActivation)
     // The bot published Budget, and wrote an Other applet its thread never published.
     const other = { ...budget, title: 'Other', js: '' }
-    await finish(f, payload, 'completed', { text: `Here is your budget.\n\n${fence(budget)}\n\n${fence(other)}` })
+    await finish(f, payload, 'completed', { text: `Here is your budget.\n\n${fence(budget)}\n\n${fence(other)}`, messageId: 'msg-1' })
 
     const reply = chatOf(f, botId).filter((message) => message.author === 'bot').at(-1)!
     expect(asked).toEqual([payload.threadId])
@@ -68,6 +68,8 @@ describe('a bot\'s applet', () => {
     const journaled = f.journal.find((row) => row.sourceKey === `bm:${reply.id}`)!
     expect(journaled.text).toContain('[Applet: Budget]')
     expect(journaled.text).not.toContain('textContent')
+    // It is that thread message, whose capture copy holds the fences: the chat row stands for it.
+    expect(journaled.standsFor).toBe(`${payload.threadId}:msg-1`)
   })
 
   it('can be replied to: the reply quotes it by name, and the bot is told which applet the owner means', async () => {

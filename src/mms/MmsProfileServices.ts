@@ -60,7 +60,7 @@ import { MousseMcpServer } from './run/mcp/MousseMcpServer'
 import { isPersonMessage, personTurnRequest } from './run/mcp/appTools/agentMessage'
 import { EffectWorker } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
-import { jobThreadIn, lastReplyOf, launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
+import { jobThreadIn, launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
 import { readRunResultText } from './run/delegation/hold'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
@@ -844,8 +844,9 @@ export class MmsProfileServices {
           const record = this.threads.lifecycleStore.get(id)
           return Boolean(record && record.state !== 'active')
         },
-        // A turn the owner started keeps no run result: then the thread's last reply, when the turn ended on one.
-        result: (id, runId) => readRunResultText(this.runEngine.store, id, runId) ?? lastReplyOf(this.orchestrator.visibleMessagesWithoutLoading(id)),
+        // The run's final reply is read from the transcript by its run id (`jobResultOf`); what the run kept, when it has none.
+        recorded: (id, runId) => readRunResultText(this.runEngine.store, id, runId),
+        messages: (id) => this.orchestrator.visibleMessagesWithoutLoading(id),
         // What it waits on, for the bot that may answer it (`approval_respond`).
         pending: (id) => this.questions.listPendingForThread(id)
       }, threadId),

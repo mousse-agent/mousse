@@ -25,6 +25,19 @@ export class CdpDisconnectedError extends Error {
   }
 }
 
+/** Chromium's answers for a page or frame target that went away (detached, closed, or navigated off) while the browser stays. */
+const TARGET_GONE = /session with given id not found|no target with given id|target closed|inspected target navigated or closed|no frame (?:with|for) (?:the )?given id|frame with the given id was not found/i
+
+/**
+ * Whether a command failed because its target is gone (a frame removed from its page, a tab closed),
+ * not because the browser is: a pipe that closed is never this.
+ */
+export function isCdpTargetGoneError(error: unknown): boolean {
+  if (error instanceof CdpDisconnectedError || !error || typeof error !== 'object' || !('cdpCode' in error)) return false
+  const message = (error as { message?: unknown }).message
+  return typeof message === 'string' && TARGET_GONE.test(message)
+}
+
 export class CdpConnection extends EventEmitter implements CdpTransport {
   private readonly decoder = new CdpAsciiDecoder()
   private readonly pending = new Map<number, Pending>()

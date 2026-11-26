@@ -1718,10 +1718,10 @@ useAppStore.subscribe((state, previous) => {
   } else scheduleDraftWorkspaceSave(state)
 })
 
-if (typeof window !== 'undefined') {
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
   window.addEventListener('beforeunload', flushPersonalWorkspaceSave)
   window.addEventListener('pagehide', flushPersonalWorkspaceSave)
-  if (typeof document !== 'undefined') {
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) flushPersonalWorkspaceSave()
     })

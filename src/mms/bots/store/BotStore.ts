@@ -1714,6 +1714,39 @@ export class BotStore {
     }
   }
 
+  /**
+   * What a runtime that reserves nothing reported its requests used (Claude Code, Codex, Antigravity): `requests` more
+   * model requests, and their tokens and cost, added to the activation's counters and spend. A measurement only: it
+   * checks no limit and never refuses, and a runtime that counts or settles through the scopes is never mirrored here.
+   */
+  recordObservedUsage(activationId: string, usage: { requests: number; input: number; output: number; usdMicros?: number }): void {
+    const whole = (value: number | undefined): number => (value !== undefined && Number.isFinite(value) && value > 0 ? Math.round(value) : 0)
+    const input = whole(usage.input)
+    const output = whole(usage.output)
+    const usd = whole(usage.usdMicros)
+    const requests = whole(usage.requests)
+    if (!requests && !input && !output && !usd) return
+    this.db.transaction(() => {
+      this.run(
+        'UPDATE bot_counters SET requests = requests + ?, input_tokens = input_tokens + ?, output_tokens = output_tokens + ? WHERE activation_id = ?',
+        requests, input, output, activationId
+      )
+      if (input || output || usd)
+        this.run(
+          'UPDATE bot_spend SET committed_input = committed_input + ?, committed_output = committed_output + ?, committed_usd_micros = committed_usd_micros + ? WHERE activation_id = ?',
+          input, output, usd, activationId
+        )
+    })
+  }
+
+  /**
+   * One Mousse app or MCP tool call a runtime that counts none itself made (Claude Code, Codex, Antigravity), added to
+   * the activation's tool calls. A measurement only: it checks no limit and never refuses.
+   */
+  recordObservedToolCall(activationId: string): void {
+    this.run('UPDATE bot_counters SET tool_calls = tool_calls + 1 WHERE activation_id = ?', activationId)
+  }
+
   // -- Turn usage (v12): what each main turn cost and carried ----------------------------------
 
   /** A main dispatch began: its row, before any usage is reported. A second start of the same dispatch changes nothing. */

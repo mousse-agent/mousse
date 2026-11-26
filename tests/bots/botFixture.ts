@@ -267,9 +267,9 @@ export async function start(f: BotFixture, activationId: string, n = 1): Promise
 }
 
 /** The run ends and the executor settles it with its final message; then everything that follows runs. */
-export async function finish(f: BotFixture, payload: BotTurnPayload, status: 'completed' | 'failed' | 'interrupted' = 'completed', options: { text?: string; outcome?: RunOutcome; unanswered?: boolean } = {}): Promise<void> {
+export async function finish(f: BotFixture, payload: BotTurnPayload, status: 'completed' | 'failed' | 'interrupted' = 'completed', options: { text?: string; messageId?: string; outcome?: RunOutcome; unanswered?: boolean } = {}): Promise<void> {
   f.runs.markTerminal(payload.runId, status, options.outcome)
-  f.bots.settle(payload, { ...(options.text !== undefined ? { text: options.text } : {}), ...(options.unanswered ? { unanswered: true } : {}) })
+  f.bots.settle(payload, { ...(options.text !== undefined ? { text: options.text } : {}), ...(options.messageId ? { messageId: options.messageId } : {}), ...(options.unanswered ? { unanswered: true } : {}) })
   await flush()
 }
 

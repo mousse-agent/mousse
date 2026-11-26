@@ -319,6 +319,31 @@ describe('the first send of a new chat runs with what the composer shows', () =>
     expect(useAppStore.getState().messages).toEqual([])
   })
 
+  it('an empty thread whose checkout can no longer change: the send makes a new thread in the picked worktree', async () => {
+    await listModels(['remembers'])
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    // A terminal or a worktree on the empty chat fixed its checkout; the person then picked a new worktree.
+    useAppStore.setState({
+      projects: [project('remembers')],
+      threads: [threadRow('draft', { worktreeEnabled: false, modelOverride: OPUS })],
+      activeThreadId: 'draft',
+      messages: [],
+      composerWorkspaceDrafts: { draft: { projectId: 'remembers', worktreeEnabled: true, worktreePicked: true } }
+    })
+    const daemon = daemonForSend(threadRow('made', { worktreeEnabled: true, modelOverride: OPUS }))
+    // As main answers the service's refusal, so the window gets its code.
+    const setWorktreeEnabled = vi.fn(async () => ({ ok: false, code: 'worktree_locked', message: 'Worktree mode is locked once a workspace is provisioned.' }))
+    bridge.threads.setWorktreeEnabled = setWorktreeEnabled
+    await mountComposer()
+
+    await send('Fix the parser')
+    expect(setWorktreeEnabled).toHaveBeenCalledWith('draft', true, true)
+    const create = daemon.calls.find((call) => call[0] === 'create')
+    expect(create?.[3]).toMatchObject({ worktreeEnabled: true })
+    expect(daemon.sentWith()).toBeDefined()
+    expect(useAppStore.getState().activeThreadId).toBe('made')
+  })
+
   it('a worktree from another branch makes a new thread, so an older empty Ask thread shows and runs in the project mode', async () => {
     // Another thread in the project remembered Full access; this older empty thread was set to Ask.
     await listModels(['remembers'])

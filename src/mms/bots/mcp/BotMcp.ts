@@ -511,7 +511,7 @@ export function mcpAskFor(servers: readonly BotMcpServer[], named: { serverId?: 
  */
 export async function callForBot(input: {
   /** `activationId` and `workspace`: where a result's pictures are kept for the owner (`keepToolImages`); absent: nowhere. */
-  bot: Pick<BotAuthority, 'check' | 'mcpTools' | 'time'> & Partial<Pick<BotAuthority, 'activationId' | 'workspace' | 'holdMcp' | 'mcpHeldNow' | 'quickCalls' | 'allows'>>
+  bot: Pick<BotAuthority, 'check' | 'mcpTools' | 'time'> & Partial<Pick<BotAuthority, 'activationId' | 'workspace' | 'holdMcp' | 'mcpHeldNow' | 'quickCalls' | 'allows' | 'callRuns'>>
   /** The name the runtime called: the relay's on Claude Code and Codex, the provider name on Pi. */
   name: string
   args: Record<string, unknown>
@@ -545,12 +545,16 @@ export async function callForBot(input: {
     // level, or its server or schema changed) is not sent unheld. The bot calls it again, and that call is held.
     else if (input.bot.mcpHeldNow?.(offered)) throw Object.assign(new Error(`${target.serverName}'s ${target.tool} now asks your owner first, so nothing was sent. Call it again to hold it for your owner.`), { code: 'bot_permission_changed' })
   }
-  const call = (signal: AbortSignal) => input.mcp.call(offered, input.args, signal, {
-    images: input.images === true,
-    assertDispatchActive: fence,
-    ...(input.heldAction ? { heldAction: true, sanitizeResult: input.sanitizeResult } : {}),
-    keepImages: (images) => keepToolImages({ activationId, filesFolder: workspace?.files, source: `${offered.serverName}-${offered.tool}`, images })
-  })
+  // The call goes to its server now (counted once, here): a held call only once its owner sent it.
+  const call = (signal: AbortSignal) => {
+    input.bot.callRuns?.()
+    return input.mcp.call(offered, input.args, signal, {
+      images: input.images === true,
+      assertDispatchActive: fence,
+      ...(input.heldAction ? { heldAction: true, sanitizeResult: input.sanitizeResult } : {}),
+      keepImages: (images) => keepToolImages({ activationId, filesFolder: workspace?.files, source: `${offered.serverName}-${offered.tool}`, images })
+    })
+  }
   const signal = AbortSignal.any([input.signal, input.bot.time.signal])
   // A chat turn's call runs within its budgets: stopped when the owner writes only if it is known to only read, when it
   // starts and still when they write (its listing read each time, never as the turn started).

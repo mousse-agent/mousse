@@ -33,10 +33,10 @@ import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { DeleteArchivedDialog } from './sidebar/DeleteArchivedDialog'
 import { ArchivedList } from './sidebar/ArchivedList'
-import { ThreadFilterBar, type BotOption, type ProjectOption } from './sidebar/ThreadFilterBar'
+import { ThreadFilterBar, type BotOption, type ComputerOption, type ProjectOption } from './sidebar/ThreadFilterBar'
 import { useThreadFilterStore } from '../stores/threadFilterStore'
 import { useBotsStore } from '../stores/botsStore'
-import { filterNarrows, lastUsedBy, threadInFilter, type ThreadFilter } from '../lib/threadFilter'
+import { filterNarrows, lastUsedBy, LOCAL_COMPUTER_ID, queryWords, threadInFilter, type ThreadFilter } from '../lib/threadFilter'
 import { clearAllRequest, deleteThreads, type DeleteRequest } from '../lib/archivedThreads'
 import { threadsForList, useArchiveMotionRows, usePendingArchives, withPendingArchives } from '../lib/archiveMotion'
 import { Collapse, COLLAPSE_LONG_LIST, motionAllowed } from './ui/Collapse'
@@ -511,8 +511,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const draggedItem = useRef<DraggedSidebarItem | null>(null)
   const suppressClick = useRef(false)
-  // Where a row dragged in the Threads tab would land: before or after this thread.
-  const [feedDrop, setFeedDrop] = useState<{ id: string; after: boolean } | null>(null)
+  // Where a dragged project or thread would land: before or after this row, shown as a line.
+  const [rowDrop, setRowDrop] = useState<{ type: DraggedSidebarItem['type']; id: string; after: boolean } | null>(null)
   const threadFeedOrder = useAppStore((s) => s.threadFeedOrder)
   const setThreadFeedOrder = useAppStore((s) => s.setThreadFeedOrder)
 
@@ -525,8 +525,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const { groups: projectGroups, groupOf } = useMemo(() => groupProjects(projects), [projects])
   const groupById = useMemo(() => new Map(projectGroups.map((group) => [group.id, group])), [projectGroups])
 
-  // The filter row's (ThreadFilterBar): Show, a bot, a project, Archived and what is typed; the Projects tab's unticked
-  // projects. Show and the unticked projects are this profile's.
+  // The filter row's (ThreadFilterBar): Show, a bot, a project, a computer, Archived and what is typed; the Projects
+  // tab's unticked projects. Show and the unticked projects are this profile's.
   const profileId = useAppStore((s) => s.profileId)
   // Before the window's profile is known the list is the warm start's (showWarmView): shown as it was, not acted on.
   const warmOnly = useAppStore((s) => !s.profileReady && s.warmView !== null)
@@ -537,13 +537,20 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const filterShow = useThreadFilterStore((s) => s.show)
   const filterProjectId = useThreadFilterStore((s) => s.projectId)
   const filterBotId = useThreadFilterStore((s) => s.botId)
+  const filterComputerId = useThreadFilterStore((s) => s.computerId)
   const hiddenProjectIds = useThreadFilterStore((s) => s.hiddenProjects)
   const filter = useMemo<ThreadFilter>(
-    () => ({ query: filterQuery, show: filterShow, projectId: filterProjectId, botId: filterBotId, archived: filterArchived }),
-    [filterQuery, filterShow, filterProjectId, filterBotId, filterArchived]
+    () => ({ query: filterQuery, show: filterShow, projectId: filterProjectId, botId: filterBotId, computerId: filterComputerId, archived: filterArchived }),
+    [filterQuery, filterShow, filterProjectId, filterBotId, filterComputerId, filterArchived]
   )
   const filtering = filterNarrows(filter)
   const bots = useBotsStore((s) => s.bots)
+  const hasRemoteProjects = projects.some((project) => project.node)
+  const hasRemoteThreads = threads.some((thread) => thread.node)
+  const { byNode: computers, devices } = useComputers(
+    hasRemoteProjects || hasRemoteThreads || (filterComputerId !== null && filterComputerId !== LOCAL_COMPUTER_ID)
+  )
+  const hasOtherComputers = hasRemoteProjects || hasRemoteThreads || Object.keys(computers).length > 0
   // What is typed also finds the threads whose messages hold it.
   const messageMatches = useThreadMessageMatches(filterQuery)
   const inFilter = useMemo(() => {
@@ -553,10 +560,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       groupOf: (projectId: string) => groupOf.get(projectId) ?? projectId,
       projectName: (projectId: string) => projectById.get(projectId)?.name,
       botName: (botId: string) => botById.get(botId)?.name,
+      computerName: hasOtherComputers
+        ? (node: string | undefined) => (node ? (computers[node]?.name ?? UNKNOWN_COMPUTER_NAME) : 'This computer')
+        : undefined,
       messageMatches
     }
     return (thread: Thread) => threadInFilter(thread, filter, context)
-  }, [filter, projects, bots, groupOf, messageMatches])
+  }, [filter, projects, bots, groupOf, computers, hasOtherComputers, messageMatches])
 
   // Subagent threads sit under their parent, not beside it: the list holds the threads people started. A thread one of
   // the owner's bots keeps out of the sidebar (`Thread.hidden`, how a bot's threads start) is listed in its chat instead,
@@ -642,8 +652,23 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const lastUsed = lastUsedBy(threads, (thread) => thread.startedByBot?.botId)
     return bots.map((bot) => ({ id: bot.id, name: bot.name, look: bot.look, lastUsed: lastUsed.get(bot.id) }))
   }, [threads, bots])
-  const hasRemoteProjects = projects.some((project) => project.node)
-  const { byNode: computers, devices } = useComputers(hasRemoteProjects || archivedThreads.some((thread) => thread.node))
+  const computerOptions = useMemo((): ComputerOption[] => {
+    const nodes = new Set<string>()
+    for (const thread of listedThreads) if (thread.node && !agentThreadIds.has(thread.id)) nodes.add(thread.node)
+    for (const project of projects) if (project.node) nodes.add(project.node)
+    for (const node of Object.keys(computers)) nodes.add(node)
+    if (filterComputerId && filterComputerId !== LOCAL_COMPUTER_ID) nodes.add(filterComputerId)
+    if (nodes.size === 0 && filterComputerId === null) return []
+    const lastUsed = lastUsedBy(threads, (thread) => thread.node ?? LOCAL_COMPUTER_ID)
+    return [
+      { id: LOCAL_COMPUTER_ID, name: 'This computer', local: true, lastUsed: lastUsed.get(LOCAL_COMPUTER_ID) },
+      ...[...nodes].map((node): ComputerOption => ({
+        id: node,
+        name: computers[node]?.name ?? UNKNOWN_COMPUTER_NAME,
+        lastUsed: lastUsed.get(node)
+      }))
+    ]
+  }, [listedThreads, agentThreadIds, projects, computers, filterComputerId, threads])
   const nameOfComputer = (node: string): string => computers[node]?.name ?? UNKNOWN_COMPUTER_NAME
   const localArchivedCount = archivedThreads.filter((thread) => !thread.node).length
   // With projects of several computers, a project's tooltip names this one too.
@@ -798,7 +823,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const projectThreadsOf = (groupId: string) => treeThreads.filter((thread) => listGroupOf(thread.projectId) === groupId)
   // The filter leaves out the projects unticked in its menu and, while it narrows to some threads, the projects with none
   // of them; those it keeps show open.
-  const treeNarrowed = filtering && filter.show !== 'all'
+  const treeNarrowed = filter.show === 'bots' || filter.botId !== null || filter.projectId !== null || filter.computerId !== null || filter.archived || queryWords(filter.query).length > 0
   const hiddenProjectSet = new Set(hiddenProjectIds)
   const shownGroups = projectGroups.filter((group) => !hiddenProjectSet.has(group.id) &&
     (filter.projectId === null || group.id === filter.projectId) &&
@@ -910,7 +935,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   /** Moves the row dragged in the Threads tab before or after `target`, or to the end without one. */
   const dropFeedThread = (target?: string, after = false) => {
     const dragged = draggedItem.current
-    setFeedDrop(null)
+    setRowDrop(null)
     // A filtered list holds only some threads: its order is not the tab's.
     if (!dragged?.feed || dragged.id === target || filtering) return
     suppressClick.current = true
@@ -918,8 +943,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     setThreadFeedOrder(arrangeThreadFeed(feedThreads.flatMap((thread) => (unmadeRows.has(thread.id) ? [] : [thread.id])), dragged.id, target, after))
   }
 
-  const reorderBefore = async (target: DraggedSidebarItem) => {
+  /** Moves the dragged project, or thread within its project, before or after `target`. */
+  const reorderAt = async (target: DraggedSidebarItem, after: boolean) => {
     const dragged = draggedItem.current
+    setRowDrop(null)
     if (!dragged || !canDropOn(target)) return
     suppressClick.current = true
     window.setTimeout(() => { suppressClick.current = false }, 0)
@@ -927,7 +954,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       // One entry per group: a project on several computers is dragged as one.
       const ids = projectGroups.map((group) => group.id)
       ids.splice(ids.indexOf(dragged.id), 1)
-      ids.splice(ids.indexOf(target.id), 0, dragged.id)
+      ids.splice(ids.indexOf(target.id) + (after ? 1 : 0), 0, dragged.id)
       await window.mousse.projects.reorder(ids)
       return
     }
@@ -936,13 +963,19 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const group = threads.filter((thread) => groupIdOf(thread.projectId) === dragged.projectId && !isPendingRowId(thread.id))
     const ids = group.map((thread) => thread.id)
     ids.splice(ids.indexOf(dragged.id), 1)
-    ids.splice(ids.indexOf(target.id), 0, dragged.id)
+    ids.splice(ids.indexOf(target.id) + (after ? 1 : 0), 0, dragged.id)
     await window.mousse.threads.reorder(dragged.projectId, ids)
+  }
+
+  /** The lower half of a row drops after it, so a row can also go last. */
+  const dropsInLowerHalf = (event: React.DragEvent) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    return event.clientY > rect.top + rect.height / 2
   }
 
   const endDrag = () => {
     draggedItem.current = null
-    setFeedDrop(null)
+    setRowDrop(null)
   }
 
 
@@ -1356,12 +1389,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     // Cards in the Threads tab can be dragged into an order of their own (archived and Needs me rows cannot).
     const feed = layout === 'card' && !isArchived && !inNeedsMe
     const dragItem: DraggedSidebarItem = { type: 'thread', id: thread.id, projectId: groupIdOf(thread.projectId), pinned: Boolean(thread.pinnedAt), ...(feed ? { feed } : {}) }
-    const dropLine = !inNeedsMe && feedDrop?.id === thread.id ? (feedDrop.after ? ' drop-after' : ' drop-before') : ''
-    // The lower half of a row drops after it, so a row can also go last.
-    const dropsAfter = (event: React.DragEvent) => {
-      const rect = event.currentTarget.getBoundingClientRect()
-      return event.clientY > rect.top + rect.height / 2
-    }
+    const dropLine = !inNeedsMe && rowDrop?.type === 'thread' && rowDrop.id === thread.id ? (rowDrop.after ? ' drop-after' : ' drop-before') : ''
 
     return (
 
@@ -1425,18 +1453,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           // Nothing drops onto a row the service has not made yet, or a chat not sent yet.
           if (inNeedsMe || actionless || !canDropOn(dragItem)) return
           event.preventDefault()
-          if (!feed) return
           event.stopPropagation()
-          const after = dropsAfter(event)
-          if (feedDrop?.id !== thread.id || feedDrop.after !== after) setFeedDrop({ id: thread.id, after })
+          const after = dropsInLowerHalf(event)
+          if (rowDrop?.type !== 'thread' || rowDrop.id !== thread.id || rowDrop.after !== after) setRowDrop({ type: 'thread', id: thread.id, after })
         }}
 
         onDrop={(event) => {
           event.stopPropagation()
           event.preventDefault()
           if (inNeedsMe || actionless) return
-          if (feed) dropFeedThread(thread.id, dropsAfter(event))
-          else void reorderBefore(dragItem)
+          if (feed) dropFeedThread(thread.id, dropsInLowerHalf(event))
+          else void reorderAt(dragItem, dropsInLowerHalf(event))
         }}
 
         onDragEnd={endDrag}
@@ -1754,7 +1781,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       </div>
 
       {contentView !== 'chats' && (
-        <ThreadFilterBar view={contentView} projects={projectOptions} bots={botOptions} onSwapView={() => void setSidebarView(contentView === 'projects' ? 'threads' : 'projects')} />
+        <ThreadFilterBar view={contentView} projects={projectOptions} bots={botOptions} computers={computerOptions} onSwapView={() => void setSidebarView(contentView === 'projects' ? 'threads' : 'projects')} />
       )}
 
       <div ref={scrollRef} className="threads-sidebar-scroll" data-view={contentView} data-fill={footerHidden || undefined} data-more-below={moreBelow || undefined}>
@@ -1824,7 +1851,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                 <div
                   key={project.id}
-                  className="threads-sidebar-project"
+                  className={`threads-sidebar-project${rowDrop?.type === 'project' && rowDrop.id === project.id ? (rowDrop.after ? ' drop-after' : ' drop-before') : ''}`}
                   data-project-id={project.id}
                   data-active-project={activeGroupId === group.id || undefined}
                   // The folder icon's color: the group's hue, as on its threads' cards (polish.css).
@@ -1832,11 +1859,19 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                   draggable={!isRenaming}
                   onDragStart={(event) => startDrag(event, { type: 'project', id: project.id })}
                   onDragOver={(event) => {
-                    if (canDropOn({ type: 'project', id: project.id })) event.preventDefault()
+                    if (!canDropOn({ type: 'project', id: project.id })) {
+                      // Over a row it cannot drop on, no line promises a place.
+                      if (rowDrop) setRowDrop(null)
+                      return
+                    }
+                    event.preventDefault()
+                    // The lower half of the group drops after it, so a project can also go last.
+                    const after = dropsInLowerHalf(event)
+                    if (rowDrop?.type !== 'project' || rowDrop.id !== project.id || rowDrop.after !== after) setRowDrop({ type: 'project', id: project.id, after })
                   }}
                   onDrop={(event) => {
                     event.preventDefault()
-                    void reorderBefore({ type: 'project', id: project.id })
+                    void reorderAt({ type: 'project', id: project.id }, dropsInLowerHalf(event))
                   }}
                   onDragEnd={endDrag}
                 >
@@ -2043,14 +2078,14 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             const rows = event.currentTarget.querySelectorAll('.threads-sidebar-thread-container')
             const bottom = rows[rows.length - 1]?.getBoundingClientRect().bottom
             const last = [...feedRows].reverse().find((thread) => !unmadeRows.has(thread.id))
-            if (last && bottom !== undefined && event.clientY > bottom && (feedDrop?.id !== last.id || !feedDrop.after)) {
-              setFeedDrop({ id: last.id, after: true })
+            if (last && bottom !== undefined && event.clientY > bottom && (rowDrop?.type !== 'thread' || rowDrop.id !== last.id || !rowDrop.after)) {
+              setRowDrop({ type: 'thread', id: last.id, after: true })
             }
           }}
           onDrop={(event) => {
             if (!draggedItem.current?.feed) return
             event.preventDefault()
-            if (feedDrop) dropFeedThread(feedDrop.id, feedDrop.after)
+            if (rowDrop?.type === 'thread') dropFeedThread(rowDrop.id, rowDrop.after)
           }}
         >
           {/* Cards render only while the tab shows (or is coming in), so a change to the list does not redraw a hidden copy of it. */}

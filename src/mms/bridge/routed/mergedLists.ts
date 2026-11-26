@@ -974,6 +974,13 @@ export class MergedLists implements RemoteListsPort {
 
   // ------------------------------------------------------------------ the port
 
+  /** The row of another computer's thread (by its qualified id) as the merged lists hold it, or undefined. */
+  row(qualifiedId: string): Thread | undefined {
+    if (!this.options.enabled()) return undefined
+    const ref = parseQualifiedId(qualifiedId)
+    return ref ? this.computersByNode.get(ref.node as NodeId)?.threads.get(qualifiedId) : undefined
+  }
+
   threads(scope?: { projectId: string | null }): Thread[] {
     if (!this.options.enabled()) return []
     const rows: Thread[] = []

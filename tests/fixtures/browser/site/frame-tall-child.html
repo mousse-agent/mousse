@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Tall form document</title>
+<style>body{margin:0;font:16px sans-serif} #name,#save{position:absolute;left:20px;width:240px;height:32px} #name{top:20px} #save{top:80px} #result{position:absolute;left:20px;top:140px;margin:0} #rest{height:1800px}</style></head>
+<body>
+  <input id="name" aria-label="Applicant name">
+  <button id="save" type="button">Save applicant</button>
+  <p id="result">idle</p>
+  <div id="rest"></div>
+  <script>document.getElementById('save').addEventListener('click', () => { document.getElementById('result').textContent = 'applicant-saved:' + document.getElementById('name').value })</script>
+</body>
+</html>

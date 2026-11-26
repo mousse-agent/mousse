@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdirSync, openSync, realpathSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, realpathSync, unlinkSync, writeSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative } from 'node:path'
 
 /** The pictures in a bot's files folder: the ones it makes (`BotImageMaker`) and the ones a tool hands its turn (`keepToolImages`). */
@@ -38,7 +38,8 @@ export function imageFileStem(prompt: string): string {
 /**
  * Saves `bytes` under `<files folder>/images/<date>/` as `<stem>-<time>.<type>`, as a new file: never over an existing
  * one, and never through a link out of the bot's files folder (its real path is checked, and the file is created only if
- * nothing is there). A picture the bot made, or one a tool handed its turn (`keepToolImages`).
+ * nothing is there). A picture the bot made, or one a tool handed its turn (`keepToolImages`). A file that could not be
+ * written whole (a full disk) is removed again: no broken picture is left behind.
  */
 export function saveBotPicture(files: string, stem: string, type: string, bytes: Uint8Array, now: Date): string {
   mkdirSync(files, { recursive: true })
@@ -66,9 +67,18 @@ export function saveBotPicture(files: string, stem: string, type: string, bytes:
       throw error
     }
     try {
-      writeSync(fd, bytes)
-    } finally {
-      closeSync(fd)
+      try {
+        for (let written = 0; written < bytes.length;) written += writeSync(fd, bytes, written)
+      } finally {
+        closeSync(fd)
+      }
+    } catch (error) {
+      try {
+        unlinkSync(path)
+      } catch {
+        // Already gone.
+      }
+      throw error
     }
     return path
   }

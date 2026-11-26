@@ -480,15 +480,22 @@ export function registerGuiIpc(
     return services.attachedBrowserHost
   }
   registerHandler('browser:register-tab', async (event, raw: unknown) => {
-    const input = domainObject(raw, ['localTabId', 'webContentsId', 'threadId'])
+    const input = domainObject(raw, ['localTabId', 'webContentsId', 'threadId', 'openRequestId', 'agentOpened'])
     return browserHost(event).registerTab(event.sender, input as unknown as Parameters<AttachedBrowserHost['registerTab']>[1])
   })
   registerHandler('browser:select-tab', async (event, raw: unknown) => {
     const input = domainObject(raw, ['localTabId', 'threadId'])
     return browserHost(event).selectTab(event.sender, input.localTabId as string, input.threadId as string)
   })
-  registerHandler('browser:take-control', async (event, localTabId: unknown) => browserHost(event).control(event.sender, localTabId as string, 'takeControl'))
-  registerHandler('browser:resume-agent', async (event, localTabId: unknown) => browserHost(event).control(event.sender, localTabId as string, 'resume'))
+  registerHandler('browser:resume-agent', async (event, localTabId: unknown) => browserHost(event).resumeAgent(event.sender, localTabId as string))
+  registerHandler('browser:user-activity', async (event, raw: unknown) => {
+    const input = domainObject(raw, ['localTabId', 'kind', 'pin'])
+    browserHost(event).reportActivity(event.sender, input as unknown as Parameters<AttachedBrowserHost['reportActivity']>[1])
+  })
+  registerHandler('browser:tab-owner', async (event, raw: unknown) => {
+    const input = domainObject(raw, ['localTabId', 'threadId'])
+    browserHost(event).setTabOwner(event.sender, input.localTabId as string, input.threadId === null ? null : input.threadId as string)
+  })
 
   // Bot names seen in the Bot UI's replies, and the bot rows already announced, for bot notifications.
   const botNotifications = new BotNotificationIndex()
@@ -2691,13 +2698,19 @@ export function registerGuiIpc(
     }
   })
   registerHandler('threads:setWorktreeEnabled', async (_e, threadId: string, enabled: boolean, picked?: boolean) => {
-    const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
-      'threads.setWorktreeEnabled',
-      // Another computer does not remember this computer's picks, and its row takes no `picked`.
-      { threadId, enabled, ...(picked === true && !isQualifiedId(threadId) ? { picked: true } : {}) }
-    )
-    broadcastIfRouted([threadId], res)
-    return res.thread
+    try {
+      const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
+        'threads.setWorktreeEnabled',
+        // Another computer does not remember this computer's picks, and its row takes no `picked`.
+        { threadId, enabled, ...(picked === true && !isQualifiedId(threadId) ? { picked: true } : {}) }
+      )
+      broadcastIfRouted([threadId], res)
+      return res.thread
+    } catch (error) {
+      // Answered, not thrown, so the window gets the code: a send then makes a new thread for the checkout it shows.
+      if (error instanceof MmsProtocolError && error.code === 'worktree_locked') return { ok: false, code: error.code, message: error.message }
+      throw error
+    }
   })
   /**
    * Gives a new chat's thread the model and then the permission mode its composer showed, each only while the thread's

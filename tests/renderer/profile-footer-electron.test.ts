@@ -11,7 +11,7 @@ it('renders the bound profile footer and its two-column popover: stale replies, 
   const directory = realpathSync(mkdtempSync(join(temporaryRoot, 'mousse-profile-footer-')))
   let child: ChildProcess | undefined, exited: Promise<number | null> | undefined
   try {
-    await build({ entryPoints: [resolve('tests/fixtures/profile-footer/entry.tsx')], outfile: join(directory, 'entry.js'), bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', loader: { '.svg': 'dataurl', '.woff2': 'file' }, define: { 'process.env.NODE_ENV': '"development"' } })
+    await build({ entryPoints: [resolve('tests/fixtures/profile-footer/entry.tsx')], outfile: join(directory, 'entry.js'), bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', loader: { '.svg': 'dataurl', '.png': 'dataurl', '.webp': 'dataurl', '.woff2': 'file' }, define: { 'process.env.NODE_ENV': '"development"' } })
     await build({ entryPoints: [resolve('tests/fixtures/profile-footer/main.ts')], outfile: join(directory, 'main.mjs'), bundle: true, platform: 'node', format: 'esm', external: ['electron'] })
     writeFileSync(join(directory, 'index.html'), '<!doctype html><meta charset="utf-8"><style>:root{--text-primary:#eee;--text-secondary:#aaa;--accent:#a99;--border:#333;--bg-secondary:#222;--titlebar-height:40px}body{margin:0;background:#111}#root{width:260px}.app{width:260px;height:600px}</style><link rel="stylesheet" href="entry.css"><div id="root"></div><script src="entry.js"></script>')
     const env = { ...process.env, MOUSSE_PROFILE_FOOTER_DIRECTORY: directory }; delete env.ELECTRON_RUN_AS_NODE

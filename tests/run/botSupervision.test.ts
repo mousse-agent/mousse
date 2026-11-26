@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { jobThreadIn, lastReplyOf } from '../../src/mms/bots/launchedThreads'
+import { jobThreadIn } from '../../src/mms/bots/launchedThreads'
 import type { ApprovalTag } from '../../src/mms/orchestrator/UserQuestionService'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS } from '../../src/shared/bots/personal/manifest'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
@@ -141,11 +141,34 @@ describe('a bot answers for the threads it started', () => {
     expect(await answered).toEqual({ db: 'pg', size: 's' })
   })
 
-  it('reads the reply a turn ended on when no run result was kept', () => {
-    const message = (role: 'user' | 'assistant' | 'system', content: string) => ({ id: content, role, content, timestamp: '' }) as ChatMessage
-    expect(lastReplyOf([message('user', 'Ask me'), message('assistant', 'one'), message('system', 'Answered by alpha')])).toBe('one')
-    // The person's message is the last: the turn ended without a reply, and an older one is not this turn's.
-    expect(lastReplyOf([message('assistant', 'older'), message('user', 'Again')])).toBeUndefined()
+  it('a job\'s answer is the reply its last run ended on, by run id: never an earlier turn\'s, and an applet only by name', async () => {
+    const w = world()
+    const message = (role: ChatMessage['role'], content: string, turnId?: string, extra: Partial<ChatMessage> = {}) => ({ id: `${role}:${content}`, role, content, timestamp: '', ...(turnId ? { turnId } : {}), ...extra }) as ChatMessage
+    let transcript: ChatMessage[] = []
+    let kept: string | undefined
+    const view = () => jobThreadIn({ threads: w.d.store, engine: w.d.engine, asks: () => false, recorded: () => kept, messages: () => transcript }, w.job.id)
+    const earlier = await w.runIn(w.job.id)
+    w.d.engine.markTerminal(earlier, 'completed')
+    const last = await w.runIn(w.job.id)
+    w.d.engine.markTerminal(last, 'completed')
+    const before = [message('user', 'Fix page A', earlier), message('assistant', 'Fixed page A.', earlier)]
+
+    // The last run wrote nothing and kept nothing: no answer, never the earlier turn's reply.
+    transcript = [...before, message('user', 'Fix page B', last)]
+    expect(view()).toMatchObject({ status: 'done' })
+    expect(view().result).toBeUndefined()
+
+    // Its reply holds a published applet after plenty of prose: the answer names the applet, never its source.
+    const source = { schemaVersion: 1, title: 'Price chart', description: 'Prices.', html: '<main id="secret-markup"></main>', css: '', js: 'drawChart()' }
+    const reply = `${'The prices over the year, as asked. '.repeat(8)}\n\n\u0060\u0060\u0060mousse-applet\n${JSON.stringify(source)}\n\u0060\u0060\u0060`
+    const reference = { appletId: 'ap1', revisionId: 'rev1', sourceHash: 'h', title: 'Price chart', description: 'Prices.' }
+    transcript = [...before, message('user', 'Chart prices', last), message('assistant', reply, last, { presentationParts: [{ type: 'applet', reference }] })]
+    kept = 'The prices over the year.'
+    const result = view().result!
+    expect(result).toContain('The prices over the year, as asked.')
+    expect(result).toContain('[Applet: Price chart (appletId ap1, revision rev1)]')
+    expect(result).not.toContain('mousse-applet')
+    expect(result).not.toContain('drawChart')
   })
 
   it('approves on a thread it started without the switch, named as itself, no wider than the thread\'s own mode', async () => {

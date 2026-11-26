@@ -130,11 +130,17 @@ export function validateAttachedBrowserWorkerRequest(value: unknown): BrowserWor
     if (!result) throw new Error(`invalid parameters for ${request.method}`)
     return result
   }
+  // The agent turn a step belongs to (`BrowserSessionManager`): the window's conflict breaker counts per turn.
+  const turnOf = (v: Record<string, unknown>): Record<string, unknown> => {
+    const turn = optionalString(v.turn, 400)
+    return turn === undefined ? {} : { turn }
+  }
   let params: Record<string, unknown>
   switch (request.method) {
     case 'session.open': {
-      const v = exact([], ['persistent', 'workspaceId', 'runId', 'threadId', 'url', 'uiTabId'])
+      const v = exact([], ['persistent', 'workspaceId', 'runId', 'threadId', 'url', 'uiTabId', 'turn', 'ownTabsOnly'])
       if (v.persistent !== undefined && typeof v.persistent !== 'boolean') throw new Error('invalid persistent flag')
+      if (v.ownTabsOnly !== undefined && v.ownTabsOnly !== true) throw new Error('invalid ownTabsOnly flag')
       const workspaceId = v.workspaceId === undefined ? undefined : id(v.workspaceId)
       const runId = optionalString(v.runId, 160)
       const threadId = optionalString(v.threadId, 160)
@@ -147,22 +153,27 @@ export function validateAttachedBrowserWorkerRequest(value: unknown): BrowserWor
         ...(runId === undefined ? {} : { runId }),
         ...(threadId === undefined ? {} : { threadId }),
         ...(url === undefined ? {} : { url }),
-        ...(uiTabId === undefined ? {} : { uiTabId })
+        ...(uiTabId === undefined ? {} : { uiTabId }),
+        // A run without a person's tree grant: its thread's own in-app tabs only.
+        ...(v.ownTabsOnly === true ? { ownTabsOnly: true } : {}),
+        ...turnOf(v)
       }
       break
     }
-    case 'session.close':
-    case 'tabs.list': {
+    case 'session.close': {
       const v = exact(['sessionId']); params = { sessionId: id(v.sessionId) }; break
     }
+    case 'tabs.list': {
+      const v = exact(['sessionId'], ['turn']); params = { sessionId: id(v.sessionId), ...turnOf(v) }; break
+    }
     case 'tabs.new': {
-      const v = exact(['sessionId'], ['url'])
-      params = { sessionId: id(v.sessionId), ...(v.url === undefined ? {} : { url: browserNavigationUrl(v.url) }) }
+      const v = exact(['sessionId'], ['url', 'turn'])
+      params = { sessionId: id(v.sessionId), ...(v.url === undefined ? {} : { url: browserNavigationUrl(v.url) }), ...turnOf(v) }
       break
     }
     case 'tabs.close':
     case 'tabs.switch': {
-      const v = exact(['sessionId', 'tabId']); params = { sessionId: id(v.sessionId), tabId: id(v.tabId) }; break
+      const v = exact(['sessionId', 'tabId'], ['turn']); params = { sessionId: id(v.sessionId), tabId: id(v.tabId), ...turnOf(v) }; break
     }
     case 'observe': {
       const v = exact(['sessionId'], ['tabId', 'ref', 'includeScreenshot', 'maxElements'])
@@ -183,7 +194,12 @@ export function validateAttachedBrowserWorkerRequest(value: unknown): BrowserWor
         ...(v.ref === undefined ? {} : { ref: id(v.ref) }) }
       break
     }
-    case 'act':
+    case 'act': {
+      if (!isObject(p)) throw new Error('invalid parameters for act')
+      const { turn, ...action } = p
+      params = { ...(validateBrowserActionRequest(action) as unknown as Record<string, unknown>), ...turnOf({ turn }) }
+      break
+    }
     case 'human.act':
       params = validateBrowserActionRequest(p) as unknown as Record<string, unknown>
       break

@@ -159,7 +159,9 @@ export async function dispatchBrowserTool(input: {
       if (!context.vision || !input.port.readScreenshot || !screenshot || !output.observation) {
         return { text: accessNotice + 'Screenshot image delivery is unavailable for this model or browser session.', isError: true, dispatched: true }
       }
-      result.image = await input.port.readScreenshot(context, output.observation.sessionId, screenshot.artifactId)
+      const shot = await input.port.readScreenshot(context, output.observation.sessionId, screenshot.artifactId)
+      result.image = { data: shot.data, mimeType: shot.mimeType }
+      if (shot.note) result.text = `${result.text}\n${shot.note}`
     }
     return userAllowed ? { ...result, text: accessNotice + result.text } : result
   } catch (error) {

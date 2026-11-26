@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Helper frame parent</title>
+<style>body{margin:0;font:16px sans-serif} #form-frame{position:absolute;left:320px;top:160px;width:480px;height:360px;border:0}</style></head>
+<body>
+  <h1>Checkout</h1>
+  <button id="parent-only" type="button">Parent only</button>
+  <!-- A form vendor's helper frames from the same site, never shown, ahead of its visible form. -->
+  <iframe id="helper-hidden" title="Hidden helper" style="display:none" src="__CHILD_ORIGIN__/frame-helper.html"></iframe>
+  <iframe id="helper-zero" title="Zero helper" style="width:0;height:0;border:0" src="__CHILD_ORIGIN__/frame-helper.html?zero=1"></iframe>
+  <iframe id="form-frame" title="Signing form" src="__CHILD_ORIGIN__/frame-form.html"></iframe>
+</body>
+</html>

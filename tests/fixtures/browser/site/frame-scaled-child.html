@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Scaled choices</title>
+<style>
+  body { margin: 0; font: 12px sans-serif }
+  /* "Left" spans (20, 20) to (80, 80) of this frame, "Right" (90, 90) to (150, 150). Drawn twice its size at
+     (100, 100), "Left"'s middle (50, 50) is at (200, 200) of the page; that point less the frame's origin,
+     (100, 100), would be on "Right". */
+  #left, #right { position: absolute; width: 60px; height: 60px; padding: 0 }
+  #left { left: 20px; top: 20px }
+  #right { left: 90px; top: 90px }
+  #state { position: absolute; left: 170px; top: 20px; margin: 0 }
+</style></head>
+<body>
+  <button id="left" type="button">Left choice</button>
+  <button id="right" type="button">Right choice</button>
+  <p id="state">choice:none</p>
+  <script>
+    for (const id of ['left', 'right']) document.getElementById(id).addEventListener('click', () => { document.getElementById('state').textContent = 'choice:' + id })
+  </script>
+</body>
+</html>

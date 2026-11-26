@@ -161,13 +161,14 @@ describe('a changed file the Changes tab does not list', () => {
     expect(useChangesStore.getState().byThread.t1).toBeUndefined()
 
     // The tab shows the file's path and reads its diff, read-only.
+    turnFileCalls.length = 0
     const panel = document.createElement('div')
     document.body.append(panel)
     const panelRoot = createRoot(panel)
     act(() => panelRoot.render(createElement(DocumentPanel)))
     await settle()
     expect(panel.querySelector('.turn-file-diff-path')!.textContent).toBe(outside)
-    expect(turnFileCalls.filter((path) => path === outside)).toHaveLength(2)
+    expect(turnFileCalls.filter((path) => path === outside)).toHaveLength(1)
     expect(panel.querySelector('.changes-diff')).not.toBeNull()
     expect(panel.querySelector('[aria-label="Hunk actions"]')).toBeNull()
     act(() => panelRoot.unmount())

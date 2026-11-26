@@ -1,14 +1,16 @@
 // @vitest-environment jsdom
 import { act, createElement, type ReactElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { Bot, User } from '../../src/renderer/lib/icons'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  BrowserAccessControl,
+  BrowserActivityIndicator,
   BrowserDeviceToolbar,
   BrowserNotice,
   BrowserStartPage,
   ClearCookiesDialog,
-  browserAgentState,
+  browserTabActivity,
   deviceWidthLabel
 } from '../../src/renderer/components/browser/BrowserToolbarParts'
 import { surfaceTabItems } from '../../src/renderer/lib/surfaces'
@@ -43,32 +45,43 @@ function buttonByText(text: string): HTMLButtonElement | undefined {
   return [...document.querySelectorAll('button')].find((button) => button.textContent === text)
 }
 
-describe('agent access in the browser toolbar', () => {
-  it('keeps off, allowed, agent and human apart', () => {
-    expect(browserAgentState(false, undefined)).toBe('off')
-    expect(browserAgentState(true, undefined)).toBe('allowed')
-    expect(browserAgentState(true, 'agent')).toBe('agent')
-    expect(browserAgentState(true, 'human')).toBe('human')
-    // Whoever holds the tab wins over the profile switch, so a takeover stays visible after revocation.
-    expect(browserAgentState(false, 'human')).toBe('human')
+describe('who is using the tab, in the browser toolbar', () => {
+  it('reads the tab\'s activity, and shows nothing for an idle or disconnected tab', () => {
+    expect(browserTabActivity(undefined)).toBe('idle')
+    expect(browserTabActivity({ owner: 'agent' })).toBe('idle')
+    expect(browserTabActivity({ owner: 'agent', activity: 'agent-busy' })).toBe('agent-busy')
+    expect(browserTabActivity({ owner: 'disconnected', activity: 'agent-busy' })).toBe('idle')
+    render(createElement(BrowserActivityIndicator, { activity: 'idle', busy: false, onResume: vi.fn() }))
+    expect(host.innerHTML).toBe('')
   })
 
-  it('shows the state and toggles access with the shared switch', () => {
-    const onChange = vi.fn()
-    render(createElement(BrowserAccessControl, { state: 'off', allowed: false, busy: false, onChange }))
-    const control = host.querySelector('.browser-access')!
-    expect(control.getAttribute('data-state')).toBe('off')
-    expect(control.getAttribute('title')).toBe('Agents can’t use browser tabs')
-    const toggle = host.querySelector<HTMLButtonElement>('button[role="switch"]')!
-    expect(toggle.className).toContain('toggle-switch')
-    expect(toggle.getAttribute('aria-checked')).toBe('false')
-    expect(toggle.getAttribute('aria-label')).toBe('Agent access to all browser tabs')
-    click(toggle)
-    expect(onChange).toHaveBeenCalledWith(true)
+  it.each([
+    ['agent-busy', 'Agent is acting in this tab — click the page to take over', Bot],
+    ['agent-waiting', 'Agent waiting to use this tab', Bot],
+    ['user-active', 'You’re using this tab', User],
+    ['waiting-human', 'The agent handed this tab to you', User]
+  ] as const)('%s: says so in its tooltip with the agent\'s or the person\'s icon, and asks nothing', (activity, text, icon) => {
+    render(createElement(BrowserActivityIndicator, { activity, busy: false, onResume: vi.fn() }))
+    const indicator = host.querySelector('.browser-activity')!
+    expect(indicator.getAttribute('data-state')).toBe(activity)
+    expect(indicator.getAttribute('title')).toBe(text)
+    expect(indicator.querySelector('[role="status"]')?.textContent).toBe(text)
+    const drawn = document.createElement('div')
+    drawn.innerHTML = renderToStaticMarkup(createElement(icon, { size: 14 }))
+    expect(indicator.querySelector('svg')?.innerHTML).toBe(drawn.querySelector('svg')?.innerHTML)
+    // No switch, and no question to answer.
+    expect(host.querySelector('[role="switch"]')).toBeNull()
+    expect(host.querySelector('[data-mousse-decision]')).toBeNull()
+    expect(buttonByText('Resume agent') !== undefined).toBe(activity === 'waiting-human')
+  })
 
-    render(createElement(BrowserAccessControl, { state: 'agent', allowed: true, busy: true, onChange }))
-    expect(host.querySelector('[role="status"]')?.textContent).toBe('An agent is using this tab')
-    expect(host.querySelector<HTMLButtonElement>('button[role="switch"]')?.disabled).toBe(true)
+  it('hands a tab the agent gave the person back with Resume agent', () => {
+    const onResume = vi.fn()
+    render(createElement(BrowserActivityIndicator, { activity: 'waiting-human', busy: false, onResume }))
+    click(buttonByText('Resume agent'))
+    expect(onResume).toHaveBeenCalledOnce()
+    render(createElement(BrowserActivityIndicator, { activity: 'waiting-human', busy: true, onResume }))
+    expect(buttonByText('Resume agent')?.disabled).toBe(true)
   })
 })
 

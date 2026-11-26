@@ -4,7 +4,8 @@ import {
   CodexTurnFailure,
   type CodexChatInput,
   type CodexChatResult,
-  type CodexProviderService
+  type CodexProviderService,
+  type CodexTurnUsage
 } from '../../vendors/codex/CodexProviderService'
 import { codexErrorKind } from '../../vendors/codex/protocol'
 import type { ChildPreflightContext, SubagentRefusal } from '../../../run/policy/featureGates'
@@ -23,6 +24,17 @@ import { providerStatusError, readProviderStatus, readUsageLimit } from '../../.
 import { isMousseServerTool } from '../../../run/mcp/attachment'
 import { createRuntimeToolMapper, promptStreams } from '../../../run/transcript/promptRuntime'
 import { retryContextOverflowOnce } from '../../../run/transcript/retryContextOverflow'
+
+/** A Codex run's usage as the turn sink takes it: its tokens, and the requests it made when it made any. */
+function sinkUsage(usage: CodexTurnUsage): Parameters<TurnSink['usage']>[0] {
+  return {
+    input: usage.input,
+    output: usage.output,
+    cacheRead: usage.cacheRead,
+    cacheWrite: usage.cacheWrite,
+    ...(usage.requests ? { requests: usage.requests } : {})
+  }
+}
 
 /** The slice of the provider service a turn drives. */
 export type CodexClient = Pick<
@@ -216,6 +228,8 @@ export class CodexAdapter implements ProviderAdapter {
       autoCompactTokens: host.context.compactionTokens,
       ...(host.bridge?.permission?.approvals === 'never' ? { approvals: 'never' as const } : {}),
       drainSteer: () => ctl.drainSteer(),
+      // An attempt that failed or was stopped still spent what it used: one retried after a context overflow included.
+      onUnreturnedUsage: (used) => sink.usage(sinkUsage(used)),
       ...(ctl.drainSteerEntry ? { drainSteerEntry: (opts) => ctl.drainSteerEntry!(opts) } : {}),
       // The hold (docs/design/steer-and-interruptions.md §2.5): offered only for a turn on it.
       ...(ctl.peekSteer ? { peekSteer: () => ctl.peekSteer!() } : {}),
@@ -336,7 +350,7 @@ export class CodexAdapter implements ProviderAdapter {
         ...(result.usage.quota?.length ? { quota: result.usage.quota } : {}),
         ...(result.resumeLost ? { resumeLost: true } : {})
       })
-      sink.usage(usage)
+      sink.usage(sinkUsage(result.usage))
     } else sink.providerMetrics({ realModelName, totalResponseTimeMs, ...(result.resumeLost ? { resumeLost: true } : {}) })
     streams.thinking.complete()
     service.commitConversation(input.threadId, host.context.nativeHistoryAfterTurn(result.text))

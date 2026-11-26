@@ -55,9 +55,9 @@ async function run(): Promise<void> {
     }))
     const beforeTakeover = await guest.executeJavaScript("document.querySelector('#name').value")
     if (beforeTakeover !== 'before agent') throw new Error('Agent completed the form before human handoff: ' + beforeTakeover + '; ' + handoffResponse.message)
-    await host.control(window.webContents, 'fixture-tab', 'takeControl')
+    // The agent handed the tab over: the person uses it with no call, then hands it back.
     await guest.executeJavaScript("document.querySelector('#name').value='human takeover'")
-    await host.control(window.webContents, 'fixture-tab', 'resume')
+    await host.resumeAgent(window.webContents, 'fixture-tab')
     const response = await gui.runWithSender(window.webContents, () => gui.request<{ message: string }>('orchestrator.send', {
       threadId: config.threadId, content: 'Human review is complete. Re-observe the selected tab, complete the Name field, and submit the form.', mode: 'build'
     }))

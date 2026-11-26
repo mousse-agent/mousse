@@ -21,6 +21,7 @@ const { ThreadsSidebar } = await import('../../src/renderer/components/ThreadsSi
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { useBotsStore } = await import('../../src/renderer/stores/botsStore')
 const { useThreadFilterStore } = await import('../../src/renderer/stores/threadFilterStore')
+const { NO_COMPUTERS, useComputersStore } = await import('../../src/renderer/lib/computers')
 const { showBotThreads } = await import('../../src/renderer/lib/showBotThreads')
 
 const at = '2026-11-18T10:00:00.000Z'
@@ -69,10 +70,11 @@ afterEach(() => {
   useAppStore.setState(appOriginal)
   useBotsStore.setState(botsOriginal)
   useThreadFilterStore.setState(filterOriginal, true)
+  useComputersStore.setState(NO_COMPUTERS, true)
 })
 
-function show(view: 'projects' | 'threads' = 'threads') {
-  useAppStore.setState({ projects, threads, threadActivity: {}, activeThreadId: null, threadsSidebarView: view, sidebarMode: view === 'threads' ? 'threads' : 'projects' })
+function show(view: 'projects' | 'threads' = 'threads', customThreads: Thread[] = threads, customProjects: Project[] = projects) {
+  useAppStore.setState({ projects: customProjects, threads: customThreads, threadActivity: {}, activeThreadId: null, threadsSidebarView: view, sidebarMode: view === 'threads' ? 'threads' : 'projects' })
   act(() => root.render(createElement(ThreadsSidebar)))
 }
 
@@ -188,11 +190,72 @@ describe('the sidebar filter', () => {
 
   it('a bot\'s See all opens the Threads tab on its threads; Archived opened there keeps the filter', async () => {
     show('projects')
+    useThreadFilterStore.getState().setComputer('mac')
     await act(async () => { await showBotThreads('b1') })
     expect(useAppStore.getState().threadsSidebarView).toBe('threads')
     expect(chips()).toEqual(['alpha'])
     expect(listed().sort()).toEqual(['a1', 'a2'])
     click(host.querySelector('section[aria-label="Archived"] .threads-sidebar-heading-toggle'))
     expect(archivedListed()).toEqual(['a3'])
+  })
+
+  it('Computer › is hidden when only this computer is in use', () => {
+    show()
+    openMenu()
+    expect(document.querySelector('[data-sub="computer"]')).toBeNull()
+  })
+
+  it('Computer › filters threads by computer, narrows typing suggestions and Projects view, and clears from its chip', () => {
+    useComputersStore.setState({
+      loaded: true,
+      routed: true,
+      byNode: { mac: { node: 'mac', name: "Avarnic's Mac mini", online: true } },
+      devices: []
+    })
+    const remoteProjects: Project[] = [
+      ...projects,
+      { id: 'mac:p1', name: 'mousse', path: '/Users/avarnic/mousse', createdAt: at, order: 2, node: 'mac', sameAs: 'p1' }
+    ]
+    const mixedThreads = [
+      ...threads,
+      thread('r1', 'Sidebar screenshot taker', { projectId: 'mac:p1', node: 'mac' }),
+      thread('r2', 'Old Mac check', { projectId: 'mac:p1', node: 'mac', archivedAt: at })
+    ]
+    show('threads', mixedThreads, remoteProjects)
+    expect(listed().sort()).toEqual(['r1', 't1', 't2'])
+
+    openMenu()
+    click(document.querySelector('[data-sub="computer"]'))
+    const search = document.querySelector<HTMLInputElement>('input[aria-label="Search computers"]')!
+    expect(document.activeElement).toBe(search)
+    click(item("Avarnic's Mac mini"))
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+    expect(chips()).toEqual(["Avarnic's Mac mini"])
+    expect(listed()).toEqual(['r1'])
+    expect(host.querySelector('.threads-sidebar-archived-count')?.textContent).toBe('1')
+
+    // Switch to Projects view while filtered to the Mac mini: only the matching project stays listed.
+    act(() => useAppStore.setState({ threadsSidebarView: 'projects', sidebarMode: 'projects' }))
+    expect([...panel().querySelectorAll('.threads-sidebar-project-name')].map((name) => name.textContent)).toEqual(['mousse'])
+    expect(listed()).toEqual(['r1'])
+
+    // Pick This computer from the menu: only local threads remain.
+    openMenu()
+    click(document.querySelector('[data-sub="computer"]'))
+    click(item('This computer'))
+    expect(chips()).toEqual(['This computer'])
+    expect(listed().sort()).toEqual(['t1', 't2'])
+
+    // Clear the chip and pick the Mac mini from typing suggestions instead.
+    click(host.querySelector('button[aria-label="Clear computer filter: This computer"]'))
+    expect(chips()).toEqual([])
+    act(() => useAppStore.setState({ threadsSidebarView: 'threads', sidebarMode: 'threads' }))
+    type('mac mini')
+    expect(listed()).toEqual(['r1'])
+    expect([...host.querySelectorAll('[role="option"]')].map((option) => option.textContent)).toEqual(["Computer:Avarnic's Mac mini↵"])
+    key(field(), 'Enter')
+    expect(field().value).toBe('')
+    expect(chips()).toEqual(["Avarnic's Mac mini"])
+    expect(listed()).toEqual(['r1'])
   })
 })

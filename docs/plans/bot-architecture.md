@@ -605,7 +605,7 @@ If no runtime can run the bot, the activation fails before dispatch. The bot the
 |---|---|
 | Chat lane (owner present) | `raiseWall` with `mode='wall'` and no expiry. The bot's reply row gets `ask`. The activation waits. |
 | Run lane | Use the open ask if one exists for `(bot_id, fingerprint)`; otherwise insert one with `mode='ask'`, plus a bot `notice` row with the card and the text "<name> wants to …". The check returns `refused` with the text `The owner has not allowed this yet. You asked them; carry on without it and say in your report what you skipped.` The dispatch continues. |
-| `escalate` tool (the bot asks on its own) | The same, by lane. In a chat turn, "ask me now for everything you'll need" leads to several `escalate` calls. The first ends the dispatch as a wall; to show several cards together, the chat-lane wall is deferred until the turn's text is complete. Each escalate call returns "Asked; the owner will answer after this message", and the dispatch ends at turn end with every card on that one message. |
+| `escalate` tool (the bot asks on its own) | The same, by lane. In a chat turn, "ask me now for everything you'll need" leads to several `escalate` calls. The first ends the dispatch as a wall; to show several cards together, the chat-lane wall is deferred until the turn's text is complete. Each escalate call returns its card's exact title ("Asked the owner — the card says '…'. The owner will answer after this message"), and the dispatch ends at turn end with every card on that one message. |
 
 **Answering: `bots.asks.answer {botId, askId, answer: 'allow' | 'not_now'}`.**
 - **Allow** runs `allowForBot`, which publishes the widened revision and approves it. The ask's card becomes "✓ Allowed: …".
