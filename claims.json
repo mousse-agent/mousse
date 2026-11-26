@@ -46,6 +46,19 @@
       "expiresAt": "2026-11-25T18:05:20.190Z"
     },
     {
+      "task": "computer-scoped-provider-settings",
+      "session": "Animatrix-fbfc56",
+      "machine": "Animatrix",
+      "branch": "computer-scoped-provider-settings",
+      "paths": [
+        "src/renderer/components/providers",
+        "src/shared/bridge/routed.ts",
+        "src/main/providers"
+      ],
+      "claimedAt": "2026-11-26T06:07:35.810Z",
+      "expiresAt": "2026-11-26T08:07:35.810Z"
+    },
+    {
       "task": "fix-windows-update-install-path",
       "session": "Animatrix-ccfd0b",
       "machine": "Animatrix",
