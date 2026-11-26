@@ -3,7 +3,7 @@
  * window missed updates (a gap, a connection opened again, an update it could not hand over) or when a turn that looks
  * active there goes quiet, and checks it when the window shows again or its renderer or graphics process is replaced.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 
 type Handler = (event: unknown, ...args: unknown[]) => unknown
@@ -35,6 +35,7 @@ import { PresentationState } from '../src/main/mms/PresentationState'
 import type { ProtocolEvent } from '../src/mms/protocol/types'
 import type { ChatMessage, ThreadActivitySnapshot, TurnState } from '../src/shared/types'
 import { useAppStore } from '../src/renderer/stores/appStore'
+import { qualifyId } from '../src/shared/threadRef'
 
 const WINDOW = 7
 const PROFILE = 'profile-1'
@@ -100,7 +101,10 @@ const guiMms = {
   snapshotThread: vi.fn(async () => snapshot()),
   snapshotThreadForSender: vi.fn(async () => snapshot()),
   // Every answer says the event number at which the service read (`revision`).
-  activityForSender: vi.fn(async () => ({ activity: { ...service.activity }, revision: service.revision })),
+  activityForSender: vi.fn(async (_senderId: number, clearsGap?: boolean) => {
+    if (clearsGap) gapFlag = false
+    return { activity: { ...service.activity }, revision: service.revision }
+  }),
   turnStatusForSender: vi.fn(statusAnswer),
   prepareWindow: vi.fn(async () => binding),
   runWithSender: (_sender: unknown, run: () => unknown) => run(),
@@ -405,6 +409,92 @@ describe('a window that missed the end of a turn', () => {
     expect(guiMms.activityForSender).not.toHaveBeenCalled()
     expect(guiMms.snapshotThreadForSender).not.toHaveBeenCalled()
     expect(logLines).toEqual([])
+  })
+})
+
+describe('a shown thread of another computer that cannot be reached', () => {
+  const REMOTE = qualifyId('nod_0123456789abcdefghjkmnpqrs', 'b1')
+  let failure: (Error & { code?: string }) | null = null
+  const offline = (): Error & { code: string } => Object.assign(new Error('The Mac is offline.'), { name: 'MmsProtocolError', code: 'computer_offline' })
+  const remoteReads = (): number =>
+    [...guiMms.turnStatusForSender.mock.calls, ...guiMms.snapshotThreadForSender.mock.calls].filter(([, threadId]) => threadId === REMOTE).length
+  const remoteViews = () => views().filter((view) => view.threadId === REMOTE)
+
+  beforeEach(async () => {
+    failure = null
+    guiMms.turnStatusForSender.mockImplementation(async (senderId: number, threadId: string, clearsGap?: boolean) => {
+      // Like the controller: a failed read that answered the gap puts the gap flag back.
+      if (threadId === REMOTE && failure) throw failure
+      return statusAnswer(senderId, threadId, clearsGap)
+    })
+    guiMms.snapshotThreadForSender.mockImplementation(async (_senderId: number, threadId: string) => {
+      if (threadId === REMOTE && failure) throw failure
+      gapFlag = false
+      return snapshot()
+    })
+    await handlers.get('threads:select')!({ sender: { id: WINDOW } }, REMOTE)
+    await vi.advanceTimersByTimeAsync(0)
+    sent.length = 0
+    logLines.length = 0
+    vi.clearAllMocks()
+  })
+  afterEach(async () => {
+    failure = null
+    guiMms.turnStatusForSender.mockImplementation(statusAnswer)
+    guiMms.snapshotThreadForSender.mockImplementation(async () => snapshot())
+    await handlers.get('threads:select')!({ sender: { id: WINDOW } }, 't1')
+  })
+
+  it('a gap while its computer is offline reads it once, not again on every update that follows', async () => {
+    failure = offline()
+    liveGap()
+    await vi.advanceTimersByTimeAsync(0)
+    // Updates about other threads keep arriving, as they did 10 to 26 times a second (#1901).
+    for (let i = 0; i < 50; i += 1) {
+      push('activity', { state: 'idle' }, 'other')
+      await vi.advanceTimersByTimeAsync(10)
+    }
+    expect(remoteReads()).toBe(1)
+    expect(gapFlag).toBe(false)
+    expect(logLines.filter((line) => line.event === 'check.failed' || line.event === 'catch-up.failed')).toHaveLength(1)
+  })
+
+  it('keeps trying while the computer stays offline, waiting longer each time, up to a minute', async () => {
+    failure = offline()
+    liveGap()
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    // 2, 4, 8, 16 and 32 seconds, then once a minute.
+    const reads = remoteReads()
+    expect(reads).toBeGreaterThanOrEqual(10)
+    expect(reads).toBeLessThanOrEqual(16)
+    vi.clearAllMocks()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(remoteReads()).toBe(1)
+  })
+
+  it('reads the thread once, within a second, when a network change says the computer may be back', async () => {
+    failure = offline()
+    liveGap()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(remoteViews()).toEqual([])
+    failure = null
+    vi.clearAllMocks()
+    push('net.updated', { enabled: true }, undefined)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(remoteViews()).toHaveLength(1)
+    expect(guiMms.snapshotThreadForSender).toHaveBeenCalledTimes(1)
+    // Its gaps are checked as usual again.
+    liveGap()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(guiMms.turnStatusForSender).toHaveBeenCalledWith(WINDOW, REMOTE, true)
+  })
+
+  it('a failure that is not about its computer is read in full at once, as for a thread of this computer', async () => {
+    failure = Object.assign(new Error('Status read interrupted'), { code: 'request_timeout' })
+    guiMms.turnStatusForSender.mockRejectedValueOnce(failure)
+    failure = null
+    liveGap()
+    await vi.waitFor(() => expect(remoteViews()).toHaveLength(1))
   })
 })
 
