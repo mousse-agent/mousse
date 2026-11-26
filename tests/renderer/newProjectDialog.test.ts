@@ -33,7 +33,7 @@ let root: Root
 /** What the daemon answers about GitHub: the account, and its repositories when connected. */
 const github: { status: Record<string, unknown>; repositories: { nameWithOwner: string; private: boolean }[] } = { status: {}, repositories: [] }
 /** The GitHub account of the Mac mini, and what it answers to a clone or a folder read. */
-const mac: { status: Record<string, unknown>; folders: Record<string, unknown>; cloneFails?: boolean } = { status: {}, folders: {} }
+const mac: { status: Record<string, unknown>; folders: Record<string, unknown>; cloneFails?: boolean; cloneWaits?: Promise<void> } = { status: {}, folders: {} }
 const platform = vi.fn(async (method: string, params?: { node?: string; path?: string }): Promise<unknown> => {
   const there = params?.node === 'nod_mac'
   if (method === 'sourceControl.status') return { providers: [there ? mac.status : github.status] }
@@ -43,6 +43,7 @@ const platform = vi.fn(async (method: string, params?: { node?: string; path?: s
     return mac.status
   }
   if (method === 'sourceControl.clone' && there) {
+    await mac.cloneWaits
     if (mac.cloneFails) throw Object.assign(new Error('Mac mini is offline.'), { code: 'peer_offline' })
     return { project: project('p9', '/Users/me/dev/web-app') }
   }
@@ -71,6 +72,7 @@ beforeEach(() => {
   mac.status = { id: 'github', name: 'GitHub', state: 'connected', account: 'me' }
   mac.folders = {}
   mac.cloneFails = false
+  mac.cloneWaits = undefined
   useAddToComputer.setState({ request: null, source: null })
   useComputersStore.setState({ loaded: true, byNode: {} })
   useAppStore.setState({
@@ -361,4 +363,24 @@ it('keeps the draft as it was when the clone fails or the dialog closes', async 
   expect(addDialog()).toBeNull()
   expect(onAdded).not.toHaveBeenCalled()
   expect(useAddToComputer.getState().request).toBeNull()
+})
+
+it('ends the add when its clone fails after Esc hid the dialog, so a later project goes to a new thread, not that composer', async () => {
+  let release = () => {}
+  mac.cloneWaits = new Promise<void>((resolve) => { release = resolve })
+  mac.cloneFails = true
+  const onAdded = await addWebAppToMac()
+  const field = () => addDialog()!.querySelector<HTMLInputElement>('input')!
+  await act(async () => field().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })))
+  await act(async () => field().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })))
+  expect(addDialog()).toBeNull()
+  await act(async () => { release() })
+  expect(useAddToComputer.getState().request).toBeNull()
+  // Later, an unrelated project: it starts its own thread.
+  const site = project('site', 'C:\dev\site')
+  api.open.mockResolvedValueOnce(site)
+  await openDialog()
+  await clickRow('Open a folder…')
+  expect(actions.listProjectAndStartThread).toHaveBeenCalledWith(site)
+  expect(onAdded).not.toHaveBeenCalled()
 })

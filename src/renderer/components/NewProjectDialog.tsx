@@ -102,10 +102,15 @@ async function runTask(label: string | null, work: () => Promise<Project | null>
   } catch (error) {
     useProjectTask.setState({ label: null })
     fail(error)
+    // Failed after Esc hid the dialog: the add it ran for is over. With the dialog open it stays, to try again from
+    // there, and ends when the dialog closes.
+    if (!useAppStore.getState().newProjectOpen) endAddToComputer()
     return
   }
   useProjectTask.setState({ label: null })
   if (project) await finish(project)
+  // Settled with nothing added while hidden (a folder picker closed without a folder): the add is over too.
+  else if (!useAppStore.getState().newProjectOpen) endAddToComputer()
 }
 
 /** The full row of a project the service just listed; the summary a clone answers with until the list arrives. */
