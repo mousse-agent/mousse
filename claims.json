@@ -97,6 +97,17 @@
       "expiresAt": "2026-11-25T20:29:30.139Z"
     },
     {
+      "task": "remote-subagent-result-notice",
+      "session": "Avarnics-Mac-mini.local-1565f6",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "remote-subagent-result-notice",
+      "paths": [
+        "src/mms/orchestrator/OrchestratorService.ts"
+      ],
+      "claimedAt": "2026-11-26T06:04:46.302Z",
+      "expiresAt": "2026-11-26T08:04:46.302Z"
+    },
+    {
       "task": "steer-poll-no-queue-file",
       "session": "Avarnics-Mac-mini.local-b17aa1",
       "machine": "Avarnics-Mac-mini.local",
