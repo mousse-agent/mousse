@@ -1533,7 +1533,9 @@ export class PiRpcEngine implements ProviderAdapter {
         missing: ['toolControl'],
         instanceId: this.options.instanceId
       })
-    await this.checkLocalTurn(input, host)
+    // Only a local server's turn waits here (its list is read again first). Every other turn emits its ref and
+    // registers itself in the same tick as the dispatch, so a Stop sent right after it reaches the starting turn.
+    if (this.options.localModel) await this.checkLocalTurn(input, host)
     const key = randomUUID()
     const ref: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model, nativeTurnId: key }
     sink.providerRef(ref)
