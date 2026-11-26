@@ -99,7 +99,7 @@ function basename(path: string): string {
 }
 
 /** A name an app gives a pasted or captured image ("paste-1795680902893.png", "image.png"), which says nothing. */
-const GENERATED_IMAGE = /^(?:paste|pasted|image|clipboard|screenshot|capture)(?:[\s_-]*[\d.:-]+)*\.(?:png|jpe?g|gif|webp|bmp)$/i
+const GENERATED_IMAGE = /^(?:paste|pasted|image|clipboard|screenshot|capture)[\s\d._:-]*\.(?:png|jpe?g|gif|webp|bmp)$/i
 
 function addFile(hints: TitleHints, name: string): void {
   const base = basename(name.trim())
