@@ -1,14 +1,11 @@
 import type { InstanceSnapshot } from '../../shared/harness/status'
-import { piProviderIdOf } from '../../shared/providerInstances'
+import { legacyProviderForInstance, piProviderIdOf } from '../../shared/providerInstances'
 import { applySnapshot } from './providerSnapshots'
 import { providersApi } from './providersComputer'
 
-/**
- * An entry on a local model server: its provider id is `local-<slug>` (`pi:local-ollama`), whatever it lists now. Only
- * an instance of the Pi driver has a provider id.
- */
-export function isLocalEntry(snapshot: Pick<InstanceSnapshot, 'instanceId'>): boolean {
-  return piProviderIdOf(snapshot.instanceId)?.startsWith('local-') === true
+/** An entry on a local model server: its provider id is `local-<slug>` (`pi:local-ollama`), whatever it lists now. */
+export function isLocalEntry(snapshot: Pick<InstanceSnapshot, 'driver' | 'instanceId'>): boolean {
+  return legacyProviderForInstance(snapshot.instanceId, snapshot)?.startsWith('local-') === true
 }
 
 /** The local server's provider id (`local-ollama`) of an entry, for `providers.local.*`. */

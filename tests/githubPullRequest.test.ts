@@ -19,7 +19,6 @@ import {
   summarizeCheckRollup
 } from '../src/mms/git/GitHubCodeHost'
 import { createGhFallbackRunner, type ExecutableRunner } from '../src/mms/git/GitHubService'
-import { ghFallbackPaths } from '../src/mms/git/ghRunner'
 import { parsePullRequestReference, pullRequestIdentityKey, pullRequestReferenceMismatch } from '../src/shared/pullRequests'
 import { FakeGh, ghFailure, stamp } from './fakeGh'
 
@@ -732,12 +731,21 @@ describe('createGhFallbackRunner', () => {
     const base = vi.fn<ExecutableRunner>(async () => { throw enoent() })
     await expect(createGhFallbackRunner(base, 'darwin')('gh', [])).rejects.toMatchObject({ code: 'ENOENT' })
     base.mockClear()
-    await expect(createGhFallbackRunner(base, 'win32')('gh', [])).rejects.toMatchObject({ code: 'ENOENT' })
+    // The machine-wide install, then the per-user one winget makes.
+    vi.stubEnv('ProgramFiles', 'D:\\Programs')
+    vi.stubEnv('LOCALAPPDATA', 'C:\\Users\\ada\\AppData\\Local')
+    try {
+      await expect(createGhFallbackRunner(base, 'win32')('gh', [])).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      vi.unstubAllEnvs()
+    }
     await expect(createGhFallbackRunner(base, 'darwin')('git', [])).rejects.toMatchObject({ code: 'ENOENT' })
-    const windows = ghFallbackPaths('win32')
-    expect(windows.length).toBeGreaterThan(0)
-    expect(windows.every((path) => path.endsWith('\\GitHub CLI\\gh.exe'))).toBe(true)
-    expect(base.mock.calls.map((call) => call[0])).toEqual(['gh', ...windows, 'git'])
+    expect(base.mock.calls.map((call) => call[0])).toEqual([
+      'gh',
+      'D:\\Programs\\GitHub CLI\\gh.exe',
+      'C:\\Users\\ada\\AppData\\Local\\Programs\\GitHub CLI\\gh.exe',
+      'git'
+    ])
   })
 
   it('does not retry when gh runs but fails', async () => {
