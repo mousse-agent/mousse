@@ -1219,6 +1219,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'Usage, limits and speech belong to the computer that holds the sign-ins; Settings → Providers of another computer uses the providers.instances rows.'
   },
   {
+    prefixes: ['updates.rollout.'],
+    reason: 'Update everywhere is started and followed on the computer whose window shows it; that computer updates the others itself.'
+  },
+  {
     prefixes: ['net.', 'netEngine.', 'bridge.', 'profiles.', 'speech.host.'],
     reason: 'Networking, devices, profiles and speech relay are managed on each computer itself.'
   },

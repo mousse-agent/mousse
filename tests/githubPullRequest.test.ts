@@ -727,13 +727,25 @@ describe('createGhFallbackRunner', () => {
     expect(base.mock.calls.map((call) => call[0])).toEqual(['/usr/local/bin/gh'])
   })
 
-  it('rethrows the original error when no fallback exists, and skips fallbacks on Windows or for other commands', async () => {
+  it('rethrows the original error when no fallback exists, tries the GitHub CLI install folders on Windows, and skips fallbacks for other commands', async () => {
     const base = vi.fn<ExecutableRunner>(async () => { throw enoent() })
     await expect(createGhFallbackRunner(base, 'darwin')('gh', [])).rejects.toMatchObject({ code: 'ENOENT' })
     base.mockClear()
-    await expect(createGhFallbackRunner(base, 'win32')('gh', [])).rejects.toMatchObject({ code: 'ENOENT' })
+    // The machine-wide install, then the per-user one winget makes.
+    vi.stubEnv('ProgramFiles', 'D:\\Programs')
+    vi.stubEnv('LOCALAPPDATA', 'C:\\Users\\ada\\AppData\\Local')
+    try {
+      await expect(createGhFallbackRunner(base, 'win32')('gh', [])).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      vi.unstubAllEnvs()
+    }
     await expect(createGhFallbackRunner(base, 'darwin')('git', [])).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(base.mock.calls.map((call) => call[0])).toEqual(['gh', 'git'])
+    expect(base.mock.calls.map((call) => call[0])).toEqual([
+      'gh',
+      'D:\\Programs\\GitHub CLI\\gh.exe',
+      'C:\\Users\\ada\\AppData\\Local\\Programs\\GitHub CLI\\gh.exe',
+      'git'
+    ])
   })
 
   it('does not retry when gh runs but fails', async () => {

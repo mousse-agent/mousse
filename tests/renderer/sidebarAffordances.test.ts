@@ -30,6 +30,7 @@ vi.mock('../../src/renderer/components/chats/ChatsSidebar', () => ({ ChatsSideba
 const { ThreadsSidebar } = await import('../../src/renderer/components/ThreadsSidebar')
 const { ToastHost, dismissToast } = await import('../../src/renderer/components/ui/Toast')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
+const { useSidebarShowMoreStore } = await import('../../src/renderer/lib/sidebarShowMore')
 const { hasMoreBelow, revealDelta } = await import('../../src/renderer/lib/sidebarScroll')
 const { startRenderCounts, stopRenderCounts } = await import('../../src/renderer/chat/components/agent-elements/render-counts')
 const { ARCHIVED_FIRST_ROWS } = await import('../../src/renderer/components/sidebar/ArchivedList')
@@ -81,6 +82,8 @@ afterEach(() => {
   document.body.innerHTML = ''
   useAppStore.setState(appOriginal)
   Object.assign(appInitial, appOriginal)
+  // Show more outlives a sidebar mount; one test's expanded project must not open the next test's.
+  useSidebarShowMoreStore.setState({ groups: new Set() })
   vi.clearAllMocks()
 })
 
