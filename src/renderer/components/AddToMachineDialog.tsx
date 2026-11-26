@@ -250,8 +250,8 @@ function FolderBrowser({ computer, state, onOpen, onUse, onBack }: {
         <button type="button" className="settings-btn primary" disabled={!view?.path} onClick={() => view?.path && onUse(view.path)}>Use this folder</button>
       </div>
       <div className="add-machine-browser-list scrollbar-ultra-thin" role="list">
-        {!view && !state.error && <div className="add-machine-muted add-machine-browser-row"><Spinner size={13} /></div>}
-        {!view && state.error && <div className="add-machine-muted add-machine-browser-row">Could not read its folders</div>}
+        {!view && !state.error && <div className="add-machine-browser-note"><Spinner size={13} /></div>}
+        {!view && state.error && <div className="add-machine-browser-note">Could not read its folders</div>}
         {view?.parent && (
           <button type="button" role="listitem" className="add-machine-browser-row" onClick={() => onOpen(view.parent!)}>
             <ArrowUp size={14} aria-hidden="true" />..
@@ -262,7 +262,7 @@ function FolderBrowser({ computer, state, onOpen, onUse, onBack }: {
             <Folder size={14} aria-hidden="true" />{entry.name}
           </button>
         ))}
-        {view && view.folders.length === 0 && <div className="add-machine-muted add-machine-browser-row">No folders here</div>}
+        {view && view.folders.length === 0 && <div className="add-machine-browser-note">No folders here</div>}
       </div>
     </div>
   )
