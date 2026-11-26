@@ -16,6 +16,7 @@ import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import type { MousseSettingsUpdate, SettingsOptions } from '../../src/shared/settings'
 import { userThemeFile } from '../../src/shared/themes/userThemes'
 import { DIM_KEY_PEEK_MS } from '../../src/renderer/components/settings/WallpaperRows'
+import { WALLPAPER_SAVE_DELAY_MS } from '../../src/renderer/components/settings/UserThemeEditor'
 import { resetWallpapersForTests, showWallpaperLayerForTests, wallpaperLayerNow } from '../../src/renderer/lib/wallpaper'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -207,8 +208,10 @@ describe('wallpaper dim', () => {
     document.documentElement.removeAttribute('data-settings-peek')
   })
 
-  it('dragging changes the chat wallpaper at once with Settings aside, never below the readability floor, and Save keeps it', () => {
+  it('dragging changes the chat wallpaper at once with Settings aside, never below the readability floor, and saves it without Save', () => {
+    vi.useFakeTimers()
     showWithWallpaper()
+    typeInto(host.querySelector<HTMLTextAreaElement>('#user-theme-css')!, 'a { color: red }')
     // Below the floor the dim changes nothing, so the slider starts at the floor and says so.
     expect(slider().value).toBe('50')
     expect(host.querySelector('.wallpaper-dim-row')?.textContent).toContain('At least 50%')
@@ -225,8 +228,20 @@ describe('wallpaper dim', () => {
     act(() => window.dispatchEvent(new MouseEvent('pointerup')))
     expect(peeking()).toBe(false)
 
-    act(() => button('Save').click())
-    expect(store.get().appearance.userThemes[0]!.wallpaper?.dim).toBe(60)
+    act(() => { vi.advanceTimersByTime(WALLPAPER_SAVE_DELAY_MS) })
+    // The dim is saved on its own; the CSS edit stays a draft.
+    expect(store.get().appearance.userThemes[0]).toMatchObject({ css: '', wallpaper: { dim: 60 } })
+    expect(host.querySelector<HTMLTextAreaElement>('#user-theme-css')!.value).toBe('a { color: red }')
+    expect(slider().value).toBe('60')
+    expect(button('Save').disabled).toBe(false)
+  })
+
+  it('leaving Settings right after a move still saves the dim', () => {
+    vi.useFakeTimers()
+    showWithWallpaper()
+    typeInto(slider(), '70')
+    act(() => root.render(createElement('div')))
+    expect(store.get().appearance.userThemes[0]!.wallpaper?.dim).toBe(70)
   })
 
   it('an arrow key moves Settings aside for a moment', () => {
