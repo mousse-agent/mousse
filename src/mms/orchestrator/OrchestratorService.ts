@@ -6938,6 +6938,7 @@ export class OrchestratorService extends EventEmitter {
     const fresh = session.messages.length === 0 && cleared
     if (busy() || (prepared.history === 'cleared' ? !cleared : prepared.history !== 'thread' && !fresh)) return cancel('bot_state_invalid')
     let text: string | undefined
+    let messageId: string | undefined
     let unanswered = false
     try {
       const response = await this.runTurnOnSession(
@@ -6958,12 +6959,13 @@ export class OrchestratorService extends EventEmitter {
       )
       // A failed turn's message is its error, never the bot's words; a turn its work goes on from hands back what it said.
       text = response.error ? response.partial : response.message
+      if (!response.error && response.messageId) messageId = response.messageId
       unanswered = !response.error && Boolean(response.steerUnanswered)
     } catch (error) {
       const settled = engine.getRun(payload.runId)
       if (!settled || (!TERMINAL_RUN_STATUSES.has(settled.status) && settled.status !== 'queued')) throw error
     } finally {
-      dispatcher.settle(payload, { ...(text !== undefined ? { text } : {}), ...(unanswered ? { unanswered: true } : {}) })
+      dispatcher.settle(payload, { ...(text !== undefined ? { text } : {}), ...(messageId ? { messageId } : {}), ...(unanswered ? { unanswered: true } : {}) })
     }
   }
 
@@ -9823,8 +9825,23 @@ export class OrchestratorService extends EventEmitter {
     try {
       const continued = engine.getRun(runId)?.outcome?.continuationOf
       const source = continued ? engine.getRun(continued) : null
-      // A bot's work that reached its runtime's step cap goes on in a fresh turn: no restart happened.
-      if (source) this.addSystemMessage(source.outcome?.pause ? `Continuing run ${source.ordinal} after the usage limit reset.` : isProviderTurnCap(source.outcome?.error) ? `Continuing run ${source.ordinal}, which took the most steps one turn may take.` : `Continuing run ${source.ordinal} after a restart.`)
+      if (!source) return
+      const outcome = source.outcome
+      // Only a run the daemon's stop cut off (interrupted, or uncertain with a tool in flight) was continued after a
+      // restart. A bot's work that reached its runtime's step cap, met a permission wall or goes on after its owner
+      // answered continues in a fresh turn with no restart.
+      const restarted = outcome?.interruptedBy === 'daemon_restart' || outcome?.uncertainReason === 'non_idempotent_tool_in_flight'
+      // The limit has reset only when the timer resumed the run, or a person did once the reset time passed. Resume now
+      // before it, or a run continued after its pause was cancelled, says no more than which run it continues.
+      const resumed = engine.getRun(runId)?.outcome?.resumedFromPause
+      const pause = outcome?.pause
+      const afterReset = !!pause && (resumed === 'auto' || (resumed === 'user' && Date.parse(pause.until) <= Date.now()))
+      this.addSystemMessage(
+        afterReset ? `Continuing run ${source.ordinal} after the usage limit reset.`
+          : isProviderTurnCap(outcome?.error) ? `Continuing run ${source.ordinal}, which took the most steps one turn may take.`
+            : restarted ? `Continuing run ${source.ordinal} after a restart.`
+              : `Continuing run ${source.ordinal}.`
+      )
     } catch (error) {
       console.warn('run engine continuation note failed', { runId, error: error instanceof Error ? error.message : String(error) })
     }
@@ -16594,11 +16611,14 @@ export class OrchestratorService extends EventEmitter {
     let resultText = redactAppletFences(displayText)
     const finalText = unshownReplyText(displayText, earlierReplies)
 
+    // The transcript row the reply ends on: a bot's chat message names it, so its journal holds the reply once.
+    let finalMessageId: string | undefined
     // A turn Send now cut before the model wrote anything shows no reply: the steer's answer, or the steer running
     // again, comes next. "Done." would read as if the turn had finished with nothing to say.
     if (noReply && !finalText) {
       this.transcript.abandonAssistant('', true)
     } else if (this.activeAssistantMessageId) {
+      finalMessageId = this.activeAssistantMessageId
       this.updateStreamingAssistantMessage(
         this.activeAssistantMessageId,
         finalText || 'Done.',
@@ -16615,6 +16635,7 @@ export class OrchestratorService extends EventEmitter {
       // A raw === stripped comparison fails on whitespace alone, and a match
       // that counted the applet fences never succeeds; either appends a
       // visually identical twin message.
+      finalMessageId = this.lastCompletedAssistantMessageId
       this.updateStreamingAssistantMessage(
         this.lastCompletedAssistantMessageId,
         finalText,
@@ -16622,7 +16643,7 @@ export class OrchestratorService extends EventEmitter {
         responseMetadata
       )
     } else {
-      this.addMessage('assistant', finalText || 'Done.', undefined, responseMetadata)
+      finalMessageId = this.addMessage('assistant', finalText || 'Done.', undefined, responseMetadata).id
     }
 
     // No reply row (a Send now cut): an earlier turn's "Done." is not this turn's.
@@ -16724,7 +16745,8 @@ export class OrchestratorService extends EventEmitter {
     const response: OrchestratorResponse = {
       message: opts?.bot && steerUnanswered ? finalText : (opts?.bot ? finalText : displayText) || 'Done.',
       actions,
-      ...(opts?.bot && steerUnanswered ? { steerUnanswered: true } : {})
+      ...(opts?.bot && steerUnanswered ? { steerUnanswered: true } : {}),
+      ...(opts?.bot && finalMessageId ? { messageId: finalMessageId } : {})
     }
     if (executionFailed) {
       this.setTurnPhase(session.threadId, 'failed', { error: 'LLM error' })

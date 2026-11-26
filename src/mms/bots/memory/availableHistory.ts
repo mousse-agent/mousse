@@ -7,11 +7,40 @@ const ENTRY_LIMIT = 512
 const MANAGED_ENTRY_LIMIT = 128
 const FILE_LIMIT = 12
 const temporary = new Set(['tmp', 'temp', 'temporary', 'scratch'])
+/**
+ * Claude Code's Linux sandbox (bubblewrap) masks these names in a command's working folder: where one is missing it
+ * mounts an empty file over it, which leaves a 0-byte stub behind in the bot's files folder (and an empty
+ * `node_modules/.bin`). Only empty files with these names are skipped; a real `package.json` or an empty `notes.md` is listed.
+ */
+const sandboxStubs = new Set([
+  'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'yarn.lock',
+  'bun.lock', 'bun.lockb', 'bunfig.toml', 'deno.json', 'deno.jsonc', 'deno.lock',
+  'pyproject.toml', 'requirements.txt', 'Pipfile', 'Pipfile.lock', 'poetry.lock', 'uv.lock', 'setup.py', 'setup.cfg',
+  'Cargo.toml', 'Cargo.lock', 'go.mod', 'go.sum', 'Gemfile', 'Gemfile.lock', 'Makefile', 'Dockerfile',
+  'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'
+])
+/** Installed packages are not the bot's saved files. */
+const skippedFolders = new Set(['node_modules'])
 
 type FileDate = { name: string; mtime: number }
 type Folder = { path: string; relative: string; kind: string }
 
-/** No contents are opened. Managed folders are counted only after the bot's files are scanned. */
+/** A 0-byte file of a masked name (`sandboxStubs`): the sandbox's, not the bot's. Only such names are looked at. */
+function isSandboxStub(path: string, name: string): boolean {
+  if (!sandboxStubs.has(name)) return false
+  try {
+    const stat = lstatSync(path)
+    return stat.isFile() && stat.size === 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * No contents are opened. Managed folders are counted only after the bot's files are scanned. Folders are read
+ * breadth first, so a deep tree (one full of sandbox stubs, say) spends the entry limit only after every shallower
+ * folder was read, and never hides a saved file beside it.
+ */
 function listFiles(folder: string) {
   const files: FileDate[] = []
   const managed: Folder[] = []
@@ -19,8 +48,9 @@ function listFiles(folder: string) {
   const scan = (pending: Folder[], limit: number): boolean => {
     let visited = 0
     let incomplete = false
-    while (pending.length && visited < limit) {
-      const current = pending.pop()!
+    // A queue: folders found are read after every folder already waiting.
+    for (let head = 0; head < pending.length && visited < limit; head++) {
+      const current = pending[head]!
       let directory: ReturnType<typeof opendirSync>
       try { directory = opendirSync(current.path) } catch {
         if (current.relative) incomplete = true
@@ -35,6 +65,7 @@ function listFiles(folder: string) {
           const relative = current.relative ? `${current.relative}/${entry.name}` : entry.name
           const path = join(current.path, entry.name)
           if (entry.isDirectory()) {
+            if (skippedFolders.has(entry.name)) continue
             // Only Mousse's root folders are managed; similarly named user files and subfolders are ordinary files.
             const kind = current.kind || (!current.relative
               ? temporary.has(entry.name) ? 'temporary' : ['images', 'attachments'].includes(entry.name) ? entry.name : ''
@@ -43,13 +74,14 @@ function listFiles(folder: string) {
             if (kind && !current.kind) managed.push(next)
             else pending.push(next)
           } else if (entry.isFile()) {
+            if (current.kind && isSandboxStub(path, entry.name)) continue
             if (current.kind === 'images') pictures++
             else if (current.kind === 'attachments') attached++
             else if (current.kind === 'temporary') temporaryFiles++
             else {
               try {
                 const stat = lstatSync(path)
-                if (stat.isFile()) files.push({ name: relative, mtime: stat.mtimeMs })
+                if (stat.isFile() && !(stat.size === 0 && sandboxStubs.has(entry.name))) files.push({ name: relative, mtime: stat.mtimeMs })
               } catch { incomplete = true }
             }
           }

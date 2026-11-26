@@ -122,6 +122,11 @@ export interface PostInput {
   clientRequestId?: string
   lane?: BotLane
   threadId?: string
+  /**
+   * A dispatch's reply: the id of its thread's message (in `threadId`) that holds these words. Capture copies that
+   * message too; the chat row stands for it, so the journal holds the reply once, and a Forget of it holds.
+   */
+  transcriptMessageId?: string
   /** The message this one answers. */
   replyTo?: string
   /** A bot's message: the question it carries (its bubble). The owner's: the question it answered. */
@@ -343,6 +348,7 @@ export class BotChatProjection {
         ...(input.activationId ? { activationId: input.activationId } : {}),
         ...(input.threadId ? { threadId: input.threadId } : {}),
         sourceKey: `bm:${id}`,
+        ...(input.threadId && input.transcriptMessageId ? { standsFor: `${input.threadId}:${input.transcriptMessageId}` } : {}),
         who: input.external ? 'tool' : input.author === 'owner' ? 'owner' : input.kind === 'error' || isServiceLine(id) ? 'mousse' : 'bot',
         ...(input.external ? { external: true } : {}),
         text: shown.journal || (input.error?.text ?? ''),

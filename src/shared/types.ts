@@ -1144,6 +1144,8 @@ export interface OrchestratorResponse {
   partial?: string
   /** On a bot's turn: a steer cut it and the model wrote nothing after it (`TurnResult.steerUnanswered`). */
   steerUnanswered?: boolean
+  /** On a bot's turn that ended well: the id of the thread's message holding `message`, its final row. */
+  messageId?: string
   actions: OrchestratorAction[]
   /**
    * When true, the send was accepted onto the thread queue instead of starting a turn.
