@@ -397,11 +397,11 @@ describe('a chat turn waiting at a card ends at every narrowing', () => {
     change()
     await flush()
     expect(f.store.activation(id)!.status).toBe('running')
-    expect(turn.prepared.authority.counters.charge('toolCall')).toMatchObject({ ok: true })
-    expect(turn.prepared.authority.counters.charge('toolCall')).toMatchObject({ ok: false })
-    const ask = f.store.escalations({ activationId: id }).find((entry) => 'budget' in entry.permission)!
-    await finish(f, turn.payload, 'interrupted', { text: 'Tidying.', outcome: { interruptedBy: 'bot_wall' } })
     if (outcome === 'waits') {
+      expect(turn.prepared.authority.counters.charge('toolCall')).toMatchObject({ ok: true })
+      expect(turn.prepared.authority.counters.charge('toolCall')).toMatchObject({ ok: false })
+      const ask = f.store.escalations({ activationId: id }).find((entry) => 'budget' in entry.permission)!
+      await finish(f, turn.payload, 'interrupted', { text: 'Tidying.', outcome: { interruptedBy: 'bot_wall' } })
       // It waits under the grant in place, so Allow continues it there.
       expect(f.store.activation(id)).toMatchObject({ status: 'waiting_grant', grantDigest: f.store.activeGrant(botId)!.digest })
       await f.bots.service.answer(botId, ask.id, 'allow')
@@ -410,8 +410,19 @@ describe('a chat turn waiting at a card ends at every narrowing', () => {
       expect(f.store.dispatch(id, 2)).toMatchObject({ kind: 'continue' })
       return
     }
+    // A run under the grant in place asks for the same limit first: its card is open for the owner.
+    const work = await start(f, await activate('same-limit'))
+    expect(work.prepared.authority.escalate!({ permission: { budget: { key: 'maxToolCalls' } }, reason: 'More steps.' })).toMatch(/^Asked the owner/)
+    await finish(f, work.payload, 'completed', { text: 'Asked.' })
+    const workAsk = f.store.escalations({ activationId: work.payload.activationId }).find((entry) => 'budget' in entry.permission)!
+    expect(workAsk.status).toBe('open')
+    expect(turn.prepared.authority.counters.charge('toolCall')).toMatchObject({ ok: true })
+    expect(turn.prepared.authority.counters.charge('toolCall')).toMatchObject({ ok: false })
+    await finish(f, turn.payload, 'interrupted', { text: 'Tidying.', outcome: { interruptedBy: 'bot_wall' } })
     expect(f.store.activation(id)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
-    expect(f.store.escalation(ask.id)!.status).toBe('withdrawn')
+    // It opened no card of its own, and took none over: the run's card is still the run's, and still open.
+    expect(f.store.escalations({ activationId: id }).filter((entry) => 'budget' in entry.permission)).toEqual([])
+    expect(f.store.escalation(workAsk.id)).toMatchObject({ status: 'open', activationId: work.payload.activationId })
     expect(chatOf(f, botId).some((message) => message.kind === 'notice' && message.text === 'I stopped there: my permissions changed.')).toBe(true)
     await f.bots.service.chatSend({ botId, text: 'never mind', clientRequestId: 'next' })
     await flush()

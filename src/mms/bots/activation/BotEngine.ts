@@ -1567,15 +1567,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!grant) return false
     if (grant.digest === row.grantDigest) return true
     const own = this.store.grantByDigest(row.botId, row.grantDigest)
-    let revision: string | undefined
-    try {
-      revision = this.entry(row.botId).published?.revision
-    } catch {
-      revision = undefined
-    }
-    if (!own || !revision || !this.holdsWithin(row.botId, own.manifest, grant.manifest)) return false
+    if (!own || !this.holdsWithin(row.botId, own.manifest, grant.manifest)) return false
     this.store.db.transaction(() => {
-      this.store.regrant(row.botId, row.grantDigest, grant.digest, revision, row.id)
+      // It keeps its own revision, held within its own grant and so within this one; the latest published revision may
+      // need an approval of its own.
+      this.store.regrant(row.botId, row.grantDigest, grant.digest, row.revision, row.id)
       this.raiseLimits(row.botId, grant, row.id)
     })
     return true
@@ -5206,13 +5202,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return this.store.escalation(escalation.id)!
   }
 
-  private wallInTransaction(activationId: string, from: readonly BotActivationRow['status'][], input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): { kind: 'wall'; escalation: BotEscalationRow; waits: boolean } | { kind: 'none' } {
+  private wallInTransaction(activationId: string, from: readonly BotActivationRow['status'][], input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): { kind: 'wall'; escalation: BotEscalationRow; waits: true } | { kind: 'wall'; waits: false } | { kind: 'none' } {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return { kind: 'none' }
-    const escalation = this.openWall(row, input)
+    // A turn that ran on after About narrowed the grant waits here only under a grant that gives all its own did. One that
+    // may not opens no card, nor takes over another's open card for the same ask (`openWall`), which it would withdraw as
+    // it ends (`raiseWall`): that card stays its own turn's.
+    const waits = this.waitsUnderActiveGrant(row)
+    const escalation = waits ? this.openWall(row, input) : undefined
     this.store.moveActivation(activationId, [row.status], 'waiting_grant', { endReason: 'wall' })
-    // A turn that ran on after About narrowed the grant waits here only under a grant that gives all its own did.
-    return { kind: 'wall', escalation, waits: this.waitsUnderActiveGrant(this.store.activation(activationId)!) }
+    return escalation ? { kind: 'wall', escalation, waits: true } : { kind: 'wall', waits: false }
   }
 
   private afterWall(activationId: string, raised: { kind: 'wall'; escalation: BotEscalationRow }): void {
