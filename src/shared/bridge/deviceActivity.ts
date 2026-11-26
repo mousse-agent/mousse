@@ -321,6 +321,9 @@ const PHRASES: Record<string, Phrase> = {
   'providers.instances.refreshAllModels': PROVIDER,
   'providers.instances.setModelPrefs': PROVIDER,
   'providers.instances.setSecret': PROVIDER_KEY,
+  'providers.local.connect': PROVIDER,
+  'providers.local.setModel': PROVIDER,
+  'providers.local.checkTools': PROVIDER,
   'providers.instances.signIn': PROVIDER_SIGN_IN,
   'providers.instances.respondSignIn': PROVIDER_SIGN_IN,
   'providers.instances.signOut': PROVIDER_SIGN_IN

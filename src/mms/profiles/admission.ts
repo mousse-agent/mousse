@@ -29,7 +29,8 @@ const PROFILE_PROVIDER_METHODS = new Set([
   'providers.instances.allowKnownProblem',
   'providers.instances.recheck', 'providers.instances.vendorSettings', 'providers.instances.setVendorSetting', 'providers.instances.refreshModels', 'providers.instances.refreshAllModels',
   'providers.instances.setModelPrefs',
-  'providers.instances.move', 'providers.instances.removeInstall', 'providers.registry.search'
+  'providers.instances.move', 'providers.instances.removeInstall', 'providers.registry.search',
+  'providers.local.detect', 'providers.local.connect', 'providers.local.setModel', 'providers.local.checkTools'
 ])
 
 export function isInstallationMethod(method: string): boolean {

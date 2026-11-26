@@ -1055,6 +1055,8 @@ type TitleNamingAvailability = 'off' | 'explicit' | 'automatic_ready' | 'automat
 interface TitleRequestOptions {
   task: OneShotTask
   scope: ProviderScope | undefined
+  /** The thread named or quoted: one on a local server is served only by its own warm model (`localTitleModel`). */
+  threadId?: string
   sessionKey: string
   maxChars: number
   signal?: AbortSignal
@@ -12266,7 +12268,7 @@ export class OrchestratorService extends EventEmitter {
     }
     // Regenerate always names the thread: a message that names nothing ("hello there") is used as written.
     const heuristic = heuristicTitle(context.request) || fitTitle(cleanTitleText(context.request).text)
-    const availability = this.titleNamingAvailability(threadId ? this.threadScope(threadId) : undefined)
+    const availability = this.titleNamingAvailability(threadId ? this.threadScope(threadId) : undefined, threadId)
     if (availability !== 'explicit' && availability !== 'automatic_ready') return heuristic
     try {
       return (await this.generateTitleText(context, threadId, undefined, 'regenerate')) ?? heuristic
@@ -12291,9 +12293,11 @@ export class OrchestratorService extends EventEmitter {
    *   first checks are started (without waiting): a daemon with no window open may not have read its providers yet.
    * - `none`: Automatic, with no connected model that can name threads.
    */
-  private titleNamingAvailability(scope: ProviderScope | undefined): TitleNamingAvailability {
+  private titleNamingAvailability(scope: ProviderScope | undefined, threadId?: string): TitleNamingAvailability {
     if (this.hasExplicitTitleModel()) return 'explicit'
     if (this.settingsStore.get().title.mode === 'off') return 'off'
+    // A thread on a local server is named by its own model while warm (`automaticTitleText`), whatever else is connected.
+    if (threadId && this.localTitleModel(threadId)) return 'automatic_ready'
     const where = scope ?? DEVICE_SCOPE
     const models = this.titleModels()
     if (models.candidates(where).length) return 'automatic_ready'
@@ -12366,6 +12370,7 @@ export class OrchestratorService extends EventEmitter {
     const text = await this.titleModelText(titleSystemPrompt(this.settingsStore.get().title.prompt), buildTitlePrompt(context), {
       task: 'title',
       scope: threadId ? this.threadScope(threadId) : undefined,
+      ...(threadId ? { threadId } : {}),
       sessionKey: threadId ?? `title:${context.request.slice(0, 200)}`,
       maxChars: 120,
       signal,
@@ -12383,12 +12388,13 @@ export class OrchestratorService extends EventEmitter {
   async askBranchName(request: BranchNameRequest, signal?: AbortSignal): Promise<string | undefined> {
     if (signal?.aborted) return undefined
     const scope = this.threadScope(request.threadId)
-    const availability = this.titleNamingAvailability(scope)
+    const availability = this.titleNamingAvailability(scope, request.threadId)
     if (availability !== 'explicit' && availability !== 'automatic_ready') return undefined
     const settings = this.branchNamingSettingsKey()
     const call = this.titleModelText(request.system, request.prompt, {
       task: 'branch_name',
       scope,
+      threadId: request.threadId,
       sessionKey: request.threadId,
       maxChars: 100,
       signal,
@@ -12424,6 +12430,9 @@ export class OrchestratorService extends EventEmitter {
   private async titleModelText(system: string, prompt: string, options: TitleRequestOptions): Promise<string> {
     // The title prompt is the title's own instruction (`generateTitleText`) and the mode its Automatic switch: neither is part of the selection.
     const { prompt: _titlePrompt, mode: _mode, ...selection } = this.settingsStore.get().title
+    // A local thread's text stays on its own server, whatever title model is chosen.
+    const local = options.threadId ? this.localTitleModel(options.threadId) : undefined
+    if (local) return this.localTitleText(local, system, prompt, options)
     const explicit = Boolean(selection.llmProvider?.trim() && selection.model?.trim())
     if (!explicit && (options.task === 'title' || options.task === 'branch_name')) return this.automaticTitleText(system, prompt, options)
     try {
@@ -12513,6 +12522,58 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * The local server model a thread runs on, when it does (`pi:local-<slug>`): its entry, server and exact model id.
+   * Such a thread's text never goes to a cloud model by Automatic naming.
+   */
+  private localTitleModel(threadId: string): { instanceId: string; providerId: string; model: string } | undefined {
+    const local = this.providerAuth?.local
+    if (!local) return undefined
+    let selection: ModelOverride | undefined
+    try {
+      // The model the thread's next turn runs: its own choice, else the default (a cleared override included).
+      const session = this.boundSession?.threadId === threadId ? this.boundSession : this.sessions?.get(threadId)
+      const explicit = session?.modelOverride ?? this.threadStore?.getThread(threadId)?.modelOverride
+      selection = this.harness.instanceMap.migrate(explicit ?? resolveModelForMode(this.settingsStore.get(), 'agent', [
+        ...(this.providerAuth.credentials?.listProviderIds() ?? []),
+        ...(this.harness.configuredProviderIds?.() ?? [])
+      ])) ?? undefined
+    } catch {
+      return undefined
+    }
+    const instanceId = selection?.instanceId
+    const providerId = instanceId ? piProviderIdOf(instanceId) : undefined
+    if (!selection || !instanceId || !providerId || !local.has(providerId)) return undefined
+    // A served id that ends like a level (`phi3:medium`) was stored split; the joined id is the model when it is listed.
+    const joined = agentModelId(selection.model, selection.effort)
+    const model = local.facts(providerId, joined) ? joined : selection.model
+    return { instanceId, providerId, model }
+  }
+
+  /**
+   * A local thread's title: its own model, only while that model is already in memory (one loopback read says so), else
+   * none (the thread keeps its first line). Never another model, never one that would have to load.
+   */
+  private async localTitleText(local: { instanceId: string; providerId: string; model: string }, system: string, prompt: string, options: TitleRequestOptions): Promise<string> {
+    const deadline = AbortSignal.timeout(AUTOMATIC_TITLE_DEADLINE_MS)
+    const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline
+    const resident = await this.providerAuth.local.resident(local.providerId, local.model, { signal, timeoutMs: 600 })
+    if (resident !== true) throw Object.assign(new Error('The local model is not loaded; the thread keeps its first line.'), { code: 'unsupported' })
+    const { text } = await this.harness.oneShot({
+      selection: { instanceId: local.instanceId, llmProvider: '', model: local.model },
+      ...(options.scope ? { scope: options.scope } : {}),
+      purpose: 'title',
+      system,
+      prompt,
+      maxChars: options.maxChars,
+      sessionKey: options.sessionKey,
+      task: options.task,
+      ...(options.namingOrigin ? { namingOrigin: options.namingOrigin } : {}),
+      signal
+    })
+    return text
+  }
+
+  /**
    * A title model the gateway refuses outright (a Bedrock model, an agent without one-shots) fails every request
    * the same way. The reason is logged once per kind of refusal, and the thread's title failure event
    * carries it, rather than a warning on every chat; Settings → Agents shows the stored choice as
@@ -12573,6 +12634,8 @@ export class OrchestratorService extends EventEmitter {
       const text = await this.titleModelText(PULL_REQUEST_DRAFT_SYSTEM, prompt, {
         task: 'pull_request',
         scope: params.projectId ? { kind: 'project', projectId: params.projectId } : params.originThreadId ? this.threadScope(params.originThreadId) : { kind: 'device' },
+        // The draft quotes the thread: a local thread's draft is written by its own warm model or by the heuristic.
+        ...(params.originThreadId ? { threadId: params.originThreadId } : {}),
         sessionKey: `pull-request-draft:${params.originThreadId ?? prompt.slice(0, 200)}`,
         maxChars: 40_000
       })
@@ -12714,7 +12777,7 @@ export class OrchestratorService extends EventEmitter {
     }
     restoreSignal?.addEventListener('abort', restore, { once: true })
     const fromMessage = heuristicTitle(userContent)
-    const availability = this.titleNamingAvailability(this.threadScope(threadId))
+    const availability = this.titleNamingAvailability(this.threadScope(threadId), threadId)
     if (availability === 'off' || availability === 'none') {
       // No model will name it later: a message that names nothing ("hello") is used as written.
       const name = fromMessage || fitTitle(cleanTitleText(userContent).text)
@@ -12790,7 +12853,7 @@ export class OrchestratorService extends EventEmitter {
         if (thread.titleSource === 'provisional') this.writeThreadTitle(threadId, thread, thread.name, 'auto')
         return
       }
-      const availability = this.titleNamingAvailability(this.threadScope(threadId))
+      const availability = this.titleNamingAvailability(this.threadScope(threadId), threadId)
       if (availability === 'automatic_pending') {
         const shown = this.writeThreadTitle(threadId, thread, thread.name, 'auto')
         if (shown) this.waitForTitleModels(threadId)
@@ -12866,7 +12929,7 @@ export class OrchestratorService extends EventEmitter {
               this.forgetColdStart(threadId)
               continue
             }
-            const availability = this.titleNamingAvailability(this.threadScope(threadId))
+            const availability = this.titleNamingAvailability(this.threadScope(threadId), threadId)
             if (availability === 'automatic_pending') continue
             this.forgetColdStart(threadId)
             await this.queueTitleWork(threadId, async () => {

@@ -2,6 +2,7 @@ import { AppError, type ErrorCategory } from '../errors'
 import type { AgentExecutionLimit } from '../agents/execution'
 import type { PermissionMode } from '../permissionMode'
 import type { ProviderDriverKind } from '../providerInstances'
+import type { LocalModelFacts } from '../localServers'
 import { retriesOf, retriesPhrase } from '../providerRetry'
 
 /**
@@ -476,6 +477,8 @@ export interface InstanceModel {
   oneShot?: false
   /** The model an alias runs (`haiku` → `claude-haiku-5-5`), when the agent says (`LlmModelOption.resolvedId`). */
   resolvedId?: string
+  /** A local server's model (`LlmModelOption.local`). */
+  local?: LocalModelFacts
 }
 
 /** Instance settings the Add dialog and editor change. `null` clears a field back to its default. */

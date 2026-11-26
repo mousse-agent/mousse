@@ -463,6 +463,11 @@ function pullRequestScopeParams(scope: PullRequestScope | undefined): Record<str
   }
 }
 
+/** A renderer's object argument, or none (the daemon validates every field). */
+function objectParams(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+}
+
 /** The provider calls a window may send to another computer, and the field of the answer it returns (`.`: all of it). */
 export const REMOTE_PROVIDER_RESULTS: Readonly<Record<string, string>> = Object.freeze({
   'providers.snapshots': 'snapshots',
@@ -485,7 +490,11 @@ export const REMOTE_PROVIDER_RESULTS: Readonly<Record<string, string>> = Object.
   'providers.instances.recheck': 'snapshot',
   'providers.instances.refreshModels': 'snapshot',
   'providers.instances.refreshAllModels': 'results',
-  'providers.instances.setModelPrefs': 'snapshot'
+  'providers.instances.setModelPrefs': 'snapshot',
+  'providers.local.detect': 'rows',
+  'providers.local.connect': '.',
+  'providers.local.setModel': 'ok',
+  'providers.local.checkTools': '.'
 })
 
 export function registerGuiIpc(
@@ -4101,6 +4110,12 @@ export function registerGuiIpc(
   registerHandler('providers:instances:refreshAllModels', async () => refreshAllInstanceModels({}))
   registerHandler('providers:instances:setModelPrefs', async (_e, instanceId: string, patch: unknown) =>
     setInstanceModelPrefs({ instanceId, patch }))
+  // Local model servers (Add provider → Local models). A server's key goes to the daemon only; it is never logged.
+  registerHandler('providers:local:detect', async () => (await guiMms.request<{ rows: unknown[] }>('providers.local.detect', {})).rows)
+  registerHandler('providers:local:connect', async (_e, input: unknown) => guiMms.request('providers.local.connect', objectParams(input)))
+  registerHandler('providers:local:setModel', async (_e, input: unknown) =>
+    (await guiMms.request<{ ok: boolean }>('providers.local.setModel', objectParams(input))).ok)
+  registerHandler('providers:local:checkTools', async (_e, input: unknown) => guiMms.request('providers.local.checkTools', objectParams(input)))
   // Settings → Providers of another computer: the call goes to that computer through this computer's service, which
   // routes only the rows the routed table offers. A key in `params` is passed on and never kept or logged here.
   registerHandler('providers:remote', async (_e, node: unknown, method: unknown, params: unknown) => {

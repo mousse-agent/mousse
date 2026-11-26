@@ -65,7 +65,8 @@ interface Ranked {
 
 /**
  * Every model Automatic naming may ask, best first. A model is left out when its instance is not ready (off, signed out,
- * not running), is a locked bot entry, runs no single requests, or the model is hidden or cannot run one. Usage limits
+ * not running), is a locked bot entry, runs no single requests, or the model is hidden, cannot run one, or is a local
+ * server's. Usage limits
  * are not read here: they are filtered when the index is read (`TitleModelCache.candidates`), so a reset that passes
  * brings the model back without a rebuild.
  */
@@ -81,7 +82,9 @@ export function rankTitleModels(input: RankTitleModelsInput): TitleModelCandidat
     } catch {
       continue
     }
-    const usable = models.filter((model) => !model.hidden && model.oneShot !== false)
+    // A local server's model names only its own threads (`OrchestratorService.localTitleText`): never another
+    // thread, which would wake it or queue on its GPU.
+    const usable = models.filter((model) => !model.hidden && model.oneShot !== false && !model.local)
     // `default` stands for whichever model the agent picks: used only when the instance lists nothing else.
     const concrete = usable.some((model) => model.id !== 'default')
     const provider = providerRank(snapshot, list)

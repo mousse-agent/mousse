@@ -473,6 +473,11 @@ export const PROTOCOL_METHODS = [
   'providers.instances.move',
   'providers.registry.search',
   'providers.catalog.addOptions',
+  // Local model servers (Add provider → Local models): detection on request, connect, a model's window, the tool check.
+  'providers.local.detect',
+  'providers.local.connect',
+  'providers.local.setModel',
+  'providers.local.checkTools',
   'webTools.getCredentialStatus',
   'webTools.setApiKey',
   'webTools.clearApiKey',

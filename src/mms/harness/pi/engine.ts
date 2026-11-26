@@ -12,7 +12,8 @@ import { permissionModeAllows } from '../../../shared/permissionMode'
 import { permissionActionForWrite } from '../../files/gitMetadataWrite'
 import { harnessAppError } from '../../../shared/harness/types'
 import type { CredentialKind } from '../../../shared/harness/status'
-import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
+import { parseListedModelId } from '../../../shared/modelVariants'
+import { LOCAL_AGENT_MIN_WINDOW, localChatOnly, localEffectiveWindow, localToolsUnattended, type LocalModelFacts } from '../../../shared/localServers'
 import type { ChatImageAttachment } from '../../../shared/types'
 import { atomicWriteFileSync, atomicWriteJsonSync } from '../../data/AtomicFs'
 import { normalizeProviderError } from '../../orchestrator/providerErrors'
@@ -130,6 +131,13 @@ export interface PiRpcEngineOptions {
   stateDir: string
   runtime: () => PiRuntimePaths
   catalog: () => PiEngineCatalog
+  /**
+   * A local server's facts for one of its models (`LocalConnections.facts`), for the turn policy: `Chat only` runs
+   * tool-free and never for bots, agent definitions or delegated work; an agent turn needs a known window.
+   */
+  localModel?: (modelId: string) => LocalModelFacts | undefined
+  /** Reads a local server's models again at dispatch; `signal` ends its reads at the bound, its failure ignored. */
+  refreshLocal?: (signal: AbortSignal) => Promise<unknown>
   /** The stored key of the instance; it reaches Pi only in the factory's catalogue answer. */
   apiKey?: () => string | undefined
   /**
@@ -318,6 +326,9 @@ function toolCallsOf(message: unknown): Array<{ id: string; name: string; argume
 function linesOf(text: unknown): number {
   return typeof text === 'string' && text ? text.split('\n').length : 0
 }
+
+/** How long a dispatch waits for a local server's list (one loopback read). */
+const LOCAL_DISPATCH_REFRESH_MS = 400
 
 /** Resolves after `promise` settles or `ms` passes, whichever is first. */
 function within(promise: Promise<unknown>, ms: number): Promise<void> {
@@ -883,7 +894,7 @@ export class PiRpcEngine implements ProviderAdapter {
    * carry (the thinking budget plus the answer room on budget-thinking models, else 256).
    */
   spendModel(model: string): SpendModelFacts | undefined {
-    const { baseId, effort } = parseThinkingSuffixFromModelId(model)
+    const { baseId, effort } = this.parseModel(model)
     const entry = this.options.catalog().provider.models.find((candidate) => candidate.id === baseId)
     if (!entry) return undefined
     const level = piThinkingLevel(effort)
@@ -900,8 +911,13 @@ export class PiRpcEngine implements ProviderAdapter {
     }
   }
 
+  /** A model id and its effort; an id the catalogue lists exactly is never split (`phi3:medium` on a local server). */
+  private parseModel(model: string): { baseId: string; effort?: string } {
+    return parseListedModelId(model, (id) => this.options.catalog().provider.models.some((candidate) => candidate.id === id))
+  }
+
   private thinkingFor(model: string): { modelId: string; thinking: PiThinkingLevel } {
-    const { baseId, effort } = parseThinkingSuffixFromModelId(model)
+    const { baseId, effort } = this.parseModel(model)
     const thinking = piThinkingLevel(effort)
     return { modelId: baseId, thinking }
   }
@@ -1185,11 +1201,49 @@ export class PiRpcEngine implements ProviderAdapter {
 
   // -- Turns --------------------------------------------------------------------------------------
 
+  /** Whether a local server's model runs this turn tool-free (`Chat only`). */
+  private chatOnly(model: string): boolean {
+    const facts = this.options.localModel?.(this.parseModel(model).baseId)
+    return facts !== undefined && localChatOnly(facts)
+  }
+
+  /**
+   * A local server's model, checked before anything starts (the list read again first, within {@link LOCAL_DISPATCH_REFRESH_MS}):
+   * a `Chat only` model runs a person's thread tool-free and is refused for bots, agent definitions and delegated work;
+   * those need a passed tool check; an agent turn needs a window that is known and large enough for Mousse's tools.
+   */
+  private async checkLocalTurn(input: TurnInput, host: AdapterHost): Promise<void> {
+    if (!this.options.localModel) return
+    // The bound stops the reads too, not only the wait: a slow server gets no more requests after it.
+    if (this.options.refreshLocal) await within(this.options.refreshLocal(AbortSignal.timeout(LOCAL_DISPATCH_REFRESH_MS)), LOCAL_DISPATCH_REFRESH_MS)
+    const model = this.parseModel(input.model).baseId
+    const facts = this.options.localModel(model)
+    const refuse = (message: string): never => {
+      throw harnessAppError({ code: 'unsupported', message, instanceId: this.options.instanceId })
+    }
+    // Only what the server lists runs: an unlisted id (a custom model) has no checked tools and no known window.
+    if (!facts) refuse(`${this.options.label} does not list ${model}. Load it on the server, then refresh in Settings → Providers.`)
+    const unattended = Boolean(host.bot || host.definition || input.child)
+    const who = host.bot ? 'Bots' : host.definition ? 'Agent definitions' : 'Delegated work'
+    if (localChatOnly(facts!)) {
+      if (unattended) refuse(`${model} is Chat only: it cannot call tools. ${who} need a model that can. Choose another model.`)
+      return
+    }
+    if (unattended && !localToolsUnattended(facts!.tools))
+      refuse(`${who} need a model whose tools passed a check. Run Check tools on ${model} in Settings → Providers → ${this.options.label}.`)
+    const window = localEffectiveWindow(facts!)
+    if (!window) refuse(`${model}'s window is unknown. Set it in Settings → Providers → ${this.options.label} before agent turns.`)
+    if (window! < LOCAL_AGENT_MIN_WINDOW)
+      refuse(`${model} runs with a ${Math.round(window! / 1024)}K window; agent turns need at least ${LOCAL_AGENT_MIN_WINDOW / 1024}K. Raise it in the server's settings, then refresh.`)
+  }
+
   private turnFor(thread: PiThreadProcess): PiTurnResponse {
     const turn = thread.turn
     const catalogRevision = this.options.catalog().revision
     if (!turn) return { attemptToken: '', sessionInstructions: '', tools: [], activeBuiltins: [], mcp: null, catalogRevision }
-    const tools: PiTurnTool[] = turn.tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema, class: tool.class }))
+    // A `Chat only` local model runs with no tool at all, Pi's own included.
+    const chatOnly = this.chatOnly(turn.input.model)
+    const tools: PiTurnTool[] = chatOnly ? [] : turn.tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema, class: tool.class }))
     // An agent definition's system prompt (with its granted skills, as the loop sends them) replaces
     // Pi's as written: none of Mousse's chat instructions (orchestration, applets) is added.
     const instructions = turn.input.instructions?.placement === 'replace' ? turn.input.instructions.text : undefined
@@ -1198,7 +1252,7 @@ export class PiRpcEngine implements ProviderAdapter {
       sessionInstructions: instructions === undefined ? turn.host.bridge?.sessionInstructions ?? '' : '',
       ...(instructions !== undefined ? { systemPrompt: instructions } : {}),
       tools,
-      activeBuiltins: [...turn.active].filter((name) => Object.hasOwn(BUILTIN_CLASSES, name)),
+      activeBuiltins: chatOnly ? [] : [...turn.active].filter((name) => Object.hasOwn(BUILTIN_CLASSES, name)),
       mcp: turn.host.bridge?.mcp ?? null,
       catalogRevision
     }
@@ -1230,7 +1284,7 @@ export class PiRpcEngine implements ProviderAdapter {
     if (!budget?.reserves) return { ok: true }
     const spend = request.spend
     const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0
-    const modelId = parseThinkingSuffixFromModelId(turn.input.model).baseId
+    const modelId = this.parseModel(turn.input.model).baseId
     const entry = this.options.catalog().provider.models.find((candidate) => candidate.id === modelId)
     const rates = entry ? reservationRates(entry.api, entry.cost, fallbackModels(entry).map((fallback) => fallback.cost)) : undefined
     const refuse = (): PiRequestResponse => {
@@ -1479,6 +1533,7 @@ export class PiRpcEngine implements ProviderAdapter {
         missing: ['toolControl'],
         instanceId: this.options.instanceId
       })
+    await this.checkLocalTurn(input, host)
     const key = randomUUID()
     const ref: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model, nativeTurnId: key }
     sink.providerRef(ref)

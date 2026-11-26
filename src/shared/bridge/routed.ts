@@ -765,6 +765,11 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'providers.instances.refreshModels': write('computer', ['instanceId'], { required: ['instanceId'] }),
   'providers.instances.refreshAllModels': write('computer', []),
   'providers.instances.setModelPrefs': write('computer', ['instanceId', 'patch'], { required: ['instanceId', 'patch'] }),
+  // Local model servers of that computer, found on its own loopback; a server's key travels in `connect` only.
+  'providers.local.detect': read('computer', []),
+  'providers.local.connect': write('computer', ['address', 'apiKey', 'allowCleartext'], { required: ['address'] }),
+  'providers.local.setModel': write('computer', ['providerId', 'modelId', 'window'], { required: ['providerId', 'modelId', 'window'] }),
+  'providers.local.checkTools': write('computer', ['providerId', 'modelId'], { required: ['providerId', 'modelId'] }),
   'skills.list': read('computer', []),
   'skills.read': read('computer', ['skillId'], { required: ['skillId'] }),
   'github.status': read('computer', []),

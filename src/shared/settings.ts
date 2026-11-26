@@ -3,6 +3,7 @@ import { normalizeProfilerSettings, type ProfilerSettings } from './diagnostics/
 import { normalizeDriverPath } from './computerUse'
 import type { MousseIntegrationsSettings, SkillModelSettings } from './integrations'
 import { isExpiryPreset, type ExpiryPreset } from './threadExpiry'
+import type { LocalModelFacts } from './localServers'
 import { normalizeGoalTurnLimit } from './threadGoal'
 import { MOUSSE_BUILTIN_TOOL_IDS } from './integrations'
 import type { ChatMode } from './types'
@@ -671,6 +672,8 @@ export interface LlmModelOption {
    * it and a check showed it runs. The picker folds it behind "Show more".
    */
   older?: true
+  /** A model of a local server (Add provider → Local models): its window, tools, images and whether it runs elsewhere. */
+  local?: LocalModelFacts
 }
 
 export interface LlmProviderOption {

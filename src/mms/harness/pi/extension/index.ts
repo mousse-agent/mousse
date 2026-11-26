@@ -24,6 +24,7 @@ import { refusalText } from '../../../run/mcp/appTools/refusal'
 import { brokerOAuth, type PiCredentialPost } from './oauth'
 import { inputBound, sizedMaxTokens, wirePlan, type PiReasoning, type ThinkingBudgets } from '../reservation'
 import { botBashSpawn, containedBashOperations } from './shell'
+import { pinnedFetch } from '../../../providers/local/http'
 
 /** The input key the app-tool registry reads a `per_call` runtime's turn token from (`registry.ts`). */
 const TURN_TOKEN_KEY = '_mousse_turn'
@@ -136,12 +137,36 @@ function postJson<T>(url: string, token: string, body: unknown, signal?: AbortSi
   })
 }
 
+/**
+ * The stock APIs with every request of a local server held to its pin (`PiCatalogProvider.pin`): its origin only, no
+ * redirect, no `Authorization` when keyless. The same `pinnedFetch` serves Mousse's own one-shots.
+ */
+function pinnedApis(pin: NonNullable<PiCatalogResponse['provider']['pin']>): Record<string, ProviderStreams> {
+  const fetch = pinnedFetch(pin)
+  const pinned = (streams: ProviderStreams): ProviderStreams => ({
+    stream: ((model, context, options) => streams.stream(model, context, { ...(options ?? {}), fetch } as never)) as ProviderStreams['stream'],
+    streamSimple: ((model, context, options) => streams.streamSimple(model, context, { ...(options ?? {}), fetch } as never)) as ProviderStreams['streamSimple']
+  })
+  return { 'openai-completions': pinned(openAICompletionsApi()) }
+}
+
 /** The instance's provider: the stock one with Mousse's catalogue and key, or a custom one on the stock APIs. */
 function instanceProvider(catalog: PiCatalogResponse, builtins: Map<string, Provider>): Provider {
   const spec = catalog.provider
   const models = spec.models.map((model) => ({ ...model, provider: spec.id }))
   const stock = spec.builtin ? builtins.get(spec.id) : undefined
   const key = catalog.apiKey
+  if (spec.pin) {
+    // A local server: only the pinned transport, so no request of it can go anywhere else.
+    return createProvider({
+      id: spec.id,
+      ...(spec.name ? { name: spec.name } : {}),
+      ...(spec.baseUrl ? { baseUrl: spec.baseUrl } : {}),
+      auth: { apiKey: { name: `${spec.name ?? spec.id} key`, resolve: async () => ({ auth: { apiKey: key ?? '' }, source: 'Mousse' }) } },
+      models,
+      api: pinnedApis(spec.pin)
+    })
+  }
   if (!stock) {
     return createProvider({
       id: spec.id,

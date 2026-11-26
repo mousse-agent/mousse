@@ -22,6 +22,15 @@ import {
 import type { LlmModelOption } from '../src/shared/settings'
 
 describe('modelVariants', () => {
+  it("lists a local server's ids as models of their own: phi3:medium is not phi3 at medium", () => {
+    const families = groupModelsByFamily('pi:local-ollama', [{ id: 'phi3', label: 'phi3' }, { id: 'phi3:medium', label: 'phi3:medium' }, { id: 'qwen3:fast', label: 'qwen3:fast' }])
+    expect(families.map((family) => [family.familyLabel, family.variants.map((variant) => variant.id), family.efforts, family.hasSubOptions]).sort()).toEqual([
+      ['phi3', ['phi3'], [], false],
+      ['phi3:medium', ['phi3:medium'], [], false],
+      ['qwen3:fast', ['qwen3:fast'], [], false]
+    ])
+  })
+
   it('offers standard speed and resolves it explicitly alongside fast variants', () => {
     const [family] = groupModelsByFamily('openai', [
       { id: 'gpt-5:fast', label: 'GPT-5 (fast)' },
