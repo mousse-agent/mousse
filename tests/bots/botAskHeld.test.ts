@@ -6,7 +6,7 @@
  * turn ends.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_HELD_CHAT_TEXT, BOT_ASK_HELD_CONSULT_TEXT, BOT_ASK_HELD_NEXT_TEXT, BOT_ASK_HELD_UNAVAILABLE_TEXT, BOT_ASK_REFUSED_TEXT, BOT_WORK_HAS_TEXT, BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_HELD_CHAT_TEXT, BOT_ASK_HELD_CONSULT_TEXT, BOT_ASK_HELD_NEXT_TEXT, BOT_ASK_HELD_UNAVAILABLE_TEXT, BOT_ASK_REFUSED_TEXT, BOT_WORK_HAS_TEXT, BotEngine, botAskedText } from '../../src/mms/bots/activation/BotEngine'
 import type { BotBrowserHost } from '../../src/mms/bots/activation/dispatcher'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
@@ -81,7 +81,7 @@ describe('work that was running when the owner pressed Allow', () => {
   it('asks for nothing the chat already got allowed: no card, and it continues with it', async () => {
     // The chat asks for commands and hands the work off in the same turn; the work starts at once, without commands.
     const turn = await chat('Run cua-driver', 'm1')
-    expect(turn.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To run it.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(turn.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To run it.' })).toBe(botAskedText('run commands', BOT_ASK_DEFERRED_TEXT))
     const { workId } = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Run cua-driver', brief: 'Run cua-driver.', key: 'k' })
     await finish(f, turn.payload, 'completed', { text: 'I asked to run commands, and I am on it.' })
     const work = await start(f, workId)
@@ -110,7 +110,7 @@ describe('work that was running when the owner pressed Allow', () => {
       expect(cards()).toEqual([])
       // The owner allows the browser from the chat; the work never calls escalate.
       const other = await chat('Use the browser from now on', 'm2')
-      expect(other.prepared.authority.escalate!({ permission: { tool: 'browser' }, reason: 'For the weather.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+      expect(other.prepared.authority.escalate!({ permission: { tool: 'browser' }, reason: 'For the weather.' })).toBe(botAskedText('use the browser', BOT_ASK_DEFERRED_TEXT))
       await finish(f, other.payload, 'completed', { text: 'Asked.' })
       await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
       expect(await open()).toEqual(refused('not_granted', BOT_ASK_HELD_NEXT_TEXT))
@@ -184,7 +184,7 @@ describe('work that was running when the owner pressed Allow', () => {
     work.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To check.' })
     await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'not_now')
     const turn = await chat('Fine, run commands', 'm2')
-    expect(turn.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'The owner agreed.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(turn.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'The owner agreed.' })).toBe(botAskedText('run commands', BOT_ASK_DEFERRED_TEXT))
     await finish(f, turn.payload, 'completed', { text: 'Asked.' })
     await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
     expect(work.prepared.authority.check(command('cua-driver --version'))).toEqual({ ok: false, refused: { text: BOT_ASK_HELD_NEXT_TEXT, askId: '' } })
@@ -201,7 +201,7 @@ describe('work that was running when the owner pressed Allow', () => {
     const work = await workStarted('Sum my numbers', 'm1')
     expect(work.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Maybe later.' })).toMatch(/^Asked the owner/)
     const other = await chat('Also check the browser', 'm2')
-    expect(other.prepared.authority.escalate!({ permission: { tool: 'browser' }, reason: 'For later.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(other.prepared.authority.escalate!({ permission: { tool: 'browser' }, reason: 'For later.' })).toBe(botAskedText('use the browser', BOT_ASK_DEFERRED_TEXT))
     await finish(f, other.payload, 'completed', { text: 'Asked.' })
     // The browser is allowed; the work only ever wanted commands, which are still not allowed.
     await f.bots.service.answer(botId, cards().find((message) => message.ask!.title === 'use the browser')!.ask!.askId, 'allow')
@@ -224,7 +224,7 @@ describe('work that was running when the owner pressed Allow', () => {
     expect(f.store.activation(work.workId)!.status).toBe('done')
     // A later turn asks again, as it does today.
     const again = await chat('Run it now', 'm2')
-    expect(again.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To run it.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(again.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To run it.' })).toBe(botAskedText('run commands', BOT_ASK_DEFERRED_TEXT))
     await finish(f, again.payload, 'completed', { text: 'Asked.' })
     expect(f.store.openAsks(botId)).toMatchObject([{ fingerprint: shellFingerprint }])
   })

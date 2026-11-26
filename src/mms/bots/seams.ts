@@ -115,6 +115,11 @@ export interface BotToolHost {
      * notes while it runs), or `start` (when it starts or goes on).
      */
     reach?(botId: string, workId: string): 'now' | 'after_compaction' | 'step_end' | 'start'
+    /**
+     * Whether a note chat activation `from` passes on carries the owner's own message: false on a turn no owner message
+     * started (a job notice, a wake), whose note is the bot's own update and is never credited to the owner.
+     */
+    fromOwner?(botId: string, from: string): boolean
   }
   /** `mcp_servers`: the owner's MCP servers the bot may ask for, and whether it holds their tools. Absent: none here. */
   mcpServers?(botId: string, lane: BotLane): Promise<BotMcpListing>
@@ -257,8 +262,11 @@ export interface BotActivityContext {
 
 /** Activity chips (§5.8). WP3 implements; WP2's engine wires it into the authority and drains it at settle. */
 export interface BotActivitySink {
-  /** Every call the authority allowed: a live chip, emitted as `bots.activity` at most 4 a second. */
-  onAllowed(ctx: BotActivityContext, call: { tool: string; input: unknown }): void
+  /**
+   * Every call the authority allowed: a live chip, emitted as `bots.activity` at most 4 a second. `own`: the provider's
+   * own storage (`BotChipCall.own`), which shows no chip of its own.
+   */
+  onAllowed(ctx: BotActivityContext, call: { tool: string; input: unknown; own?: true }): void
   /** An app tool returned: its outcome chip, if it has one. */
   onAppResult(ctx: BotActivityContext, tool: string, result: unknown): void
   /** The dispatch settled: its rolled-up chips for the message row, and the list is cleared. */
@@ -321,6 +329,11 @@ export interface BotJournalInput {
   threadId?: string
   /** Idempotence key, unique per bot: `bm:<bot_messages.id>`, `<threadId>:<messageId>`, `act:<id>:start` … */
   sourceKey: string
+  /**
+   * A chat row (`bm:<id>`) that is a thread's message too: that message's capture key (`<threadId>:<messageId>`). The
+   * row stands for it, so capture never journals the message apart (`BotMemoryStore.appendInTx`).
+   */
+  standsFor?: string
   who: BotJournalWho
   /** The content came from outside (a web page, tool output). */
   external?: boolean

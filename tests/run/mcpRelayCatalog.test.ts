@@ -205,7 +205,7 @@ describe('RelayCatalog', () => {
     const { catalog, settings, state } = setup()
     await catalog.refresh()
     expect(catalog.revision()).not.toBe('')
-    settings.relay = { runtimes: { claude: false, codex: false, cursor: false, acp: false, antigravity: false, grok: false } }
+    settings.relay = { runtimes: { claude: false, codex: false, cursor: false, acp: false, antigravity: false, grok: false, opencode: false } }
     expect(catalog.revision()).toBe('')
     settings.relay = { runtimes: {} }
     state.servers = [{ ...echo, status: 'missing-env' }]
@@ -288,7 +288,7 @@ describe('RelayCatalog', () => {
 
   it('starts no server when no runtime has the relay', async () => {
     const { catalog, manager, settings } = setup()
-    settings.relay = { runtimes: { claude: false, codex: false, cursor: false, acp: false, antigravity: false, grok: false } }
+    settings.relay = { runtimes: { claude: false, codex: false, cursor: false, acp: false, antigravity: false, grok: false, opencode: false } }
     await catalog.refresh()
     expect(manager.listConfiguredServers).not.toHaveBeenCalled()
     expect(manager.getEnabledToolsByServer).not.toHaveBeenCalled()
@@ -310,7 +310,7 @@ describe('relayTurnContext (completeAppTurn)', () => {
     const relay = await relayTurnContext(catalog, settings, { projectPath: '/p' })
     expect(relay).toEqual({
       revision: catalog.revision('/p'),
-      runtimes: { claude: true, codex: true, cursor: false, acp: true, antigravity: true, grok: true }
+      runtimes: { claude: true, codex: true, cursor: false, acp: true, antigravity: true, grok: true, opencode: true }
     })
     expect(relay!.revision).not.toBe('')
   })

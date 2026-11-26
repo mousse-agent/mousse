@@ -217,7 +217,19 @@ export interface TurnSink {
    * Token usage; the orchestrator adds it to the usage statistics, attributed to the latest
    * `providerMetrics` model.
    */
-  usage(u: { input: number; output: number; cacheRead: number; cacheWrite: number; /** The request's price, when the runtime knows it. */ costUsd?: number }): void
+  usage(u: {
+    input: number
+    output: number
+    cacheRead: number
+    cacheWrite: number
+    /** The price of what this report covers, when the runtime knows it. */
+    costUsd?: number
+    /**
+     * How many model requests this report covers, when the runtime says (Claude Code: its distinct assistant messages;
+     * Codex: its token updates). Absent where a report sums a whole prompt's requests without naming them (ACP).
+     */
+    requests?: number
+  }): void
   /** The provider session reference, as soon as it is known and whenever it changes (§13.1 `nativeRef`). */
   providerRef(ref: ProviderRef): void
   /**

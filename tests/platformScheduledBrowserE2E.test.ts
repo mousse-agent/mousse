@@ -173,9 +173,9 @@ describe('scheduled Browser workflow after owning GUI closes', () => {
       }, policy: services.platform.workflowRuns.policy.snapshot(main.profileId, {
         allowedTools: ['browser_open'], allowedCapabilities: ['browser.session'], allowedEffects: ['external']
       }), signal: attachedAbort.signal }, 'browser_open', {})
-      // No GUI is present to grant access. The request must wait for consent,
+      // No GUI is present to open an in-app tab. The request must wait for a tab,
       // stay off managed Chrome, and remain cancellable instead of hanging the test.
-      await vi.waitFor(() => expect(services!.platform.browser.accessStatus().pending).toHaveLength(1))
+      await vi.waitFor(() => expect(services!.platform.browser.accessStatus().tabRequests).toHaveLength(1))
       expect(services.platform.browser.managedDispatchAttempted).toBe(false)
       attachedAbort.abort()
       expect(await explicitAttached).toMatchObject({ ok: false, error: { code: 'cancelled' } })

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Wheel targets</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; font: 16px sans-serif }
+  /* Two panes that scroll on their own, side by side; the page itself does not scroll. Left pane: (0, 100)
+     to (400, 400); right pane: (500, 100) to (900, 400). A wheel moves only the pane under it. */
+  .pane { position: absolute; top: 100px; width: 400px; height: 300px; overflow: auto; background: #eef }
+  .pane div { height: 2000px }
+  #left { left: 0 }
+  #right { left: 500px }
+  #state { position: absolute; left: 0; top: 450px; margin: 0 }
+</style></head>
+<body>
+  <div id="left" class="pane"><div></div></div>
+  <div id="right" class="pane"><div></div></div>
+  <p id="state">left:0 right:0</p>
+  <script>
+    const left = document.getElementById('left')
+    const right = document.getElementById('right')
+    const show = () => { document.getElementById('state').textContent = 'left:' + Math.round(left.scrollTop) + ' right:' + Math.round(right.scrollTop) }
+    left.addEventListener('scroll', show)
+    right.addEventListener('scroll', show)
+  </script>
+</body>
+</html>

@@ -22,7 +22,7 @@ import type { BotChatMessage } from '../../src/shared/bots/personal/chat'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import { QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT } from '../../src/shared/bots/personal/questions'
-import { BOT_ASK_DEFERRED_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, botAskedText } from '../../src/mms/bots/activation/BotEngine'
 import { BOT_THREADS_READ_ONLY_TURN_NOTE, botInstructions } from '../../src/mms/bots/instructions'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -214,7 +214,7 @@ describe('a question in the chat', () => {
 describe('what a question never does', () => {
   it('ask_owner after escalate in the same turn is refused: a tap at the wall would count as Not now', async () => {
     const turn = await chatTurn('Book the viewing for me', 'w1')
-    expect(turn.prepared.authority.escalate!({ permission: { tool: 'browser' }, reason: 'To book it on the site.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(turn.prepared.authority.escalate!({ permission: { tool: 'browser' }, reason: 'To book it on the site.' })).toBe(botAskedText('use the browser', BOT_ASK_DEFERRED_TEXT))
     expect(await tool('ask_owner', turn.prepared, turn.payload.threadId, FLATS)).toEqual({ text: QUESTION_AFTER_ASK_TEXT, isError: true })
     await finish(f, turn.payload, 'completed', { text: 'I need the browser.' })
     expect(chatOf(f, botId).some((message) => message.question)).toBe(false)

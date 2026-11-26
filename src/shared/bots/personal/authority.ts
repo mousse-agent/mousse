@@ -204,6 +204,12 @@ export interface BotAuthority {
   checkAny?(calls: readonly NormalisedCall[]): BotCheck
   /** Pi alone: prepare a file call after the grant check, before charging it. Complete only calls that ran. */
   piFileCall?(tool: string, args: Record<string, unknown>): { refused: string } | { completed(success: boolean, read?: BotFileReadResult): void }
+  /**
+   * One Mousse app tool or MCP call of this turn, allowed, starts running now: the registry hands it to its handler, or
+   * the relay or Pi's proxy to its server. Each call reaches this once, however many times it was checked before, so a
+   * turn whose runtime counts no tool calls itself counts it here. Absent: nothing is counted here.
+   */
+  callRuns?(): void
   /** The activation's request and tool-call counts: one atomic row, shared by its main run and consults. */
   counters: CounterScope
   time: ActiveTimeScope

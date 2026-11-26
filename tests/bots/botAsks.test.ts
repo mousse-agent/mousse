@@ -8,7 +8,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_DUPLICATE_TEXT, BOT_ASK_NOT_NOW_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_MCP_UNAVAILABLE_TEXT, BOT_SKILLS_NO_ASK_TEXT, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_DUPLICATE_TEXT, BOT_ASK_NOT_NOW_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_MCP_UNAVAILABLE_TEXT, BOT_SKILLS_NO_ASK_TEXT, BOT_WORK_HAS_TEXT, BOT_ASK_RAISED_TEXT, botAskedText } from '../../src/mms/bots/activation/BotEngine'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
@@ -74,10 +74,12 @@ describe('asks in a run', () => {
 
   it('the bot\'s own escalate in a run asks once and carries on', async () => {
     const first = await run('r1')
-    expect(first.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To tidy them.' })).toMatch(/^Asked the owner/)
+    // It is told the exact title of the card it made: the name it tells its owner it asked for.
+    expect(first.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To tidy them.' })).toBe(botAskedText('run commands', BOT_ASK_RAISED_TEXT))
     await finish(f, first.payload, 'completed', { text: 'Done what I could.' })
     const second = await run('r2')
-    expect(second.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Again.' })).toMatch(/^Asked the owner/)
+    // The card already open is the one it names.
+    expect(second.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Again.' })).toBe(botAskedText('run commands', BOT_ASK_RAISED_TEXT))
     // A gate refusal of the same permission finds the same ask.
     const gate = second.prepared.authority.check(command('ls'))
     expect(gate).toMatchObject({ ok: false, refused: { askId: f.store.openAsks(botId)[0]!.id } })
@@ -165,12 +167,12 @@ describe('asks in the chat', () => {
 
   it('several asks in one turn show together; the turn continues once every card is answered', async () => {
     const { activation, payload, prepared } = await chat('Ask me now for everything you\'ll need', 'm1')
-    expect(prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Threads.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Threads.' })).toBe(botAskedText('use your threads', BOT_ASK_DEFERRED_TEXT))
     // Asks are ordered by when they were made (two in the same millisecond order by id).
     f.clock.now += 1
-    expect(prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Commands.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Commands.' })).toBe(botAskedText('run commands', BOT_ASK_DEFERRED_TEXT))
     // The same permission again adds no card.
-    expect(prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Threads again.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Threads again.' })).toBe(botAskedText('use your threads', BOT_ASK_DEFERRED_TEXT))
     // The turn keeps running until its text is complete.
     expect(f.store.activation(activation.id)!.status).toBe('running')
     expect(prepared.authority.time.signal.aborted).toBe(false)
@@ -214,7 +216,7 @@ describe('asks in the chat', () => {
   it('an export_memory ask grants nothing', async () => {
     const before = f.store.activeGrant(botId)!.digest
     const { activation, payload, prepared } = await chat('Export your memory', 'm1')
-    expect(prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'You asked.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'You asked.' })).toBe(botAskedText('save its memory to a folder', BOT_ASK_DEFERRED_TEXT))
     await finish(f, payload, 'completed', { text: 'Pick a folder.' })
     const card = chatOf(f, botId).at(-1)!.ask!
     expect(card).toMatchObject({ kind: 'export_memory', status: 'open', title: 'save its memory to a folder' })
@@ -376,7 +378,7 @@ describe('"run commands": one permission, asked for once and remembered', () => 
 
   it('the bot can ask for it itself (escalate), as on runtimes where an ungranted shell does not exist', async () => {
     const { prepared, payload } = await chat('Run the tests in my project', 'm1')
-    expect(prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To run your tests.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To run your tests.' })).toBe(botAskedText('run commands', BOT_ASK_DEFERRED_TEXT))
     await finish(f, payload, 'completed', { text: 'I\'ve asked to run commands.' })
     expect(f.store.openAsks(botId)).toMatchObject([{ fingerprint: shellFingerprint, title: 'run commands' }])
   })

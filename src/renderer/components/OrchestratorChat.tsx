@@ -30,7 +30,7 @@ import { runSlashCommand, type SlashCommandEnv } from '../lib/slashCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isThreadActivityActive, isTurnActivePhase, isTurnStoppable, type TurnPhase } from '../../shared/types'
 import { deletedThreadIds, useAppStore } from '../stores/appStore'
-import { holdModelPick, isSupersededModelPick, modelPickSaved, settleModelPick } from '../lib/modelPicks'
+import { holdModelPick, isSupersededModelPick, modelPickSaved, settleModelPick, withSavedModel } from '../lib/modelPicks'
 import { useCommand } from '../commands/commandRegistry'
 import {
   ChatComposer,
@@ -69,6 +69,7 @@ import { findSubagentEntry, isSubagentStartingOptimistically } from './subagentS
 import { useSubagents } from '../hooks/useSubagents'
 import { useBackgroundWork } from '../hooks/useBackgroundWork'
 import { BackgroundWorkRow } from './BackgroundWorkRow'
+import { NativeSubagentPage } from './NativeSubagentPage'
 import { isRunningSubagent, isWorkingSubagent } from '../../shared/subagents'
 import { stopAllSubagents } from './sideCard/lineageLogic'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
@@ -122,7 +123,6 @@ import { composerThreadActions } from '../lib/composerThreadActions'
 import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, isPendingRowId, pendingThreadRow, typedAfterSend, type PendingThreadRow } from '../lib/pendingThreadRows'
 import { type ComposerWorkspace, composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, newThreadWorktree, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
 import { ComposerProjectPicker, ComposerThreadSettings, type ComposerDeviceProps } from './ComposerWorkspaceToolbar'
-import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
 import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 import { threadReferenceRefusal } from '../lib/threadReference'
@@ -164,6 +164,13 @@ const NO_VOICE_MESSAGES: VoiceMessage[] = []
 /** Composer media (files/voice) cannot go in the persisted workspace store — File/Blob + object URLs. */
 type ComposerMediaDraft = { files: AttachedFile[]; voice: VoiceMessage[] }
 const EMPTY_COMPOSER_MEDIA: ComposerMediaDraft = { files: [], voice: [] }
+
+/** A saved model pick reaches the thread's row as it is now: only the model and the settings revision change (`withSavedModel`). */
+function storeSavedModel(threadId: string, saved: Thread): void {
+  const store = useAppStore.getState()
+  const row = store.threads.find((entry) => entry.id === threadId)
+  store.upsertThread(row ? withSavedModel(row, saved) : saved)
+}
 
 function composerMediaKey(threadId: string | null): string {
   return threadId ?? '__blank__'
@@ -1838,7 +1845,7 @@ export function OrchestratorChat() {
       // A thread without a model of its own would run on the unusable default: give it the shown one.
       const updated = await window.mousse.threads.setModel(activeThreadId, autoModel)
       if (!stillVisible()) return
-      if (updated) useAppStore.getState().upsertThread(updated)
+      if (updated) storeSavedModel(activeThreadId, updated)
       if (typeof updated?.settingsRevision === 'number') autoModelRevision = updated.settingsRevision
     }
     // A thread made for its first message is listed at once, so after a failed selection, a reload or another route in
@@ -1988,7 +1995,7 @@ export function OrchestratorChat() {
           return
         }
         modelPickSaved(threadId, updated ?? undefined)
-        if (settleModelPick(threadId, ticket).latest && updated) useAppStore.getState().upsertThread(updated)
+        if (settleModelPick(threadId, ticket).latest && updated) storeSavedModel(threadId, updated)
       } catch (error) {
         if (!current) {
           setSendError(sendErrorLine(error))
@@ -2169,7 +2176,6 @@ export function OrchestratorChat() {
         ref={inputAreaRef}
         className={`chat-input-area${showQuestions ? ' has-questions' : ''}`}
       >
-        {activeThreadId && !activeThread?.node && <ChatBrowserAccess key={`${profileId}:${activeThreadId}`} threadId={activeThreadId} requireSelectedThread />}
         {emptyThread && <EmptyThreadHeading headline={emptyHeadline} animate={newChatAnimations} continued={continuesWarmEmpty} />}
         <ComposerNoticeProvider>
         {sendError && (sendChanges?.line === sendError && activeThreadId
@@ -2342,6 +2348,7 @@ export function OrchestratorChat() {
         )}
       />
       </SecretRequestActionsContext.Provider>
+      <NativeSubagentPage threadId={activeThreadId} />
     </div>
   )
 }

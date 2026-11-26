@@ -45,15 +45,23 @@ export function textOffsetProblem(all: readonly TranscriptMessage[], afterIndex:
   return undefined
 }
 
-/** The rows from `afterIndex`, `limit` at most, built one at a time so a reader that stops early reads no further. */
+/**
+ * The rows from `afterIndex`, `limit` at most, built one at a time so a reader that stops early reads no further. A
+ * system row with no text (a tool call's or a step's marker) says nothing to a reader and is left out, unless the page
+ * reads on in it (`textOffset`); every row keeps its index in the transcript, so a page continues after its last row's
+ * index (`nextAfterIndexOf`), not after as many rows as it holds.
+ */
 export function* messageRows(
   all: readonly TranscriptMessage[],
   page: { afterIndex: number; limit: number; textOffset: number; maxChars: number }
 ): Generator<MessageRow> {
-  for (let index = page.afterIndex; index < Math.min(all.length, page.afterIndex + page.limit); index += 1) {
+  let yielded = 0
+  for (let index = page.afterIndex; index < all.length && yielded < page.limit; index += 1) {
     const message = all[index]!
     const text = textOf(message)
     const from = index === page.afterIndex ? page.textOffset : 0
+    if (message.role === 'system' && text.length === 0 && from === 0) continue
+    yielded += 1
     const end = cutEnd(text, from + page.maxChars)
     yield {
       index,
@@ -65,4 +73,15 @@ export function* messageRows(
       ...(end < text.length ? { truncated: true as const, totalChars: text.length, nextTextOffset: end } : {})
     }
   }
+}
+
+/**
+ * Where the page after `rows` starts: after its last row's index (rows keep their transcript index, and empty system
+ * rows are left out between them), or, on a page with no row, at the end of the transcript (`total`) when the page
+ * started before it: every message left was one with nothing to read.
+ */
+export function nextAfterIndexOf(rows: ReadonlyArray<Pick<MessageRow, 'index'>>, afterIndex: number, total: number | undefined): number {
+  const last = rows.at(-1)
+  if (last) return last.index + 1
+  return typeof total === 'number' ? Math.max(afterIndex, total) : afterIndex
 }

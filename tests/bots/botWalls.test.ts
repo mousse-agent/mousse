@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_DUPLICATE_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_DUPLICATE_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT, BotEngine, type BotEngineHost, botAskedText } from '../../src/mms/bots/activation/BotEngine'
 import { isBotWallAbort } from '../../src/mms/bots/activation/dispatcher'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
@@ -25,6 +25,7 @@ import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../sr
 import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/definition'
 import { type BotEscalationSummary, type BotPermissionRequest } from '../../src/shared/bots/personal/escalation'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
+import { askText } from '../../src/shared/bots/personal/askText'
 import { BOT_ITEM_TOOLS } from '../../src/shared/bots/personal/items'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import { BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
@@ -200,7 +201,7 @@ const gateWall = (prepared: { authority: BotAuthority }) => prepared.authority.c
 
 /** `escalate` in a chat turn: recorded now; the turn finishes and then waits with its card. */
 async function askAndFinish(prepared: { authority: { escalate?: (request: { permission: unknown; reason: string }) => string } }, payload: BotTurnPayload, permission: BotPermissionRequest = { tool: 'web_fetch' }) {
-  expect(prepared.authority.escalate!({ permission, reason: 'docs' })).toBe(BOT_ASK_DEFERRED_TEXT)
+  expect(prepared.authority.escalate!({ permission, reason: 'docs' })).toBe(botAskedText(askText(permission).title, BOT_ASK_DEFERRED_TEXT))
   end(payload.runId, 'completed')
   bots.settle(payload, { text: 'I need to read the changelog.' })
   await tick()
@@ -236,7 +237,7 @@ describe('walls', () => {
     const { activation, prepared, payload } = await running()
     expect(prepared.authority.escalate!({ permission: { shell: true }, reason: 'x' })).toContain('not one a bot can ask for')
     expect(bots.getActivation(activation.id).status).toBe('running')
-    expect(prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'I need the changelog.', toolCallId: 'call-1' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'I need the changelog.', toolCallId: 'call-1' })).toBe(botAskedText('read web pages', BOT_ASK_DEFERRED_TEXT))
     expect(store.escalations({ activationId: activation.id })[0]).toMatchObject({ kind: 'escalate', mode: 'wall', toolCallId: 'call-1', reason: 'I need the changelog.', status: 'open' })
     // The turn goes on: it is not aborted, and the activation waits only once its text is complete.
     expect(prepared.authority.time.signal.aborted).toBe(false)
@@ -276,13 +277,13 @@ describe('walls', () => {
       expect(bots.getActivation(activation.id).status).toBe('running')
       expect(store.escalations({ activationId: activation.id })).toHaveLength(1)
       // Another permission is not a repeat.
-      expect(next.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Commands.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+      expect(next.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Commands.' })).toBe(botAskedText('run commands', BOT_ASK_DEFERRED_TEXT))
     })
 
     it('may be asked again once the owner writes', async () => {
       const { activation, next } = await deniedThreads()
       bots.chat.post({ botId: 'site-editor', author: 'owner', kind: 'text', text: 'ok, you can ask again', activationId: activation.id, lane: 'chat' })
-      expect(next.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Now?' })).toBe(BOT_ASK_DEFERRED_TEXT)
+      expect(next.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Now?' })).toBe(botAskedText('use your threads', BOT_ASK_DEFERRED_TEXT))
     })
 
     it('may be asked again once the grant changes', async () => {

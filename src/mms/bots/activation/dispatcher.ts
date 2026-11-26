@@ -5,6 +5,7 @@ import type { BindPolicy, ProviderSelection } from '../../../shared/harness/type
 import type { BrowserExecutionBinding } from '../../orchestrator/browser/binding'
 import type { BotTurnPayload } from '../../run/types'
 import type { ProviderMetrics } from '../../harness/adapter'
+import type { CounterScope } from '../../../shared/harness/counters'
 
 /**
  * What the `turn.start` executor asks of the bot engine (PR 6 §4 "Execution"). The payload names
@@ -22,8 +23,9 @@ export interface BotTurnDispatcher {
    */
   refresh?(payload: BotTurnPayload): Promise<void>
   /** The dispatch's run ended (the executor saw it terminal); `text` is the final message, if any. */
+  /** `messageId`: the thread's message holding `text` (`OrchestratorResponse.messageId`). */
   /** `unanswered`: a steer cut the turn and the model wrote nothing after it (`TurnResult.steerUnanswered`). */
-  settle(payload: BotTurnPayload, outcome: { text?: string; unanswered?: boolean }): void
+  settle(payload: BotTurnPayload, outcome: { text?: string; messageId?: string; unanswered?: boolean }): void
   /** The bot's name when `threadId` is one of its threads: ordinary sends there are refused. */
   ownerOf(threadId: string): string | undefined
 }
@@ -42,15 +44,23 @@ export interface PreparedBotTurn {
   /** The binding's policy (`bind(…, {policy})`). */
   policy: BindPolicy
   authority: BotAuthority
+  /**
+   * The activation's counts as the turn's runtime charges them (its budget): `authority.counters`, noting that the
+   * runtime counts its own model requests. Absent: the runtime charges `authority.counters`.
+   */
+  runtimeCounters?: CounterScope
   /** The activation's private scratch folder: the turn's working directory. */
   scratch: string
   /** The runtime produced model text, thinking or a tool call: its prompt reached the model. */
   modelOutput?(): void
   /**
    * The turn's runtime reported token usage (`TurnSink.usage`): one request, or the whole turn where the runtime sums
-   * them. Kept as a measurement in `bots.db` (`bot_turn_usage`); it never changes the turn.
+   * them. A main turn keeps it as a measurement in `bots.db` (`bot_turn_usage`); every turn (a consult's and a
+   * subagent's too) adds what its runtime records none of itself to its activation's counts and spend. It never changes
+   * the turn. `costUsd`: what the runtime says it cost, when it says; `requests`: how many requests it covers, when it
+   * says.
    */
-  usage?(usage: { input: number; output: number; cacheRead: number; cacheWrite: number }): void
+  usage?(usage: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd?: number; requests?: number }): void
   /** The turn's runtime reported its measurements (`TurnSink.providerMetrics`): context size, window, cache and plan use. */
   metrics?(metrics: ProviderMetrics): void
   /** Skill ids the turn may list and load. */
@@ -113,10 +123,16 @@ export interface BotTurnBrowser {
 
 /** The engine's view of the bots' browsers (`BotBrowsers`). */
 export interface BotBrowserHost {
-  /** The browser of one dispatch; undefined when the bot's browser can't be offered here. */
-  turn(input: { botId: string; activationId: string; lane: BotLane; homeThreadId: string; runId: string; signal: AbortSignal }): BotTurnBrowser | undefined
-  /** The activation ended (done, failed or stopped): its tabs close, and an idle browser after them. */
-  activationEnded(input: { botId: string; activationId: string }): void
+  /**
+   * The browser of one dispatch; undefined when the bot's browser can't be offered here. `filesFolder`: the bot's files
+   * folder, where its screenshots are saved for its owner to see.
+   */
+  turn(input: { botId: string; activationId: string; lane: BotLane; homeThreadId: string; runId: string; signal: AbortSignal; filesFolder?: string }): BotTurnBrowser | undefined
+  /**
+   * The activation ended (done, failed or stopped) or let go of the browser to wait: its tabs close, and an idle browser
+   * after them; later when `waitingForOwner` (it waits for its owner's answer, who may check or take over the page).
+   */
+  activationEnded(input: { botId: string; activationId: string; waitingForOwner?: boolean }): void
   /** The bot was deleted: its browser closes; `purge` also erases its sign-ins and site data. */
   removeBot?(botId: string, purge: boolean): Promise<void> | void
 }

@@ -1111,9 +1111,9 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   --chat-composer-gap: 22px;
 }
 
-/* The thread's pane already stands 8px off the window's bottom (frameless-shell.css), so its composer takes that much
-   less: its bottom edge lines up with a side chat's in the app panel, which reaches the window's bottom. */
-html[data-theme] .app .sidebar .chat:not(.chat--empty) {
+/* The thread's pane and the app panel's card both stand 8px off the window's bottom (frameless-shell.css), so their
+   composers take that much less and a side chat's composer lines up with the thread's. */
+html[data-theme] .app :is(.sidebar, .main-area) .chat:not(.chat--empty) {
   --chat-composer-gap: 14px;
 }
 

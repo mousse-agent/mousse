@@ -16,6 +16,7 @@ import { BrowserWorkerError, fail } from '../errors'
 import { browserNavigationUrl } from '../../shared/browser/validation'
 import type { ActionableTarget } from './actionability'
 import { readControlValue } from './actionability'
+import { sleep } from '../util'
 
 function mouseButton(button?: 'left' | 'right' | 'middle'): 'left' | 'right' | 'middle' {
   return button ?? 'left'
@@ -40,6 +41,11 @@ async function mouseClick(
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 }, { sessionId, signal })
   await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, buttons: BUTTON_BITS[button], clickCount }, { sessionId, signal })
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, buttons: 0, clickCount }, { sessionId, signal })
+}
+
+/** The session pointer input for a target goes to (see `ActionableTarget.pointerSessionId`). */
+function pointerSession(target: ActionableTarget, cdpSessionId: string): string {
+  return target.pointerSessionId ?? cdpSessionId
 }
 
 async function focus(cdp: CdpTransport, sessionId: string, backendNodeId: number, signal?: AbortSignal): Promise<void> {
@@ -81,10 +87,10 @@ export async function dispatchAction(
       if (!target || 'from' in target) fail('invalid_action', 'Pointer action requires a target')
       if (target.disabled) fail('not_actionable', 'Target is disabled')
       if (action.type === 'hover') {
-        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.point.x, y: target.point.y }, { sessionId: cdpSessionId, signal })
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.point.x, y: target.point.y }, { sessionId: pointerSession(target, cdpSessionId), signal })
         return
       }
-      await mouseClick(cdp, cdpSessionId, target.point.x, target.point.y, mouseButton(action.button), action.type === 'double-click' ? 2 : 1, signal)
+      await mouseClick(cdp, pointerSession(target, cdpSessionId), target.point.x, target.point.y, mouseButton(action.button), action.type === 'double-click' ? 2 : 1, signal)
       return
     }
     case 'fill':
@@ -92,7 +98,7 @@ export async function dispatchAction(
       if (!target || 'from' in target) fail('invalid_action', 'Text action requires a target')
       if (target.disabled || target.readOnly) fail('not_actionable', 'Target is not editable')
       await focus(cdp, cdpSessionId, target.backendNodeId, signal)
-      await mouseClick(cdp, cdpSessionId, target.point.x, target.point.y, 'left', 1, signal)
+      await mouseClick(cdp, pointerSession(target, cdpSessionId), target.point.x, target.point.y, 'left', 1, signal)
       if (action.type === 'fill') {
         await cdp.send('Runtime.callFunctionOn', {
           objectId: target.objectId,
@@ -130,31 +136,34 @@ export async function dispatchAction(
       if (target.disabled) fail('not_actionable', 'Target is disabled')
       const current = await readControlValue(cdp, cdpSessionId, target.objectId, signal)
       if (!!current.checked !== action.checked) {
-        await mouseClick(cdp, cdpSessionId, target.point.x, target.point.y, 'left', 1, signal)
+        await mouseClick(cdp, pointerSession(target, cdpSessionId), target.point.x, target.point.y, 'left', 1, signal)
       }
       return
     }
     case 'scroll': {
-      const point = target && !('from' in target) ? target.point : undefined
-      const x = point?.x ?? 10
-      const y = point?.y ?? 10
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: action.deltaX, deltaY: action.deltaY }, { sessionId: cdpSessionId, signal })
+      const one = target && !('from' in target) ? target : undefined
+      const x = one?.point.x ?? 10
+      const y = one?.point.y ?? 10
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: action.deltaX, deltaY: action.deltaY }, { sessionId: one ? pointerSession(one, cdpSessionId) : cdpSessionId, signal })
       return
     }
     case 'drag': {
       if (!target || !('from' in target)) fail('invalid_action', 'Drag requires two targets')
       if (target.from.disabled || target.to.disabled) fail('not_actionable', 'Drag target is disabled')
+      // Both ends' points are in one viewport: the tab's (image points) or one frame's (refs), never one of each.
+      const sessionId = pointerSession(target.from, cdpSessionId)
+      if (pointerSession(target.to, cdpSessionId) !== sessionId) fail('unsupported', 'Cross-frame drag is not certified')
       const from = target.from.point
       const to = target.to.point
       const steps = Math.min(40, Math.max(4, Math.ceil(Math.hypot(to.x - from.x, to.y - from.y) / 24)))
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y, buttons: 0 }, { sessionId: cdpSessionId, signal })
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: from.x, y: from.y, button: 'left', buttons: 1, clickCount: 1 }, { sessionId: cdpSessionId, signal })
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y, buttons: 0 }, { sessionId, signal })
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: from.x, y: from.y, button: 'left', buttons: 1, clickCount: 1 }, { sessionId, signal })
       for (let index = 1; index <= steps; index += 1) {
         if (signal?.aborted) fail('cancelled', 'Drag cancelled')
         const t = index / steps
-        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t, button: 'left', buttons: 1 }, { sessionId: cdpSessionId, signal })
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t, button: 'left', buttons: 1 }, { sessionId, signal })
       }
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: to.x, y: to.y, button: 'left', buttons: 0, clickCount: 1 }, { sessionId: cdpSessionId, signal })
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: to.x, y: to.y, button: 'left', buttons: 0, clickCount: 1 }, { sessionId, signal })
       return
     }
     case 'upload':
@@ -358,6 +367,21 @@ export interface NavigationOptions {
   signs?: (frameId: string) => Promise<BrowserPageSigns | undefined>
   /** Answer at the commit (a person's own navigation: their view shows it loading from there). */
   untilCommit?: boolean
+  /** `navigateTab` only: retry once a connection the site closed before answering (default on; tests turn it off). */
+  retryTransient?: boolean
+  /** The time (epoch ms) the navigation answers "still loading" by, however long its setup took; overrides `ceilingMs`. */
+  deadline?: number
+}
+
+/** Chromium's codes for a connection dropped before any answer: on a cold start, often gone a moment later. */
+const TRANSIENT_CONNECTION_ERRORS = new Set(['net::ERR_CONNECTION_CLOSED', 'net::ERR_CONNECTION_RESET'])
+/** How long `navigateTab` waits before its one retry of a dropped connection. */
+const TRANSIENT_RETRY_DELAY_MS = 250
+/** The least time under the ceiling the retry must have left to be worth it. */
+const TRANSIENT_RETRY_MIN_LEFT_MS = 500
+
+function isTransientConnectionFailure(error: unknown): boolean {
+  return error instanceof BrowserWorkerError && error.problem?.kind === 'unreachable' && TRANSIENT_CONNECTION_ERRORS.has(error.problem.code ?? '')
 }
 
 /**
@@ -371,10 +395,57 @@ export interface NavigationOptions {
 export async function navigateTab(cdp: CdpTransport, cdpSessionId: string, url: string, options: NavigationOptions = {}): Promise<BrowserNavigation> {
   const targetUrl = browserNavigationUrl(url)
   // The command answers with this navigation's own loader: only that one counts.
-  return followNavigation(cdp, cdpSessionId, targetUrl, options, false, async () => {
+  const attempt = (attemptOptions: NavigationOptions, before?: () => void) => followNavigation(cdp, cdpSessionId, targetUrl, attemptOptions, false, async () => {
+    before?.()
     const result = await cdp.send<{ frameId: string; loaderId?: string; errorText?: string }>('Page.navigate', { url: targetUrl }, { sessionId: cdpSessionId, timeoutMs: 120_000, signal: options.signal })
     return result
   })
+  if (options.retryTransient === false) return attempt(options)
+  // On a cold start Chromium sometimes reports a connection closed or reset before any answer, and
+  // the same address opens a moment later: that one failure is retried once, under one deadline for
+  // both tries, and only while no other navigation has committed in the tab since this one started.
+  const deadline = options.deadline ?? Date.now() + (options.ceilingMs ?? (options.pace ?? navigationPace).ceilingMs())
+  let replacedBy: string | undefined
+  const onCommit = (params: unknown, sessionId?: string) => {
+    if (sessionId !== cdpSessionId) return
+    const frame = (params as { frame?: { parentId?: string; url?: string; unreachableUrl?: string } })?.frame
+    if (!frame || frame.parentId) return
+    // Chromium's error page for this very address is this navigation's own failure, not another navigation.
+    if (frame.unreachableUrl && sameAddress(frame.unreachableUrl, targetUrl)) return
+    replacedBy ??= frame.url ?? ''
+  }
+  cdp.on('Page.frameNavigated', onCommit)
+  try {
+    try {
+      return await attempt({ ...options, deadline })
+    } catch (error) {
+      if (!isTransientConnectionFailure(error) || options.signal?.aborted) throw error
+      if (deadline - Date.now() - TRANSIENT_RETRY_DELAY_MS <= TRANSIENT_RETRY_MIN_LEFT_MS) throw error
+      await sleep(TRANSIENT_RETRY_DELAY_MS, options.signal).catch(() => {
+        throw new BrowserWorkerError('cancelled', 'Navigation cancelled')
+      })
+      if (replacedBy !== undefined) throw error
+      // Checked again as the retry is sent: its setup may take a moment, and a navigation then is not replaced either.
+      return await attempt({ ...options, deadline }, () => {
+        if (replacedBy !== undefined) throw error
+      })
+    }
+  } finally {
+    cdp.off('Page.frameNavigated', onCommit)
+  }
+}
+
+/** Whether two addresses are the same page (a fragment aside). */
+function sameAddress(a: string, b: string): boolean {
+  const strip = (value: string) => {
+    const hash = value.indexOf('#')
+    return hash >= 0 ? value.slice(0, hash) : value
+  }
+  try {
+    return strip(new URL(a).href) === strip(new URL(b).href)
+  } catch {
+    return strip(a) === strip(b)
+  }
 }
 
 /** Back, forward or reload in a tab, followed like `navigateTab` (`url` is where it was). */
@@ -439,7 +510,8 @@ const DOWNLOAD_WAIT_MS = 600
 
 async function followNavigation(cdp: CdpTransport, cdpSessionId: string, url: string, options: NavigationOptions, commitByEvent: boolean, start: () => Promise<StartedNavigation | undefined>): Promise<BrowserNavigation> {
   const pace = options.pace ?? navigationPace
-  const ceilingMs = options.ceilingMs ?? pace.ceilingMs()
+  // One deadline from the call (or the caller's): the time setting up below is spent from it, not added to it.
+  const deadline = options.deadline ?? Date.now() + (options.ceilingMs ?? pace.ceilingMs())
   const graceMs = options.loadGraceMs ?? LOAD_GRACE_MS
   const startedAt = Date.now()
   await cdp.send('Page.setLifecycleEventsEnabled', { enabled: true }, { sessionId: cdpSessionId, signal: options.signal })
@@ -556,7 +628,7 @@ async function followNavigation(cdp: CdpTransport, cdpSessionId: string, url: st
     }
     const onAbort = () => finish(undefined, new BrowserWorkerError('cancelled', 'Navigation cancelled'))
     // The site has not answered, or the document is not ready, by the ceiling: it is still loading.
-    const ceiling = setTimeout(() => finish({ url: committed?.url ?? url, state: 'loading', ...(committed ? { frameId: committed.frameId } : {}) }), ceilingMs)
+    const ceiling = setTimeout(() => finish({ url: committed?.url ?? url, state: 'loading', ...(committed ? { frameId: committed.frameId } : {}) }), Math.max(0, deadline - Date.now()))
     cdp.on('Page.lifecycleEvent', onLifecycle)
     cdp.on('Page.frameNavigated', onNavigated)
     cdp.on('Page.navigatedWithinDocument', onWithinDocument)

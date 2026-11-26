@@ -28,7 +28,8 @@ import { disposeFixtures, memoryFixture } from './memory/memoryFixture'
 // The open items (their three lines of instructions with the stages, and item_save and item_list in full on every
 // provider), with report_bug and the thread-link line that came beside them, bring the chat lane to about 59,200 on
 // Codex and Pi and 25,550 on Claude Code.
-const CEILING = { codexPi: 59_250, claude: 25_550 } as const
+// The line that browser screenshots show to the owner by themselves, and Other… on ask_owner, add about 150 to each.
+const CEILING = { codexPi: 59_400, claude: 25_700 } as const
 
 let fx: DelegationFixture | undefined
 afterEach(() => {

@@ -2,11 +2,12 @@ import { catalogEntryFor, type BotModelTier } from '../../shared/bots/personal/m
 import type { InstanceSnapshot } from '../../shared/harness/status'
 import type { InstanceModel, ProviderScope } from '../../shared/harness/types'
 import type { ModelCatalog } from '../../shared/modelCatalog'
-import { REASONING_LEVELS } from '../../shared/modelVariants'
 import { piProviderIdOf } from '../../shared/providerInstances'
 import { bundledModelCatalog, modelCatalog } from '../models/modelCatalog'
-import { candidateTier, credentialOf, instanceReady, type ModelCredential } from '../models/modelCandidates'
+import { candidateTier, credentialOf, instanceReady, titleEffortFor, type ModelCredential } from '../models/modelCandidates'
 import type { UsageLimitTracker } from '../models/usageLimits'
+
+export { titleEffortFor }
 
 /**
  * Automatic thread naming's models (Settings → Agents → Thread titles left on Automatic): every connected model that
@@ -46,25 +47,10 @@ function namingProviders(catalog: ModelCatalog | undefined): readonly string[] {
 
 /** Where an instance stands in the provider list: the first entry naming its Pi provider, its driver, or `*`. */
 function providerRank(snapshot: InstanceSnapshot, list: readonly string[]): number {
-  const piProvider = snapshot.driver === 'pi' ? piProviderIdOf(snapshot.instanceId) : undefined
+  const piProvider = piProviderIdOf(snapshot.instanceId)
   const keys = [...(piProvider ? [`pi:${piProvider}`] : []), snapshot.driver, '*']
   const rank = list.findIndex((entry) => keys.includes(entry))
   return rank === -1 ? list.length : rank
-}
-
-/**
- * The level a naming request asks for. A Pi model runs with thinking off unless it cannot turn it off; Claude Code and
- * Codex at `low` when the model offers it; any other agent (Antigravity) at the model's own default.
- */
-export function titleEffortFor(driver: string, model: InstanceModel): string | undefined {
-  const efforts = model.capabilities.efforts
-  if (driver === 'pi') {
-    if (model.capabilities.thinkingOff !== false) return undefined
-    if (efforts.includes('low')) return 'low'
-    return [...REASONING_LEVELS].find((level) => level !== 'none' && efforts.includes(level)) ?? efforts.find((level) => level !== 'off' && level !== 'none')
-  }
-  if (driver === 'claude' || driver === 'codex') return efforts.includes('low') ? 'low' : undefined
-  return undefined
 }
 
 interface Ranked {

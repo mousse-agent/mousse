@@ -585,6 +585,35 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     expect((await call('parent', 'thread_read', { threadId: 'stranger', view: 'messages', limit: 201 })).isError).toBe(true)
   })
 
+  it('thread_read messages: system rows with no text are left out; rows keep their transcript index and the pages read on to the end', async () => {
+    const { read, messages } = await world()
+    // Rows: user, an empty system marker, a reply, two empty markers, a system row with text, a reply, two empty markers at the end.
+    const long = 'z'.repeat(THREAD_MESSAGE_MAX_CHARS + 10)
+    messages.set('stranger', [
+      message(0, 'ask'), message(1, '', 'system'), message(2, 'one', 'assistant'), message(3, '', 'system'), message(4, '', 'system'),
+      message(5, long, 'system'), message(6, 'two', 'assistant'), message(7, '', 'system'), message(8, '', 'system')
+    ])
+    const indices = (page: { messages: Array<{ index: number }> }) => page.messages.map((entry) => entry.index)
+    // The limit counts the rows a reader gets, not the markers passed over.
+    const first = await read('parent', { threadId: 'stranger', view: 'messages', limit: 2 })
+    expect(indices(first)).toEqual([0, 2])
+    expect(first).toMatchObject({ total: 9, nextAfterIndex: 3 })
+    // A system row with text is read like any other, and read on with textOffset.
+    const second = await read('parent', { threadId: 'stranger', view: 'messages', afterIndex: first.nextAfterIndex, limit: 1 })
+    expect(second.messages[0]).toMatchObject({ index: 5, role: 'system', truncated: true })
+    const rest = await read('parent', { threadId: 'stranger', view: 'messages', afterIndex: 5, textOffset: second.messages[0].nextTextOffset, limit: 2 })
+    expect(rest.messages.map((entry: { index: number; text: string }) => [entry.index, entry.text])).toEqual([[5, 'z'.repeat(10)], [6, 'two']])
+    // Following the pages from there reaches the end of the transcript, past the markers it ends with.
+    let at = rest.nextAfterIndex
+    for (let pages = 0; pages < 3 && at < 9; pages += 1) {
+      const page = await read('parent', { threadId: 'stranger', view: 'messages', afterIndex: at })
+      expect(page.messages).toEqual([])
+      expect(page.nextAfterIndex).toBeGreaterThan(at)
+      at = page.nextAfterIndex
+    }
+    expect(at).toBe(9)
+  })
+
   it('thread_read messages: a message marked truncated is read on with textOffset to its end, never splitting a character', async () => {
     const { call, read, messages } = await world()
     // A character outside the BMP sits on the cut: the first part stops before it rather than halving it.

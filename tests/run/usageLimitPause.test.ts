@@ -275,6 +275,27 @@ describe('a usage limit pauses the run', () => {
       expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Do the work', CONTINUE_TEXT])
     })
 
+    it('pressed before the reset, the note says only which run it continues: the limit has not reset', async () => {
+      const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi])
+      const { thread, run } = await paused(d, pi)
+      await d.orch.resumePausedRun(run.runId)
+      await waitFor(() => runsOf(d, thread.id).length === 2 && settled(d, thread.id), 'the continuation to finish')
+      expect(runsOf(d, thread.id)[1]).toMatchObject({ source: 'resume_now', outcome: { continuationOf: run.runId, resumedFromPause: 'user' } })
+      expect(systemLines(d, thread.id).filter((text) => text.startsWith('Continuing run'))).toEqual(['Continuing run 1.'])
+    })
+
+    it('pressed once the reset time passed, the note says the limit reset', async () => {
+      const pi = scripted([{ fail: () => limit() }])
+      const d = boot(newHome(), [pi], { runs: { resumeAfterUsageLimit: false } })
+      const { thread, run } = await paused(d, pi)
+      const until = Date.parse(run.outcome!.pause!.until)
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, until - Date.now()) + 50))
+      await d.orch.resumePausedRun(run.runId)
+      await waitFor(() => runsOf(d, thread.id).length === 2 && settled(d, thread.id), 'the continuation to finish')
+      expect(systemLines(d, thread.id).filter((text) => text.startsWith('Continuing run'))).toEqual(['Continuing run 1 after the usage limit reset.'])
+    })
+
     it('replaces the waiting timer: one item and one run, however often it is pressed', async () => {
       const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
       const d = boot(newHome(), [pi])

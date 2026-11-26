@@ -617,34 +617,49 @@ html.platform-darwin .titlebar-left {
   color: var(--text-secondary);
 }
 
-/* A browser tab names its page (its title, else its host), cut short with an ellipsis, even where other tabs show
-   only their icons. */
+/* A browser tab names its page (its title, else its host), cut short with an ellipsis. */
 .main-view-tab.is-browser .main-view-tab-label {
   max-width: 22ch;
 }
 
+/* A narrow panel (the side pane opens at 440px) keeps every tab's name, cut short; only a terminal's folder goes. */
 @container main-area (max-width: 520px) {
-  .main-view-tab-label,
   .main-view-tab-detail {
     display: none;
   }
 
+  .main-view-tab-label,
   .main-view-tab.is-browser .main-view-tab-label {
-    display: block;
     max-width: 12ch;
   }
 
+  /* Tabs cut their names shorter before the strip has to scroll, so the add button stays in view; each keeps its
+     icon and a letter or two. Only the selected tab (or one reached from the keyboard) keeps a close button, so the
+     others' names get its room; middle-click still closes any tab. */
   .main-view-tab {
-    gap: 0;
-    padding: 6px 9px;
+    flex-shrink: 1;
+    min-width: 52px;
+  }
+
+  .main-view-tab.active {
+    min-width: 76px;
+  }
+
+  .main-view-tab-select {
+    flex: 1 1 auto;
+    overflow: hidden;
+  }
+
+  .main-view-tab-close {
+    flex-shrink: 0;
+  }
+
+  .main-view-tab:not(.active):not(:focus-within) .main-view-tab-close {
+    display: none;
   }
 }
 
 @container main-area (max-width: 360px) {
-  .main-view-tab {
-    padding: 6px 7px;
-  }
-
   .main-view-tabs {
     gap: 1px;
   }
@@ -924,6 +939,30 @@ html.platform-darwin .titlebar-left {
   white-space: nowrap;
   color: var(--text-secondary);
   font-size: 12.5px;
+}
+
+/* A file the turn deleted, or that is gone from its path now: its name struck through, the row quieter. */
+.turn-edits-file[data-gone] {
+  color: var(--text-secondary);
+}
+
+.turn-edits-file[data-gone] .turn-edits-file-name {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, currentColor 60%, transparent);
+}
+
+.turn-edits-file[data-gone] .turn-edits-file-icon,
+.turn-edits-file[data-gone] .turn-edits-stat {
+  opacity: 0.6;
+}
+
+/* An empty mark under a turn whose calls named no file: its time on screen reads the turn's recorded changes. Out of
+   the flow, so it adds no gap. */
+.turn-edits-probe {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
 }
 
 .placeholder-view {
@@ -4073,7 +4112,6 @@ html[data-theme='high-contrast'] {
 }
 
 .browser-menu > button,
-.browser-menu-actions > button,
 .browser-menu-zoom {
   display: flex;
   align-items: center;
@@ -4087,10 +4125,10 @@ html[data-theme='high-contrast'] {
   text-align: left;
 }
 
-.browser-menu > button:hover, .browser-menu-actions > button:hover { background: rgba(var(--accent-rgb), 0.15); }
+.browser-menu > button:hover { background: rgba(var(--accent-rgb), 0.15); }
 .browser-menu-label { display: inline-flex; align-items: center; gap: 8px; }
 .browser-menu-label svg,
-.browser-menu > button > svg, .browser-menu-actions > button > svg { width: 14px; height: 14px; flex-shrink: 0; }
+.browser-menu > button > svg { width: 14px; height: 14px; flex-shrink: 0; }
 .browser-menu-zoom > span:first-child { margin-right: auto; }
 .browser-menu-zoom > button { display: inline-flex; padding: 4px; border-radius: 4px; }
 .browser-menu-zoom > button:hover { background: rgba(var(--accent-rgb), 0.16); }
@@ -4113,7 +4151,7 @@ html[data-theme='high-contrast'] {
   min-width: 130px;
 }
 
-/* Agent access in the toolbar: who may drive the browser, and who drives this tab now. */
+/* Who has a watched browser, beside its address (`WatchedBrowserPane`'s control). */
 .browser-access {
   display: inline-flex;
   align-items: center;
@@ -4125,9 +4163,31 @@ html[data-theme='high-contrast'] {
 }
 
 .browser-access-icon { flex-shrink: 0; }
-.browser-access-off .browser-access-icon { opacity: 0.6; }
 .browser-access-agent .browser-access-icon { color: var(--accent); }
 .browser-access-human .browser-access-icon { color: var(--text-primary); }
+
+/* Who is using the in-app tab, beside the address bar (`BrowserActivityIndicator`); nothing while it is idle. */
+.browser-activity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 0 4px 0 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.browser-activity-icon { flex-shrink: 0; }
+.browser-activity-agent-busy .browser-activity-icon { color: var(--accent); }
+.browser-activity-agent-waiting .browser-activity-icon { opacity: 0.6; animation: browser-activity-pulse 1.6s steps(12, jump-none) infinite; }
+@keyframes browser-activity-pulse { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) {
+  .browser-activity-agent-waiting .browser-activity-icon { animation: none; }
+}
+[data-motion='off'] .browser-activity-agent-waiting .browser-activity-icon { animation: none; }
+.browser-activity-resume { padding: 2px 8px; border: 1px solid var(--ui-line); border-radius: 6px; background: transparent; color: var(--text-primary); font-size: 12px; cursor: pointer; }
+.browser-activity-resume:hover:not(:disabled) { background: var(--ui-hover); }
+.browser-activity-resume:disabled { opacity: .5; cursor: default; }
 
 /* The last browser action's result or error, directly under the toolbar. */
 .browser-notice {
@@ -4208,42 +4268,7 @@ html[data-theme='high-contrast'] {
 
 .browser-manual-surface { position: relative; }
 
-/* Asking for agent access: a panel at the pane's right edge, under the toolbar, sliding and fading like a bot's About. */
-.browser-manual-surface { anchor-scope: --browser-toolbar; }
-.browser-toolbar { anchor-name: --browser-toolbar; }
-.browser-access-panel {
-  position: absolute;
-  z-index: 4;
-  top: anchor(--browser-toolbar bottom, 0px);
-  right: 0;
-  bottom: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-8);
-  width: min(300px, 100%);
-  padding: var(--space-24) var(--space-16);
-  overflow-y: auto;
-  background: var(--pane-surface, var(--bg-primary));
-  border-left: 1px solid var(--ui-line);
-  box-shadow: -16px 0 32px rgb(0 0 0 / 0.18);
-  color: var(--text-secondary);
-  font-size: 12.5px;
-  line-height: 1.45;
-  opacity: 0;
-  transform: translateX(24px);
-  transition: opacity var(--ui-dur-slow) ease, transform var(--ui-dur-slow) cubic-bezier(0.22, 1, 0.36, 1);
-}
-.browser-access-panel.is-open { opacity: 1; transform: none; }
-.browser-access-panel p { margin: 0; }
-.browser-access-panel-icon { display: grid; place-items: center; width: 36px; height: 36px; margin-bottom: var(--space-4); border-radius: 50%; background: var(--ui-hover); color: var(--text-secondary); }
-.browser-access-panel .browser-access-panel-title { color: var(--text-primary); font-size: 13px; font-weight: 500; }
-.browser-access-panel-actions { display: flex; gap: var(--space-8); margin-top: var(--space-8); }
-.browser-access-panel-actions button { padding: 5px 12px; border: 1px solid var(--ui-line); border-radius: 6px; background: transparent; color: var(--text-primary); cursor: pointer; }
-.browser-access-panel-actions button:hover:not(:disabled) { background: var(--ui-hover); }
-.browser-access-panel-actions .browser-access-panel-allow { border-color: transparent; background: var(--accent); color: var(--ui-on-accent); }
-.browser-access-panel-actions .browser-access-panel-allow:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, #fff); }
-.browser-access-panel-actions button:disabled { opacity: .5; cursor: default; }
+/* Over a page while an agent's step changes it: the person's first touch stops the step and gives the tab back. */
 .browser-agent-shield { position: absolute; inset: 0; z-index: 3; cursor: default; }
 
 /* The app-owned start page follows the app theme; visited sites keep the white default. */

@@ -57,10 +57,11 @@ interface LiveState {
   timer?: unknown
 }
 
-/** A call as the chips read it: the neutral or app-tool name and its arguments. */
-export function chipCallOf(call: NormalisedCall): { tool: string; input: unknown } {
+/** A call as the chips read it: the neutral or app-tool name, its arguments, and whether it touched the provider's own storage. */
+export function chipCallOf(call: NormalisedCall): BotChipCall {
   switch (call.kind) {
     case 'builtin':
+      return { tool: call.tool, input: call.args, ...(call.own ? { own: true as const } : {}) }
     case 'app':
       return { tool: call.tool, input: call.args }
     // The server's name only ("used GitHub"): never the tool's arguments, nor the server's id.
@@ -84,7 +85,7 @@ export class BotActivityLog implements BotActivitySink {
     return (call) => this.onAllowed(ctx, chipCallOf(call))
   }
 
-  onAllowed(ctx: BotActivityContext, call: { tool: string; input: unknown }): void {
+  onAllowed(ctx: BotActivityContext, call: BotChipCall): void {
     try {
       const dispatch = this.dispatch(ctx)
       const key = `${call.tool}\u0000${stableStringify(call.input ?? null)}`
@@ -92,9 +93,10 @@ export class BotActivityLog implements BotActivitySink {
       const first = dispatch.seen.get(key)
       if (first !== undefined && at - first < BOT_ACTIVITY_SAME_CALL_MS) return
       dispatch.seen.set(key, at)
-      dispatch.calls.push({ tool: call.tool, input: call.input })
-      // A call with no words of its own still replaces what was shown: the bot is no longer doing that.
-      this.show(ctx, chipForCall(call.tool, call.input, dispatch.chipContext) ?? WORKING_LIVE_CHIP)
+      dispatch.calls.push({ tool: call.tool, input: call.input, ...(call.own ? { own: true as const } : {}) })
+      // A call with no words of its own (or the provider's own storage) still replaces what was shown: the bot is no
+      // longer doing that.
+      this.show(ctx, (call.own ? null : chipForCall(call.tool, call.input, dispatch.chipContext)) ?? WORKING_LIVE_CHIP)
     } catch (error) {
       // An observer of the authority never fails the call it watched.
       console.warn('[bots] could not record activity', { activationId: ctx.activationId, error: error instanceof Error ? error.message : String(error) })

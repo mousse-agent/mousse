@@ -7,16 +7,19 @@ import { Collapse } from "../../../components/ui/Collapse";
 import { useAppStore } from "../../../stores/appStore";
 import { openTurnInChanges } from "../../../components/changes/openChanges";
 import { FileExtIcon } from "./icons/file-ext-icon";
+import { useGoneFiles, useRecordedTurn, type PresenceQuery, type RecordedTurn } from "./turn-recorded-files";
 import { extractFilePathArg } from "./utils/tool-adapters";
 import { isRecord, isV5ToolPart } from "./utils/assistant-blocks";
 
 interface FileEdit {
   /** Relative to the project folder when it is inside it. */
   path: string;
-  /** The path as the agent wrote it, which the Changes tab maps to its changed file. */
+  /** The path as the agent wrote it, or the recorded file's full path; the Changes tab maps it to its changed file. */
   source: string;
   added: number;
   removed: number;
+  /** The turn deleted it (from the recorded list). */
+  deleted?: boolean;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -167,12 +170,15 @@ function partChanges(
   return [{ filePath, ...(kind === "write" ? writeDelta(input, output) : editDelta(input, output)) }];
 }
 
-function collectEdits(messages: UIMessage[], root: string | null): { files: FileEdit[]; added: number; removed: number } | null {
+/** The files the turn's Edit and Write calls changed, and whether it made any tool call at all. */
+function collectEdits(messages: UIMessage[], root: string | null): { files: FileEdit[]; toolCalls: boolean } {
   const byPath = new Map<string, FileEdit>();
+  let toolCalls = false;
   for (const message of messages) {
     for (const candidate of message.parts ?? []) {
       const part: unknown = candidate;
       if (!isV5ToolPart(part)) continue;
+      toolCalls = true;
       if (part.state && part.state !== "output-available") continue;
       const kind = toolLabel(part);
       if (!kind) continue;
@@ -187,15 +193,73 @@ function collectEdits(messages: UIMessage[], root: string | null): { files: File
       }
     }
   }
-  if (byPath.size === 0) return null;
-  const files = [...byPath.values()];
-  let added = 0;
-  let removed = 0;
-  for (const file of files) {
-    added += file.added;
-    removed += file.removed;
+  return { files: [...byPath.values()], toolCalls };
+}
+
+const ABSOLUTE = /^(?:[a-zA-Z]:\/|\/)/;
+
+function slashes(path: string): string {
+  return path.replace(/\\/g, "/");
+}
+
+function joinPath(root: string, path: string): string {
+  return `${slashes(root).replace(/\/$/, "")}/${path}`;
+}
+
+/** The file's full path, with `/`: as written when absolute, else inside the project folder (when known). */
+function fullPath(path: string, root: string | null): string {
+  const norm = slashes(path);
+  return ABSOLUTE.test(norm) || !root ? norm : joinPath(root, norm);
+}
+
+/** The path inside `root`, or null for a file outside it. */
+function inside(full: string, root: string | null): string | null {
+  if (!root) return null;
+  const prefix = `${slashes(root).replace(/\/$/, "")}/`;
+  return full.toLowerCase().startsWith(prefix.toLowerCase()) ? full.slice(prefix.length) : null;
+}
+
+interface ListedFile extends FileEdit {
+  /** The full path, folded for comparison. */
+  key: string;
+  presence: PresenceQuery;
+}
+
+/**
+ * The turn's files: those its Edit and Write calls changed, and those Mousse recorded for the turn (any change inside
+ * the thread's folder, a shell command's or a script's too), each once. The recorded counts win; a file only the calls
+ * name (outside the thread's folder, or one Git ignores) keeps the calls' counts.
+ */
+function mergeFiles(edits: FileEdit[], turn: RecordedTurn | null | undefined, root: string | null, caseInsensitive: boolean): ListedFile[] {
+  const fold = (path: string) => (caseInsensitive ? path.toLowerCase() : path);
+  const recorded = new Map<string, ListedFile>();
+  for (const entry of turn?.files ?? []) {
+    const full = joinPath(turn!.root, entry.path);
+    const key = fold(full);
+    recorded.set(key, {
+      key,
+      path: relativePath(full, root ?? turn!.root),
+      source: full,
+      added: entry.additions,
+      removed: entry.deletions,
+      ...(entry.status === "deleted" ? { deleted: true } : {}),
+      presence: { key, inFolder: inside(full, root), written: null },
+    });
   }
-  return { files, added, removed };
+  const files: ListedFile[] = [];
+  const seen = new Set<string>();
+  for (const edit of edits) {
+    const full = fullPath(edit.source, root);
+    const key = fold(full);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const fromRecord = recorded.get(key);
+    files.push(fromRecord
+      ? { ...fromRecord, presence: { ...fromRecord.presence, written: edit.source } }
+      : { ...edit, key, presence: { key, inFolder: inside(full, root), written: edit.source } });
+  }
+  for (const [key, file] of recorded) if (!seen.has(key)) files.push(file);
+  return files;
 }
 
 function Stat({ added, removed }: { added: number; removed: number }) {
@@ -212,25 +276,48 @@ function Stat({ added, removed }: { added: number; removed: number }) {
  * action for the turn, and a chevron that lists the files (each opens in the Changes tab). Settings >
  * General > "Changed files after each turn" picks the line (default), the list already open, or
  * nothing.
+ *
+ * The list is the turn's Edit and Write calls' files and, once the line has stayed on screen, the turn's recorded
+ * changes (`useRecordedTurn`), so a file a shell command or a script changed is listed and counted too. The message
+ * list mounts this only for a finished turn, so nothing is read while a turn runs. A listed file the turn deleted, or
+ * that is gone from its path now, is struck through.
  */
 export function TurnEditSummary({ messages, turnId }: { messages: UIMessage[]; turnId?: string }) {
   const mode = useTurnChangedFiles();
   const root = useActiveProjectPath();
-  const summary = useMemo(() => (mode === "off" ? null : collectEdits(messages, root)), [mode, messages, root]);
+  const threadId = useAppStore((s) => s.activeThreadId);
+  const caseInsensitive = useAppStore((s) => s.appInfo?.platform === "win32");
+  const edits = useMemo(() => (mode === "off" ? null : collectEdits(messages, root)), [mode, messages, root]);
+  // A turn that ran no tool changed no file. A folder that is not on disk is not read: reading would bring it back.
+  const { recorded, ref } = useRecordedTurn(threadId, turnId, Boolean(edits?.toolCalls) && root !== null);
+  const files = useMemo(
+    () => (edits ? mergeFiles(edits.files, recorded, root, caseInsensitive) : []),
+    [edits, recorded, root, caseInsensitive],
+  );
   // Null until the user toggles it: the setting decides, then the list stays as the user left it.
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
-  if (!summary) return null;
   const open = userOpen ?? mode === "list";
-  const countLabel = `${summary.files.length} file${summary.files.length === 1 ? "" : "s"} changed`;
-  const review = (file?: string) => void openTurnInChanges(useAppStore.getState().activeThreadId, turnId, file);
+  const queries = useMemo(() => files.filter((file) => !file.deleted).map((file) => file.presence), [files]);
+  const gone = useGoneFiles(threadId, queries, open && files.length > 0, caseInsensitive);
+  if (!edits) return null;
+  // Nothing from the calls yet: an empty mark whose time on screen reads the recorded changes.
+  if (files.length === 0) return edits.toolCalls && recorded === undefined ? <div ref={ref} className="turn-edits-probe" aria-hidden="true" /> : null;
+  let added = 0;
+  let removed = 0;
+  for (const file of files) {
+    added += file.added;
+    removed += file.removed;
+  }
+  const countLabel = `${files.length} file${files.length === 1 ? "" : "s"} changed`;
+  const review = (file?: string) => void openTurnInChanges(threadId, turnId, file);
   const toggleLabel = open ? "Hide changed files" : "Show changed files";
 
   return (
-    <section className="turn-edits" aria-label={countLabel} data-find-ignore>
+    <section ref={ref} className="turn-edits" aria-label={countLabel} data-find-ignore>
       <div className="turn-edits-line">
         <FileText size={14} strokeWidth={1.8} className="turn-edits-icon" aria-hidden="true" />
         <span className="turn-edits-count">{countLabel}</span>
-        <Stat added={summary.added} removed={summary.removed} />
+        <Stat added={added} removed={removed} />
         <button type="button" className="turn-edits-review" title="Review this turn's changes" onClick={() => review()}>
           Review
         </button>
@@ -245,16 +332,18 @@ export function TurnEditSummary({ messages, turnId }: { messages: UIMessage[]; t
           <ChevronRight size={14} strokeWidth={2} className="turn-edits-chevron ui-collapse-chevron" data-open={open || undefined} />
         </button>
       </div>
-      <Collapse open={open} as="ul" className="turn-edits-files" itemCount={summary.files.length}>
-          {summary.files.map((file) => {
+      <Collapse open={open} as="ul" className="turn-edits-files" itemCount={files.length}>
+          {files.map((file) => {
             const { name, folder } = splitPath(file.path);
+            const gonePath = file.deleted ? "Deleted in this turn" : gone.has(file.key) ? "No longer exists" : null;
             return (
-              <li key={file.path}>
+              <li key={file.key}>
                 <button
                   type="button"
                   className="turn-edits-file"
-                  title={file.path}
+                  title={gonePath ?? file.path}
                   aria-label={`Review ${file.path}`}
+                  data-gone={gonePath ? "" : undefined}
                   onClick={() => review(file.source)}
                 >
                   <FileExtIcon filename={name} className="turn-edits-file-icon" />

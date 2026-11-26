@@ -123,6 +123,9 @@
 .chat-approval { margin: 0 20px; max-height: 320px; overflow: auto; }
 .chat-browser-permission { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 12px; margin: 6px 20px; padding: 10px; border-radius: 8px; background: rgba(var(--accent-rgb), .1); }
 .chat-browser-permission button { color: var(--accent); }
+.chat-browser-access-on { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 4px 20px; font-size: 12px; color: var(--text-secondary); }
+.chat-browser-access-on button { margin-left: 4px; padding: 0; border: 0; background: none; color: var(--text-secondary); font: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.chat-browser-access-on button:hover:not(:disabled) { color: var(--text-primary); }
 .chat-network-boundary { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; margin: 10px 0 18px; border: 1px solid rgba(var(--accent-rgb), .2); border-radius: 8px; background: rgba(var(--accent-rgb), .05); color: var(--text-primary); font-size: 12px; }
 .chat-network-boundary > span { width: 100%; color: var(--text-secondary); font-size: 11px; }
 .chat-network-presence { display: flex; gap: 8px 16px; flex-wrap: wrap; margin-bottom: 16px; color: var(--text-secondary); font-size: 11px; }

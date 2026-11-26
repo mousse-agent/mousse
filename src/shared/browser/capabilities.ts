@@ -17,7 +17,7 @@ export function browserBackendCapabilities(backend: BrowserSessionRecord['backen
   const uploads = !attached || ATTACHED_CAPABILITY_DEFAULT.capabilities.actions.artifactUpload
   return {
     backend,
-    tabs: attached ? Object.entries(ATTACHED_CAPABILITY_DEFAULT.capabilities.tabs).filter(([, supported]) => supported).map(([name]) => name as 'list' | 'switch') : ['list', 'new', 'switch', 'close'],
+    tabs: attached ? Object.entries(ATTACHED_CAPABILITY_DEFAULT.capabilities.tabs).filter(([, supported]) => supported).map(([name]) => name as 'list' | 'new' | 'switch' | 'close') : ['list', 'new', 'switch', 'close'],
     actions: actions.filter((action) => action !== 'upload' || uploads),
     screenshots: vision && (actual?.screenshots ?? !attached),
     uploads,

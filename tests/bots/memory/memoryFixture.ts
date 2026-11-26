@@ -21,8 +21,11 @@ export interface MemoryFixture {
   clock: { now: number }
   /** A new store over the same database, as a daemon restart opens it. */
   reopen(options?: Partial<BotMemoryStoreOptions>): BotMemoryStore
-  /** Writes a `bot_messages` row and its journal row in one transaction, as WP2's `BotStore` does. */
-  message(input: { botId: string; id: string; author: 'owner' | 'bot'; kind?: 'text' | 'run_report' | 'notice'; text: string; activationId?: string; at?: string }): number
+  /**
+   * Writes a `bot_messages` row and its journal row in one transaction, as WP2's `BotStore` does. `standsFor`: the thread
+   * message (`<threadId>:<messageId>`) a dispatch's reply is (`BotJournalInput.standsFor`).
+   */
+  message(input: { botId: string; id: string; author: 'owner' | 'bot'; kind?: 'text' | 'run_report' | 'notice'; text: string; activationId?: string; at?: string; standsFor?: string }): number
   dispose(): void
 }
 
@@ -56,6 +59,7 @@ export function memoryFixture(options: Partial<BotMemoryStoreOptions> = {}): Mem
         lane: input.kind === 'run_report' ? 'run' : 'chat',
         ...(input.activationId ? { activationId: input.activationId } : {}),
         sourceKey: `bm:${input.id}`,
+        ...(input.standsFor ? { standsFor: input.standsFor } : {}),
         who: input.author === 'owner' ? 'owner' : 'bot',
         text: input.text
       }, at)!

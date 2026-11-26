@@ -138,6 +138,7 @@ import { ActionExecutionError, StaleThreadActionRevisionError, ThreadActionServi
 import { UndoService } from '../actions/UndoService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
 import { ReceiptRefReleaseService } from '../actions/ReceiptRefReleaseService'
+import { readActions } from '../actions/actionsFile'
 import { releaseSnapshotRefs } from '../actions/SnapshotRefReleaseService'
 import { inThreadSnapshotScopeAsync, snapshotsOffReason } from '../workspace/SnapshotWorkspace'
 import { RedoService } from '../actions/RedoService'
@@ -1404,6 +1405,40 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
     clearCleanupMarker(ctx.mms.threads.lifecycleStore, threadId)
   }
   if ((await manager.verify()).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
+}
+
+/** A checkout switch the thread's workspace no longer allows; the window makes a new thread for the send instead. */
+function worktreeLocked(): DomainRpcError {
+  return new DomainRpcError('worktree_locked', 'Worktree mode is locked once a workspace is provisioned.')
+}
+
+/** Whether work started in the thread: a turn under way, a message, or a recorded action (a file write, a terminal's). */
+function threadStartedWork(ctx: HandlerContext, threadId: string, directory: string): boolean {
+  return ctx.mms.orchestrator.isTurnActive(threadId) || ctx.mms.orchestrator.getMessages(threadId).length > 0 || readActions(directory).length > 0
+}
+
+/**
+ * Whether the thread's workspace keeps it from switching between a worktree and its project folder: a worktree of its
+ * own, or a project-folder record of a thread where work started. A project-folder record an empty chat got from a
+ * branch switch holds nothing and is dropped by the switch (`dropUnusedProjectFolder`). A terminal on such a chat holds
+ * neither the record nor the thread's lease (`terminalBeforeWork`).
+ */
+function checkoutLocked(ctx: HandlerContext, threadId: string, directory: string, workspace: ThreadWorkspaceMetadata | undefined): boolean {
+  if (!workspace || workspace.prepared || (workspace.lifecycle !== 'ready' && workspace.lifecycle !== 'provisioning')) return false
+  if (!isProjectFolderWorkspace(workspace)) return true
+  return threadStartedWork(ctx, threadId, directory)
+}
+
+/**
+ * Whether a terminal opened on the thread starts in its project's folder and leaves the thread's workspace alone: a
+ * chat in a project where no work started and that has no worktree of its own (a prepared one is not yet its own). It
+ * writes no workspace record or pin and takes no lease, so the checkout stays free until the first send applies it.
+ */
+function terminalBeforeWork(ctx: HandlerContext, threadId: string, directory: string, task: Thread): boolean {
+  if (!task.projectId) return false
+  const workspace = new ThreadWorkspaceManager(directory).load()
+  if (workspace && !workspace.prepared && !isProjectFolderWorkspace(workspace)) return false
+  return !threadStartedWork(ctx, threadId, directory)
 }
 
 /** A worktree a retirement or rebuild left without its `.git`, or unfinished, that its reconstruction manifest can bring back. */
@@ -2794,10 +2829,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const directory = ctx.mms.threads.getThreadDir(threadId)
       const thread = await setDraftCheckout(directory, { enabled, picked: pickedCheckout }, async ({ enabled, picked }, latest) => {
         await settledPreparation(directory)
+        // Refused at once, without waiting for the lease a terminal open in the thread holds: the window then makes a
+        // new thread for the send.
+        const shown = ctx.mms.threads.getThread(threadId)
+        if (shown && shown.worktreeEnabled !== enabled && checkoutLocked(ctx, threadId, directory, new ThreadWorkspaceManager(directory).load())) {
+          if (!latest()) return shown
+          throw worktreeLocked()
+        }
         const lease = await waitAcquireExecutionLease(directory, { source: 'draft-checkout-choice' })
         try {
           const manager = new ThreadWorkspaceManager(directory)
-          const workspace = manager.load()
+          let workspace = manager.load()
           const current = ctx.mms.threads.getThread(threadId)!
           if (!latest()) return current
           if (workspace && !workspace.prepared && current.worktreeEnabled === enabled) {
@@ -2805,7 +2847,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
             return current
           }
           if (workspace && !workspace.prepared && (workspace.lifecycle === 'ready' || workspace.lifecycle === 'provisioning')) {
-            throw new DomainRpcError('worktree_locked', 'Worktree mode is locked once a workspace is provisioned.')
+            // A project-folder record of a thread that never ran (a terminal, branch switch or file write on the empty
+            // chat made it) holds nothing: it is dropped and the switch goes ahead.
+            if (checkoutLocked(ctx, threadId, directory, workspace) || !await manager.dropUnusedProjectFolder(threadId, lease)) throw worktreeLocked()
+            workspace = manager.load()
           }
           if (enabled && workspace?.prepared) await manager.separateRenamedPreparation(lease)
           if (!latest()) return ctx.mms.threads.getThread(threadId)!
@@ -3522,6 +3567,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const task = threadId !== '__unbound__' ? ctx.mms.threads.getThread(threadId) : undefined
       if (threadId !== '__unbound__' && !task) throw new DomainRpcError('thread_not_found', 'Task not found for terminal', { threadId })
       const directory = task ? ctx.mms.threads.getThreadDir(threadId) : undefined
+      if (task && ctx.mms.threadRuntimes.listAgents(threadId).find((agent) => agent.id === agentId)?.workspacePolicy?.access === 'read-only') throw new DomainRpcError('terminal_not_allowed', 'Read-only agents cannot open an arbitrary shell')
+      if (task && directory && terminalBeforeWork(ctx, threadId, directory, task)) {
+        // The project's own folder, as a new project-folder chat uses it; a folder the window names inside it is kept.
+        const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
+        if (!projectPath) throw new DomainRpcError('thread_has_no_folder', 'Task has no project workspace')
+        let folder = projectPath
+        if (!routed && p.cwd !== undefined) { try { folder = assertEpisodePath(projectPath, cwd) } catch { folder = projectPath } }
+        // Admitted like a terminal that takes the lease: not while the thread is trashed or deleted.
+        const ptyId = withThreadLifecyclePath(directory, 'execution', () => ctx.mms.ptyManager.create(agentId, folder, command, { threadId, env, shellArgs, ...(label ? { label } : {}) }))
+        routed?.onTerminalCreated?.(ptyId)
+        ctx.mms.threadRuntimes.registerPty(threadId, ptyId)
+        return { ptyId, ptys: ctx.mms.ptyManager.list(threadId) }
+      }
       if (directory) await settledPreparation(directory)
       const manager = directory ? new ThreadWorkspaceManager(directory) : undefined
       // A project terminal cannot bypass a task's writer ownership by naming its checkout.
@@ -3533,7 +3591,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           catch (error) { if (String(error).includes('task-bound terminal')) throw error }
         }
       }
-      if (task && ctx.mms.threadRuntimes.listAgents(threadId).find((agent) => agent.id === agentId)?.workspacePolicy?.access === 'read-only') throw new DomainRpcError('terminal_not_allowed', 'Read-only agents cannot open an arbitrary shell')
       const terminalFolder = (metadata: ThreadWorkspaceMetadata | undefined): void => {
         const projectPath = task?.projectId ? resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId) : undefined
         if (!metadata) {

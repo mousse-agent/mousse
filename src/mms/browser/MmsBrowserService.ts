@@ -44,6 +44,8 @@ interface LiveAttachment {
   profileEpoch: number
   threadId?: string
   selectedThreadId?: string
+  /** The selection was a free tab a run borrowed (`selectedTarget`), not one the window chose for the thread. */
+  borrowed?: boolean
 }
 
 interface PendingGuestClosure {
@@ -68,6 +70,8 @@ export interface MmsBrowserServiceOptions {
   admitManagedLaunch?: () => Promise<{ release(): void }>
   /** The thread browsers' view clock and hold lease (tests). */
   views?: Pick<ThreadBrowsersOptions, 'holdLeaseMs' | 'leaseTimer' | 'now' | 'computerName'>
+  /** How long a thread agent waits for its window to open an in-app tab, and how often it looks (tests). */
+  tabWait?: { timeoutMs?: number; pollMs?: number; now?: () => number; sleep?: (ms: number) => Promise<void> }
 }
 
 function requireUuid(value: string, label: string): string {
@@ -102,7 +106,11 @@ function publicSession(record: BrowserSessionRecord): BrowserSessionPublicRecord
   }
 }
 
-/** Profile-owned browser composition: attached GUI targets, managed broker, sessions, tools. */
+/**
+ * Profile-owned browser composition: attached GUI targets, managed broker, sessions, tools. A thread agent a person
+ * started at the window (`source` `gui`) uses the in-app tabs with no question asked: its tree's grant
+ * (`BrowserTreeGrants`) is the permission. `access` is the separate consent group chats ask for their shared browser.
+ */
 export class MmsBrowserService {
   readonly access = new BrowserAccessController()
   readonly sessions: BrowserSessionManager
@@ -121,8 +129,6 @@ export class MmsBrowserService {
   private readonly unproven = new Map<string, PendingGuestClosure>()
   private readonly managed: LazyManagedBrowserBackend
   private disposed = false
-  private readonly guiDispatches = new Set<Promise<BrowserToolResult>>()
-  private accessRevocation?: Promise<void>
   private readonly tabRequests = new Map<string, { requestId: string; waiters: number }>()
 
   constructor(private readonly options: MmsBrowserServiceOptions) {
@@ -205,15 +211,10 @@ export class MmsBrowserService {
     try {
       await this.requestAccess(context.execution, context.signal)
       const target = this.resolveTarget(context)
-      const signal = context.execution.source === 'gui'
-        ? AbortSignal.any([this.access.signal, ...(context.signal ? [context.signal] : [])])
-        : context.signal
+      const signal = context.signal
       const invoke = (held?: AbortSignal): Promise<BrowserToolResult> => this.tools.invoke(name, args, { ...context, target, signal: held ? (signal ? AbortSignal.any([signal, held]) : held) : signal })
       // A thread agent's browser without a window: the person's view of it follows the call, and a hold refuses what acts.
-      const operation = target.backend === 'managed-chromium' ? this.views.agentCall({ ...context, target }, name, args, invoke) : invoke()
-      if (context.execution.source === 'gui') this.guiDispatches.add(operation)
-      try { return await operation }
-      finally { this.guiDispatches.delete(operation) }
+      return await (target.backend === 'managed-chromium' ? this.views.agentCall({ ...context, target }, name, args, invoke) : invoke())
     } catch (error) {
       if (error instanceof BrowserAutomationError) {
         return { ok: false, error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) } }
@@ -226,13 +227,16 @@ export class MmsBrowserService {
     return { ...this.access.status(), tabRequests: [...this.tabRequests].map(([threadId, request]) => ({ requestId: request.requestId, threadId })) }
   }
 
+  /**
+   * A thread agent's way into the in-app browser: no question to the person (the tree's grant is the permission), only
+   * a tab of its thread, which the window opens when it has none.
+   */
   async requestAccess(context: ExecutionContext, signal?: AbortSignal): Promise<'allowed' | 'already-allowed'> {
     this.assertActive()
     if (context.profileId !== this.options.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
     if (context.source !== 'gui') return 'already-allowed'
-    const response = await this.access.request(context.threadId, signal)
     await this.waitForAttachedTab(context, signal)
-    return response
+    return 'already-allowed'
   }
 
   private async waitForAttachedTab(context: ExecutionContext, signal?: AbortSignal): Promise<void> {
@@ -244,55 +248,29 @@ export class MmsBrowserService {
     const request = this.tabRequests.get(threadId) ?? { requestId: randomUUID(), waiters: 0 }
     request.waiters++
     this.tabRequests.set(threadId, request)
-    const deadline = Date.now() + 30_000
-    const grantSignal = this.access.signal
+    const wait = this.options.tabWait ?? {}
+    const now = wait.now ?? Date.now
+    const pause = wait.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+    const deadline = now() + (wait.timeoutMs ?? 30_000)
     try {
       while (true) {
         this.assertActive()
         if (signal?.aborted) throw new BrowserAutomationError({ code: 'cancelled', message: 'Opening the in-app browser was cancelled' })
-        if (grantSignal.aborted || !this.access.status().allowed) throw new BrowserAutomationError({ code: 'policy_denied', message: 'The user disabled agents browser access.', details: { userResponse: 'deny' } })
         if (this.targetFor(context)) return
-        if (Date.now() >= deadline) throw new BrowserAutomationError({ code: 'setup_required', message: 'The in-app browser did not connect in time. Keep the Mousse window open and retry.' })
-        await new Promise<void>((resolve) => setTimeout(resolve, 100))
+        if (now() >= deadline) throw new BrowserAutomationError({ code: 'setup_required', message: 'The in-app browser did not connect in time. Keep the Mousse window open and retry.' })
+        await pause(wait.pollMs ?? 100)
       }
     } finally {
       if (--request.waiters === 0) this.tabRequests.delete(threadId)
     }
   }
 
+  /** The group chats' consent to their shared browser (`createChatBrowserRuntime`); thread agents never ask it. */
   async setAccess(allowed: boolean, requestId?: string): Promise<BrowserAccessState> {
-    // A second window cannot regrant access while old leases are still draining.
-    if (allowed && this.accessRevocation) await this.accessRevocation
     this.assertActive()
-    const wasAllowed = this.access.status().allowed
     if (requestId === undefined) this.access.set(allowed)
     else this.access.respond(requestId, allowed)
-    if (!allowed && wasAllowed) {
-      const revocation = (async () => {
-        await Promise.allSettled([...this.guiDispatches])
-        await this.sessions.closeAll('electron-attached')
-        this.releaseUnusedSelections()
-      })()
-      this.accessRevocation = revocation
-      // Revocation is already effective. Do not hold the UI RPC open while
-      // debugger commands drain; regrant still waits for successful cleanup.
-      void revocation.then(() => {
-        if (this.accessRevocation === revocation) this.accessRevocation = undefined
-      }, () => { /* Retain failed cleanup so a new grant cannot bypass it. */ })
-    }
     return this.accessStatus()
-  }
-
-  releaseUnusedSelections(): void {
-    for (const [threadId, uiTabId] of this.selectedByThread) {
-      const active = this.sessions.listThreadSessions({ profileId: this.options.profileId, threadId })
-        .some((session) => this.attached.bindingForSession(session.id)?.uiTabId === uiTabId && session.lifecycle !== 'disconnected')
-      if (!active) {
-        this.selectedByThread.delete(threadId)
-        const live = this.liveByUiTab(uiTabId)
-        if (live) { live.selectedThreadId = undefined; live.threadId = undefined }
-      }
-    }
   }
 
   resolveTarget(context: BrowserToolContext): NonNullable<BrowserToolContext['target']> {
@@ -318,8 +296,9 @@ export class MmsBrowserService {
   }
 
   /**
-   * The in-app tab a run drives: its thread's own, or, for the agent at the root of its tree only, a free tab. A subagent
-   * never takes a free tab (docs/plans/tool-api.md §2.6 "Tabs"): it waits for one opened for its own thread.
+   * The in-app tab a run drives: its thread's own, or, for the agent at the root of its tree only, a free tab. A subagent,
+   * and a run with no tree grant, never takes a free tab (docs/plans/tool-api.md §2.6 "Tabs"): it waits for one opened
+   * for its own thread.
    */
   targetFor(execution: ExecutionContext): BrowserSelectedTarget | undefined {
     return this.selectedTarget(execution.threadId, { borrow: mayTakeFreeTab(execution) })
@@ -327,12 +306,26 @@ export class MmsBrowserService {
 
   selectedTarget(threadId: string, options: { borrow?: boolean } = {}): BrowserSelectedTarget | undefined {
     let uiTabId = this.selectedByThread.get(threadId)
-    if (!uiTabId && this.access.status().allowed) {
+    // A run that may not borrow never inherits a shared tab another run of its thread borrowed: it needs the thread's own.
+    const cached = uiTabId ? this.liveByUiTab(uiTabId) : undefined
+    if (uiTabId && options.borrow === false && cached?.borrowed && cached.threadId !== threadId) {
+      const own = [...this.live.values()].find((tab) => tab.threadId === threadId && (!tab.selectedThreadId || tab.selectedThreadId === threadId))
+      if (!own) return undefined
+      const borrowed = this.liveByUiTab(uiTabId)
+      if (borrowed?.selectedThreadId === threadId) {
+        const { selectedThreadId: _released, borrowed: _borrowed, ...released } = borrowed
+        this.live.set(borrowed.registrationId, released)
+      }
+      this.selectedByThread.delete(threadId)
+      uiTabId = undefined
+    }
+    if (!uiTabId) {
       // The thread's own tab wins over a tab shared by every thread.
       const free = [...this.live.values()].filter((tab) => (!tab.selectedThreadId || tab.selectedThreadId === threadId) && (!tab.threadId || tab.threadId === threadId))
       const available = free.find((tab) => tab.threadId === threadId) ?? (options.borrow === false ? undefined : free[0])
       if (available) {
         available.selectedThreadId = threadId
+        available.borrowed = available.threadId !== threadId
         this.selectedByThread.set(threadId, available.uiTabId)
         uiTabId = available.uiTabId
       }
@@ -483,10 +476,44 @@ export class MmsBrowserService {
     }
     const current = this.selectedByThread.get(threadId)
     if (current && current !== uiTabId) this.selectedByThread.delete(threadId)
-    const selected: LiveAttachment = { ...live, selectedThreadId: threadId }
+    const { borrowed: _borrowed, ...chosen } = live
+    const selected: LiveAttachment = { ...chosen, selectedThreadId: threadId }
     this.live.set(selected.registrationId, selected)
     this.selectedByThread.set(threadId, uiTabId)
     return { backend: 'electron-attached', uiTabId }
+  }
+
+  /**
+   * The window moved an in-app tab to another thread (`threadId`), or kept it in every thread (none). A thread that had
+   * it selected loses it, so its agent's next `browser_open` asks for a tab of its own; its sessions that ran through
+   * the tab end (the window already ended them). The new thread's agent finds the tab as its own.
+   */
+  setAttachmentOwner(params: { uiTabId: string; threadId?: string }, owner: BrowserAttachmentOwner): { ok: true } {
+    this.assertActive()
+    const uiTabId = requireIdentifier(params.uiTabId, 'uiTabId')
+    const threadId = params.threadId === undefined ? undefined : requireIdentifier(params.threadId, 'threadId')
+    if (threadId !== undefined && !this.options.threadExists(threadId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Thread does not belong to this profile' })
+    const live = this.liveByUiTab(uiTabId)
+    if (!live) return { ok: true }
+    if (live.connectionId !== owner.connectionId || live.profileId !== owner.profileId || live.profileEpoch !== owner.profileEpoch) {
+      throw new BrowserAutomationError({ code: 'policy_denied', message: 'This in-app tab is registered to another GUI connection' })
+    }
+    const next: LiveAttachment = { ...live }
+    if (threadId === undefined) delete next.threadId
+    else next.threadId = threadId
+    if (threadId !== undefined && live.selectedThreadId !== undefined && live.selectedThreadId !== threadId) {
+      if (this.selectedByThread.get(live.selectedThreadId) === uiTabId) this.selectedByThread.delete(live.selectedThreadId)
+      delete next.selectedThreadId
+    }
+    this.live.set(next.registrationId, next)
+    if (threadId !== undefined) {
+      for (const sessionId of this.attached.sessionsOnUiTab(uiTabId)) {
+        if (this.sessions.threadOf(sessionId) === threadId) continue
+        this.sessions.markEnded(sessionId)
+        this.attached.forgetSession(sessionId)
+      }
+    }
+    return { ok: true }
   }
 
   /** Connection close/rebind: revoke dispatch and selection. Guest-close proof stays with unregister/ack. */
@@ -615,9 +642,13 @@ class LazyManagedBrowserBackend implements BrowserBackendPort {
   }
 }
 
-/** Only a run outside any tree grant, or the agent at its tree's root, may take a free in-app tab. */
+/**
+ * Only the agent at the root of a tree a person started may take a free in-app tab: the tree's grant is what lets it use
+ * the browser unasked. A run with no grant (an editor try-run, a workflow the app started) asks nothing either, so it
+ * never takes a tab it did not get: it waits for one the window opens for its own thread.
+ */
 function mayTakeFreeTab(execution: ExecutionContext): boolean {
-  return !execution.browserGrant || execution.browserGrant.rootThreadId === execution.threadId
+  return execution.browserGrant?.rootThreadId === execution.threadId
 }
 
 function tokenHash(token: string): Buffer {

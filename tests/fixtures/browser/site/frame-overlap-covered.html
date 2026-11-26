@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Covered form</title>
+<style>body { margin: 0; font: 16px sans-serif } #covered-button { position: absolute; left: 0; top: 0; width: 800px; height: 340px } #state { position: absolute; left: 0; top: 350px; margin: 0 }</style></head>
+<body>
+  <button id="covered-button" type="button">Covered button</button>
+  <p id="state">covered:idle</p>
+  <script>
+    // Any press or click that reaches this frame shows.
+    for (const type of ['pointerdown', 'mousedown', 'click']) document.addEventListener(type, () => { document.getElementById('state').textContent = 'covered:touched' }, true)
+  </script>
+</body>
+</html>

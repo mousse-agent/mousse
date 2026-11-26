@@ -79,9 +79,10 @@ function workerEnabled(): boolean {
 /**
  * Starts `file` (the Git program, from `gitFile()`) with `args`, on the current lane's helper. Returns at once; the
  * process starts on the helper. Commands with a final `beforeStart` check run directly to keep that check adjacent
- * to process creation.
+ * to process creation. On Windows Git never opens a console window unless `windowsHide: false` asks for one.
  */
-export function spawnGit<I extends Pipe = 'pipe', O extends Pipe = 'pipe', E extends Pipe = 'pipe'>(file: string, args: readonly string[], options: GitSpawnOptions & { stdio?: [I, O, E] } = {}): GitChild<I, O, E> {
+export function spawnGit<I extends Pipe = 'pipe', O extends Pipe = 'pipe', E extends Pipe = 'pipe'>(file: string, args: readonly string[], given: GitSpawnOptions & { stdio?: [I, O, E] } = {}): GitChild<I, O, E> {
+  const options = { ...given, windowsHide: given.windowsHide ?? true }
   if (draining) throw workerError('The daemon is shutting down')
   if (options.beforeStart || !workerEnabled()) return spawnHere(file, args, options) as GitChild<I, O, E>
   return lane(lanes.getStore() ?? 'interactive').start(file, args, options) as unknown as GitChild<I, O, E>

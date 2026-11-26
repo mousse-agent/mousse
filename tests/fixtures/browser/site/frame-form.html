@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Signing form document</title>
+<style>body{margin:0;font:16px sans-serif} label,input,button{display:block;margin:8px}</style></head>
+<body>
+  <form id="sign" novalidate>
+    <label>Work email <input id="email" name="email"></label>
+    <button id="sign-up" type="submit">Sign up</button>
+  </form>
+  <p id="state">waiting</p>
+  <script>document.getElementById('sign').addEventListener('submit', (event) => { event.preventDefault(); document.getElementById('state').textContent = 'signed:' + document.getElementById('email').value })</script>
+</body>
+</html>

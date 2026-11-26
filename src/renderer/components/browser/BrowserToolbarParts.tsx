@@ -1,9 +1,7 @@
-import { useEffect, useState, type MouseEvent } from 'react'
 import { Bot, CircleAlert, CircleCheck, User, X } from '../../lib/icons'
-import { motionOff, scaleMotionMs } from '../../lib/motion'
+import type { AttachedTabActivity } from '../../../shared/browser/attached'
 import type { InAppBrowserState } from '../../../shared/browser/inApp'
 import { MousseLogoOutline } from '../MousseLogoOutline'
-import { Switch } from '../settings/SettingsRow'
 import { Modal } from '../ui/Modal'
 import { Select } from '../ui/Select'
 
@@ -21,88 +19,39 @@ export function deviceWidthLabel(presetId: string): string {
   return width ? `${width} px` : 'Auto'
 }
 
-/** Off: agents may not use the browser. Allowed: they may. Agent / human: who drives this tab now. */
-export type BrowserAgentState = 'off' | 'allowed' | 'agent' | 'human'
-
-export function browserAgentState(allowed: boolean, owner: InAppBrowserState['owner'] | undefined): BrowserAgentState {
-  if (owner === 'agent') return 'agent'
-  if (owner === 'human') return 'human'
-  return allowed ? 'allowed' : 'off'
+/** Who is using the active tab, for the toolbar: idle shows nothing. */
+export function browserTabActivity(state: Pick<InAppBrowserState, 'activity' | 'owner'> | undefined): AttachedTabActivity {
+  if (state?.owner === 'disconnected') return 'idle'
+  return state?.activity ?? 'idle'
 }
 
-const AGENT_STATE_TEXT: Record<BrowserAgentState, string> = {
-  off: 'Agents can’t use browser tabs',
-  allowed: 'Agents can use all browser tabs',
-  agent: 'An agent is using this tab',
-  human: 'You have control of this tab'
-}
-
-/** Compact agent-access status and switch for the browser toolbar. */
-export function BrowserAccessControl({
-  state,
-  allowed,
-  busy,
-  onChange
-}: {
-  state: BrowserAgentState
-  allowed: boolean
-  busy: boolean
-  onChange: (allowed: boolean) => void
-}) {
-  const Icon = state === 'human' ? User : Bot
-  return (
-    <div className={`browser-access browser-access-${state}`} title={AGENT_STATE_TEXT[state]} data-state={state}>
-      <Icon size={14} className="browser-access-icon" aria-hidden="true" />
-      <span className="sr-only" role="status">{AGENT_STATE_TEXT[state]}</span>
-      <Switch checked={allowed} disabled={busy} label="Agent access to all browser tabs" onChange={onChange} />
-    </div>
-  )
+const ACTIVITY_TEXT: Record<Exclude<AttachedTabActivity, 'idle'>, string> = {
+  'agent-busy': 'Agent is acting in this tab — click the page to take over',
+  'agent-waiting': 'Agent waiting to use this tab',
+  'user-active': 'You’re using this tab',
+  'waiting-human': 'The agent handed this tab to you'
 }
 
 /**
- * Asking before agents may use every browser tab: a panel at the pane's right, below the toolbar, that slides and fades
- * in and out like a bot's About. It is the same ask whether the switch was turned on or an agent asked.
+ * Who is using the active tab, beside the address bar: the agent while one of its steps runs (or waits for the person
+ * to finish), the person while they use it. Nothing when the tab is idle. A tab the agent handed over offers it back.
  */
-export function BrowserAccessPanel({ open, agentAsking, busy, onAllow, onDeny }: {
-  open: boolean
-  agentAsking: boolean
+export function BrowserActivityIndicator({ activity, busy, onResume }: {
+  activity: AttachedTabActivity
   busy: boolean
-  onAllow: (event: MouseEvent<HTMLButtonElement>) => void
-  onDeny: () => void
+  onResume: () => void
 }) {
-  const [mounted, setMounted] = useState(open)
-  const [shown, setShown] = useState(open)
-  useEffect(() => {
-    if (open) {
-      setMounted(true)
-      if (motionOff()) { setShown(true); return }
-      // Two frames: the closed state is laid out first, so the change to open is a transition.
-      let inner = 0
-      const outer = requestAnimationFrame(() => { inner = requestAnimationFrame(() => setShown(true)) })
-      return () => { cancelAnimationFrame(outer); cancelAnimationFrame(inner) }
-    }
-    setShown(false)
-    if (motionOff()) { setMounted(false); return }
-    // transitionend, or this backstop when it never comes (a pane hidden mid-slide).
-    const timer = window.setTimeout(() => setMounted(false), scaleMotionMs(200) + 80)
-    return () => window.clearTimeout(timer)
-  }, [open])
-  if (!mounted) return null
+  if (activity === 'idle') return null
+  const agent = activity === 'agent-busy' || activity === 'agent-waiting'
+  const Icon = agent ? Bot : User
+  const text = ACTIVITY_TEXT[activity]
   return (
-    <div
-      className={`browser-access-panel${shown ? ' is-open' : ''}`}
-      inert={!open || undefined}
-      // A closing panel is no longer a request.
-      {...(open ? { role: 'region', 'aria-label': 'Agent browser access request', 'data-mousse-decision': '' } : {})}
-      onTransitionEnd={(event) => { if (!open && event.target === event.currentTarget && event.propertyName === 'opacity') setMounted(false) }}
-    >
-      <span className="browser-access-panel-icon" aria-hidden="true"><Bot size={18} strokeWidth={1.8} /></span>
-      <p className="browser-access-panel-title">{agentAsking ? 'An agent wants to use the browser' : 'Let agents use the browser?'}</p>
-      <p className="browser-access-panel-line">Agents could open, read and act in every browser tab, in every thread. You can turn it off any time.</p>
-      <div className="browser-access-panel-actions">
-        <button type="button" className="browser-access-panel-allow" disabled={busy} onClick={onAllow}>Allow</button>
-        <button type="button" disabled={busy} onClick={onDeny}>Deny</button>
-      </div>
+    <div className={`browser-activity browser-activity-${activity}`} title={text} data-state={activity}>
+      <Icon size={14} className="browser-activity-icon" aria-hidden="true" />
+      <span className="sr-only" role="status">{text}</span>
+      {activity === 'waiting-human' && (
+        <button type="button" className="browser-activity-resume" disabled={busy} onClick={onResume}>Resume agent</button>
+      )}
     </div>
   )
 }
