@@ -286,11 +286,12 @@ export default function App() {
       if (isCurrentProfile()) apply(value)
     }
     let liveSettingsReceived = false
-    const applyAnimationSettings = (settings: Awaited<ReturnType<typeof window.mousse.settings.get>>) => {
+    const applyExperimentalSettings = (settings: Awaited<ReturnType<typeof window.mousse.settings.get>>) => {
       useAppStore.setState({
         sidebarAnimations: settings?.experimental?.sidebarAnimations !== false,
         newChatAnimations: settings?.experimental?.newChatAnimations !== false,
-        shimmerAnimations: settings?.experimental?.shimmerAnimations !== false
+        shimmerAnimations: settings?.experimental?.shimmerAnimations !== false,
+        hidePermissionsWhileRunning: settings?.experimental?.hidePermissionsWhileRunning !== false
       })
     }
     const finishHydration = (): void => {
@@ -363,7 +364,7 @@ export default function App() {
 
     // The bound profile's shortcut overrides, bot-thread notifications and new-chat worktree default; later changes arrive through settings.onChanged below.
     window.mousse.settings.get().then(applyIfCurrent((settings) => {
-      if (!liveSettingsReceived) applyAnimationSettings(settings)
+      if (!liveSettingsReceived) applyExperimentalSettings(settings)
       setShortcuts(settings.shortcuts ?? {})
       useAppStore.getState().setNotifyBotThreads(settings.notifications?.botThreads === true)
       useAppStore.getState().setRunDefaults(normalizeRunSettings(settings.runs))
@@ -456,7 +457,7 @@ export default function App() {
       // Keep the default provider current; subagent rows of threads on the default draw its logo.
       window.mousse.settings.onChanged(applyIfCurrent((settings) => {
         liveSettingsReceived = true
-        applyAnimationSettings(settings)
+        applyExperimentalSettings(settings)
         const info = useAppStore.getState().appInfo
         const llmProvider = settings?.provider?.llmProvider ?? ''
         if (info && info.llmProvider !== llmProvider) setAppInfo({ ...info, llmProvider })

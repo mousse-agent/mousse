@@ -463,6 +463,8 @@ export interface ExperimentalSettings {
   sidebarAnimations: boolean
   newChatAnimations: boolean
   shimmerAnimations: boolean
+  /** Hide the composer's permissions button while a thread runs (Settings → Labs). On by default. */
+  hidePermissionsWhileRunning: boolean
   /** The profiler (Settings → Labs). */
   profiler: ProfilerSettings
 }
@@ -476,6 +478,7 @@ export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings
     sidebarAnimations: raw?.sidebarAnimations !== false,
     newChatAnimations: raw?.newChatAnimations !== false,
     shimmerAnimations: raw?.shimmerAnimations !== false,
+    hidePermissionsWhileRunning: raw?.hidePermissionsWhileRunning !== false,
     profiler: normalizeProfilerSettings(raw?.profiler)
   }
 }

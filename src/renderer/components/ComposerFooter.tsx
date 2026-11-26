@@ -422,6 +422,7 @@ export function ComposerFooter({
 }: ComposerFooterProps) {
   const bindings = useCommandBindings()
   const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
+  const hidePermissionsWhileRunning = useAppStore((state) => state.hidePermissionsWhileRunning)
   const stopBinding = bindings['run.stop']
   const stopTitle = stopBinding ? `Stop · ${formatBinding(stopBinding, platform)}` : 'Stop'
   const enterKey = formatBinding('Enter', platform)
@@ -497,8 +498,8 @@ export function ComposerFooter({
 
   // While connecting the controls stay laid out, so the row keeps its height, but are hidden and out of reach.
   const away = connecting ? { inert: true, 'aria-hidden': true } as const : {}
-  // Changing the permission mode does not affect an active run or pending approval: hide the chip until it stops or finishes.
-  const permissionShown = loading || stoppable ? undefined : permission
+  // Changing the permission mode does not affect an active run or pending approval: hide the chip until it stops or finishes (Settings → Labs).
+  const permissionShown = hidePermissionsWhileRunning && (loading || stoppable) ? undefined : permission
   return (
     <div className="composer-footer" data-connecting={connecting ? '' : undefined}>
       {connecting && connectingNote ? <span className="composer-connecting-note" role="status">{connectingNote}</span> : null}

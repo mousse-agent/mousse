@@ -83,7 +83,7 @@ beforeEach(async () => {
   defaultMode = 'accept_edits'
   stubBridge()
   const { useAppStore } = await import('../../src/renderer/stores/appStore')
-  useAppStore.setState({ profileId: 'prf_test', profileReady: true, workspaceReady: true })
+  useAppStore.setState({ profileId: 'prf_test', profileReady: true, workspaceReady: true, hidePermissionsWhileRunning: true })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -712,6 +712,11 @@ describe('permission chip visibility during a run', () => {
     act(() => useAppStore.setState({
       turnStates: { 'run-1': { threadId: 'run-1', turnId: 't2', phase: 'thinking', updatedAt: '2026-11-10T00:00:04Z' } }
     }))
+    expect(permissionChip()).toBeUndefined()
+    // Disabling the Labs setting shows the chip again while still running.
+    act(() => useAppStore.setState({ hidePermissionsWhileRunning: false }))
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+    act(() => useAppStore.setState({ hidePermissionsWhileRunning: true }))
     expect(permissionChip()).toBeUndefined()
     act(() => useAppStore.setState({
       turnStates: { 'run-1': { threadId: 'run-1', turnId: 't2', phase: 'completed', updatedAt: '2026-11-10T00:00:05Z' } }

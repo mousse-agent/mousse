@@ -27,6 +27,7 @@ afterEach(() => {
   act(() => root.unmount())
   host.remove()
   document.body.innerHTML = ''
+  useAppStore.setState({ hidePermissionsWhileRunning: true })
 })
 
 const opus: LlmModelOption = { id: 'opus', label: 'Opus 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'], defaultEffort: 'medium', thinkingOff: false }
@@ -648,7 +649,15 @@ describe('composer model picker', () => {
     render({ mode: 'ask', open: false, footer: { loading: false, stoppable: true } })
     expect(host.querySelector('.composer-permission-chip')).toBeNull()
 
-    // Stopped or finished: chip comes back with its menu closed.
+    // Turning the Labs toggle off shows the chip even while running or stoppable.
+    act(() => useAppStore.setState({ hidePermissionsWhileRunning: false }))
+    expect(host.querySelector('.composer-permission-chip')).not.toBeNull()
+    render({ mode: 'ask', open: false, footer: { loading: true } })
+    expect(host.querySelector('.composer-permission-chip')).not.toBeNull()
+
+    // Turning it back on hides the chip again until the run stops or finishes.
+    act(() => useAppStore.setState({ hidePermissionsWhileRunning: true }))
+    expect(host.querySelector('.composer-permission-chip')).toBeNull()
     render({ mode: 'ask', open: false, footer: { loading: false, stoppable: false } })
     expect(host.querySelector('.composer-permission-chip')).not.toBeNull()
     expect(permissionMenu()).toBeNull()
