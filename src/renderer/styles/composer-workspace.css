@@ -43,9 +43,6 @@ button.new-thread-chip:hover:not(:disabled),
 .new-thread-chip.active { background: color-mix(in srgb, var(--private-tint, var(--accent)) 16%, transparent); color: var(--private-tint, var(--accent)); }
 .new-thread-chip.active:hover:not(:disabled) { background: color-mix(in srgb, var(--private-tint, var(--accent)) 24%, transparent); color: var(--private-tint, var(--accent)); }
 .new-thread-chip:disabled { opacity: 0.5; cursor: default; }
-/* The project the draft had here, offered on the computer picked: an action, in the accent color. */
-.new-thread-add-there { color: var(--accent); }
-button.new-thread-add-there:hover:not(:disabled) { color: var(--accent); }
 .new-thread-chip:focus-visible,
 .composer-workspace-menu-item:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .new-thread-expiry-label { font-size: 11px; font-variant-numeric: tabular-nums; }

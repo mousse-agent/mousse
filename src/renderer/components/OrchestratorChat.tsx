@@ -17,6 +17,7 @@ import type {
   ChatMessage,
   ChatMode,
   ContextUsageSnapshot,
+  Project,
   QueuedMessage,
   SendExpectation,
   SkillChatMode,
@@ -121,9 +122,10 @@ import { SetupFailureNotice } from '../chat/components/SetupFailureNotice'
 import { CommandInfoNotice, GoalNotice } from '../chat/components/GoalNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, isPendingRowId, pendingThreadRow, typedAfterSend, type PendingThreadRow } from '../lib/pendingThreadRows'
-import { type ComposerWorkspace, composerWorkspaceFor, projectToAddThere, workspaceWithAddedProject, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, newThreadWorktree, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
+import { type ComposerWorkspace, composerWorkspaceFor, isComposerWorkspaceLocked, workspaceOnOtherComputer, isNewEmptyThread, isWorkspacePending, newThreadWorktree, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
 import { ComposerProjectPicker, ComposerThreadSettings, type ComposerDeviceProps } from './ComposerWorkspaceToolbar'
-import { openAddToComputer } from '../lib/addToComputer'
+import { addTargets, computersWithProject, draftLocalProject } from '../lib/addToMachine'
+import { AddToMachineDialog } from './AddToMachineDialog'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
 import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 import { threadReferenceRefusal } from '../lib/threadReference'
@@ -2044,24 +2046,21 @@ export function OrchestratorChat() {
     setComposerWorkspaceDraft(activeThreadId, workspaceOnDevice(workspace, projects, node))
   }
 
-  // The project the draft had here, when the computer picked does not have it: offered to add there instead of dropped.
-  const carriedProject = projectToAddThere(workspace, projects)
-  const addCarriedProject = () => {
-    const node = workspace.node
-    if (!node || !carriedProject) return
-    const threadId = activeThreadId
-    openAddToComputer({
-      node,
-      projectId: carriedProject.id,
-      name: carriedProject.name,
-      onAdded: (project) => {
-        const state = useAppStore.getState()
-        if (state.profileId !== profileId) return
-        const draft = composerWorkspaceFor(state.composerWorkspaceDrafts[threadId ?? '__blank__'], state.threads.find((t) => t.id === threadId), state.projects)
-        const next = workspaceWithAddedProject(draft, node, project.id)
-        if (next !== draft) setComposerWorkspaceDraft(threadId, next)
-      }
-    })
+  // The draft's project as this computer has it: the computer menu lists only the computers that have it too, and
+  // Add to machine puts it on another.
+  const draftProject = draftLocalProject(workspace, projects)
+  const projectComputers = useMemo(() => (draftProject ? computersWithProject(projects, draftProject.id) : undefined), [projects, draftProject])
+  const canAddToMachine = Boolean(projectComputers && addTargets(runOnDevices, projectComputers).length > 0)
+  const [addingToMachine, setAddingToMachine] = useState<{ projectId: string; threadId: string | null } | null>(null)
+  /** The project is on `node` now: the draft runs there, in it. */
+  const addedToMachine = (node: NodeId, project: Project) => {
+    const request = addingToMachine
+    setAddingToMachine(null)
+    const state = useAppStore.getState()
+    if (!request || state.profileId !== profileId) return
+    if (!state.projects.some((entry) => entry.id === project.id)) state.setProjects([...state.projects, project])
+    const draft = composerWorkspaceFor(state.composerWorkspaceDrafts[request.threadId ?? '__blank__'], state.threads.find((t) => t.id === request.threadId), state.projects)
+    setComposerWorkspaceDraft(request.threadId, { ...workspaceOnOtherComputer(draft, node, project.id), localProjectId: request.projectId })
   }
 
   /** Asks the picked computer to open a folder; resolves with its refusal, if any. */
@@ -2163,7 +2162,9 @@ export function OrchestratorChat() {
     notSharing,
     onRefresh: refreshRunOnDevices,
     onSelect: (node) => void selectRunOnDevice(node),
-    onOpenRemoteProject: openProjectOnRunOnDevice
+    onOpenRemoteProject: openProjectOnRunOnDevice,
+    ...(projectComputers ? { projectComputers } : {}),
+    ...(canAddToMachine && draftProject ? { onAddToMachine: () => setAddingToMachine({ projectId: draftProject.id, threadId: activeThreadId }) } : {})
   }
 
   handleSendRef.current = handleSend
@@ -2267,6 +2268,17 @@ export function OrchestratorChat() {
         {/* The dock on the composer's top edge: the top notice, one at a time. */}
         <ComposerNoticeSlot />
 
+        {addingToMachine && draftProject?.id === addingToMachine.projectId && projectComputers && (
+          <AddToMachineDialog
+            project={draftProject}
+            projects={projects}
+            devices={runOnDevices}
+            withProject={projectComputers}
+            notSharing={notSharing}
+            onAdded={addedToMachine}
+            onClose={() => setAddingToMachine(null)}
+          />
+        )}
         {newThreadSettings && (
           <ComposerProjectPicker
             key={`${newThreadKey}:project`}
@@ -2277,7 +2289,6 @@ export function OrchestratorChat() {
             onChange={pickDraftProject}
             onOpenProject={openProjectForDraft}
             onError={setSendError}
-            {...(carriedProject ? { addThere: { name: carriedProject.name, onAdd: addCarriedProject } } : {})}
           />
         )}
             <ChatComposer

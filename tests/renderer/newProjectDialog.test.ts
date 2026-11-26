@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, createElement, StrictMode } from 'react'
+import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Project } from '../../src/shared/types'
@@ -12,7 +12,7 @@ const actions = vi.hoisted(() => ({
 }))
 const remote = vi.hoisted(() => ({ openRemoteProject: vi.fn() }))
 vi.mock('../../src/renderer/lib/threadActions', () => actions)
-vi.mock('../../src/renderer/lib/remoteComputers', () => ({ openRemoteProject: remote.openRemoteProject, remoteErrorMessage: (_e: unknown, name: string) => `Could not reach ${name}` }))
+vi.mock('../../src/renderer/lib/remoteComputers', () => ({ openRemoteProject: remote.openRemoteProject, remoteErrorMessage: (_e: unknown, name: string) => `Could not reach ${name}`, remoteReason: (_e: unknown, name: string) => `Could not reach ${name}` }))
 vi.mock('../../src/renderer/components/WindowCaptionButtons', () => ({ WindowCaptionButtons: () => null }))
 vi.mock('../../src/renderer/components/TitleBarNav', () => ({ TitleBarNav: () => null }))
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -24,7 +24,6 @@ const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { useComputersStore } = await import('../../src/renderer/lib/computers')
 const { qualifyId } = await import('../../src/shared/threadRef')
 const { useSourceControl } = await import('../../src/renderer/lib/sourceControl')
-const { openAddToComputer, useAddToComputer } = await import('../../src/renderer/lib/addToComputer')
 
 const project = (id: string, path: string, extra: Partial<Project> = {}): Project => ({ id, name: id, path, createdAt: '2026-10-01T00:00:00.000Z', order: 0, ...extra })
 
@@ -33,7 +32,7 @@ let root: Root
 /** What the daemon answers about GitHub: the account, and its repositories when connected. */
 const github: { status: Record<string, unknown>; repositories: { nameWithOwner: string; private: boolean }[] } = { status: {}, repositories: [] }
 /** The GitHub account of the Mac mini, and what it answers to a clone or a folder read. */
-const mac: { status: Record<string, unknown>; folders: Record<string, unknown>; cloneFails?: boolean; cloneWaits?: Promise<void> } = { status: {}, folders: {} }
+const mac: { status: Record<string, unknown>; folders: Record<string, unknown> } = { status: {}, folders: {} }
 const platform = vi.fn(async (method: string, params?: { node?: string; path?: string }): Promise<unknown> => {
   const there = params?.node === 'nod_mac'
   if (method === 'sourceControl.status') return { providers: [there ? mac.status : github.status] }
@@ -43,11 +42,8 @@ const platform = vi.fn(async (method: string, params?: { node?: string; path?: s
     return mac.status
   }
   if (method === 'sourceControl.clone' && there) {
-    await mac.cloneWaits
-    if (mac.cloneFails) throw Object.assign(new Error('Mac mini is offline.'), { code: 'peer_offline' })
     return { project: project('p9', '/Users/me/dev/web-app') }
   }
-  if (method === 'sourceControl.projectSource' && !there) return { repository: 'acme/web-app', branch: 'feature/login' }
   if (method === 'folders.browse' && there) return mac.folders[params?.path ?? '']
   throw new Error(`unexpected ${method}`)
 })
@@ -71,9 +67,6 @@ beforeEach(() => {
   github.status = { id: 'github', name: 'GitHub', state: 'signed-out' }
   mac.status = { id: 'github', name: 'GitHub', state: 'connected', account: 'me' }
   mac.folders = {}
-  mac.cloneFails = false
-  mac.cloneWaits = undefined
-  useAddToComputer.setState({ request: null, source: null })
   useComputersStore.setState({ loaded: true, byNode: {} })
   useAppStore.setState({
     sidebarMode: 'threads',
@@ -307,80 +300,4 @@ it('asks where a clone goes on the other computer by browsing its folders, never
   await clickRow('dev')
   await clickRow('Use this folder')
   expect(platform).toHaveBeenCalledWith('sourceControl.clone', { node: 'nod_mac', provider: 'github', repository: 'acme/web-app', path: '/Users/me/dev/web-app' })
-})
-
-/** New project, opened by a composer that picked the Mac mini, to add the project `web-app` of this computer there. */
-const addWebAppToMac = async (extra: Project[] = []) => {
-  useComputersStore.setState({ loaded: true, byNode: { nod_mac: { node: 'nod_mac', name: 'Mac mini', online: true } } })
-  useAppStore.setState({ projects: [project('web-app', 'C:\dev\web-app'), project('nod_mac:api', '/Users/me/dev/api', { node: 'nod_mac' }), ...extra] })
-  const onAdded = vi.fn()
-  // StrictMode, as in development: React mounts the dialog twice, and the add must survive that.
-  await act(async () => root.render(createElement(StrictMode, null, createElement(TitleBar), createElement(NewProjectDialog), createElement(ToastHost))))
-  await act(async () => openAddToComputer({ node: 'nod_mac', projectId: 'web-app', name: 'web-app', onAdded }))
-  return onAdded
-}
-const addDialog = () => host.querySelector<HTMLElement>('[role="dialog"][aria-label="Add web-app to Mac mini"]')
-const addRows = () => [...addDialog()!.querySelectorAll('[role="option"] .thread-search-result-title')].map((title) => title.textContent)
-
-it('adds a project to another computer by cloning it there on the same branch; the composer takes it, and no thread starts', async () => {
-  const onAdded = await addWebAppToMac()
-  expect(addRows()).toEqual(['Clone acme/web-app', 'Pick its folder on Mac mini…'])
-  expect(addDialog()!.textContent).toContain('feature/login')
-  await act(async () => addDialog()!.querySelector<HTMLInputElement>('input')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })))
-  expect(platform).toHaveBeenCalledWith('sourceControl.clone', { node: 'nod_mac', provider: 'github', repository: 'acme/web-app', path: '/Users/me/dev/web-app', branch: 'feature/login' })
-  expect(onAdded).toHaveBeenCalledWith(expect.objectContaining({ id: qualifyId('nod_mac', 'p9'), node: 'nod_mac' }))
-  expect(actions.listProjectAndStartThread).not.toHaveBeenCalled()
-  expect(addDialog()).toBeNull()
-})
-
-it("offers that computer's matching projects, and adds a checkout there picked by browsing", async () => {
-  const onAdded = await addWebAppToMac([project('nod_mac:old', '/Users/me/dev/web-app-old',{ node: 'nod_mac', similarTo: 'web-app' })])
-  expect(addRows()).toEqual(['Open “nod_mac:old”', 'Clone acme/web-app', 'Pick its folder on Mac mini…'])
-  mac.folders = {
-    '/Users/me/dev': { path: '/Users/me/dev', parent: '/Users/me', folders: [{ name: 'web-app', path: '/Users/me/dev/web-app' }] },
-    '/Users/me/dev/web-app': { path: '/Users/me/dev/web-app', parent: '/Users/me/dev', folders: [] }
-  }
-  remote.openRemoteProject.mockResolvedValueOnce({ ok: true, project: project('p7', '/Users/me/dev/web-app') })
-  const click = async (title: string) => {
-    const row = [...addDialog()!.querySelectorAll<HTMLButtonElement>('[role="option"]')].find((option) => option.querySelector('.thread-search-result-title')?.textContent === title)!
-    await act(async () => row.click())
-  }
-  await click('Pick its folder on Mac mini…')
-  await click('web-app')
-  await click('Use this folder')
-  expect(remote.openRemoteProject).toHaveBeenCalledWith('nod_mac', '/Users/me/dev/web-app')
-  expect(platform).not.toHaveBeenCalledWith('sourceControl.clone', expect.anything())
-  expect(onAdded).toHaveBeenCalledWith(expect.objectContaining({ id: qualifyId('nod_mac', 'p7'), node: 'nod_mac' }))
-})
-
-it('keeps the draft as it was when the clone fails or the dialog closes', async () => {
-  mac.cloneFails = true
-  const onAdded = await addWebAppToMac()
-  const field = () => addDialog()!.querySelector<HTMLInputElement>('input')!
-  await act(async () => field().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })))
-  expect(addDialog()!.querySelector('[role="alert"]')!.textContent).toBeTruthy()
-  await act(async () => field().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })))
-  expect(addDialog()).toBeNull()
-  expect(onAdded).not.toHaveBeenCalled()
-  expect(useAddToComputer.getState().request).toBeNull()
-})
-
-it('ends the add when its clone fails after Esc hid the dialog, so a later project goes to a new thread, not that composer', async () => {
-  let release = () => {}
-  mac.cloneWaits = new Promise<void>((resolve) => { release = resolve })
-  mac.cloneFails = true
-  const onAdded = await addWebAppToMac()
-  const field = () => addDialog()!.querySelector<HTMLInputElement>('input')!
-  await act(async () => field().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })))
-  await act(async () => field().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })))
-  expect(addDialog()).toBeNull()
-  await act(async () => { release() })
-  expect(useAddToComputer.getState().request).toBeNull()
-  // Later, an unrelated project: it starts its own thread.
-  const site = project('site', 'C:\dev\site')
-  api.open.mockResolvedValueOnce(site)
-  await openDialog()
-  await clickRow('Open a folder…')
-  expect(actions.listProjectAndStartThread).toHaveBeenCalledWith(site)
-  expect(onAdded).not.toHaveBeenCalled()
 })

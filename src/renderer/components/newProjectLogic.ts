@@ -10,9 +10,7 @@ export type NewProjectRow =
    * Clones a GitHub repository (`owner/name`) into `destination`; null until a folder for new projects is known.
    * `owned` marks one of the signed-in account's repositories, offered from its list.
    */
-  | { kind: 'clone'; repository: string; name: string; destination: string | null; owned?: { private: boolean }; branch?: string }
-  /** Adding a project to another computer: pick a checkout of it there by browsing, which becomes the project there. */
-  | { kind: 'pick-checkout'; name: string }
+  | { kind: 'clone'; repository: string; name: string; destination: string | null; owned?: { private: boolean } }
   /**
    * GitHub is not connected: on this computer Settings → Source control connects it; on another, it connects there from
    * here. The account's repositories then show here.
@@ -230,36 +228,3 @@ export function browseRows(view: { path: string | null; parent: string | null; f
   return [{ label: view.path ?? `Folders on ${computer}`, rows }]
 }
 
-/** A project of this computer that another computer is asked to have: what is known of it here. */
-export interface AddToComputer {
-  name: string
-  computer: string
-  /** Its GitHub repository (`owner/name`); without one it can only be picked from a folder there. */
-  repository?: string
-  /** The branch its checkout here is on; a clone there checks it out when GitHub has it. */
-  branch?: string
-  /** Where clones go on that computer, when known. */
-  parent: string | null
-  /** That computer's projects that look like this one (`sameAs`, `similarTo`). */
-  matches: readonly { id: string; name: string; path: string }[]
-}
-
-/**
- * Adding a project to another computer: its checkouts there that are already projects, a clone of its GitHub
- * repository there (on the same branch), and a folder there picked by browsing, for a checkout that is not a project yet.
- */
-export function addToComputerRows(add: AddToComputer): RowGroup[] {
-  const groups: RowGroup[] = []
-  if (add.matches.length > 0) {
-    groups.push({ label: `On ${add.computer}`, rows: add.matches.map((project) => ({ kind: 'existing', projectId: project.id, name: project.name, path: project.path })) })
-  }
-  if (add.repository) {
-    const name = add.repository.split('/')[1]!
-    groups.push({
-      label: `Clone on ${add.computer}`,
-      rows: [{ kind: 'clone', repository: add.repository, name, destination: add.parent ? joinFolder(add.parent, name) : null, ...(add.branch ? { branch: add.branch } : {}) }]
-    })
-  }
-  groups.push({ label: add.repository ? 'Already there' : `On ${add.computer}`, rows: [{ kind: 'pick-checkout', name: add.name }] })
-  return groups
-}
