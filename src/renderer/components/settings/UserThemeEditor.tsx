@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { THEME_OPTIONS, type AppearanceSettings } from '../../../shared/settings'
-import { USER_THEME_BASES, USER_THEME_LIMITS, isUserThemeBase, type UserTheme } from '../../../shared/themes/userThemes'
+import { USER_THEME_BASES, USER_THEME_LIMITS, isUserThemeBase, type ThemeWallpaper, type UserTheme } from '../../../shared/themes/userThemes'
 import { applyAppearance } from '../../hooks/useTheme'
 import { sanitizeThemeCss } from '../../lib/themeCss'
 import { themeCssTooLong } from '../../../shared/themes/cssSafety'
@@ -36,11 +36,38 @@ function sameTheme(a: UserTheme, b: UserTheme): boolean {
   return JSON.stringify(a) === JSON.stringify(b)
 }
 
+/** How long the wallpaper settings rest before they are saved, so a dragged dim slider saves once. */
+export const WALLPAPER_SAVE_DELAY_MS = 250
+
+/**
+ * The draft after the saved theme changed from `previous` to `next`: the fields edited here and not saved yet stay, the
+ * others take the saved value. Another theme replaces the draft.
+ */
+function rebaseDraft(draft: UserTheme, previous: UserTheme, next: UserTheme): UserTheme {
+  if (draft.id !== next.id || previous.id !== next.id) return next
+  const keys = new Set([...Object.keys(draft), ...Object.keys(previous), ...Object.keys(next)]) as Set<keyof UserTheme>
+  const rebased: Record<string, unknown> = {}
+  for (const key of keys) {
+    const edited = JSON.stringify(draft[key]) !== JSON.stringify(previous[key])
+    const value = edited ? draft[key] : next[key]
+    if (value !== undefined) rebased[key] = value
+  }
+  return rebased as unknown as UserTheme
+}
+
+/** `theme` with `wallpaper`, or without one when it is undefined. */
+function withWallpaper(theme: UserTheme, wallpaper: ThemeWallpaper | undefined): UserTheme {
+  const next: UserTheme = { ...theme }
+  if (wallpaper) next.wallpaper = wallpaper
+  else delete next.wallpaper
+  return next
+}
+
 export interface UserThemeEditorProps {
   /** The saved theme being edited (the one in use). */
   theme: UserTheme
   appearance: AppearanceSettings
-  onSave: (theme: UserTheme) => void
+  onSave: (theme: UserTheme) => void | Promise<void>
   onDelete: (id: string) => void
   onExport: (theme: UserTheme) => void
 }
@@ -48,18 +75,46 @@ export interface UserThemeEditorProps {
 /**
  * Edits the user theme in use: name, base, a few colors and its CSS. Every change shows at once on the whole window
  * (the page's own theme pipeline, `applyAppearance`, with the draft in place of the saved theme); Save keeps it, and
- * leaving or Discard puts what is saved back.
+ * leaving or Discard puts what is saved back. The wallpaper rows are settings like the rest of the page: they save on
+ * their own, a moment after the last change, and never save the other edits with them.
  */
 export function UserThemeEditor({ theme, appearance, onSave, onDelete, onExport }: UserThemeEditorProps) {
   const [draft, setDraft] = useState<UserTheme>(theme)
   const dirty = !sameTheme(draft, theme)
   const saved = useRef(appearance)
   saved.current = appearance
+  const latest = useRef({ theme, onSave })
+  latest.current = { theme, onSave }
 
-  // A theme saved here or elsewhere (an agent, another window) replaces the draft; other settings changes do not.
+  // A theme saved here or elsewhere (an agent, another window) updates the draft, keeping the fields edited here and not
+  // saved yet; other settings changes do not.
   const savedKey = JSON.stringify(theme)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { setDraft(theme) }, [savedKey])
+  const savedTheme = useRef(theme)
+  useEffect(() => {
+    const previous = savedTheme.current
+    savedTheme.current = theme
+    setDraft((current) => rebaseDraft(current, previous, theme))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedKey])
+
+  // The wallpaper waiting to be saved, and its timer.
+  const pendingWallpaper = useRef<{ wallpaper: ThemeWallpaper | undefined } | null>(null)
+  const wallpaperTimer = useRef<number | undefined>(undefined)
+  const saveWallpaper = (): void | Promise<void> => {
+    window.clearTimeout(wallpaperTimer.current)
+    const pending = pendingWallpaper.current
+    pendingWallpaper.current = null
+    if (!pending) return
+    const { theme: current, onSave: save } = latest.current
+    if (JSON.stringify(current.wallpaper) === JSON.stringify(pending.wallpaper)) return
+    return save(withWallpaper(current, pending.wallpaper))
+  }
+  const setWallpaper = (wallpaper: ThemeWallpaper | undefined): void => {
+    setDraft((current) => withWallpaper(current, wallpaper))
+    pendingWallpaper.current = { wallpaper }
+    window.clearTimeout(wallpaperTimer.current)
+    wallpaperTimer.current = window.setTimeout(() => void saveWallpaper(), WALLPAPER_SAVE_DELAY_MS)
+  }
 
   // Live preview: the draft over the saved settings, a moment after the last keystroke.
   const previewed = useRef(false)
@@ -74,9 +129,11 @@ export function UserThemeEditor({ theme, appearance, onSave, onDelete, onExport 
 
   // Leaving after a preview shows what is saved now, read again: the editor also closes because the theme was turned
   // off (View → Turn off custom theme, an agent), and its last props would put that theme back.
+  // A wallpaper change still waiting is saved first.
   useEffect(() => () => {
+    const saving = saveWallpaper()
     if (!previewed.current) return
-    void window.mousse.settings.get().then((settings) => applyAppearance(settings.appearance)).catch(() => {})
+    void Promise.resolve(saving).catch(() => {}).then(() => window.mousse.settings.get()).then((settings) => applyAppearance(settings.appearance)).catch(() => {})
   }, [])
 
   const tooLong = draft.css.length > USER_THEME_LIMITS.css
@@ -84,8 +141,10 @@ export function UserThemeEditor({ theme, appearance, onSave, onDelete, onExport 
   const update = (patch: Partial<UserTheme>): void => setDraft((current) => ({ ...current, ...patch }))
   const setSwatch = (key: string, value: string): void =>
     setDraft((current) => (key === 'accent' ? { ...current, accent: value } : { ...current, colors: { ...current.colors, [key]: value } }))
+  // The wallpaper is not part of the draft: Discard keeps it.
   const discard = (): void => {
-    setDraft(theme)
+    void saveWallpaper()
+    setDraft((current) => withWallpaper(theme, current.wallpaper))
     previewed.current = false
     applyAppearance(saved.current)
   }
@@ -135,7 +194,7 @@ export function UserThemeEditor({ theme, appearance, onSave, onDelete, onExport 
           </div>
         }
       />
-      <WallpaperRows wallpaper={draft.wallpaper} onChange={(wallpaper) => setDraft((current) => ({ ...current, wallpaper }))} />
+      <WallpaperRows wallpaper={draft.wallpaper} onChange={setWallpaper} />
       <SettingsRow
         title="Custom CSS"
         anchor="appearance-custom-css"
@@ -157,7 +216,7 @@ export function UserThemeEditor({ theme, appearance, onSave, onDelete, onExport 
         />
       </SettingsRow>
       <div className="user-theme-actions">
-        <button type="button" className="settings-btn" disabled={!dirty || !draft.name.trim() || tooLong} onClick={() => { if (!tooLong) onSave({ ...draft, name: draft.name.trim() }) }}>Save</button>
+        <button type="button" className="settings-btn" disabled={!dirty || !draft.name.trim() || tooLong} onClick={() => { if (!tooLong) void onSave({ ...draft, name: draft.name.trim() }) }}>Save</button>
         {dirty && <button type="button" className="settings-btn" onClick={discard}>Discard</button>}
         <span className="user-theme-actions-spacer" />
         <button type="button" className="settings-icon-btn" title="Export as a file" aria-label="Export theme" onClick={() => onExport(theme)}>
