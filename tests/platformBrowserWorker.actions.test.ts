@@ -234,26 +234,36 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
     await broker.close()
   }, 120_000)
 
-  it('scrolls at an image point on plain background, and refuses a scroll that moves nothing', async () => {
+  it('scrolls the pane under an image point and no other, and refuses a scroll that moves nothing', async () => {
     const { broker } = await createInProcessBroker()
-    // Scrolled to 700 on load; nothing but the page's background right of x=800.
-    const opened = await broker.call(workerRequest('profile_point_scroll', 'session.open', { url: `${origin}/scrolled.html` }))
-    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
-    const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
-    const scrollY = async () => ((await broker.call(workerRequest('profile_point_scroll', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId }))).result as BrowserObservation).viewport.scrollY
-    const observed = await broker.call(workerRequest('profile_point_scroll', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId, includeScreenshot: true }))
-    expect(observed.ok, JSON.stringify(observed.error)).toBe(true)
-    const observation = observed.result as BrowserObservation
-    const background = { x: observation.viewport.cssWidth - 40, y: 360 }
-    expect(background.x).toBeGreaterThan(800)
-    const before = observation.viewport.scrollY
-    const scrolled = await broker.call(workerRequest('profile_point_scroll', 'act', actParams(payload.session, observation, { type: 'scroll', target: { kind: 'image-point', point: imagePointOf(observation, background) }, deltaX: 0, deltaY: 400 }, 'point_scroll')))
-    expect(scrolled.ok, JSON.stringify(scrolled.error)).toBe(true)
-    await expect.poll(scrollY, { timeout: 5_000 }).toBeGreaterThan(before)
-    const still = await broker.call(workerRequest('profile_point_scroll', 'act', actParams(payload.session, (scrolled.result as BrowserActionResult).observation!, { type: 'scroll', deltaX: 0, deltaY: 0 }, 'zero_scroll')))
-    expect(still.ok).toBe(false)
-    expect(still.error?.code).toBe('invalid_action')
-    await broker.close()
+    try {
+      // Two panes that scroll on their own (left at x 0-400, right at x 500-900, both at y 100-400); the page does not scroll.
+      const opened = await broker.call(workerRequest('profile_point_scroll', 'session.open', { url: `${origin}/wheel-targets.html` }))
+      expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
+      const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+      const observe = async (includeScreenshot: boolean) => {
+        const observed = await broker.call(workerRequest('profile_point_scroll', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId, includeScreenshot }))
+        expect(observed.ok, JSON.stringify(observed.error)).toBe(true)
+        return observed.result as BrowserObservation
+      }
+      /** How far each pane has scrolled, as the page reports it. */
+      const panes = async () => /left:\d+ right:\d+/.exec(JSON.stringify((await observe(false)).elements))?.[0]
+      expect(await panes()).toBe('left:0 right:0')
+      // The fixture's own coordinates, not the worker's bounds: the middle of the right pane.
+      let observation = await observe(true)
+      const right = await broker.call(workerRequest('profile_point_scroll', 'act', actParams(payload.session, observation, { type: 'scroll', target: { kind: 'image-point', point: imagePointOf(observation, { x: 700, y: 250 }) }, deltaX: 0, deltaY: 400 }, 'point_scroll_right')))
+      expect(right.ok, JSON.stringify(right.error)).toBe(true)
+      await expect.poll(panes, { timeout: 5_000 }).toMatch(/^left:0 right:[1-9]\d*$/)
+      observation = await observe(true)
+      const left = await broker.call(workerRequest('profile_point_scroll', 'act', actParams(payload.session, observation, { type: 'scroll', target: { kind: 'image-point', point: imagePointOf(observation, { x: 200, y: 250 }) }, deltaX: 0, deltaY: 400 }, 'point_scroll_left')))
+      expect(left.ok, JSON.stringify(left.error)).toBe(true)
+      await expect.poll(panes, { timeout: 5_000 }).toMatch(/^left:[1-9]\d* right:[1-9]\d*$/)
+      const still = await broker.call(workerRequest('profile_point_scroll', 'act', actParams(payload.session, (left.result as BrowserActionResult).observation!, { type: 'scroll', deltaX: 0, deltaY: 0 }, 'zero_scroll')))
+      expect(still.ok).toBe(false)
+      expect(still.error?.code).toBe('invalid_action')
+    } finally {
+      await broker.close()
+    }
   }, 120_000)
 
   it('refuses an image point on a page that scrolled by itself since its screenshot, and presses nothing', async () => {
