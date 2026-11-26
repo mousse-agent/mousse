@@ -737,13 +737,15 @@ function ProfileModelFamilyMenu({
         >
           {compactRows ? null : (
             <span className="model-picker-row-icon">
-              <ProviderIcon providerId={entry.brandId === 'anthropic' ? 'claude' : entry.brandId} size={16} />
+              <ProviderIcon providerId={entry.providerId} size={16} />
               {entry.badge ? <span className="model-picker-instance-badge" aria-hidden="true">{entry.badge}</span> : null}
             </span>
           )}
           <span className="model-picker-row-text">
-            {/* Beside the maker's logo, or under its selected rail item, the brand is not repeated ("Opus 5.5"). */}
-            <span className="model-picker-row-title">{shortModelName(entry.family.familyLabel)}</span>
+            {/* Beside its own maker's logo (Claude Code's), the brand is not repeated ("Opus 5.5"); elsewhere it is named in full. */}
+            <span className="model-picker-row-title">
+              {providerMakerId(entry.providerId) === entry.brandId ? shortModelName(entry.family.familyLabel) : entry.family.familyLabel}
+            </span>
             {!subtitle && !entry.providerStatus ? null : (
               <span className="model-picker-row-subtitle">
                 {subtitle ? <span className="model-picker-row-provider">{subtitle}</span> : null}
