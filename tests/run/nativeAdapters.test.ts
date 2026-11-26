@@ -19,6 +19,7 @@ import { CodexAdapter, type CodexClient } from '../../src/mms/harness/drivers/co
 import { ClaudeMetricsCollector } from '../../src/mms/harness/vendors/claude/metrics'
 import { TurnFrames } from '../../src/mms/harness/vendors/claude/turnFrames'
 import { transcriptSink } from '../support/transcriptSink'
+import { botFixture, createBot, start } from '../bots/botFixture'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 
 const user = (text: string): Message => ({ role: 'user', content: text, timestamp: 0 })
@@ -109,6 +110,34 @@ describe('ClaudeSubscriptionAdapter', () => {
     await expect(adapter.startTurn(input(), recordingSink(), control(), host())).rejects.toThrow(
       'claude-subscription requires a project workspace'
     )
+  })
+
+  it('a bot turn on Claude Code keeps what Claude Code says the turn cost on its activation\'s ledger', async () => {
+    const f = botFixture()
+    try {
+      const { botId } = await createBot(f, { reply: 'Hello' })
+      await f.bots.service.chatSend({ botId, text: 'What is on today?', clientRequestId: 'u1' })
+      const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+      const { prepared } = await start(f, activation.id)
+      const client = claudeClient(async (chat) => {
+        chat.onText('Nothing today.')
+        chat.onMetrics?.({
+          totalResponseTimeMs: 50,
+          usage: { input: 10, output: 5, cacheRead: 100, cacheWrite: 5, totalTokens: 120, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.0123 } },
+          requests: 2
+        })
+        return 'Nothing today.'
+      })
+      const sink = recordingSink()
+      // The orchestrator's turn sink hands a bot turn its usage as the runtime reported it (`botTurnUsage.test.ts`).
+      sink.usage = (usage) => prepared.usage!(usage)
+      await new ClaudeSubscriptionAdapter(() => client).startTurn(input({ cwd: null }), sink, control(), host())
+      expect(f.store.get('SELECT committed_input, committed_output, committed_usd_micros FROM bot_spend WHERE activation_id = ?', activation.id))
+        .toEqual({ committed_input: 115, committed_output: 5, committed_usd_micros: 12_300 })
+      expect(f.store.counters(activation.id)).toMatchObject({ requests: 2, inputTokens: 115, outputTokens: 5 })
+    } finally {
+      f.close()
+    }
   })
 
   it('Stop reaches the thread\'s Claude process through the service', async () => {

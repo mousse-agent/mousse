@@ -301,14 +301,18 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
           ...(report.quota?.length ? { quota: report.quota } : {}),
           ...(report.resumeLost ? { resumeLost: true } : {})
         })
-        if (report.usage)
+        if (report.usage) {
+          // What Claude Code says the turn cost (its `total_cost_usd`, less what an earlier turn of the session had).
+          const cost = report.usage.cost?.total
           sink.usage({
             input: report.usage.input,
             output: report.usage.output,
             cacheRead: report.usage.cacheRead,
             cacheWrite: report.usage.cacheWrite,
+            ...(typeof cost === 'number' && Number.isFinite(cost) && cost > 0 ? { costUsd: cost } : {}),
             ...(report.requests !== undefined ? { requests: report.requests } : {})
           })
+        }
       },
       onLineEdits: (lines) => sink.lineEdits(lines)
     })
