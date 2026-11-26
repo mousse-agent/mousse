@@ -9831,8 +9831,13 @@ export class OrchestratorService extends EventEmitter {
       // restart. A bot's work that reached its runtime's step cap, met a permission wall or goes on after its owner
       // answered continues in a fresh turn with no restart.
       const restarted = outcome?.interruptedBy === 'daemon_restart' || outcome?.uncertainReason === 'non_idempotent_tool_in_flight'
+      // The limit has reset only when the timer resumed the run, or a person did once the reset time passed. Resume now
+      // before it, or a run continued after its pause was cancelled, says no more than which run it continues.
+      const resumed = engine.getRun(runId)?.outcome?.resumedFromPause
+      const pause = outcome?.pause
+      const afterReset = !!pause && (resumed === 'auto' || (resumed === 'user' && Date.parse(pause.until) <= Date.now()))
       this.addSystemMessage(
-        outcome?.pause ? `Continuing run ${source.ordinal} after the usage limit reset.`
+        afterReset ? `Continuing run ${source.ordinal} after the usage limit reset.`
           : isProviderTurnCap(outcome?.error) ? `Continuing run ${source.ordinal}, which took the most steps one turn may take.`
             : restarted ? `Continuing run ${source.ordinal} after a restart.`
               : `Continuing run ${source.ordinal}.`
