@@ -23,6 +23,8 @@ interface ComputerBadgeViewProps {
   offline?: string
   /** What the badge is on: a thread (the default), or a project, which is named "On <computer>" ("Also on" for one of this computer's). */
   of?: BadgeOf
+  /** Give the words as a hover tooltip too; off where the row's own hover card already names the computer. */
+  tooltip?: boolean
   className?: string
 }
 
@@ -30,10 +32,10 @@ interface ComputerBadgeViewProps {
  * Which computer runs a thread. One that cannot be reached (offline, or not sharing its threads) has its icon struck
  * through; the tooltip says which and since when.
  */
-export function ComputerBadgeView({ name, state, withName = false, offline, of, className }: ComputerBadgeViewProps) {
+export function ComputerBadgeView({ name, state, withName = false, offline, of, tooltip = true, className }: ComputerBadgeViewProps) {
   const title = computerBadgeTitle(name, state, offline, of)
   return (
-    <span className={`computer-badge${className ? ` ${className}` : ''}`} data-state={state} title={title}>
+    <span className={`computer-badge${className ? ` ${className}` : ''}`} data-state={state} title={tooltip ? title : undefined}>
       <span className="computer-badge-icon">
         <Server size={withName ? 11 : 12} strokeWidth={2} aria-label={title} />
       </span>
@@ -43,7 +45,7 @@ export function ComputerBadgeView({ name, state, withName = false, offline, of, 
 }
 
 /** The badge of a thread row; nothing for a thread of this computer. */
-export function ThreadComputerBadge({ thread, withName, of, className }: { thread: Pick<Thread, 'node' | 'offline' | 'notShared'>; withName?: boolean; of?: BadgeOf; className?: string }) {
+export function ThreadComputerBadge({ thread, withName, of, tooltip, className }: { thread: Pick<Thread, 'node' | 'offline' | 'notShared'>; withName?: boolean; of?: BadgeOf; tooltip?: boolean; className?: string }) {
   const computer = useComputer(thread.node)
   if (!thread.node) return null
   const state = threadComputerState(thread, computer)
@@ -54,6 +56,7 @@ export function ThreadComputerBadge({ thread, withName, of, className }: { threa
       withName={withName}
       offline={offlineLabel(computer, Date.now())}
       of={of}
+      tooltip={tooltip}
       className={className}
     />
   )
