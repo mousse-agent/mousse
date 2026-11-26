@@ -57,6 +57,8 @@ export interface LocalConnectionRecord {
 interface FileShape {
   version: 1
   connections: LocalConnectionRecord[]
+  /** Ids of removed connections: never given out again, so a thread that chose one never reaches another server. */
+  retired?: string[]
 }
 
 /** How long a refresh of one connection may take. */
@@ -95,6 +97,7 @@ function maxTokensFor(window: number): number {
 
 export class LocalConnections {
   private records = new Map<string, LocalConnectionRecord>()
+  private retired = new Set<string>()
   private loaded = false
 
   constructor(
@@ -114,6 +117,7 @@ export class LocalConnections {
     } catch {
       return
     }
+    for (const id of Array.isArray(parsed?.retired) ? parsed.retired : []) if (typeof id === 'string') this.retired.add(id)
     for (const record of Array.isArray(parsed?.connections) ? parsed.connections : []) {
       if (!record || typeof record.id !== 'string' || !record.id.startsWith('local-') || typeof record.root !== 'string' || !normalizeLocalAddress(record.root)) continue
       this.records.set(record.id, { ...record, models: Array.isArray(record.models) ? record.models : [] })
@@ -122,7 +126,7 @@ export class LocalConnections {
   }
 
   private save(): void {
-    atomicWriteJsonSync(this.path, { version: 1, connections: [...this.records.values()] } satisfies FileShape)
+    atomicWriteJsonSync(this.path, { version: 1, connections: [...this.records.values()], ...(this.retired.size ? { retired: [...this.retired] } : {}) } satisfies FileShape)
   }
 
   has(providerId: string): boolean {
@@ -213,22 +217,25 @@ export class LocalConnections {
         ? { ok: false, problem: 'needs_key', message: 'This server needs its API key.', kind: identified.kind }
         : { ok: false, problem: 'not_a_model_server', message: `${address.root} lists no models Mousse can use.`, kind: identified.kind }
     }
-    const id = existing?.id ?? this.freeId(identified.kind)
-    const label = existing?.label ?? this.freeLabel(LOCAL_RUNTIME_LABELS[identified.kind])
+    // Read again after the awaits: a connect to the same address that finished meanwhile is this one's record. The id is
+    // taken and the record saved with no await in between, so two connects at once never share an id.
+    const current = [...this.records.values()].find((record) => record.root === address.root)
+    const id = current?.id ?? this.freeId(identified.kind)
+    const label = current?.label ?? this.freeLabel(LOCAL_RUNTIME_LABELS[identified.kind])
     const record: LocalConnectionRecord = {
-      ...(existing ?? {}),
+      ...(current ?? {}),
       id,
       kind: identified.kind,
       label,
       root: address.root,
-      keyed: Boolean(apiKey) || (existing?.keyed ?? false),
-      ...(input.allowCleartext || existing?.cleartext ? { cleartext: true as const } : {}),
+      keyed: Boolean(apiKey) || (current?.keyed ?? false),
+      ...(input.allowCleartext || current?.cleartext ? { cleartext: true as const } : {}),
       models: listed.models,
       refreshedAt: Date.now()
     }
-    if (apiKey) await this.credentials.modify(id, async () => ({ type: 'api_key', key: apiKey }))
     this.records.set(id, record)
     this.save()
+    if (apiKey) await this.credentials.modify(id, async () => ({ type: 'api_key', key: apiKey }))
     this.register(id)
     return { ok: true, providerId: id, label, kind: identified.kind, count: listed.models.length }
   }
@@ -244,7 +251,8 @@ export class LocalConnections {
       ...(apiKey ? { apiKey } : {}),
       ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {})
     }).catch(() => undefined)
-    if (!listed?.ok) return false
+    // A read stopped part-way left some models' facts unread: the saved ones stay.
+    if (!listed?.ok || options.signal?.aborted) return false
     const current = this.records.get(providerId)
     if (!current) return false
     this.records.set(providerId, { ...current, models: listed.models, refreshedAt: Date.now() })
@@ -257,6 +265,7 @@ export class LocalConnections {
   async remove(providerId: string): Promise<void> {
     if (!this.get(providerId)) return
     this.records.delete(providerId)
+    this.retired.add(providerId)
     this.save()
     this.models.deleteProvider(providerId)
     await this.credentials.delete(providerId).catch(() => undefined)
@@ -298,6 +307,8 @@ export class LocalConnections {
     if (!record || !model) return { ok: false, problem: 'unknown_model', message: 'This model is no longer listed. Refresh, then try again.' }
     const resident = await this.resident(providerId, modelId, signal ? { signal } : {})
     if (resident === false) return { ok: false, problem: 'cold', message: 'Load this model in its app first; the check never loads one.' }
+    // A server that cannot say may load the model to answer, and the check never loads one.
+    if (resident !== true) return { ok: false, problem: 'cold', message: `${record.label} does not say whether this model is loaded, so the check cannot run without risking a load.` }
     const bounded = signal ? AbortSignal.any([signal, AbortSignal.timeout(TOOL_CHECK_TIMEOUT_MS)]) : AbortSignal.timeout(TOOL_CHECK_TIMEOUT_MS)
     let outcome: 'passed' | 'failed'
     try {
@@ -392,8 +403,9 @@ export class LocalConnections {
 
   private freeId(kind: LocalRuntimeKind): string {
     const base = `local-${kind === 'openai' ? 'server' : kind}`
-    if (!this.records.has(base)) return base
-    for (let n = 2; ; n += 1) if (!this.records.has(`${base}-${n}`)) return `${base}-${n}`
+    const taken = (id: string) => this.records.has(id) || this.retired.has(id)
+    if (!taken(base)) return base
+    for (let n = 2; ; n += 1) if (!taken(`${base}-${n}`)) return `${base}-${n}`
   }
 
   private freeLabel(base: string): string {

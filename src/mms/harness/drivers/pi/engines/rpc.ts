@@ -134,7 +134,7 @@ export interface PiRpcDriverOptions {
   local?: {
     facts(providerId: string, modelId: string): LocalModelFacts | undefined
     has(providerId: string): boolean
-    refresh(providerId: string): Promise<unknown>
+    refresh(providerId: string, options?: { signal?: AbortSignal }): Promise<unknown>
   }
   /** Mousse's tools for a thread, with their class; as `runId`'s turn is offered them when given (`ToolRegistry.listForTurn`). */
   mousseTools?(threadId: string, runId?: string): PiMousseTool[]
@@ -200,7 +200,7 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
     runtime: () => options.runtime(),
     catalog: () => options.catalog(providerId),
     ...(options.local?.has(providerId)
-      ? { localModel: (modelId: string) => options.local!.facts(providerId, modelId), refreshLocal: () => options.local!.refresh(providerId) }
+      ? { localModel: (modelId: string) => options.local!.facts(providerId, modelId), refreshLocal: (signal: AbortSignal) => options.local!.refresh(providerId, { signal }) }
       : {}),
     ...(options.apiKey ? { apiKey: () => options.apiKey!(providerId) } : {}),
     ...(options.oauth ? { oauth: options.oauth } : {}),

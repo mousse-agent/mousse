@@ -117,7 +117,8 @@ export function piRpcProfileOptions(inputs: PiProfileInputs): PiRpcDriverOptions
     catalog: (providerId): PiEngineCatalog => {
       const listed = inputs.auth()?.models.getModels(providerId) ?? []
       const template = listed[0]
-      const custom = template
+      // A local server runs only what it lists (`checkLocalTurn` refuses anything else), so it gets no custom models.
+      const custom = template && !inputs.auth()?.local?.has(providerId)
         ? (inputs.customModels?.(piInstanceId(providerId)) ?? []).filter((entry) => !listed.some((model) => model.id === entry.id)).map((entry) => customModelDefinition(template, entry))
         : []
       const models: Model<Api>[] = [...listed, ...custom]
