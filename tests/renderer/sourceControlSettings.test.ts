@@ -28,7 +28,7 @@ const request = vi.fn(async (method: string, _params?: unknown): Promise<unknown
 
 beforeEach(() => {
   request.mockClear()
-  useSourceControl.setState({ github: null, repositories: [], fetchedAt: 0 })
+  useSourceControl.setState({ computers: {} })
   Object.assign(window, { mousse: { platformRequest: { request } } })
   host = document.createElement('div')
   document.body.append(host)

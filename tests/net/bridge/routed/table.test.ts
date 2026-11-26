@@ -173,7 +173,7 @@ describe('the routed method table', () => {
       Object.entries(ROUTED_METHODS)
         .filter(([, row]) => row.absolutePath)
         .map(([method]) => method)
-    ).toEqual(['projects.open'])
+    ).toEqual(['projects.open', 'sourceControl.clone', 'folders.browse'])
     for (const [method, row] of Object.entries(ROUTED_METHODS))
       if (method.startsWith('files.') || method.startsWith('git.'))
         expect(row.target, method).toMatch(/^(thread|folder|project)$/)

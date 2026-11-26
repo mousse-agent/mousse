@@ -9,7 +9,9 @@ export const SOURCE_CONTROL_METHODS = [
   'sourceControl.connect',
   'sourceControl.cancel',
   'sourceControl.signOut',
-  'sourceControl.repositories'
+  'sourceControl.repositories',
+  'sourceControl.clone',
+  'folders.browse'
 ] as const
 export type SourceControlMethod = (typeof SOURCE_CONTROL_METHODS)[number]
 

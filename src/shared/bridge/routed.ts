@@ -77,7 +77,7 @@ export interface RoutedRow {
    * not durable, so a lost reply is answered by sending the same number again, never by a fresh request.
    */
   sequenced?: true
-  /** Only the call that names an absolute `path` (`projects.open`) may. */
+  /** Only a call that names an absolute `path` of the owner (`projects.open`, a clone's folder, browsing folders) may. */
   absolutePath?: true
   /**
    * Keys whose value may be sent ahead through `routed.stage` instead of inline (a large message, an
@@ -766,6 +766,22 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'skills.list': read('computer', []),
   'skills.read': read('computer', ['skillId'], { required: ['skillId'] }),
   'github.status': read('computer', []),
+  // Settings → Source control of the owner, and New project's Clone on it: its GitHub account, the account's
+  // repositories, Connect (install GitHub CLI when it is missing and sign it in; the owner also needs terminal access
+  // for the caller, `OwnerRoutes`) with the one-time code relayed by `sourceControl.status`, and a clone into a folder
+  // there that becomes a project there. The owner checks the folder as it checks `projects.open`.
+  'sourceControl.status': read('computer', ['refresh'], { via: 'domain' }),
+  'sourceControl.repositories': read('computer', ['provider', 'refresh'], { via: 'domain', required: ['provider'] }),
+  'sourceControl.connect': write('computer', ['provider'], { via: 'domain', required: ['provider'] }),
+  'sourceControl.cancel': write('computer', ['provider'], { via: 'domain', required: ['provider'] }),
+  'sourceControl.clone': write('computer', ['provider', 'repository', 'path', 'branch'], {
+    via: 'domain',
+    required: ['provider', 'repository', 'path'],
+    absolutePath: true
+  }),
+  // The folders of the owner by name, to pick where a clone goes by browsing: never files, hidden folders, the Mousse
+  // data folder or folders that hold credentials (`folderBrowse.ts`).
+  'folders.browse': read('computer', ['path'], { via: 'domain', absolutePath: true }),
   'pullRequests.list': read('project', ['projectId', 'limit', 'force']),
   'pullRequests.resolve': read('project', ['projectId', 'reference'], { required: ['reference'] }),
 
@@ -1140,8 +1156,8 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'They use the computer’s own GitHub sign-in or take a raw folder path; they are not thread features.'
   },
   {
-    prefixes: ['sourceControl.'],
-    reason: 'The GitHub sign-in of a computer is added, used and removed from Settings → Source control on that computer.'
+    methods: ['sourceControl.signOut'],
+    reason: 'Signing a computer out of GitHub is done from Settings → Source control on that computer.'
   },
   {
     methods: ['skills.refresh', 'skills.openFolderIntent'],
