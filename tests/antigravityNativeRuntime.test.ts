@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -23,7 +23,7 @@ vi.mock('../src/mms/harness/acp/presets/antigravity/installation', async (import
 }))
 
 // Only the agent process is replaced, to read what Mousse starts it with.
-const spawned = vi.hoisted(() => ({ calls: [] as Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv; cwd?: string; stdin: import('node:stream').PassThrough; stdout: import('node:stream').PassThrough; stderr: import('node:stream').PassThrough }>, help: '' }))
+const spawned = vi.hoisted(() => ({ calls: [] as Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv; cwd?: string; stdin: import('node:stream').PassThrough; stdout: import('node:stream').PassThrough; stderr: import('node:stream').PassThrough; child: import('node:events').EventEmitter }>, help: '' }))
 vi.mock('node:child_process', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:child_process')>()
   return {
@@ -32,8 +32,9 @@ vi.mock('node:child_process', async (importOriginal) => {
       const stdin = new PassThrough()
       const stdout = new PassThrough()
       const stderr = new PassThrough()
-      spawned.calls.push({ file, args, env: options.env, cwd: options.cwd, stdin, stdout, stderr })
-      return Object.assign(new EventEmitter(), { stdin, stdout, stderr, exitCode: null, signalCode: null, kill: vi.fn() })
+      const child = Object.assign(new EventEmitter(), { stdin, stdout, stderr, exitCode: null, signalCode: null, kill: vi.fn() })
+      spawned.calls.push({ file, args, env: options.env, cwd: options.cwd, stdin, stdout, stderr, child })
+      return child
     }),
     // `agy acp --help`, as `spawned.help` says.
     execFile: vi.fn((_file: string, _args: string[], _options: unknown, done: (error: Error | null, stdout: string, stderr: string) => void) => done(null, '', spawned.help)),
@@ -340,7 +341,7 @@ describe('launching each runtime', () => {
   describe('a one-shot', () => {
     const HELP = 'Flags:\n  --cli_dir_name   Subdirectory under app_data_dir\n  --include-default-customizations  Include default customizations (default true)\n'
     /** A one-shot launched on `kind`, its scratch folder made as the service makes it, with `agy acp --help` printing `help`. */
-    const launchOneShot = async (kind: 'legacy' | 'native', help = HELP, handlers: Record<string, unknown> = {}) => {
+    const launchOneShot = async (kind: 'legacy' | 'native', help = HELP, handlers: Record<string, unknown> = {}, extra: { privateHome?: string; onExit?: () => void } = {}) => {
       const dir = mkdtempSync(join(tmpdir(), 'mousse-agy-launch-'))
       homes.push(dir)
       const binary = join(dir, 'agy.exe')
@@ -352,23 +353,27 @@ describe('launching each runtime', () => {
       process.env.MOUSSE_TEST_USER_SECRET = 'kept out'
       try {
         const env = vi.fn((base: NodeJS.ProcessEnv) => ({ ...base, USER_VAR: '1' }))
-        const connection = antigravityConnectionFactory({ profileDir: dir, profileHome: dir, runtime: () => ({ kind, binary, source: 'user' }), args: () => ['--user-flag'], env })(
-          { purpose: 'one_shot', cwd, handlers: { requestPermission: vi.fn(), ...handlers } } as never)
+        const privateHome = extra.privateHome ? join(dir, extra.privateHome) : undefined
+        const connection = antigravityConnectionFactory({ profileDir: dir, profileHome: dir, ...(privateHome ? { privateHome } : {}), runtime: () => ({ kind, binary, source: 'user' }), args: () => ['--user-flag'], env })(
+          { purpose: 'one_shot', cwd, handlers: { requestPermission: vi.fn(), ...handlers }, ...(extra.onExit ? { onExit: extra.onExit } : {}) } as never)
         return { dir, cwd, call: spawned.calls.at(-1)!, env, connection }
       } finally {
         delete process.env.MOUSSE_TEST_USER_SECRET
       }
     }
 
-    it("starts agy in its own folder with its own settings, an allowlisted environment, and none of the user's flags, variables or skill links", async () => {
+    it("starts agy in its own folder on an empty home with its own settings, an allowlisted environment, and none of the user's flags, variables or skill links", async () => {
       const { dir, cwd, call, env } = await launchOneShot('native')
       const geminiHome = join(dir, 'gemini-home')
+      const home = join(dir, 'one-shot-homes', 'request-1')
       expect(call.cwd).toBe(cwd)
-      expect(call.args).toEqual(['acp', '--gemini-dir', geminiHome, '--app-data-dir', 'antigravity-acp', '--cli_dir_name', 'one-shot-request-1', '--include-default-customizations=false'])
+      // The home's hooks and MCP servers (`<gemini-dir>/config`) stay out; its app data (sign-in, sessions) is the entry's.
+      expect(call.args).toEqual(['acp', '--gemini-dir', home, '--app-data-dir', join('..', '..', 'gemini-home', 'antigravity-acp'), '--cli_dir_name', 'one-shot-request-1', '--include-default-customizations=false'])
+      expect(readdirSync(home)).toEqual([])
       expect(env).not.toHaveBeenCalled()
       expect(call.env.MOUSSE_TEST_USER_SECRET).toBeUndefined()
       expect(call.env.USER_VAR).toBeUndefined()
-      expect(call.env.GEMINI_HOME).toBe(geminiHome)
+      expect(call.env.GEMINI_HOME).toBe(home)
       expect(call.env.PATH ?? call.env.Path).toBeDefined()
       const settings = JSON.parse(readFileSync(join(geminiHome, 'antigravity-acp', 'one-shot-request-1', 'settings.json'), 'utf8')) as Record<string, unknown>
       expect(settings).toMatchObject({ toolPermission: 'strict', allowNonWorkspaceAccess: false, agentMode: '', permissions: { deny: expect.arrayContaining(['command(*)', 'write_file(*)', 'read_file(*)', 'mcp(*)']) } })
@@ -381,6 +386,25 @@ describe('launching each runtime', () => {
       const older = await launchOneShot('native', 'Flags:\n  --cli_dir_name   Subdirectory under app_data_dir\n')
       expect(older.call.args).not.toContain('--include-default-customizations=false')
       await expect(launchOneShot('native', 'Flags:\n  --gemini-dir  Path\n')).rejects.toMatchObject({ code: 'wont_run' })
+    })
+
+    it("starts an added entry's one-shot on an empty home beside its own, its sign-in still read from its own app data", async () => {
+      const { dir, call } = await launchOneShot('native', HELP, {}, { privateHome: join('entry', 'home') })
+      expect(call.args.slice(0, 5)).toEqual(['acp', '--gemini-dir', join(dir, 'entry', 'home', 'one-shot-homes', 'request-1'), '--app-data-dir', join('..', '..', 'gemini-home', 'antigravity-acp')])
+      expect(call.env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE).toBe('1')
+    })
+
+    it('sees a tool the agent reports after it exits, and counts it ended only once its output has closed', async () => {
+      const observe = vi.fn()
+      const onExit = vi.fn()
+      const { call } = await launchOneShot('native', HELP, { observe }, { onExit })
+      call.child.emit('exit', 0, null)
+      call.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Write file' } } })}\n`)
+      await vi.waitFor(() => expect(observe).toHaveBeenCalledWith(expect.objectContaining({ params: expect.objectContaining({ update: expect.objectContaining({ sessionUpdate: 'tool_call' }) }) })))
+      expect(onExit).not.toHaveBeenCalled()
+      call.stdout.end()
+      call.child.emit('close', 0, null)
+      expect(onExit).toHaveBeenCalledTimes(1)
     })
 
     it("keeps the 1.1.1 server's ordinary launch", async () => {

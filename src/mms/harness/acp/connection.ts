@@ -136,11 +136,12 @@ export function connectAcpProcess(child: ChildProcessWithoutNullStreams, handler
   const end = () => {
     if (ended) return
     ended = true
+    connection.close()
     wiring.onExit?.()
   }
   if (handlers.observe) observeOutput(output, handlers.observe)
+  // Observed, the connection stays open until the output has been read: closing it would end the output early.
   child.on('exit', () => {
-    connection.close()
     if (!handlers.observe) end()
     else setTimeout(end, ACP_DRAIN_MS).unref?.()
   })

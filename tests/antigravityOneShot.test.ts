@@ -7,15 +7,17 @@
  * Inputs the agent may send during the prompt: text (answer), too much text, a `tool_call` update before any text,
  * a permission request, a client file read, a terminal request, an unknown extension request, a question, a file
  * left in its folder, an empty folder left there, a cancelled stop reason, nothing until Stop, nothing until the
- * deadline. Inputs of the home: hooks or MCP servers set, a blank or empty config, a malformed config. Session
- * files: this request's, another session's, this session's naming another folder.
+ * deadline, "authentication required". While it ends: a tool report, or no end at all. Session files: this
+ * request's, another session's, this session's naming another folder, one that cannot be removed. Leftovers: a live
+ * request's, a recorded running process's, an ended one's.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
+import { methods, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AntigravityProviderService } from '../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
+import { ONE_SHOT_RETRY_MS, oneShotFs, sweepOneShotLeftovers } from '../src/mms/harness/acp/presets/antigravity/oneShotGuards'
 import { ONE_SHOT_DEADLINE_MS, ONE_SHOT_INSTRUCTION, ONE_SHOT_OUTPUT_CAP } from '../src/mms/harness/acp/session'
 import type { AcpClientHandlers, AcpLaunchRequest } from '../src/mms/harness/acp/connection'
 import { antigravityDriver } from '../src/mms/harness/drivers/antigravity'
@@ -40,24 +42,41 @@ const answers: unknown[] = []
 afterEach(() => { answers.length = 0 })
 type Script = (agent: Agent) => Promise<unknown>
 
-/** An Antigravity service whose agent processes are scripted: `prompt` answers each `session/prompt`. */
-function fixture(prompt: Script) {
+type Process = { requests: Array<[string, Record<string, unknown>]>; close: ReturnType<typeof vi.fn>; launched: AcpLaunchRequest; update(update: unknown): void; exit(): void }
+
+/**
+ * An Antigravity service whose agent processes are scripted: `prompt` answers each `session/prompt`. Ending a process
+ * (kill or close) reports its exit, unless `onKill` says otherwise: it runs first, and `'stays'` keeps it running.
+ */
+function fixture(prompt: Script, options: { onKill?: (process: Process) => void | 'stays'; entry?: boolean } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-agy-one-shot-'))
   homes.push(home)
-  const processes: Array<{ requests: Array<[string, Record<string, unknown>]>; close: ReturnType<typeof vi.fn>; launched: AcpLaunchRequest }> = []
+  const processes: Process[] = []
   const questions = new UserQuestionService()
+  const entry = options.entry ? { instanceId: 'antigravity_work', stateDir: join(home, 'entry'), home: join(home, 'entry', 'home') } : undefined
   const service = new AntigravityProviderService(home, home, questions, undefined, {
+    ...(entry ? { entry } : {}),
     connect: (launched) => {
       const abort = new AbortController()
       const requests: Array<[string, Record<string, unknown>]> = []
+      let exited = false
+      const exit = () => {
+        if (exited) return
+        exited = true
+        abort.abort(new Error('ACP closed'))
+        launched.onExit?.()
+      }
+      const kill = vi.fn(() => {
+        if (options.onKill?.(process) === 'stays') return
+        exit()
+      })
       // Closing ends the process, which then reports its exit (`AcpLaunchRequest.onExit`).
       const close = vi.fn(() => {
         if (abort.signal.aborted) return
-        abort.abort(new Error('ACP closed'))
-        launched.onExit?.()
+        kill()
       })
       const active = {
-        child: { exitCode: null, signalCode: null, kill: vi.fn() },
+        child: { pid: undefined, exitCode: null, signalCode: null, kill },
         connection: {
           signal: abort.signal,
           close,
@@ -83,7 +102,8 @@ function fixture(prompt: Script) {
         },
         onUpdate: undefined as ((update: unknown) => void) | undefined
       }
-      processes.push({ requests, close, launched })
+      const process: Process = { requests, close, launched, update: (update) => active.onUpdate?.(update), exit }
+      processes.push(process)
       return active as never
     }
   })
@@ -95,11 +115,16 @@ function fixture(prompt: Script) {
   const spec = (patch: Partial<Parameters<AntigravityProviderService['oneShot']>[0]> = {}) => ({
     model: 'account-model', system: 'You name chats.', prompt: 'User request: fix the login bug', onActivity: vi.fn(), ...patch
   })
-  const oneShotDir = join(home, 'providers', 'antigravity', 'one-shot')
-  const geminiHome = join(home, 'providers', 'antigravity', 'gemini-home')
+  const stateDir = entry?.stateDir ?? join(home, 'providers', 'antigravity')
+  const oneShotDir = join(stateDir, 'one-shot')
+  const geminiHome = join(entry?.home ?? stateDir, 'gemini-home')
+  const homesDir = join(entry?.home ?? stateDir, 'one-shot-homes')
   /** The service runs `agy` (its session files are then removed afterwards). */
   const onAgy = () => vi.spyOn(service as unknown as { runtime(): unknown }, 'runtime').mockReturnValue({ kind: 'native', binary: join(home, 'agy.exe'), source: 'manual' })
-  return { service, processes, spec, questions, oneShotDir, geminiHome, onAgy }
+  /** Every one-shot file left: scratch folders, homes, settings folders. */
+  const leftovers = () => [oneShotDir, homesDir].flatMap((dir) => existsSync(dir) ? readdirSync(dir) : [])
+    .concat(existsSync(join(geminiHome, 'antigravity-acp')) ? readdirSync(join(geminiHome, 'antigravity-acp')).filter((name) => name.startsWith('one-shot-')) : [])
+  return { service, processes, spec, questions, stateDir, oneShotDir, homesDir, geminiHome, onAgy, leftovers }
 }
 
 const text = (value: string) => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: value } })
@@ -122,8 +147,8 @@ describe('Antigravity one-shot', () => {
     expect(String(opened.cwd).startsWith(s.oneShotDir)).toBe(true)
     // The process starts in the same folder.
     expect(process.launched.cwd).toBe(opened.cwd)
-    // The folder is gone afterwards.
-    expect(readdirSync(s.oneShotDir)).toEqual([])
+    // The folder, its home and its settings folder are gone afterwards.
+    expect(s.leftovers()).toEqual([])
     expect(process.requests).toContainEqual([methods.agent.session.setConfigOption, expect.objectContaining({ configId: 'model', value: 'account-model' })])
     const sent = process.requests.find(([method]) => method === methods.agent.session.prompt)![1].prompt as Array<{ type: string; text: string }>
     expect(sent).toEqual([{ type: 'text', text: `${ONE_SHOT_INSTRUCTION}\n\nYou name chats.\n\nUser request: fix the login bug` }])
@@ -186,28 +211,15 @@ describe('Antigravity one-shot', () => {
     await expect(folders.service.oneShot(folders.spec(), new AbortController().signal)).resolves.toEqual({ text: 'Login bug' })
   })
 
-  it.each([
-    ['hooks.json', '{"hooks":{"PreToolUse":[{"command":"curl example.com"}]}}', 'wont_run'],
-    ['mcp_config.json', '{"mcpServers":{"files":{"command":"npx"}}}', 'wont_run'],
-    ['mcp_config.json', '{"mcpServers":', 'wont_run'],
-    ['hooks.json', '[]', 'wont_run'],
-    ['mcp_config.json', '', undefined],
-    ['mcp_config.json', '{"mcpServers":{}}', undefined],
-    ['hooks.json', ' \n', undefined]
-  ])("the home's config/%s holding %j is refused before anything starts (%s), or runs", async (file, content, refused) => {
+  it("runs whatever hooks and MCP servers the home's config sets, or however malformed it is (its launch reads an empty home)", async () => {
     const s = fixture(async (agent) => {
       agent.update(text('Login bug'))
       return { stopReason: 'end_turn' }
     })
     mkdirSync(join(s.geminiHome, 'config'), { recursive: true })
-    writeFileSync(join(s.geminiHome, 'config', file), content)
-    const run = s.service.oneShot(s.spec(), new AbortController().signal)
-    if (!refused) {
-      await expect(run).resolves.toEqual({ text: 'Login bug' })
-      return
-    }
-    await expect(run).rejects.toMatchObject({ code: refused, message: expect.stringContaining(file) })
-    expect(s.processes).toHaveLength(0)
+    writeFileSync(join(s.geminiHome, 'config', 'hooks.json'), '{"probe":{"SessionStart":[{"type":"command","command":"curl example.com"}]}}')
+    writeFileSync(join(s.geminiHome, 'config', 'mcp_config.json'), '{"mcpServers":')
+    await expect(s.service.oneShot(s.spec(), new AbortController().signal)).resolves.toEqual({ text: 'Login bug' })
   })
 
   it('an answer longer than the cap ends the request and the process', async () => {
@@ -308,6 +320,103 @@ describe('Antigravity one-shot', () => {
     await expect(s.service.oneShot(s.spec(), stop.signal)).rejects.toBeDefined()
     expect(s.processes).toHaveLength(0)
     expect(existsSync(s.oneShotDir)).toBe(false)
+  })
+
+  it('a tool the agent reports while it ends, after its answer, still refuses the request', async () => {
+    const s = fixture(async (agent) => {
+      agent.update(text('Login bug'))
+      return { stopReason: 'end_turn' }
+    }, { onKill: (process) => process.update({ sessionUpdate: 'tool_call', toolCallId: 't9', title: 'Write file' }) })
+    await expect(s.service.oneShot(s.spec(), new AbortController().signal)).rejects.toMatchObject({ code: 'one_shot_tool_refused', message: expect.stringContaining('Write file') })
+  })
+
+  it('a process that does not end keeps every file of its request, which go once it does', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const s = fixture(async (agent) => {
+        agent.update(text('Login bug'))
+        return { stopReason: 'end_turn' }
+      }, { onKill: () => 'stays' })
+      s.onAgy()
+      const run = s.service.oneShot(s.spec(), new AbortController().signal)
+      const settled = expect(run).rejects.toMatchObject({ code: 'protocol' })
+      await vi.waitFor(() => expect(s.processes[0]?.launched.handlers).toBeDefined())
+      await vi.advanceTimersByTimeAsync(10_000)
+      await settled
+      const left = s.leftovers()
+      expect(left).toHaveLength(2)
+      // Even a sweep long after leaves a live request alone.
+      sweepOneShotLeftovers(s.stateDir, s.geminiHome, Date.now() + 24 * 60 * 60_000)
+      expect(s.leftovers()).toEqual(left)
+      s.processes[0].exit()
+      await vi.waitFor(() => expect(s.leftovers()).toEqual([]))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the sweep removes an ended request of an earlier Mousse, and skips one whose recorded process still runs', async () => {
+    const s = fixture(async () => ({ stopReason: 'end_turn' }))
+    const old = (Date.now() - 2 * 60 * 60_000) / 1000
+    const leave = (id: string, record: object | undefined) => {
+      for (const dir of [join(s.oneShotDir, id), join(s.homesDir, id), join(s.geminiHome, 'antigravity-acp', `one-shot-${id}`)]) {
+        mkdirSync(dir, { recursive: true })
+        if (record && dir.startsWith(s.homesDir)) writeFileSync(join(dir, 'mousse-one-shot.json'), JSON.stringify(record))
+        utimesSync(dir, old, old)
+      }
+    }
+    const running = '00000000-0000-4000-8000-000000000001'
+    const ended = '00000000-0000-4000-8000-000000000002'
+    const unrecorded = '00000000-0000-4000-8000-000000000003'
+    leave(running, { pid: process.pid })
+    leave(ended, { pid: 2 ** 22 + 7 })
+    leave(unrecorded, undefined)
+    sweepOneShotLeftovers(s.stateDir, s.geminiHome)
+    expect(readdirSync(s.oneShotDir)).toEqual([running])
+    expect(readdirSync(s.homesDir)).toEqual([running])
+  })
+
+  it('session files it cannot remove are reported and tried again until they go', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const s = fixture(async (agent) => {
+        const conversations = join(s.geminiHome, 'antigravity-acp', 'conversations')
+        mkdirSync(conversations, { recursive: true })
+        writeFileSync(join(conversations, `${agent.sessionId}.db`), `workspace file:///${agent.cwd.replaceAll('\\', '/')}`)
+        writeFileSync(join(conversations, `${agent.sessionId}.db-wal`), '')
+        agent.update(text('Login bug'))
+        return { stopReason: 'end_turn' }
+      })
+      s.onAgy()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const rm = oneShotFs.rm
+      let locked = true
+      vi.spyOn(oneShotFs, 'rm').mockImplementation((path) => {
+        if (locked && path.endsWith('.db-wal')) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' })
+        rm(path)
+      })
+      await expect(s.service.oneShot(s.spec(), new AbortController().signal)).resolves.toEqual({ text: 'Login bug' })
+      const conversations = join(s.geminiHome, 'antigravity-acp', 'conversations')
+      expect(readdirSync(conversations)).toEqual(['session-1.db-wal'])
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not be removed'), expect.objectContaining({ paths: [join(conversations, 'session-1.db-wal')] }))
+      // Its home keeps the record the next try needs.
+      expect(readdirSync(s.homesDir)).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(ONE_SHOT_RETRY_MS[0])
+      expect(warn).toHaveBeenCalledTimes(2)
+      locked = false
+      await vi.advanceTimersByTimeAsync(ONE_SHOT_RETRY_MS[1])
+      expect(readdirSync(conversations)).toEqual([])
+      expect(s.leftovers()).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("an added entry's request answered \"authentication required\" fails without signing the entry out", async () => {
+    const s = fixture(async () => { throw new RequestError(-32000, 'Authentication required') }, { entry: true })
+    const signedOut = vi.spyOn(s.service as unknown as { markSignedOut(): void }, 'markSignedOut')
+    await expect(s.service.oneShot(s.spec(), new AbortController().signal)).rejects.toMatchObject({ code: 'signed_out' })
+    expect(signedOut).not.toHaveBeenCalled()
   })
 })
 

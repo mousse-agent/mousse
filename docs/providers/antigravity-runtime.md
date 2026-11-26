@@ -112,8 +112,6 @@ Thread titles, branch names, pull request drafts, commit messages and a bot's na
 single requests. On `agy` each one runs on a launch of its own, and it is labelled best-effort:
 `agy` may run a native action before Mousse sees it and stops the request.
 
-- **Before:** refused when the entry's `gemini-home/config/hooks.json` or `mcp_config.json` sets
-  hooks or MCP servers, or can't be read or parsed. A missing, blank or empty file is fine.
 - **Launch:** a new empty folder is both the process's working folder and the session's workspace.
   The process gets only system, locale and proxy variables, none of the user's arguments, variables
   or skill links, and `--include-default-customizations=false` where `agy acp --help` lists it.
@@ -121,14 +119,29 @@ single requests. On `agy` each one runs on a launch of its own, and it is labell
   `gemini-home/antigravity-acp`): `default` agent mode, `strict` tool permission, no access outside
   the workspace, and a rule denying every action `agy` names. An `agy` without `--cli_dir_name` is
   refused.
+- **Hooks and MCP servers:** `agy` reads them from `<gemini-dir>/config` (`hooks.json`,
+  `mcp_config.json`), and neither `--cli_dir_name` nor `--include-default-customizations=false`
+  keeps them out (checked on agy 1.5.18 with hooks and an MCP server that each write a marker). So
+  the request's `--gemini-dir` is an empty home of its own (`one-shot-homes/<id>`, beside
+  `gemini-home`), and `--app-data-dir` points back to `gemini-home/antigravity-acp` by a relative
+  path: `agy` refuses an absolute one and reads a relative one from the gemini dir. The sign-in and
+  sessions stay where they are. The keyring sign-in of the first entry was checked on a real request;
+  an added entry's file-based sign-in was not, so an "authentication required" answer there fails
+  the request without signing the entry out.
 - **During:** permission requests are cancelled and questions declined; file, terminal and unknown
   requests are refused. Each of these, and any tool call `agy` reports, ends the request as
   `one_shot_tool_refused`, and Automatic naming moves on to its next model. The request ends after
   180 s, or once the answer passes 128,000 characters.
-- **After:** the process is ended and waited for. Anything but empty folders left in the workspace
-  fails the request. The settings folder is removed, and so are the session's saved conversation,
-  notes and annotations once the saved conversation names this request's folder. Folders an ended
-  Mousse left are swept a minute after the entry's next single request.
+- **While it ends:** the process tree is ended while the refusals still listen, and its output is
+  read until it closes, so a tool it reports while it ends still fails the request.
+- **After:** the request waits up to 8 s for the process to end; one still running fails it. The
+  request's files are touched only once the process has ended, however late. Then anything but
+  empty folders left in the workspace fails the request, and the workspace, the settings folder and
+  the empty home are removed, with the session's saved conversation, notes and annotations once the
+  saved conversation names this request's folder. A file that can't be removed (locked) is logged
+  and tried again after 10 s, 1 min and 5 min; the home keeps a record of the request (process id,
+  session id) until then. A minute after the entry's next single request, a sweep removes what
+  ended requests left, skipping any request still running here or whose recorded process still runs.
 
 The 1.1.1 server keeps the ordinary launch for single requests; that launch is not checked.
 

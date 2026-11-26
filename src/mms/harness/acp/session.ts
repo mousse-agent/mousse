@@ -2418,8 +2418,9 @@ export class AcpSessions {
    * prompt is {@link ONE_SHOT_INSTRUCTION}, the system text and the prompt. Every permission, file, terminal or
    * unknown request and every question is refused, and so is any tool call the agent reports; each ends the request
    * as `one_shot_tool_refused`. The answer is the agent's text, ended past {@link ONE_SHOT_OUTPUT_CAP} characters or
-   * {@link ONE_SHOT_DEADLINE_MS}. One attempt, never saved or resumed; `signal` stops it. The process is ended and
-   * waited for before this returns or throws.
+   * {@link ONE_SHOT_DEADLINE_MS}. One attempt, never saved or resumed; `signal` stops it. The process tree is ended
+   * while the refusals still listen, so a tool it reports while it ends refuses the answer too, and is waited for up
+   * to {@link ONE_SHOT_REAP_MS}: one still running then fails the request, and `onEnded` says when it has gone.
    */
   async oneShot(input: OneShotInput): Promise<string> {
     const { label, quirks } = this.options

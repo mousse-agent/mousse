@@ -1,10 +1,10 @@
 /**
  * Live check of an Antigravity single request (a chat title) on the real `agy`, on this computer's existing sign-in:
  * it never signs in or out. It runs one title prompt that needs no tools, on the one-shot launch, and reads what
- * `agy` logged and left behind. Only with MOUSSE_LIVE_AGY=1; MOUSSE_AGY_BINARY may name the executable. Skipped
+ * `agy` logged and left behind. Hooks and an MCP server set in the home's config each write a marker if they run. Only with MOUSSE_LIVE_AGY=1; MOUSSE_AGY_BINARY may name the executable. Skipped
  * (with a line saying so) where `agy` is not signed in.
  */
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
@@ -18,7 +18,7 @@ const homes: string[] = []
 afterAll(() => { for (const home of homes) rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 }) })
 
 describe.runIf(live && binary)('an Antigravity single request on the real agy', () => {
-  it('names a chat on the one-shot launch, with its own settings, and leaves no session behind', async (context) => {
+  it("names a chat on the one-shot launch, with its own settings, none of the home's hooks or MCP servers, and leaves no session behind", async (context) => {
     const home = mkdtempSync(join(tmpdir(), 'mousse-live-agy-one-shot-'))
     homes.push(home)
     const service = new AntigravityProviderService(home, home, new UserQuestionService(), undefined, { findUserAgy: () => binary })
@@ -27,6 +27,16 @@ describe.runIf(live && binary)('an Antigravity single request on the real agy', 
         console.info('agy is not signed in on this computer: the single request was not run')
         context.skip()
       }
+      // Every hook and an MCP server, set where agy reads them for this home: each writes a marker if it runs.
+      const markers = join(home, 'markers')
+      const mark = join(home, 'mark.cjs')
+      mkdirSync(markers)
+      writeFileSync(mark, "require('fs').writeFileSync(process.argv[2], 'ran'); setTimeout(() => process.exit(0), 5000)")
+      const command = (name: string) => `"${process.execPath}" "${mark}" "${join(markers, name)}"`
+      const config = join(home, 'providers', 'antigravity', 'gemini-home', 'config')
+      mkdirSync(config, { recursive: true })
+      writeFileSync(join(config, 'hooks.json'), JSON.stringify(Object.fromEntries(['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'].map((event) => [`probe-${event}`, { [event]: [{ type: 'command', command: command(event), timeout: 10 }] }]))))
+      writeFileSync(join(config, 'mcp_config.json'), JSON.stringify({ mcpServers: { probe: { command: process.execPath, args: [mark, join(markers, 'mcp')] } } }))
       const appData = join(home, 'providers', 'antigravity', 'gemini-home', 'antigravity-acp')
       const model = service.models()[0]!.id
       // What agy logged while it ran, read before its settings folder is removed.
@@ -58,6 +68,9 @@ describe.runIf(live && binary)('an Antigravity single request on the real agy', 
       // Nothing of the request stays: its settings folder, its scratch folder, its saved conversation.
       expect(readdirSync(appData).filter((name) => name.startsWith('one-shot-'))).toEqual([])
       expect(readdirSync(join(home, 'providers', 'antigravity', 'one-shot'))).toEqual([])
+      expect(readdirSync(join(home, 'providers', 'antigravity', 'one-shot-homes'))).toEqual([])
+      // None of the home's hooks or MCP servers ran.
+      expect(readdirSync(markers)).toEqual([])
       expect(conversations()).toEqual(before)
       // The saved conversation named the request's folder, so it was removed, not kept.
       expect(warned).not.toHaveBeenCalledWith(expect.stringContaining('session files were kept'), expect.anything())
