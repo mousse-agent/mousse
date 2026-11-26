@@ -1,19 +1,19 @@
 import type { NodeId } from '../../../shared/net/ids'
+import type { ProviderEventEntry, ProviderEventsReply, ProviderOperationEvent } from '../../../shared/harness/types'
 import { DomainRpcError } from '../../protocol/domainRegistry'
-
-/** The records about providers a caller's private channel stream carries. */
-export type ProviderChannelType = 'providers.operation' | 'providers.changed'
 
 /** How long a computer that worked on Settings → Providers here keeps hearing about its changes, from its last call. */
 export const PROVIDER_FOLLOW_MS = 10 * 60_000
-/** Changes to the entries reach a following computer at most this often, as one notice. */
-export const PROVIDER_CHANGED_GAP_MS = 500
 /** How long progress of an operation is kept for the call that started it, which may return after it. */
 export const PROVIDER_EARLY_MS = 10_000
+/** How long an entry no read has taken is kept for a computer. */
+export const PROVIDER_EVENT_KEEP_MS = 2 * 60_000
 const EARLY_OPERATIONS = 64
 /** Operations remembered in all at most; one that never ends gives way to newer ones. */
 const OWNED_OPERATIONS = 256
 const EARLY_EVENTS = 32
+/** Entries kept per computer at most; the oldest give way. */
+const LOG_ENTRIES = 200
 
 /** The routed calls that start an operation and answer `{ operation: { operationId } }`. */
 const STARTS_OPERATION = new Set([
@@ -70,36 +70,29 @@ export function withHiddenLaunchSettings(value: unknown, depth = 0): unknown {
 
 interface Timers {
   now(): number
-  setTimeout(run: () => void, ms: number): unknown
-  clearTimeout(handle: unknown): void
 }
 
 export interface ProviderEventRelayOptions {
-  /** Adds a record to the private channel stream `node` holds open; false when it holds none. */
-  push(node: NodeId, type: ProviderChannelType, data: unknown): boolean
   timers?: Timers
 }
 
-const realTimers: Timers = {
-  now: () => Date.now(),
-  setTimeout: (run, ms) => {
-    const handle = setTimeout(run, ms)
-    ;(handle as { unref?: () => void }).unref?.()
-    return handle
-  },
-  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
-}
+const realTimers: Timers = { now: () => Date.now() }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value)
 
+type LoggedEntry = ProviderEventEntry & { at: number }
+
 /**
- * The owner's side of Settings → Providers of another computer. The page there works through routed
- * `providers.*` calls; this tells it, on its own channel stream, what a window of this computer learns by
- * event: the progress, prompts and outcome of each operation it started (nobody else's), and that the entries
- * changed (a notice only: the page reads the snapshots again with a routed read, so no record is large).
+ * The owner's side of Settings → Providers of another computer. The page there works through routed `providers.*`
+ * calls and asks with `providers.events` what a window of this computer learns by event: the progress, prompts and
+ * outcome of each operation it started (nobody else's), and that the entries changed (a notice only: the page reads
+ * the snapshots again with a routed read).
  *
- * Nothing a caller sends is kept here: a key or a pasted answer is in the call, never in an event.
+ * Everything here is in memory, and nothing of it is sent or kept anywhere else: a sign-in's link, device code or
+ * error text is never written to disk on either computer. An entry goes once a read moved past it, once the operation
+ * it belongs to finished and was read, or after a while; a page that opens later reads from then on, never the past.
+ * Nothing a caller sends is kept here either: a key or a pasted answer is in the call, never in an event.
  */
 export class ProviderEventRelay {
   private readonly timers: Timers
@@ -109,9 +102,10 @@ export class ProviderEventRelay {
   private readonly operations = new Map<string, NodeId>()
   /** Events of operations no computer has claimed yet: the call that started one may return after its first events. */
   private readonly early = new Map<string, { at: number; events: unknown[] }>()
-  private readonly changedTimers = new Map<NodeId, unknown>()
+  /** What each computer has not read yet, numbered. */
+  private readonly logs = new Map<NodeId, { seq: number; entries: LoggedEntry[] }>()
 
-  constructor(private readonly options: ProviderEventRelayOptions) {
+  constructor(options: ProviderEventRelayOptions = {}) {
     this.timers = options.timers ?? realTimers
   }
 
@@ -156,23 +150,58 @@ export class ProviderEventRelay {
         this.followers.delete(node)
         continue
       }
-      if (this.changedTimers.has(node)) continue
-      this.changedTimers.set(
-        node,
-        this.timers.setTimeout(() => {
-          this.changedTimers.delete(node)
-          this.options.push(node, 'providers.changed', {})
-        }, PROVIDER_CHANGED_GAP_MS)
-      )
+      // One notice stands for every change until it is read.
+      if (!this.logOf(node).entries.some((entry) => entry.kind === 'changed')) this.append(node, { kind: 'changed' })
     }
   }
 
+  /**
+   * `providers.events` of `node`: without `after`, where its entries stand now and none of the past; with it, the
+   * entries after it. Entries up to `after` were read, and so were the operations whose end this answer carries.
+   */
+  read(node: NodeId, after: unknown): ProviderEventsReply {
+    const log = this.logOf(node)
+    this.prune(log)
+    if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0) return { cursor: log.seq, events: [] }
+    log.entries = log.entries.filter((entry) => entry.seq > after)
+    const events: ProviderEventEntry[] = log.entries.map(({ at: _at, ...entry }) => entry as ProviderEventEntry)
+    const ended = new Set(
+      events.flatMap((entry) => (entry.kind === 'operation' && FINISHED.has(entry.event.phase) ? [entry.event.operationId] : []))
+    )
+    // An operation that ended is never answered again, to this page or a later one.
+    if (ended.size) log.entries = log.entries.filter((entry) => entry.kind !== 'operation' || !ended.has(entry.event.operationId))
+    if (events.some((entry) => entry.kind === 'changed')) log.entries = log.entries.filter((entry) => entry.kind !== 'changed')
+    return { cursor: log.seq, events }
+  }
+
   close(): void {
-    for (const handle of this.changedTimers.values()) this.timers.clearTimeout(handle)
-    this.changedTimers.clear()
     this.followers.clear()
     this.operations.clear()
     this.early.clear()
+    this.logs.clear()
+  }
+
+  private logOf(node: NodeId): { seq: number; entries: LoggedEntry[] } {
+    let log = this.logs.get(node)
+    if (!log) {
+      log = { seq: 0, entries: [] }
+      this.logs.set(node, log)
+    }
+    return log
+  }
+
+  private append(node: NodeId, entry: { kind: 'changed' } | { kind: 'operation'; event: ProviderOperationEvent }): void {
+    const log = this.logOf(node)
+    this.prune(log)
+    log.seq += 1
+    log.entries.push({ ...entry, seq: log.seq, at: this.timers.now() })
+    if (log.entries.length > LOG_ENTRIES) log.entries.splice(0, log.entries.length - LOG_ENTRIES)
+  }
+
+  private prune(log: { entries: LoggedEntry[] }): void {
+    const now = this.timers.now()
+    if (log.entries.some((entry) => entry.at + PROVIDER_EVENT_KEEP_MS <= now))
+      log.entries = log.entries.filter((entry) => entry.at + PROVIDER_EVENT_KEEP_MS > now)
   }
 
   private operation(data: unknown): void {
@@ -180,7 +209,7 @@ export class ProviderEventRelay {
     const operationId = data.operationId
     const node = this.operations.get(operationId)
     if (!node) return this.hold(operationId, data)
-    this.options.push(node, 'providers.operation', { event: data })
+    this.append(node, { kind: 'operation', event: data as unknown as ProviderOperationEvent })
     if (typeof data.phase === 'string' && FINISHED.has(data.phase)) this.operations.delete(operationId)
   }
 

@@ -4331,6 +4331,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // Present while the profile's stored instance map cannot be read (nothing is overwritten).
       return { scope, snapshots, ...(instancesError ? { instancesError } : {}) }
     }
+    // Answered by the computer a window's page shows (`ProviderEventRelay` there): this computer's own page has events.
+    case 'providers.events':
+      throw new DomainRpcError('invalid_params', 'providers.events names another computer.')
     case 'providers.catalog.addOptions':
       return { options: harnessGateway(ctx).catalog.addOptions() }
     case 'providers.instances.add': {

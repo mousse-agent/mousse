@@ -725,9 +725,10 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   // ---------------------------------------------------------------- providers of the computer
   // Settings → Providers of another computer: its entries, switches, models, installs and sign-ins, kept and run
   // there. A key or a pasted sign-in answer travels in this call only and is saved on the owner; the caller keeps
-  // nothing of it. The owner tells the caller's window about the operations it starts (progress, sign-in prompts) and
-  // about changes to its entries, on the caller's private channel stream. A provider's own settings file and moving an
-  // entry stay with a window of the computer itself.
+  // nothing of it. The caller's page reads with `providers.events` what happened to the operations it started
+  // (progress, sign-in prompts) and whether the entries changed: answered from memory, never written to disk on either
+  // computer. A provider's own settings file and moving an entry stay with a window of the computer itself.
+  'providers.events': read('computer', ['after']),
   'providers.catalog.addOptions': read('computer', []),
   'providers.registry.search': read('computer', ['query']),
   'providers.instances.recheck': read('computer', ['instanceId'], { required: ['instanceId'] }),

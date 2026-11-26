@@ -139,9 +139,6 @@ export class ThreadRouter implements ThreadRouterPort {
       maxPerComputer: options.maxPerComputer,
       maxTotal: options.maxTotal,
       onGit: (node, data) => this.gitProgress(data),
-      // Settings → Providers of another computer: every window here hears of it, named by the computer.
-      onProviders: (node, type, data) =>
-        services.events.emit({ channel: 'protocol:event', data: { type: 'providers.remote', data: { node, type, data } } }),
       onMetadata: (node, thread) => this.lists?.applyMetadata(node, thread),
       computer: (node) => this.computer(node)
     })
@@ -252,8 +249,6 @@ export class ThreadRouter implements ThreadRouterPort {
 
     const progress = GIT_PROGRESS.has(method) ? this.followGit(ctx, owner) : undefined
     if (progress) await this.attached.channel(node).catch(() => undefined)
-    // The operations a providers call starts, and changes to that computer's providers, come on the channel stream.
-    if (method.startsWith('providers.')) await this.attached.channel(node).catch(() => undefined)
     let raw: unknown
     try {
       raw = await this.client.call(node, method, owner, {

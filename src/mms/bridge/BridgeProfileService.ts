@@ -386,11 +386,9 @@ export class BridgeProfileService {
       // The upload belongs to the staging request, so it is read through its request-bound artifact.
       readInput: (ref, context) => this.artifacts.input(ref, context, 'routed.stage')
     })
-    // Settings → Providers of this computer, worked on from another one: its operations and changes reach that
-    // computer on its own channel stream.
-    const providerEvents = new ProviderEventRelay({
-      push: (node, type, data) => this.threads.pushChannel(node, type, data)
-    })
+    // Settings → Providers of this computer, worked on from another one: what its operations and changes were, kept in
+    // memory for that computer's `providers.events` reads.
+    const providerEvents = new ProviderEventRelay()
     const offHarness = services.harness?.instances.subscribe((event) => providerEvents.event(event))
     this.disposers.add(() => {
       offHarness?.()

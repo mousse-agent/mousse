@@ -259,11 +259,10 @@ export const BRIDGE_THREAD_EVENT_TYPES = [
   'thread.metadata'
 ] as const
 /**
- * Records only a private stream carries (one computer's own stream: Git progress, terminal output, and the
- * provider operations it started and changes to the providers it works on in Settings → Providers).
+ * Records only a private stream carries (one computer's own stream: Git progress and terminal output).
  * A phone's or a hub's display stream never has them, and its projection refuses them.
  */
-export const BRIDGE_ROUTED_EVENT_TYPES = ['git.operation', 'pty.data', 'pty.exit', 'providers.operation', 'providers.changed'] as const
+export const BRIDGE_ROUTED_EVENT_TYPES = ['git.operation', 'pty.data', 'pty.exit'] as const
 export type ContentEventType = (typeof CONTENT_EVENT_TYPES)[number]
 
 export type KnownEventType = MetaEventType | ContentEventType

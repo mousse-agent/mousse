@@ -409,6 +409,11 @@
     "digest": "e1b2634dfa7c5469",
     "security": "2455464eaace895f"
   },
+  "providers.events": {
+    "version": 1,
+    "digest": "beb677bdc7607756",
+    "security": "2455464eaace895f"
+  },
   "providers.instances.add": {
     "version": 1,
     "digest": "3b66affe3ee20f84",
@@ -860,8 +865,8 @@
     "security": "926c4af141d1208d"
   },
   "threads.create": {
-    "version": 2,
-    "digest": "b1ae8b79e2d13bc9",
+    "version": 3,
+    "digest": "f23a83dee2f959d6",
     "security": "38223490f704a80a"
   },
   "threads.delete": {

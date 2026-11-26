@@ -255,7 +255,7 @@ export function AddProviderDialog({
    */
   const addAnother = (choice: Extract<AddChoice, { kind: 'new' }>) =>
     void run(choice.key, async () => {
-      const { instances } = window.mousse.providers
+      const { instances } = api
       const name = choice.label
       const known = choice.existing
       if (choice.setups) {

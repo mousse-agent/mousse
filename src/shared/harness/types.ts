@@ -654,9 +654,15 @@ export type ProviderOperationEvent = ProviderOperationStarted & (
 )
 
 /**
- * `providers.remote`: on Settings → Providers of another computer (`node`), an event of an operation this computer
+ * One entry of `providers.events` (Settings → Providers of another computer): an event of an operation this computer
  * started there, or a notice that its providers changed (read them again with a routed `providers.snapshots`).
  */
-export type RemoteProviderEvent =
-  | { node: string; type: 'providers.operation'; data: { event: ProviderOperationEvent } }
-  | { node: string; type: 'providers.changed'; data: Record<string, never> }
+export type ProviderEventEntry =
+  | { seq: number; kind: 'operation'; event: ProviderOperationEvent }
+  | { seq: number; kind: 'changed' }
+
+/** What `providers.events` answers: the entries after the cursor asked with, and where the entries stand now. */
+export interface ProviderEventsReply {
+  cursor: number
+  events: ProviderEventEntry[]
+}

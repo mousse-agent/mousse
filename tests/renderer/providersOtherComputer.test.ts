@@ -10,7 +10,9 @@ import { ProvidersSettings } from '../../src/renderer/components/providers/Provi
 import { ArgsRow, EnvRow, ExecutableRow } from '../../src/renderer/components/providers/CliSections'
 import { NO_COMPUTERS, useComputersStore } from '../../src/renderer/lib/computers'
 import type { InstanceSnapshot } from '../../src/shared/harness/status'
-import type { RemoteProviderEvent } from '../../src/shared/harness/types'
+import type { ProviderEventEntry, ProviderOperationEvent } from '../../src/shared/harness/types'
+import { openAddProvider, openProvider } from '../../src/renderer/lib/settingsNavigation'
+import { watchPendingSignIn } from '../../src/renderer/lib/providerSnapshots'
 import { getDefaultSettings } from '../../src/shared/settings'
 import { snapshot } from '../providerSnapshotFixture'
 
@@ -23,8 +25,10 @@ describe('Settings → Providers of another computer', () => {
   let host: HTMLDivElement
   let root: Root
   let nodes: unknown[]
-  // The snapshot store listens once per module, so its listener outlives each test's mount.
-  const remoteListeners: Array<(event: RemoteProviderEvent) => void> = []
+  /** What the Mac answers its next `providers.events` read with. */
+  let macEvents: ProviderEventEntry[]
+  let macCursor: number
+  const macEmits = (event: ProviderOperationEvent) => macEvents.push({ seq: ++macCursor, kind: 'operation', event })
   let local: Record<string, ReturnType<typeof vi.fn>>
   let remote: ReturnType<typeof vi.fn>
   let openLoginUrl: ReturnType<typeof vi.fn>
@@ -64,6 +68,8 @@ describe('Settings → Providers of another computer', () => {
     ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
     useComputersStore.setState(NO_COMPUTERS)
     nodes = [device('nod_self00000000000000000000000', 'This PC', { self: true }), device(MAC, 'Mac mini')]
+    macEvents = []
+    macCursor = 0
     macEntries = [snapshot({ instanceId: 'claude:work', builtIn: false, displayName: 'Work Claude', auth: { state: 'signed_out', account: undefined }, nextStep: { action: 'sign_in', label: 'Sign in' } })]
     local = {
       setEnabled: vi.fn(async () => snapshot()),
@@ -80,6 +86,11 @@ describe('Settings → Providers of another computer', () => {
         case 'providers.instances.signIn': return { operationId: 'op-mac-1', instanceId: params.instanceId, kind: 'sign_in' }
         case 'providers.instances.respondSignIn': return true
         case 'providers.instances.recheck': return macEntries[0]
+        case 'providers.events': {
+          const events = params.after === undefined ? [] : macEvents.filter((entry) => entry.seq > (params.after as number))
+          macEvents = []
+          return { cursor: macCursor, events }
+        }
         default: throw new Error(`unexpected ${method}`)
       }
     })
@@ -97,10 +108,6 @@ describe('Settings → Providers of another computer', () => {
         snapshots: async () => [snapshot()],
         onSnapshots: () => () => {},
         onOperation: () => () => {},
-        onRemote: (listener: (event: RemoteProviderEvent) => void) => {
-          remoteListeners.push(listener)
-          return () => {}
-        },
         openLoginUrl,
         remote,
         catalog: { addOptions: async () => [] },
@@ -140,17 +147,10 @@ describe('Settings → Providers of another computer', () => {
     await click(button('Sign in'))
     expect(remoteCalls('providers.instances.signIn')).toEqual([[MAC, 'providers.instances.signIn', { instanceId: 'claude:work' }]])
     expect(local.signIn).not.toHaveBeenCalled()
-    // The Mac's sign-in asks for the browser; its page returns to a server on the Mac.
-    await act(async () => {
-      for (const listener of remoteListeners)
-        listener({
-          node: MAC,
-          type: 'providers.operation',
-          data: { event: { operationId: 'op-mac-1', instanceId: 'claude:work', kind: 'sign_in', phase: 'prompt', prompt: { promptId: 'p1', type: 'auth_url', url: 'https://auth.example/start', usesCallbackServer: true, acceptsRedirectPaste: true } } }
-        })
-    })
+    // The Mac's sign-in asks for the browser; its page returns to a server on the Mac. The page asks the Mac for it.
+    macEmits({ operationId: 'op-mac-1', instanceId: 'claude:work', kind: 'sign_in', phase: 'prompt', prompt: { promptId: 'p1', type: 'auth_url', url: 'https://auth.example/start', usesCallbackServer: true, acceptsRedirectPaste: true } })
+    await vi.waitFor(() => expect(openLoginUrl).toHaveBeenCalledWith('https://auth.example/start'), { timeout: 4_000 })
     await settle()
-    expect(openLoginUrl).toHaveBeenCalledWith('https://auth.example/start')
     // The browser here cannot reach the Mac's server, so the paste field is open at once.
     const field = document.body.querySelector<HTMLInputElement>('#provider-signin-redirect')
     expect(field).not.toBeNull()
@@ -164,6 +164,54 @@ describe('Settings → Providers of another computer', () => {
       [MAC, 'providers.instances.respondSignIn', { operationId: 'op-mac-1', response: { promptId: 'p1', kind: 'redirect_url', value: 'http://localhost:1455/auth/callback?code=c' } }]
     ])
     expect(local.respondSignIn).not.toHaveBeenCalled()
+  })
+
+  it('opens on this computer again for every link into the page, whichever computer it showed', async () => {
+    await mount()
+    await chooseComputer('Mac mini')
+    expect(text()).toContain('Work Claude')
+    // A bot's Sign in (or Usage's Reconnect) names an entry of this computer.
+    await act(async () => openProvider('claude'))
+    await settle()
+    expect(computerMenu()?.textContent).toContain('This device')
+    expect(text()).toContain('Claude Code')
+    expect(text()).not.toContain('Work Claude')
+    // First-run setup's Add key opens Add provider for this computer.
+    await chooseComputer('Mac mini')
+    const before = remote.mock.calls.length
+    await act(async () => openAddProvider())
+    await settle()
+    expect(computerMenu()?.textContent).toContain('This device')
+    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull()
+    expect(remote.mock.calls.slice(before).some((call) => call[1] === 'providers.catalog.addOptions')).toBe(false)
+  })
+
+  it('cancels a sign-in still running on the other computer when another computer is chosen', async () => {
+    await mount()
+    await chooseComputer('Mac mini')
+    await click(button('Sign in'))
+    macEmits({ operationId: 'op-mac-1', instanceId: 'claude:work', kind: 'sign_in', phase: 'prompt', prompt: { promptId: 'p1', type: 'device_code', userCode: 'ABCD', verificationUri: 'https://auth.example/device' } })
+    await vi.waitFor(() => expect(openLoginUrl).toHaveBeenCalled(), { timeout: 4_000 })
+    await settle()
+    await chooseComputer('This device')
+    expect(remoteCalls('providers.instances.respondSignIn')).toEqual([[MAC, 'providers.instances.respondSignIn', { operationId: 'op-mac-1', response: { kind: 'cancel' } }]])
+    // The page of this computer asks the Mac nothing more.
+    const asked = remote.mock.calls.length
+    await new Promise((done) => setTimeout(done, 1_500))
+    expect(remote.mock.calls.length).toBe(asked)
+  })
+
+  it("checks a pending sign-in of this computer without reading another computer's list", async () => {
+    await mount()
+    await chooseComputer('Mac mini')
+    await chooseComputer('This device')
+    const snapshots = vi.fn(async () => [snapshot()])
+    ;(window as unknown as { mousse: { providers: { snapshots: unknown } } }).mousse.providers.snapshots = snapshots
+    remote.mockClear()
+    const stop = watchPendingSignIn('claude')
+    await vi.waitFor(() => expect(snapshots).toHaveBeenCalled(), { timeout: 4_000 })
+    stop()
+    expect(remote).not.toHaveBeenCalled()
   })
 
   it("shows the other computer's refusal in one line", async () => {

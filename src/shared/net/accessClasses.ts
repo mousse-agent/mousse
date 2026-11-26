@@ -317,6 +317,7 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
     'scheduled.resume': 'work',
     'scheduled.delete': 'work',
     // Settings → Providers of this computer, from another one: reading it is a view; changing it is work.
+    'providers.events': 'view',
     'providers.catalog.addOptions': 'view',
     'providers.registry.search': 'view',
     'providers.instances.recheck': 'view',

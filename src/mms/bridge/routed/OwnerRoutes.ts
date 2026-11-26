@@ -128,7 +128,7 @@ export interface OwnerRoutesOptions {
    * Settings → Providers of this computer from another one: checks a call that names an operation, and learns of
    * each providers call that went through (`ProviderEventRelay`).
    */
-  providerEvents?: Pick<ProviderEventRelay, 'admit' | 'called'>
+  providerEvents?: Pick<ProviderEventRelay, 'admit' | 'called' | 'read'>
   /**
    * The first folder a device registers as a project here (`projects.open`): a desktop notice for the owner, and a
    * row of its own in the audit (`project.first_open`). It stands in for the first-use notice when both are due.
@@ -643,12 +643,16 @@ export class OwnerRoutes {
           } satisfies RoutedReply
         const sent = typeof params.data === 'string' ? Buffer.byteLength(params.data) : 0
         result = await verdict.apply(sent, () => this.dispatch(method, row, params, context, head))
-      } else result = marked ? await this.remoteAgent.run(method, params, marked) : await this.dispatch(method, row, params, context, head, slot)
+      } else if (method === 'providers.events')
+        // What happened to the provider operations this computer started here, from memory (never the ledger or disk).
+        result = this.options.providerEvents?.read(node, params.after) ?? { cursor: 0, events: [] }
+      else result = marked ? await this.remoteAgent.run(method, params, marked) : await this.dispatch(method, row, params, context, head, slot)
       if (method.startsWith('providers.')) {
         this.options.providerEvents?.called(node, method, result)
         // Launch arguments and variable values often hold keys: a computer that may not use a terminal here reads only
-        // the variables' names.
-        if (!this.options.policy.get(node).terminal) result = withHiddenLaunchSettings(result)
+        // the variables' names. A change's reply is kept in the request ledger and answered again to a retry, maybe
+        // after that access is gone, so it never carries them: the page reads them with the list, checked each time.
+        if (row.durable || !this.options.policy.get(node).terminal) result = withHiddenLaunchSettings(result)
       }
       // A thread a bot started names that bot only to a computer that reaches it ("Started by a bot" otherwise).
       if (!row.sequenced) result = withHiddenBots(result, this.options.services.botReach?.hiddenFor(node))

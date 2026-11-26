@@ -288,11 +288,6 @@ export function bridgeProtocolEvent(
       if (data?.event) broadcast('providers:operation', data.event)
       return true
     }
-    // Settings → Providers of another computer: its operations and changes, named by the computer.
-    case 'providers.remote': {
-      broadcast('providers:remote', event.data)
-      return true
-    }
     // A provider's usage reading was kept (`usageReads.ts`): bot headers' usage rings follow it.
     case 'providers.usage': {
       broadcast('providers:usage', event.data)

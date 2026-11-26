@@ -147,7 +147,6 @@ import type {
   ProviderOperationStarted,
   ProviderScope,
   RegistryAgentView,
-  RemoteProviderEvent,
   RemoveInstallResult,
   SignInResponse
 } from '../shared/harness/types'
@@ -1331,12 +1330,6 @@ const api = {
      */
     remote: <T = unknown>(node: string, method: string, params: Record<string, unknown>): Promise<T> =>
       ipcRenderer.invoke('providers:remote', node, method, params),
-    /** Operations this computer started on another one, and changes to that computer's providers. */
-    onRemote: (cb: (event: RemoteProviderEvent) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, event: RemoteProviderEvent) => cb(event)
-      ipcRenderer.on('providers:remote', handler)
-      return () => ipcRenderer.removeListener('providers:remote', handler)
-    },
     /** The ACP agent registry ("More ACP agents"): agents that fit this computer, best match first. */
     registry: {
       search: (query: string): Promise<RegistryAgentView[]> => ipcRenderer.invoke('providers:registry:search', query)

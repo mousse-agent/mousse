@@ -8,6 +8,7 @@ import {
   DEVICE_SCOPE,
   applySnapshot,
   computerKey,
+  followRemoteProviders,
   loadProviderSnapshots,
   modelPrefsByInstance,
   onProviderListingsChanged,
@@ -51,9 +52,6 @@ interface SignInSession {
   /** Called when the dialog closes, finished or not. */
   onEnd?: () => void
 }
-
-/** The computer last chosen on this page ('' is this one), kept while the app runs. */
-let lastComputer = ''
 
 /**
  * The other computers whose providers this page can manage: computers of the user's list, not revoked, that work on
@@ -99,14 +97,23 @@ function apiRemoveHint(name: string, method: AddOptionMethod | undefined, retire
 export function ProvidersSettings(props: ProvidersSettingsProps) {
   const { devices } = useComputers()
   const computers = providerComputers(devices)
-  const [chosen, setChosen] = useState(lastComputer)
+  // The page opens on this computer each time; the choice lasts while it is open.
+  const [chosen, setChosen] = useState('')
   // A computer that left the list (removed, revoked, no longer working on threads) falls back to this one.
   const computer = chosen ? computers.find((entry) => entry.node === chosen) : undefined
   const node = computer?.node
-  const choose = (next: string) => {
-    lastComputer = next
-    setChosen(next)
-  }
+  // Every link into this page is about this computer's providers (a bot's Sign in, Usage's Reconnect, first-run setup's
+  // Add key, Agents' provider links): it shows this computer again, whose page then takes what was asked for.
+  useEffect(() => {
+    const toThisComputer = (event: Event) => {
+      if (event.type !== 'mousse:settings-section' || (event as CustomEvent<unknown>).detail === 'providers') setChosen('')
+    }
+    const types = ['mousse:settings-provider', 'mousse:settings-add-provider', 'mousse:settings-section']
+    for (const type of types) window.addEventListener(type, toThisComputer)
+    return () => {
+      for (const type of types) window.removeEventListener(type, toThisComputer)
+    }
+  }, [])
   const menu =
     computers.length > 0 ? (
       <span className="prov-scope" title="Changes on this page apply to the chosen computer">
@@ -115,7 +122,7 @@ export function ProvidersSettings(props: ProvidersSettingsProps) {
           ariaLabel="Computer"
           size="small"
           value={node ?? ''}
-          onChange={choose}
+          onChange={setChosen}
           options={[
             { value: '', label: 'This device' },
             ...computers.map((entry) => ({
@@ -150,9 +157,12 @@ function ProvidersPage({
   const { node, api } = useProvidersComputer()
   const remote = Boolean(node)
   const { snapshots, error: loadError, loading, reload } = useProviderSnapshots(DEVICE_SCOPE, node)
-  // Another computer pushes no snapshots here: its list is read whenever its page opens.
+  // Another computer pushes no snapshots here: its list is read whenever its page opens, and what happens there is asked
+  // for while it is on screen.
   useEffect(() => {
-    if (node) void reload()
+    if (!node) return
+    void reload()
+    return followRemoteProviders(node)
   }, [node, reload])
   useLegacyFavoritesImport()
   /** A snapshot a call returned, into the chosen computer's list. */
@@ -161,14 +171,17 @@ function ProvidersPage({
   // A bot's Sign in opens Providers on one entry's card, before or after the page mounted.
   const [selectedId, setSelectedId] = useState<string | null>(() => takePendingProvider() ?? null)
   useEffect(() => {
+    // A link to an entry is about this computer: another computer's page leaves it to the page of this one.
+    if (node) return
     const pick = () => { const instanceId = takePendingProvider(); if (instanceId) setSelectedId(instanceId) }
     window.addEventListener('mousse:settings-provider', pick)
     return () => window.removeEventListener('mousse:settings-provider', pick)
-  }, [])
+  }, [node])
   const [addOptions, setAddOptions] = useState<ProviderAddOption[]>([])
   // First-run setup's Add key opens Add provider here, before or after the page mounted.
-  const [addOpen, setAddOpen] = useState(takePendingAddProvider)
+  const [addOpen, setAddOpen] = useState(() => !node && takePendingAddProvider())
   useEffect(() => {
+    if (node) return
     const open = () => {
       if (!takePendingAddProvider()) return
       setAddOpen(true)
@@ -185,7 +198,22 @@ function ProvidersPage({
     []
   )
   // A sign-in started here is checked again by itself until it reads signed in; leaving the page stops that.
-  useEffect(() => stopPendingSignIns, [])
+  // Leaving the page (or choosing another computer) stops this computer's checks of it. A sign-in still running on
+  // another computer is cancelled there, so a new one is not held up by it, and whoever waits on it stops.
+  useEffect(
+    () => () => {
+      stopPendingSignIns(node)
+      const session = signInRef.current
+      if (!node || !session) return
+      const phase = useProviderSnapshotsStore.getState().operations[session.operationId]?.phase
+      if (phase !== 'completed' && phase !== 'failed' && phase !== 'cancelled')
+        void providersApi(node).instances.respondSignIn(session.operationId, { kind: 'cancel' }).catch(() => undefined)
+      session.onEnd?.()
+    },
+    // The page is mounted again for another computer: `node` is the one it was mounted for.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  )
   const [pageError, setPageError] = useState<string | null>(null)
   /** Something a finished action wants the user to know (files kept after a remove). */
   const [pageNotice, setPageNotice] = useState<string | null>(null)

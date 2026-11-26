@@ -461,6 +461,7 @@ function pullRequestScopeParams(scope: PullRequestScope | undefined): Record<str
 /** The provider calls a window may send to another computer, and the field of the answer it returns (`.`: all of it). */
 export const REMOTE_PROVIDER_RESULTS: Readonly<Record<string, string>> = Object.freeze({
   'providers.snapshots': 'snapshots',
+  'providers.events': '.',
   'providers.catalog.addOptions': 'options',
   'providers.registry.search': 'agents',
   'providers.instances.add': 'snapshot',

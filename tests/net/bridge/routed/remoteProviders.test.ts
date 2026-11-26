@@ -28,6 +28,10 @@ const snapshot = (instanceId: string, enabled = true) =>
 /** An event of the owner's provider instances, as its gateway tells its listeners. */
 const ownerEmits = (event: HarnessGatewayEvent) => (owner() as unknown as { emit(event: HarnessGatewayEvent): void }).emit(event)
 
+/** What the caller's page reads with `providers.events`. */
+const events = (after?: number) =>
+  t.dispatch('providers.events', { node: t.node, ...(after === undefined ? {} : { after }) }) as Promise<{ cursor: number; events: Array<Record<string, any>> }>
+
 /** Every file under `folder`, as bytes. */
 function filesUnder(folder: string): Array<{ path: string; bytes: Buffer }> {
   const found: Array<{ path: string; bytes: Buffer }> = []
@@ -112,15 +116,17 @@ describe("Settings → Providers of another computer", () => {
     }
   }, 60_000)
 
-  it("brings a sign-in it started there to this computer's windows, prompts included, and answers it there", async () => {
+  it("brings a sign-in it started there to this computer's page, prompts included, answers it there, and keeps none of it on disk or for later", async () => {
     const operationId = `op-${randomUUID()}`
+    const state = randomUUID()
     const prompt: ProviderOperationEvent = {
       operationId,
       instanceId: 'codex',
       kind: 'sign_in',
       phase: 'prompt',
-      prompt: { promptId: 'p1', type: 'auth_url', url: 'https://auth.example/start', usesCallbackServer: true, acceptsRedirectPaste: true }
+      prompt: { promptId: 'p1', type: 'auth_url', url: `https://auth.example/start?state=${state}`, usesCallbackServer: true, acceptsRedirectPaste: true }
     }
+    const { cursor } = await events()
     // The owner's first event goes out before the call that started the sign-in has answered.
     vi.spyOn(owner().instances, 'signIn').mockImplementation(async () => {
       ownerEmits({ type: 'operation', data: prompt })
@@ -130,17 +136,26 @@ describe("Settings → Providers of another computer", () => {
 
     const started = await t.dispatch('providers.instances.signIn', { node: t.node, instanceId: 'codex' })
     expect(started.operation.operationId).toBe(operationId)
-    const remote = () =>
-      t.events.filter((event) => event.type === 'providers.remote' && event.data.type === 'providers.operation' && event.data.data.event.operationId === operationId)
-    await vi.waitFor(() => expect(remote()).toHaveLength(1), { timeout: 15_000 })
-    expect(remote()[0]!.data).toMatchObject({ node: t.node, data: { event: { phase: 'prompt', prompt: { url: 'https://auth.example/start' } } } })
+    const first = await events(cursor)
+    expect(first.events).toEqual([expect.objectContaining({ kind: 'operation', event: expect.objectContaining({ phase: 'prompt', prompt: expect.objectContaining({ url: prompt.prompt.url }) }) })])
 
     // The address the browser here ended on goes to the owner, which finishes the sign-in.
     const response = { promptId: 'p1', kind: 'redirect_url', value: 'http://localhost:1455/auth/callback?code=c' }
     expect((await t.dispatch('providers.instances.respondSignIn', { node: t.node, operationId, response })).ok).toBe(true)
     expect(answered).toHaveBeenCalledWith(operationId, response)
     ownerEmits({ type: 'operation', data: { operationId, instanceId: 'codex', kind: 'sign_in', phase: 'completed' } })
-    await vi.waitFor(() => expect(remote().map((event) => event.data.data.event.phase)).toEqual(['prompt', 'completed']), { timeout: 15_000 })
+    const second = await events(first.cursor)
+    expect(second.events.map((entry) => entry.event?.phase)).toEqual(['completed'])
+
+    // Nothing of it comes back: not to the page reading on, not to a page that opens later and reads from the start.
+    expect((await events(second.cursor)).events).toEqual([])
+    expect((await events(0)).events).toEqual([])
+    expect((await events()).events).toEqual([])
+    // The link with its state never reached either computer's disk: no stream, ledger or log holds it.
+    for (const home of [homeOf.get(t.caller)!, homeOf.get(t.owner)!])
+      expect(filesUnder(home).filter((file) => file.bytes.includes(Buffer.from(state))).map((file) => file.path)).toEqual([])
+    // Nor did it travel as an event this computer keeps for its windows.
+    expect(JSON.stringify(t.events)).not.toContain(state)
   }, 60_000)
 
   it("never answers or cancels an operation it did not start there, and never hears of one", async () => {
@@ -155,7 +170,7 @@ describe("Settings → Providers of another computer", () => {
     expect(cancel.code).toBe('not_found')
     expect(answered).not.toHaveBeenCalled()
     expect(cancelled).not.toHaveBeenCalled()
-    expect(t.events.some((event) => event.type === 'providers.remote' && JSON.stringify(event.data).includes(operationId))).toBe(false)
+    expect(JSON.stringify(await events(0))).not.toContain(operationId)
   }, 60_000)
 
   it("changes what an agent runs with there only while that computer lets this one use its terminal", async () => {
@@ -247,7 +262,7 @@ describe("Settings → Providers of another computer", () => {
     vi.spyOn(owner().instances, 'recheck').mockResolvedValue(configured('claude'))
     vi.spyOn(owner().instances, 'addInstance').mockResolvedValue({ snapshot: configured('claude:new') } as never)
     vi.spyOn(owner().instances, 'refreshAllModels').mockResolvedValue([{ instanceId: 'claude', outcome: 'refreshed', snapshot: configured('claude') }] as never)
-    const eventsBefore = t.events.length
+    const { cursor } = await events()
     const replies = [
       await t.dispatch('providers.snapshots', { node: t.node, scope: { kind: 'device' } }),
       await t.dispatch('providers.instances.configure', { node: t.node, instanceId: 'claude', patch: { displayName: 'Work' } }),
@@ -258,8 +273,9 @@ describe("Settings → Providers of another computer", () => {
     ]
     // A change there reaches this computer as a notice only.
     ownerEmits({ type: 'snapshots', data: { scope: { kind: 'device' }, snapshots: [configured('claude')] } })
-    await vi.waitFor(() => expect(t.events.slice(eventsBefore).some((event) => event.type === 'providers.remote')).toBe(true), { timeout: 15_000 })
-    const seen = JSON.stringify([replies, t.events.slice(eventsBefore)])
+    const notices = await events(cursor)
+    expect(notices.events.map((entry) => entry.kind)).toEqual(['changed'])
+    const seen = JSON.stringify([replies, notices])
     expect(seen).not.toContain(secret)
     expect(seen).not.toContain(token)
     // The names stay, so the page can say which variables are set.
@@ -276,18 +292,36 @@ describe("Settings → Providers of another computer", () => {
     }
   }, 60_000)
 
+  it("keeps no launch value in a change's reply, which the owner may answer again after terminal access is gone", async () => {
+    const secret = `sk-ledger-${randomUUID()}`
+    const configured = { ...snapshot('claude'), config: { home: 'default', args: [], env: { OPENAI_API_KEY: secret } } } as unknown as InstanceSnapshot
+    vi.spyOn(owner().instances, 'configure').mockResolvedValue(configured)
+    vi.spyOn(owner().instances, 'snapshots').mockResolvedValue([configured])
+    await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: true })
+    let reply: any
+    try {
+      // With terminal access the list shows the value, read each time; the change's reply does not.
+      expect((await t.dispatch('providers.snapshots', { node: t.node, scope: { kind: 'device' } })).snapshots[0].config.env.OPENAI_API_KEY).toBe(secret)
+      reply = await t.dispatch('providers.instances.configure', { node: t.node, instanceId: 'claude', patch: { displayName: 'Work' } })
+    } finally {
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: false })
+    }
+    expect(reply.snapshot.config).toMatchObject({ env: { OPENAI_API_KEY: '' }, launchHidden: true })
+    // What a retry after the revoke is answered with comes from the owner's request ledger: it never held the value.
+    const holding = filesUnder(homeOf.get(t.owner)!).filter((file) => file.bytes.includes(Buffer.from(secret))).map((file) => file.path)
+    expect(holding).toEqual([])
+  }, 60_000)
+
   it("tells this computer's windows when the other computer's providers change, so its page reads them again", async () => {
-    const before = t.events.filter((event) => event.type === 'providers.remote' && event.data.type === 'providers.changed').length
     vi.spyOn(owner().instances, 'snapshots').mockResolvedValue([snapshot('claude')])
-    // This computer is on the page (it read the list), then a change happens there.
+    // This computer is on the page (it read the list), then two changes happen there.
     await t.dispatch('providers.snapshots', { node: t.node, scope: { kind: 'device' } })
+    const { cursor } = await events()
     ownerEmits({ type: 'snapshots', data: { scope: { kind: 'device' }, snapshots: [snapshot('claude', false)] } })
-    await vi.waitFor(
-      () => expect(t.events.filter((event) => event.type === 'providers.remote' && event.data.type === 'providers.changed').length).toBe(before + 1),
-      { timeout: 15_000 }
-    )
-    // A notice only: the list itself is read again with the routed read.
-    const notice = t.events.filter((event) => event.type === 'providers.remote').at(-1)!
-    expect(notice.data).toEqual({ node: t.node, type: 'providers.changed', data: {} })
+    ownerEmits({ type: 'snapshots', data: { scope: { kind: 'device' }, snapshots: [snapshot('claude', true)] } })
+    // One notice only: the list itself is read again with the routed read.
+    const read = await events(cursor)
+    expect(read.events).toEqual([{ seq: expect.any(Number), kind: 'changed' }])
+    expect((await events(read.cursor)).events).toEqual([])
   }, 60_000)
 })
