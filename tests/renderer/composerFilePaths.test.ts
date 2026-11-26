@@ -185,6 +185,54 @@ describe('a video or other file pasted in the composer', () => {
   })
 })
 
+describe('a screenshot pasted in the composer', () => {
+  /** What each attached image is called on its tile, in order. */
+  const imageNames = () => [...host.querySelectorAll<HTMLElement>('.composer-attachments [data-attachment-id]')].map((tile) => tile.title.split(': ')[0])
+  // A clipboard names every screenshot `image.png`.
+  const screenshot = () => png('image.png')
+
+  it('is named by its place among the message images, and the agent gets each one under its own name and file', async () => {
+    await mount()
+    await paste([screenshot()])
+    await paste([screenshot()])
+    await settle()
+    expect(imageNames()).toEqual(['image-1.png', 'image-2.png'])
+
+    await type('compare these')
+    await pressEnter()
+    const [, request] = (orchestrator.sendToThread as ReturnType<typeof vi.fn>).mock.calls[0]! as [string, { content: string; images?: Array<{ name: string }> }]
+    expect(request.images?.map((image) => image.name)).toEqual(['image-1.png', 'image-2.png'])
+    expect(request.content).toContain('image-1.png (/tmp/mousse-attachments/thread-a/1a2b3c4d-image-1.png)')
+    expect(request.content).toContain('image-2.png (/tmp/mousse-attachments/thread-a/1a2b3c4d-image-2.png)')
+  })
+
+  it('pasted two at once takes the next two numbers', async () => {
+    await mount()
+    await paste([screenshot(), screenshot()])
+    await settle()
+    expect(imageNames()).toEqual(['image-1.png', 'image-2.png'])
+  })
+
+  it('counts an image with a name of its own, which keeps that name', async () => {
+    await mount()
+    await paste([png('chart.png')])
+    await paste([screenshot()])
+    await settle()
+    expect(imageNames()).toEqual(['chart.png', 'image-2.png'])
+  })
+
+  it('never takes the name of an image still in the message', async () => {
+    await mount()
+    await paste([screenshot()])
+    await paste([screenshot()])
+    await settle()
+    await act(async () => { host.querySelector<HTMLButtonElement>('button[aria-label="Remove image-1.png"]')!.click() })
+    await paste([screenshot()])
+    await settle()
+    expect(imageNames()).toEqual(['image-2.png', 'image-3.png'])
+  })
+})
+
 describe('an image attached in the composer', () => {
   it('is prepared as it is attached, and the send carries what was prepared without reading it again', async () => {
     const reads = vi.spyOn(FileReader.prototype, 'readAsDataURL')
