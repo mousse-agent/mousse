@@ -86,7 +86,7 @@ export interface BotWatchersDeps {
   spawn?: (command: string, options: SpawnOptions) => ChildProcess
   now?: () => number
   setTimer?: (fn: () => void, ms: number) => { clear(): void }
-  /** Ends a process tree (tests); default `killProcessTree`. */
+  /** Signals a command's tree (tests); default its process group on macOS and Linux, its tree on Windows. */
   kill?: (pid: number, signal: NodeJS.Signals) => void
   platform?: NodeJS.Platform
 }
@@ -175,6 +175,9 @@ export class BotWatchers {
         env: spec.env,
         ...(spec.match ? { match: spec.match } : {}),
         limitMs: spec.limitMs,
+        // Its end waits for its output to close, so a result a child prints late still reaches the wake, and a daemon it
+        // started with its output elsewhere keeps running after it exits.
+        leftBehind: 'kept',
         // Never `holdsOwner`: the bot's chat has one slot, and a command must not keep it.
         sink: { end: (_job, end, final) => this.ended(spec, watcherEnd(end), final.tail) }
       })

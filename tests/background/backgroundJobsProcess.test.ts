@@ -1,8 +1,8 @@
 /**
  * The background job service with real processes, shared by a thread's monitors and a real bot engine as the profile
  * wires it (`MmsProfileServices`): a command runs with exactly the environment its caller gives, never Mousse's own; a
- * bot's command started from its chat never holds the chat and comes back as a wake; a restart with commands and
- * wake-ups pending tells each thread and bot as before.
+ * bot's command started from its chat never holds the chat and comes back as a wake, with a result its child printed
+ * after the shell exited; a restart with commands and wake-ups pending tells each thread and bot as before.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -31,13 +31,21 @@ const monitorsOver = (recordFile?: string) => new ThreadMonitors({ jobs, env: th
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'mousse-jobs-'))
   script = join(dir, 'job.js')
-  // Prints whether it sees the sentinel, writes its pid, then exits or runs until a go file appears.
+  // Prints whether it sees the sentinel, writes its pid, then exits or runs until a go file appears. \`late\` leaves a
+  // child on its output (detached, so it outlives it on Windows too) that prints the result 1.5 s after it exits.
   writeFileSync(script, `
 const [mode, pidFile] = process.argv.slice(2)
 require('fs').writeFileSync(pidFile, String(process.pid))
-console.log('sentinel=' + (process.env.${LEAK} || 'absent'))
-if (mode === 'exit') process.exit(0)
-setInterval(() => { if (require('fs').existsSync(pidFile + '.go')) { console.log('built'); process.exit(0) } }, 25)
+if (mode === 'child') setTimeout(() => { console.log('result=late'); process.exit(0) }, 1500)
+else {
+  console.log('sentinel=' + (process.env.${LEAK} || 'absent'))
+  if (mode === 'late') {
+    require('child_process').spawn(process.execPath, [__filename, 'child', pidFile + '.child'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true })
+    process.exit(0)
+  }
+  if (mode === 'exit') process.exit(0)
+  setInterval(() => { if (require('fs').existsSync(pidFile + '.go')) { console.log('built'); process.exit(0) } }, 25)
+}
 `)
   process.env[LEAK] = 'secret-of-mousse'
   jobs = new BackgroundJobService()
@@ -136,6 +144,19 @@ describe('a bot\'s chat is never held by its command', () => {
     writeFileSync(`${file}.go`, '')
     expect(await woken(watcherId)).toContain('exited with code 0')
     expect(wakeTurn(watcherId)!.lane).toBe('chat')
+  })
+})
+
+describe('a bot\'s command whose child prints its result after the shell exited', () => {
+  it('the wake and watch_list both carry the result', async () => {
+    await allowCommands()
+    const turn = await chat('Run the tests and tell me', 'm1')
+    const { watcherId } = f.bots.tools.watchers!.start(botId, turn.activation.id, { command: command('late', pidFile('late')), brief: 'Say how the tests went.' })
+    await finish(f, turn.payload, 'completed', { text: 'Running.' })
+    const prompt = await woken(watcherId)
+    expect(prompt).toContain('result=late')
+    expect(prompt).toContain('exited with code 0')
+    expect(f.bots.tools.watchers!.output!(botId, watcherId)?.output).toContain('result=late')
   })
 })
 

@@ -6,7 +6,9 @@
  *
  * Rows: a thread's streaming monitor (batches), a thread's background command (stop tail), a bot's command (match,
  * kept output, retention per owner, stop), each beside the others on the same service; a command without an environment;
- * a bot job asking to hold its owner.
+ * a bot job asking to hold its owner; how each owner's command ends when it exits by itself (output after the exit,
+ * what it left in its group); which process ids are signalled on macOS and Linux; kept output dropped on time with
+ * nothing read.
  */
 import { EventEmitter } from 'node:events'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
@@ -25,8 +27,17 @@ class FakeChild extends EventEmitter {
   constructor(readonly pid: number) { super() }
   print(text: string): void { this.stdout.emit('data', text) }
   exit(code: number): void {
+    this.exited(code)
+    this.closed()
+  }
+  /** The shell exits (and is reaped); something it left may still hold its output. */
+  exited(code: number): void {
     this.exitCode = code
-    this.emit('close', code, null)
+    this.emit('exit', code, null)
+  }
+  /** Its output closes. */
+  closed(): void {
+    this.emit('close', this.exitCode, null)
   }
 }
 
@@ -34,6 +45,8 @@ function setup() {
   const children: FakeChild[] = []
   const spawned: Array<{ command: string; options: SpawnOptions }> = []
   const killed: string[] = []
+  /** Whether a process is still in the command's process group (what it left running). */
+  const group = { alive: true }
   const jobs = new BackgroundJobService({
     spawn: (command, options) => {
       const child = new FakeChild(1000 + children.length)
@@ -42,6 +55,7 @@ function setup() {
       return child as unknown as ChildProcess
     },
     kill: (pid, signal) => { killed.push(`${pid} ${signal}`) },
+    groupAlive: () => group.alive,
     platform: 'linux'
   })
   const posted: Array<{ threadId: string; payload: MonitorEventPayload }> = []
@@ -51,7 +65,7 @@ function setup() {
   const ends: Array<{ id: string; end: WatcherEnd; tail: string }> = []
   const watchers = new BotWatchers({ jobs, onEnd: (spec, end, tail) => { ends.push({ id: spec.id, end, tail }) } })
   const watcher = (id: string, extra: Partial<WatcherSpec> = {}): WatcherSpec => ({ id, botId: 'bot1', title: `Build ${id}`, command: `make ${id}`, limitMs: 60 * 60_000, cwd: '/bots/bot1/files', env: { PATH: '/bin', BOT_ONLY: '1' }, ...extra })
-  return { jobs, children, spawned, killed, posted, working, monitors, watchers, ends, watcher }
+  return { jobs, children, spawned, killed, group, posted, working, monitors, watchers, ends, watcher }
 }
 
 describe('a thread\'s monitors and a bot\'s commands on one service', () => {
@@ -157,5 +171,109 @@ describe('what the service refuses', () => {
     expect(s.spawned).toEqual([])
     s.watchers.start(s.watcher('rem_1'))
     expect(s.jobs.holds({ kind: 'bot', botId: 'bot1' })).toBe(false)
+  })
+})
+
+describe('a command that exits by itself', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  /**
+   * Who started it, and how it ended, against what happens to its group (on macOS and Linux) and to output that comes
+   * after the shell exits. A thread's command ends 1 s after its exit and takes its leftovers with it; a bot's waits for
+   * its output to close and leaves a daemon it started running.
+   */
+  const ROWS: Array<{ name: string; owner: 'thread' | 'bot'; end: 'exits' | 'stopped'; killed: string[] }> = [
+    { name: 'a thread\'s command exits: what it left in its group ends', owner: 'thread', end: 'exits', killed: ['1000 SIGTERM', '1000 SIGKILL'] },
+    { name: 'a bot\'s command exits: a daemon it left running keeps running', owner: 'bot', end: 'exits', killed: [] },
+    { name: 'a thread\'s command is stopped: its group ends', owner: 'thread', end: 'stopped', killed: ['1000 SIGTERM', '1000 SIGKILL'] },
+    { name: 'a bot\'s command is stopped: its group ends', owner: 'bot', end: 'stopped', killed: ['1000 SIGTERM', '1000 SIGKILL'] }
+  ]
+
+  it.each(ROWS)('$name', ({ owner, end, killed }) => {
+    const s = setup()
+    const thread = owner === 'thread' ? s.monitors.startBackground({ threadId: 't1', description: 'deploy', command: 'start-server &', cwd: '/repo' }) : undefined
+    if (owner === 'bot') s.watchers.start(s.watcher('rem_1'))
+    if (end === 'exits') s.children[0]!.exit(0)
+    else if (thread) s.monitors.stop('t1', thread.id)
+    else s.watchers.stop('rem_1')
+    vi.advanceTimersByTime(10_000)
+    expect(s.killed).toEqual(killed)
+  })
+
+  it('a bot\'s command whose child prints the result after the shell exited: the end and its kept output carry it', () => {
+    const s = setup()
+    s.watchers.start(s.watcher('rem_1'))
+    s.children[0]!.print('started\n')
+    s.children[0]!.exited(0)
+    vi.advanceTimersByTime(5_000)
+    expect(s.ends).toEqual([])
+    s.children[0]!.print('result: 42 passed\n')
+    s.children[0]!.closed()
+    expect(s.ends).toEqual([{ id: 'rem_1', end: { kind: 'exit', code: 0 }, tail: 'started\nresult: 42 passed\n' }])
+    expect(s.watchers.output('bot1', 'rem_1')?.output).toContain('result: 42 passed')
+  })
+
+  it('a thread\'s command whose child prints after the shell exited: it ends a second after the exit, as before', () => {
+    const s = setup()
+    const view = s.monitors.startBackground({ threadId: 't1', description: 'build', command: 'make &', cwd: '/repo' })
+    s.children[0]!.exited(0)
+    vi.advanceTimersByTime(1_000)
+    expect(s.posted.at(-1)?.payload).toMatchObject({ monitorId: view.id, end: { reason: 'exit', code: 0 } })
+  })
+})
+
+describe('which processes are signalled on macOS and Linux', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('only the group, never the bare process id; and no SIGKILL once the command is reaped and its group is empty', () => {
+    const signals: Array<[number, NodeJS.Signals | number | undefined]> = []
+    let groupLeft = true
+    vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
+      signals.push([pid, signal])
+      if (signal === 0 && !groupLeft) throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' })
+      return true
+    }) as typeof process.kill)
+    const children: FakeChild[] = []
+    const jobs = new BackgroundJobService({ spawn: () => { const child = new FakeChild(4242); children.push(child); return child as unknown as ChildProcess }, platform: 'linux' })
+    const start = (id: string) => jobs.start({ id, owner: { kind: 'thread', threadId: 't1' }, kind: 'background', label: 'x', command: 'make', cwd: '/r', env: {}, limitMs: 60_000, sink: { end: () => undefined } })
+
+    // Stopped while running: the group gets SIGTERM, and SIGKILL after the grace while something is still in it.
+    start('a')
+    jobs.stop({ kind: 'thread', threadId: 't1' }, 'a')
+    children[0]!.signalCode = 'SIGTERM'
+    vi.advanceTimersByTime(10_000)
+    expect(signals.filter(([, signal]) => signal !== 0)).toEqual([[-4242, 'SIGTERM'], [-4242, 'SIGKILL']])
+
+    // Stopped, then its whole group gone within the grace: no SIGKILL, since its id may be another's by then.
+    signals.length = 0
+    start('b')
+    jobs.stop({ kind: 'thread', threadId: 't1' }, 'b')
+    children[1]!.signalCode = 'SIGTERM'
+    groupLeft = false
+    vi.advanceTimersByTime(10_000)
+    expect(signals.filter(([, signal]) => signal !== 0)).toEqual([[-4242, 'SIGTERM']])
+    expect(signals.every(([pid]) => pid < 0)).toBe(true)
+  })
+})
+
+describe('kept output of ended jobs', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('goes when its six hours are up, with nothing ending or read meanwhile', () => {
+    const s = setup()
+    s.watchers.start(s.watcher('rem_1'))
+    s.children[0]!.print('x'.repeat(10_000))
+    s.children[0]!.exit(0)
+    expect(s.jobs.keptOutput()).toEqual({ jobs: 1, chars: 10_000 })
+    vi.advanceTimersByTime(ENDED_JOB_KEEP_MS - 60_000)
+    expect(s.jobs.keptOutput().jobs).toBe(1)
+    vi.advanceTimersByTime(60_000)
+    expect(s.jobs.keptOutput()).toEqual({ jobs: 0, chars: 0 })
   })
 })

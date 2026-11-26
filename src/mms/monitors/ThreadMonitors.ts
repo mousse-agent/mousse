@@ -106,6 +106,8 @@ export interface ThreadMonitorsDeps {
   spawn?: (command: string, options: SpawnOptions) => ChildProcess
   connect?: (url: string) => MonitorSocket
   kill?: (pid: number, signal: NodeJS.Signals) => void
+  /** Whether a process is still in a script's process group (tests); default asks the system. */
+  groupAlive?: (pid: number) => boolean
   platform?: NodeJS.Platform
 }
 
@@ -174,6 +176,7 @@ export class ThreadMonitors {
       ...(deps.spawn ? { spawn: deps.spawn } : {}),
       ...(deps.connect ? { connect: deps.connect } : {}),
       ...(deps.kill ? { kill: deps.kill } : {}),
+      ...(deps.groupAlive ? { groupAlive: deps.groupAlive } : {}),
       ...(deps.platform ? { platform: deps.platform } : {})
     })
     // Read now, without waiting: a write never runs before it, so it never drops what the last run left.

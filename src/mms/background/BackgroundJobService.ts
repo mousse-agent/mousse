@@ -12,14 +12,16 @@ import { countLineBreaks } from '../terminals/terminalText'
  * their tools, their records and where their ends go; this owns what they share:
  *
  * - starting a command in a shell, in its own process group where there is one, and ending its whole tree (SIGTERM,
- *   then SIGKILL after a grace), or opening a WebSocket;
+ *   then SIGKILL after a grace), or opening a WebSocket. On macOS and Linux only the group is signalled, and only while
+ *   it is known to be alive (its leader not reaped yet, or a process still in it), so a reused process id is never hit;
+ * - when a command that exits by itself counts as ended, and whether what it left running ends with it (`leftBehind`);
  * - the environment: a command runs with exactly the one its caller gives (`JobSpec.env`), never this process's own;
  *   a command started without one is refused;
  * - reading its output: a line that matches `match` ends it; with `stream`, every line (or socket message) is an event,
  *   and events close together reach the owner as one batch, with a stop for a job that is too chatty;
  * - keeping its output (the last `JOB_OUTPUT_CHARS`, and how many lines fell out, which `terminalPage` pages) and the
  *   end of it (`JOB_TAIL_CHARS`), while it runs and for `ENDED_JOB_KEEP_MS` after it ended (the last
- *   `MAX_ENDED_JOBS_PER_OWNER` of each owner);
+ *   `MAX_ENDED_JOBS_PER_OWNER` of each owner); an ended job's output goes when its time is up, read or not;
  * - its time limit, and a stop that hands back what it printed since its last batch (the stop tail).
  *
  * Who it belongs to (`JobOwner`) decides one thing here: only a thread's job may keep its owner Working (`holdsOwner`).
@@ -41,7 +43,10 @@ export const MONITOR_CONNECT_TIMEOUT_MS = 15_000
 export const MONITOR_MESSAGE_BYTES = 1_000_000
 /** How long a stopped command has to end before its tree is killed outright. */
 export const MONITOR_KILL_GRACE_MS = 3_000
-/** How long after a command exits its output may still arrive before it counts as ended (something it left holds the pipe). */
+/**
+ * How long after a command exits its output may still arrive before it counts as ended (something it left holds the
+ * pipe), for a job whose leftovers end with it (`leftBehind: 'ended'`).
+ */
 export const MONITOR_EXIT_DRAIN_MS = 1_000
 /** The end of a command's output that its end carries. */
 export const JOB_TAIL_CHARS = 4_000
@@ -123,6 +128,13 @@ export interface JobSpec {
   limitMs: number
   /** Keeps its owner Working while it runs (its caller shows it, from `holds`). A thread's only. */
   holdsOwner?: boolean
+  /**
+   * A command that exits by itself. `ended` (the default; a thread's): output that arrives within
+   * `MONITOR_EXIT_DRAIN_MS` of its exit still counts, then the job ends and so does what it left in its process group
+   * (`tail -f x &`). `kept` (a bot's): the job ends once its output closes (or at its time limit), and what it left
+   * running with its output elsewhere (a daemon it started) keeps running.
+   */
+  leftBehind?: 'ended' | 'kept'
   sink: JobSink
 }
 
@@ -137,7 +149,10 @@ export interface JobSocket {
 export interface BackgroundJobServiceDeps {
   spawn?: (command: string, options: SpawnOptions) => ChildProcess
   connect?: (url: string) => JobSocket
+  /** Signals a command's tree: on macOS and Linux its process group (`-pid`) only; on Windows its tree from `pid`. */
   kill?: (pid: number, signal: NodeJS.Signals) => void
+  /** Whether a process is still in the process group `pid` leads (macOS and Linux). */
+  groupAlive?: (pid: number) => boolean
   platform?: NodeJS.Platform
   now?: () => number
   /** The time-limit timer (tests drive it). */
@@ -211,6 +226,21 @@ function defaultConnect(url: string): JobSocket {
   return new WebSocket(url, { handshakeTimeout: MONITOR_CONNECT_TIMEOUT_MS, maxPayload: MONITOR_MESSAGE_BYTES, followRedirects: false })
 }
 
+/** On macOS and Linux only the group: the bare pid may be another process's once the command was reaped. */
+function signalTree(pid: number, signal: NodeJS.Signals, windows: boolean): void {
+  if (windows) killProcessTree(pid, signal)
+  else process.kill(-pid, signal)
+}
+
+function groupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function defaultTimer(fn: () => void, ms: number): { clear(): void } {
   const timer = setTimeout(fn, ms)
   timer.unref?.()
@@ -230,6 +260,8 @@ export class BackgroundJobService {
   private readonly running = new Map<string, Job>()
   /** Jobs that ended (stopped ones included), oldest first. */
   private ended: Ended[] = []
+  /** Drops the oldest ended job's output when its time is up. */
+  private pruneTimer: { clear(): void } | undefined
 
   constructor(private readonly deps: BackgroundJobServiceDeps = {}) {}
 
@@ -319,7 +351,9 @@ export class BackgroundJobService {
     }
     child.once('close', exited)
     // A process it left running (`tail -f x &`) keeps its output open, so `close` would wait for it: the command's exit
-    // counts once its last output had time to arrive, and the end then stops what it left.
+    // counts once its last output had time to arrive, and the end then stops what it left. A job that keeps what it
+    // left waits for its output to close instead, so a result printed late is never lost.
+    if (job.spec.leftBehind === 'kept') return
     child.once('exit', (code, signal) => {
       const drain = setTimeout(() => exited(code, signal), MONITOR_EXIT_DRAIN_MS)
       drain.unref?.()
@@ -452,8 +486,9 @@ export class BackgroundJobService {
     } catch (error) {
       console.warn('a background job\'s end could not be handled', { jobId: job.id, error: error instanceof Error ? error.message : String(error) })
     }
-    // Even after a command exits on its own, what it left in its process group (`tail -f x &`) ends with it.
-    this.kill(job)
+    // Even after a command exits on its own, what it left in its process group (`tail -f x &`) ends with it, unless its
+    // caller keeps what it leaves (a bot's daemon).
+    if (!(end.reason === 'exit' && job.spec.leftBehind === 'kept')) this.kill(job)
     return final
   }
 
@@ -465,17 +500,18 @@ export class BackgroundJobService {
     const pid = child?.pid
     if (!child || pid === undefined) return
     const running = (): boolean => child.exitCode === null && child.signalCode === null
+    const windows = (this.deps.platform ?? process.platform) === 'win32'
     // On macOS and Linux the command leads its own process group, which outlives it when it leaves something behind:
-    // the group is ended whatever ended the command, and sent SIGKILL after the grace (a group already gone is
-    // harmless). On Windows a tree is found from its live root only.
-    const group = (this.deps.platform ?? process.platform) !== 'win32'
-    if (!group && !running()) return
-    const kill = this.deps.kill ?? killProcessTree
+    // the group is signalled whatever ended the command, SIGTERM and then SIGKILL after the grace, each only while the
+    // group is known to be alive (its leader not reaped yet, or a process still in it). On Windows a tree is found from
+    // its live root only.
+    const alive = windows ? running : (): boolean => running() || (this.deps.groupAlive ?? groupAlive)(pid)
+    const kill = this.deps.kill ?? ((target: number, signal: NodeJS.Signals) => signalTree(target, signal, windows))
+    if (!alive()) return
     try { kill(pid, 'SIGTERM') } catch { /* gone */ }
     const timer = setTimeout(() => {
-      if (group || running()) {
-        try { kill(pid, 'SIGKILL') } catch { /* gone */ }
-      }
+      if (!alive()) return
+      try { kill(pid, 'SIGKILL') } catch { /* gone */ }
     }, MONITOR_KILL_GRACE_MS)
     timer.unref?.()
   }
@@ -551,6 +587,11 @@ export class BackgroundJobService {
     return ended ? { info: ended.info, end: ended.end, endedAt: ended.endedAt, output: ended.output, droppedLines: ended.droppedLines } : undefined
   }
 
+  /** How many ended jobs' output is kept now, and its characters (diagnostics). */
+  keptOutput(): { jobs: number; chars: number } {
+    return { jobs: this.ended.length, chars: this.ended.reduce((sum, entry) => sum + entry.output.length, 0) }
+  }
+
   private pruneEnded(): void {
     const now = this.now()
     this.ended = this.ended.filter((entry) => now - entry.endedAt < ENDED_JOB_KEEP_MS)
@@ -561,6 +602,16 @@ export class BackgroundJobService {
       perOwner.set(key, count)
       if (count > MAX_ENDED_JOBS_PER_OWNER) this.ended.splice(index, 1)
     }
+    // The oldest kept output goes when its time is up, even if nothing ends or is read meanwhile.
+    this.pruneTimer?.clear()
+    this.pruneTimer = undefined
+    const oldest = this.ended.reduce<number | undefined>((at, entry) => (at === undefined || entry.endedAt < at ? entry.endedAt : at), undefined)
+    if (oldest === undefined) return
+    // Its own timer, not the time-limit one tests drive: nothing waits for it.
+    this.pruneTimer = defaultTimer(() => {
+      this.pruneTimer = undefined
+      this.pruneEnded()
+    }, Math.max(1_000, oldest + ENDED_JOB_KEEP_MS - now))
   }
 
   private info(job: Job): JobInfo {

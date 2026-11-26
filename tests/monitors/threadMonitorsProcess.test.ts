@@ -33,7 +33,8 @@ describe('thread monitors with real scripts', () => {
   let monitors: ThreadMonitors | undefined
   afterEach(() => {
     monitors?.close()
-    if (dir) rmSync(dir, { recursive: true, force: true })
+    // A script's process may still be letting go of its folder on Windows (EPERM, EBUSY): retry briefly.
+    if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
     dir = undefined
   })
 
@@ -79,7 +80,8 @@ describe.skipIf(process.platform === 'win32')('thread monitors on macOS and Linu
   let monitors: ThreadMonitors | undefined
   afterEach(() => {
     monitors?.close()
-    if (dir) rmSync(dir, { recursive: true, force: true })
+    // A script's process may still be letting go of its folder on Windows (EPERM, EBUSY): retry briefly.
+    if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
     dir = undefined
   })
 

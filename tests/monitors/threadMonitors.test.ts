@@ -58,6 +58,8 @@ function setup(extra: Partial<ThreadMonitorsDeps> = {}) {
   const children: FakeChild[] = []
   const sockets: FakeSocket[] = []
   const killed: string[] = []
+  /** Whether a process is still in the script's process group: on until a row says it emptied. */
+  const group = { alive: true }
   const working: Array<[string, boolean]> = []
   const spawned: Array<{ command: string; cwd: unknown }> = []
   const monitors = new ThreadMonitors({
@@ -76,10 +78,11 @@ function setup(extra: Partial<ThreadMonitorsDeps> = {}) {
       return socket
     },
     kill: (pid, signal) => { killed.push(`${pid} ${signal}`) },
+    groupAlive: () => group.alive,
     platform: 'linux',
     ...extra
   })
-  return { monitors, posted, children, sockets, killed, working, spawned }
+  return { monitors, posted, children, sockets, killed, group, working, spawned }
 }
 
 const command = (threadId = 't1', extra: Record<string, unknown> = {}) => ({ threadId, description: 'CI for PR 12', command: 'gh pr checks 12 --watch', cwd: '/repo', ...extra })
@@ -215,10 +218,28 @@ describe('thread monitors', () => {
       const s = setup()
       const view = s.monitors.startMonitor(command())
       s.monitors.stop('t1', view.id)
-      // The shell leader ended on SIGTERM; what it left in its group may not have.
+      // The shell leader ended on SIGTERM; what it left in its group had not.
       s.children[0]!.signalCode = 'SIGTERM'
       vi.advanceTimersByTime(MONITOR_KILL_GRACE_MS)
       expect(s.killed).toEqual(['4242 SIGTERM', '4242 SIGKILL'])
+    })
+
+    it('on macOS and Linux no SIGKILL follows once the script is reaped and its group is empty: its id may be another process\'s by then', () => {
+      const s = setup()
+      const view = s.monitors.startMonitor(command())
+      s.monitors.stop('t1', view.id)
+      s.children[0]!.signalCode = 'SIGTERM'
+      s.group.alive = false
+      vi.advanceTimersByTime(MONITOR_KILL_GRACE_MS)
+      expect(s.killed).toEqual(['4242 SIGTERM'])
+
+      // Exited and reaped, with nothing left in its group: not signalled at all.
+      const gone = setup()
+      gone.group.alive = false
+      gone.monitors.startMonitor(command())
+      gone.children[0]!.exit(0)
+      vi.advanceTimersByTime(MONITOR_KILL_GRACE_MS)
+      expect(gone.killed).toEqual([])
     })
 
     it('on macOS and Linux a script that exits on its own takes what it left in its group with it', () => {
