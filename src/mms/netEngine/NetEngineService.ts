@@ -1420,6 +1420,12 @@ export class NetEngineService implements EngineDirectoryPort {
           ? deviceRelay(this.relayView, row.endpoint, now, this.dismissed(), engineLimits().relayOffersShown)
           : undefined
         const other = started.access.other(row)
+        // The ticket's approved hints beyond the same network (LAN ones are found automatically anyway).
+        const approvedAddresses = (row.approved ?? []).filter((address) => {
+          const parsed = parseRoute(address)
+          const cls = parsed && routeClass(parsed)
+          return !!cls && cls !== 'forbidden' && cls !== 'lan' && !row.addresses?.includes(address)
+        })
         const listsError = this.options.bridge()?.lists.lastError(node)
         return {
           node,
@@ -1443,6 +1449,7 @@ export class NetEngineService implements EngineDirectoryPort {
           ...(started.roles.pending(node) ? { accessPending: true } : {}),
           ...(started.pairing.sshParked(node) ? { sshParked: started.pairing.sshParked(node) } : {}),
           ...(row.addresses?.length ? { addresses: row.addresses } : {}),
+          ...(approvedAddresses.length ? { approvedAddresses } : {}),
           ...(row.ssh && !row.ssh.removed && (row.ssh.target || row.ssh.host)
             ? { ssh: row.ssh.target || (row.ssh.user ? `${row.ssh.user}@${row.ssh.host}` : row.ssh.host!) }
             : {}),
@@ -1658,6 +1665,8 @@ export class NetEngineService implements EngineDirectoryPort {
         onPathInUse: (connection) => {
           // The access exchange follows the client to the path it uses now.
           access.ensure(connection.peer)
+          // The row names the route in use, which may have changed (to the same network, say).
+          this.changed()
           const conn = Number(connection.id)
           if (!Number.isSafeInteger(conn) || !this.helper || connection.reversed) return
           void this.helper.request('path.reopened', { conn }).catch(() => {

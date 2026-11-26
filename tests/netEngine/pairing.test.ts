@@ -129,7 +129,11 @@ describe('client selection', () => {
 
   it('moves to a newer connection, and says it is in use once the call on the older one is answered', async () => {
     const { sessions, links, inUse } = linked([5, 5], 300)
+    // Reached over Tailscale, then over the same network.
+    Object.assign(links[0]!.outbound, { route: { kind: 'tcp', class: 'tailnet' } })
+    Object.assign(links[1]!.outbound, { route: { kind: 'tcp', class: 'lan' } })
     await sessions.attach(links[0]!.outbound)
+    expect(sessions.route(node)?.class).toBe('tailnet')
     const client = sessions.client(node)
     expect(inUse).toEqual([links[0]!.outbound.id])
     const call = client.rpc('net.info', {}, { id: 'rpc_slow' as never, deadlineMs: 5_000 })
@@ -141,6 +145,8 @@ describe('client selection', () => {
     expect(await call).toEqual({ on: links[0]!.outbound.id })
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(inUse).toEqual([links[0]!.outbound.id, links[1]!.outbound.id])
+    // The row reads the route of the connection in use.
+    expect(sessions.route(node)?.class).toBe('lan')
   })
 
   it('keeps the slot when an older connection closes, and hands it back when the newest does', async () => {
