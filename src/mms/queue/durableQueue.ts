@@ -70,18 +70,22 @@ export function runDurableQueueCommand(
  * The last locked read of each thread's queue, by the identity of its `queue.json` when it was read. The file is only
  * ever replaced whole (written aside, then renamed over it), so the same identity means the same content, whichever
  * process wrote it. A running turn's steer poll reads the queue ten times a second; with this, a read whose file has
- * not changed takes no lock.
+ * not changed takes no lock. A thread that never queued a message has no `queue.json` until its first queued message,
+ * often for its whole first turns: a missing file is an empty queue, kept as such until the file appears.
  */
 const lastReads = new Map<string, { stamp: string; items: QueuedMessage[] }>()
 const LAST_READS_MAX = 256
 
-/** `queue.json`'s identity, or none when it is missing or its file system gives no file id to tell a replacement by. */
+/** A missing `queue.json`: the queue is empty. */
+const MISSING = 'missing'
+
+/** `queue.json`'s identity, `MISSING` when there is none, or none when it cannot be told (no file id, a failed stat). */
 function queueStamp(file: string): string | undefined {
   try {
     const info = statSync(file)
     return info.ino ? `${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}:${info.birthtimeMs}` : undefined
-  } catch {
-    return undefined
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? MISSING : undefined
   }
 }
 
@@ -94,7 +98,8 @@ export function readDurableQueue(store: ThreadDataStore, threadId: string): Queu
   if (kept && kept.stamp === stamp) return structuredClone(kept.items)
   const items = withQueueMutationLock(threadDir, () => store.loadMessageQueue(threadId))
   lastReads.delete(key)
-  if (stamp) {
+  // A file written between the stat and the read is not what "missing" names: the next read stats it and keeps it.
+  if (stamp && (stamp !== MISSING || items.length === 0)) {
     lastReads.set(key, { stamp, items: structuredClone(items) })
     if (lastReads.size > LAST_READS_MAX) lastReads.delete(lastReads.keys().next().value!)
   }
