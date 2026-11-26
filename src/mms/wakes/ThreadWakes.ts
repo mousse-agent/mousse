@@ -136,6 +136,12 @@ export class ThreadWakes {
       waiting: () => this.record.wakes.filter((wake) => wake.event),
       threadState: (wake, threadId) => this.deps.threadState(wake.threadId, threadId),
       pullRequestState: (_wake, repo, number) => this.deps.pullRequestState(repo, number),
+      // A wake whose time ran out while an earlier pull request was read gives up, as of the moment its turn comes.
+      expire: (wake, now) => {
+        if (Date.parse(wake.dueAt) > now || !this.record.wakes.includes(wake)) return false
+        this.fire(wake, { kind: 'ended', reason: 'expired' })
+        return true
+      },
       // A wake cancelled, or whose thread was stopped, while its event was read stays cancelled.
       fire: (wake, fired) => !this.closed && this.record.wakes.includes(wake) && this.fire(wake, fired),
       now: () => this.now()
@@ -270,6 +276,7 @@ export class ThreadWakes {
 
   close(): void {
     this.closed = true
+    this.detector.close()
     if (this.timer) (this.deps.clearTimer ?? clearTimeout)(this.timer)
     this.timer = undefined
   }
@@ -293,7 +300,8 @@ export class ThreadWakes {
 
   /**
    * Looks at every waiting wake (or only those on thread `only.threadId`): drops those of a deleted thread, fires those
-   * whose time came, then those whose event happened (`WakeDetector`, one pass at a time).
+   * whose time came, then those whose event happened (`WakeDetector`: a thread's end at once, pull requests read in turn,
+   * each wake's time looked at again as its read comes).
    */
   private async pass(only?: { threadId: string }): Promise<void> {
     if (this.closed) return

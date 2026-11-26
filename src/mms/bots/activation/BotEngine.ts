@@ -952,10 +952,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       pullRequestState: (_wake, repo, number) => this.host.pullRequestState?.(repo, number),
       // A watcher fires from its process (`watcherEnded`); one that no longer runs here was ended by a restart.
       otherEvent: (wake) => wake.event?.kind === 'watcher' && !this.watchers.has(wake.id) ? { kind: 'ended', reason: 'restart' } : undefined,
-      // Only a wake still waiting fires (`fireWake`): a Stop or cancel that lands while its event was read wins.
+      // Only a wake still waiting fires (`fireWake`): a Stop or cancel that lands while its event was read wins. One
+      // that fired is due now: the delivery timer is armed for it at once, not after pull requests still being read.
       fire: (wake, fired, at) => {
         if (!this.store.fireWake(wake.id, fired, new Date(at).toISOString())) return false
         this.changed({ botId: wake.botId })
+        this.armDue()
         return true
       },
       now: () => this.now()
@@ -10099,7 +10101,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   async checkWakeEvents(now: Date = new Date(this.now()), only?: { threadId: string }): Promise<void> {
     if (!this.startupPassed || this.closed) return
-    if (await this.wakeEvents.check(only, now.getTime())) this.armDue()
+    await this.wakeEvents.check(only, now.getTime())
   }
 
   /** A thread's run ended: the wakes waiting on that thread look now, not at the next tick. */
@@ -11139,6 +11141,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   close(): void {
     // Background commands end with this process; at the next start each one's bot is told (`checkWakeEvents`).
     this.watchers.close()
+    this.wakeEvents.close()
     for (const [activationId, live] of this.live) {
       live.timer?.clear()
       live.watch?.clear()
