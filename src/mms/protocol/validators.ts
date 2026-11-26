@@ -605,15 +605,6 @@ export function asAddInstanceInput(v: unknown): AddInstanceInput {
   return { driver, ...(Object.keys(config).length > 0 ? { config } : {}), ...(slug ? { slug } : {}), ...(o.signIn ? { signIn: 'ambient' as const } : {}) }
 }
 
-/** Device scope takes a boolean; a project may also clear its override with null. */
-export function asEnabledForScope(v: unknown, scope: ProviderScope): boolean | null {
-  if (v === null && scope.kind === 'project') return null
-  if (typeof v !== 'boolean') {
-    throw invalidParams(scope.kind === 'project' ? 'enabled must be a boolean or null' : 'enabled must be a boolean')
-  }
-  return v
-}
-
 function asModelCapabilities(v: unknown, name: string): ModelCapabilities {
   const o = asPlainObject(v, name)
   assertKnownKeys(o, name, ['efforts', 'images', 'contextWindow'])

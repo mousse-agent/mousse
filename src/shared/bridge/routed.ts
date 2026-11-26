@@ -721,6 +721,35 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'activity.snapshot': read('computer', []),
   'chatReferences.resolve': read('computer', ['reference'], { required: ['reference'] }),
   'providers.snapshots': read('computer', ['scope']),
+
+  // ---------------------------------------------------------------- providers of the computer
+  // Settings → Providers of another computer: its entries, switches, models, installs and sign-ins, kept and run
+  // there. A key or a pasted sign-in answer travels in this call only and is saved on the owner; the caller keeps
+  // nothing of it. The caller's page reads with `providers.events` what happened to the operations it started
+  // (progress, sign-in prompts) and whether the entries changed: answered from memory, never written to disk on either
+  // computer. A provider's own settings file and moving an entry stay with a window of the computer itself. Checking an
+  // entry again keeps nothing in the ledger but starts its agent, so it needs the work grant (`METHOD_ACCESS`); what
+  // picks the program an agent runs, or removes its install, needs terminal access too (`choosesProgram`).
+  'providers.events': read('computer', ['after']),
+  'providers.catalog.addOptions': read('computer', []),
+  'providers.registry.search': read('computer', ['query']),
+  'providers.instances.recheck': read('computer', ['instanceId'], { required: ['instanceId'] }),
+  'providers.instances.add': write('computer', ['driver', 'config', 'slug', 'signIn'], { required: ['driver'] }),
+  'providers.instances.setSecret': write('computer', ['instanceId', 'value'], { required: ['instanceId', 'value'] }),
+  'providers.instances.remove': write('computer', ['instanceId'], { required: ['instanceId'] }),
+  'providers.instances.configure': write('computer', ['instanceId', 'patch'], { required: ['instanceId', 'patch'] }),
+  'providers.instances.setEnabled': write('computer', ['instanceId', 'enabled'], { required: ['instanceId', 'enabled'] }),
+  'providers.instances.install': write('computer', ['instanceId'], { required: ['instanceId'] }),
+  'providers.instances.removeInstall': write('computer', ['instanceId', 'force'], { required: ['instanceId'] }),
+  'providers.instances.cancelInstall': write('computer', ['operationId'], { required: ['operationId'] }),
+  'providers.instances.update': write('computer', ['instanceId'], { required: ['instanceId'] }),
+  'providers.instances.signIn': write('computer', ['instanceId', 'method'], { required: ['instanceId'] }),
+  'providers.instances.respondSignIn': write('computer', ['operationId', 'response'], { required: ['operationId', 'response'] }),
+  'providers.instances.signOut': write('computer', ['instanceId'], { required: ['instanceId'] }),
+  'providers.instances.allowKnownProblem': write('computer', ['instanceId', 'version'], { required: ['instanceId', 'version'] }),
+  'providers.instances.refreshModels': write('computer', ['instanceId'], { required: ['instanceId'] }),
+  'providers.instances.refreshAllModels': write('computer', []),
+  'providers.instances.setModelPrefs': write('computer', ['instanceId', 'patch'], { required: ['instanceId', 'patch'] }),
   'skills.list': read('computer', []),
   'skills.read': read('computer', ['skillId'], { required: ['skillId'] }),
   'github.status': read('computer', []),
@@ -1140,9 +1169,14 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'The inbox (runs, Needs you and Tuning notes) is kept by the computer that runs the automations, and read and changed there.'
   },
   {
+    methods: ['providers.instances.vendorSettings', 'providers.instances.setVendorSetting', 'providers.instances.move'],
+    reason:
+      "A provider's own settings file is read and changed from a window of its computer only, and so is moving an entry, which can copy a saved key."
+  },
+  {
     prefixes: ['providers.'],
     reason:
-      'Providers, accounts and usage belong to the computer that holds the sign-ins; the picker reads providers.snapshots.'
+      'Usage, limits and speech belong to the computer that holds the sign-ins; Settings → Providers of another computer uses the providers.instances rows.'
   },
   {
     prefixes: ['net.', 'netEngine.', 'bridge.', 'profiles.', 'speech.host.'],

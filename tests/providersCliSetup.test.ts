@@ -11,7 +11,7 @@ import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayMod
 import { AgentEditor, ModelsEditorSection, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow, StatusLine, shortStatus } from '../src/renderer/components/providers/parts'
 import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
-import { commandLabel, modelsFreshness, parseEnvLines, switchStateOf } from '../src/renderer/components/providers/providerView'
+import { commandLabel, modelsFreshness, parseEnvLines } from '../src/renderer/components/providers/providerView'
 import { ProvidersSettings } from '../src/renderer/components/providers/ProvidersSettings'
 import { model, snapshot, type SnapshotOverrides } from './providerSnapshotFixture'
 import { addedInstanceId, defaultInstanceId } from '../src/mms/harness/instances'
@@ -164,53 +164,11 @@ describe('Runtime rows', () => {
   })
 })
 
-function listRow(entry: InstanceSnapshot, scope: Parameters<typeof switchStateOf>[1]) {
-  return renderToStaticMarkup(createElement(ProviderListRow, {
-    iconId: 'claude',
-    name: entry.displayName,
-    status: describeStatus(entry),
-    toggle: switchStateOf(entry, scope),
-    selected: false,
-    onSelect: () => undefined,
-    onToggle: noop,
-    onReset: scope.kind === 'project' ? noop : undefined
-  }))
-}
-
-describe('Scope: device ceiling and project overrides', () => {
-  const project = { kind: 'project', projectId: 'p1' } as const
-
-  it('shows no override marker on the device', () => {
-    const html = listRow(snapshot(), { kind: 'device' })
-    expect(labels(html)).not.toContain('Overridden for this project. Show where this value comes from')
-  })
-
-  it('marks a project override and offers the reset to the device setting', () => {
-    const entry = snapshot({ scope: project, enabled: { device: true, project: false, effective: false, setBy: 'project' } })
-    const html = listRow(entry, project)
-    expect(html).toContain('title="Overridden for this project"')
-    expect(html).toContain('title="Reset to the device setting"')
-    expect(html).toContain('>Disabled</span>')
-    expect(html).toContain('is-off')
-  })
-
-  it('inherits without a marker when the project sets nothing', () => {
-    const html = listRow(snapshot({ scope: project }), project)
-    expect(html).not.toContain('Overridden for this project')
-  })
-
-  it('locks the switch in a project when the device has it off', () => {
-    const entry = snapshot({ scope: project, enabled: { device: false, effective: false, setBy: 'device' } })
-    expect(switchStateOf(entry, project)).toEqual({ checked: false, locked: true, overridden: false, deviceEnabled: false })
-    expect(listRow(entry, project)).toContain('Turned off on this device. Turn it on for the device first.')
-  })
-})
-
 describe('List row and editor status', () => {
   const row = (entry: InstanceSnapshot, update?: { label: string; onClick: () => void }) =>
     renderToStaticMarkup(createElement(ProviderListRow, {
       iconId: 'claude', name: entry.displayName, version: 'v2.1.0', update, status: describeStatus(entry),
-      toggle: switchStateOf(entry, { kind: 'device' }), selected: false, onSelect: () => undefined, onToggle: noop
+      enabled: entry.enabled.device, selected: false, onSelect: () => undefined, onToggle: noop
     }))
 
   it('shows the short status in the list and the whole line, in its tone, in the editor', () => {
@@ -247,7 +205,7 @@ describe('Model list freshness', () => {
   })
   const row = (entry: InstanceSnapshot) => at(() => renderToStaticMarkup(createElement(ProviderListRow, {
     iconId: 'claude', name: entry.displayName, status: describeStatus(entry),
-    toggle: switchStateOf(entry, { kind: 'device' }), selected: false, onSelect: () => undefined, onToggle: noop
+    enabled: entry.enabled.device, selected: false, onSelect: () => undefined, onToggle: noop
   })))
 
   it('says when the list was updated, from the time the daemon kept with it, in the Models tooltip only', () => {
@@ -280,7 +238,7 @@ describe('Model list freshness', () => {
 })
 
 describe('Providers page toolbar', () => {
-  it('heads the list with Add provider, then Refresh provider status and Refresh models; no scope without a project', () => {
+  it('heads the list with Add provider, then Refresh provider status and Refresh models; no computer choice without another computer', () => {
     const html = renderToStaticMarkup(createElement(ProvidersSettings, {
       settings: {} as never, refreshProviderData: async () => ({ opts: {} as never }), updateSettings: async () => undefined, ensureValidProviderSelection: async (next) => next
     }))
@@ -288,8 +246,7 @@ describe('Providers page toolbar', () => {
     expect(labels(html)).toContain('Refresh provider status')
     expect(html.indexOf('Add provider')).toBeLessThan(html.indexOf('aria-label="Refresh provider status"'))
     expect(html.indexOf('aria-label="Refresh provider status"')).toBeLessThan(html.indexOf('Refresh models'))
-    // With no project to choose, the device is implied.
-    expect(html).not.toContain('Settings scope')
+    // With no other computer to choose, this one is implied.
     expect(html).not.toContain('Applying settings for')
     // Usage stays on its own page.
     expect(html).not.toMatch(/usage|quota|meter/i)
@@ -704,15 +661,3 @@ describe('Agent editor for a managed ChatGPT entry', () => {
   })
 })
 
-describe('Agent editor scope', () => {
-  const editor = (scope: InstanceSnapshot['scope']) => {
-    const entry = snapshot({ scope })
-    return renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
-  }
-
-  it('in a project scope, says display name, the Advanced settings and models apply to the whole device', () => {
-    const notes = (html: string) => html.split('Applies to this device, in every project.').length - 1
-    expect(notes(editor({ kind: 'project', projectId: 'p1' }))).toBe(3)
-    expect(notes(editor({ kind: 'device' }))).toBe(0)
-  })
-})

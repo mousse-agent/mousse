@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { InstanceSnapshot, StatusDescription } from '../../../shared/harness/status'
 import type { ModelPrefsPatch, ProviderOperationEvent, TelemetrySetting } from '../../../shared/harness/types'
 import { ChevronRight } from '../../lib/icons'
 import { COLLAPSE_DETAILS_CLASS } from '../ui/Collapse'
 import { ProviderIcon } from '../../lib/providerIcons'
+import { ProvidersComputerContext } from '../../lib/providersComputer'
 import { confirmNavigation } from '../../services/navigationGuards'
 import { useAppStore } from '../../stores/appStore'
 import { Segmented, SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
@@ -15,22 +16,12 @@ import { EditorSection, RemoveButton, useAsyncAction, useRelativeTime } from './
 import { DownloadedFilesRow, RegistrySourceRow, RemoveWithFilesButton, type RemoveOptions } from './RegistryAgents'
 import { DRIVER_INFO, formatVersion, iconIdOf, isManagedSetup, modelsFreshness } from './providerView'
 
-/**
- * Provider setup is per machine: only the on/off switch has a project override. In
- * a project scope the device-wide sections say so.
- */
-const DEVICE_WIDE = 'Applies to this device, in every project.'
-
 /** Agents whose subscription usage the Subscription usage page shows. */
 const USAGE_DRIVERS: ReadonlySet<InstanceSnapshot['driver']> = new Set(['claude', 'codex', 'antigravity'])
 
 /** Leaves Settings for the Usage page; an integrations draft is asked about first, as on any navigation. */
 function openUsagePage() {
   void confirmNavigation().then((allowed) => { if (allowed) useAppStore.getState().setUsageOpen(true) })
-}
-
-function deviceWideNote(snapshot: InstanceSnapshot): string | undefined {
-  return snapshot.scope.kind === 'project' ? DEVICE_WIDE : undefined
 }
 
 /**
@@ -102,7 +93,7 @@ function DisplayNameRow({ snapshot, onRename }: { snapshot: InstanceSnapshot; on
     <SettingsRow
       title="Display name"
       anchor="providers-display-name"
-      description={rename.error ? <span className="prov-error">{rename.error}</span> : deviceWideNote(snapshot)}
+      description={rename.error ? <span className="prov-error">{rename.error}</span> : undefined}
       control={
         <input
           className="settings-input"
@@ -150,6 +141,8 @@ export function AgentEditor({
   const source = snapshot.config?.source?.kind === 'registry' ? snapshot.config.source : undefined
   const downloaded = snapshot.install.downloaded
   const managed = isManagedSetup(snapshot)
+  // Another computer's entry: its own settings file and this computer's Usage page stay with that computer.
+  const remote = Boolean(useContext(ProvidersComputerContext).node)
   return (
     <>
       <EditorHeader
@@ -172,14 +165,13 @@ export function AgentEditor({
         update={info.bundled ? undefined : <UpdateChip snapshot={snapshot} operation={operation} actions={actions} />}
       />
       <EditorSection title="Setup">
-        <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} updateRow={!info.bundled} onOpenUsage={USAGE_DRIVERS.has(snapshot.driver) ? openUsagePage : undefined} />
+        <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} updateRow={!info.bundled} onOpenUsage={!remote && USAGE_DRIVERS.has(snapshot.driver) ? openUsagePage : undefined} />
         {source && <RegistrySourceRow snapshot={snapshot} source={source} actions={actions} />}
         <DisplayNameRow snapshot={snapshot} onRename={(displayName) => actions.configure({ displayName })} />
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} reveal={revealModels} />
       {/* Advanced: what the user can change, in titled groups; the read-only facts last, in Info. */}
       <SettingsAdvanced>
-        {deviceWideNote(snapshot) && <p className="settings-group-desc prov-advanced-note">{deviceWideNote(snapshot)}</p>}
         {hasBehaviorRows(snapshot) && (
           <EditorSection title="Behavior">
             <TelemetryRow snapshot={snapshot} onSave={(telemetry) => actions.configure({ telemetry })} />
@@ -200,7 +192,7 @@ export function AgentEditor({
             <EnvRow snapshot={snapshot} onSave={(env) => actions.configure({ env })} />
           </EditorSection>
         )}
-        <VendorSettingsSection snapshot={snapshot} />
+        {!remote && <VendorSettingsSection snapshot={snapshot} />}
         <ProviderInfoSection rows={agentInfoRows(snapshot)} />
       </SettingsAdvanced>
     </>
@@ -245,7 +237,6 @@ export function ModelsEditorSection({
         <section className="settings-group prov-editor-section" data-settings-anchor="providers-models">
           <p className="settings-group-desc">
             Favorites show first in the model picker. Hidden models are not offered anywhere in Mousse.
-            {snapshot.scope.kind === 'project' ? ` ${DEVICE_WIDE}` : ''}
           </p>
           <div className="settings-group-rows">
             <div className="prov-models-wrap">

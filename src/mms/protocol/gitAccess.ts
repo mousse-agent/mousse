@@ -187,6 +187,7 @@ export const GIT_ACCESS = {
   'providers.synthesizeSpeech': 'none',
   'providers.transcribeAudio': 'none',
   'providers.snapshots': 'none',
+  'providers.events': 'none',
   'providers.instances.add': 'none',
   'providers.instances.setSecret': 'none',
   'providers.instances.remove': 'none',

@@ -393,7 +393,7 @@ export function harnessAppError(error: HarnessError): AppError {
 /** `checkPolicy()` result: the policy is enforceable, or the typed reason it is not. */
 export type Enforceability = { ok: true } | { ok: false; error: HarnessError & { code: 'policy_unenforceable' } }
 
-/** Which settings layer a read or write applies to. Device is a ceiling; projects only narrow. */
+/** Which settings layer a read applies to: the computer, or a project (its own default model; on/off is the computer's). */
 export type ProviderScope = { kind: 'device' } | { kind: 'project'; projectId: string }
 
 /** `<profileHome>/harness/scopes.json`. */
@@ -403,6 +403,7 @@ export interface HarnessScopesFile {
 }
 
 export interface ProjectProviderOverrides {
+  /** Per-project on/off switches an older Mousse stored; kept as they are and ignored. */
   instances: Record<string, { enabled?: boolean }>
   defaultSelection?: ProviderSelection
 }
@@ -651,3 +652,17 @@ export type ProviderOperationEvent = ProviderOperationStarted & (
   | { phase: 'failed'; error: HarnessError }
   | { phase: 'cancelled' }
 )
+
+/**
+ * One entry of `providers.events` (Settings → Providers of another computer): an event of an operation this computer
+ * started there, or a notice that its providers changed (read them again with a routed `providers.snapshots`).
+ */
+export type ProviderEventEntry =
+  | { seq: number; kind: 'operation'; event: ProviderOperationEvent }
+  | { seq: number; kind: 'changed' }
+
+/** What `providers.events` answers: the entries after the cursor asked with, and where the entries stand now. */
+export interface ProviderEventsReply {
+  cursor: number
+  events: ProviderEventEntry[]
+}

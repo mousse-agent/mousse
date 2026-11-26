@@ -2,7 +2,6 @@ import { nextEntryName } from '../../../shared/providerInstances'
 import type { BinarySource, InstallOwner, InstanceSnapshot } from '../../../shared/harness/status'
 import type {
   HarnessDriverKind,
-  ProviderScope,
   RegistryAgentView,
   RegistryChecksum,
   RegistrySourcePatch,
@@ -226,6 +225,8 @@ export interface InstanceConfigView {
   binaryPath?: string
   args: string[]
   env: Record<string, string>
+  /** Another computer that hides its launch arguments and variable values from this one (no terminal access there). */
+  launchHidden?: true
   movedTo?: string
 }
 
@@ -246,36 +247,19 @@ export function instanceConfigOf(snapshot: InstanceSnapshot): InstanceConfigView
     ...(typeof raw.binaryPath === 'string' && raw.binaryPath ? { binaryPath: raw.binaryPath } : {}),
     args: Array.isArray(raw.args) ? raw.args.filter((arg): arg is string => typeof arg === 'string') : [],
     env,
+    ...(raw.launchHidden === true ? { launchHidden: true as const } : {}),
     ...(typeof raw.movedTo === 'string' && raw.movedTo ? { movedTo: raw.movedTo } : {})
   }
 }
+
+/** The tooltip of launch settings another computer hides from this one. */
+export const LAUNCH_HIDDEN_TITLE = 'Hidden: needs terminal access to that computer'
 
 /** The executable override: from the config when reported, else from an override binary. */
 export function binaryOverrideOf(snapshot: InstanceSnapshot): string | undefined {
   const config = instanceConfigOf(snapshot)
   if (config) return config.binaryPath
   return snapshot.binary?.source === 'override' ? snapshot.binary.path : undefined
-}
-
-/** The switch: the device setting is a ceiling, and a project can only narrow it. */
-export interface SwitchState {
-  checked: boolean
-  /** The device has it off, so a project cannot turn it on. */
-  locked: boolean
-  /** The project sets its own value ("Overridden for this project"). */
-  overridden: boolean
-  deviceEnabled: boolean
-}
-
-export function switchStateOf(snapshot: Pick<InstanceSnapshot, 'enabled'>, scope: ProviderScope): SwitchState {
-  const { enabled } = snapshot
-  if (scope.kind === 'device') return { checked: enabled.device, locked: false, overridden: false, deviceEnabled: enabled.device }
-  return {
-    checked: enabled.effective,
-    locked: !enabled.device,
-    overridden: enabled.project !== undefined,
-    deviceEnabled: enabled.device
-  }
 }
 
 /** How fresh a provider's model list is, for the editor's Models tooltip: when it was updated, or that it is a cached list. */
