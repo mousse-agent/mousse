@@ -75,10 +75,11 @@ describe('NotificationThreadIndex', () => {
 
 describe('NotificationThreadIndex and threads a bot keeps out of the sidebar', () => {
   const list = [
-    { id: 'job', name: 'Quick check', hidden: true },
+    { id: 'job', name: 'Quick check', hidden: true, startedByBot: { botId: 'pip', name: 'Pip' } },
     { id: 'helper', name: 'Helper', lineage: subagentOf('job') },
     { id: 'deep', name: 'Deep helper', lineage: subagentOf('helper', 'job') },
-    { id: 'mine', name: 'Fix tests' }
+    { id: 'mine', name: 'Fix tests' },
+    { id: 'launched', name: 'Started by an agent', hidden: true }
   ]
   const kinds = ['completed', 'question', 'idle'] as const
 
@@ -89,6 +90,12 @@ describe('NotificationThreadIndex and threads a bot keeps out of the sidebar', (
       for (const id of ['job', 'helper', 'deep']) expect(index.resolve('a', id, kind), `${id} ${kind}`).toBeNull()
       expect(index.resolve('a', 'mine', kind)).toEqual(expect.objectContaining({ threadId: 'mine' }))
     }
+  })
+
+  it('still notifies for a thread an agent, not a bot, keeps out of the sidebar', () => {
+    const index = new NotificationThreadIndex()
+    index.note('a', list)
+    for (const kind of kinds) expect(index.resolve('a', 'launched', kind), kind).toEqual(expect.objectContaining({ threadId: 'launched' }))
   })
 
   it('notifies like any thread when the person chose to hear about bot threads', () => {

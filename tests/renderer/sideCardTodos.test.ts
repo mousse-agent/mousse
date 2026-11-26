@@ -28,6 +28,7 @@ vi.mock('../../src/renderer/components/sideCard/DeviceSection', () => ({ DeviceS
 vi.mock('../../src/renderer/components/sideCard/GitSection', () => ({ GitSection: () => null }))
 vi.mock('../../src/renderer/components/sideCard/ActionsSection', () => ({ ActionsSection: () => null }))
 vi.mock('../../src/renderer/components/sideCard/LineageSection', () => ({ LineageSection: () => null }))
+vi.mock('../../src/renderer/components/sideCard/StartedThreadsSection', () => ({ StartedThreadsSection: () => null }))
 
 const { SideCardSections } = await import('../../src/renderer/components/sideCard/ThreadSideCard')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
