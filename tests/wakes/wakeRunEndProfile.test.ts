@@ -99,4 +99,27 @@ describe('a wake on a thread whose run ends while its turn still holds the threa
     expect(wakeRows().map((row) => [(row.payload as ThreadWakePayload).wakeId, (row.payload as ThreadWakePayload).label]))
       .toEqual([[set.wakeId, wakeFiredLabel({ kind: 'thread', threadId: worker.id, status: 'completed', title: 'Port the parser' })]])
   }, 60_000)
+
+  it('set while a failed run\'s turn still saves it, with a message queued behind: taking that message back fires it with the failed run, not as cancelled', async () => {
+    const services = profile()
+    const watcher = services.threads.createThread('Reviewer')
+    const worker = services.threads.createThread('Port the parser')
+    const first = await running(services, worker.id, 'first')
+    const queued = await services.runEngine.dispatch({ kind: 'send', threadId: worker.id, clientRequestId: 'queued', source: 'gui' })
+    if (queued.status !== 'accepted') throw new Error('send rejected')
+    // The run fails; its turn still holds the thread while it saves its checkpoint.
+    const isTurnActive = services.orchestrator.isTurnActive.bind(services.orchestrator)
+    vi.spyOn(services.orchestrator, 'isTurnActive').mockImplementation((threadId) => threadId === worker.id || isTurnActive(threadId))
+    vi.spyOn(services.orchestrator, 'activeTurnRunId').mockImplementation((threadId) => threadId === worker.id ? first : undefined)
+    services.runEngine.markTerminal(first, 'failed', { error: 'tests failed' })
+    expect(services.runEngine.getRun(queued.runId)?.status).toBe('queued')
+    services.threadWakes.start()
+    const set = await services.threadWakes.add(watcher.id, { brief: 'Review what the parser port wrote.', event: { kind: 'thread', threadId: worker.id } })
+
+    services.runEngine.markTerminal(queued.runId, 'cancelled', { interruptedBy: 'user' })
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve))
+    const rows = services.runEngine.inbox.listForThread(watcher.id).filter(isThreadWakeRow)
+    expect(rows.map((row) => [(row.payload as ThreadWakePayload).wakeId, (row.payload as ThreadWakePayload).label]))
+      .toEqual([[set.wakeId, wakeFiredLabel({ kind: 'thread', threadId: worker.id, status: 'failed', title: 'Port the parser' })]])
+  }, 60_000)
 })

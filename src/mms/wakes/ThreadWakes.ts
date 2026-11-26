@@ -101,8 +101,8 @@ export interface ThreadWakesDeps {
   changed?(threadId: string): void
   /** How thread `threadId` stands for the agent of thread `from`, for a wake on run `runId`'s end (`wakeThreadState`). */
   threadState(from: string, threadId: string, runId?: string): WakeThreadState
-  /** A pull request of one of the person's projects (`pullRequestStateOf`). */
-  pullRequestState(repo: string, number: number): Promise<WakePullRequestState | { none: true } | { problem: string }>
+  /** A pull request of one of the person's projects (`pullRequestStateOf`); with `fresh`, as read from then on. */
+  pullRequestState(repo: string, number: number, fresh?: { notBefore: number }): Promise<WakePullRequestState | { none: true } | { problem: string }>
   /** When the person last wrote in the thread; undefined when they never did. */
   personLastWroteAt(threadId: string): string | undefined
   /** Whether the thread still exists (a wake of a deleted one is dropped). */
@@ -135,7 +135,7 @@ export class ThreadWakes {
     this.detector = new WakeDetector<ThreadWake>({
       waiting: () => this.record.wakes.filter((wake) => wake.event),
       threadState: (wake, threadId, runId) => this.deps.threadState(wake.threadId, threadId, runId),
-      pullRequestState: (_wake, repo, number) => this.deps.pullRequestState(repo, number),
+      pullRequestState: (_wake, repo, number, fresh) => this.deps.pullRequestState(repo, number, fresh),
       // A wake whose pull request was read past its deadline, and shows nothing that happened by then, gives up.
       expire: (wake, _now, why) => !this.closed && this.record.wakes.includes(wake) && this.fire(wake, why),
       // A wake cancelled, or whose thread was stopped, while its event was read stays cancelled.

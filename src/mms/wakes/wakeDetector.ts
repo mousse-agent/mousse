@@ -12,15 +12,18 @@ import { PR_WAKE_READ_MS, pullRequestWakeHappened, threadWakeOutcome, type WakeP
  *   (`runId`): a check made by a run's end (`ended`) fires it with that run's outcome, though the thread still shows the
  *   run live or its next run has already started, and the end of any other run of the thread (a queued message taken
  *   back) leaves it waiting. A wake set just after its run ended fires at the next check, as the run is looked up;
- * - wakes on a pull request are read one after the other, each at most every `PR_WAKE_READ_MS` (timed by this
- *   computer's clock when its read started, whatever time the caller passed), and never twice at once, however checks
- *   overlap. Before each read the wake must still wait. What the read shows counts when the host's own time for it (the
+ * - wakes on a pull request are read one after the other, through one line for every check and deadline (overdue wakes
+ *   after a restart are not read all at once), each at most every `PR_WAKE_READ_MS` (timed by this computer's clock when
+ *   its read started, whatever time the caller passed), and never twice at once, however checks overlap. Before each
+ *   read the wake must still wait. What the read shows counts when the host's own time for it (the
  *   merge, the close, the last check to finish, the review) is at or before the wake's deadline, even if the read came
  *   later. A read that gives no such time counts when the read started by the deadline. A wake gives up (`expire`) only
  *   after a read shows what it waits for came after the deadline, or a read started from the deadline on shows nothing
  *   (or fails: it then gives up saying it couldn't look). A store's deadline hands a wake on a pull request to
  *   `atDeadline`, which reads it once more now, so a merge between the last read and the deadline still counts. A read
- *   that doesn't answer in `PR_WAKE_READ_TIMEOUT_MS` counts as failed and frees the wakes queued behind it;
+ *   from the deadline on asks for the pull request as it stands from then (`WakeReadFresh`): no cached value and no
+ *   read in flight from before the deadline. A wake given up keeps its why (`expired_unread`) until its store takes it.
+ *   A read that doesn't answer in `PR_WAKE_READ_TIMEOUT_MS` counts as failed and frees the wakes queued behind it;
  * - a wake is fired through its store's `fire`, which fires only one still waiting: a Stop or a cancel that lands while
  *   its pull request is read wins, and nothing resumes. A store that fails to fire one is logged, and the rest still go;
  * - after `close` nothing new starts: no check, and no read still queued.
@@ -41,6 +44,14 @@ export interface WaitingWake {
 /** A read of a pull request that hasn't answered by then counts as failed: its wake, and those queued behind it, go on. */
 export const PR_WAKE_READ_TIMEOUT_MS = 90_000
 
+/**
+ * A read made from a wake's deadline on: it shows the pull request as it stood from then, never a value read before it
+ * (a watch's cached "open") nor a read in flight that started before it (`notBefore`, ms by the host's clock).
+ */
+export interface WakeReadFresh {
+  notBefore: number
+}
+
 /** A check made because a thread's run ended: that run's outcome, as its terminal event gave it. */
 export interface WakeCheckOnly {
   threadId: string
@@ -56,7 +67,7 @@ export interface WakeDetectorDeps<W extends WaitingWake> {
    */
   threadState(wake: W, threadId: string, runId?: string): WakeThreadState | undefined
   /** A pull request of the person's projects; undefined when none can be read here. */
-  pullRequestState(wake: W, repo: string, number: number): Promise<WakePullRequestState | { none: true } | { problem: string }> | undefined
+  pullRequestState(wake: W, repo: string, number: number, fresh?: WakeReadFresh): Promise<WakePullRequestState | { none: true } | { problem: string }> | undefined
   /** An event of the store's own kind (a bot's background command); undefined while it is still to come. */
   otherEvent?(wake: W): BotWakeFired | undefined
   /**
@@ -74,8 +85,13 @@ export class WakeDetector<W extends WaitingWake> {
   private readonly readAt = new Map<string, number>()
   /** Wakes whose pull request read is queued or under way, each with the batch that holds it: a batch frees only its own. */
   private readonly reading = new Map<string, object>()
-  /** Wakes given up after a read past their deadline: their store ends them now, with no read again. */
-  private readonly expired = new Set<string>()
+  /**
+   * Wakes given up after a read past their deadline, with why: their store ends them with no read again. `accepted`
+   * once the store took it (`expire` true); until then a later deadline asks it again with the same why.
+   */
+  private readonly expired = new Map<string, { why: Extract<BotWakeFired, { kind: 'ended' }>; accepted: boolean }>()
+  /** Every pull request read goes through this one line, a check's and a deadline's alike: one read at a time. */
+  private line: Promise<unknown> = Promise.resolve()
   private closed = false
 
   constructor(private readonly deps: WakeDetectorDeps<W>) {}
@@ -88,16 +104,23 @@ export class WakeDetector<W extends WaitingWake> {
 
   /**
    * A store's deadline came for `wake`. A wake on a pull request is the detector's to end: true while its last read is
-   * queued or under way (started now when none is), which fires it if what it waits for happened by the deadline, or
-   * else gives it up (`expire`). False when the store ends it itself: not a wake on a pull request, one the detector has
-   * given up already, or the detector is closed.
+   * queued or under way (queued now when none is), which fires it if what it waits for happened by the deadline, or
+   * else gives it up (`expire`). True too while giving it up still waits for the store to take it: asked again now, with
+   * the same why (`expired_unread` stays so). False when the store ends it itself: not a wake on a pull request, one the
+   * detector has given up and the store took, or the detector is closed.
    */
   atDeadline(wake: W): boolean {
-    if (this.closed || wake.event?.kind !== 'pr' || this.expired.has(wake.id)) return false
+    if (this.closed || wake.event?.kind !== 'pr') return false
+    const given = this.expired.get(wake.id)
+    if (given) {
+      if (given.accepted) return false
+      this.giveUp(wake, given)
+      return true
+    }
     if (this.reading.has(wake.id)) return true
     const batch = {}
     this.reading.set(wake.id, batch)
-    void this.read([wake as W & { event: Extract<BotWakeEvent, { kind: 'pr' }> }], batch)
+    void this.queue([wake as W & { event: Extract<BotWakeEvent, { kind: 'pr' }> }], batch)
     return true
   }
 
@@ -124,7 +147,7 @@ export class WakeDetector<W extends WaitingWake> {
     }
     const ids = new Set(waiting.map((wake) => wake.id))
     for (const id of this.readAt.keys()) if (!ids.has(id) && !this.reading.has(id)) this.readAt.delete(id)
-    for (const id of this.expired) if (!ids.has(id)) this.expired.delete(id)
+    for (const id of this.expired.keys()) if (!ids.has(id)) this.expired.delete(id)
     let fired = false
     const batch = {}
     const reads: Array<W & { event: Extract<BotWakeEvent, { kind: 'pr' }> }> = []
@@ -147,7 +170,7 @@ export class WakeDetector<W extends WaitingWake> {
       if (happened && this.fire(wake, happened, at)) fired = true
     }
     if (!reads.length) return Promise.resolve(fired)
-    return this.read(reads, batch).then((read) => fired || read)
+    return this.queue(reads, batch).then((read) => fired || read)
   }
 
   /**
@@ -160,6 +183,13 @@ export class WakeDetector<W extends WaitingWake> {
     if (ended && event.runId && ended.runId && ended.runId !== event.runId) return seen
     if (!ended || !seen || (seen.state !== 'running' && seen.state !== 'idle')) return seen
     return { state: 'idle', ...(seen.title ? { title: seen.title } : {}), lastRun: { status: ended.status, ...(ended.endedAt ? { endedAt: ended.endedAt } : {}) } }
+  }
+
+  /** The batch is read once every read queued before it is done: overdue wakes after a restart are read one at a time. */
+  private queue(wakes: Array<W & { event: Extract<BotWakeEvent, { kind: 'pr' }> }>, batch: object): Promise<boolean> {
+    const turn = this.line.then(() => this.read(wakes, batch))
+    this.line = turn.catch(() => undefined)
+    return turn
   }
 
   /**
@@ -179,7 +209,8 @@ export class WakeDetector<W extends WaitingWake> {
             if (this.closed || !this.stillWaiting(wake.id)) break
             const startedAt = this.deps.now()
             this.readAt.set(wake.id, startedAt)
-            const state = await this.readPullRequest(wake)
+            // From the deadline on, a read shows the pull request as it stood from then: no value read before it.
+            const state = await this.readPullRequest(wake, startedAt >= deadline ? { notBefore: deadline } : undefined)
             const happened = pullRequestWakeHappened(wake.event, state, wake.setAt)
             // By the host's time for what happened; with none, by when the read started.
             if (happened && !((happened.at ?? startedAt) > deadline)) {
@@ -189,9 +220,10 @@ export class WakeDetector<W extends WaitingWake> {
             if (!(this.deps.now() >= deadline) || this.closed || !this.stillWaiting(wake.id)) break
             // What it waits for came after the deadline, or a read from the deadline on shows nothing: it gives up.
             if (happened || startedAt >= deadline) {
-              this.expired.add(wake.id)
               const unread = !state || 'problem' in state || 'none' in state
-              this.deps.expire(wake, this.deps.now(), { kind: 'ended', reason: unread ? 'expired_unread' : 'expired' })
+              const given = { why: { kind: 'ended' as const, reason: unread ? 'expired_unread' as const : 'expired' as const }, accepted: false }
+              this.expired.set(wake.id, given)
+              this.giveUp(wake, given)
               break
             }
           }
@@ -208,7 +240,7 @@ export class WakeDetector<W extends WaitingWake> {
   }
 
   /** The wake's pull request; a read that throws, or doesn't answer in `PR_WAKE_READ_TIMEOUT_MS`, is a problem. */
-  private async readPullRequest(wake: W & { event: Extract<BotWakeEvent, { kind: 'pr' }> }): Promise<WakePullRequestState | { none: true } | { problem: string } | undefined> {
+  private async readPullRequest(wake: W & { event: Extract<BotWakeEvent, { kind: 'pr' }> }, fresh?: WakeReadFresh): Promise<WakePullRequestState | { none: true } | { problem: string } | undefined> {
     let timer: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<{ problem: string }>((resolve) => {
       timer = setTimeout(() => resolve({ problem: 'the read took too long' }), PR_WAKE_READ_TIMEOUT_MS)
@@ -217,12 +249,21 @@ export class WakeDetector<W extends WaitingWake> {
     try {
       return await Promise.race([
         Promise.resolve()
-          .then(() => this.deps.pullRequestState(wake, wake.event.repo, wake.event.number))
+          .then(() => this.deps.pullRequestState(wake, wake.event.repo, wake.event.number, fresh))
           .catch((error: unknown) => ({ problem: error instanceof Error ? error.message : String(error) })),
         timeout
       ])
     } finally {
       clearTimeout(timer)
+    }
+  }
+
+  /** The store ends the wake as given up; one that fails or throws keeps the why for the next deadline to ask again. */
+  private giveUp(wake: W, given: { why: Extract<BotWakeFired, { kind: 'ended' }>; accepted: boolean }): void {
+    try {
+      given.accepted = this.deps.expire(wake, this.deps.now(), given.why)
+    } catch (error) {
+      warn('a wake-up could not be given up; its deadline asks again', wake.id, error)
     }
   }
 
