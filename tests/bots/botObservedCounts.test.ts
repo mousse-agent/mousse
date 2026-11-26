@@ -5,16 +5,15 @@
  * them (`recordObservedUsage`), never twice. The engine runs over a real `bots.db`; which runtime a turn has is what it
  * charged, as the orchestrator hands `runtimeCounters` to the runtime's budget (the hop is covered in
  * `botTurnUsage.test.ts`). Their Mousse app and relayed MCP tool calls are counted the same way
- * (`recordObservedToolCall`): once per call, however many points check it.
+ * (`recordObservedToolCall`): once per call, where it runs (`BotAuthority.callRuns`), however many points check it.
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ACTIVITY_SAME_CALL_MS } from '../../src/mms/bots/activity/BotActivitySink'
-import { BotMcp } from '../../src/mms/bots/mcp/BotMcp'
+import { BotMcp, callForBot } from '../../src/mms/bots/mcp/BotMcp'
 import { botFilesFolder } from '../../src/mms/bots/grants/compile'
 import type { McpToolDescriptor } from '../../src/shared/integrations'
-import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
+import type { BotAuthority, NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { botFixture, createBot, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
@@ -104,47 +103,61 @@ describe('a turn\'s app and MCP calls are counted for it, once each', () => {
   const app = (tool: string, args: Record<string, unknown> = {}): NormalisedCall => ({ kind: 'app', tool, args })
   const note = (args: Record<string, unknown>): NormalisedCall => ({ kind: 'mcp', server: 'srv-notes', tool: 'read_note', args })
 
-  it('one count per call: the same tool with the same arguments within a chip\'s window is the call already counted', async () => {
+  const signal = () => new AbortController().signal
+  /** The relay's run of an MCP call (Claude Code, Codex): checked by the bot's authority, then sent to its server. */
+  const relayed = (authority: BotAuthority, args: Record<string, unknown>) =>
+    callForBot({ bot: authority, mcp: f.host.mcp!, name: 'Notes__read_note', args, signal: signal(), known: () => ({ server: 'srv-notes', tool: 'read_note', serverName: 'Notes' }) })
+
+  it('two identical calls are two, each counted once when it runs, however often it was checked', async () => {
     const turn = await work('w1')
+    const { authority } = turn.prepared
+    const counted = () => f.store.counters(turn.activation.id).toolCalls
+    for (const n of [1, 2]) {
+      // Locked Claude checks an app call at PreToolUse and canUseTool; the registry runs it (`callRuns`).
+      expect(authority.check(app('theme_read'))).toMatchObject({ ok: true })
+      expect(authority.check(app('theme_read'))).toMatchObject({ ok: true })
+      expect(counted()).toBe(n - 1)
+      authority.callRuns!()
+      expect(counted()).toBe(n)
+    }
+    // The same MCP call twice, a second apart, through the relay: two calls reach the server, two are counted.
+    f.clock.now += 1_000
+    expect((await relayed(authority, { name: 'today' })).isError).toBeFalsy()
+    f.clock.now += 1_000
+    expect((await relayed(authority, { name: 'today' })).isError).toBeFalsy()
+    expect(counted()).toBe(4)
+  })
+
+  it('one call checked at points far apart is one', async () => {
+    const turn = await work('w1')
+    const { authority } = turn.prepared
+    // Claude's PreToolUse checks it, the owner's server is slow to start, and the relay runs it ten seconds later.
+    expect(authority.check(note({ name: 'today' }))).toMatchObject({ ok: true })
+    f.clock.now += 10_000
+    expect((await relayed(authority, { name: 'today' })).isError).toBeFalsy()
+    expect(f.store.counters(turn.activation.id).toolCalls).toBe(1)
+    // A built-in is counted by its runtime's own gate (Claude's PreToolUse), never here.
     const files = botFilesFolder(f.profile, botId)
     mkdirSync(files, { recursive: true })
     writeFileSync(join(files, 'notes.md'), 'x')
-    // Each allowed check, the time since the one before, and the activation's tool calls after it.
-    const steps: Array<[string, NormalisedCall, number, number]> = [
-      ['an app call (locked Claude\'s PreToolUse)', app('theme_read'), 0, 1],
-      ['its next check (canUseTool)', app('theme_read'), 1_000, 1],
-      ['the registry\'s check, with the call id and turn token', app('theme_read', { clientRequestId: 'c1', _mousse_turn: 't1' }), 1_000, 1],
-      ['another app tool', app('schedule_list'), 0, 2],
-      ['an MCP call', note({ name: 'today' }), 0, 3],
-      ['the relay\'s check of it', note({ name: 'today' }), 0, 3],
-      ['the same MCP tool with other arguments', note({ name: 'week' }), 0, 4],
-      // A built-in is counted by its runtime's own gate (Claude's PreToolUse), never here.
-      ['a built-in', { kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(files, 'notes.md') } }, 0, 4],
-      ['the first app call again, a chip\'s window after it was counted', app('theme_read'), BOT_ACTIVITY_SAME_CALL_MS - 2_000, 5]
-    ]
-    for (const [name, call, after, toolCalls] of steps) {
-      f.clock.now += after
-      expect(turn.prepared.authority.check(call), name).toMatchObject({ ok: true })
-      expect(f.store.counters(turn.activation.id).toolCalls, name).toBe(toolCalls)
-    }
+    expect(authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(files, 'notes.md') } })).toMatchObject({ ok: true })
+    expect(f.store.counters(turn.activation.id).toolCalls).toBe(1)
   })
 
   it('a refused call is not counted', async () => {
     await f.bots.service.chatSend({ botId, text: 'What is in my notes?', clientRequestId: 'm1' })
     const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
     const talk = await start(f, activation.id)
-    // A chat turn hands MCP work on to work: the call is refused.
-    expect(talk.prepared.authority.check(note({ name: 'today' }))).toMatchObject({ ok: false })
+    // A chat turn hands MCP work on to work: the relay's check refuses the call before it reaches the server.
+    expect((await relayed(talk.prepared.authority, { name: 'today' })).isError).toBe(true)
     expect(f.store.counters(activation.id).toolCalls).toBe(0)
-    expect(talk.prepared.authority.check(app('theme_read'))).toMatchObject({ ok: true })
-    expect(f.store.counters(activation.id).toolCalls).toBe(1)
   })
 
-  it('Pi\'s calls are counted by its budget only: once it charged a request, no check counts one', async () => {
+  it('Pi\'s calls are counted by its budget only: once it charged a request, a call that runs counts none here', async () => {
     const turn = await work('w1')
     turn.prepared.runtimeCounters!.charge('request')
-    expect(turn.prepared.authority.check(app('theme_read'))).toMatchObject({ ok: true })
-    expect(turn.prepared.authority.check(note({ name: 'today' }))).toMatchObject({ ok: true })
+    turn.prepared.authority.callRuns!()
+    expect((await relayed(turn.prepared.authority, { name: 'today' })).isError).toBeFalsy()
     expect(f.store.counters(turn.activation.id)).toMatchObject({ requests: 1, toolCalls: 0 })
   })
 })

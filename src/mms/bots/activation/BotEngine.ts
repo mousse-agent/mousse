@@ -119,9 +119,7 @@ import { createBotAuthority, type BotFileReadState } from '../authority/botAutho
 import { type BotChatImages, BotChatService, chatInput, messageInput } from '../chat/BotChatService'
 import { askFingerprintOf, BotChatProjection, clockTime, starterManifest } from '../chat/projection'
 import { BotDefinitionError, upgradeDefinitionV1, type BotDefinitionEntry, type BotDefinitionStore } from '../definitions/BotDefinitionStore'
-import { BOT_ACTIVITY_SAME_CALL_MS, chipCallOf } from '../activity/BotActivitySink'
-import { stableStringify } from '../../run/json'
-import { withoutTransportFields } from '../../agentDefinitions/definitionGate'
+import { chipCallOf } from '../activity/BotActivitySink'
 import { botFilesFolder, botManifestDigest, compileBotThread, subagentManifest, type BotPermissions, type CompileInput } from '../grants/compile'
 import { shortModelName } from '../../../shared/modelNames'
 import { isCodexBotRefusal } from '../../../shared/harness/codexBotVersion'
@@ -755,10 +753,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const tool = mcp?.offered(new Set([`${target.server}::${target.tool}`]))[0]
       if (!mcp?.call || !tool) throw new BotActionChanged('This tool changed. Nothing was sent.')
       const signal = new AbortController().signal
-      const actionId = this.actions.forWork(row.id)!.id
+      const action = this.actions.forWork(row.id)!
+      const actionId = action.id
       return callForBot({ mcp: mcp as BotMcp, bot: {
         activationId: row.id, mcpTools: [tool], workspace: null, time: { signal, deadline: () => Number.MAX_SAFE_INTEGER },
-        check: () => this.actionPair(row, target) ? { ok: true } : { ok: false, wall: { kind: 'revoked' } }
+        check: () => this.actionPair(row, target) ? { ok: true } : { ok: false, wall: { kind: 'revoked' } },
+        // Sent now: counted once, unless the runtime that held it counted it already (`holdMcp`).
+        callRuns: () => { if (!this.selfCountedHold(row.id, action.call_key, false)) this.countToolCall(row.id) }
       }, name: tool.name, args, signal, heldAction: true, sanitizeResult: (result) => removeHiddenArguments(result, args, mcp.inputSchema?.(target)), assertDispatchActive: () => {
         this.actions.assertRunning(actionId)
       } })
@@ -777,6 +778,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }) }
   readonly service: BotChatService
+  /**
+   * Held MCP calls (`call_key`) whose runtime counted them already when the model made them (Pi's budget), by activation:
+   * sending one counts nothing more. Kept in memory only, so after a restart a sent call of Pi's may count twice: the
+   * count is a measurement, and an extra one never lets a call through.
+   */
+  private readonly selfCountedHolds = new Map<string, Set<string>>()
   /** Pi file versions, shared by the activation's dispatches and discarded when it ends. */
   private readonly fileReads = new Map<string, Map<string, BotFileReadState>>()
   /** Each activation's context pack as its latest main dispatch read it (frozen by the provider, bot-context.md §5). */
@@ -3868,7 +3875,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     permissionsNow?(grant: { digest: string; manifest: BotManifest }): BotPermissions | undefined
     /**
      * Whether the turn's runtime leaves its Mousse app and MCP tool calls uncounted (it has no budget of its own, as Pi
-     * has): each allowed call is then counted here, once (`recordObservedToolCall`). Absent: nothing is counted here.
+     * has): each call is then counted here, once, when it runs (`callRuns`). Absent: nothing is counted here.
      */
     countsAppCalls?(): boolean
   }): BotAuthority {
@@ -3994,26 +4001,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return this.store.workWait(row.id)?.status === 'waiting'
         ? 'This work is waiting. End your turn now; it carries on here when the time or event comes.' : QUESTION_END_TURN_TEXT
     }
-    // One app or MCP call is checked at several points (locked Claude: PreToolUse, canUseTool, then the registry or the
-    // relay), so the same tool with the same arguments within `BOT_ACTIVITY_SAME_CALL_MS` is that same call, as chips
-    // read it. Built-ins are counted by their runtime's own gate (Claude's PreToolUse), never here.
-    const countedCalls = new Map<string, number>()
-    const countCall = (call: NormalisedCall): void => {
-      if ((call.kind !== 'app' && call.kind !== 'mcp') || !input.countsAppCalls?.()) return
-      try {
-        const name = call.kind === 'mcp' ? `mcp\u0000${call.server}\u0000${call.tool}` : `app\u0000${call.tool}`
-        const key = `${name}\u0000${stableStringify(withoutTransportFields(call.args))}`
-        const at = this.monotonic()
-        const first = countedCalls.get(key)
-        if (first !== undefined && at - first < BOT_ACTIVITY_SAME_CALL_MS) return
-        if (countedCalls.size >= 256) for (const [old, when] of countedCalls) if (at - when >= BOT_ACTIVITY_SAME_CALL_MS) countedCalls.delete(old)
-        countedCalls.set(key, at)
-        this.store.recordObservedToolCall(row.id)
-      } catch (error) {
-        // A measurement: it never fails the call it counts.
-        console.warn('a bot\'s tool call could not be counted', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
-      }
-    }
     const check = (call: NormalisedCall): BotCheck => {
       this.progress(row.id)
       const stop = endTurn()
@@ -4021,7 +4008,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const decided = base.check(call)
       if (decided.ok) {
         observe(call)
-        countCall(call)
         return decided
       }
       if (subagent) return 'refused' in decided || !ESCALATABLE.has(decided.wall.kind) ? decided : { ok: false, refused: { text: BOT_SUBAGENT_LACKS_TEXT, askId: '' } }
@@ -4092,6 +4078,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
             const allowed = base.check({ kind: 'mcp', server: tool.server, tool: tool.tool, args })
             if (!allowed.ok) return { text: checkMessage(allowed), isError: true }
           }
+          // A runtime that counts its own tool calls (Pi) counted this one when the model made it; any other has it
+          // counted when it is sent (`execute`), never while it waits for the owner's answer.
+          if (toolCallId && !input.countsAppCalls?.()) this.selfCountedHold(row.id, JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, toolCallId]), true)
           const outcome = this.actions.hold(row, input.callDispatchId ?? input.dispatchId, tool, args, toolCallId)
           if (outcome instanceof Promise) return outcome
           if (!outcome.isError && this.actions.forWork(row.id)?.status === 'open') { this.askedIn.set(row.id, input.mainN); this.releaseParked(this.store.activation(row.id) ?? row, 'approval') }
@@ -4110,6 +4099,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return decided.ok ? undefined : checkMessage(decided)
       },
       check,
+      // Counted where it runs, never where it is checked: one call is checked at several points (locked Claude's
+      // PreToolUse and canUseTool, then the registry or the relay), and two identical calls are two.
+      ...(input.countsAppCalls ? { callRuns: () => { if (input.countsAppCalls!()) this.countToolCall(row.id) } } : {}),
       held: (asked) => {
         this.progress(row.id)
         if (this.permissionOff(row.botId, asked as BotAskRequest)) return this.offText()
@@ -4190,6 +4182,29 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (input.role === 'activation' && row.lane === 'run' && turnRightsOf(row).subagents)
       authority.subagents = this.subagentHandle({ row, mainN: input.mainN, controller })
     return authority
+  }
+
+  /** One Mousse app or MCP call of the activation ran where its runtime counts none itself (`BotAuthority.callRuns`). */
+  private countToolCall(activationId: string): void {
+    try {
+      this.store.recordObservedToolCall(activationId)
+    } catch (error) {
+      // A measurement: it never fails the call it counts.
+      console.warn('a bot\'s tool call could not be counted', { activationId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** Marks (`add`) a held call its runtime counted itself, or takes the mark off: true when it was marked. */
+  private selfCountedHold(activationId: string, callKey: string, add: boolean): boolean {
+    let keys = this.selfCountedHolds.get(activationId)
+    if (add) {
+      if (!keys) this.selfCountedHolds.set(activationId, keys = new Set())
+      keys.add(callKey)
+      return true
+    }
+    const had = keys?.delete(callKey) ?? false
+    if (keys && !keys.size) this.selfCountedHolds.delete(activationId)
+    return had
   }
 
   /** The activation's counter: a refused count is a budget wall. */
@@ -7470,6 +7485,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private cleanup(row: BotActivationRow): void {
     if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
     this.fileReads.delete(row.id)
+    this.selfCountedHolds.delete(row.id)
     this.postChatDraft(row)
     for (const key of this.replyEffects.keys()) if (key.startsWith(`${row.id}:`)) this.replyEffects.delete(key)
     this.refusedAsks.delete(row.id)

@@ -627,6 +627,8 @@ export class ToolRegistry {
     const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', ...(scope ? { scope } : {}) }
     const ledger = this.options.toolLedger?.(active)
     const ledgerId = ledger?.start({ type: 'toolCall', id: ctx.toolCallId, name, arguments: args } as ToolCall)
+    // A bot's call runs now: its activation counts it here, once (`BotAuthority.callRuns`).
+    turn.bot?.callRuns?.()
     let outcome: ToolOutcome
     try {
       outcome = await this.runHandler(tool, args, ctx, turn.toolAccess)

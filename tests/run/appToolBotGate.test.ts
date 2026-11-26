@@ -42,6 +42,22 @@ describe('app tools under a bot’s authority (MCP)', () => {
     expect((await registry.call('create_task', { description: 'fine' }, ctx())).isError).toBe(false)
   })
 
+  it('each call that reaches its handler is one run of the bot\'s call (`callRuns`); a refused one is none', async () => {
+    fx = delegationFixture()
+    const run = await fx.runningRun('thread-a')
+    const fake = fakeAppToolHost()
+    const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
+    const callRuns = vi.fn()
+    turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, bot: { ...bot(['create_task']), callRuns } }))
+    const ctx = () => request({ threadId: 'thread-a', runId: run.runId })
+    await registry.call('ask_user', { questions: [] }, ctx())
+    expect(callRuns).not.toHaveBeenCalled()
+    // The same call twice is two calls.
+    expect((await registry.call('create_task', { description: 'fine' }, ctx())).isError).toBe(false)
+    expect((await registry.call('create_task', { description: 'fine' }, ctx())).isError).toBe(false)
+    expect(callRuns).toHaveBeenCalledTimes(2)
+  })
+
   it('a bot turn is told only its granted app tools are usable; a thread\'s turn every one', () => {
     const granted = bot([...BOT_DEFAULT_APP_TOOLS])
     expect(botTurnOffers(granted, 'escalate')).toBe(true)

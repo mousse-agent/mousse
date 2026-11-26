@@ -140,6 +140,8 @@ it('holds once, frees the slot, and Send executes exactly the stored arguments o
   await t.call()
   await t.call()
   expect(t.calls).toEqual([])
+  // A held call counts as one of the work's tool calls only once it is sent.
+  expect(f.store.counters(t.workId).toolCalls).toBe(0)
   const actions = f.store.all('SELECT * FROM bot_actions')
   expect(actions).toHaveLength(1)
   expect(f.store.all('SELECT id FROM bot_messages WHERE id = ?', actions[0].message_id)).toHaveLength(1)
@@ -148,6 +150,7 @@ it('holds once, frees the slot, and Send executes exactly the stored arguments o
   const answer = { actionId: String(actions[0].id), digest: String(actions[0].args_digest), answer: 'send' as const }
   await Promise.allSettled([f.bots.actions.answer(answer), f.bots.actions.answer(answer)])
   expect(t.calls).toEqual([t.args])
+  expect(f.store.counters(t.workId).toolCalls).toBe(1)
   expect(f.store.get('SELECT status, exec_args FROM bot_actions')).toMatchObject({ status: 'done', exec_args: null })
   expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('delivered')
 })
@@ -197,8 +200,21 @@ it('Not now makes no call and resumes with the refusal as data', async () => {
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
   await flush()
   expect(t.calls).toEqual([])
+  expect(f.store.counters(t.workId).toolCalls).toBe(0)
   expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('chose Not now; nothing was sent')
   expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: 'declined', exec_args: null })
+})
+it('a held call on Pi, whose budget counted it when the model made it, counts nothing more when it is sent', async () => {
+  const t = await setup(true)
+  // Pi charges each model request (and each tool call) through its own budget: the first request comes before any call.
+  t.work.prepared.runtimeCounters!.charge('request')
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  expect(t.calls).toEqual([t.args])
+  expect(f.store.counters(t.workId)).toMatchObject({ requests: 1, toolCalls: 0 })
 })
 it.each(['send', 'not_now'] as const)('Send racing Not now, %s arriving first, never calls twice', async first => {
   const t = await setup(true)
