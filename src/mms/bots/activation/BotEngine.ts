@@ -827,6 +827,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private closed = false
   /** Final messages the executor delivered while the dispatch's end was still being recorded, by `<activationId>:<n>`. */
   private readonly lateTexts = new Map<string, string>()
+  /**
+   * The thread's message each dispatch's final message is (`OrchestratorResponse.messageId`), with that text, by
+   * `<activationId>:<n>`: a chat reply posted with that text names it, so the journal holds the reply once.
+   */
+  private readonly replyRows = new Map<string, { messageId: string; text: string }>()
   /** Chat turns whose main dispatch (`n`) read the owner's messages as a steer while it answered, by activation. */
   private readonly steeredChats = new Map<string, number>()
   /** Turns whose main dispatch (`n`) a steer cut with no words after it (`TurnResult.steerUnanswered`), by activation. */
@@ -5718,7 +5723,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private postReply(row: BotActivationRow, dispatch: BotDispatchRow, text: string | undefined, expectText: boolean, draftReplyTo?: string): void {
     const key = `${row.id}:${dispatch.n}`
-    if (this.store.message(`bm_${row.id}_d${dispatch.n}`)) return
+    if (this.store.message(`bm_${row.id}_d${dispatch.n}`)) {
+      this.replyRows.delete(key)
+      return
+    }
     // Work that ran out of room says so with what it had and the ask that lets it go on, once (`postRoom` may have).
     const waiting = workWaits(row) && row.endReason === 'budget_exhausted'
     if (waiting && this.store.message(`bm_${row.id}_room_d${dispatch.n}`)) return
@@ -5741,6 +5749,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.pendingReplies.get(key)?.timer.clear()
     this.pendingReplies.delete(key)
     this.lateTexts.delete(key)
+    // The thread's message this reply is, when its words are that message's (not a draft's, nor an earlier turn's).
+    const replyRow = this.replyRows.get(key)
+    this.replyRows.delete(key)
+    const transcriptMessageId = row.lane === 'chat' && replyRow && text === replyRow.text ? replyRow.messageId : undefined
     // The questions a chat turn asked (`ask_owner`) show under its reply. A turn that stopped at a wall shows none: a tap
     // there would count as Not now, so they are withdrawn, and its continuation says to ask again.
     const atWall = row.lane === 'chat' && row.status === 'waiting_grant'
@@ -5824,7 +5836,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           ...(replyTo ? { replyTo } : {}),
           activationId: row.id,
           lane: row.lane,
-          threadId: dispatch.threadId
+          threadId: dispatch.threadId,
+          ...(transcriptMessageId ? { transcriptMessageId } : {})
         })
         if (reply && row.lane === 'chat') this.clearChatDraft(row)
         for (const ask of more)
@@ -5877,6 +5890,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.drained.delete(key)
       this.drainedCalls.delete(key)
       this.lateTexts.delete(key)
+      this.replyRows.delete(key)
     }
     this.askedIn.delete(row.id)
     this.releaseParked(row, workWaitRule(row)!)
@@ -5900,6 +5914,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.drained.delete(key)
     this.drainedCalls.delete(key)
     this.lateTexts.delete(key)
+    this.replyRows.delete(key)
     const counters = this.store.counters(row.id)
     const maxTurns = counters.limits.maxTurns
     if (maxTurns !== undefined && counters.requests >= maxTurns) {
@@ -7092,7 +7107,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * A consult: its end, and its final message for the waiting `consult` call. Idempotent; the
    * executor's final message may come after the run's terminal event settled the dispatch.
    */
-  settle(payload: BotTurnPayload, outcome: { text?: string; unanswered?: boolean }): void {
+  settle(payload: BotTurnPayload, outcome: { text?: string; messageId?: string; unanswered?: boolean }): void {
     const runs = this.host.runs()
     const run = runs?.getRun(payload.runId)
     if (!runs || !run || !TERMINAL_RUN_STATUSES.has(run.status)) return
@@ -7108,6 +7123,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // turn that reached its runtime's turn cap: its work goes on, and what it said last is kept (`continueAfterTurnCap`).
     const capped = run.status === 'failed' && isProviderTurnCap(run.outcome?.error)
     const text = run.status === 'failed' && !capped ? undefined : outcome.text
+    if (text !== undefined && !capped && outcome.messageId) this.replyRows.set(key, { messageId: outcome.messageId, text })
     if (dispatch.endedAt !== null) {
       // A capped turn's words that arrive after its end: its work already went on (its next message carries them), or
       // it is still moving on (`advance` reads them as a late text).

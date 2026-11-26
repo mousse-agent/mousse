@@ -22,8 +22,9 @@ export interface BotTurnDispatcher {
    */
   refresh?(payload: BotTurnPayload): Promise<void>
   /** The dispatch's run ended (the executor saw it terminal); `text` is the final message, if any. */
+  /** `messageId`: the thread's message holding `text` (`OrchestratorResponse.messageId`). */
   /** `unanswered`: a steer cut the turn and the model wrote nothing after it (`TurnResult.steerUnanswered`). */
-  settle(payload: BotTurnPayload, outcome: { text?: string; unanswered?: boolean }): void
+  settle(payload: BotTurnPayload, outcome: { text?: string; messageId?: string; unanswered?: boolean }): void
   /** The bot's name when `threadId` is one of its threads: ordinary sends there are refused. */
   ownerOf(threadId: string): string | undefined
 }

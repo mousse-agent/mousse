@@ -321,6 +321,11 @@ export interface BotJournalInput {
   threadId?: string
   /** Idempotence key, unique per bot: `bm:<bot_messages.id>`, `<threadId>:<messageId>`, `act:<id>:start` … */
   sourceKey: string
+  /**
+   * A chat row (`bm:<id>`) that is a thread's message too: that message's capture key (`<threadId>:<messageId>`). The
+   * row stands for it, so capture never journals the message apart (`BotMemoryStore.appendInTx`).
+   */
+  standsFor?: string
   who: BotJournalWho
   /** The content came from outside (a web page, tool output). */
   external?: boolean

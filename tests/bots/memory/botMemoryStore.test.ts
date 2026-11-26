@@ -109,23 +109,6 @@ describe('the journal', () => {
     expect(db.statement("SELECT count(*) AS n FROM bot_messages WHERE id = 'msg-3'").get()).toMatchObject({ n: 0 })
   })
 
-  it('the history count leaves out a reply\'s thread copy journaled before copies were dropped, and counts every other message', () => {
-    const fx = memoryFixture()
-    const copy = (key: string, text: string, activationId: string) =>
-      fx.store.append({ botId: 'ada', kind: 'bot_msg', lane: 'chat', activationId, threadId: 'home', sourceKey: `home:${key}`, who: 'bot', text })
-    fx.message({ botId: 'ada', id: 'o1', author: 'owner', text: 'Plan my week', activationId: 'act-1' })
-    fx.message({ botId: 'ada', id: 'r1', author: 'bot', text: 'Your week is planned.', activationId: 'act-1' })
-    // Older journals hold both: the chat row, then the copy (with or without the cards the chat row carries).
-    copy('a1', 'Your week is planned.', 'act-1')
-    fx.message({ botId: 'ada', id: 'r2', author: 'bot', text: 'Here it is.\n\n[file] week.md', activationId: 'act-2' })
-    copy('a2', 'Here it is.', 'act-2')
-    // The same words in another activation are another reply; a copy with no chat row is a message of its own.
-    fx.message({ botId: 'ada', id: 'r3', author: 'bot', text: 'Your week is planned.', activationId: 'act-3' })
-    copy('s4', 'Still looking.', 'act-4')
-    expect(fx.store.journal('ada')).toHaveLength(7)
-    expect(fx.store.messageHistory('ada').count).toBe(5)
-  })
-
   it('a write that fails is bot_journal_failed', () => {
     const fx = memoryFixture()
     const failing = new BotMemoryStore({

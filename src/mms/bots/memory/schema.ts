@@ -5,13 +5,15 @@
  * `cursor:` prefix so `BotMemoryStore.wipe` keeps the create request's identity.
  *
  * - `bot_journal`: the append-only record of everything Mousse observed of a bot. Rows are never
- *   deleted except by the 30-day purge and the owner's wipes (`/forget history`, `/reset`); a
+ *   deleted except by the 30-day purge and the owner's wipes (`/forget history`, `/reset`), and a
+ *   chat reply's thread copy, which its chat row stands for (`reply_copy:` in `bot_memory_state`); a
  *   forget redacts a row's text in place.
  * - `bot_journal_fts`: an external-content FTS5 index over the journal, kept in step by triggers in
  *   the writer's transaction, and rebuildable (`'rebuild'`).
  * - `bot_memories`: memory entries, one row per version; a forgotten entry keeps its hash only.
  * - `bot_memories_fts`: an FTS5 index over memory versions that still have text.
- * - `bot_memory_state`: the chat summary, the window start, capture cursors, frozen packs, stats.
+ * - `bot_memory_state`: the chat summary, the window start, capture cursors, the thread messages chat
+ *   rows stand for, frozen packs, stats.
  *
  * Deviations from the plan's sketch, both for durability: `bot_journal.keys` exists because an
  * external-content index reads every indexed column back from its content table, and
