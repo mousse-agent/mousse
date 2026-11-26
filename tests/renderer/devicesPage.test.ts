@@ -14,6 +14,7 @@ const { MousseIdAccount } = await import('../../src/renderer/components/MousseId
 const { useMousseIdStore } = await import('../../src/renderer/stores/mousseIdStore')
 const { SERVICE_ANSWERED_LATE, SERVICE_STOPPED_ANSWERING } = await import('../../src/shared/errors')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
+const { NO_COMPUTERS, useComputersStore } = await import('../../src/renderer/lib/computers')
 
 const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: true }
 /** A set-up computer that manages its devices, with one other computer and a phone. */
@@ -82,6 +83,8 @@ beforeEach(() => {
 })
 afterEach(() => {
   act(() => root.unmount())
+  // Each case starts with no computers listed, as a fresh window does.
+  useComputersStore.setState(NO_COMPUTERS)
   host.remove()
   document.body.innerHTML = ''
 })

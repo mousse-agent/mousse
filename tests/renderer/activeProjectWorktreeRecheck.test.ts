@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useActiveProjectLocation } from '../../src/renderer/hooks/useActiveProjectPath'
 import { useAppStore } from '../../src/renderer/stores/appStore'
+import { NO_COMPUTERS, useComputersStore } from '../../src/renderer/lib/computers'
 import type { ActiveProject } from '../../src/renderer/lib/activeProject'
 import { qualifyId } from '../../src/shared/threadRef'
 import type { Thread, TurnState } from '../../src/shared/types'
@@ -54,6 +55,8 @@ afterEach(() => {
   act(() => root.unmount())
   host.remove()
   useAppStore.setState(initialStore, true)
+  // Each case starts with no computers listed, as a fresh window does.
+  useComputersStore.setState(NO_COMPUTERS)
 })
 
 describe('the folder of a new worktree thread', () => {

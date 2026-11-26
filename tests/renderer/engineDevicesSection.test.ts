@@ -17,6 +17,7 @@ const { EngineDevicesSection } = await import('../../src/renderer/components/net
 const { AccessAskHost } = await import('../../src/renderer/components/netEngine/AccessAskHost')
 const { UseComputerDialog } = await import('../../src/renderer/components/netEngine/UseComputerDialog')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
+const { NO_COMPUTERS, useComputersStore } = await import('../../src/renderer/lib/computers')
 const { engineRow, engineSideRow, engineSides, clockMessage, SHARED_ACCOUNT_LINE } = await import(
   '../../src/renderer/components/netEngine/engineRows'
 )
@@ -180,6 +181,8 @@ beforeEach(() => {
 })
 afterEach(() => {
   act(() => root.unmount())
+  // Each case starts with no computers listed, as a fresh window does.
+  useComputersStore.setState(NO_COMPUTERS)
   host.remove()
   document.body.innerHTML = ''
 })
