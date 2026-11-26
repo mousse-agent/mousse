@@ -8,6 +8,7 @@ import type {
 import { formatMousseFileLink } from '../../shared/chatReferences'
 import { stripHtmlComments } from '../../shared/pullRequestText'
 import { isGitHubSignedOut } from '../lib/githubSignIn'
+import type { PullRequestCheckRowTone } from './sideCard/gitSectionLogic'
 
 /** Pure helpers for the pull request panel. No React or store imports, so tests can load it. */
 
@@ -61,23 +62,36 @@ export function safeWebUrl(value: string | null | undefined): string | null {
 }
 
 /**
- * Turns the `<img>` tags that pasted screenshots arrive as into markdown links, since raw HTML is never
- * rendered and images are shown as links (private attachments need a signed-in browser to load).
+ * Turns the `<img>` tags that pasted screenshots arrive as into markdown images, since raw HTML is never rendered.
  * A tag without a web address is dropped.
  */
-export function htmlImagesToLinks(text: string): string {
+export function htmlImagesToMarkdown(text: string): string {
   if (!/<img\b/i.test(text)) return text
   return text.replace(HTML_IMAGE, (tag) => {
     const url = safeWebUrl(attribute(tag, 'src'))
     if (!url) return ''
     const alt = (attribute(tag, 'alt') ?? '').replace(/[[\]\\`]/g, ' ').replace(/\s+/g, ' ').trim()
-    return `[Image${alt ? `: ${alt}` : ''}](${url})`
+    return `![${alt}](${url})`
   })
 }
 
-/** What a remark's markdown is drawn from: no HTML comments, images as links, and at most `bodyChars` characters. */
+/**
+ * An image address the panel draws inline: GitHub's own attachment and image hosts over https only. Anything else
+ * stays a link, so a comment can't make the app fetch from an arbitrary server.
+ */
+export function inlineImageUrl(value: string | null | undefined): string | null {
+  const safe = safeWebUrl(value)
+  if (!safe) return null
+  const url = new URL(safe)
+  if (url.protocol !== 'https:') return null
+  const host = url.hostname.toLowerCase()
+  if (host === 'github.com') return url.pathname.startsWith('/user-attachments/') || /^\/[^/]+\/[^/]+\/assets\//.test(url.pathname) ? safe : null
+  return host.endsWith('.githubusercontent.com') ? safe : null
+}
+
+/** What a remark's markdown is drawn from: no HTML comments, HTML images as markdown ones, and at most `bodyChars` characters. */
 export function prepareCommentBody(body: string, limit: number = PANEL_LIMITS.bodyChars): { text: string; clipped: boolean } {
-  const text = htmlImagesToLinks(stripHtmlComments(body)).trim()
+  const text = htmlImagesToMarkdown(stripHtmlComments(body)).trim()
   if (text.length <= limit) return { text, clipped: false }
   // Do not cut a surrogate pair in half.
   let end = limit
@@ -470,4 +484,30 @@ export function pullRequestQuestionIdentity(input: {
   number: number | null
 }): string {
   return JSON.stringify([input.threadId, input.projectId, input.folderThreadId, input.path, input.branch, input.number])
+}
+
+// ---------------------------------------------------------------------------------------------
+// Checks
+// ---------------------------------------------------------------------------------------------
+
+const CHECK_SUMMARY_WORDS: Record<PullRequestCheckRowTone, string> = {
+  failing: 'failed',
+  waiting: 'waiting',
+  pending: 'running',
+  passing: 'passed',
+  skipped: 'skipped'
+}
+
+/** A check that needs a look: failed, waiting or still running. Passed and skipped ones wait behind the summary. */
+export function checkNeedsAttention(tone: PullRequestCheckRowTone): boolean {
+  return tone === 'failing' || tone === 'waiting' || tone === 'pending'
+}
+
+/** "1 failed", "2 running", "9 passed" for the checks' one-line summary, worst first, without zero counts. */
+export function checkSummary(rows: readonly { tone: PullRequestCheckRowTone }[]): { tone: PullRequestCheckRowTone; text: string }[] {
+  const counts = new Map<PullRequestCheckRowTone, number>()
+  for (const row of rows) counts.set(row.tone, (counts.get(row.tone) ?? 0) + 1)
+  return (['failing', 'waiting', 'pending', 'passing', 'skipped'] as const)
+    .filter((tone) => counts.has(tone))
+    .map((tone) => ({ tone, text: `${counts.get(tone)} ${CHECK_SUMMARY_WORDS[tone]}` }))
 }

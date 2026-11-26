@@ -2,7 +2,7 @@
 /**
  * Clicking a GitHub pull request link in a chat response opens Mousse's Pull Request viewer side panel
  * instead of a Browser tab, for both the active project's repo and external `owner/repo` links, with a
- * "Back to thread PR" button to return to the thread's own pull request.
+ * back button to return to the thread's own pull request.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -44,7 +44,12 @@ function sampleDetail(identity: PullRequestIdentity, title: string): PullRequest
     checkCounts: { passed: 1, failed: 0, pending: 0, waiting: 0, total: 1 },
     reviewDecision: 'approved',
     reviews: [],
-    comments: [],
+    comments: [{
+      id: 'c1', author: 'bob', authorAssociation: 'MEMBER', bodyTruncated: false, edited: false,
+      body: 'Looks good ![after](https://github.com/user-attachments/assets/abc)',
+      createdAt: '2026-11-24T00:00:00Z', url: `https://${identity.host}/${identity.nameWithOwner}/pull/${identity.number}#c1`,
+      path: null, line: null, startLine: null, side: null, inReplyTo: null
+    }],
     commentsTruncated: false,
     checkRuns: [{ name: 'CI', state: 'passing', url: null }],
     updatedAt: '2026-11-24T00:00:00Z',
@@ -125,11 +130,18 @@ describe('clicking a GitHub pull request link in chat', () => {
     await vi.waitFor(() => {
       expect(host.textContent).toContain('PR 42 in external/project')
     })
-    expect(host.textContent).toContain('external/project #42')
-    const back = [...host.querySelectorAll('button')].find((btn) => btn.textContent?.includes('Back to thread PR'))
-    expect(back).toBeDefined()
+    expect(host.querySelector('.pr-panel-repo')?.textContent).toBe('external/project')
 
-    // Clicking "Back to thread PR" clears the linked PR view.
+    // Comments wait behind Load comments; once loaded, a GitHub attachment shows as an image.
+    expect(host.textContent).not.toContain('Looks good')
+    const load = [...host.querySelectorAll('button')].find((btn) => btn.textContent?.startsWith('Load comments'))
+    await act(async () => { load!.click() })
+    expect(host.textContent).toContain('Looks good')
+    expect(host.querySelector('.pr-panel-markdown img')?.getAttribute('src')).toBe('https://github.com/user-attachments/assets/abc')
+
+    // The back button clears the linked PR view.
+    const back = host.querySelector<HTMLButtonElement>('button[aria-label="Back to this thread’s pull request"]')
+    expect(back).not.toBeNull()
     await act(async () => { back!.click() })
     expect(useGitPullRequestStore.getState().viewedPullRequest).toBeNull()
   })
