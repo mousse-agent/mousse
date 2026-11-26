@@ -619,6 +619,27 @@ describe('a time wake while a pull request read hangs', () => {
   })
 })
 
+describe('a bot\'s time wake while a pull request wake waits for its last read', () => {
+  it('arms the timer for the time wake, not for the read\'s retry a minute on', async () => {
+    const setAt = f.clock.now
+    await f.bots.service.chatSend({ botId, text: 'Watch these', clientRequestId: 'm1' })
+    const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const turn = await start(f, chat.id)
+    await f.bots.tools.wakes!.add(botId, chat.id, { brief: 'Ship once merged.', event: { kind: 'pr', repo: 'acme/app', number: 13 }, hours: 0.1 })
+    f.clock.now += 1
+    const time = await f.bots.tools.wakes!.add(botId, chat.id, { brief: 'Check the deploy.', dueAt: new Date(setAt + 6 * 60_000 + 5_000).toISOString() })
+    await finish(f, turn.payload, 'completed', { text: 'Will do.' })
+    const count = reads({ 13: () => new Promise<PrRead>(() => {}) })
+    f.clock.now = setAt + 6 * 60_000
+    f.timers.length = 0
+    await f.bots.deliverDueReminders(new Date(f.clock.now))
+    for (let i = 0; i < 20 && !count[13]; i++) await settle()
+    expect(count[13]).toBe(1)
+    expect(f.store.reminder(time.wakeId)?.status).toBe('waiting')
+    expect(f.timers.at(-1)!.ms).toBeLessThanOrEqual(5_000)
+  })
+})
+
 describe('a wake on a thread stored just after the run it waits for ended', () => {
   /**
    * The thread's runs, as the real `wakeThreadState` reads them. The first look at the thread (setting the wake) sees
