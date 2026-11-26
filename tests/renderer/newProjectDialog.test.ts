@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, createElement } from 'react'
+import { act, createElement, StrictMode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Project } from '../../src/shared/types'
@@ -312,7 +312,8 @@ const addWebAppToMac = async (extra: Project[] = []) => {
   useComputersStore.setState({ loaded: true, byNode: { nod_mac: { node: 'nod_mac', name: 'Mac mini', online: true } } })
   useAppStore.setState({ projects: [project('web-app', 'C:\dev\web-app'), project('nod_mac:api', '/Users/me/dev/api', { node: 'nod_mac' }), ...extra] })
   const onAdded = vi.fn()
-  await show()
+  // StrictMode, as in development: React mounts the dialog twice, and the add must survive that.
+  await act(async () => root.render(createElement(StrictMode, null, createElement(TitleBar), createElement(NewProjectDialog), createElement(ToastHost))))
   await act(async () => openAddToComputer({ node: 'nod_mac', projectId: 'web-app', name: 'web-app', onAdded }))
   return onAdded
 }

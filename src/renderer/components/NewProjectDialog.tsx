@@ -30,6 +30,12 @@ const THIS_COMPUTER = 'self'
  */
 const useProjectTask = create<{ label: string | null; error: string }>(() => ({ label: null, error: '' }))
 
+// New project closed without the project: the add ends, unless a clone for it goes on in the background. Followed on
+// the store rather than on the panel's unmount, which also runs when React checks a mount twice.
+useAppStore.subscribe((state, previous) => {
+  if (previous.newProjectOpen && !state.newProjectOpen && !useProjectTask.getState().label) endAddToComputer()
+})
+
 /** Where clones on another computer go, by computer: the folder last picked there by browsing. */
 const useRemoteParents = create<Record<string, string>>(() => ({}))
 
@@ -61,8 +67,9 @@ async function finish(project: Project): Promise<void> {
   // Adding a project to another computer: the composer that asked takes it; no thread starts here.
   if (useAddToComputer.getState().request) {
     if (!app.projects.some((entry) => entry.id === project.id)) app.setProjects([...app.projects, project])
-    app.setNewProjectOpen(false)
+    // The add ends with the project before the dialog closes, since closing ends an add without one.
     endAddToComputer(project)
+    app.setNewProjectOpen(false)
     return
   }
   if (app.newProjectOpen) {
@@ -169,10 +176,6 @@ function NewProjectPanel() {
   useEffect(() => {
     inputRef.current?.focus()
     useProjectTask.setState({ error: '' })
-    // Closed without the project: the add ends, unless a clone for it goes on in the background.
-    return () => {
-      if (!useProjectTask.getState().label) endAddToComputer()
-    }
   }, [])
 
   // The account's repositories, of this computer or the one picked: shown from memory at once, read again behind them when old.
