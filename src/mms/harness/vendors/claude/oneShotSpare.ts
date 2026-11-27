@@ -19,6 +19,13 @@ export const ONE_SHOT_SPARE_IDLE_MS = 10 * 60_000
  */
 export const ONE_SHOT_SPARE_SYSTEM = 'You answer exactly one request. Follow the instructions that come with it. You have no tools.'
 
+/**
+ * Set on every single request's Claude Code process, over the user's own variables: no retry of a 429 or a 5xx, and no
+ * second, non-streaming request after a failed stream. Counted at a stub (`claudeOneShotCount.test.ts`): 11 requests
+ * on a 429 or a 503 without them, 1 with them.
+ */
+export const ONE_SHOT_SINGLE_REQUEST_ENV = Object.freeze({ CLAUDE_CODE_MAX_RETRIES: '0', CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: '1' })
+
 /** The one-shots a process is started ahead for: titles and branch names, asked for at every new thread. */
 export function oneShotUsesSpare(task: OneShotTask | undefined): boolean {
   return task === 'title' || task === 'branch_name'
@@ -30,13 +37,13 @@ export function oneShotSpareMessage(system: string, prompt: string): string {
 }
 
 /**
- * What a one-shot's process is started with, as one digest: model, effort, folder, environment, account (`account`)
- * and every other option a process cannot change once started. A process started ahead answers only a request whose
+ * What a one-shot's process is started with, as one digest: model, effort, environment, account (`account`) and every
+ * other option a process cannot change once started. Its folder is not part of it: each process has a place of its own. A process started ahead answers only a request whose
  * launch and account have the same digest; anything else changed (the title model, the account, the launch settings)
  * starts anew.
  */
 export function oneShotLaunchKey(options: Options, account: string | null = null): string {
-  const { abortController: _abort, canUseTool: _tools, stderr: _stderr, ...rest } = options
+  const { abortController: _abort, canUseTool: _tools, stderr: _stderr, cwd: _cwd, spawnClaudeCodeProcess: _spawn, ...rest } = options
   return createHash('sha256').update(JSON.stringify({ ...rest, account })).digest('hex')
 }
 
@@ -44,6 +51,8 @@ export function oneShotLaunchKey(options: Options, account: string | null = null
 export class OneShotInput implements AsyncIterable<SDKUserMessage> {
   private message: SDKUserMessage | undefined
   private ended = false
+  /** The process read the request's message: it may have sent it, so nothing sends it again (the handoff fence). */
+  taken = false
   private wake: (() => void) | undefined
 
   push(text: string): void {
@@ -59,6 +68,7 @@ export class OneShotInput implements AsyncIterable<SDKUserMessage> {
   async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
     while (!this.message && !this.ended) await new Promise<void>((resolve) => { this.wake = resolve })
     if (this.ended) return
+    this.taken = true
     yield this.message!
     // Open until the answer is read: Claude Code ends its session when its input ends.
     while (!this.ended) await new Promise<void>((resolve) => { this.wake = resolve })

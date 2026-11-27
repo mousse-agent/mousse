@@ -202,6 +202,7 @@ import { forEachYielding, startupBackgroundTimed, startupPhase } from './startup
 import { logInfo } from './log/diag'
 import { onThreadBranchChanged } from './workspace/threadHeads'
 import { schedulePlaceSweep } from './harness/oneShot/sweep'
+import { ANTIGRAVITY_LEFTOVER_RULES, sweepLegacyAntigravityOneShots } from './harness/acp/presets/antigravity/oneShotGuards'
 import { botDigestOneShot, botNameOneShot } from './bots/botOneShots'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
@@ -2785,7 +2786,12 @@ export class MmsProfileServices {
     // The storage service is the only scheduler; it runs the trash sweep inside its own run.
     this.storageCleanup.start()
     // What ended single requests left (thread titles and the like, `oneShot/places.ts`), a minute after ready.
-    this.cancelPlaceSweep = schedulePlaceSweep(this.homeDir, { stopped: stopping })
+    // Antigravity's own leftovers (its settings folder and session files) are typed by its rules.
+    this.cancelPlaceSweep = schedulePlaceSweep(this.homeDir, {
+      stopped: stopping,
+      rules: ANTIGRAVITY_LEFTOVER_RULES,
+      also: () => sweepLegacyAntigravityOneShots(this.homeDir)
+    })
     await startupBackgroundTimed('threadRuntimes', () => this.threadRuntimes.settleRestartedThreads(stopping), log)
   }
 

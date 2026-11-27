@@ -1,5 +1,5 @@
-import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { InstallOwner } from '../../../shared/harness/status'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import type { ResolvedSettings } from '@anthropic-ai/claude-agent-sdk'
@@ -38,7 +38,9 @@ import { ptyAvailable, redactSignIn, runInPty, terminalText, transcriptLinks, ty
 import { runHarness } from '../spawn'
 import { InstanceVault } from '../vault'
 import { ALL_MIRROR_FIELDS, SIGN_OUT_MIRROR_FIELDS } from '../vendorMirror'
-import { legacyOneShotRoute } from '../oneShot/routes'
+import { claudeFacts } from '../oneShot/routes'
+import type { OneShotRouteDecision } from '../oneShot/route'
+import { managedSettingsPaths } from '../vendors/claude/accountSubject'
 
 export const CLAUDE_CODE_CAPS: HarnessCaps = Object.freeze({
   ...CLAUDE_SUBSCRIPTION_CAPABILITIES,
@@ -135,6 +137,8 @@ export interface ClaudeCodeDriverOptions {
   platform?: NodeJS.Platform
   /** Test seam: whether an organisation's Claude Code policy applies, fixed (default: read per entry). */
   managedPolicy?: () => boolean
+  /** Test seam: whether a Claude Code managed settings file is on this computer (default: looked for, `managedSettingsFound`). */
+  managedSettingsFile?: () => boolean
   /** Test seam: the fresh policy reading of one entry (default `readClaudeManagedPolicy`). */
   readPolicy?: (input: ManagedPolicyReadInput) => Promise<boolean>
   /** Test seam: the containment evidence (default `CONTAINMENT_EVIDENCE`). */
@@ -170,6 +174,25 @@ export function claudeRunsOnApiKey(config: Pick<InstanceConfig, 'loginMethod'>):
 export function claudeFamilyAlias(model: string): string | undefined {
   return /(?:^|[^a-z])(opus|sonnet|haiku)(?:[^a-z]|$)/i.exec(model)?.[1]?.toLowerCase()
 }
+
+/** How long a look for Claude Code's managed settings files is reused by the title listing and admission. */
+const MANAGED_SETTINGS_LOOK_MS = 60_000
+let managedSettingsLook: { found: boolean; at: number; platform: NodeJS.Platform } | undefined
+
+/**
+ * Whether a managed settings file (`managed-settings.json` or its `managed-settings.d` drop-ins) is on this computer:
+ * Claude Code applies its hooks whatever a caller asks. A few existence checks, reused for a minute; never on a start path.
+ */
+function managedSettingsFound(platform: NodeJS.Platform): boolean {
+  const now = Date.now()
+  if (managedSettingsLook && managedSettingsLook.platform === platform && now - managedSettingsLook.at < MANAGED_SETTINGS_LOOK_MS) return managedSettingsLook.found
+  const found = managedSettingsPaths(platform).some((file) => existsSync(file) || existsSync(join(dirname(file), 'managed-settings.d')))
+  managedSettingsLook = { found, at: now, platform }
+  return found
+}
+
+const CLAUDE_ROUTE: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: 'claude:cli' as const, facts: claudeFacts(false) }) })
+const CLAUDE_MANAGED_ROUTE: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: 'claude:cli' as const, facts: claudeFacts(true) }) })
 
 /** Vault entries of an API-key entry. */
 const SECRET = { apiKey: 'anthropic_api_key' } as const
@@ -271,9 +294,9 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     privateHome: true,
     canInstall: false,
     customModels: true,
-    // Chat titles, pull request drafts and commit messages: one turn with no tools (`service.oneShot`).
-    // Until its own slice, on its own one-shot code (`DriverRuntime.oneShot`), admitted with no facts claimed.
-    oneShotRoute: legacyOneShotRoute('claude'),
+    // Thread titles, branch names, pull request drafts, commit messages: one turn with no tool offered and one request
+    // on the wire (`service.oneShotTransport`). Held, or best-effort where managed settings can enforce hooks.
+    oneShotRoute: () => ((options.managedSettingsFile ?? (() => managedSettingsFound(platform)))() ? CLAUDE_MANAGED_ROUTE : CLAUDE_ROUTE),
     methodLabel: 'Claude Code sign-in',
     // Mousse's own PreToolUse hook stamps each Mousse call with the turn's token (`updatedInput`).
     mcpTurnBinding: 'per_call',
@@ -379,6 +402,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
                 }
               : {}),
             stateDir: context.stateDir,
+            instanceId: context.instanceId,
             findBinary: () => live().findBinary(),
             baseEnv: () => environmentOf(live()),
             launchConfig: launch,
@@ -624,7 +648,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         signOut: privateHome ? signOutOfHome : () => service.logout(),
         forgetConversation: (threadId) => service.forgetConversation(threadId),
         compactConversation: (request) => service.compactConversation(request.threadId, request.history, request.instanceId, request.focus, request.signal, { cacheCold: request.cacheCold === true }),
-        oneShot: (spec, signal) => service.oneShot(spec, signal),
+        oneShotTransport: (spec) => service.oneShotTransport(spec),
         setLiveHost: (host) => service.setLiveHost(host),
         inFlightContinuation: (threadId) => service.inFlightContinuation(threadId),
         hasContinuation: (threadId, id) => service.hasContinuation(threadId, id),

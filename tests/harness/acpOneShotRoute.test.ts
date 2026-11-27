@@ -12,7 +12,8 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { acpDriver } from '../../src/mms/harness/drivers/acp'
 import type { Harness } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
-import { ONE_SHOT_INSTRUCTION, oneShotWasSent } from '../../src/mms/harness/oneShot/runner'
+import { classifyOneShotFailure, ONE_SHOT_INSTRUCTION, oneShotWasSent } from '../../src/mms/harness/oneShot/runner'
+import { extractLimitFromError } from '../../src/mms/models/usageLimits'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { testHarness } from '../../src/mms/run/testkit/harness'
@@ -130,6 +131,21 @@ describe('a generic ACP agent names threads on acpOneShot', () => {
       expect(relative(join(p.home, 'one-shot', place.split(/[\\/]/)[0]!), String(env[name])).startsWith('..'), name).toBe(false)
     expect(env.secret).toBeNull()
     // The place and its record are gone.
+    expect(p.placesLeft()).toEqual([])
+  }, 90_000)
+
+  it("an agent whose answer is agy's quota notice fails as that model's usage limit, not a title: Automatic moves on", async () => {
+    const notice = '\n⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h28m19s.\n'
+    const p = await profile([{ name: 'A quota agent', answer: notice }, { name: 'B quiet agent', answer: 'OAuth redirect state' }])
+    await p.harness.llmProviders({ kind: 'device' })
+    const failed = await p.harness.oneShot({ selection: { instanceId: p.ids['A quota agent']!, llmProvider: '', model: 'default' }, purpose: 'title', system: 'You name chats.', prompt: 'fix the login bug', maxChars: 80 })
+      .catch((error: unknown) => error)
+    expect(classifyOneShotFailure(failed)).toBe('rate_limited')
+    const limit = extractLimitFromError(failed)!
+    expect(limit.scope).toBe('model')
+    expect(Date.parse(limit.until) - Date.now()).toBeGreaterThan(2 * 60 * 60_000)
+    const thread = await namer(p.harness, { ...getDefaultSettings().title }).name('Please fix the OAuth loop')
+    expect(thread).toMatchObject({ name: 'OAuth redirect state', titleSource: 'auto' })
     expect(p.placesLeft()).toEqual([])
   }, 90_000)
 
