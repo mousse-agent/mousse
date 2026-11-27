@@ -39,6 +39,7 @@ function snapshot(overrides: Overrides = {}): InstanceSnapshot {
 describe('describeStatus', () => {
   const cases: Array<[string, Overrides, { headline: string; tone: string; action: string | null }]> = [
     ['signed in shows the account', {}, { headline: 'Signed in · Max plan', tone: 'ready', action: null }],
+    ['an email account shows the sign-in method instead', { auth: { state: 'signed_in', account: { id: 'acct-1', label: 'me@example.com' }, methodLabel: 'Claude subscription' } }, { headline: 'Signed in · Claude subscription', tone: 'ready', action: null }],
     ['no sign-in needed is available', { auth: { state: 'not_required', account: undefined } }, { headline: 'Available', tone: 'ready', action: null }],
     ['off on the device', { enabled: { device: false, effective: false, setBy: 'device' } }, { headline: 'Disabled', tone: 'disabled', action: 'enable' }],
     ['installing', { install: { state: 'installing', operationId: 'op-1', progress: { message: 'Downloading 40%' } } }, { headline: 'Installing', tone: 'neutral', action: 'cancel_install' }],

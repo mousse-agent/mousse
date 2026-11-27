@@ -265,6 +265,29 @@ describe('another computer’s lists over a real link', () => {
     expect(found.skipped).toBeUndefined()
   }, 90_000)
 
+  it('names its threads whose messages match for the sidebar filter, once each, beside the window’s other search', async () => {
+    const at = new Date().toISOString()
+    const message = (id: string, content: string) => ({ id, role: 'user', content, timestamp: at })
+    const thread = t.owner.threads.createThread('Quiet title elsewhere')
+    t.owner.threads.updateThreadMeta(thread.id, { startedAt: at } as never)
+    t.owner.threads.mutateThreadData(thread.id, () => ({
+      messages: [message('m1', 'the okapi retry'), message('m2', 'okapi retry again')] as never
+    }))
+    t.caller.threads.createThread('Okapi retry here')
+    // Both at once, as when the palette is open while the sidebar filter is typed in: neither replaces the other.
+    const [filter, palette] = await Promise.all([
+      t.dispatch('threads.search', { query: 'okapi retry', limit: 5000, perThread: true, others: true }),
+      t.dispatch('threads.search', { query: 'okapi retry', limit: 20 })
+    ])
+    // Only the other computer's matches, one hit for the thread however many of its messages hold the words.
+    expect(filter.results).toEqual([
+      expect.objectContaining({ threadId: t.qualified(thread.id), node: t.node, matchType: 'message' })
+    ])
+    expect(filter.skipped).toBeUndefined()
+    expect(palette.skipped).toBeUndefined()
+    expect(palette.results.map((result: { threadId: string }) => result.threadId)).toContain(t.qualified(thread.id))
+  }, 90_000)
+
   it('archives a thread of the other computer first, and leaves its permanent delete to that computer', async () => {
     const thread = t.owner.threads.createThread('Archive me elsewhere')
     const threadId = t.qualified(thread.id)

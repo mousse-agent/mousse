@@ -66,10 +66,12 @@ export function CompactStatus({ status }: { status: StatusDescription }) {
 }
 
 /** The editor's Setup → Status: the headline in a badge of the tone's colour, the detail under it. */
-export function StatusLine({ status, title }: { status: StatusDescription; title?: string }) {
+/** The status badge, with the signed-in account (ccount) beside it, and its detail under it. */
+export function StatusLine({ status, title, account }: { status: StatusDescription; title?: string; account?: ReactNode }) {
+  const badge = <span className="prov-status-badge">{status.headline}</span>
   return (
     <span className={`prov-status-text is-${status.tone}`} title={title} aria-live="polite">
-      <span className="prov-status-badge">{status.headline}</span>
+      {account ? <span className="prov-status-head">{badge}{account}</span> : badge}
       {statusDetail(status) && <span className="prov-status-detail">{statusDetail(status)}</span>}
     </span>
   )

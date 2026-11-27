@@ -21,6 +21,9 @@ describe('which calls are computer use calls', () => {
   it.each([
     ['mcp__mousse__computer_use', 'computer_use'],
     ['mcp_mousse_computer_use', 'computer_use'],
+    // OpenCode: `<server>_<tool>`, the server being this thread's `mousse_<12 hex>`.
+    ['mousse_0123456789ab_computer_use', 'computer_use'],
+    ['mousse_0123456789ab_computer_use_request', 'computer_use_request'],
     ['mousse__computer_tools', 'computer_tools'],
     ['mousse.computer_use', 'computer_use'],
     ['mousse/computer_use_request', 'computer_use_request'],
@@ -34,6 +37,7 @@ describe('which calls are computer use calls', () => {
 
   it.each([
     ['a relayed tool of the same name', 'mcp__mousse-relay__computer_use'],
+    ['a relayed tool of the same name on OpenCode', 'mousse_0123456789ab_relay_computer_use'],
     ['another server', 'mcp__other__computer_use'],
     ['a sentence', 'Computer use'],
     ['an ordinary Mousse tool', 'mcp__mousse__thread_list']

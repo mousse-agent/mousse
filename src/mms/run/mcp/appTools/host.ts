@@ -274,7 +274,7 @@ export interface ApprovalRequestInfo {
 /** What an agent's answer to an approval did. Everything but a conflicting key is a value the caller can act on. */
 export type AgentApprovalResult =
   /** Settled by this call (`replayed: false`), or by an earlier call with the same `clientRequestId` (`replayed: true`). */
-  | { ok: true; decision: 'allow' | 'reject'; replayed: boolean }
+  | { ok: true; decision: 'allow' | 'reject'; replayed: boolean; fenced?: true }
   /** A plain question, answered by the bot that started its thread (`supervisorOf`). */
   | { ok: true; answered: 'question'; replayed: boolean }
   /** A plain question that is the user's: the caller is not the bot that started the thread, or the thread's turn is not one it supervises. */

@@ -527,7 +527,16 @@ export class AttachedThreads {
     const owner = attachment.threadId
     this.push(attachment, {
       type: 'thread.messages',
-      data: qualifyRoutedEvent('thread.messages', { messages: state.messages, replace: true }, context)
+      // A long thread's older part is still there to load: the window keeps its "Load earlier messages".
+      data: qualifyRoutedEvent(
+        'thread.messages',
+        {
+          messages: state.messages,
+          replace: true,
+          ...(state.earlier !== undefined ? { earlier: state.earlier } : {})
+        },
+        context
+      )
     })
     this.push(attachment, {
       type: 'queue.updated',

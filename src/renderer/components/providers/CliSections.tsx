@@ -1,11 +1,12 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
-import { updateAvailableDetail, type InstanceSnapshot, type StatusDescription } from '../../../shared/harness/status'
+import { accountEmail, updateAvailableDetail, type InstanceSnapshot, type StatusDescription } from '../../../shared/harness/status'
 import type { InstanceConfigPatch, ProviderOperationEvent, RemoveInstallResult, TelemetrySetting } from '../../../shared/harness/types'
 import { Select } from '../ui/Select'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 import { Download, Gauge, Logout, Plus, RotateCcw, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
 import { BrowseButton, CommandBox, FieldWithAction, RefreshButton, StatusLine, useAsyncAction } from './parts'
+import { HiddenEmail } from '../ui/HiddenEmail'
 import {
   DRIVER_INFO,
   binaryOverrideOf,
@@ -164,7 +165,10 @@ export function SetupRow({
 
   const { auth } = snapshot
   const account = auth.state === 'signed_in' || auth.state === 'expired'
-  const accountLine = account ? [auth.account?.label, auth.methodLabel].filter(Boolean).join(' \u00b7 ') : ''
+  // An email shows hidden beside the badge until clicked; any other account name stays in the tooltip.
+  const label = account ? auth.account?.label?.trim() : undefined
+  const email = accountEmail(label)
+  const accountLine = account ? [email ? undefined : label, auth.methodLabel].filter(Boolean).join(' \u00b7 ') : ''
   const usage = account && auth.state === 'signed_in' && onOpenUsage && (
     <button type="button" className="settings-btn" data-testid="prov-account-usage" onClick={onOpenUsage}>
       <Gauge size={14} />
@@ -183,7 +187,7 @@ export function SetupRow({
       <SettingsRow
         title="Status"
         anchor="providers-status"
-        description={withError(progress ?? <StatusLine status={updateRow ? withoutUpdateDetail(status, snapshot) : status} title={accountLine || undefined} />, error)}
+        description={withError(progress ?? <StatusLine status={updateRow ? withoutUpdateDetail(status, snapshot) : status} title={accountLine || undefined} account={email && <HiddenEmail email={email} />} />, error)}
         control={
           <>
             {usage}

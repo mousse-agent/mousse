@@ -325,6 +325,51 @@
   color: var(--text-secondary);
 }
 
+/* The badge with the signed-in email beside it. */
+.prov-status-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+  max-width: 100%;
+}
+
+/* An email scrambled and blurred until clicked (ui/HiddenEmail). */
+.hidden-email {
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.hidden-email:hover {
+  background: var(--ui-hover);
+}
+
+.hidden-email:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
+.hidden-email-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  filter: blur(4px);
+  user-select: none;
+  transition: filter calc(360ms * var(--ui-motion-scale, 1)) ease;
+}
+
+.hidden-email.is-revealed .hidden-email-text {
+  filter: none;
+  user-select: text;
+}
+
 html[data-theme='high-contrast'] .prov-status-badge {
   outline: 1px solid var(--prov-tone);
 }

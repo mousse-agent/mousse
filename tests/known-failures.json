@@ -3,6 +3,13 @@
   { "file": "tests/run/profileDatabase.test.ts", "test": "refuses a symlinked run directory", "issue": 1964, "how": "creating the symlink fails with EPERM without Developer Mode", "platform": "win32" },
   { "file": "tests/net/bridge/routed/threadToolsRemote.test.ts", "test": "kept while that computer is offline, it is sent by the restarted daemon once that computer answers", "issue": 1965, "how": "intermittent: the archive is still pending, not sent" },
   { "file": "tests/docs/setupMatrix.test.ts", "issue": 1966, "how": "the file does not load: SyntaxError: Invalid or unexpected token" },
-  { "file": "tests/net/bridge/routed/remoteSubagents.test.ts", "issue": 1967, "how": "intermittent: all tests pass, then the cleanup hook times out" },
+  { "file": "tests/net/bridge/routed/remoteSubagents.test.ts", "issue": 1967, "how": "intermittent: all tests pass, then the cleanup hook times out" },
+  { "file": "tests/net/bridge/routed/table.test.ts", "test": "classifies every protocol and domain method as a row or as local with a reason", "issue": 1970, "how": "orchestrator.correctSubagents is neither a row nor local with a reason" },
+  { "file": "tests/threadSearchIndex.test.ts", "test": "thread search index", "issue": 1971, "how": "EPERM removing the index folder while the index database is open", "platform": "win32" },
+  { "file": "tests/gitFoundationProtocol.test.ts", "test": "a public main-agent send writes into the task", "issue": 1973, "how": "EPERM removing its temp folder: a file in it is still held open", "platform": "win32" },
+  { "file": "tests/gitFoundationProtocol.test.ts", "test": "public undo/redo selects a parent turn", "issue": 1973, "how": "EPERM removing its temp folder: a file in it is still held open", "platform": "win32" },
+  { "file": "tests/gitFoundationProtocol.test.ts", "test": "code-only workflow undo and redo preserve", "issue": 1973, "how": "EPERM removing its temp folder: a file in it is still held open", "platform": "win32" },
+  { "file": "tests/gitFoundationProtocol.test.ts", "test": "public recovery finishes conversation restoration", "issue": 1973, "how": "EPERM removing its temp folder: a file in it is still held open", "platform": "win32" },
+  { "file": "tests/threadRuntimeProtocol.test.ts", "test": "PTY output is replayable from the sequence and scrollback after client disconnect", "issue": 1975, "how": "the replayed output holds only ConPTY's mode switches, not 'replay-marker-1'", "platform": "win32" },
   { "file": "tests/bots/botActions.test.ts", "test": "C4 bridge delivers a complete card or disables Send when oversized=true", "issue": 1982, "how": "writes to a hardcoded /tmp, which Windows does not have: ENOENT", "platform": "win32" }
 ]

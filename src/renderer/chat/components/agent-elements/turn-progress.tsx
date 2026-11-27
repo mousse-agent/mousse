@@ -9,7 +9,7 @@ import { isWaitingPermissionRequest } from "./tools/permission-request";
 import { useSubagentCards } from "./tools/subagent-cards-context";
 import type { SubagentCardModel } from "../../adapters/subagentCards";
 import { parseMcpToolType } from "./tools/tool-registry";
-import { cuaPresentation, mousseToolLabels, mousseToolOf } from "./tools/mousse-tools";
+import { cuaPresentation, mousseToolLabels, mousseToolOf, mousseToolSubject } from "./tools/mousse-tools";
 import { isCompactionRow, thoughtSourceOf, thoughtTextFromPart, type ToolPartBase } from "./utils/assistant-blocks";
 import { liveThoughtText, thoughtHeadline } from "./utils/format-tool";
 import { commandLabel } from "../../../../shared/agentActivity";
@@ -168,7 +168,8 @@ export function callPhrase(part: Part & { type: string }, tense: "running" | "do
   const mousseTool = mousseToolOf(part.type);
   if (mousseTool) {
     const labels = mousseToolLabels(mousseTool);
-    return { label: tense === "running" ? labels.running : tense === "done" ? labels.done : labels.failed, detail };
+    const subject = mousseToolSubject(mousseTool, part.input) ?? detail;
+    return { label: tense === "running" ? labels.running : tense === "done" ? labels.done : labels.failed, detail: subject };
   }
   const name = toolName(part.type);
   if (tense === "failed") return { label: part.type === "tool-Bash" ? "Failed" : `${name} failed`, detail };
@@ -216,7 +217,8 @@ function toolProgress(part: Part): TurnProgress {
   const mousseTool = mousseToolOf(part.type);
   if (mousseTool) {
     const label = `${mousseToolLabels(mousseTool).running}…`;
-    return preparing ? { kind: "preparing-tool", label, title: detail, tool: part.type } : { kind: "running-tool", label, title: detail, detail, tool: part.type };
+    const subject = mousseToolSubject(mousseTool, part.input) ?? detail;
+    return preparing ? { kind: "preparing-tool", label, title: subject, tool: part.type } : { kind: "running-tool", label, title: subject, detail: subject, tool: part.type };
   }
   if (preparing) return { kind: "preparing-tool", label: `Preparing ${name}…`, title: detail, tool: part.type };
   return { kind: "running-tool", label: `Running ${name}…`, title: detail, detail, tool: part.type };

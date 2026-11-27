@@ -130,7 +130,7 @@ export function runtimeToolEvent(event: RuntimeToolEvent): StreamingLlmToolEvent
     title: event.title,
     summary: record?.failed ? 'The MCP tool returned an error.' : (event.toolName ?? event.title),
     details: [],
-    ...(record ? { input: record.input, ...(record.response ? { response: record.response } : {}) } : {}),
+    ...(record ? { input: record.input, ...(record.response ? { response: record.response } : {}) } : event.input ? { input: event.input } : {}),
     ...(activity ? { activity } : {}),
     ...(event.parentCallId ? { parentCallId: event.parentCallId } : {})
   }
