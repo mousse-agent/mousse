@@ -7,8 +7,9 @@ import { managingLine } from '../../bots/chat/projection'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS } from '../../../shared/bots/personal/definition'
 import { MAX_CHOICE_LABEL_CHARS } from '../../../shared/bots/personal/questions'
 import type { BotLook } from '../../../shared/bots/personal/look'
-import type { BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
 import { MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotsPersonalV2Api } from '../../../shared/bots/personal/methods'
+import { REMOTE_BOT_METHOD_NAMES, remoteBotMethod, type RemoteBotMethod } from '../../../shared/bots/personal/methodTable'
+import type { BotChatService } from '../../bots/chat/BotChatService'
 import type { RpcContext, RpcMethod } from '../../net/contracts'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import { canonicalJson } from '../../net/sync/codec'
@@ -21,37 +22,20 @@ import { REMOTE_BOT_REACH, type BotDeviceAccess } from '../../../shared/bots/per
  * asks, its pause, what it remembers and the rest of About, and a new bot. Deny-default like `BRIDGE_REMOTE_METHODS`;
  * each one calls the same `BotChatService` method the desktop's `bots.*` handler calls, with the same params (less
  * `attachments`, which name files on this computer) and results. No result carries a model, an instance id or a path
- * on this computer. While "Share bots with other devices" is off, every one is refused.
+ * on this computer. While "Share bots with other devices" is off, every one is refused. Which methods these are, their
+ * keys and their access classes are the `remote` rows of `BOT_METHODS` (`shared/bots/personal/methodTable.ts`).
  *
  * Which devices reach which bot (`docs/bots.md`, Which devices reach a bot) is checked in `remoteBotMethods`'s one
  * wrapper, so a method added here later is held to it too: a device whose switch for bots is off is refused every one,
  * and a bot whose Devices choice leaves the device out answers exactly as a bot that is not there.
  */
-export const REMOTE_BOT_METHODS = {
-  'bots.get': { capability: 'read', mutating: false },
-  'bots.chat.list': { capability: 'read', mutating: false },
-  'bots.chat.attachment': { capability: 'read', mutating: false },
-  'bots.memory.list': { capability: 'read', mutating: false },
-  'bots.chat.send': { capability: 'chat', mutating: true },
-  'bots.chat.stop': { capability: 'chat', mutating: true },
-  'bots.work.stop': { capability: 'chat', mutating: true },
-  'bots.chat.markRead': { capability: 'chat', mutating: true },
-  'bots.asks.answer': { capability: 'chat', mutating: true },
-  'bots.actions.answer': { capability: 'chat', mutating: true },
-  'bots.questions.answer': { capability: 'chat', mutating: true },
-  'bots.personal.pause': { capability: 'write', mutating: true },
-  'bots.personal.resume': { capability: 'write', mutating: true },
-  'bots.create': { capability: 'write', mutating: true },
-  'bots.update': { capability: 'write', mutating: true },
-  'bots.reminders.snooze': { capability: 'chat', mutating: true },
-  'bots.reminders.cancel': { capability: 'write', mutating: true },
-  'bots.schedules.remove': { capability: 'write', mutating: true },
-  'bots.permissions.set': { capability: 'write', mutating: true },
-  'bots.permissions.revoke': { capability: 'write', mutating: true },
-  'bots.memory.forget': { capability: 'write', mutating: true },
-  'bots.memory.edit': { capability: 'write', mutating: true }
-} as const satisfies Record<string, { capability: NodeCapability; mutating: boolean }>
-export type RemoteBotMethod = keyof typeof REMOTE_BOT_METHODS
+export const REMOTE_BOT_METHODS: Readonly<Record<RemoteBotMethod, { capability: NodeCapability; mutating: boolean }>> = Object.freeze(
+  Object.fromEntries(REMOTE_BOT_METHOD_NAMES.map((name) => {
+    const { capability, mutating } = remoteBotMethod(name)
+    return [name, { capability, mutating }]
+  })) as Record<RemoteBotMethod, { capability: NodeCapability; mutating: boolean }>
+)
+export type { RemoteBotMethod }
 
 /**
  * The version of each method above that this computer accepts, as `net.info` reports it (`bots`), so a device sends only
@@ -60,66 +44,12 @@ export type RemoteBotMethod = keyof typeof REMOTE_BOT_METHODS
  */
 export function remoteBotVersions(): Record<RemoteBotMethod, number> {
   const out = {} as Record<RemoteBotMethod, number>
-  for (const name of Object.keys(REMOTE_BOT_METHODS) as RemoteBotMethod[]) out[name] = name === 'bots.create' ? 2 : 1
+  for (const name of REMOTE_BOT_METHOD_NAMES) out[name] = remoteBotMethod(name).version ?? 1
   return out
 }
 
-/** What the remote methods use of the profile's bots (`BotChatService`). */
-export interface RemoteBotsPort {
-  list(): { bots: BotSummary[] }
-  get(botId: string): BotDetail
-  chatList(botId: string, page?: { beforeSeq?: number; limit?: number }): BotsPersonalV2Api['bots.chat.list']['result']
-  chatSend(input: { botId: string; text: string; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage }>
-  chatStop(botId: string): Promise<Record<string, never>>
-  workStop(botId: string, workId: string): Promise<{ stopped: boolean }>
-  markRead(botId: string, seq: number): Record<string, never>
-  askKind(botId: string, askId: string): 'permission' | 'export_memory' | 'threads'
-  answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<{ message: BotChatMessage }>
-  actionMessage(botId: string, actionId: string): BotChatMessage
-  answerAction(input: { botId: string; actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }>
-  actionCheck(input: { botId: string; actionId: string; digest: string; answer: 'send' | 'not_now' }): void
-  questionCheck(botId: string, questionId: string): void
-  answerQuestion(input: { botId: string; questionId: string; choice: string; clientRequestId: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage; question?: BotChatMessage }>
-  pause(botId: string): { bot: BotSummary }
-  resume(botId: string): Promise<{ bot: BotSummary }>
-  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; access?: BotDeviceAccess }): Promise<{ bot: BotSummary }>
-  update(botId: string, change: { name?: string; look?: BotLook }): { bot: BotSummary }
-  reminderSnooze(botId: string, messageId: string, choice: import('../../../shared/bots/personal/chat').BotSnoozeChoice): BotChatMessage
-  reminderCancel(botId: string, reminderId: string): BotDetail
-  removeSchedule(botId: string, scheduleId: string): BotDetail
-  setPermission(botId: string, id: string, enabled: boolean): BotDetail
-  revokePermission(botId: string, id: string): BotDetail
-  memoryList(botId: string, history?: boolean): BotMemoryListing
-  memoryForget(botId: string, id: string): BotMemoryForgetResult
-  memoryEdit(botId: string, id: string, text: string): BotMemoryEntry
-  attachmentFile(botId: string, messageId: string, index: number): { name: string; path: string }
-}
-
-const KEYS: Record<RemoteBotMethod, { required: readonly string[]; optional?: readonly string[] }> = {
-  'bots.get': { required: ['botId'] },
-  'bots.chat.list': { required: ['botId'], optional: ['beforeSeq', 'limit'] },
-  'bots.chat.attachment': { required: ['botId', 'messageId', 'index'], optional: ['offset'] },
-  'bots.memory.list': { required: ['botId'] },
-  // No `attachments`: they name files on this computer, which another device has none of.
-  'bots.chat.send': { required: ['botId', 'text', 'clientRequestId'], optional: ['replyTo'] },
-  'bots.chat.stop': { required: ['botId'] },
-  'bots.work.stop': { required: ['botId', 'workId'] },
-  'bots.chat.markRead': { required: ['botId', 'seq'] },
-  'bots.asks.answer': { required: ['botId', 'askId', 'answer'] },
-  'bots.actions.answer': { required: ['botId', 'actionId', 'digest', 'answer'] },
-  'bots.questions.answer': { required: ['botId', 'questionId', 'choice', 'clientRequestId'] },
-  'bots.personal.pause': { required: ['botId'] },
-  'bots.personal.resume': { required: ['botId'] },
-  'bots.create': { required: ['look', 'description', 'clientRequestId'], optional: ['name', 'reach'] },
-  'bots.update': { required: ['botId'], optional: ['name', 'look'] },
-  'bots.reminders.snooze': { required: ['botId', 'messageId', 'choice'] },
-  'bots.reminders.cancel': { required: ['botId', 'reminderId'] },
-  'bots.schedules.remove': { required: ['botId', 'scheduleId'] },
-  'bots.permissions.set': { required: ['botId', 'permissionId', 'enabled'] },
-  'bots.permissions.revoke': { required: ['botId', 'permissionId'] },
-  'bots.memory.forget': { required: ['botId', 'id'] },
-  'bots.memory.edit': { required: ['botId', 'id', 'text'] }
-}
+/** The profile's bots, as the remote methods use them. */
+export type RemoteBotsPort = BotChatService
 
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const ASK_ID = /^esc_[0-9a-f-]{36}$/
@@ -212,7 +142,7 @@ export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown)
   )
     throw new NetError('bad_request')
   const p = value as Record<string, unknown>
-  const { required, optional = [] } = KEYS[method]
+  const { required, optional = [] } = remoteBotMethod(method)
   if (
     required.some((key) => !Object.hasOwn(p, key)) ||
     Object.keys(p).some((key) => !required.includes(key) && !optional.includes(key))

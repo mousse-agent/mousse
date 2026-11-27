@@ -1,6 +1,5 @@
-import { BOTS_PERSONAL_V2_CAPABILITY } from '../../shared/bots/personal/methods'
+import { localBotMethod, localBotMethods } from '../../shared/bots/personal/methodTable'
 import {
-  BOT_DEVICE_METHODS,
   botDeviceAccessProblem,
   type BotDeviceAccess,
   type BotDeviceChoice,
@@ -8,7 +7,7 @@ import {
   type BotDevicesView
 } from '../../shared/bots/personal/deviceAccess'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
-import { connectionIsLocal } from '../protocol/threadVisibility'
+import { assertLocalCaller } from './localCallers'
 import { BotDefinitionError, isBotId } from './definitions/BotDefinitionStore'
 import type { BotDeviceAccessStore } from './definitions/BotDeviceAccessStore'
 
@@ -33,7 +32,7 @@ async function view(source: BotDevicesSource, botId: string): Promise<BotDevices
 }
 
 function validate(method: BotDeviceMethod, value: unknown): Record<string, unknown> {
-  const p = domainObject(value ?? {}, ['profileId', 'botId', ...(method === 'bots.devices.set' ? ['access'] : [])])
+  const p = domainObject(value ?? {}, ['profileId', ...localBotMethod(method).keys])
   if (!isBotId(p.botId)) throw new DomainRpcError('invalid_params', 'A bot id is required')
   if (method === 'bots.devices.set') {
     const problem = botDeviceAccessProblem(p.access)
@@ -51,16 +50,14 @@ export function registerBotDeviceMethods(
   domains: DomainHandlerRegistry,
   sourceFor: (profileId: string) => BotDevicesSource | null | undefined | Promise<BotDevicesSource | null | undefined>
 ): void {
-  for (const method of BOT_DEVICE_METHODS)
+  for (const method of localBotMethods('devices'))
     domains.register({
       method,
       scope: 'profile',
-      capability: BOTS_PERSONAL_V2_CAPABILITY,
+      capability: localBotMethod(method).capability,
       validate: (params) => validate(method, params),
       async handle(context, params, binding) {
-        const connection = context.connection
-        if (!connectionIsLocal(connection) || connection?.bridgeCaller)
-          throw new DomainRpcError('forbidden', 'Change which devices reach a bot on its own computer.')
+        assertLocalCaller(method, context.connection)
         try {
           const source = await sourceFor(binding!.profileId)
           if (!source) throw new DomainRpcError('bots_unavailable', 'Bots are unavailable in this profile: their data could not be opened.')

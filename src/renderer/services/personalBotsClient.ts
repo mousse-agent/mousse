@@ -40,7 +40,7 @@ export interface PersonalBotsClient {
    * The owner taps one of a question's answers: their reply, and the question's bubble as it is now. An older service
    * lacks it and rejects; the owner answers with Reply there.
    */
-  answerAction(actionId: string, digest: string, answer: 'send' | 'not_now'): Promise<BotsPersonalV2Result<'bots.actions.answer'>>
+  answerAction(botId: string, actionId: string, digest: string, answer: 'send' | 'not_now'): Promise<BotsPersonalV2Result<'bots.actions.answer'>>
   /** The owner's Continue or Stop on what the bot holds past the limit between bots, by its batch (`BotSummary.chainHold`). */
   answerChainHold(botId: string, holdId: string, answer: 'continue' | 'stop'): Promise<BotsPersonalV2Result<'bots.chainHold.answer'>>
   answerQuestion(botId: string, questionId: string, choice: string, clientRequestId: string): Promise<BotsPersonalV2Result<'bots.questions.answer'>>
@@ -107,7 +107,15 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     react: async (botId, messageId, emoji) => (await call('bots.chat.react', { botId, messageId, emoji })).message,
     answer: async (botId, askId, answer) => (await call('bots.asks.answer', { botId, askId, answer })).message,
     snoozeReminder: (botId, messageId, choice) => call('bots.reminders.snooze', { botId, messageId, choice }),
-    answerAction: (actionId, digest, answer) => call('bots.actions.answer', { actionId, digest, answer }),
+    answerAction: async (botId, actionId, digest, answer) => {
+      try {
+        return await call('bots.actions.answer', { botId, actionId, digest, answer })
+      } catch (cause) {
+        // An older service takes no bot id and refuses the key before anything runs: ask it again without one.
+        if ((cause as { code?: unknown } | null)?.code !== 'invalid_params') throw cause
+        return transport.request<BotsPersonalV2Result<'bots.actions.answer'>>('bots.actions.answer', { actionId, digest, answer })
+      }
+    },
     answerChainHold: (botId, holdId, answer) => call('bots.chainHold.answer', { botId, holdId, answer }),
     answerQuestion: (botId, questionId, choice, clientRequestId) => call('bots.questions.answer', { botId, questionId, choice, clientRequestId }),
     setPermission: (botId, permissionId, enabled) => call('bots.permissions.set', { botId, permissionId, enabled }),

@@ -2649,13 +2649,13 @@ it('shows complete stored action arguments as guarded text, with an in-place bod
   expect(card.querySelectorAll('[aria-label="Hidden value that will be sent"]')).toHaveLength(1)
   expect(button('Send', card)?.autofocus).toBe(false)
 })
-it('answers only the card id, digest and choice, then redraws a changed card with live buttons', async () => {
+it('answers only the bot, the card id, digest and choice, then redraws a changed card with live buttons', async () => {
   fake.chats.inbox = [held()]
   const answer = vi.fn(async () => { fake.chats.inbox = [held({ digest: 'new-digest', title: 'Changed email' })]; throw Object.assign(new Error('This changed since you saw it'), { code: 'bot_action_changed' }) })
   Object.assign(fake.client, { answerAction: answer })
   await open()
   await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
-  expect(answer).toHaveBeenCalledWith('held-1', 'shown-digest', 'send')
+  expect(answer).toHaveBeenCalledWith('inbox', 'held-1', 'shown-digest', 'send')
   expect(host.textContent).toContain('This changed since you saw it')
   expect(host.textContent).toContain('Changed email')
   expect(button('Send', host.querySelector('[aria-label="Action to review"]')!)?.disabled).toBe(false)
@@ -2721,11 +2721,29 @@ it('passes exactly the shown action identity through the real client transport, 
   Object.assign(fake.client, { answerAction: createPersonalBotsClient({ request } as never).answerAction })
   await open()
   await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
-  expect(request).toHaveBeenCalledExactlyOnceWith('bots.actions.answer', { actionId: 'held-1', digest: 'shown-digest', answer: 'send' })
+  expect(request).toHaveBeenCalledExactlyOnceWith('bots.actions.answer', { botId: 'inbox', actionId: 'held-1', digest: 'shown-digest', answer: 'send' })
   const card = host.querySelector('[aria-label="Action to review"]')!
   expect(card.textContent).toContain('The tool reported an error')
   expect(card.querySelector('[aria-label="Tool result"]')?.textContent).toBe('<error>Partial delivery</error>')
   expect(button('Send', card)).toBeUndefined()
+})
+
+it('sends a held action\'s answer to an older service, which takes no bot id, once more without it', async () => {
+  fake.chats.inbox = [held()]
+  const { createPersonalBotsClient } = await import('../../src/renderer/services/personalBotsClient')
+  const request = vi.fn(async (_method: string, params: Record<string, unknown>) => {
+    if ('botId' in params) throw Object.assign(new Error('Unknown key botId'), { code: 'invalid_params' })
+    fake.chats.inbox = [held({ status: 'done' })]
+    return { status: 'done' }
+  })
+  Object.assign(fake.client, { answerAction: createPersonalBotsClient({ request } as never).answerAction })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  expect(request.mock.calls.map(([, params]) => params)).toEqual([
+    { botId: 'inbox', actionId: 'held-1', digest: 'shown-digest', answer: 'send' },
+    { actionId: 'held-1', digest: 'shown-digest', answer: 'send' }
+  ])
+  expect(button('Send', host.querySelector('[aria-label="Action to review"]')!)).toBeUndefined()
 })
 
 it('keeps subject and multiline recipient probes inside data and drops legacy notes', async () => {
@@ -3008,7 +3026,7 @@ it.each([
   Object.assign(fake.client, { answerAction: createPersonalBotsClient({ request } as never).answerAction })
   await open()
   await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
-  expect(request).toHaveBeenCalledExactlyOnceWith('bots.actions.answer', { actionId: 'held-1', digest: 'shown-digest', answer: 'send' })
+  expect(request).toHaveBeenCalledExactlyOnceWith('bots.actions.answer', { botId: 'inbox', actionId: 'held-1', digest: 'shown-digest', answer: 'send' })
   expect(host.textContent).toContain(reason === 'expired' ? 'Expired · not sent' : text)
   const card = host.querySelector('[aria-label="Action to review"]')
   if (reason === 'gone') expect(card).toBeNull()
@@ -3050,7 +3068,7 @@ it.each(['Send', 'Not now'])('keeps the stored review intact when the device Wor
   expect(button('Send', card)?.disabled).toBe(false)
   expect(button('Not now', card)?.disabled).toBe(false)
   expect(card.querySelector('[aria-label="Tool result"]')).toBeNull()
-  expect(fake.client.answerAction).toHaveBeenCalledExactlyOnceWith('held-1', 'shown-digest', label === 'Send' ? 'send' : 'not_now')
+  expect(fake.client.answerAction).toHaveBeenCalledExactlyOnceWith('inbox', 'held-1', 'shown-digest', label === 'Send' ? 'send' : 'not_now')
 })
 
 it('six adjacent expired schedule cards fold to one quiet line, keeping the waiting row', async () => {

@@ -328,7 +328,12 @@ it('the app answer method reaches the held call and returns redraw for a repeate
   const domains = new DomainHandlerRegistry()
   registerPersonalBotMethods(domains, () => f.bots.service)
   const context = { connection: { id: 'c', binding: { profileId: 'p1', epoch: 1 }, capabilities: new Set<string>() } } as never
-  const params = { actionId: a.id, digest: a.args_digest, answer: 'send' }
+  const params = { botId: a.bot_id, actionId: a.id, digest: a.args_digest, answer: 'send' }
+  // The app names the bot whose chat shows the card: another bot's chat can't send it.
+  const { botId: other } = await createBot(f, { reply: 'Hello' })
+  await expect(domains.dispatch(context, 'bots.actions.answer', { ...params, botId: other })).rejects.toMatchObject({ code: 'bot_action_gone' })
+  await expect(domains.dispatch(context, 'bots.actions.answer', { actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'invalid_params' })
+  expect(t.calls).toEqual([])
   expect(await domains.dispatch(context, 'bots.actions.answer', params)).toMatchObject({ status: 'done' })
   await expect(domains.dispatch(context, 'bots.actions.answer', params)).rejects.toMatchObject({ code: 'bot_action_settled' })
   expect(t.calls).toEqual([t.args])
@@ -2693,7 +2698,8 @@ it.each(c4Refusals)('C4 integration protocol preserves the exact %s refusal and 
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   const params = { actionId: a.id, digest: a.args_digest, answer: 'send' }
-  if (reason === 'changed') params.digest = 'stale'
+  const named = { botId: t.botId, ...params }
+  if (reason === 'changed') params.digest = named.digest = 'stale'
   if (reason === 'paused') f.bots.pauseBot(t.botId)
   if (reason === 'expired') await legacyExpired(a)
   if (reason === 'withdrawn') await f.bots.stopWork(t.botId, t.workId)
@@ -2708,7 +2714,7 @@ it.each(c4Refusals)('C4 integration protocol preserves the exact %s refusal and 
   registerPersonalBotMethods(domains, () => f.bots.service)
   const context = { connection: { id: 'c', binding: { profileId: 'p1', epoch: 1 }, capabilities: new Set<string>() } } as never
   const text = reason === 'paused' ? `Resume ${f.bots.definitionOf(t.botId).name} to send this.` : storedSentence
-  await expect(domains.dispatch(context, 'bots.actions.answer', params)).rejects.toMatchObject({ code: reason === 'withdrawn' ? 'bot_action_work_ended' : reason === 'unreachable' ? 'bot_action_gone' : `bot_action_${reason}`, message: text })
+  await expect(domains.dispatch(context, 'bots.actions.answer', named)).rejects.toMatchObject({ code: reason === 'withdrawn' ? 'bot_action_work_ended' : reason === 'unreachable' ? 'bot_action_gone' : `bot_action_${reason}`, message: text })
   const projected = f.bots.service.chatList(t.botId).messages.find(message => message.id === a.message_id)?.action
   if (reason === 'gone') expect(projected).toBeUndefined()
   else expect(projected?.status === 'open').toBe(['changed', 'paused'].includes(reason))

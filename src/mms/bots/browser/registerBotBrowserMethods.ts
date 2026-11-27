@@ -2,17 +2,13 @@ import {
   BOT_BROWSER_FILES_METHOD,
   BOT_BROWSER_FRAME_EVENT,
   BOT_BROWSER_WINDOW_METHOD,
-  BOTS_BROWSER_WINDOW_CAPABILITY,
-  BOTS_BROWSER_HOLD_CAPABILITY,
-  BOTS_BROWSER_METHODS,
-  BOTS_BROWSER_STREAM_CAPABILITY,
   type BotBrowserFrameEvent,
   type BotBrowserHoldRequest,
   type BotBrowserSent,
   type BotsBrowserMethod
 } from '../../../shared/bots/personal/browser'
 import { validateWatchedBrowserInput as validateBotBrowserInput, type WatchedBrowserPageSize } from '../../../shared/browser/watched'
-import { BOTS_PERSONAL_V2_CAPABILITY } from '../../../shared/bots/personal/methods'
+import { localBotMethod, localBotMethods } from '../../../shared/bots/personal/methodTable'
 import { browserNavigationUrl } from '../../../shared/browser/validation'
 import { browserWindowDisplay, type BrowserWindowDisplay } from '../../../shared/browser/window'
 import { serviceHasDesktop } from '../../browser/windowDesktop'
@@ -35,20 +31,11 @@ import type { BotBrowsers } from './BotBrowsers'
  * (`windowable`); no other caller is ever told so.
  */
 
-const KEYS: Record<BotsBrowserMethod, readonly string[]> = {
-  'bots.browser.get': ['botId', 'frame', 'viewId'],
-  'bots.browser.control': ['botId', 'control'],
-  'bots.browser.input': ['botId', 'input'],
-  'bots.browser.open': ['botId', 'url', 'viewId', 'platform'],
-  'bots.browser.close': ['botId'],
-  'bots.browser.watch': ['botId', 'watchId', 'width', 'fps', 'viewId', 'page'],
-  'bots.browser.unwatch': ['botId', 'watchId'],
-  'bots.browser.hold': ['botId', 'viewId', 'request'],
-  'bots.browser.send': ['botId', 'viewId', 'holdId', 'inputs']
-}
+/** The browser's own methods; `bots.browser.window` and `bots.browser.files` are registered apart, below. */
+const VIEW_METHODS = localBotMethods('browser').filter((method): method is BotsBrowserMethod => method !== BOT_BROWSER_WINDOW_METHOD && method !== BOT_BROWSER_FILES_METHOD)
 
 function validate(method: BotsBrowserMethod, value: unknown): Record<string, unknown> {
-  const p = domainObject(value ?? {}, ['profileId', ...KEYS[method]])
+  const p = domainObject(value ?? {}, ['profileId', ...localBotMethod(method).keys])
   if (!isBotId(p.botId)) throw new DomainRpcError('invalid_params', 'A bot id is required')
   if (p.viewId !== undefined && !isWatchId(p.viewId)) throw new DomainRpcError('invalid_params', 'viewId must be an id')
   try {
@@ -164,20 +151,16 @@ async function withWindowable(context: HandlerContext, result: unknown): Promise
   return { ...(result as object), browser: { ...browser, windowable: true } }
 }
 
-/** The capability each method is offered under: `watch` and `hold` tell the app what this daemon can do. */
-function capabilityOf(method: BotsBrowserMethod): string {
-  if (method === 'bots.browser.watch' || method === 'bots.browser.unwatch') return BOTS_BROWSER_STREAM_CAPABILITY
-  if (method === 'bots.browser.hold' || method === 'bots.browser.send') return BOTS_BROWSER_HOLD_CAPABILITY
-  return BOTS_PERSONAL_V2_CAPABILITY
-}
-
-/** Bind once before server seal. The browsers come from the daemon's admitted profile, never a client path. */
+/**
+ * Bind once before server seal. The browsers come from the daemon's admitted profile, never a client path. Each method's
+ * capability is its row's in `BOT_METHODS`: `watch` and `hold` tell the app what this daemon can do.
+ */
 export function registerBotBrowserMethods(domains: DomainHandlerRegistry, browsersForProfile: (profileId: string) => BotBrowsers | null | undefined | Promise<BotBrowsers | null | undefined>): void {
-  for (const method of BOTS_BROWSER_METHODS) {
+  for (const method of VIEW_METHODS) {
     domains.register({
       method,
       scope: 'profile',
-      capability: capabilityOf(method),
+      capability: localBotMethod(method).capability,
       validate: (params) => validate(method, params),
       async handle(context, params, binding) {
         const browsers = await browsersForProfile(binding!.profileId)
@@ -195,9 +178,9 @@ export function registerBotBrowserMethods(domains: DomainHandlerRegistry, browse
   domains.register({
     method: BOT_BROWSER_WINDOW_METHOD,
     scope: 'profile',
-    capability: BOTS_BROWSER_WINDOW_CAPABILITY,
+    capability: localBotMethod(BOT_BROWSER_WINDOW_METHOD).capability,
     validate: (params): Record<string, unknown> => {
-      const p = domainObject(params ?? {}, ['profileId', 'botId', 'viewId', 'holdId', 'op', 'display'])
+      const p = domainObject(params ?? {}, ['profileId', ...localBotMethod(BOT_BROWSER_WINDOW_METHOD).keys])
       if (!isBotId(p.botId)) throw new DomainRpcError('invalid_params', 'A bot id is required')
       if (!isWatchId(p.viewId)) throw new DomainRpcError('invalid_params', 'A view id is required')
       if (!isHoldId(p.holdId)) throw new DomainRpcError('invalid_params', 'A hold id is required')
@@ -228,9 +211,9 @@ export function registerBotBrowserMethods(domains: DomainHandlerRegistry, browse
   domains.register({
     method: BOT_BROWSER_FILES_METHOD,
     scope: 'profile',
-    capability: BOTS_BROWSER_HOLD_CAPABILITY,
+    capability: localBotMethod(BOT_BROWSER_FILES_METHOD).capability,
     validate: (params): Record<string, unknown> => {
-      const p = domainObject(params ?? {}, ['profileId', 'botId', 'viewId', 'holdId', 'paths'])
+      const p = domainObject(params ?? {}, ['profileId', ...localBotMethod(BOT_BROWSER_FILES_METHOD).keys])
       if (!isBotId(p.botId)) throw new DomainRpcError('invalid_params', 'A bot id is required')
       if (!isWatchId(p.viewId)) throw new DomainRpcError('invalid_params', 'A view id is required')
       if (!isHoldId(p.holdId)) throw new DomainRpcError('invalid_params', 'A hold id is required')

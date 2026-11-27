@@ -1,5 +1,6 @@
 import type { RoutedStreamKind } from '../bridge/routed'
 import type { StreamKind } from './streams'
+import { botMethodAccess } from '../bots/personal/methodTable'
 
 /**
  * What a call or stream from another device of the user's list does on this computer, as the receiver's per-device
@@ -103,30 +104,8 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
   'chats.cancel': 'work',
   'bridge.dispatch': 'work',
 
-  // ---------------------------------------------------------------- personal bots
-  'bots.get': 'bots_chat',
-  'bots.chat.list': 'bots_chat',
-  'bots.chat.attachment': 'bots_chat',
-  'bots.memory.list': 'bots_chat',
-  'bots.chat.send': 'bots_chat',
-  'bots.chat.stop': 'bots_chat',
-  'bots.work.stop': 'bots_chat',
-  'bots.chat.markRead': 'bots_chat',
-  'bots.actions.answer': 'bots_manage',
-  'bots.questions.answer': 'bots_chat',
-  'bots.reminders.snooze': 'bots_chat',
-  // Both choices on a permission ask or held external action require Work; reading the cards stays bots_chat.
-  'bots.asks.answer': 'bots_manage',
-  'bots.personal.pause': 'bots_manage',
-  'bots.personal.resume': 'bots_manage',
-  'bots.create': 'bots_manage',
-  'bots.update': 'bots_manage',
-  'bots.reminders.cancel': 'bots_manage',
-  'bots.schedules.remove': 'bots_manage',
-  'bots.permissions.set': 'bots_manage',
-  'bots.permissions.revoke': 'bots_manage',
-  'bots.memory.forget': 'bots_manage',
-  'bots.memory.edit': 'bots_manage',
+  // ---------------------------------------------------------------- personal bots: `BOT_METHODS`' remote rows
+  ...botMethodAccess(),
 
   // ---------------------------------------------------------------- routed: the transport
   ...routed({

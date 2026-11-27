@@ -1,4 +1,4 @@
-import { BOTS_PERSONAL_V2_CAPABILITY, BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, MAX_BOT_CHAT_TEXT, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
+import { MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, MAX_BOT_CHAT_TEXT, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
 import { MAX_BOT_CUSTOM_SLOT_DESCRIPTION, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_MODEL_CHARS, MAX_BOT_NAME_CHARS, type BotModelPick, type BotModelSlots, type BotSchedule } from '../../shared/bots/personal/definition'
 import { modelPickProblem, modelRowsProblem } from '../../shared/bots/personal/modelSlots'
 import { MAX_CHOICE_LABEL_CHARS } from '../../shared/bots/personal/questions'
@@ -9,6 +9,8 @@ import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol
 import { BotEngineError } from './activation/BotEngine'
 import type { BotChatService } from './chat/BotChatService'
 import { botMemoryMethods } from './memory/methods'
+import { assertLocalCaller } from './localCallers'
+import { localBotMethod, localBotMethods } from '../../shared/bots/personal/methodTable'
 import { BotDefinitionError, isBotId } from './definitions/BotDefinitionStore'
 import { isFacePictureKey, MAX_FACE_PICTURE_BYTES } from './facePicture'
 
@@ -19,46 +21,6 @@ import { isFacePictureKey, MAX_FACE_PICTURE_BYTES } from './facePicture'
  */
 
 type Params = Record<string, unknown>
-
-const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
-  'bots.personal.list': [],
-  'bots.create': ['look', 'name', 'description', 'clientRequestId', 'model', 'slots', 'image', 'access'],
-  'bots.get': ['botId'],
-  'bots.update': ['botId', 'name', 'look', 'description'],
-  'bots.personal.pause': ['botId'],
-  'bots.personal.resume': ['botId'],
-  'bots.delete': ['botId'],
-  'bots.chat.list': ['botId', 'beforeSeq', 'limit'],
-  'bots.chat.send': ['botId', 'text', 'attachments', 'clientRequestId', 'replyTo'],
-  'bots.chat.stop': ['botId'],
-  'bots.work.stop': ['botId', 'workId'],
-  'bots.reminders.snooze': ['botId', 'messageId', 'choice'],
-  'bots.reminders.cancel': ['botId', 'reminderId'],
-  'bots.chat.markRead': ['botId', 'seq'],
-  'bots.chat.react': ['botId', 'messageId', 'emoji'],
-  'bots.asks.answer': ['botId', 'askId', 'answer'],
-  'bots.actions.answer': ['actionId', 'digest', 'answer'],
-  'bots.chainHold.answer': ['botId', 'holdId', 'answer'],
-  'bots.questions.answer': ['botId', 'questionId', 'choice', 'clientRequestId'],
-  'bots.permissions.set': ['botId', 'permissionId', 'enabled'],
-  'bots.permissions.revoke': ['botId', 'permissionId'],
-  'bots.schedules.add': ['botId', 'when', 'prompt', 'model'],
-  'bots.schedules.remove': ['botId', 'scheduleId'],
-  'bots.model.get': ['botId'],
-  'bots.model.choices': [],
-  'bots.model.set': ['botId', 'model'],
-  'bots.model.setSlots': ['botId', 'slots', 'oneWork'],
-  'bots.model.setImage': ['botId', 'pick'],
-  'bots.memory.list': ['botId', 'history'],
-  'bots.memory.forget': ['botId', 'id'],
-  'bots.memory.edit': ['botId', 'id', 'text'],
-  'bots.memory.export': ['botId', 'dir'],
-  'bots.chat.clear': ['botId'],
-  'bots.memory.wipe': ['botId', 'keep'],
-  'bots.reset': ['botId'],
-  'bots.model.setCustom': ['botId', 'name', 'pick', 'description'],
-  'bots.facePicture.save': ['botId', 'key', 'png']
-}
 
 /** A face picture's base64, at most `MAX_FACE_PICTURE_BYTES` decoded. */
 const FACE_PICTURE_BASE64 = /^[A-Za-z0-9+/]+={0,2}$/
@@ -121,9 +83,10 @@ function attachments(value: unknown): BotChatAttachment[] {
 }
 
 function validate(method: BotsPersonalV2Method, value: unknown): Params {
-  const p = domainObject(value ?? {}, ['profileId', ...KEYS[method]])
-  if (KEYS[method].includes('botId') && !isBotId(p.botId)) throw new DomainRpcError('invalid_params', 'A bot id is required')
-  if (KEYS[method].includes('clientRequestId') && (typeof p.clientRequestId !== 'string' || !REQUEST_ID.test(p.clientRequestId)))
+  const keys = localBotMethod(method).keys
+  const p = domainObject(value ?? {}, ['profileId', ...keys])
+  if (keys.includes('botId') && !isBotId(p.botId)) throw new DomainRpcError('invalid_params', 'A bot id is required')
+  if (keys.includes('clientRequestId') && (typeof p.clientRequestId !== 'string' || !REQUEST_ID.test(p.clientRequestId)))
     throw new DomainRpcError('invalid_params', 'A request id is required')
   switch (method) {
     case 'bots.create':
@@ -276,7 +239,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.chat.react': return bots.react(botId, p.messageId as string, p.emoji as string | null)
     case 'bots.asks.answer': return bots.answer(botId, p.askId as string, p.answer as 'allow' | 'not_now')
     case 'bots.chainHold.answer': return bots.answerChainHold(botId, p.holdId as string, p.answer as 'continue' | 'stop')
-    case 'bots.actions.answer': return bots.answerAction({ actionId: p.actionId as string, digest: p.digest as string, answer: p.answer as 'send' | 'not_now' })
+    case 'bots.actions.answer': return bots.answerAction({ forBot: botId, actionId: p.actionId as string, digest: p.digest as string, answer: p.answer as 'send' | 'not_now' })
     case 'bots.questions.answer': return bots.answerQuestion({ botId, questionId: p.questionId as string, choice: p.choice as string, clientRequestId: p.clientRequestId as string })
     case 'bots.permissions.set': return bots.setPermission(botId, p.permissionId as string, p.enabled as boolean)
     case 'bots.permissions.revoke': return bots.revokePermission(botId, p.permissionId as string)
@@ -303,22 +266,17 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
 
 /** Bind once before server seal. The bots come from the daemon's admitted profile, never a client path. */
 export function registerPersonalBotMethods(domains: DomainHandlerRegistry, botsForProfile: (profileId: string) => BotChatService | null | undefined | Promise<BotChatService | null | undefined>): void {
-  for (const method of [...BOTS_PERSONAL_V2_METHODS, ...BOTS_WORK_METHODS]) {
+  for (const method of localBotMethods('chat')) {
+    const { capability } = localBotMethod(method)
     domains.register({
       method,
       scope: 'profile',
-      capability: BOTS_PERSONAL_V2_CAPABILITY,
+      capability,
       validate: (params) => validate(method, params),
       async handle(_context, params, binding) {
-        if (method === 'bots.permissions.set' && (_context.connection?.clientType !== 'gui' || _context.connection?.bridgeCaller))
-          throw new DomainRpcError('forbidden', 'Change permissions in the app window.')
-        // Only the owner lets bots go on messaging each other (issue #1443): a person at a window on this computer, never
-        // an agent, the CLI or another device (none has the method; `REMOTE_BOT_METHODS` leaves it out).
-        if (method === 'bots.chainHold.answer' && (_context.connection?.clientType !== 'gui' || _context.connection?.bridgeCaller))
-          throw new DomainRpcError('forbidden', 'Answer this in the Mousse window on the computer that runs the bot.')
-        // The face picture is the app window's drawing of the bot's look: no agent, CLI or other device writes it.
-        if (method === 'bots.facePicture.save' && (_context.connection?.clientType !== 'gui' || _context.connection?.bridgeCaller))
-          throw new DomainRpcError('forbidden', 'Only the Mousse window saves a bot\'s face picture.')
+        // A few are a person's at this computer's window alone (`BOT_METHODS`' `only`): Allow on a permission, letting
+        // bots go on messaging each other (issue #1443), and the window's drawing of the bot's face.
+        assertLocalCaller(method, _context.connection)
         try {
           const bots = await botsForProfile(binding!.profileId)
           // The profile's bots.db could not be opened: bots are unavailable, nothing else is affected.

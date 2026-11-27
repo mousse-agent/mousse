@@ -494,9 +494,15 @@ export class BotChatService {
     }
   }
 
-  async answerAction(input: { actionId: string; digest: string; answer: 'send' | 'not_now'; botId?: string }): Promise<{ status: string }> {
+  /**
+   * `botId` (another device): the action must be there and that bot's, else `not_found`. `forBot` (this computer's app,
+   * which names the bot whose chat shows the card): an action of another bot can't be sent from it; one that is gone is
+   * refused as it is without a bot.
+   */
+  async answerAction({ forBot, ...input }: { actionId: string; digest: string; answer: 'send' | 'not_now'; botId?: string; forBot?: string }): Promise<{ status: string }> {
     const action = this.engine.actions.get(input.actionId)
     if (input.botId && action?.bot_id !== input.botId) throw new BotEngineError('not_found', 'No held action here.')
+    if (forBot && action && action.bot_id !== forBot) throw new BotEngineError('bot_action_gone', "This can't be sent any more.")
     try { return await this.engine.actions.answer(input) } catch (error) {
       if (error instanceof BotActionChanged) throw new BotEngineError(error.code, error.message)
       throw error
