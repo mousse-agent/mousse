@@ -863,6 +863,17 @@ describe('the split view used as the thread browser is', () => {
       .toEqual([[5, 640, 180], [5, 640, 180], [5, 640, 180]])
   })
 
+  it('a first press cancelled before the browser is taken over sends nothing to the page', async () => {
+    await expanded()
+    await act(async () => {
+      frameOf().dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 420, clientY: 140, button: 0, buttons: 1 }))
+      frameOf().dispatchEvent(new MouseEvent('pointercancel', { bubbles: true, clientX: 420, clientY: 140, button: 0, buttons: 0 }))
+    })
+    await settle()
+    expect(button('Give back')).toBeDefined()
+    expect(sentInputs()).toEqual([])
+  })
+
   it('a press still held once the browser is taken over stays down, so dragging selects text', async () => {
     await expanded()
     await act(async () => { frameOf().dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 420, clientY: 140, button: 0, buttons: 1 })) })

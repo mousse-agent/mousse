@@ -356,7 +356,8 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   const act = (entry: WatchedBrowserInput) => void using(() => send(entry))
   /**
    * A press on the page while the agent has it: taken over, and the press lands where it was made. Still held once the
-   * browser is this window's, it stays down (a drag selects text); let go of before, it is a click.
+   * browser is this window's, it stays down (a drag selects text); let go of before, it is a click; cancelled before
+   * (the system took the pointer), nothing reaches the page.
    */
   const takeOnPress = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (busy || event.button !== 0 || event.pointerType === 'touch' || (event.target instanceof Element && event.target.closest('.watched-browser-dialog, .watched-browser-closed'))) return
@@ -367,13 +368,18 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
     const pinned = input.pin(press)
     if (!pinned) return
     const pointer = event.pointerId
-    let up = false
-    const release = (next: PointerEvent) => { if (next.pointerId === pointer) up = true }
+    let ended: 'up' | 'cancelled' | undefined
+    const release = (next: PointerEvent) => { if (next.pointerId === pointer) ended ??= 'up' }
+    const cancel = (next: PointerEvent) => { if (next.pointerId === pointer) ended ??= 'cancelled' }
     window.addEventListener('pointerup', release, true)
-    window.addEventListener('pointercancel', release, true)
-    void using(() => { if (up) input.clickAt(press, 'left', pinned); else input.pressAt(press, pinned) }).finally(() => {
+    window.addEventListener('pointercancel', cancel, true)
+    void using(() => {
+      if (ended === 'cancelled') return
+      if (ended === 'up') input.clickAt(press, 'left', pinned)
+      else input.pressAt(press, pinned)
+    }).finally(() => {
       window.removeEventListener('pointerup', release, true)
-      window.removeEventListener('pointercancel', release, true)
+      window.removeEventListener('pointercancel', cancel, true)
     })
   }
   const holding: WatchedBrowserHolding = owner ? (windowed ? 'window' : 'this-window') : elsewhere ? 'another-window' : view.open ? 'agent' : 'closed'
