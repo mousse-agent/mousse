@@ -7,7 +7,7 @@ The agent skills Mousse is built with. Each one is a folder in `skills/` with a 
 | Skill | When | What it does |
 |---|---|---|
 | `work` | Any authorized implementation | Takes a change from branch to merged PR: related-work check, claim, focused tests, PR text, merge and sync. |
-| `design` | A large goal with no plan yet | Gets to an architecture that lasts: the problem and its rules, shapes that really differ, spikes for the unknowns, one decision, a thin slice. |
+| `design` | A large goal with no plan yet | Gets to an architecture that lasts: the problem and its rules, a rubric, options that really differ, spikes for the unknowns, one decision, a thin slice. Three levels: the agent proposes; two model families propose and a judge marks them; or three propose and a council names the winner. |
 | `slice` | Work that needs more than one PR | Plans it as slices that each merge on their own within a day: the rules first, then the slices, their order and their files. |
 | `review` | Reviewing a PR, diff or plan, or answering findings | One pass: who reviews at each tier, findings that need proof, a re-check of the fix only, and when to stop. |
 | `council` | Heavy core changes, only after the human agrees | Two independent reviewers from different model families for a design or PR. Same proof rules as `review`, no scores. |
@@ -25,7 +25,7 @@ The agent skills Mousse is built with. Each one is a folder in `skills/` with a 
 Some skills call others:
 
 - `work` uses `slice`, `check-related-work`, `test-the-claim`, `check-on-real-data` and `review`, and hands off to `nightly-build-release` and `end-session`.
-- `design` uses `check-related-work`, then `review` or `council` for the one read of the design, and hands off to `slice`.
+- `design` uses `check-related-work`, then `review` for the one read of the chosen design (at level 3, `council` judges the proposals), and hands off to `slice`.
 - `slice` uses `check-related-work`, and `review` for a tier 5 plan.
 - `council` is `review` with two reviewers.
 - `retro` points back at whichever skill the lost time traces to.

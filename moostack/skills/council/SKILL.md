@@ -9,7 +9,7 @@ Two independent reviewers check a design, a plan or a PR before it moves on. It 
 
 ## When to use it
 
-**Ask the human first, every time.** Say in one line what you want reviewed and why, and run it only after a yes. A yes covers that one review, not later ones.
+**Ask the human first, every time.** Say in one line what you want reviewed and why, and run it only after a yes. A yes covers that one review, not later ones. At level 3 of [design](../design/SKILL.md) the council judges the proposals and names the winner; its yes is asked for when that design starts.
 
 Use it for work that is both:
 
@@ -20,7 +20,7 @@ Everything else gets the one review pass its tier sets in [review](../review/SKI
 
 ## Members
 
-Two reviewers at high effort, each from a different model family, neither of them the author. The human who agrees to the council names the families; if they have not, ask in the same line as the request. Use the newest model of each family that is available, looked up when the council starts. Never write a model ID into a skill or a brief.
+Two reviewers at high effort, each from a different model family, neither of them the author. The human who agrees to the council names the families; if they have not, ask in the same line as the request. Use the newest model of each family that is available, looked up when the council starts. Never write a model ID into a skill or a brief. When the council judges design proposals, a member may share a family with a proposer, as long as it is a fresh session and the proposals carry no author names.
 
 If a member is unavailable or out of usage, say so and run with the other alone. Do not substitute another family, and do not retry a member that hit its limit.
 
@@ -59,6 +59,18 @@ Check against the code on the default branch: does it solve the request, does ev
 Severity: blocker = the intended case is wrong, data is lost, or a permission check is skipped. should = a real bug a person hits in normal use. note = everything else.
 Each finding: id, severity, one sentence, and proof (the file:line or the PR that shows it). A blocker or should without proof is a note.
 Write findings, most severe first, to <file>, then what you would cut. No score. Last line exactly VERDICT: APPROVE or VERDICT: CHANGES REQUESTED.
+```
+
+Judging proposals (level 3 of design), one round:
+
+```text
+You are one of two independent judges of design proposals for <repo>. Review only: no edits, commits, GitHub comments or subagents.
+Problem, flows and rules: <path>
+Proposals: A <path>, B <path>, C <path>. You are not told who wrote them.
+Rubric: <path>   Results of the spikes: <path>
+For each proposal, mark every criterion met, partly met or not met, with the reason. A claim about the code needs the file:line that shows it. No overall number.
+Then name the one proposal you would build, and the one or two things worth taking from each of the others.
+Write to <file>. Last line exactly WINNER: A, WINNER: B or WINNER: C.
 ```
 
 PR, round one:
