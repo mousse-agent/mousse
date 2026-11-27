@@ -8,7 +8,9 @@
  * - outcome: launched with a first message, without one, first message refused there, a launch cut after the create;
  * - retries: the same clientRequestId again (after a launch, after a cut), the same key with other arguments;
  * - refusals: the computer offline, not sharing its threads, outdated (no agent mark), not allowed here (switch off, not
- *   ticked) or there (agent reach none), no project for the repository, several checkouts (and choosing one).
+ *   ticked) or there (agent reach none), no project for the repository, several checkouts (and choosing one);
+ * - no project there: the launcher's thread has none, projectId null from a thread in a project, that computer with no
+ *   projects at all, and no project with a new worktree (refused).
  */
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
@@ -39,6 +41,7 @@ let policy: SqliteNodePolicy
 let startTurn: ReturnType<typeof vi.fn>
 let repo: { path: string; remote: string }
 let ownerProject: string
+let ownerCheckout: string
 let seq = 0
 
 const git = (cwd: string, ...args: string[]): string =>
@@ -74,7 +77,8 @@ beforeAll(async () => {
   t = await linked()
   policy = (t.insideOwner.routes as unknown as { options: { policy: SqliteNodePolicy } }).options.policy
   repo = repository()
-  ownerProject = t.owner.projects.openProject(clone(repo)).id
+  ownerCheckout = clone(repo)
+  ownerProject = t.owner.projects.openProject(ownerCheckout).id
 }, 120_000)
 afterAll(cleanupAll)
 afterEach(() => {
@@ -398,6 +402,72 @@ describe('thread_create on another computer (issue #1160)', () => {
     }, 120_000)
   })
 
+  describe('no project there', () => {
+    it('a thread in no project here starts one in no project there, even when that computer has no projects', async () => {
+      standInForTurns()
+      // That computer has no projects at all.
+      t.owner.projects.removeProject(ownerProject)
+      try {
+        expect(t.owner.projects.listProjects()).toEqual([])
+        const { thread, create } = await caller({ project: null })
+        const out = await create({ computer: t.node, title: 'Look around', firstMessage: 'What is on this computer?', clientRequestId: 'no-project-1' })
+        expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
+        const [far] = launchedBy(thread.id)
+        expect(out.body).toMatchObject({ threadId: qualifyId(t.node, far!.id), firstMessage: 'sent' })
+        expect(far!.projectId).toBeUndefined()
+        expect(far).toMatchObject({ name: 'Look around', startedFrom: { node: t.callerNode, agent: { thread: thread.id } } })
+        await vi.waitFor(() => expect(startTurn).toHaveBeenCalled())
+        expect(String((startTurn.mock.calls.at(-1)![0] as Loose).input.content)).toContain('What is on this computer?')
+        expect(t.caller.runEngine.remoteLaunches.listForLauncher(thread.id)).toEqual([expect.objectContaining({ remoteProjectId: null, state: 'launched' })])
+        // A retry with the same key is the same launch.
+        const again = await create({ computer: t.node, title: 'Look around', firstMessage: 'What is on this computer?', clientRequestId: 'no-project-1' })
+        expect(again.body).toMatchObject({ threadId: out.body.threadId, replayed: true })
+        expect(launchedBy(thread.id)).toHaveLength(1)
+      } finally {
+        ownerProject = t.owner.projects.openProject(ownerCheckout).id
+      }
+    }, 120_000)
+
+    it('a personal bot that names no project here starts one in no project there, and its retry is the same launch', async () => {
+      standInForTurns()
+      // The caller is the owner's bot (its own turn, "use your threads"): its thread's project is not the one it means.
+      const { thread, runId } = await caller()
+      vi.spyOn(t.caller.orchestrator as unknown as Loose, 'botSenderOf').mockReturnValue({ botId: 'bot1', name: 'Helper', activationId: 'act1', limit: 'auto' })
+      const host = (t.caller.orchestrator as unknown as { mcpToolHost(): AppToolHost }).mcpToolHost()
+      const actor = { kind: 'agent' as const, threadId: thread.id, runId, toolCallId: 'call-1' }
+      const request = { computer: t.node, title: 'Look around', workspace: 'project' as const, firstMessage: 'Look around.', mode: 'agent' as const }
+      const first = await host.createRemoteThread!(request, { clientRequestId: 'bot-no-project', actor })
+      expect(first, JSON.stringify(first)).toMatchObject({ status: 'launched', firstMessage: 'sent', replayed: false })
+      const [far] = launchedBy(thread.id)
+      expect(far!.projectId).toBeUndefined()
+      expect(t.caller.runEngine.remoteLaunches.listForLauncher(thread.id)).toEqual([expect.objectContaining({ remoteProjectId: null })])
+      const again = await host.createRemoteThread!(request, { clientRequestId: 'bot-no-project', actor })
+      expect(again).toMatchObject({ status: 'launched', threadId: (first as { threadId: string }).threadId, replayed: true })
+      expect(launchedBy(thread.id)).toHaveLength(1)
+    }, 120_000)
+
+    it('projectId null from a thread in a project starts it in no project there; the same key without it is another launch', async () => {
+      const { thread, create } = await caller()
+      const out = await create({ computer: t.node, projectId: null, clientRequestId: 'no-project-2' })
+      expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
+      const [far] = launchedBy(thread.id)
+      expect(far!.projectId).toBeUndefined()
+      expect(await registryConflict(() => create({ computer: t.node, clientRequestId: 'no-project-2' }))).toMatch(/already used/)
+      expect(launchedBy(thread.id)).toHaveLength(1)
+    }, 120_000)
+
+    it('no project with a new worktree is refused, and nothing is made there', async () => {
+      const count = t.owner.threads.listAllThreads().length
+      const { create } = await caller()
+      expect((await create({ computer: t.node, projectId: null, workspace: 'new_worktree', clientRequestId: 'no-project-3' })).isError).toBe(true)
+      const bare = await caller({ project: null })
+      const out = await bare.create({ computer: t.node, workspace: 'new_worktree', clientRequestId: 'no-project-4' })
+      expect(out.isError).toBe(true)
+      expect(out.body.data).toMatchObject({ code: 'no_matching_project' })
+      expect(t.owner.threads.listAllThreads().length).toBe(count)
+    }, 120_000)
+  })
+
   describe('refusals name which they are, with the computer, and make nothing there', () => {
     const before = () => t.owner.threads.listAllThreads().length
     const refusal = async (args: Record<string, unknown>, options: Parameters<typeof caller>[0] = {}, setup?: () => void) => {
@@ -455,7 +525,7 @@ describe('thread_create on another computer (issue #1160)', () => {
     it('no project for the repository there', async () => {
       const elsewhere = repository()
       expect(await refusal({}, { project: elsewhere.path })).toMatchObject({ code: 'no_matching_project', message: expect.stringContaining('projectId') })
-      expect(await refusal({}, { project: null })).toMatchObject({ code: 'no_matching_project', message: expect.stringContaining('projectId') })
+      // A thread with no project here starts one in no project there instead: see 'no project there'.
     }, 120_000)
 
     it('a projectId that computer does not have, or one of another computer, lists its projects', async () => {

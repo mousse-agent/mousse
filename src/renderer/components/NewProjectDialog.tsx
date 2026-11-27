@@ -34,12 +34,15 @@ const useRemoteParents = create<Record<string, string>>(() => ({}))
 
 type CloneRow = Extract<NewProjectRow, { kind: 'clone' }>
 
-/** The folder browser of another computer: what it shows, and the clone that waits for a folder. */
+/**
+ * The folder browser of another computer: what it shows, and what waits for a folder: a clone (where it goes), a folder
+ * to add as a project there ('add'), or nothing (where clones go from now on).
+ */
 interface Browser {
   view: BrowsedFolders | null
   loading: boolean
   error: string
-  pending: CloneRow | null
+  pending: CloneRow | 'add' | null
   /** What the field held before browsing, back when it ends. */
   savedQuery: string
 }
@@ -92,8 +95,9 @@ function listedProject(summary: { id: string; name: string; path: string }): Pro
 
 /**
  * New project, from the title bar's Add project: one field takes a GitHub repository to clone, a folder to add, or a
- * name for a new empty project, with the system's folder picker one row away. On another computer it adds a folder
- * that is already there, by its path. The new project opens with a new thread.
+ * name for a new empty project, with the system's folder picker one row away. On another computer it clones there, or
+ * adds a folder that is already there, picked by browsing that computer's folders or by its path. The new project opens
+ * with a new thread.
  */
 export function NewProjectDialog() {
   const open = useAppStore((state) => state.newProjectOpen)
@@ -114,6 +118,7 @@ function NewProjectPanel() {
   const inputRef = useRef<HTMLInputElement>(null)
   const listId = useId()
   const [browser, setBrowser] = useState<Browser | null>(null)
+  const browseAsk = useRef(0)
 
   const remote = computer !== THIS_COMPUTER
   // The computer whose GitHub account the dialog uses: this one (`''`) or the one picked.
@@ -124,7 +129,7 @@ function NewProjectPanel() {
   const theirs = useMemo(() => projects.filter((project) => (remote ? project.node === computer : !project.node)), [projects, remote, computer])
   const parent = remote ? remoteParent ?? usualParent(theirs.map((project) => project.path)) : chosenParent ?? usualParent(theirs.map((project) => project.path))
   const groups = useMemo(() => {
-    if (browser) return browser.view ? browseRows(browser.view, query, computerName) : []
+    if (browser) return browser.view ? browseRows(browser.view, query, computerName, { adding: browser.pending === 'add' }) : []
     const base = remote
       ? newProjectRows(query, { remote: true, computer: computerName, folders: projectFolders(theirs.map((project) => project.path)), parent })
       : newProjectRows(query, { remote: false, parent })
@@ -213,20 +218,24 @@ function NewProjectPanel() {
   }
 
   const loadFolder = async (path?: string) => {
+    // Only the latest folder asked for is shown: a slower answer for one clicked before never replaces it.
+    const ask = ++browseAsk.current
     setBrowser((current) => current && { ...current, loading: true, error: '' })
     try {
       const view = await sourceControlClient.browse(computer, path)
+      if (ask !== browseAsk.current) return
       setBrowser((current) => current && { ...current, view, loading: false })
       setQuery('')
       setActiveIndex(0)
     } catch (error) {
+      if (ask !== browseAsk.current) return
       // A folder picked before that is gone: start from the places there.
       if (path) return loadFolder()
       setBrowser((current) => current && { ...current, loading: false, error: remoteReason(error, computerName) })
     }
   }
 
-  /** Browses the folders of the computer picked for where clones go; pending clones once one is picked. */
+  /** Browses the folders of the computer picked: for where clones go (a pending clone runs once one is picked), or a folder to add. */
   const openBrowser = (pending: Browser['pending']) => {
     setBrowser({ view: null, loading: true, error: '', pending, savedQuery: query })
     useProjectTask.setState({ error: '' })
@@ -279,11 +288,14 @@ function NewProjectPanel() {
         return loadFolder(row.path)
       case 'browse-use': {
         const pending = closeBrowser()?.pending
+        if (pending === 'add') return addThere(row.path)
         useRemoteParents.setState({ [computer]: row.path })
         if (pending) return cloneThere({ ...pending, destination: joinFolder(row.path, pending.name) })
         return
       }
       case 'open-folder':
+        // On another computer, its own folders are browsed here: the system's picker shows only this one's.
+        if (remote) return openBrowser('add')
         return runTask(null, () => window.mousse.projects.open())
       case 'clone-hint':
       case 'new-hint':
@@ -387,6 +399,9 @@ function NewProjectPanel() {
             <Select
               value={computer}
               onChange={(next) => {
+                // The folders shown are the previous computer's: browsing ends, and an answer still on its way is dropped.
+                browseAsk.current++
+                setBrowser(null)
                 setComputer(next)
                 edit('')
                 setHint(null)
@@ -501,7 +516,7 @@ function rowView(row: NewProjectRow, remote: boolean, computer: string, github: 
   const into = (destination: string | null) => (destination ? `into ${shortPath(destination)}` : 'Choose where it goes first')
   switch (row.kind) {
     case 'open-folder':
-      return { icon: <FolderOpen size={15} strokeWidth={2} />, title: 'Open a folder…', end: 'Browse' }
+      return { icon: <FolderOpen size={15} strokeWidth={2} />, title: remote ? `Add a folder on ${computer}…` : 'Open a folder…', end: 'Browse' }
     case 'clone-hint':
       return { icon: <GitFork size={15} strokeWidth={2} />, title: 'Clone a repository…', end: 'GitHub' }
     case 'new-hint':
@@ -516,7 +531,7 @@ function rowView(row: NewProjectRow, remote: boolean, computer: string, github: 
       return { icon: <GitHub size={15} strokeWidth={2} />, title: `Connect GitHub on ${computer}…`, meta }
     }
     case 'browse-use':
-      return { icon: <Check size={15} strokeWidth={2} />, title: 'Use this folder', meta: row.path }
+      return { icon: <Check size={15} strokeWidth={2} />, title: row.adding ? 'Add this folder' : 'Use this folder', meta: row.adding ? `As a project on ${computer} · ${row.path}` : row.path }
     case 'browse-open':
       return row.up ? { icon: <ArrowUp size={15} strokeWidth={2} />, title: '..', meta: row.path } : { icon: <Folder size={15} strokeWidth={2} />, title: row.name }
     case 'create':

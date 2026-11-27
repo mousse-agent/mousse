@@ -6199,9 +6199,15 @@ export class OrchestratorService extends EventEmitter {
     // (projectId), or one here whose repository it means (fromProjectId). Its thread runs in Full access, or no wider
     // than the device its owner wrote from, as a thread it starts here does.
     const bot = this.botSenderOf(options.actor, 'thread_create')
-    if (bot && !input.fromProjectId && !input.projectId)
-      return refuse('no_matching_project', `Name the project: projectId, one of ${computer.name}'s (thread_list with computer lists them), or fromProjectId, a project here whose repository ${computer.name} has a checkout of.`, at)
-    const project = await this.remoteProjectFor(callerThreadId, computer, input.projectId, input.fromProjectId)
+    // No project there: asked for (`projectId: null`), or a bot that names no project there or here. That computer needs none.
+    const noProject = input.noProject === true || (bot !== undefined && !input.fromProjectId && !input.projectId)
+    if (noProject && (input.projectId !== undefined || input.fromProjectId !== undefined))
+      return refuse('invalid_project', 'A thread in no project names no projectId or fromProjectId.', at)
+    if (noProject && input.workspace === 'new_worktree')
+      return refuse('invalid_project', 'workspace "new_worktree" needs a project: a thread in no project works in its own folder there.', at)
+    const project = noProject
+      ? { ok: true as const, projectId: null }
+      : await this.remoteProjectFor(callerThreadId, computer, input.projectId, input.fromProjectId, input.workspace)
     if (!project.ok) return refuse(project.code, project.message, { ...at, ...(project.candidates ? { candidates: project.candidates } : {}) })
     // The launcher's own mode, never looser than its run; that computer narrows it to the limit it set for this one.
     const permissionMode = bot ? bot.limit ?? 'full' : narrowPermissionMode(this.requestedPermissionMode(callerThreadId), this.runPermissionMode(options.actor.runId))
@@ -6351,8 +6357,8 @@ export class OrchestratorService extends EventEmitter {
    * caller's own project, `wantedRef` choosing among those that may be. No strong match, or several, refuses with the
    * candidates; nothing is cloned there (#484).
    */
-  private async remoteProjectFor(callerThreadId: string, computer: { node: string; name: string }, wantedRef: string | undefined, fromProjectId?: string):
-    Promise<{ ok: true; projectId: string } | { ok: false; code: string; message: string; candidates?: RemoteProjectCandidate[] }> {
+  private async remoteProjectFor(callerThreadId: string, computer: { node: string; name: string }, wantedRef: string | undefined, fromProjectId: string | undefined, workspace: 'project' | 'new_worktree'):
+    Promise<{ ok: true; projectId: string | null } | { ok: false; code: string; message: string; candidates?: RemoteProjectCandidate[] }> {
     let wanted = wantedRef
     if (wantedRef !== undefined) {
       const qualified = parseQualifiedId(wantedRef)
@@ -6363,6 +6369,8 @@ export class OrchestratorService extends EventEmitter {
     if (wanted !== undefined && fromProjectId === undefined) return this.remoteProjectNamed(computer, wanted, wantedRef!)
     // The repository is the one of the project here it names (`fromProjectId`), else of the caller's own thread.
     const projectId = fromProjectId ?? this.threadStore?.getThread(callerThreadId)?.projectId
+    // An agent's thread in no project starts one in no project there, as it is here: there is no repository to match.
+    if (!projectId && wanted === undefined && workspace === 'project') return { ok: true, projectId: null }
     const projectPath = projectId ? this.projectManager?.getProject(projectId)?.path : undefined
     if (!projectPath)
       return {
@@ -6370,7 +6378,7 @@ export class OrchestratorService extends EventEmitter {
         code: 'no_matching_project',
         message: fromProjectId
           ? `There is no project ${fromProjectId} here, so there is no repository to find on ${computer.name}. Name one of ${computer.name}'s projects with projectId instead (thread_list with computer lists them).`
-          : `This thread has no project, so there is no repository to find on ${computer.name}. Name one of ${computer.name}'s projects with projectId (thread_list with computer lists them).`
+          : `This thread has no project, so there is no repository to find on ${computer.name}. Name one of ${computer.name}'s projects with projectId (thread_list with computer lists them), or use workspace "project" to start it in no project there.`
       }
     let found: Awaited<ReturnType<RemoteComputersPort['projectCandidates']>>
     try {
