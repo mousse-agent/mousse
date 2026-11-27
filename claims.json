@@ -2,6 +2,20 @@
   "version": 1,
   "claims": [
     {
+      "task": "bot-skills-and-browser-handoff",
+      "session": "Animatrix-17eea9",
+      "machine": "Animatrix",
+      "branch": "bot-skills-and-browser-handoff",
+      "paths": [
+        "src/mms/harness/vendors/codex/childPolicy.ts",
+        "src/mms/bots/instructions.ts",
+        "src/mms/run/mcp/appTools/bots.ts",
+        "src/shared/bots/personal/catalogue.ts"
+      ],
+      "claimedAt": "2026-11-27T10:28:22.685Z",
+      "expiresAt": "2026-11-27T12:28:22.685Z"
+    },
+    {
       "task": "bot-subagents-delegations",
       "session": "LAPTOP-HIEROJK7-ee6868",
       "machine": "LAPTOP-HIEROJK7",
@@ -46,19 +60,6 @@
       "expiresAt": "2026-11-26T11:23:17.394Z"
     },
     {
-      "task": "macos-signing-notarization",
-      "session": "Animatrix-7dc63c",
-      "machine": "Animatrix",
-      "branch": "bot-chat-quick-tools",
-      "paths": [
-        "package.json",
-        "build/entitlements.mac.plist",
-        ".github/workflows/package.yml"
-      ],
-      "claimedAt": "2026-11-26T08:22:51.331Z",
-      "expiresAt": "2026-11-26T10:22:51.331Z"
-    },
-    {
       "task": "remote-project-add-and-projectless-threads",
       "session": "Aeonix-82f81a",
       "machine": "Aeonix",
@@ -86,18 +87,6 @@
       ],
       "claimedAt": "2026-11-26T09:12:48.179Z",
       "expiresAt": "2026-11-26T11:12:48.179Z"
-    },
-    {
-      "task": "remote-thread-offline-backoff",
-      "session": "Animatrix-3be80e",
-      "machine": "Animatrix",
-      "branch": "remote-thread-offline-backoff",
-      "paths": [
-        "src/main/ipc/registerGuiIpc.ts",
-        "src/shared/bridge/computerErrors.ts"
-      ],
-      "claimedAt": "2026-11-26T08:19:50.899Z",
-      "expiresAt": "2026-11-26T10:19:50.899Z"
     },
     {
       "task": "t3/fence-approvals-s2",
