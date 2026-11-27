@@ -61,6 +61,26 @@ Some tests are the only place a real boundary is exercised. Shrink their fixture
 - **Real Chrome, where the platform allows it:** `platformBrowserWorker.*`, `platformManagedBrowserDrain`, `platformMainBrowserE2E`, `platformScheduledBrowserE2E`.
 - **Named in the Windows CI job** (`.github/workflows/ci.yml`): moving or deleting one of those files silently removes it from that job.
 
+## Known failures
+
+`tests/known-failures.json` lists tests that fail on the default branch for a reason that is not yet fixed. `node scripts/verify.mjs` reads it: a failure the list covers is printed as known with its issue and does not fail the run. Every other failure fails the run as before.
+
+```json
+[
+  { "file": "tests/run/example.test.ts", "test": "hold is released", "issue": 1234, "how": "races the timer on a slow disk" },
+  { "file": "tests/example.test.ts", "issue": 1235, "how": "cleanup times out", "platform": "win32" }
+]
+```
+
+- `file`, `issue` and `how` are required. Every entry has an open issue; the entry goes when the issue closes.
+- `test` covers the tests in that file whose full name contains the text. Without `test`, the entry covers only the file failing as a whole: it does not load, or its setup or cleanup fails. It never covers a failing test inside the file, so a new failure there still fails the run.
+- `platform` limits an entry to `win32`, `darwin` or `linux`.
+- A test is added only after it was seen failing on the default branch, in the PR that found it.
+- When a listed test passes, `verify.mjs` says so. Remove the entry in that PR.
+- A list that cannot be read counts as empty, and `verify.mjs` says why.
+
+The list is for the wait between finding a failure and fixing it. It is not a place to park a test: a flaky test still gets its cause found (`moostack/skills/debug/SKILL.md`).
+
 ## Adding tests for a feature
 
 Follow the [test-the-claim skill](../moostack/skills/test-the-claim/SKILL.md) first: it picks the level from what the PR claims. The rules below are about where the tests then go.

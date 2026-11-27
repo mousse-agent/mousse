@@ -19,36 +19,107 @@ Options:
   --no-notes         do not record the run in .task-notes.json
   --help             this text
 
+Failures listed in tests/known-failures.json (tests shown to fail on the default branch too, each with an issue)
+are reported as known and do not fail the run. A listed test that passes is reported so its entry gets removed.
+
 Exit codes: 0 everything passed, 1 something failed or could not run, 2 usage error.
 The record (HEAD sha, working-tree fingerprint, commands, results) lives in .task-notes.json under "tested".
 Rerunning with the same fingerprint replaces the entry for the same command; any change to the files starts a new record.`;
 
 const TYPECHECKS = { web: 'tsconfig.web.json', node: 'tsconfig.node.json' };
+const KNOWN_FAILURES = 'tests/known-failures.json';
+const UNHANDLED = /unhandled (error|rejection)/i;
 
 // ---------- pure digesting ----------
 
-/** Summarises vitest's JSON report: counts plus the first failing tests with trimmed messages. */
-export function summarizeVitestJson(report, { maxFailures = 3 } = {}) {
+/**
+ * Reads the list of tests known to fail on the default branch. Each entry names a file, an issue and how it
+ * fails; `test` narrows it to tests whose full name contains that text, and without `test` it covers only the
+ * file failing as a whole (it does not load, or its setup or cleanup fails). `platform` limits an entry to one
+ * operating system. A list that cannot be read counts as empty, so nothing is excused by a broken file.
+ */
+export function readKnownFailures(root, { platform = process.platform } = {}) {
+  const path = join(root, KNOWN_FAILURES);
+  if (!existsSync(path)) return { entries: [], error: null };
+  let list;
+  try {
+    list = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    return { entries: [], error: `${KNOWN_FAILURES} is not valid JSON (${error.message}); no failure is treated as known` };
+  }
+  if (!Array.isArray(list)) return { entries: [], error: `${KNOWN_FAILURES} must be a list; no failure is treated as known` };
+  const bad = list.findIndex((entry) => !entry || typeof entry.file !== 'string' || !entry.file
+    || !Number.isInteger(entry.issue) || typeof entry.how !== 'string' || !entry.how
+    || (entry.test !== undefined && (typeof entry.test !== 'string' || !entry.test))
+    || (entry.platform !== undefined && typeof entry.platform !== 'string'));
+  if (bad !== -1) return { entries: [], error: `${KNOWN_FAILURES} entry ${bad + 1} needs "file", "issue" (a number) and "how"; no failure is treated as known` };
+  const entries = list
+    .filter((entry) => entry.platform === undefined || entry.platform === platform)
+    .map((entry) => ({ ...entry, file: entry.file.replace(/\\/g, '/') }));
+  return { entries, error: null };
+}
+
+/** Whether a known-failure entry covers this failure: the same file, and the same test or the file as a whole. */
+function coversFailure(entry, failure) {
+  if (entry.file !== failure.file) return false;
+  return entry.test === undefined ? failure.test === null : failure.test !== null && failure.test.includes(entry.test);
+}
+
+/**
+ * Summarises vitest's JSON report: counts plus the first failing tests with trimmed messages. Failures the
+ * `known` list covers are reported apart and do not fail the run; a listed test that passed is reported as
+ * stale so the entry gets removed.
+ */
+export function summarizeVitestJson(report, { maxFailures = 3, known = [] } = {}) {
   const files = report.testResults ?? [];
   const failures = [];
+  const stale = [];
   for (const file of files) {
-    const failedTests = (file.assertionResults ?? []).filter((test) => test.status === 'failed');
+    const name = shortName(file.name);
+    const tests = file.assertionResults ?? [];
+    const failedTests = tests.filter((test) => test.status === 'failed');
     for (const test of failedTests) {
-      failures.push({ where: `${shortName(file.name)} > ${test.fullName ?? test.title}`, message: (test.failureMessages ?? []).join('\n') });
+      const title = test.fullName ?? test.title ?? '';
+      failures.push({ file: name, test: title, where: `${name} > ${title}`, message: (test.failureMessages ?? []).join('\n') });
     }
-    if (file.status === 'failed' && !failedTests.length) {
-      failures.push({ where: shortName(file.name), message: file.message || 'the file failed to run' });
+    const failedWhole = file.status === 'failed' && !failedTests.length;
+    if (failedWhole) failures.push({ file: name, test: null, where: name, message: file.message || 'the file failed to run' });
+    for (const entry of known.filter((item) => item.file === name)) {
+      const passedAgain = entry.test === undefined
+        ? file.status === 'passed'
+        : tests.some((test) => test.status === 'passed' && (test.fullName ?? test.title ?? '').includes(entry.test))
+          && !failedTests.some((test) => (test.fullName ?? test.title ?? '').includes(entry.test));
+      if (passedAgain) stale.push(`  note: ${name}${entry.test ? ` > ${entry.test}` : ''} is listed in ${KNOWN_FAILURES} (#${entry.issue}) but passed; remove the entry`);
     }
   }
+  const excused = [];
+  const unexplained = [];
+  for (const failure of failures) {
+    const entry = known.find((item) => coversFailure(item, failure));
+    if (entry) excused.push(`  ~ known: ${failure.where} (#${entry.issue}: ${entry.how})`);
+    else unexplained.push(failure);
+  }
   const failedTests = report.numFailedTests ?? failures.length;
-  const ok = report.success === true && failures.length === 0 && failedTests === 0;
+  // Every failure must be one this function found and the list covers; a failed run with nothing found stays failed.
+  const ok = unexplained.length === 0 && failedTests <= failures.length && (report.success === true || failures.length > 0);
   const total = report.numTotalTests ?? 0;
-  const summary = `${files.length} file(s), ${total} test(s)${ok ? '' : `, ${failedTests} failed`}`;
+  const failedPart = ok && !failures.length ? '' : `, ${failedTests} failed${excused.length ? ` (${excused.length} known)` : ''}`;
+  const summary = `${files.length} file(s), ${total} test(s)${failedPart}`;
   const clean = (message) => stripAnsi(message).split(/\r?\n/).filter((line) => !/^\s*at /.test(line)).join('\n');
-  const shown = failures.slice(0, maxFailures).map(({ where, message }) =>
+  const shown = unexplained.slice(0, maxFailures).map(({ where, message }) =>
     `  x ${where}\n${indent(trimText(clean(message), { maxLines: 6, maxLineChars: 160 }), '      ')}`);
-  if (failures.length > maxFailures) shown.push(`  … ${failures.length - maxFailures} more failure(s)`);
-  return { ok, summary, failures: shown };
+  if (unexplained.length > maxFailures) shown.push(`  … ${unexplained.length - maxFailures} more failure(s)`);
+  return { ok, summary, failures: shown, known: excused, stale, knownOnly: ok && failures.length > 0 };
+}
+
+/**
+ * Vitest exits non-zero whenever a test fails, so a run whose only failures are known ones still passes. An
+ * unhandled error also exits non-zero and is not in the report, so its mention in the output keeps the run failed.
+ */
+export function vitestPassed(summary, exitStatus, output = '') {
+  if (!summary.ok) return false;
+  if (exitStatus === 0) return true;
+  return summary.knownOnly === true && !UNHANDLED.test(output);
 }
 
 /** Summarises tsc output: error count plus the first errors. */
@@ -90,18 +161,24 @@ function runTool(root, script, args, { timeout }) {
   return { result, ms: Date.now() - started };
 }
 
-function runVitest(root, files, maxFailures) {
+function runVitest(root, files, maxFailures, known) {
   const vitest = nodeTool(root, ['vitest', 'vitest.mjs']);
   const command = `npx vitest run ${files.join(' ')}`;
   if (!vitest) return { command, ok: false, summary: 'vitest is not installed here (run npm ci or link node_modules)', failures: [], ms: 0 };
   const dir = mkdtempSync(join(tmpdir(), 'verify-'));
   const outputFile = join(dir, 'report.json');
   try {
-    const { result, ms } = runTool(root, vitest, ['run', ...files, '--reporter=json', `--outputFile=${outputFile}`], { timeout: 20 * 60_000 });
+    // The JSON report leaves out unhandled errors; the dot reporter prints them, which vitestPassed looks for.
+    const { result, ms } = runTool(root, vitest, ['run', ...files, '--reporter=json', '--reporter=dot', `--outputFile.json=${outputFile}`], { timeout: 20 * 60_000 });
     if (existsSync(outputFile)) {
       try {
-        const summary = summarizeVitestJson(JSON.parse(readFileSync(outputFile, 'utf8')), { maxFailures });
-        return { command, ...summary, ok: summary.ok && result.status === 0, ms };
+        const summary = summarizeVitestJson(JSON.parse(readFileSync(outputFile, 'utf8')), { maxFailures, known });
+        const output = `${result.stderr ?? ''}\n${result.stdout ?? ''}`;
+        const ok = vitestPassed(summary, result.status, output);
+        const failures = summary.knownOnly && !ok
+          ? ['  x vitest reported an unhandled error besides the known failures; run the file directly to see it']
+          : summary.failures;
+        return { command, ...summary, failures, ok, ms };
       } catch { /* fall through to the raw tail */ }
     }
     const tail = trimText(stripAnsi(`${result.stderr ?? ''}\n${result.stdout ?? ''}`).split('\n').slice(-30).join('\n'), { maxLines: 8 });
@@ -149,17 +226,25 @@ export function main(argv, { cwd = process.cwd() } = {}) {
   if (missing.length) { console.error(`test file(s) not found: ${missing.join(', ')}`); return 2; }
 
   const results = [];
-  if (args.positional.length) results.push({ name: 'tests', ...runVitest(root, args.positional, maxFailures) });
+  const lines = [];
+  if (args.positional.length) {
+    const known = readKnownFailures(root);
+    if (known.error) lines.push(`note: ${known.error}`);
+    results.push({ name: 'tests', ...runVitest(root, args.positional, maxFailures, known.entries) });
+  }
   if (typecheck) for (const which of typecheck === 'all' ? ['node', 'web'] : [typecheck]) results.push(runTsc(root, which, maxFailures));
 
-  const lines = [];
+  let knownCount = 0;
   for (const result of results) {
     lines.push(`${result.ok ? 'PASS' : 'FAIL'} ${result.name}: ${result.summary} (${seconds(result.ms)})`);
     lines.push(`  $ ${result.command}`);
     if (!result.ok) lines.push(...result.failures);
+    lines.push(...(result.known ?? []), ...(result.stale ?? []));
+    knownCount += (result.known ?? []).length;
   }
   const ok = results.every((result) => result.ok);
-  lines.push(`verify: ${ok ? 'PASS' : 'FAIL'} @ ${sha.slice(0, 7)}${dirty ? ' + uncommitted changes' : ''} (tree ${tree.slice(0, 7)})`);
+  const knownNote = ok && knownCount ? ` with ${knownCount} known failure(s)` : '';
+  lines.push(`verify: ${ok ? 'PASS' : 'FAIL'}${knownNote} @ ${sha.slice(0, 7)}${dirty ? ' + uncommitted changes' : ''} (tree ${tree.slice(0, 7)})`);
   console.log(lines.join('\n'));
 
   if (!args.bool['no-notes']) {
