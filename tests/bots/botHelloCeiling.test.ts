@@ -84,6 +84,8 @@ describe('a bot\'s hello', () => {
   it('every tool a bot can be listed is in the core set or in exactly one group', () => {
     const listed = new Set([...hello('chat', 'search').listed, ...hello('run', 'search').listed].map((tool) => tool.name))
     const homes = (name: string) => (BOT_CORE_TOOLS.includes(name) ? 1 : 0) + BOT_CATALOGUE.filter((group) => group.tools.includes(name)).length
-    expect([...listed].filter((name) => homes(name) !== 1)).toEqual([])
+    // request_answer has two homes, as the two tools it replaced had: answering an approval in a thread (threads) and
+    // passing the owner's answer on to work (work). A bot reading either group finds it there.
+    expect([...listed].filter((name) => homes(name) !== (name === 'request_answer' ? 2 : 1))).toEqual([])
   })
 })

@@ -9,6 +9,7 @@ import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { BrowserRuntimePort } from '../../src/shared/browser/runtime'
 import { PLAN_TURN_NOTE } from '../../src/mms/run/mcp/appTools/assemble'
+import { canonicalToolName } from '../../src/shared/toolAliases'
 import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { callTool, listTools, VendorAdapter, vendorDaemon, type Mcp, type ToolCallResult, type VendorDaemon } from './appToolVendorFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
@@ -127,8 +128,10 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
     const listed = d!.orch.mcpToolRegistry().listForThread(childThreadId)
     expect(listed.length).toBeGreaterThan(0)
     expect(listed.map((tool) => tool.name)).not.toContain('thread_fork')
-    // A tool that sends a note to its family (`messageIntent`, thread_send) stays listed for a read-only child.
-    for (const tool of listed) expect(tool.access === 'reads' || tool.access === 'readsOthers' || tool.readOnlySafe === true || tool.messageIntent !== undefined, tool.name).toBe(true)
+    // A tool that sends a note to its family (`messageIntent`, thread_send) stays listed for a read-only child, as does one
+    // whose old variant was read-only-safe (thread_stop, as task_cancel was listed; each call is still held to it).
+    const viaVariant = readOnlySafeVariants(d!.orch.mcpToolRegistry())
+    for (const tool of listed) expect(tool.access === 'reads' || tool.access === 'readsOthers' || tool.readOnlySafe === true || tool.messageIntent !== undefined || viaVariant.has(tool.name), tool.name).toBe(true)
     // The parent's list is unaffected.
     expect(d!.orch.mcpToolRegistry().listForThread(parentId).map((tool) => tool.name)).toContain('thread_fork')
   }
@@ -138,6 +141,10 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
     expectReadOnlyPlanListing(parentId, childThreadId)
   }, 30_000)
 })
+
+/** The new tools listed for a read-only child through an old variant of theirs that was read-only-safe (`listsAsVariant`). */
+const readOnlySafeVariants = (registry: { variantTools(): Array<{ name: string; readOnlySafe?: boolean }> }) =>
+  new Set(registry.variantTools().filter((tool) => tool.readOnlySafe === true).map((tool) => canonicalToolName(tool.name)))
 
 describe('listing and per-turn availability over the server', () => {
   let fx: DelegationFixture | undefined
@@ -197,8 +204,12 @@ describe('listing and per-turn availability over the server', () => {
     const { bearer, registry } = await setup({ readOnlyThread: () => true })
     const mcp = bearer()
     const tools = await listTools(mcp)
-    const expected = registry.listFor({ readOnly: false, modeCeiling: 'default' }).filter((tool) => tool.access === 'reads' || tool.access === 'readsOthers' || tool.readOnlySafe || tool.messageIntent !== undefined).map((tool) => tool.name).sort()
+    const viaVariant = readOnlySafeVariants(registry)
+    const expected = registry.listFor({ readOnly: false, modeCeiling: 'default' }).filter((tool) => tool.access === 'reads' || tool.access === 'readsOthers' || tool.readOnlySafe || tool.messageIntent !== undefined || viaVariant.has(tool.name)).map((tool) => tool.name).sort()
     expect(tools).toEqual(expected)
+    // thread_stop is listed for its subagent variant only: a Stop of a thread it names is refused, as before.
+    expect(tools).toContain('thread_stop')
+    expect(refusalOf(await callTool(mcp, 'thread_stop', { threadId: 'thread-b', runId: 'run-b' }))).toMatchObject({ code: 'mousse_read_only' })
     expect(tools).toEqual(expect.arrayContaining(['thread_read', 'queue_list', 'question_ask']))
     expect(tools).not.toContain('thread_fork')
     expect(tools).not.toContain('queue_enqueue')

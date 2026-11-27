@@ -35,6 +35,13 @@ describe('policy table: permission decisions', () => {
   const WRITERS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell', 'BashOutput']
   const EXTERNAL = ['mcp__userserver__lookup', 'mcp__oauthserver__post']
   const NATIVE_SUBAGENT = ['Agent', 'Task']
+  // The hook judges a call by its arguments (an old name is the variant they name), so each tool is called as a model
+  // calls it: the subagent tools name a subagent.
+  const ARGS: Record<string, Record<string, unknown>> = {
+    mcp__mousse__continue_subagent: { subagent: 'API reviewer', prompt: 'Round two' },
+    mcp__mousse__task_status: { subagent: 'API reviewer' },
+    mcp__mousse__task_cancel: { subagent: 'API reviewer' }
+  }
 
   it.each([
     ['not a subagent', undefined, [...READ_ONLY_BUILTINS, ...MOUSSE_READS, ...MOUSSE_WRITES, ...WRITERS, ...EXTERNAL, ...NATIVE_SUBAGENT], []],
@@ -42,8 +49,8 @@ describe('policy table: permission decisions', () => {
     // A subagent may start subagents, so Claude's own subagent tool stays available; its calls pass the same hook.
     ['shared child', SHARED, [...READ_ONLY_BUILTINS, ...MOUSSE_READS, ...NATIVE_SUBAGENT], [...MOUSSE_WRITES, ...WRITERS, ...EXTERNAL]]
   ])('Claude tools for a %s', (_name, child, allowed, denied) => {
-    for (const tool of allowed) expect(claudeChildToolDenial(child, tool), tool).toBeUndefined()
-    for (const tool of denied) expect(claudeChildToolDenial(child, tool), tool).toEqual(expect.any(String))
+    for (const tool of allowed) expect(claudeChildToolDenial(child, tool, ARGS[tool]), tool).toBeUndefined()
+    for (const tool of denied) expect(claudeChildToolDenial(child, tool, ARGS[tool]), tool).toEqual(expect.any(String))
   })
 
   const READ_ONLY = { approvalPolicy: 'on-request', sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false } }
