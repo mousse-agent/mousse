@@ -12370,9 +12370,13 @@ export function turnRightsOf(row: Pick<BotActivationRow, 'lane'> & Partial<Pick<
   return turnRights(row.lane, provenanceOf(row))
 }
 
-/** The tools `row`'s turn holds (`held`) that its start may not call, with what the bot is told (`turnRefusals`). */
+/**
+ * The tools `row`'s turn holds (`held`) that its start may not call, with what the bot is told (`turnRefusals`). The
+ * "may act" cell is `threadsActOf`'s: a held call's result keeps the rule of the turn that held it.
+ */
 function turnRefusalsOf(row: Pick<BotActivationRow, 'lane'> & Partial<Pick<BotActivationRow, 'idempotencyKey' | 'provenance' | 'trigger'>>, held: ReadonlySet<string>): Map<string, string> {
-  return turnRefusals(turnRightsOf(row), held)
+  const rights = turnRightsOf(row)
+  return turnRefusals(rights.threadsAct && !threadsActOf(row as ActivationStart) ? { ...rights, threadsAct: false } : rights, held)
 }
 
 /** The activation as the turn-kind predicates read it: a row, or its lane and key (and its provenance when stored). */

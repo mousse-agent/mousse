@@ -12,6 +12,8 @@ import { botInstructions } from '../../src/mms/bots/instructions'
 import { BOT_AUTOMATIONS_SWITCH } from '../../src/shared/bots/personal/manifest'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { botAppToolRefusal } from '../../src/shared/bots/personal/walls'
+import { listsTool } from '../../src/mms/run/mcp/appTools/authority'
+import type { MousseTool } from '../../src/mms/run/mcp/appTools/types'
 import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
 const ENABLE = 'automation_enable'
@@ -94,6 +96,31 @@ describe('a bot turning automations on', () => {
     await finish(f, other.payload, 'completed', { text: 'Skipped.' })
   })
 
+
+  it('is refused on a held call\'s result whose turn could not act, as acting on threads is (review R1)', async () => {
+    await allow()
+    // The result of a call held in a turn another bot's message started keeps that turn's rule (`actionResultInTx`).
+    const enqueue = (f.bots as unknown as { enqueue(botId: string, key: string, trigger: object, lane: string): Promise<{ id: string }> }).enqueue.bind(f.bots)
+    const held = await enqueue(botId, 'action:a1', { kind: 'manual', input: 'The call went through.', threadsReadOnly: 'not_owner' }, 'chat')
+    await flush()
+    const result = await start(f, held.id)
+    expect(f.store.activation(held.id)?.provenance).toBe('action_result')
+    expect(botAppToolRefusal(result.prepared.authority, ENABLE, {})).toMatch(/Not on this kind of turn/)
+    await finish(f, result.payload, 'completed', { text: 'Skipped.' })
+    // One from a turn that could act may turn automations on.
+    const acting = await enqueue(botId, 'action:a2', { kind: 'manual', input: 'The call went through.' }, 'chat')
+    await flush()
+    const free = await start(f, acting.id)
+    expect(botAppToolRefusal(free.prepared.authority, ENABLE, {})).toBeUndefined()
+    await finish(f, free.payload, 'completed', { text: 'On.' })
+  })
+
+  it('is listed to a bot\'s thread only while its turn holds it, never to a consult (review R2)', () => {
+    const tool = { name: ENABLE, listed: () => true } as unknown as MousseTool
+    expect(listsTool(tool, { threadId: 't', botRole: 'activation', botTurnTools: new Set([ENABLE]) })).toBe(true)
+    expect(listsTool(tool, { threadId: 't', botRole: 'activation', botTurnTools: new Set(['automation_draft_save']) })).toBe(false)
+    expect(listsTool(tool, { threadId: 't', botRole: 'context', botTurnTools: new Set([ENABLE]) })).toBe(false)
+  })
   it('goes with the automation tools\' switch, and its own row switches it alone', async () => {
     await allow()
     f.bots.service.setPermission(botId, BOT_AUTOMATIONS_SWITCH, false)

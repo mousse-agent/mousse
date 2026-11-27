@@ -407,11 +407,11 @@ const TASK_TOOL_SET: ReadonlySet<string> = new Set(BOT_TASK_TOOLS)
 
 /**
  * Whether a bot's thread lists `name` only while the turn holds it: the tools of a group (the owner's threads, the
- * computer, the profiler, themes, scheduled jobs, secrets, quick actions) and the task list. A turn holds them only
+ * computer, the profiler, themes, scheduled jobs, secrets, quick actions), the task list and `automation_enable`. A turn holds them only
  * where `compileBotThread` gave them (never a consult; a subagent only what a thread's subagent may use).
  */
 export function isBotTurnHeldTool(name: string): boolean {
-  return THREAD_TOOL_NAMES.has(name) || PROFILER_TOOL_SET.has(name) || THEME_TOOL_SET.has(name) || GROUPED_TOOLS.has(name) || TASK_TOOL_SET.has(name)
+  return THREAD_TOOL_NAMES.has(name) || PROFILER_TOOL_SET.has(name) || THEME_TOOL_SET.has(name) || GROUPED_TOOLS.has(name) || TASK_TOOL_SET.has(name) || name === BOT_AUTOMATION_ENABLE_TOOL
 }
 
 /**
