@@ -37,6 +37,22 @@
       "expiresAt": "2026-11-26T17:29:52.364Z"
     },
     {
+      "task": "bound-idle-agent-processes",
+      "session": "Animatrix-c69d02",
+      "machine": "Animatrix",
+      "branch": "bound-idle-agent-processes",
+      "paths": [
+        "src/mms/harness/acp/session.ts",
+        "src/mms/harness/pi/engine.ts",
+        "src/mms/harness/vendors/claude/liveSession.ts",
+        "src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService.ts",
+        "src/mms/harness/vendors/codex/CodexProviderService.ts",
+        "src/mms/harness/cursor/session.ts"
+      ],
+      "claimedAt": "2026-11-27T05:43:32.082Z",
+      "expiresAt": "2026-11-27T07:43:32.082Z"
+    },
+    {
       "task": "lan-first-paths",
       "session": "Avarnics-Mac-mini.local-8600b4",
       "machine": "Avarnics-Mac-mini.local",
