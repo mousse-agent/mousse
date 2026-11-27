@@ -255,9 +255,19 @@ describe('the status forms runtimes report a refusal in', () => {
     ['unexpected status 400 Bad Request: bad, url: http://x/v1/responses, request id: r1', 400, 'bad'],
     ['[API Error: got status: 429 Too Many Requests. {"error":{"message":"Resource exhausted"}}]', 429, '{"error":{"message":"Resource exhausted"}}'],
     ['openai API error (404): no such model', 404, 'no such model'],
-    ['HTTP 502: Bad gateway', 502, 'Bad gateway']
+    ['HTTP 502: Bad gateway', 502, 'Bad gateway'],
+    ['{"error":{"message":"Bad Request","type":null},"status":400}', 400, '{"error":{"message":"Bad Request","type":null},"status":400}']
   ])('%s', (text, status, body) => {
     expect(readProviderStatus(text)).toEqual({ status, body })
+  })
+
+  it.each([
+    ['a JSON error without a status', '{"error":{"message":"x"}}'],
+    ['a status that is no error', '{"error":{"message":"x"},"status":200}'],
+    ['a status without an error', '{"status":400}'],
+    ['text that is not JSON', '{not json, status: 400}']
+  ])('reads no status from %s', (_name, text) => {
+    expect(readProviderStatus(text)).toBeUndefined()
   })
 
   it('a reported failure without a status shows its message alone; an ACP label is dropped', () => {

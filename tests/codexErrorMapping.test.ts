@@ -46,6 +46,17 @@ describe('codexHarnessError (managed Codex)', () => {
     expect(codexHarnessError(busy)).toMatchObject({ message: '503 · The service is overloaded.', errorInfo: { category: 'unavailable', retryable: true } })
   })
 
+  it('shows a refusal Codex reports as OpenAI\'s error envelope with no status of its own as the provider\'s status and message', () => {
+    // Recorded from Codex 0.162.1 (a `/v1/responses` 400 with a bare "Bad Request" body, issue #1999).
+    const envelope = (status: number, message: string) => JSON.stringify({ error: { message, type: null, code: null, param: null }, status }, null, 2)
+    const badRequest = failure({ message: envelope(400, 'Bad Request'), codexErrorInfo: 'other' })
+    expect(codexHarnessError(badRequest, 'codex-2')).toMatchObject({ code: 'provider_api_error', message: '400 · Bad Request', errorInfo: { category: 'invalid', retryable: false }, details: { provider: 'codex', status: 400 } })
+    const busy = failure({ message: envelope(503, 'Upstream busy'), codexErrorInfo: 'other' })
+    expect(codexHarnessError(busy)).toMatchObject({ message: '503 · Upstream busy', errorInfo: { category: 'unavailable', retryable: true } })
+    // A JSON message without a status is still Codex's own error.
+    expect(codexHarnessError(failure({ message: JSON.stringify({ error: { message: 'stream ended' } }), codexErrorInfo: 'other' }))).toMatchObject({ code: 'protocol' })
+  })
+
   it('leaves a context overflow and other errors unchanged', () => {
     const overflow = failure({ codexErrorInfo: 'contextWindowExceeded', message: 'context window exceeded' })
     expect(codexHarnessError(overflow)).toBe(overflow)
