@@ -1393,8 +1393,12 @@ export class PiRpcEngine implements ProviderAdapter {
     const definition = turn.host.definition
     let input = request.input
     let rewritten: Record<string, unknown> | undefined
+    // An app tool is judged as the registry will run it (`resolveAppCall`): its variant, with the arguments the variant
+    // takes (Pi's extension sends Pi's call id as the clientRequestId, which the registry keys a retry by).
+    const app = builtin ? undefined : turn.host.tools.resolveAppCall?.(request.toolName, { ...request.input, clientRequestId: request.toolCallId })
+    if (app && 'refused' in app) return { allow: false, reason: app.refused.text }
     // An app or MCP tool is approved as the registry will run it: without transport fields.
-    if (definition && !builtin) input = withoutTransportFields(request.input)
+    if (definition && !builtin) input = withoutTransportFields(app?.args ?? request.input)
     if (access || ((definition || turn.host.bot) && builtin)) {
       input = { ...request.input }
       const argument = PI_PATH_ARGUMENTS[request.toolName]
@@ -1432,7 +1436,7 @@ export class PiRpcEngine implements ProviderAdapter {
         const decided = bot.check({ kind: 'mcp', server: mcp.server, tool: mcp.tool, serverName: mcp.serverName, args })
         if (!decided.ok) return refuse('not_granted', checkMessage(decided))
       } else {
-        const refusal = botAppToolRefusal(bot, request.toolName, args)
+        const refusal = botAppToolRefusal(bot, app?.variant ?? request.toolName, app ? withoutTransportFields(app.args) : args)
         if (refusal) return refuse('not_granted', refusal)
       }
     }

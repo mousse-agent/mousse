@@ -7,7 +7,7 @@ import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 import { BOT_MEMORY_TOOLS } from './memory'
 import { BOT_ITEM_TOOLS } from './items'
 import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from './catalogue'
-import { canonicalToolName } from '../../toolAliases'
+import { canonicalGrantName } from '../../toolAliases'
 
 /**
  * A bot manifest's canonical form, the subset rule of approval, and the plain words the approval
@@ -408,8 +408,8 @@ export function isBotTurnHeldTool(name: string): boolean {
  * holds).
  */
 export function botGrantTool(name: string): string {
-  // An old name asks for, and is granted as, the tool it was renamed to.
-  const tool = canonicalToolName(name)
+  // An old name asks for, and is granted as, the tool it was renamed to; one that became a variant, as that variant.
+  const tool = canonicalGrantName(name)
   if (BROWSER_TOOLS.has(tool)) return BOT_BROWSER_PERMISSION
   if (PROFILER_TOOL_SET.has(tool)) return BOT_PROFILER_PERMISSION
   if (THEME_TOOL_SET.has(tool)) return BOT_THEMES_PERMISSION
@@ -420,7 +420,7 @@ export function botGrantTool(name: string): string {
 
 /** Whether `tool` is one of the bot's own tools: not a permission, never listed in About. */
 export function isOwnBotAppTool(tool: string): boolean {
-  return OWN_APP_TOOLS.has(canonicalToolName(tool))
+  return OWN_APP_TOOLS.has(canonicalGrantName(tool))
 }
 
 /**
@@ -500,8 +500,8 @@ export function manifestProblem(value: unknown): string | undefined {
   const strings = (list: unknown) => Array.isArray(list) && list.every((item) => typeof item === 'string' && item.length > 0 && item.length <= 256)
   if (!Array.isArray(manifest.tools) || !manifest.tools.every((tool) => typeof tool === 'string' && isNeutralTool(tool))) return 'A built-in tool is not one Mousse knows.'
   if (!strings(manifest.appTools)) return 'An app tool name is invalid.'
-  // A grant an older build approved may name a tool by its old name (`canonicalToolName`): it is that tool.
-  const refusedApp = (manifest.appTools as string[]).find((tool) => !BOT_APP_TOOLS.has(canonicalToolName(tool)) && !BOT_RETIRED_APP_TOOLS.has(tool))
+  // A grant an older build approved may name a tool by its old name (`canonicalGrantName`): it is that tool (or, for a variant, that variant).
+  const refusedApp = (manifest.appTools as string[]).find((tool) => !BOT_APP_TOOLS.has(canonicalGrantName(tool)) && !BOT_RETIRED_APP_TOOLS.has(tool))
   if (refusedApp !== undefined) return `A bot can't be given the Mousse tool ${refusedApp}: it would reach other threads, act in your name or ask you, outside the bot's permissions.`
   if (!strings(manifest.skills)) return 'A skill id is invalid.'
   if (!Array.isArray(manifest.mcp) || !manifest.mcp.every((pair) => pair && typeof pair === 'object' && typeof pair.serverId === 'string' && typeof pair.tool === 'string' && MCP_PART.test(pair.serverId) && MCP_PART.test(pair.tool))) return 'An MCP tool is invalid.'
@@ -571,9 +571,9 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
   const given = withFullTrust(granted)
   const tools = new Set(given.tools)
   for (const tool of wanted.tools) if (!tools.has(tool)) lines.push(toolLine(tool))
-  // Under the names tools have now: a grant stored under an old name holds its new one (`canonicalToolName`).
-  const appTools = new Set(given.appTools.map(canonicalToolName))
-  for (const tool of wanted.appTools) if (!appTools.has(canonicalToolName(tool)) && !BOT_RETIRED_APP_TOOLS.has(tool)) lines.push(appToolLine(tool))
+  // Under the names tools have now: a grant stored under an old name holds its new one (`canonicalGrantName`).
+  const appTools = new Set(given.appTools.map(canonicalGrantName))
+  for (const tool of wanted.appTools) if (!appTools.has(canonicalGrantName(tool)) && !BOT_RETIRED_APP_TOOLS.has(tool)) lines.push(appToolLine(tool))
   const mcp = new Set(granted.mcp.map(mcpIdentity))
   for (const pair of wanted.mcp) if (!mcp.has(mcpIdentity(pair))) lines.push(mcpLine(pair))
   // A tool the grant holds as asking first, wanted without asking: a looser hold is more, as a new tool is.
@@ -693,8 +693,8 @@ export function intersectManifest(wanted: BotManifest, granted: BotManifest): Bo
   }
   return {
     tools: within(wanted.tools, granted.tools, (tool) => tool),
-    // Under the names tools have now: a grant stored under an old name holds its new one (`canonicalToolName`).
-    appTools: within([...new Set(wanted.appTools.map(canonicalToolName))], granted.appTools.map(canonicalToolName), (tool) => tool),
+    // Under the names tools have now: a grant stored under an old name holds its new one (`canonicalGrantName`).
+    appTools: within([...new Set(wanted.appTools.map(canonicalGrantName))], granted.appTools.map(canonicalGrantName), (tool) => tool),
     mcp: within(wanted.mcp, granted.mcp, mcpIdentity).map(pair => ({ ...pair, ...(granted.mcp.find(g => mcpIdentity(g) === mcpIdentity(pair))?.level === 'asks_first' ? { level: 'asks_first' as const } : {}) })),
     skills: within(wanted.skills, granted.skills, (skill) => skill),
     workspace: null,

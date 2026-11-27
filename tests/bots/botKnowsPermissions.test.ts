@@ -211,7 +211,7 @@ describe('the stated permissions match the tools a run is given', () => {
 
 describe("a bot's thread lists only tools a bot can hold", () => {
   const tool = (name: string): MousseTool => ({ name, description: name, inputSchema: { type: 'object', properties: {} }, access: 'reads', class: 'read', handler: async () => ({ text: '' }) }) as unknown as MousseTool
-  const names = ['delegate_task', 'thread_read', 'queue_enqueue', 'browser_open', 'browser_request_human', 'web_fetch', 'work_start', 'permission_ask']
+  const names = ['integrate_delegation', 'thread_read', 'queue_enqueue', 'browser_open', 'browser_request_human', 'web_fetch', 'work_start', 'permission_ask']
 
   it('lists no delegation or queue tools on a bot thread, only the thread tools "use your threads" gives, and every tool on any other', () => {
     const registry = new ToolRegistry({ activeRunId: () => null, botRole: (threadId) => (threadId === 'bot-home' ? 'activation' : undefined) })
@@ -242,8 +242,8 @@ describe("a bot's thread lists only tools a bot can hold", () => {
       turns.register(appTurn({ threadId: 'bot-home', runId: run.runId, bot: authority(['permission_ask']) }))
       // Not "Browser tools are not bound for this turn": the bot is told it is not allowed, and to escalate.
       expect(await registry.call('browser_open', { url: 'https://example.com' }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual(refused('not_granted', NOT_ALLOWED))
-      // Any other tool outside the grant keeps its wall.
-      expect(await registry.call('delegate_task', { prompt: 'x', title: 'x', workspace: 'shared' }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual(refused('not_granted', 'This bot is not allowed to use delegate_task.'))
+      // Any other tool outside the grant keeps its wall. A bot's subagents start through the bot port, never an agent's.
+      expect(await registry.call('delegate_task', { prompt: 'x', title: 'x', workspace: 'shared' }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual(refused('not_granted', 'A bot starts its subagents with subagent_start, and its work with work_start: thread_create starts threads (kind "thread").', { variant: 'delegate_task' }))
     } finally {
       fx.dispose()
     }

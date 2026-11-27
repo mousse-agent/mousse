@@ -1,20 +1,22 @@
 import type { RunEngine } from '../../RunEngine'
 import type { AppToolHost } from './host'
-import type { JsonSchema, MousseTool } from './types'
+import { refused } from './refusal'
+import type { JsonSchema, MousseTool, ToolOutcome, ToolVariant, VariantSite } from './types'
 
 /**
- * `thread_create` (docs/plans/tool-api.md §2.1): one tool that starts a subagent or a thread. Each kind is held to a
- * declaration of its own (`MousseTool.kinds`), so who may start what is read here:
+ * `thread_create` (docs/plans/tool-api.md §2.1): one tool that starts a subagent or a thread. Each kind is a variant with
+ * a declaration of its own (`MousseTool.variants`), so who may start what is read here:
  *
  * - `kind: subagent` needs `threads.delegate`, which every thread holds, readers and Plan included: a child no wider
  *   than its caller, here or on another computer (`computer`). It is `delegate_task`'s declaration and host
- *   (`delegation.ts`), whose old name is an alias of this kind (`MOUSSE_TOOL_ALIASES`).
+ *   (`delegation.ts`), under that name: a grant (a bot's, a definition's) judges it as `delegate_task`, whose old name
+ *   is an alias of this kind (`MOUSSE_TOOL_ALIASES`).
  * - `kind: thread` needs `threads.start`, which a Plan ceiling and a read-only child lack, and a project: the thread
  *   family's independent thread (`thread.ts`). An agent's is a handoff (another project, or a thread the person asked
  *   for) and always shows in the person's sidebar; `hidden` is a personal bot's (#2004, #2003).
  *
- * The tool is listed and usable as its widest kind, the subagent. A bot's turn starts threads only: its subagents and
- * its work start through the bot port (`subagent_start`, `work_start`).
+ * The tool is listed and held where either kind is. A bot's turn starts threads only: its subagents and its work start
+ * through the bot port (`subagent_start`, `work_start`).
  */
 export type ThreadCreateKind = 'subagent' | 'thread'
 
@@ -26,40 +28,43 @@ const KIND_SCHEMA: JsonSchema = {
 
 /** `thread_create`, from the declarations of its two kinds. Without the run engine there is no thread kind. */
 export function threadCreateTool(kinds: { subagent: MousseTool; thread?: MousseTool }, host: Pick<AppToolHost, 'threadMeta'>, engine?: RunEngine): MousseTool {
-  const declarations: Partial<Record<ThreadCreateKind, MousseTool>> = {
-    subagent: { ...kinds.subagent, name: 'thread_create', capabilities: ['threads.delegate'] },
+  const variants: Partial<Record<ThreadCreateKind, MousseTool>> = {
+    subagent: { ...kinds.subagent, capabilities: ['threads.delegate'] },
     ...(kinds.thread ? { thread: kinds.thread } : {})
   }
   const properties = { subagent: propertiesOf(kinds.subagent.inputSchema), thread: propertiesOf(kinds.thread?.inputSchema) }
-  const { definition: _definition, ...subagent } = declarations.subagent!
+  const { definition: _definition, ...subagent } = kinds.subagent
   return {
     ...subagent,
+    name: 'thread_create',
     description: `Start a subagent or a thread; kind is required. kind "subagent": ${kinds.subagent.description}${kinds.thread ? ` kind "thread": ${kinds.thread.description}` : ''}`,
     inputSchema: { type: 'object', properties: { kind: KIND_SCHEMA, ...mergedProperties(properties.subagent, properties.thread) }, required: ['kind'] },
     // A bot's thread lists the thread kind only, as a bot uses it (`asBotTool`).
     ...(kinds.thread ? { botDescription: kinds.thread.botDescription ?? kinds.thread.description, botInputSchema: kinds.thread.botInputSchema ?? kinds.thread.inputSchema, botClass: kinds.thread.class } : {}),
-    kinds: {
-      declarations: declarations as Record<string, MousseTool>,
-      of: (args, { caller, turn, toolCallId }) => {
-        if (args.kind !== undefined && args.kind !== 'subagent' && args.kind !== 'thread') throw new Error('kind must be "subagent" or "thread".')
-        const older = args.kind === undefined ? olderCall(args, { caller, turn, toolCallId }, host, engine) : undefined
-        const kind: ThreadCreateKind = older?.kind ?? (args.kind as ThreadCreateKind)
-        const call = older?.args ?? args
-        if (turn.bot && kind === 'subagent') throw new Error('A bot starts its subagents with subagent_start, and its work with work_start: thread_create starts threads (kind "thread").')
-        if (!declarations[kind]) throw new Error(`kind "${kind}" is not available here.`)
-        // An argument of the other kind only is a mistake about the kind, never one to drop.
-        const other = kind === 'subagent' ? 'thread' : 'subagent'
-        const foreign = Object.keys(call).filter((key) => key in properties[other] && !(key in properties[kind]))
-        if (foreign.length) throw new Error(`${foreign.join(', ')} ${foreign.length === 1 ? 'is' : 'are'} for kind "${other}", not "${kind}".`)
-        return { kind, args: { ...call, kind } }
-      }
-    },
-    handler: (args, ctx) => {
-      const declaration = declarations[args.kind as ThreadCreateKind]
-      if (!declaration) throw new Error('kind must be "subagent" or "thread".')
-      return declaration.handler(args, ctx)
+    describe: () => 'Start a subagent or a thread',
+    variants: Object.values(variants) as MousseTool[],
+    variantOf: (args, site) => kindOf(args, site, variants, properties, host, engine),
+    handler: () => {
+      throw new Error('thread_create runs as the kind its call names (variantOf).')
     }
   }
+}
+
+/** The kind a call is, and the arguments that kind takes; an older caller names none (`olderCall`). */
+function kindOf(args: Record<string, unknown>, site: VariantSite, variants: Partial<Record<ThreadCreateKind, MousseTool>>, properties: Record<ThreadCreateKind, Record<string, JsonSchema>>, host: Pick<AppToolHost, 'threadMeta'>, engine?: RunEngine): ToolVariant | { refused: ToolOutcome } {
+  if (args.kind !== undefined && args.kind !== 'subagent' && args.kind !== 'thread') return { refused: refused('invalid_arguments', 'kind must be "subagent" or "thread".') }
+  const older = args.kind === undefined ? olderCall(args, site, host, engine) : undefined
+  const kind: ThreadCreateKind = older?.kind ?? (args.kind as ThreadCreateKind)
+  const call = older?.args ?? args
+  if (site.turn.bot && kind === 'subagent')
+    return { refused: refused('not_granted', 'A bot starts its subagents with subagent_start, and its work with work_start: thread_create starts threads (kind "thread").', { variant: 'delegate_task' }) }
+  const tool = variants[kind]
+  if (!tool) return { refused: refused('unavailable', `kind "${kind}" is not available here.`) }
+  // An argument of the other kind only is a mistake about the kind, never one to drop.
+  const other = kind === 'subagent' ? 'thread' : 'subagent'
+  const foreign = Object.keys(call).filter((key) => key in properties[other] && !(key in properties[kind]))
+  if (foreign.length) return { refused: refused('invalid_arguments', `${foreign.join(', ')} ${foreign.length === 1 ? 'is' : 'are'} for kind "${other}", not "${kind}".`) }
+  return { tool, args: { ...call, kind } }
 }
 
 /**
@@ -68,12 +73,12 @@ export function threadCreateTool(kinds: { subagent: MousseTool; thread?: MousseT
  * sight: that is a subagent now (#2004), unless a thread was made for this request already (a retry across the upgrade
  * finds it). Hidden anywhere else, it is still a thread, and the thread kind refuses an agent's `hidden`.
  */
-function olderCall(args: Record<string, unknown>, ctx: { caller: { threadId: string }; turn: { bot?: unknown }; toolCallId: string }, host: Pick<AppToolHost, 'threadMeta'>, engine?: RunEngine): { kind: ThreadCreateKind; args?: Record<string, unknown> } {
+function olderCall(args: Record<string, unknown>, ctx: VariantSite, host: Pick<AppToolHost, 'threadMeta'>, engine?: RunEngine): { kind: ThreadCreateKind; args?: Record<string, unknown> } {
   const message = typeof args.firstMessage === 'string' && args.firstMessage.trim() ? args.firstMessage : undefined
-  const ownProject = typeof args.projectId === 'string' && args.projectId === host.threadMeta?.(ctx.caller.threadId)?.projectId
+  const ownProject = typeof args.projectId === 'string' && args.projectId === host.threadMeta?.(ctx.threadId)?.projectId
   if (ctx.turn.bot || args.hidden !== true || args.computer !== undefined || !message || !ownProject) return { kind: 'thread' }
   const request = typeof args.clientRequestId === 'string' && args.clientRequestId ? args.clientRequestId : ctx.toolCallId
-  if (engine?.store.getReceipt(`thread_create:${ctx.caller.threadId}:${request}`)) return { kind: 'thread' }
+  if (request && engine?.store.getReceipt(`thread_create:${ctx.threadId}:${request}`)) return { kind: 'thread' }
   // A subagent reports back to its parent, so `notify` has nothing to add; `hidden` is what it is.
   const { projectId: _project, fromProjectId: _from, firstMessage: _message, workspace, mode, hidden: _hidden, notify: _notify, title, ...rest } = args
   const named = typeof title === 'string' && title.trim() ? title.trim() : message.trim().split('\n')[0].slice(0, 60)

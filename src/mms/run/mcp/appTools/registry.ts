@@ -310,6 +310,12 @@ function asBotTool(tool: MousseTool): MousseTool {
     : tool
 }
 
+/** Whether `text` names the thread `threadId` as a whole id (not inside another id, such as a request's). */
+function namesThread(text: string, threadId: string): boolean {
+  const escaped = threadId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(^|[^\\w-])${escaped}([^\\w-]|$)`).test(text)
+}
+
 /**
  * The tool a `use_tool` call names and its arguments, with the `clientRequestId` a retry gives taken out of them as
  * Mousse's MCP server takes it out of a direct call; or why the call is malformed.
@@ -598,7 +604,7 @@ export class ToolRegistry {
         const named = this.tools.get(inner.name)
         if (!named && this.options.userMcp && turn.bot.mcpTools?.some((offered) => offered.providerName === inner.name))
           return await this.callUserMcp(inner.name, inner.args, { ...site, request: innerRequest })
-        if (!named || !toolNeeds(named).callable || inner.name === BOT_USE_TOOL || !botMayBeOffered(inner.name))
+        if (!named || !toolNeeds(named).callable || inner.name === BOT_USE_TOOL || !(named.variants ?? [named]).some((tool) => botMayBeOffered(tool.name)))
           return refused('unknown_tool', `You have no tool named ${inner.name}. tool_catalogue lists each group's tools.`)
         return this.inOwnerZone(turn, await this.callAdmitted(inner.name, this.variantOf(inner.name, named, inner.args, turn), inner.args, caller, { ...site, request: innerRequest }))
       }
@@ -626,20 +632,46 @@ export class ToolRegistry {
    * (`compileTool`), step by step: the bot's grant, the targets, what the turn lacks, a definition's grants, asking
    * first, then its handler.
    */
-  private async callAdmitted(name: string, registered: MousseTool, args: Record<string, unknown>, caller: McpCaller, site: CallSite): Promise<ToolOutcome> {
-    const { active, turn, request } = site
-    // A tool whose calls come in kinds (`kinds`): every check below holds the call to its kind's declaration, and the
-    // tool runs it with its kind named.
-    let tool = registered
-    if (registered.kinds) {
-      try {
-        const call = registered.kinds.of(args, { caller, turn, toolCallId: request.toolCallId })
-        tool = registered.kinds.declarations[call.kind]
-        args = call.args
-      } catch (error) {
-        return refused('invalid_arguments', error instanceof Error ? error.message : String(error))
-      }
+  private async callAdmitted(name: string, called: MousseTool, calledArgs: Record<string, unknown>, caller: McpCaller, site: CallSite): Promise<ToolOutcome> {
+    // A tool of variants: the call is the variant its arguments name, with that variant's authority, under this name.
+    const variant = called.variantOf?.(calledArgs, { threadId: caller.threadId, turn: site.turn, toolCallId: site.request.toolCallId })
+    if (variant && 'refused' in variant) return variant.refused
+    if (!variant?.conceals) return this.callVariant(name, variant ?? { tool: called, args: calledArgs }, caller, site)
+    // The variant read a thread from what the call named: a refusal that would name it (one the caller may not reach)
+    // says only that there is no such request.
+    const { threadId, refusal } = variant.conceals
+    let outcome: ToolOutcome
+    try {
+      outcome = await this.callVariant(name, variant, caller, site)
+    } catch (error) {
+      const refusedNow = refusalOutcome(error)
+      if (!refusedNow) throw error
+      outcome = refusedNow
     }
+    return outcome.isError && namesThread(outcome.text, threadId) ? refusal : outcome
+  }
+
+  /**
+   * How every gate judges a call before the registry runs it (`ToolHost.resolveAppCall`): the canonical name, the
+   * variant it is (a bot's grant names variants), and the arguments it runs with, read as `callAdmitted` reads them, so
+   * a runtime's gate, a definition's grant and approval digest, and the registry all see the same call.
+   */
+  resolveCall(calledAs: string, rawArgs: Record<string, unknown>, at: { threadId: string; runId: string }): { name: string; variant: string; args: Record<string, unknown> } | { refused: ToolOutcome } {
+    const { clientRequestId, ...given } = rawArgs
+    const { name, args } = canonicalToolCall(calledAs, given)
+    const tool = this.tools.get(name)
+    const turn = this.options.turns?.get(at.runId)
+    if (!tool?.variantOf || !turn) return { name, variant: name, args }
+    // The call's id as the MCP server will key it (`mcp:<clientRequestId>`), so a retry resolves as its receipt says.
+    const key = typeof clientRequestId === 'string' && clientRequestId.trim() ? { toolCallId: `mcp:${clientRequestId.trim()}` } : {}
+    const variant = tool.variantOf(args, { threadId: at.threadId, turn, ...key })
+    return 'refused' in variant ? variant : { name, variant: variant.tool.name, args: variant.args }
+  }
+
+  /** `callAdmitted` once the call is its variant. */
+  private async callVariant(name: string, variant: { tool: MousseTool; args: Record<string, unknown> }, caller: McpCaller, site: CallSite): Promise<ToolOutcome> {
+    const { active, turn, request } = site
+    const { tool, args } = variant
     // A native helper's call holds none of what the run is offered only because it is not a subagent (asking the person,
     // goals, tasks, secrets, quick actions): availability alone would let it call them.
     if (request.helper && tool.offered && tool.offered(turn) !== true && tool.offered(hostingTurn(turn)) === true)
@@ -681,8 +713,8 @@ export class ToolRegistry {
       // so it stops at its deadline or when the owner writes.
       const quick = BOT_CHAT_QUICK_TOOLS.has(name) ? turn.bot?.quickCalls : undefined
       outcome = quick
-        ? await quick.run({ tool: name, readOnly: true, signal: ctx.signal, call: (signal) => this.runHandler(registered, args, { ...ctx, signal }, turn.toolAccess) })
-        : await this.runHandler(registered, args, ctx, turn.toolAccess)
+        ? await quick.run({ tool: name, readOnly: true, signal: ctx.signal, call: (signal) => this.runHandler(tool, args, { ...ctx, signal }, turn.toolAccess) })
+        : await this.runHandler(tool, args, ctx, turn.toolAccess)
     } catch (error) {
       if (ledgerId) ledger?.failed(ledgerId)
       if (error instanceof McpToolError) throw error

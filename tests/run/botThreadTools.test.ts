@@ -160,9 +160,11 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     const { registry, runId } = await world(options)
     const thread = (names: string[]) => names.filter(isBotThreadTool).sort()
     // Of the tools this registry has (the git tools need a host that reads repositories).
-    const expected = shown.filter((name) => registry.get(name)).sort()
+    // Answering a thread's approvals (\`approval_respond\`) is a kind of \`request_answer\`: listed with it.
+    const expected = shown.filter((name) => registry.get(name)?.name === name).sort()
     expect(thread(registry.listForThread('home', 'default', runId).map((tool) => tool.name))).toEqual(expected)
     expect(thread(registry.listForTurn('home', runId).map((tool) => tool.name))).toEqual(expected)
+    expect(registry.listForThread('home', 'default', runId).some((tool) => tool.name === 'request_answer')).toBe(shown.includes('approval_respond'))
     // With no turn of its own running, none; and never what no bot can hold.
     expect(thread(registry.listForThread('home', 'default').map((tool) => tool.name))).toEqual([])
     expect(registry.listForThread('home', 'default', runId).map((tool) => tool.name).filter((name) => name === 'delegate_task' || name === 'continue_subagent')).toEqual([])

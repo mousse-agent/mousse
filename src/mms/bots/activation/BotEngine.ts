@@ -60,7 +60,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
-import { canonicalToolName } from '../../../shared/toolAliases'
+import { canonicalGrantName } from '../../../shared/toolAliases'
 import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_AUTOMATIONS_SWITCH, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_DROPPED_PERMISSIONS, BOT_IMAGE_TOOL, BOT_RETIRED_APP_TOOLS, BOT_MCP_SERVER_SWITCH, BOT_MCP_SWITCH, BOT_SKILLS_SWITCH, BOT_THREADS_PERMISSION, BOT_CHAT_NATIVE_OFF, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, isBotDefaultSwitch, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
@@ -3377,7 +3377,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // holds (it hands those jobs off), a run what it holds itself, and whether its browser could be offered.
     const told = this.instructionsOf(definition, definition.main, row.lane, {
       // MCP servers set up later reach the bot without asking, unless its owner switched MCP off for it.
-      canAskMcp: effective.appTools.some((tool) => canonicalToolName(tool) === 'permission_ask') && !this.defaultsOff(row.botId).mcp, scheduled: row.trigger.kind === 'schedule',
+      canAskMcp: effective.appTools.some((tool) => canonicalGrantName(tool) === 'permission_ask') && !this.defaultsOff(row.botId).mcp, scheduled: row.trigger.kind === 'schedule',
       // Guidance follows the actual local service-read authority; hand-started runs have none.
       secretFetchOffered: Boolean(authority.secretFetch),
       allowed: { ...botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)), ...(compiled.permissions.appTools.includes(BOT_IMAGE_TOOL) ? { images: true } : {}) },
@@ -9715,7 +9715,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     questions: {
       ask: (botId, activationId, asks) => this.askOwner(botId, activationId, asks),
       withdraw: (botId, activationId, questionId) => this.withdrawQuestion(botId, activationId, questionId),
-      relay: (botId, activationId, questionId, answer) => this.relayAnswer(botId, activationId, questionId, answer)
+      relay: (botId, activationId, questionId, answer, requestKey) => this.relayAnswer(botId, activationId, questionId, answer, requestKey),
+      asked: (botId, questionId) => {
+        const question = this.store.question(questionId)
+        return question?.botId === botId && question.lane === 'run'
+      }
     },
     cards: {
       show: (botId, activationId, card) => this.showCard(botId, activationId, card)
@@ -10157,9 +10161,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * ("go with the second flat"). Only a chat turn the owner's own message or tapped answer started (`relayAnswer` in
    * `BOT_TURN_KINDS`: the tap posts the owner's row, which the answer keeps), and only for a
    * question work of this bot waits on. The answer keeps the owner's message it came from (`answer_message`), so Forget
-   * reaches it, and the bubble reads "Answered in chat".
+   * reaches it, and the bubble reads "Answered in chat". A retry of the call (`requestKey`) replays what it did, and never
+   * answers again: not even the same question opened again because the owner forgot an answer the work had not read.
    */
-  relayAnswer(botId: string, activationId: string, questionId: string, answer: string): { ok: true; title: string } | { ok: false; text: string } {
+  relayAnswer(botId: string, activationId: string, questionId: string, answer: string, requestKey?: string): { ok: true; title: string; replayed?: true } | { ok: false; text: string } {
     const row = this.store.activation(activationId)
     if (!row || row.botId !== botId || !turnRightsOf(row).relayAnswer) return { ok: false, text: BOT_RELAY_OWNER_ONLY_TEXT }
     const text = answer.replace(/\s+/g, ' ').trim()
@@ -10171,7 +10176,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!from) return { ok: false, text: BOT_RELAY_OWNER_ONLY_TEXT }
     // The owner forgot what they wrote in this turn: nothing of it is passed on, and the question stays open.
     if (this.ownerMessageForgotten(activationId)) return { ok: false, text: QUESTION_ANSWER_FORGOTTEN_TEXT }
-    const answered = this.recorded(row, () => this.answerWorkInTx(questionId, { text, by: 'chat' }, from))
+    const receipt = requestKey ? `relay-request:${activationId}:${requestKey}` : undefined
+    const earlier = receipt ? this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, receipt) : undefined
+    if (earlier) return earlier.value === questionId ? { ok: true, title: this.workTitle(work), replayed: true } : { ok: false, text: 'That clientRequestId already passed on an answer to another question; use a fresh one for each answer.' }
+    const answered = this.recorded(row, () => {
+      const done = this.answerWorkInTx(questionId, { text, by: 'chat' }, from)
+      if (done && receipt) this.store.run('INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, receipt, questionId)
+      return done
+    })
     if (!answered) return { ok: false, text: question.status === 'open' ? 'It could not be passed on. Try again.' : 'That question was already answered, or is no longer open.' }
     this.afterWorkAnswer(questionId)
     return { ok: true, title: this.workTitle(work) }
@@ -12183,7 +12195,7 @@ function grantHolds(manifest: BotManifest, asked: BotAskRequest): boolean {
   if (!('tool' in asked) || typeof asked.tool !== 'string') return false
   const tool = botGrantTool(asked.tool)
   // The web tools are neutral tools that a grant keeps with the app tools (the starter grant does): either holds them.
-  return (isNeutralTool(tool) && (manifest.tools as readonly string[]).includes(tool)) || manifest.appTools.some((held) => canonicalToolName(held) === tool)
+  return (isNeutralTool(tool) && (manifest.tools as readonly string[]).includes(tool)) || manifest.appTools.some((held) => canonicalGrantName(held) === tool)
 }
 
 /**

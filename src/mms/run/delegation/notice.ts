@@ -271,7 +271,7 @@ function questionNotice(payload: ChildQuestionPayload, context: NoticeContext): 
   const prompts = context.questionPrompts?.(payload.requestId) ?? []
   const parts: NoticePart[] = [`${who} is waiting for an answer to question ${payload.requestId}.`]
   if (prompts.length) parts.push(quoted('subagent question', prompts.map((prompt) => head(prompt)).join('\n')))
-  parts.push(`Answer it with answer_subagent (subagent "${title ?? payload.childThreadId}", requestId ${payload.requestId}), or ask the user.`)
+  parts.push(`Answer it with request_answer (requestId ${payload.requestId}) for "${title ?? payload.childThreadId}", or ask the user.`)
   return notice({ kind: 'subagent_question', ...(payload.delegationId ? { ref: payload.delegationId } : {}) }, parts)
 }
 

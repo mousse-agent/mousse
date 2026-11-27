@@ -145,7 +145,9 @@ export interface BotToolHost {
      * `question_answer`: a chat turn the owner's own message started passes on to work the answer they gave in the chat
      * to the question it waits on; `title` is the work's.
      */
-    relay(botId: string, activationId: string, questionId: string, answer: string): { ok: true; title: string } | { ok: false; text: string }
+    relay(botId: string, activationId: string, questionId: string, answer: string, requestKey?: string): { ok: true; title: string; replayed?: true } | { ok: false; text: string }
+    /** Whether `questionId` is a question this bot's work asked its owner, in any state (`request_answer`'s kind). */
+    asked?(botId: string, questionId: string): boolean
   }
   /**
    * `show_card` (issue #1123): a small card, already checked for shape (`cardOf`), kept for the turn's next message. A

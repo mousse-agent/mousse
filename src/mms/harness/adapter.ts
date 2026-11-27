@@ -419,6 +419,11 @@ export interface ToolHost {
   /** Whether the turn's run is still its thread's active run; an app tool call after that is refused. */
   runActive?: () => boolean
   /**
+   * A Mousse tool call as the registry will run it (`ToolRegistry.resolveCall`): its canonical name, the variant it is
+   * and the arguments it runs with, or the refusal it gets. A runtime's gate judges that call, never the raw one.
+   */
+  resolveAppCall?: (name: string, args: Record<string, unknown>) => { name: string; variant: string; args: Record<string, unknown> } | { refused: { text: string } }
+  /**
    * What hides the secrets the thread may use (and ones removed while it runs), read at each tool result: a runtime that
    * runs its own tools masks their results with it before its model sees them or its session file keeps them.
    */

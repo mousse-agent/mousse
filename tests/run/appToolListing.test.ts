@@ -56,12 +56,13 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
     ])
     expect(plan.runId).not.toBe(agent.runId)
 
-    // The usable-tools note names what each turn may use: the tools that start threads only on the agent turn.
+    // The usable-tools note names what each turn may use: thread_fork only on the agent turn, and thread_create on both
+    // (its subagent kind; its thread kind is refused on the plan turn).
     const planNote = usableNow(vendor.bridges[0].turnPreamble)
     const agentNote = usableNow(vendor.bridges[1].turnPreamble)
     expect(planNote).not.toContain('thread_fork')
     expect(agentNote).toContain('thread_fork')
-    expect(agentNote.filter((name) => !planNote.includes(name))).toEqual(['thread_create', 'thread_fork'])
+    expect(agentNote.filter((name) => !planNote.includes(name))).toEqual(['thread_fork'])
     for (const name of agentNote) expect(onAgent.tools).toContain(name)
 
     // Plan mode has no tool to submit a plan: the plan turn neither lists nor may use one, and is told its reply is the plan.
@@ -84,7 +85,7 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
     tools.enabledTools = tools.enabledTools!.filter((name) => name !== 'question_ask' && name !== 'task_create')
     await d.send('Hello')
     const note = usableNow(vendor.bridges[0].turnPreamble)
-    expect(note).toEqual(expect.arrayContaining(['delegate_task', 'task_list', 'thread_read', 'thread_fork', 'queue_enqueue']))
+    expect(note).toEqual(expect.arrayContaining(['thread_create', 'task_list', 'thread_read', 'thread_fork', 'queue_enqueue']))
     expect(note).not.toContain('question_ask')
     expect(note).not.toContain('task_create')
     expect(note.filter((name) => name.startsWith('browser_'))).toEqual([])

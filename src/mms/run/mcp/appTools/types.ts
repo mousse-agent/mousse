@@ -72,6 +72,24 @@ export type ToolCapability = 'threads.delegate' | 'threads.start' | 'themes' | '
 export const TOOL_CLASSES: ReadonlySet<string> = new Set<ToolClass>(['read', 'mutation', 'delegation'])
 
 /** Who a call acts as: the thread's active run, under the ceiling its turn was given. */
+/** What a tool of variants reads to pick the variant of a call: who calls, in which turn, and the call's id. */
+export interface VariantSite {
+  threadId: string
+  turn: AppToolTurn
+  /** The call's id as the registry keys its receipts (`mcp:<clientRequestId>` over MCP). */
+  toolCallId?: string
+}
+
+/**
+ * The variant a call is: its tool and the arguments it runs with. `conceals` is a thread the variant read from what
+ * the call named rather than from the call: a refusal that would name it gets `refusal` instead.
+ */
+export interface ToolVariant {
+  tool: MousseTool
+  args: Record<string, unknown>
+  conceals?: { threadId: string; refusal: ToolOutcome }
+}
+
 export interface McpCaller {
   threadId: string
   runId: string
@@ -359,16 +377,12 @@ export interface MousseTool {
    */
   authorize?: ToolAuthorize
   /**
-   * A tool whose calls come in kinds, each held to its own declaration (docs/plans/tool-api.md §2.1: `thread_create`'s
-   * `kind: subagent | thread`). `of` reads a call's kind and the arguments that kind takes (an older caller names none),
-   * or throws why the call names no kind. The tool is listed and usable as its widest kind; every check of a call (its
-   * targets, the ceiling, a read-only child, what the turn lacks, a bot's grant, a definition's, asking first) reads its
-   * kind's declaration, and the handler gets the call with `kind` in it.
+   * A tool whose variant is decided by what its arguments name, not by an argument the caller picks (`request_answer`:
+   * the kind of the request its id names). Each variant is a whole tool with its own authority: the tool is listed and
+   * held when one of them is, and a call is checked and run as the variant `variantOf` picks, under this tool's name.
    */
-  kinds?: {
-    of(args: Record<string, unknown>, ctx: { caller: McpCaller; turn: AppToolTurn; toolCallId: string }): { kind: string; args: Record<string, unknown> }
-    declarations: Readonly<Record<string, MousseTool>>
-  }
+  variants?: readonly MousseTool[]
+  variantOf?(args: Record<string, unknown>, site: VariantSite): ToolVariant | { refused: ToolOutcome }
   handler(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> | ToolOutcome
 }
 

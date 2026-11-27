@@ -18,7 +18,7 @@ import { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessage } from '../../src
 
 /** The tools a credential lists before the app tools joined (still listed, still these classes). */
 const PHASE5_TOOLS: Record<string, string> = {
-  answer_subagent: 'actsAsCaller',
+  request_answer: 'actsAsCaller',
   question_ask: 'actsAsCaller',
   task_create: 'actsAsCaller',
   task_update: 'actsAsCaller',
@@ -29,7 +29,6 @@ const PHASE5_TOOLS: Record<string, string> = {
   // Listed as its widest kind, the subagent (`delegate_task`'s): a call of kind thread is held to `managesOthers`.
   thread_create: 'actsAsCaller',
   thread_stop: 'managesOthers',
-  approval_respond: 'managesOthers',
   queue_list: 'readsOthers',
   queue_enqueue: 'managesOthers',
   queue_update: 'managesOthers',
@@ -482,7 +481,7 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
   it('lists the tools that read and manage other threads for every caller', async () => {
     const { registry } = await world()
     expect(registry.listForThread('parent').map((tool) => tool.name)).toEqual(
-      expect.arrayContaining(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'thread_send', 'thread_stop', 'thread_create', 'approval_respond'])
+      expect.arrayContaining(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'thread_send', 'thread_stop', 'thread_create', 'request_answer'])
     )
   })
 

@@ -76,8 +76,8 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     const list = await rpc(server.url, attachment.token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} })
     const names = list.body.result.tools.map((tool: { name: string }) => tool.name).sort()
     // The fake host offers no browser, skills, quick actions, web or dev GUI: only the tools it can serve are listed.
-    expect(names).toEqual(['answer_subagent', 'approval_respond', 'computer_list', 'model_list', 'publish_applet', 'question_ask', 'question_withdraw', 'queue_enqueue',
-      'queue_list', 'queue_update', 'read_applet', 'task_create', 'task_list', 'task_update', 'thread_archive', 'thread_create', 'thread_fork',
+    expect(names).toEqual(['computer_list', 'model_list', 'publish_applet', 'question_ask', 'question_withdraw', 'queue_enqueue',
+      'queue_list', 'queue_update', 'read_applet', 'request_answer', 'task_create', 'task_list', 'task_update', 'thread_archive', 'thread_create', 'thread_fork',
       'thread_list', 'thread_read', 'thread_return', 'thread_search', 'thread_send', 'thread_stop', 'thread_update', 'thread_wait'])
 
     const read = await rpc(server.url, attachment.token, call(4, 'thread_read'))

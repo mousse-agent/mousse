@@ -2,8 +2,9 @@
  * Quotes in the composer (#364): text selected in a conversation is replied to with a reply pill that sits in
  * the composer's text where it was inserted. The text box holds a short token for it, bracketed by two invisible
  * isolate marks, which the input backdrop paints as a pill with a reply icon in the token's first (blank) slot; the
- * quoted words live in a registry keyed by the token. On send each token becomes the quoted words in double quotes,
- * with one blank line above and below; the sent bubble shows those paragraphs as pills again (`splitSentQuotes`).
+ * quoted words live in a registry keyed by the token. On send each token becomes the quoted words as a Markdown quote
+ * (every line starting with `>`), with one blank line above and below; the sent bubble shows those paragraphs as pills
+ * again (`splitSentQuotes`). The quote is in the text itself, so a message shows its pills on every computer.
  */
 
 const OPEN = '\u2068'
@@ -56,7 +57,17 @@ export function findQuoteTokens(input: string, registry: QuoteRegistry): QuoteTo
   return spans
 }
 
-/** The message text an agent gets: each quote in double quotes, alone in its paragraph. */
+/** `text` as a Markdown quote: every line starts with `>`, a blank one with `>` alone. */
+function asBlockquote(text: string): string {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/^\s*\n|\s+$/g, '')
+    .split('\n')
+    .map((line) => (line.trim() ? `> ${line}` : '>'))
+    .join('\n')
+}
+
+/** The message text an agent gets: each quote as a Markdown quote, alone in its paragraph. */
 export function expandQuoteTokens(input: string, registry: QuoteRegistry): string {
   const spans = findQuoteTokens(input, registry)
   if (!spans.length) return input
@@ -66,7 +77,7 @@ export function expandQuoteTokens(input: string, registry: QuoteRegistry): strin
     // Words after an earlier pill start their own paragraph: the spaces typed after that pill go.
     const between = input.slice(from, span.index)
     const before = (out + (from > 0 ? between.replace(/^\s+/, '') : between)).replace(/\s+$/, '')
-    out = `${before}${before ? '\n\n' : ''}"${span.text}"\n\n`
+    out = `${before}${before ? '\n\n' : ''}${asBlockquote(span.text)}\n\n`
     from = span.index + span.length
   }
   const rest = input.slice(from).replace(/^\s+/, '')
@@ -138,20 +149,37 @@ export function registerQuote(text: string): string {
 export type SentSegment = { kind: 'text'; text: string } | { kind: 'quote'; text: string }
 
 /**
- * A sent message's text in parts: each paragraph that is a known quote in double quotes (as `expandQuoteTokens`
- * wrote it) is a quote part, so the bubble can show it as a pill; the blank lines around it go. Words that only
- * look like a quote, but were never replied to here, stay text.
+ * A sent message's text in parts: each paragraph that is a Markdown quote (as `expandQuoteTokens` writes it) is a
+ * quote part, so the bubble can show it as a pill; the blank lines around it go. `legacy` are the quotes this app
+ * replied with before quotes were sent as Markdown, in double quotes: a paragraph that is one of them in double quotes
+ * is a quote part too. Other words in double quotes stay text.
  */
-export function splitSentQuotes(text: string, quotes: Iterable<string>): SentSegment[] {
+export function splitSentQuotes(text: string, legacy: Iterable<string> = []): SentSegment[] {
   const spans: Array<{ index: number; end: number; text: string }> = []
-  for (const quote of new Set(quotes)) {
-    if (!quote) continue
-    const wrapped = `"${quote}"`
-    for (let at = text.indexOf(wrapped); at >= 0; at = text.indexOf(wrapped, at + 1)) {
-      const end = at + wrapped.length
-      const startsParagraph = at === 0 || text.startsWith('\n\n', at - 2)
-      const endsParagraph = end === text.length || text.startsWith('\n\n', end)
-      if (startsParagraph && endsParagraph) spans.push({ index: at, end, text: quote })
+  const startsParagraph = (at: number) => at === 0 || text.startsWith('\n\n', at - 2)
+  const endsParagraph = (end: number) => end === text.length || text.startsWith('\n\n', end)
+  if (text.includes('>')) {
+    // Each paragraph whose every line starts with `>`.
+    for (let start = 0; start < text.length; ) {
+      const found = text.indexOf('\n\n', start)
+      const end = found < 0 ? text.length : found
+      const lines = text.slice(start, end).split('\n')
+      if (lines.every((line) => line.startsWith('>'))) {
+        const quoted = lines.map((line) => line.slice(1).replace(/^ /, '')).join('\n').trim()
+        if (quoted) spans.push({ index: start, end, text: quoted })
+      }
+      start = end + 2
+      while (text[start] === '\n') start += 1
+    }
+  }
+  if (text.includes('"')) {
+    for (const quote of new Set(legacy)) {
+      if (!quote) continue
+      const wrapped = `"${quote}"`
+      for (let at = text.indexOf(wrapped); at >= 0; at = text.indexOf(wrapped, at + 1)) {
+        const end = at + wrapped.length
+        if (startsParagraph(at) && endsParagraph(end)) spans.push({ index: at, end, text: quote })
+      }
     }
   }
   if (!spans.length) return [{ kind: 'text', text }]
@@ -171,10 +199,10 @@ export function splitSentQuotes(text: string, quotes: Iterable<string>): SentSeg
   return segments
 }
 
-/** `splitSentQuotes` with the quotes this app has replied with. */
+/** `splitSentQuotes`, with the quotes this app has replied with for messages sent before quotes were Markdown. */
 export function splitSentMessage(text: string): SentSegment[] {
-  if (!text.includes('"')) return [{ kind: 'text', text }]
-  return splitSentQuotes(text, quoteRegistry().values())
+  if (!text.includes('>') && !text.includes('"')) return [{ kind: 'text', text }]
+  return splitSentQuotes(text, text.includes('"') ? quoteRegistry().values() : [])
 }
 
 /** `expandQuoteTokens` with the app's registry. */
