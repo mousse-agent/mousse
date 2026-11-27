@@ -4,6 +4,7 @@ import { agentMessageWords } from '../../../shared/agentMessageWords'
 import type { UIMessage } from 'ai'
 import { isToolTimelineMessage, RESTART_INTERRUPTED_TEXT, TURN_STOPPED_TEXT } from '../../../shared/types'
 import { retriesOf, retriesPhrase } from '../../../shared/providerRetry'
+import { CHATGPT_USAGE_URL } from '../../../shared/providerAuth'
 import {
   filterImageAttachmentNames,
   guessMimeTypeFromFilename,
@@ -467,7 +468,7 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     // A failed turn ends with Mousse's line carrying the error: it shows as the turn's error, where Retry is.
     if (msg.role === 'system' && msg.error) {
       base.role = 'assistant'
-      base.parts = [{ type: 'error', title: errorTitle(msg.error), message: errorText(msg.error, msg.content) } as unknown as UIMessage['parts'][number]]
+      base.parts = [{ type: 'error', title: errorTitle(msg.error), message: errorText(msg.error, msg.content), ...(typeof msg.error.code === 'string' ? { code: msg.error.code } : {}) } as unknown as UIMessage['parts'][number]]
       out.push(base)
       lastAssistantText = null
       continue
@@ -732,9 +733,24 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
 export function errorTitle(error: { code?: unknown; details?: unknown } | undefined): string {
   const code = typeof error?.code === 'string' ? error.code : ''
   if (code === 'provider_usage_limit') return 'Usage limit reached'
+  if (code === 'provider_app_limit') return 'App limit reached'
   const retries = retriesOf(error?.details)
   if (code.startsWith('provider_')) return retries ? `Provider error ${retriesPhrase(retries)}` : 'Provider error'
   return retries ? `Request failed ${retriesPhrase(retries)}` : 'Request failed'
+}
+
+/** A link a failed turn's error offers next to Retry, for the one thing that fixes it. */
+export interface ErrorAction {
+  label: string
+  /** Tooltip and accessible name. */
+  title: string
+  url: string
+}
+
+/** The link for an error's code: ChatGPT's app limits for an app limit. None for anything else. */
+export function errorAction(code: unknown): ErrorAction | undefined {
+  if (code !== 'provider_app_limit') return undefined
+  return { label: 'App limits', title: 'Open ChatGPT → Settings → Usage → App limits, where ChatGPT sets how much of your plan Mousse may use', url: CHATGPT_USAGE_URL }
 }
 
 /** A failed turn's error text: its message, then the reference it was logged under when the message does not name it. */
