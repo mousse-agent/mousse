@@ -119,6 +119,20 @@ describe('a routed call marked as an agent\'s (issue #1160)', () => {
     expect(t.owner.threads.getThread(independent.thread.id)!.startedFrom?.agent).not.toHaveProperty('hidden')
   }, 120_000)
 
+  it('keeps a subagent out of the sidebar only when its create asks: hidden false or none shows', async () => {
+    // A subagent is reached through its parent, so one its create asks to hide is hidden from the start.
+    const asked = await call('threads.create', { name: 'Hidden subagent', hidden: true, subagent: true, agent: mark() })
+    expect(asked.thread.hidden).toBe(true)
+    expect(t.owner.threads.getThread(asked.thread.id)!.hidden).toBe(true)
+    for (const hidden of [false, undefined]) {
+      const shown = await call('threads.create', { name: `Subagent ${hidden}`, ...(hidden === undefined ? {} : { hidden }), subagent: true, agent: mark() })
+      expect(shown.thread.hidden, String(hidden)).toBeUndefined()
+      const stored = t.owner.threads.getThread(shown.thread.id)!
+      expect(stored.startedFrom?.agent, String(hidden)).toMatchObject({ subagent: true })
+      expect(stored.hidden, String(hidden)).toBeUndefined()
+    }
+  }, 120_000)
+
   it('records the thread as the agent\'s subagent only when its create says so, and never from a person\'s create', async () => {
     const subagent = await call('threads.create', { name: 'Subagent', hidden: true, subagent: true, agent: mark() })
     expect(t.owner.threads.getThread(subagent.thread.id)!.startedFrom?.agent).toMatchObject({ thread: 'sender-thread', subagent: true })
