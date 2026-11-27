@@ -121,6 +121,21 @@ export function isUsageLimitText(message: string | undefined): boolean {
   return /usage limit|rate limit/i.test(message ?? '')
 }
 
+/** Kinds Codex gives failures that are not a usage limit: believed over a message that mentions one. */
+const NOT_A_LIMIT = new Set(['contextWindowExceeded', 'serverOverloaded', 'internalServerError', 'unauthorized', 'badRequest', 'threadRollbackFailed', 'sandboxError'])
+
+/**
+ * A failed turn that stands for a plan usage limit: Codex classifies it as one, or its message names one
+ * and its kind says only how the request failed (no kind, a dropped stream or connection, too many
+ * failed attempts, `other`, a kind Mousse does not know). A ChatGPT subscription-sharing limit arrives
+ * as `stream disconnected before completion: The ChatGPT user has reached their … usage limit`.
+ */
+export function isUsageLimitFailure(info: CodexErrorInfo | null | undefined, message: string | undefined): boolean {
+  if (isUsageLimitInfo(info)) return true
+  const kind = codexErrorKind(info)
+  return (kind === undefined || !NOT_A_LIMIT.has(kind)) && isUsageLimitText(message)
+}
+
 /**
  * The usage page's windows for a snapshot Codex sent at some earlier time. A window whose reset
  * has passed since then has started over: it reads as all left, with no reset time.

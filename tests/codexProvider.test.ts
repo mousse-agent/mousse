@@ -1657,12 +1657,12 @@ describe('CodexProviderService options (managed Codex)', () => {
   it('a failed turn throws CodexTurnFailure with the error kind and HTTP status', async () => {
     const server = turnServer({
       provider: () => MANAGED,
-      turn: () => ({ status: 'failed', error: { message: 'usage limit', additionalDetails: null, codexErrorInfo: { responseStreamFailed: { httpStatusCode: 429 } } } })
+      turn: () => ({ status: 'failed', error: { message: 'too many requests', additionalDetails: null, codexErrorInfo: { responseStreamFailed: { httpStatusCode: 429 } } } })
     })
     const service = managed(server)
     const failure = await chat(service).catch((error: unknown) => error)
     expect(failure).toBeInstanceOf(CodexTurnFailure)
-    expect(failure).toMatchObject({ message: 'usage limit', httpStatus: 429, codexErrorInfo: { responseStreamFailed: { httpStatusCode: 429 } } })
+    expect(failure).toMatchObject({ message: 'too many requests', httpStatus: 429, codexErrorInfo: { responseStreamFailed: { httpStatusCode: 429 } } })
   })
 
   it('a models source replaces model/list and no fallback model is listed before it', async () => {
@@ -2072,6 +2072,15 @@ describe('a usage limit on a Codex turn', () => {
     const server = failingServer({ error: limitError(undefined, "You've hit your usage limit. Try again at 2:01 PM."), rateLimits: { result: { rateLimits: exhausted(inHours(1)) } } })
     const error = await chat(create(server)).catch((caught: unknown) => caught)
     expect(error).toMatchObject({ code: 'provider_usage_limit', details: { estimated: false } })
+  })
+
+  it('a dropped stream whose message names a usage limit is a usage limit, with no guessed reset', async () => {
+    // The subscription-sharing limit: Codex sends a transport kind, and the plan windows are not exhausted.
+    const message = 'stream disconnected before completion: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.'
+    const server = failingServer({ error: limitError({ responseStreamDisconnected: { httpStatusCode: null } }, message), rateLimits: { result: { rateLimits: { primary: window(40, 300, inHours(2)) } } } })
+    const error = await chat(create(server)).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'provider_usage_limit', details: { provider: 'codex', estimated: true }, errorInfo: { retryable: false } })
+    expect(server.methods()).toContain('account/rateLimits/read')
   })
 
   it('a structured kind that is not a limit is believed over the message', async () => {

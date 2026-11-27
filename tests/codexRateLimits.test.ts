@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { RateLimitSnapshot } from '../src/mms/harness/vendors/codex/protocol'
-import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot } from '../src/mms/harness/vendors/codex/rateLimits'
+import { isUsageLimitFailure, isUsageLimitInfo, isUsageLimitText, resetFromSnapshot } from '../src/mms/harness/vendors/codex/rateLimits'
 
 const NOW = Date.parse('2026-10-01T00:00:00Z')
 const at = (hours: number) => NOW / 1000 + hours * 3600
@@ -56,5 +56,32 @@ describe('Codex usage-limit errors', () => {
     expect(isUsageLimitText('Rate limit reached')).toBe(true)
     expect(isUsageLimitText('The context window is full')).toBe(false)
     expect(isUsageLimitText(undefined)).toBe(false)
+  })
+
+  // Every kind Codex sends, with a message that names a usage limit and one that does not.
+  const SHARING = 'stream disconnected before completion: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.'
+  const DROPPED = 'stream disconnected before completion: error sending request'
+  it.each([
+    // kind, a message naming a limit is one, a message that does not is one
+    [undefined, true, false],
+    ['other', true, false],
+    ['responseStreamDisconnected', true, false],
+    [{ responseStreamDisconnected: { httpStatusCode: null } }, true, false],
+    ['responseStreamConnectionFailed', true, false],
+    ['httpConnectionFailed', true, false],
+    [{ responseTooManyFailedAttempts: { httpStatusCode: null } }, true, false],
+    ['aKindMousseDoesNotKnow', true, false],
+    ['usageLimitExceeded', true, true],
+    [{ responseTooManyFailedAttempts: { httpStatusCode: 429 } }, true, true],
+    ['contextWindowExceeded', false, false],
+    ['badRequest', false, false],
+    ['unauthorized', false, false],
+    ['serverOverloaded', false, false],
+    ['internalServerError', false, false],
+    ['sandboxError', false, false],
+    ['threadRollbackFailed', false, false]
+  ] as const)('a %j failure: a usage limit when the message names one (%s), else %s', (kind, withLimitText, withOtherText) => {
+    expect(isUsageLimitFailure(kind, SHARING)).toBe(withLimitText)
+    expect(isUsageLimitFailure(kind, DROPPED)).toBe(withOtherText)
   })
 })
