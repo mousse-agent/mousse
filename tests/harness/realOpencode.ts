@@ -1,12 +1,15 @@
 /**
  * The real OpenCode for single-request tests (`opencode:sealed`), with nothing of the person's own: every folder it
  * reads or writes is a throwaway one, its only model is an OpenAI-compatible stub on loopback that keeps every request,
- * and any other address goes to a closed port. No sign-in; dummy keys only.
+ * and any other address goes to a closed port. No sign-in; dummy keys only. An account sign-in is a fake one: a plugin
+ * (`stubAccountPlugin`) gives the stub provider an OAuth method whose renewal asks the stub's own token endpoint.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import type { DriverRuntime } from '../../src/mms/harness/driver'
 import { opencodeDriver, type OpencodeDriverOptions } from '../../src/mms/harness/drivers/opencode'
 import { instanceEnv, resolveCommand } from '../../src/mms/harness/env'
@@ -39,17 +42,30 @@ export interface ModelStub {
   answer: string
   /** When set, every answer is a call of this tool instead of text. */
   toolCall?: { name: string; arguments: Record<string, unknown> }
+  /** The refresh tokens presented to the token endpoint (`/oauth/token`), in order. */
+  renewals: string[]
+  /** What the token endpoint answers: a new access and refresh token. */
+  renewed: { access: string; refresh: string }
+  /** Runs when the token endpoint is asked, before it answers. */
+  onRenewal?: () => void
   close(): void
 }
 
 /** An OpenAI-compatible chat completions stand-in on loopback. */
 export async function modelStub(answer = 'Fix login bug'): Promise<ModelStub> {
-  const stub: ModelStub = { url: '', requests: [], statuses: [], answer, close: () => server.close() }
+  const stub: ModelStub = { url: '', requests: [], statuses: [], answer, renewals: [], renewed: { access: 'access-2', refresh: 'refresh-2' }, close: () => server.close() }
   const server: Server = createServer((request, response) => {
     let text = ''
     request.setEncoding('utf8')
     request.on('data', (chunk: string) => { text += chunk })
     request.on('end', () => {
+      if (request.url === '/oauth/token') {
+        stub.renewals.push(new URLSearchParams(text).get('refresh_token') ?? '')
+        stub.onRenewal?.()
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ access_token: stub.renewed.access, refresh_token: stub.renewed.refresh, expires_in: 3600 }))
+        return
+      }
       let body: Record<string, unknown> = {}
       try { body = JSON.parse(text) as Record<string, unknown> } catch { /* not JSON */ }
       const tools = Array.isArray(body.tools) ? body.tools.map((tool: { function?: { name?: unknown } }) => String(tool?.function?.name ?? '')) : []
@@ -79,9 +95,85 @@ export async function modelStub(answer = 'Fix login bug'): Promise<ModelStub> {
   return stub
 }
 
-/** The stub as an OpenCode provider (`stub` by default) with model `stub-model`: its key comes from `apiKey`, else a sign-in. */
-export function stubProviderConfig(stub: ModelStub, apiKey?: string, provider = 'stub', model = 'stub-model'): string {
-  return JSON.stringify({ providers: { [provider]: { name: 'Stub', package: '@opencode/ai/providers/openai-compatible', settings: { baseURL: stub.url, ...(apiKey ? { apiKey } : {}) }, models: { [model]: { name: 'Stub model' } } } } })
+/**
+ * The stub as an OpenCode provider (`stub` by default) with model `stub-model`: its key comes from `apiKey`, else a
+ * sign-in. `plugins` are loaded with it (`stubAccountPlugin`).
+ */
+export function stubProviderConfig(stub: ModelStub, apiKey?: string, provider = 'stub', model = 'stub-model', plugins?: string[]): string {
+  return JSON.stringify({ ...(plugins ? { plugins } : {}), providers: { [provider]: { name: 'Stub', package: '@opencode/ai/providers/openai-compatible', settings: { baseURL: stub.url, ...(apiKey ? { apiKey } : {}) }, models: { [model]: { name: 'Stub model' } } } } })
+}
+
+/** The fake account sign-in's method on the stub provider. */
+export const STUB_ACCOUNT_METHOD = 'stub-login'
+
+/**
+ * A plugin (in `dir`) that gives the `stub` integration an OAuth method, `stub-login`, standing in for OpenCode's own
+ * account sign-ins: OpenCode renews it when it is about to expire, and its renewal asks the stub's token endpoint.
+ * Returns the plugin's URL for a config's `plugins`.
+ */
+export function stubAccountPlugin(dir: string, stub: ModelStub): string {
+  mkdirSync(dir, { recursive: true })
+  const token = stub.url.replace(/\/v1$/, '/oauth/token')
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'test-stub-account', type: 'module' }))
+  writeFileSync(join(dir, 'index.js'), `export default {
+  id: 'test.stub-account',
+  setup: async (ctx) => {
+    await ctx.integration.transform((draft) => {
+      draft.method.update({
+        integrationID: 'stub',
+        method: { id: ${JSON.stringify(STUB_ACCOUNT_METHOD)}, type: 'oauth', label: 'Stub account' },
+        authorize: async () => { throw new Error('no sign-in here') },
+        refresh: async (credential) => {
+          const response = await fetch(${JSON.stringify(token)}, { method: 'POST', body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: credential.refresh }) })
+          const tokens = await response.json()
+          return { ...credential, access: tokens.access_token, refresh: tokens.refresh_token, expires: Date.now() + tokens.expires_in * 1000 }
+        }
+      })
+    })
+  }
+}
+`)
+  return pathToFileURL(dir).href
+}
+
+/** An account sign-in on the stub: expired (`expires` 1) unless `expires` is given, so the next use renews it. */
+export function stubAccount(expires = 1, tokens = { access: 'access-1', refresh: 'refresh-1' }): Record<string, unknown> {
+  return { type: 'oauth', methodID: STUB_ACCOUNT_METHOD, refresh: tokens.refresh, access: tokens.access, expires }
+}
+
+/**
+ * Signs the throwaway person in the way OpenCode does: their own OpenCode (`env`) stores `value` for `integrationID`
+ * through its API, in their real database. Resolves once that OpenCode has ended.
+ */
+export async function signInWithOpencode(binary: string, env: Record<string, string>, cwd: string, integrationID: string, value: Record<string, unknown>): Promise<void> {
+  const password = 'sign-in'
+  const child = spawn(binary, ['serve', '--stdio', '--hostname', '127.0.0.1', '--port', '0'], {
+    env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, ...env, OPENCODE_DISABLE_MODELS_FETCH: '1', OPENCODE_DISABLE_PROJECT_CONFIG: '1', OPENCODE_PASSWORD: password },
+    cwd,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true
+  })
+  const exited = new Promise((resolve) => child.once('exit', resolve))
+  try {
+    const url = await new Promise<string>((resolve, reject) => {
+      let out = ''
+      child.stdout.on('data', (chunk: Buffer) => {
+        out += chunk.toString('utf8')
+        const newline = out.indexOf('\n')
+        if (newline >= 0) resolve((JSON.parse(out.slice(0, newline)) as { url: string }).url)
+      })
+      child.once('exit', (code) => reject(new Error(`OpenCode exited (${code}) before it was ready.`)))
+    })
+    const response = await fetch(`${url}/api/credential`, {
+      method: 'POST',
+      headers: { authorization: `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ integrationID, value })
+    })
+    if (!response.ok) throw new Error(`OpenCode did not store the sign-in: ${response.status} ${await response.text()}`)
+  } finally {
+    child.kill()
+    await exited
+  }
 }
 
 /** A throwaway person: a home with OpenCode's config, data and temporary folders, as their environment names them. */

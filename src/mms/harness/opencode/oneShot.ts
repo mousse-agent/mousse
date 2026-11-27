@@ -33,9 +33,15 @@ import { isOpencodeFreeModel, parseModel } from './sessions'
  * - Sign-ins live in OpenCode's database (`credential` rows; `auth.json` is only read once, to import), with its sessions
  *   and everything else. A server on the user's database would add a project for every place to it; one on a copy
  *   would write a refreshed OAuth token where the user's OpenCode never sees it. So the sealed server gets its own
- *   database in the place, and a key goes into it through its API: an API key read from the user's database at the
- *   time of the request (it cannot rotate, and a replaced key is read the next time), or the variable OpenCode itself
- *   reported as the provider's connection. A provider signed in with an account (OAuth) is refused, with its reason.
+ *   database in the place, and the sign-in goes into it through its API (`POST /api/credential`), read from the user's
+ *   database at the time of the request: an API key (it cannot rotate, and a replaced key is read the next time), an
+ *   account sign-in (OAuth) under its own row id, or the variable OpenCode itself reported as the provider's connection.
+ * - OpenCode renews an account sign-in that expires within five minutes when it is used, and stores the renewal over
+ *   the same row (`Integration.connection.resolve`); a running OpenCode reads its rows from the database each time.
+ *   So once the sealed server has ended, its row is read back from its database, and a renewal is written to the
+ *   user's row only if that row still holds what the request read (`writeBackSignIn`): a renewal of their own wins.
+ *   A renewal that cannot be saved could sign the user out (a renewal can replace the refresh token), so a request on
+ *   an account sign-in is not sent unless the user's database takes a write (`checkSignInWritable`).
  * - OpenCode's own provider (`opencode`, its Console) loads the organisation's config from the Console with its key: on
  *   that provider only the environment is held (`env_only`). Its free models take no key, but refuse a request with no
  *   tool, so they are offered `read` (never run: `generate` runs no tool) and are best-effort.
@@ -98,12 +104,7 @@ export function opencodeOneShotRoute(model: string, cache: OpencodeOneShotCache 
   const provider = model.slice(0, slash)
   const id = model.slice(slash + 1).replace(/:[^:/]*$/, '')
   if (freeModel(provider, id, cache)) return FREE
-  if (cache?.signIns?.[provider]?.kind === 'oauth') return { refused: oauthRefusal(provider) }
   return provider === 'opencode' ? CONSOLE : SEALED
-}
-
-function oauthRefusal(provider: string): string {
-  return `OpenCode signs in to ${provider} with an account. A single request runs on a sealed OpenCode that could not hand a renewed sign-in back to yours, so it does not use it. Connect an API key for ${provider} in OpenCode to name threads with it.`
 }
 
 /**
@@ -117,24 +118,100 @@ export function opencodeDatabasePath(env: Readonly<Record<string, string | undef
   return file === ':memory:' ? undefined : resolve(data, file)
 }
 
-/** The sign-in of `integrationID` a request may use, read from OpenCode's database now. */
-export type StoredSignIn = { kind: 'key'; key: string } | { kind: 'oauth' } | undefined
+/**
+ * The sign-in of `integrationID` a request may use, read from OpenCode's database now. An account sign-in carries its
+ * row's id and the row's value as stored (`raw`), which a write-back compares against.
+ */
+export type StoredSignIn = { kind: 'key'; key: string } | { kind: 'oauth'; id: string; raw: string; value: Record<string, unknown> } | undefined
+
+/** How long a write to the user's OpenCode database waits for a running OpenCode's lock before it gives up. */
+export const SIGN_IN_BUSY_MS = 2_000
 
 /**
  * Reads the active credential of `integrationID` from OpenCode's database, read-only (the row its server picks: the
- * active one, else the newest). Only an API key's value leaves here; an OAuth grant is reported by its kind alone.
+ * active one, else the newest).
  */
 export async function readOpencodeSignIn(database: string | undefined, integrationID: string): Promise<StoredSignIn> {
   if (!database || !existsSync(database)) return undefined
   const { DatabaseSync } = await import('node:sqlite')
   const db = new DatabaseSync(database, { readOnly: true })
   try {
-    const row = db.prepare('SELECT value FROM credential WHERE integration_id = ? ORDER BY active DESC, time_created DESC, id DESC LIMIT 1').get(integrationID) as { value?: unknown } | undefined
+    const row = db.prepare('SELECT id, value FROM credential WHERE integration_id = ? ORDER BY active DESC, time_created DESC, id DESC LIMIT 1').get(integrationID) as { id?: unknown; value?: unknown } | undefined
     if (!row || typeof row.value !== 'string') return undefined
     const value = JSON.parse(row.value) as unknown
     if (!isRecord(value)) return undefined
-    if (value.type === 'oauth') return { kind: 'oauth' }
+    if (value.type === 'oauth') return typeof row.id === 'string' && row.id ? { kind: 'oauth', id: row.id, raw: row.value, value } : undefined
     return value.type === 'key' && typeof value.key === 'string' && value.key ? { kind: 'key', key: value.key } : undefined
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * Whether the user's OpenCode database takes a write to the sign-in row `id`, changing nothing: it is opened for
+ * writing, a write transaction is begun (`BEGIN IMMEDIATE`, which waits up to `SIGN_IN_BUSY_MS` for a running
+ * OpenCode's lock), the row is set to its own value, and the transaction is rolled back. Throws why not (a read-only
+ * file or folder, a lock held past the wait, a missing table).
+ */
+export async function checkSignInWritable(database: string, id: string): Promise<void> {
+  const { DatabaseSync } = await import('node:sqlite')
+  const db = new DatabaseSync(database, { timeout: SIGN_IN_BUSY_MS })
+  try {
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      db.prepare('UPDATE credential SET value = value WHERE id = ?').run(id)
+    } finally {
+      db.exec('ROLLBACK')
+    }
+  } finally {
+    db.close()
+  }
+}
+
+/** The value of sign-in row `id` in a sealed server's own database, read once the server has ended. */
+export async function readSealedSignIn(database: string | undefined, id: string): Promise<Record<string, unknown> | undefined> {
+  if (!database || !existsSync(database)) return undefined
+  const { DatabaseSync } = await import('node:sqlite')
+  const db = new DatabaseSync(database, { readOnly: true })
+  try {
+    const row = db.prepare('SELECT value FROM credential WHERE id = ?').get(id) as { value?: unknown } | undefined
+    const value = typeof row?.value === 'string' ? (JSON.parse(row.value) as unknown) : undefined
+    return isRecord(value) && value.type === 'oauth' ? value : undefined
+  } finally {
+    db.close()
+  }
+}
+
+/** JSON with its keys sorted, so two values compare by content. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
+  if (isRecord(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`
+  return JSON.stringify(value) ?? 'null'
+}
+
+/** Whether two sign-in values hold the same grant. */
+export function sameSignIn(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  return canonical(a) === canonical(b)
+}
+
+/**
+ * Writes a renewed sign-in back to the user's row `id` only if the row still holds `expected` (its value as the request
+ * read it), in one write transaction that waits up to `SIGN_IN_BUSY_MS` for a running OpenCode's lock. `kept`: the row
+ * changed meanwhile (their OpenCode renewed it itself), so theirs is kept. Throws when the write fails.
+ */
+export async function writeBackSignIn(database: string, id: string, expected: string, renewed: Record<string, unknown>): Promise<'written' | 'kept'> {
+  const { DatabaseSync } = await import('node:sqlite')
+  const db = new DatabaseSync(database, { timeout: SIGN_IN_BUSY_MS })
+  try {
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      const changed = db.prepare('UPDATE credential SET value = ?, time_updated = ? WHERE id = ? AND value = ?').run(JSON.stringify(renewed), Date.now(), id, expected).changes
+      db.exec('COMMIT')
+      return Number(changed) === 1 ? 'written' : 'kept'
+    } catch (error) {
+      if (db.isTransaction) db.exec('ROLLBACK')
+      throw error
+    }
   } finally {
     db.close()
   }
@@ -190,11 +267,26 @@ function generateError(label: string, error: unknown, instanceId: string): Error
   return harnessAppError({ code: 'service_unavailable', message, instanceId })
 }
 
+/** Writes a sign-in the sealed server renewed back to the user's row, unless their row changed meanwhile. Logs what happened. */
+async function saveRenewal(label: string, instanceId: string, database: string, account: Extract<StoredSignIn, { kind: 'oauth' }>, after: Record<string, unknown> | undefined): Promise<void> {
+  if (!after || sameSignIn(after, account.value)) return
+  const where = { instanceId, credential: account.id }
+  try {
+    const result = await writeBackSignIn(database, account.id, account.raw, after)
+    if (result === 'written') console.info(`[one-shot] ${label} renewed a sign-in during a single request; it was saved to OpenCode's sign-ins.`, where)
+    else console.warn(`[one-shot] ${label} renewed a sign-in during a single request, but OpenCode had renewed it meanwhile: theirs is kept.`, where)
+  } catch (error) {
+    console.warn(`[one-shot] ${label} renewed a sign-in during a single request, and Mousse could not save it to OpenCode's sign-ins: OpenCode may ask to sign in again.`, { ...where, error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
 /**
  * The transport of `opencode:sealed`: the request's place (its record first, then its folder), a fresh `opencode serve`
  * in it on the sealed launch (reserved roots, no entry `OPENCODE_*` variable and none of the entry's arguments, the
- * folders above skipped), the key the request may use, a session that denies every tool, and one `generate` on it.
- * The place is removed once its process tree has gone, with proof; anything written in its working folder fails the
+ * folders above skipped), the sign-in the request may use, a session that denies every tool, and one `generate` on it.
+ * An account sign-in the sealed server renewed is written back to the user's row before the place is removed (only
+ * if their row is unchanged), whether or not the request succeeded; a request on one is not sent unless the user's
+ * database takes a write. The place is removed once its process tree has gone, with proof; anything written in its working folder fails the
  * request. A server per request costs about half a second to start (OpenCode 2.0.20 on Windows; about a second to an
  * answer from a loopback model); one kept across requests would outlive its place, so none is.
  */
@@ -207,16 +299,28 @@ export function sealedOpencodeTransport(options: SealedOpencodeOptions, spec: { 
       if (!ref) throw harnessAppError({ code: 'model_unavailable', message: `${label} names threads only with a model picked from its list.`, instanceId })
       const cache = options.cache()
       const free = freeModel(ref.providerID, ref.id, cache)
-      // The key the request may use, read now: an API key from OpenCode's own store, else the variables OpenCode
-      // reported as the provider's connection. An account sign-in is never handed to a sealed server.
+      // The sign-in the request may use, read now: an API key or an account sign-in from OpenCode's own store, else the
+      // variables OpenCode reported as the provider's connection.
       const preset: Record<string, string> = {}
+      const database = options.database()
       let key: string | undefined
+      let account: Extract<StoredSignIn, { kind: 'oauth' }> | undefined
       if (!free) {
-        const stored = await readOpencodeSignIn(options.database(), ref.providerID).catch((error: unknown) => {
+        const stored = await readOpencodeSignIn(database, ref.providerID).catch((error: unknown) => {
           throw harnessAppError({ code: 'service_unavailable', message: `${label}: Mousse could not read OpenCode's sign-ins (${error instanceof Error ? error.message : String(error)}).`, instanceId })
         })
-        if (stored?.kind === 'oauth') throw harnessAppError({ code: 'unsupported', reason: 'not_admitted', message: oauthRefusal(ref.providerID), instanceId })
-        if (stored?.kind === 'key') key = stored.key
+        if (stored?.kind === 'oauth' && database) {
+          // A renewal the sealed server makes must reach the user's row; one that could not would leave them signed out.
+          await checkSignInWritable(database, stored.id).catch((error: unknown) => {
+            throw harnessAppError({
+              code: 'unsupported',
+              reason: 'not_admitted',
+              message: `${label} signs in to ${ref.providerID} with an account, and Mousse could not write to OpenCode's sign-ins (${error instanceof Error ? error.message : String(error)}), so a renewed sign-in could not be saved. It did not send the request.`,
+              instanceId
+            })
+          })
+          account = stored
+        } else if (stored?.kind === 'key') key = stored.key
         else {
           const signIn = cache?.signIns?.[ref.providerID]
           for (const name of signIn?.kind === 'env' ? signIn.names : []) {
@@ -231,6 +335,7 @@ export function sealedOpencodeTransport(options: SealedOpencodeOptions, spec: { 
       const place = reservePlace(options.profileHome, { route: OPENCODE_ONE_SHOT_ROUTE, instanceId })
       const work = join(place.dir, WORK)
       let proc: PlaceProcess | undefined
+      let sealedDatabase: string | undefined
       let text = ''
       let failure: unknown
       try {
@@ -249,6 +354,7 @@ export function sealedOpencodeTransport(options: SealedOpencodeOptions, spec: { 
           },
           root: join(place.dir, ROOT)
         })
+        sealedDatabase = opencodeDatabasePath(env)
         // None of the entry's arguments: the server's are Mousse's own.
         proc = spawnInPlace(place, { command: program.command, args: [...program.args, 'serve', '--stdio', '--hostname', '127.0.0.1', '--port', '0'], env, purpose: 'opencode-one_shot', instanceId, cwd: work })
         proc.child.stdin.on('error', () => { /* the server already ended */ })
@@ -257,6 +363,8 @@ export function sealedOpencodeTransport(options: SealedOpencodeOptions, spec: { 
         events.activity()
         const client = new OpencodeClient({ url, password })
         if (key) await client.request('POST', '/api/credential', { body: { integrationID: ref.providerID, value: { type: 'key', key } }, signal })
+        // An account sign-in under its own row id, so the row read back afterwards is this one.
+        if (account) await client.request('POST', '/api/credential', { body: { id: account.id, integrationID: ref.providerID, value: account.value }, signal })
         const created = await client.data('POST', '/api/session', {
           body: { location: { directory: work }, model: { providerID: ref.providerID, id: ref.id, ...(ref.variant ? { variant: ref.variant } : {}) }, permissions: oneShotRules(free), title: 'Mousse one-shot' },
           signal
@@ -274,6 +382,11 @@ export function sealedOpencodeTransport(options: SealedOpencodeOptions, spec: { 
         failure = error
       } finally {
         untrack?.()
+      }
+      if (account && proc && database) {
+        // Once the server has ended nothing writes its database: a renewal it made is in its row now.
+        await proc.stop()
+        await saveRenewal(label, instanceId, database, account, await readSealedSignIn(sealedDatabase, account.id).catch(() => undefined))
       }
       const released = await releasePlace(place, proc, [], { written: WORK })
       if (failure) throw failure
