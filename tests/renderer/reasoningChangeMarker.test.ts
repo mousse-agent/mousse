@@ -61,6 +61,14 @@ describe('a reasoning change in the transcript', () => {
     expect(said).toEqual(['Model changedClaude Opus 5.5 · Low→Claude Sonnet 5.5 · High'])
   })
 
+  it('says a switch that sent the chat over is a model change, with what was sent on hover', () => {
+    const full = show('', { from: opus, to: sonnet, strategy: 'full_summary' }).markers[0]!
+    expect(full.textContent).toMatch(/^Model changed/)
+    expect(full.getAttribute('title')).toBe('Sent the new model the chat so far')
+    expect(show('', { from: opus, to: sonnet, strategy: 'delta' }).markers[0]!.getAttribute('title')).toBe('Sent the new model the messages it missed')
+    expect(show('', { from: opus, to: sonnet, strategy: 'native_resume' }).markers[0]!.hasAttribute('title')).toBe(false)
+  })
+
   it('leaves a fork that kept the model as a fork', () => {
     const { said } = show('Forked from Draft', { from: opus, to: { ...opus, effort: 'high' }, transfer: 'fork' })
     expect(said).toEqual(['Forked from DraftClaude Opus 5.5 · High'])

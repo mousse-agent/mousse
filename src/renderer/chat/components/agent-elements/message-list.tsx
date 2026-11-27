@@ -3239,12 +3239,20 @@ type HandoffMarker = {
 
 /**
  * What a handoff marker says happened: a thread transfer names its source ("Forked from Draft"),
- * a switch that rebuilt the context for the new model is a context handoff, any other switch a
- * plain model change.
+ * any model switch is "Model changed".
  */
 function handoffStatus(handoff: HandoffMarker, text: string): string {
   if (handoff.transfer) return text || (handoff.transfer === "fork" ? "Forked" : "Merged back");
-  return handoff.strategy && handoff.strategy !== "native_resume" ? "Context handoff" : "Model changed";
+  return "Model changed";
+}
+
+/**
+ * The marker's tooltip when Mousse sent the conversation to the new model itself, because the
+ * model could not pick up its own session: only what it missed (`delta`), or the chat so far.
+ */
+function handoffDetail(handoff: HandoffMarker): string | undefined {
+  if (handoff.transfer || !handoff.strategy || handoff.strategy === "native_resume") return undefined;
+  return handoff.strategy === "delta" ? "Sent the new model the messages it missed" : "Sent the new model the chat so far";
 }
 
 /** Where `/clear` started the model context again: a quiet rule across the thread with its label. */
@@ -3287,7 +3295,7 @@ function ContextHandoffMarker({ handoff, text }: { handoff: HandoffMarker; text:
   // A transfer that kept the model names it once.
   const sameModel = handoff.from.provider === handoff.to.provider && handoff.from.model === handoff.to.model;
   return <div role="status" aria-label={sameModel ? `${status}: ${to}` : `${status}: ${from} to ${to}`}
-    className="flex w-full flex-col items-center gap-1 py-1.5 text-xs text-muted-foreground">
+    title={handoffDetail(handoff)} className="flex w-full flex-col items-center gap-1 py-1.5 text-xs text-muted-foreground">
     <span className="text-[11px] opacity-70">{status}</span>
     <span className="flex items-center gap-2">
       {!sameModel && <>
