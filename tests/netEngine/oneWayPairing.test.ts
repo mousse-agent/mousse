@@ -175,7 +175,7 @@ describe('pairing one way', () => {
       caller = await computer(fabric, 'split-caller')
     const { callerOnOwner, ownerOnCaller } = await fabric.pair(owner, caller)
 
-    // On the owner, "Can use this computer": the caller's grant goes; the owner still uses the caller.
+    // On the owner, the caller stops using it: the caller's grant goes; the owner still uses the caller.
     await owner.dispatch('netEngine.remove', { node: callerOnOwner, direction: 'in' }, true)
     expect(fabric.network.holds(owner.endpoint, caller.endpoint)).toBe(false)
     expect(sent(owner, 'grant.revoke_local')).toHaveLength(1)
@@ -185,7 +185,7 @@ describe('pairing one way', () => {
     await fabric.connect(owner, callerOnOwner)
     expect(await accessThere(owner, callerOnOwner)).toMatchObject({ blocked: false })
 
-    // On the caller, "Computers I use from here": its peer record goes; the owner still uses it.
+    // On the caller, it stops using the owner: its peer record goes; the owner still uses it.
     await caller.dispatch('netEngine.remove', { node: ownerOnCaller, direction: 'out' }, true)
     expect(fabric.network.peersOf(caller.endpoint)).not.toContain(owner.endpoint)
     expect(fabric.network.holds(caller.endpoint, owner.endpoint)).toBe(true)

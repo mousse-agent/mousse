@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * The update button when another computer is behind: it shows "1 computer behind" (or "N computers behind") even
- * when this computer is up to date, opens Settings → Devices when that is all it has, adds the count to this
+ * when this computer is up to date, opens the list of computers when that is all it has, adds the count to this
  * computer's own update, and once dismissed stays hidden until a newer release or another computer falls behind.
  * Only online computers count; a phone never does.
  */
@@ -92,7 +92,7 @@ describe('the update button and the computers behind this one', () => {
     expect(computersRow()).toMatchObject({ label: '1 computer behind', computers: [{ node: 'm', name: 'Mini', version: '0.9.3' }] })
   })
 
-  it('shows while this computer is up to date and opens Settings → Devices', async () => {
+  it('shows while this computer is up to date and opens the list of computers, each with why it is not updated from here', async () => {
     setComputers([computer('b', 'Laptop', { version: '0.9.0', olderThanThis: true })])
     expect(summarizeDownloads(useDownloadsStore.getState().entries)).toMatchObject({ status: 'available', label: '1 computer behind' })
     const opened: string[] = []
@@ -102,9 +102,11 @@ describe('the update button and the computers behind this one', () => {
     expect(host.textContent).toContain('1 computer behind')
     await act(async () => button('1 computer behind')!.click())
     window.removeEventListener('mousse:settings-section', listen)
-    expect(opened).toEqual(['connections'])
-    // Straight there, with no list to open first.
-    expect(document.querySelector('.downloads-popover')).toBeNull()
+    expect(opened).toEqual([])
+    const rows = [...document.querySelectorAll('.downloads-popover .downloads-row-text')].map((row) => row.textContent)
+    expect(rows).toEqual(['This computerv0.9.2 · Up to date', 'Laptopv0.9.0 → v0.9.2 · Too old to update from here'])
+    // Nothing can be updated from here: no Update everywhere.
+    expect(button('Update everywhere…')).toBeUndefined()
   })
 
   it('adds the count to this computer’s own update, keeping its flow', () => {
@@ -122,11 +124,10 @@ describe('the update button and the computers behind this one', () => {
     useDownloadsStore.setState({ entries: applyUpdateState([], useUpdateStore.getState()) })
     setComputers([computer('b', 'Laptop', { olderThanThis: true })])
     await act(async () => root.render(createElement(DownloadsIndicator, { variant: 'nav' })))
-    // With this computer's update too, the button opens the list, where the computers row has its own Dismiss.
+    // The list of computers has its own Hide at the bottom.
     await act(async () => button('Update available · 1 computer behind')!.click())
     expect(document.querySelector('.downloads-popover')?.textContent).toContain('Laptop')
-    const row = [...document.querySelectorAll<HTMLElement>('.downloads-row-item')].find((item) => item.textContent?.includes('1 computer behind'))!
-    await act(async () => row.querySelector<HTMLButtonElement>('[aria-label="Dismiss"]')!.click())
+    await act(async () => button('Hide until a newer version')!.click())
     expect(computersRow()).toBeUndefined()
 
     // The same computer, read again: still hidden, in a later window too.

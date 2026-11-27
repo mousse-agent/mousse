@@ -7,6 +7,7 @@
 import { mkdirSync, readdirSync, readFileSync, truncateSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { faceKeyOf } from '../../src/mms/bots/facePicture'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../src/mms/protocol/handlers'
@@ -395,4 +396,28 @@ it('refuses a stale snooze after Clear chat without making a reminder', async ()
     code: 'reminder_not_found', message: 'This message has no reminder to snooze.'
   })
   expect(f.store.waitingReminders(botId)).toEqual([])
+})
+
+it('only the local app window saves a bot\'s face picture; the Bots list then carries the key it was drawn from', async () => {
+  const botId = await created()
+  const listed = async () => (await call<{ bots: BotSummary[] }>('bots.personal.list')).bots.find((bot) => bot.id === botId)!
+  expect((await listed()).facePicture).toEqual({})
+  // A 1 px PNG.
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+  const params = { botId, key: 'v1|blue|headphones', png }
+  for (const clientType of ['cli', 'agent', 'mcp', undefined]) {
+    const caller = { connection: { ...context.connection, clientType } } as unknown as HandlerContext
+    await expect(domains.dispatch(caller, 'bots.facePicture.save', params)).rejects.toMatchObject({ code: 'forbidden' })
+  }
+  const gui = { connection: { ...context.connection, clientType: 'gui' } } as unknown as HandlerContext
+  const routed = { connection: { ...gui.connection, bridgeCaller: { node: 'phone' } } } as unknown as HandlerContext
+  await expect(domains.dispatch(routed, 'bots.facePicture.save', params)).rejects.toMatchObject({ code: 'forbidden' })
+  for (const bad of [{ key: '' }, { key: 'x\n' }, { png: Buffer.from('not a png').toString('base64') }, { png: 'not base64!' }, { extra: 1 }]) {
+    await expect(domains.dispatch(gui, 'bots.facePicture.save', { ...params, ...bad })).rejects.toMatchObject({ code: expect.stringMatching(/invalid_params|unknown_field/) })
+  }
+  expect((await listed()).facePicture).toEqual({})
+  const { path } = await domains.dispatch(gui, 'bots.facePicture.save', params) as { path: string }
+  expect(path.endsWith('face.png')).toBe(true)
+  expect(faceKeyOf(readFileSync(path))).toBe('v1|blue|headphones')
+  expect((await listed()).facePicture).toEqual({ key: 'v1|blue|headphones' })
 })

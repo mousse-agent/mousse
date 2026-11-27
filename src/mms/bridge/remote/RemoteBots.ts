@@ -303,8 +303,8 @@ export function remoteBotError(error: BotError): BotError {
 
 /** A bot as another device sees it. */
 export function remoteBotSummary(bot: BotSummary): BotSummary {
-  // Which devices reach the bot is set and shown on its own computer only.
-  const { error, reach: _reach, ...rest } = bot
+  // Which devices reach the bot is set and shown on its own computer only, and only its own computer's app draws its face picture.
+  const { error, reach: _reach, facePicture: _face, ...rest } = bot
   return { ...rest, ...withoutOtherComputersThreads(bot), ...(error ? { error: remoteBotError(error) } : {}) }
 }
 

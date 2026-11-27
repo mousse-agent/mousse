@@ -274,14 +274,26 @@ export class BotChatService {
   }
 
   /**
-   * The summary with which devices reach the bot, for the menu's Make private: this computer alone, or other devices too
-   * (an older file's every device, until the snapshot, is other devices too).
+   * The summary with which devices reach the bot, for the menu's Make private (this computer alone, or other devices
+   * too), and the key its face picture was drawn from, so the app draws it again only when that changes
+   * (`bots.facePicture.save`).
    */
   private withReach(summary: BotSummary): BotSummary {
     const access = this.options.deviceAccess?.get(summary.id).access
-    if (!access) return summary
-    const alone = access.mode === 'this_computer' || (access.mode === 'chosen' && access.nodes.length === 0)
-    return { ...summary, reach: alone ? 'this_computer' : 'chosen' }
+    const alone = access && (access.mode === 'this_computer' || (access.mode === 'chosen' && access.nodes.length === 0))
+    const key = this.engine.facePictureKey(summary.id)
+    return { ...summary, ...(access ? { reach: alone ? 'this_computer' as const : 'chosen' as const } : {}), facePicture: key ? { key } : {} }
+  }
+
+  /** `bots.facePicture.save`: the app's picture of the bot's face, written into its files folder as `face.png`. */
+  facePictureSave(botId: string, key: string, png: Buffer): { path: string } {
+    this.engine.definitionOf(botId)
+    try {
+      return this.engine.saveFacePicture(botId, key, png)
+    } catch (error) {
+      if (error instanceof BotEngineError) throw error
+      throw new BotEngineError('invalid_params', error instanceof Error ? error.message : String(error))
+    }
   }
 
   /** `bots.personal.list`: every bot that is not deleted, oldest first. */

@@ -39,4 +39,19 @@ describe('computerUpdateWay', () => {
         : way.kind
     expect(got).toBe(expected)
   })
+
+  // The few words the update list shows for each way it can't update from here.
+  const reasons: Array<[string, string]> = [
+    ['takes requests, but only uses this computer', 'Paired one way'],
+    ['takes requests, this build has no release', 'Update it there'],
+    ['offline', 'Offline'],
+    ["offline, said it can't update itself", 'Updates on macOS need a signed build'],
+    ['too old to report', 'Too old to update from here'],
+    ['app not open', "Mousse isn't open there"]
+  ]
+  it.each(reasons)('%s: %s', (label, reason) => {
+    const [, device, options] = rows.find(([name]) => name === label)!
+    const way = computerUpdateWay(device as never, { name: 'Laptop', current: '0.9.2', ...options })
+    expect(way?.kind === 'there' ? way.reason : way?.kind).toBe(reason)
+  })
 })

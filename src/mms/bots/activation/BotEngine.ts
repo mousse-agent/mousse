@@ -33,7 +33,10 @@ import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { basename, join } from 'node:path'
 import { askNoticeText, askText } from '../../../shared/bots/personal/askText'
-import { lookFields, type BotLook } from '../../../shared/bots/personal/look'
+import { facePictureShowsLook, lookFields, normalizeBotLook, type BotLook, type KnownBotLook } from '../../../shared/bots/personal/look'
+import { BotFacePictures } from '../facePicture'
+import { botIdentityLine, type BotFacePicture, type BotProfileFacts } from '../profile'
+import { botDeviceAllowed, DEFAULT_BOT_DEVICE_ACCESS } from '../../../shared/bots/personal/deviceAccess'
 import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHold, type BotSubagentHold } from '../../../shared/bots/personal/subagentHold'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import { launchedActive, type BotChatMessage, type BotChip, type BotError, type BotLaunchedThread, type BotPermissionItem } from '../../../shared/bots/personal/chat'
@@ -346,9 +349,9 @@ export interface BotEngineHost {
   /**
    * The bot's system text (WP3's `botInstructions`): who it is, its files folder, the base
    * instructions and what its owner allows now (`allowed`). Built at each dispatch, never stored, so
-   * a rename or a changed permission applies at the next turn.
+   * a rename or a changed permission applies at the next turn. `identity`: its look and face picture in one line.
    */
-  instructions?(bot: { name: string; description: string; filesFolder: string; lane?: BotLane; allowed?: BotAllowed; secretFetchOffered?: boolean; browserOffline?: boolean; subagent?: true; withheld?: readonly string[]; promptChanged?: true }): string
+  instructions?(bot: { name: string; description: string; filesFolder: string; lane?: BotLane; allowed?: BotAllowed; secretFetchOffered?: boolean; browserOffline?: boolean; subagent?: true; withheld?: readonly string[]; promptChanged?: true; identity?: string }): string
   /** A schedule in plain words ("every weekday · 09:00"; WP3's `describeSchedule`). */
   scheduleLabel?(when: BotSchedule['when']): string
   /** The provider family of an instance in plain words ("Claude"), never a model. */
@@ -373,6 +376,8 @@ export interface BotEngineHost {
   deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget' | 'needsSnapshot'>
   /** The owner's other devices, for New bot's Devices step (`BotReachPort.devices`); undefined while Bridge is off. */
   devices?(): Promise<BotDeviceChoice[] | undefined>
+  /** The secrets a thread's agents may use (the bot's home thread: the bot's), by name and label, never a value. */
+  secretsHeld?(threadId: string): Array<{ name: string; label?: string }>
   /**
    * The owner's MCP servers a bot may hold tools of (`BotMcp`): set up for the whole profile in Mousse. Absent: no bot
    * is offered an MCP tool, and an ask for one is refused with no card.
@@ -422,9 +427,9 @@ export const BOT_ASK_NOT_YET_TEXT = "Don't ask for permissions yet: the owner ha
  * What a chat turn's call of the runtime's own web is answered with when the grant holds the web: its web is Mousse's
  * `web_search` and `web_fetch`, which keep to the chat's deadlines (`frontDeskManifest`).
  */
-export const BOT_CHAT_WEB_TEXT = "The owner already allowed the web. Here use Mousse's web_search and web_fetch for it; a job of several steps goes to work_start."
+export const BOT_CHAT_WEB_TEXT = "The owner already allowed the web. Here use Mousse's web_search and web_fetch for it; a job of several steps goes to your work (thread_create, kind \"subagent\")."
 /** What a chat turn's ask for something its work already holds is answered with (commands, the computer, the browser). */
-export const BOT_WORK_HAS_TEXT = 'Your work already has this; the chat does not use it. Hand the job to work_start and tell the owner you are on it.'
+export const BOT_WORK_HAS_TEXT = 'Your work already has this; the chat does not use it. Hand the job to your work (thread_create, kind "subagent") and tell the owner you are on it.'
 /**
  * What a run's call or `escalate` is answered with when the owner allowed the permission after its turn started: the
  * turn keeps the permissions it started with, and the work continues with the new one once the turn ends.
@@ -696,6 +701,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `BotEscalationSummary` when a wall asks the owner (the v1 form's event; no longer bridged).
    */
   readonly events = new EventEmitter()
+
+  /** Each bot's face picture in its files folder (`face.png`), which the app draws and Mousse writes. */
+  readonly facePictures = new BotFacePictures((botId) => this.filesFolder(botId))
 
   /**
    * The bot threads this process knows of, kept beside `bots.db`: when a read of it fails, a
@@ -3652,18 +3660,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   private instructionsOf(definition: BotDefinition, thread: BotThreadSpec, lane?: BotLane, permissions?: { allowed: BotAllowed; canAskMcp?: boolean; scheduled?: boolean; secretFetchOffered?: boolean; browserOffline?: boolean; subagent?: true; withheld?: readonly string[] }): { instructions?: string } {
     if (permissions) {
-      // Commands, the browser and the owner's threads the owner switched off for the bot are named as off, and so are
-      // MCP, skills and the automation tools, which every bot has unless switched off.
-      const off: Partial<Record<keyof BotSwitchedOff, true>> = {}
-      for (const row of this.store.disabledPermissions(definition.id)) {
-        const permission = switchedOffPermission(row)
-        const which = permission && namedPowerOf(permission)
-        if (which) off[which] = true
-      }
-      const defaults = this.defaultsOff(definition.id)
-      if (defaults.mcp) off.mcp = true
-      if (defaults.skills) off.skills = true
-      if (defaults.automations) off.automation = true
+      const off = this.switchedOff(definition.id)
       if (Object.keys(off).length) permissions = { ...permissions, allowed: { ...permissions.allowed, off } }
     }
     // Its name and prompt as they are now, read as this turn is prepared: the owner's edit in About (or a rename) reaches
@@ -3671,9 +3668,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const words = this.wordsNow(definition)
     // Replies of its own written before the owner's last prompt edit may still be in view: they must not set the style.
     const promptChanged = Boolean(words.promptChangedAt) && !permissions?.subagent && this.repliedBefore(definition.id, words.promptChangedAt!)
+    // Its look in a few words and its face picture (a stat, no read): the line changes only when either does.
+    let identity: string | undefined
+    if (!permissions?.subagent) {
+      try {
+        const look = normalizeBotLook(words.look)
+        identity = botIdentityLine(look, this.facePictureOf(definition.id, look))
+      } catch {
+        identity = undefined
+      }
+    }
     let system: string | undefined
     try {
-      system = this.host.instructions?.({ name: words.name, description: words.description, filesFolder: this.filesFolder(definition.id), ...(lane ? { lane } : {}), ...permissions, ...(promptChanged ? { promptChanged: true as const } : {}) })
+      system = this.host.instructions?.({ name: words.name, description: words.description, filesFolder: this.filesFolder(definition.id), ...(lane ? { lane } : {}), ...permissions, ...(promptChanged ? { promptChanged: true as const } : {}), ...(identity ? { identity } : {}) })
     } catch {
       system = undefined
     }
@@ -3690,10 +3697,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** The words a turn works under from the published revision now, else from `definition` (the activation's own). */
-  private wordsNow(definition: BotDefinition): Pick<BotDefinition, 'name' | 'description' | 'role' | 'promptChangedAt'> {
+  private wordsNow(definition: BotDefinition): Pick<BotDefinition, 'name' | 'description' | 'role' | 'promptChangedAt' | 'look'> {
     try {
       const now = this.published(definition.id)
-      return { name: now.name, description: now.description, role: now.role, ...(now.promptChangedAt ? { promptChangedAt: now.promptChangedAt } : {}) }
+      return { name: now.name, description: now.description, role: now.role, look: now.look, ...(now.promptChangedAt ? { promptChangedAt: now.promptChangedAt } : {}) }
     } catch {
       return definition
     }
@@ -3863,6 +3870,111 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
+   * What the owner switched off for the bot (About → Can use), as its system text and profile name it: commands, the
+   * browser, the owner's threads and the computer, and MCP, skills and the automation tools, which every bot has unless
+   * switched off.
+   */
+  private switchedOff(botId: string): Partial<Record<keyof BotSwitchedOff, true>> {
+    const off: Partial<Record<keyof BotSwitchedOff, true>> = {}
+    for (const row of this.store.disabledPermissions(botId)) {
+      const permission = switchedOffPermission(row)
+      const which = permission && namedPowerOf(permission)
+      if (which) off[which] = true
+    }
+    const defaults = this.defaultsOff(botId)
+    if (defaults.mcp) off.mcp = true
+    if (defaults.skills) off.skills = true
+    if (defaults.automations) off.automation = true
+    return off
+  }
+
+  /**
+   * The bot's own profile (`get_profile`), read from where each part is kept: the published revision (name, words, look,
+   * rows), the approved grant as its turns hold it (the owner's switches applied), the device choice, and the names of
+   * the secrets its home thread may use. Never a secret's value.
+   */
+  profileFacts(botId: string): BotProfileFacts {
+    const definition = this.published(botId)
+    const grant = this.store.activeGrant(botId)
+    const image = imagePickOf(definition.main)
+    let allowed: BotAllowed | undefined
+    if (grant) {
+      const held = this.revisionGives(botId, definition.permissions, grant.manifest, { defaults: true })
+      const off = this.switchedOff(botId)
+      allowed = {
+        ...botAllowedOf(narrowManifest(held, definition.main.narrow), (ids) => this.mcpServerNames(ids)),
+        ...(image ? { images: true as const } : {}),
+        ...(Object.keys(off).length ? { off } : {})
+      }
+    }
+    let devices: BotProfileFacts['devices']
+    try {
+      const access = this.host.deviceAccess?.get(botId).access ?? DEFAULT_BOT_DEVICE_ACCESS
+      const others = this.host.otherComputers?.() ?? []
+      devices = {
+        here: this.host.computerName?.() || 'this computer',
+        access: access.mode,
+        reach: others.filter((other) => botDeviceAllowed(access, other.node)).map((other) => other.name)
+      }
+    } catch {
+      devices = undefined
+    }
+    const homeThreadId = this.store.registry(botId)?.homeThreadId
+    let secrets: BotProfileFacts['secrets'] = []
+    try {
+      secrets = homeThreadId ? this.host.secretsHeld?.(homeThreadId) ?? [] : []
+    } catch {
+      secrets = []
+    }
+    const look = normalizeBotLook(definition.look)
+    const face = this.facePictureOf(botId, look)
+    return {
+      name: definition.name,
+      description: definition.description,
+      look,
+      ...(face ? { facePicture: face } : {}),
+      filesFolder: this.filesFolder(botId),
+      rows: slotsOf(definition.main),
+      depth: definition.main.model.depth,
+      image,
+      custom: customSlotsOf(definition.main).map((slot) => ({ name: slot.name, ...(slot.description ? { description: slot.description } : {}) })),
+      ...(devices ? { devices } : {}),
+      secrets,
+      ...(allowed ? { allowed } : {})
+    }
+  }
+
+  /**
+   * The app saves the bot's face picture (`bots.facePicture.save`), drawn from `key` (its look, the art version and the
+   * size): written whole into its files folder, then the bot's next turn names it, and the Bots list carries the key so
+   * the app draws it again only when the look or the art changes.
+   */
+  saveFacePicture(botId: string, key: string, png: Buffer): { path: string } {
+    this.published(botId)
+    const path = this.facePictures.save(botId, key, png)
+    this.changed({ botId })
+    return { path }
+  }
+
+  /**
+   * The bot's saved face picture, and whether it shows `look` (its key, read once per change of the file, names the look
+   * it was drawn from); undefined when it has none.
+   */
+  private facePictureOf(botId: string, look: KnownBotLook): BotFacePicture | undefined {
+    const face = this.facePictures.current(botId)
+    return face ? { path: face.path, current: facePictureShowsLook(face.key, look) } : undefined
+  }
+
+  /** The key the bot's saved face picture was drawn from, or undefined when it has none (or one Mousse didn't write). */
+  facePictureKey(botId: string): string | undefined {
+    try {
+      return this.facePictures.current(botId)?.key
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
    * What the owner switched off for the bot of what every bot has by default (About → Can use): all of MCP, single
    * servers by installation (from their switch, or a server an older build switched off), every skill, the automation
    * tools. Kept as switched-off rows beside the grant, so the grant and its digest stay the same.
@@ -3966,7 +4078,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const note = !servers.length
       ? read ? 'Your owner has no MCP servers set up in Mousse for you to use.' : 'Your owner\'s MCP servers are still being read. Call mcp_servers again in a moment.'
       : lane === 'chat'
-        ? 'Servers marked yes are your work\'s, with no asking: hand jobs that need them to work_start. One still starting has its tools once it has listed them. Asking won\'t help for one your owner switched off.'
+        ? 'Servers marked yes are your work\'s, with no asking: hand jobs that need them to work. One still starting has its tools once it has listed them. Asking won\'t help for one your owner switched off.'
         : 'Use the tools of servers marked yes, with no asking. One still starting has its tools in your next turn once it has listed them. Asking won\'t help for one your owner switched off: carry on without it, and say so in your report.'
     return { servers, note }
   }
@@ -6715,7 +6827,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (isSpecialAsk(answer.permission)) return `The owner allowed: ${title}. Mousse saves it now.`
       // A chat turn is not offered what takes long: the work it hands off has it now.
       if (row.lane === 'chat' && 'tool' in answer.permission && (BOT_WORK_ONLY_TOOLS.includes(botGrantTool(answer.permission.tool)) || botGrantTool(answer.permission.tool) === BOT_BROWSER_PERMISSION))
-        return `The owner allowed: ${title}. Your work has it now: hand the job to work_start.`
+        return `The owner allowed: ${title}. Your work has it now: hand the job to your work (thread_create, kind "subagent").`
       return `The owner allowed: ${title}.`
     }
     // Ordered store events supply the same update slot as ordinary notes and answers. The reason
@@ -7116,7 +7228,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private subagentCapped(activationId: string, under: string | null, title?: string): string | undefined {
     const records = this.subagentRecords(activationId, under)
     if (title !== undefined && (records.some((record) => record.spec.title.toLowerCase() === title.toLowerCase()) || this.startingSubagents.get(startingKey(activationId, under))?.has(title.toLowerCase())))
-      return `You already have a subagent called "${title}". Give this one another title, or send that one more work with subagent_send.`
+      return `You already have a subagent called "${title}". Give this one another title, or send that one more work (thread_send with its title as subagent).`
     const live = this.live.get(activationId)
     if (live && live.deadline - this.now() < 2 * ACTIVE_TIME_CHUNK_MS)
       return 'Your turn is about to end, so no subagent can start now. Start it after your work goes on.'
@@ -7136,9 +7248,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const row = turn
     const under = childrenOf(main)
     const title = cutText(request.title, MAX_SUBAGENT_TITLE_CHARS)
-    if (!title) return { refused: 'subagent_start needs a short title, like "Price check".' }
+    if (!title) return { refused: 'A subagent needs a short title, like "Price check".' }
     const brief = request.brief.trim()
-    if (!brief) return { refused: 'subagent_start needs a brief that stands on its own: the subagent sees nothing else.' }
+    if (!brief) return { refused: 'A subagent needs a brief that stands on its own: the subagent sees nothing else.' }
     // Never cut: a brief over the limit is refused whole, so the subagent never works from part of it.
     if (brief.length > MAX_SUBAGENT_BRIEF_CHARS) return { refused: subagentTooLongText('brief', brief.length) }
     // A repeat of the same tool call (a runtime's retry) starts nothing new.
@@ -7211,7 +7323,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const record = this.subagentNamed(row.id, request.subagent, under)
     if (!record) return { refused: this.unknownSubagent(row.id, request.subagent, under) }
     const message = request.message.trim()
-    if (!message) return { refused: 'subagent_send needs the message.' }
+    if (!message) return { refused: 'A message to a subagent needs its content.' }
     if (message.length > MAX_SUBAGENT_BRIEF_CHARS) return { refused: subagentTooLongText('message', message.length) }
     // One still working takes it in at its next step, as a correction to what it does.
     if (this.subagentRunning(record)) return this.noteSubagent(record, message)
@@ -7228,7 +7340,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (this.subagentRunning(fresh)) return this.noteSubagent(fresh, message)
     // `subagent_result` reads a subagent's last turn: more work before the work read what the last one returned would
     // leave that result where nothing reads it, and its notice pointing at the next one's.
-    if (this.subagentResultUnread(row.id, fresh)) return { refused: `Read what "${fresh.spec.title}" returned first (subagent_result): more work replaces that result.` }
+    if (this.subagentResultUnread(row.id, fresh)) return { refused: `Read what "${fresh.spec.title}" returned first (thread_wait with timeoutSeconds 0): more work replaces that result.` }
     const recheck = this.subagentCapped(row.id, under)
     if (recheck) return { refused: recheck }
     const lacks = held.hold.withheld.map((power) => BOT_HELD_POWER_TEXT[power])
@@ -7252,7 +7364,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private noteSubagent(record: SubagentRecord, message: string): { sent: BotSubagentView; note: string } | { refused: string } {
     const notes = this.subagentNotes.get(record.turns.at(-1)!.delegation.childRunId)
-    if (!notes?.attached) return { refused: `"${record.spec.title}" is still working and can't take a message until it finishes. Wait for it (subagent_wait), or stop it and send it what changed.` }
+    if (!notes?.attached) return { refused: `"${record.spec.title}" is still working and can't take a message until it finishes. Wait for it (thread_wait), or stop it and send it what changed.` }
     notes.waiting.push(message)
     return { sent: { subagent: record.spec.title, model: record.spec.model, state: 'running' }, note: SUBAGENT_NOTE_SENT }
   }
@@ -7948,11 +8060,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** `subagent_stop`: the subagent's turn ends now (a queued one never starts). */
-  private stopSubagent(activationId: string, request: { subagent: string }, under: string | null): { stopped: BotSubagentView } | { refused: string } {
+  private stopSubagent(activationId: string, request: { subagent: string; toolCallId?: string }, under: string | null): { stopped: BotSubagentView } | { refused: string } {
+    // A retry of a Stop answers as the first did: the subagent may have taken more work since, and that turn is not stopped.
+    const call = request.toolCallId
+    if (call)
+      for (const record of this.subagentRecords(activationId, under))
+        for (const turn of record.turns) {
+          const earlier = turn.spec.stops?.find((stop) => stop.call === call)
+          if (earlier) return { stopped: { subagent: record.spec.title, model: turn.spec.model, state: earlier.state as BotSubagentView['state'] } }
+        }
     const record = this.subagentNamed(activationId, request.subagent, under)
     if (!record) return { refused: this.unknownSubagent(activationId, request.subagent, under) }
-    if (!this.subagentRunning(record)) return { stopped: this.subagentView(record, false) }
-    const { delegation } = record.turns.at(-1)!
+    const last = record.turns.at(-1)!
+    const noted = (view: BotSubagentView) => {
+      if (call) this.store.noteSubagentStop(activationId, last.delegation.childRunId, call, view.state)
+      return { stopped: view }
+    }
+    if (!this.subagentRunning(record)) return noted(this.subagentView(record, false))
+    const { delegation } = last
     this.subagentStops.add(delegation.childRunId)
     const runs = this.host.runs()
     if (runs?.getRun(delegation.childRunId)?.status === 'queued') {
@@ -7964,7 +8089,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     if (!runs || !TERMINAL_RUN_STATUSES.has(runs.getRun(delegation.childRunId)?.status ?? 'queued'))
       void Promise.resolve(this.host.stopThread?.(record.threadId)).catch(() => {})
-    return { stopped: { subagent: record.spec.title, model: record.spec.model, state: 'stopped' } }
+    return noted({ subagent: record.spec.title, model: record.spec.model, state: 'stopped' })
   }
 
   private unknownSubagent(activationId: string, name: string, under: string | null): string {
@@ -8018,8 +8143,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const stopped = untold.filter((entry) => entry.stopped)
     const ended = untold.filter((entry) => !entry.stopped)
     this.store.markSubagentsTold(row.id, untold.map((entry) => entry.childRunId))
-    return (stopped.length ? ` Your subagents ${titles(stopped)} were stopped when your last turn ended; subagent_result shows each one, and you may start them again.` : '')
-      + (ended.length ? ` Your subagents ${titles(ended)} ended since you last looked; read what each returned with subagent_result.` : '')
+    return (stopped.length ? ` Your subagents ${titles(stopped)} were stopped when your last turn ended; thread_wait with timeoutSeconds 0 shows each one, and you may start them again.` : '')
+      + (ended.length ? ` Your subagents ${titles(ended)} ended since you last looked; read what each returned with thread_wait (timeoutSeconds 0).` : '')
   }
 
   /**
@@ -9472,7 +9597,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return Promise.race([call, timedOut])
   }
 
-  /** Which devices reach the bot changed (About's Devices, Make private): the Bots list reads it again for its lock. */
+  /** Which devices reach the bot changed (About's Devices, Make private): the bot's menu reads it again. */
   reachChanged(botId: string): void {
     this.changed({ botId })
   }
@@ -9713,7 +9838,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       done: (threadId, why) => this.completeSchedule(threadId, why),
       list: (botId) => this.listSchedules(botId)
     },
-    setProfile: (botId, profile) => this.setProfile(botId, profile),
+    // A look the bot changes merges into the one it has, then goes the owner's way (`setProfile`), so the app's face
+    // changes at once.
+    setProfile: (botId, { look, ...rest }) => {
+      this.setProfile(botId, { ...rest, ...(look ? { look: normalizeBotLook({ ...this.published(botId).look, ...look }) } : {}) })
+    },
+    profile: (botId) => this.profileFacts(botId),
     setModel: (botId, activationId, scope, choice) => this.setModel(botId, activationId, scope, choice),
     ownerWords: (botId, activationId) => this.ownerWords(botId, activationId),
     rows: (botId) => this.ownerSlots(botId),
@@ -12184,7 +12314,7 @@ function subagentNoteText(messages: readonly string[]): string {
 /** The notice a work's running turn takes in at its next step when one of its subagents ended (`steerNext`). */
 function subagentNoticeText(entry: Pick<BotSubagentRunRow, 'spec' | 'outcome'>): string {
   const how = entry.outcome === 'done' ? 'finished' : entry.outcome === 'failed' ? 'ended without a result' : 'was stopped'
-  return mousseNotice({ kind: 'bot_subagent' }, [`Your subagent "${entry.spec.title}" ${how}. Read what it returned with subagent_result.`])
+  return mousseNotice({ kind: 'bot_subagent' }, [`Your subagent "${entry.spec.title}" ${how}. Read what it returned with thread_wait (timeoutSeconds 0).`])
 }
 
 /** The room a subagent holds on its work's spend before it runs (`holdSubagentSpend`): about one small first request. */
@@ -12203,7 +12333,7 @@ const SUBAGENT_NO_PORT_TEXT = 'Bots are not running here, so no subagent can sta
 const SUBAGENT_RESULT_LINE = 'End with your result for the work that started you: what you found or did, in plain words. Your last message is your result.'
 const SUBAGENT_NOTHING_STARTED = 'Nothing was started.'
 const SUBAGENT_TURN_ENDED_TEXT = 'Your turn has ended, so nothing was started.'
-const SUBAGENT_STARTED_NOTE = 'It runs now, beside you. You are told when it finishes; read its result with subagent_result, or wait for it with subagent_wait. Before you report, wait for the ones you need and stop the rest: one still running when you report is stopped.'
+const SUBAGENT_STARTED_NOTE = 'It runs now, beside you. You are told when it finishes; read its result with thread_wait and timeoutSeconds 0, or wait for it with thread_wait. Before you report, wait for the ones you need and stop the rest: one still running when you report is stopped.'
 /** The Mousse app tools that are the web: a turn without either has no web. */
 const BOT_WEB_TOOLS: ReadonlySet<string> = new Set(['web_search', 'web_fetch'])
 

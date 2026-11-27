@@ -71,7 +71,7 @@ describe('every phase states what the owner allows now', () => {
     expect(line(text, 'Run commands')).toMatch(/: no$/)
     expect(line(text, 'Use the browser')).toMatch(/: no$/)
     // The chat is told what its work has, and makes a quick web call itself with Mousse's web tools, never the runtime's.
-    expect(text).toContain('hand jobs that need them to work_start')
+    expect(text).toContain('hand jobs that need them to work')
     expect(first.prepared.authority.appTools.has('web_fetch')).toBe(true)
     expect(first.prepared.authority.tools.has('web_fetch')).toBe(false)
 
@@ -175,7 +175,7 @@ describe('the stated permissions match the tools a run is given', () => {
     // The servers it holds tools of, by name; the chat is told they are its work's.
     const chat = botAllowedText({ shell: false, browser: false, threads: false, web: true, automation: [], mcp: ['GitHub', 'Notes'] }, 'chat')
     expect(chat).toContain("- Your owner's MCP servers: GitHub, Notes")
-    expect(chat).toContain('In the chat, the browser, commands and apps on this computer are for your work: hand jobs that need them to work_start. The web and MCP tools you may use here for a quick call.')
+    expect(chat).toContain('In the chat, the browser, commands and apps on this computer are for your work: hand jobs that need them to work. The web and MCP tools you may use here for a quick call.')
   })
 
   it('a locked Claude Code turn with no sandbox is told commands are allowed but not available, and is offered no Bash', async () => {
@@ -211,13 +211,13 @@ describe('the stated permissions match the tools a run is given', () => {
 
 describe("a bot's thread lists only tools a bot can hold", () => {
   const tool = (name: string): MousseTool => ({ name, description: name, inputSchema: { type: 'object', properties: {} }, access: 'reads', class: 'read', handler: async () => ({ text: '' }) }) as unknown as MousseTool
-  const names = ['integrate_delegation', 'thread_read', 'queue_enqueue', 'browser_open', 'browser_request_human', 'web_fetch', 'work_start', 'permission_ask']
+  const names = ['integrate_delegation', 'thread_read', 'queue_enqueue', 'browser_open', 'browser_request_human', 'web_fetch', 'remind', 'permission_ask']
 
   it('lists no delegation or queue tools on a bot thread, only the thread tools "use your threads" gives, and every tool on any other', () => {
     const registry = new ToolRegistry({ activeRunId: () => null, botRole: (threadId) => (threadId === 'bot-home' ? 'activation' : undefined) })
     for (const name of names) registry.register(tool(name))
     // The thread tools only for a turn that holds them (tests/run/botThreadTools.test.ts): with no turn here, none.
-    expect(registry.listForThread('bot-home').map((entry) => entry.name).sort()).toEqual(['browser_open', 'permission_ask', 'web_fetch', 'work_start'])
+    expect(registry.listForThread('bot-home').map((entry) => entry.name).sort()).toEqual(['browser_open', 'permission_ask', 'remind', 'web_fetch'])
     expect(registry.listForThread('other').map((entry) => entry.name).sort()).toEqual([...names].sort())
     expect(registry.isBotThread('bot-home')).toBe(true)
     expect(registry.isBotThread('other')).toBe(false)
@@ -242,8 +242,9 @@ describe("a bot's thread lists only tools a bot can hold", () => {
       turns.register(appTurn({ threadId: 'bot-home', runId: run.runId, bot: authority(['permission_ask']) }))
       // Not "Browser tools are not bound for this turn": the bot is told it is not allowed, and to escalate.
       expect(await registry.call('browser_open', { url: 'https://example.com' }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual(refused('not_granted', NOT_ALLOWED))
-      // Any other tool outside the grant keeps its wall. A bot's subagents start through the bot port, never an agent's.
-      expect(await registry.call('delegate_task', { prompt: 'x', title: 'x', workspace: 'shared' }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual(refused('not_granted', 'A bot starts its subagents with subagent_start, and its work with work_start: thread_create starts threads (kind "thread").', { variant: 'delegate_task' }))
+      // Any other tool outside the grant keeps its wall. A bot's subagents start through the bot port, never an agent's:
+      // this turn is neither a chat nor work, so its own tool refuses.
+      expect(await registry.call('delegate_task', { prompt: 'x', title: 'x', workspace: 'shared' }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual(refused('unavailable', 'Only your work starts subagents: not the chat, a consult or a subagent.'))
     } finally {
       fx.dispose()
     }

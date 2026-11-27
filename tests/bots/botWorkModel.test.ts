@@ -102,7 +102,7 @@ describe('work on a model the owner named', () => {
     expect(turn.prepared.selection).toEqual({ instanceId: 'claude', model: 'sonnet' })
     const started = await call(turn.activation.id, 'work_start', { title: 'Vacuum comparison', brief: 'Compare three vacuums.', model: { instanceId: 'claude', model: 'opus', effort: 'high' } })
     expect(started.value).toMatchObject({ status: 'started', model: { name: 'Opus 5.5', entry: 'Claude Code', effort: 'high' } })
-    const workId = started.value.workId as string
+    const workId = started.value.runId as string
     // The work line names it, with the details on hover.
     expect(f.bots.service.get(botId).summary.work).toEqual([expect.objectContaining({ id: workId, model: { name: 'Opus 5.5', detail: 'Opus 5.5 on Claude Code, high reasoning, for this work only' } })])
     const first = await start(f, workId)
@@ -125,8 +125,8 @@ describe('work on a model the owner named', () => {
     const next = await chat('Now look up train times', 'm2')
     const plain = await call(next.activation.id, 'work_start', { title: 'Train times', brief: 'Look up train times.' })
     expect(plain.value.model).toBeUndefined()
-    expect(f.bots.service.get(botId).summary.work?.find((item) => item.id === plain.value.workId)?.model).toBeUndefined()
-    expect((await start(f, plain.value.workId)).prepared.selection).toEqual({ instanceId: 'claude', model: 'sonnet' })
+    expect(f.bots.service.get(botId).summary.work?.find((item) => item.id === plain.value.runId)?.model).toBeUndefined()
+    expect((await start(f, plain.value.runId)).prepared.selection).toEqual({ instanceId: 'claude', model: 'sonnet' })
   })
 
   it('the bot\'s usual model named again is a pin the line does not mention', async () => {
@@ -134,7 +134,7 @@ describe('work on a model the owner named', () => {
     const started = await call(turn.activation.id, 'work_start', { title: 'Job', brief: 'Do it.', model: { instanceId: 'claude', model: 'sonnet' } })
     expect(started.value.model).toBeUndefined()
     expect(f.bots.service.get(botId).summary.work?.[0]?.model).toBeUndefined()
-    expect(f.store.activation(started.value.workId)!.modelOverride).toMatchObject({ mode: 'named', instanceId: 'claude', model: 'sonnet' })
+    expect(f.store.activation(started.value.runId)!.modelOverride).toMatchObject({ mode: 'named', instanceId: 'claude', model: 'sonnet' })
   })
 
   it('a pick not offered, on an entry that can\'t run work, or at a level the model lacks is refused and nothing starts', async () => {
@@ -156,7 +156,7 @@ describe('work on a model the owner named', () => {
     const mark = f.resolved.length
     const started = await call(turn.activation.id, 'work_start', { title: 'Cheap job', brief: 'Do it cheaply.', model: { instanceId: 'pi:openrouter', model: 'cheap/model' } })
     await flush()
-    expect(f.store.activation(started.value.workId)).toMatchObject({ status: 'failed', endReason: 'bot_pick_unavailable', selection: null })
+    expect(f.store.activation(started.value.runId)).toMatchObject({ status: 'failed', endReason: 'bot_pick_unavailable', selection: null })
     // Only the named pick was tried for the work: never the row it would have used.
     expect(f.resolved.slice(mark).map((entry) => entry.pick?.instanceId)).toEqual(['pi:openrouter'])
     expect(chatOf(f, botId).some((message) => message.error?.text === 'I can\'t use Cheap Model on OpenRouter: it\'s turned off.')).toBe(true)
@@ -175,9 +175,9 @@ describe('work on a model the owner named', () => {
     // Work itself can't start work, with or without a model.
     const turn = await chat('Research this', 'm1')
     const started = await call(turn.activation.id, 'work_start', { title: 'Job', brief: 'Do it.' })
-    await start(f, started.value.workId)
-    expect((await call(started.value.workId, 'work_start', { title: 'More', brief: 'More.', model: pick })).isError).toBe(true)
-    expect((await call(started.value.workId, 'model_list', {})).isError).toBe(true)
+    await start(f, started.value.runId)
+    expect((await call(started.value.runId, 'work_start', { title: 'More', brief: 'More.', model: pick })).isError).toBe(true)
+    expect((await call(started.value.runId, 'model_list', {})).isError).toBe(true)
     // A reminder's work has no model of its own: it runs on the rows, whatever its text says.
     f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: new Date(f.clock.now + 60_000).toISOString(), text: 'Checking.', work: { title: 'Later', brief: 'Do this one with Opus on Claude Code.' } })
     await finish(f, turn.payload, 'completed', { text: 'Set.' })
@@ -196,8 +196,8 @@ describe('work on a model the owner named', () => {
     const hello = await start(f, greeting.id)
     const routed = await call(greeting.id, 'work_start', { title: 'Build the app', brief: 'Fix the Xcode build.', slot: 'iOSDev' })
     expect(routed.value).toMatchObject({ status: 'started' })
-    expect(f.store.activation(routed.value.workId)!.trigger).toMatchObject({ kind: 'work', slot: 'iosdev' })
-    expect((await start(f, routed.value.workId)).prepared.selection).toEqual({ instanceId: 'claude', model: 'opus', effort: 'high' })
+    expect(f.store.activation(routed.value.runId)!.trigger).toMatchObject({ kind: 'work', slot: 'iosdev' })
+    expect((await start(f, routed.value.runId)).prepared.selection).toEqual({ instanceId: 'claude', model: 'opus', effort: 'high' })
     // A slot the bot doesn't have: nothing starts, and the bot is told the slots there are.
     const before = runs().length
     expect((await call(greeting.id, 'work_start', { title: 'Docs', brief: 'Write docs.', slot: 'docs' })).text).toBe('Your owner has no slot named "docs". Their slots: iosdev. Nothing was started.')
@@ -206,7 +206,7 @@ describe('work on a model the owner named', () => {
     // The owner names a model for this one work: it wins over the slot.
     const turn = await chat('Do the Swift job with the cheap one on OpenRouter', 'm1')
     const both = await call(turn.activation.id, 'work_start', { title: 'Swift job', brief: 'Do it.', slot: 'iosdev', model: { instanceId: 'pi:openrouter', model: 'cheap/model' } })
-    expect((await start(f, both.value.workId)).prepared.selection).toEqual({ instanceId: 'pi:openrouter', model: 'cheap/model' })
+    expect((await start(f, both.value.runId)).prepared.selection).toEqual({ instanceId: 'pi:openrouter', model: 'cheap/model' })
     // Without slots, the bot is told to leave slot out.
     f.bots.setCustomSlot(botId, 'iosdev', null)
     expect((await call(turn.activation.id, 'work_start', { title: 'Swift', brief: 'Do it.', slot: 'iosdev' })).text).toBe('Your owner has set up no custom slots: leave slot out. Nothing was started.')

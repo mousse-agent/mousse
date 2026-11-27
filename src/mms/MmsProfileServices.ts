@@ -970,6 +970,12 @@ export class MmsProfileServices {
       deviceAccess: this.botDeviceAccess,
       // New bot's Devices step lists the owner's other devices, as About's Devices does.
       devices: async () => this.botReach?.devices(),
+      // The secrets a bot's home thread may use, for its profile: names and labels only, read when it asks.
+      secretsHeld: (threadId) => {
+        const vault = this.secretVault
+        if (!vault) return []
+        return vault.list().filter((entry) => vault.usableIn(entry.name, threadId)).map((entry) => ({ name: entry.name, ...(entry.label ? { label: entry.label } : {}) }))
+      },
       browser: botBrowsers,
       // "Use your threads" removed: what the bot sent that has not started leaves its owner's threads.
       threadsWithdrawn: (bot) => { this.orchestrator.withdrawBotThreadMessages(bot) },

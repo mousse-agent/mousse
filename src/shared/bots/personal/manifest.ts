@@ -75,6 +75,13 @@ export const BOT_CHAT_NATIVE_OFF: readonly string[] = ['web_search', 'web_fetch'
 export const BOT_MCP_LIST_TOOL = 'mcp_servers'
 
 /**
+ * The bot's own profile (`get_profile`): who it is (name, description, look and face picture), how it runs, what it can
+ * reach (devices, MCP servers, the names of its secrets, never their values) and what it may do. It reads only the bot's
+ * own settings, so like memory it is always on and never grantable, on a bot's main turns; never a consult or a subagent.
+ */
+export const BOT_PROFILE_TOOL = 'get_profile'
+
+/**
  * What runs now for the bot's folders (`running_list`): its background commands, and servers and commands there, with
  * their addresses. It reads and starts nothing, so it is never grantable and every bot turn has it (chat, work, consults
  * and subagents), as a thread's agent has it on every turn.
@@ -373,6 +380,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   ...BOT_MEMORY_TOOLS,
   ...BOT_ITEM_TOOLS,
   BOT_MCP_LIST_TOOL,
+  BOT_PROFILE_TOOL,
   BOT_RUNNING_TOOL,
   BOT_IMAGE_TOOL,
   BOT_APPLET_TOOL,

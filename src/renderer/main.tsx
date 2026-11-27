@@ -17,6 +17,7 @@ import { EditorAskHost } from './components/EditorAskPrompt'
 import { AccessAskHost } from './components/netEngine/AccessAskHost'
 import { OnboardingHost } from './components/onboarding/Onboarding'
 import { startFaceFrameStore, warmFaceRendererAfterPaint } from './components/bots/face/faceRenderer'
+import { startFacePictures } from './components/bots/face/startFacePictures'
 import './styles/global.css'
 import './styles/compact-shell.css'
 import './styles/sentence-case.css'
@@ -94,3 +95,5 @@ createAppRoot(document.getElementById('root')!).render(
 // Start compiling the bot face shader once the first frame is painted (seconds on Direct3D 11), so
 // faces are live by the time one shows.
 warmFaceRendererAfterPaint()
+// Each bot's face picture (face.png in its files folder) is drawn here, in idle time once the faces draw live.
+startFacePictures()

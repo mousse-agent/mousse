@@ -24,6 +24,8 @@ const SELECTOR = 'abcdefghijklmnopqrstuvwxyz'
 function a(answers: {
   prepare: (request: Record<string, unknown>) => Record<string, unknown>
   dial?: () => Promise<number>
+  /** A helper refusal to throw for `op`, as the helper channel builds it. */
+  refuse?: (op: string) => Error | undefined
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'engine-ssh-'))
   const db = new NetDatabase({ profileDir: dir })
@@ -46,6 +48,8 @@ function a(answers: {
     },
     request: async (op: string, fields: any) => {
       asked.push([op, fields])
+      const refusal = answers.refuse?.(op)
+      if (refusal) throw refusal
       if (op === 'ssh.run') {
         if (fields.request.op === 'prepare') {
           atPrepare.push(peers.all().map((row) => `${row.state}:${row.source}`).join(','))
@@ -176,6 +180,28 @@ describe('Add over SSH (A)', () => {
     const after = t.dials()
     await wait()
     expect(t.dials()).toBe(after)
+  })
+
+  it('shows a helper refusal by its reason, never the remote output or an internal error', async () => {
+    const output = "'exec' is not recognized as an internal or external command, operable program or batch file."
+    // What the helper channel builds for `{code: 'windows_remote_unsupported', reason: <the remote's output>}`: the
+    // code is no Net error code, so it arrives as `internal` with the output as its text.
+    const s = a({
+      prepare: () => reply,
+      refuse: (op) =>
+        op === 'ssh.run'
+          ? new NetError('internal', output, {
+              details: { reason: 'windows_remote_unsupported', helper: 'windows_remote_unsupported' }
+            })
+          : undefined
+    })
+    const refused = await s.ssh.profiles('r1', 'animatrix', 'me').catch((error: unknown) => error)
+    expect(refused).toBeInstanceOf(NetError)
+    expect(refused).toMatchObject({
+      code: 'bad_request',
+      message: sshErrorText('windows_remote_unsupported', 'animatrix', 'me'),
+      details: { reason: 'windows_remote_unsupported' }
+    })
   })
 
   it('lists only well-formed profile selectors', async () => {

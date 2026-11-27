@@ -97,11 +97,6 @@ export function consentedTurns(rollout: Pick<Rollout, 'rows'>): Record<string, n
   return Object.fromEntries(rollout.rows.filter((row) => row.via !== 'manual').map((row) => [row.node, row.runningTurns ?? 0]))
 }
 
-/** "Update everywhere · 3 computers": this computer when it needs the version, and each other one updated from here. */
-export function everywhereLabel(plan: readonly RolloutRow[]): string {
-  return `Update everywhere · ${computersCount(rolloutTargets(plan).length)}`
-}
-
 /** The row's name: this computer is called so. */
 export const rowName = (row: Pick<RolloutRow, 'node' | 'name'>): string => (row.node === SELF_NODE ? 'This computer' : row.name)
 

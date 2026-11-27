@@ -282,7 +282,7 @@ function receiptsForUnknownRuns(db: ProfileDatabase): FsckFinding[] {
   const rows = db
     .statement(
       `SELECT client_request_id, thread_id, command_kind, result FROM receipts
-       WHERE status = 'accepted' AND command_kind NOT IN ('thread_create', 'thread_address') ORDER BY created_at, client_request_id`
+       WHERE status = 'accepted' AND command_kind NOT IN ('thread_create', 'thread_address', 'schedule_delete') ORDER BY created_at, client_request_id`
     )
     .all()
   const exists = db.statement('SELECT 1 AS found FROM runs WHERE run_id = ?')

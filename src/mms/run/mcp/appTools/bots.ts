@@ -5,7 +5,7 @@ import { Type, type Tool } from '@earendil-works/pi-ai'
 import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule, type BotWorkLevel } from '../../../../shared/bots/personal/definition'
 import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, pickReasonText, pickSourceOf, plainLabel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
 import type { BotModelOption, BotWorkChoices } from '../../../../shared/bots/personal/methods'
-import { BOT_CARD_TOOL, BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_QUESTION_WITHDRAW_TOOL } from '../../../../shared/bots/personal/manifest'
+import { BOT_CARD_TOOL, BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, BOT_PROFILE_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_QUESTION_WITHDRAW_TOOL } from '../../../../shared/bots/personal/manifest'
 import type { BotSubagentView } from '../../../../shared/bots/personal/authority'
 import { DEFAULT_ANSWER_AFTER_MINUTES, DEFAULT_NUDGE_AFTER_MINUTES, MAX_CHOICE_DETAIL_CHARS, MAX_CHOICE_LABEL_CHARS, MAX_FOLLOW_UP_MINUTES, MAX_QUESTION_CHARS, MAX_QUESTION_CHOICES, MAX_QUESTIONS_PER_CALL, MIN_FOLLOW_UP_MINUTES, MIN_QUESTION_CHOICES, QUESTION_NOT_OFFERED_TEXT, questionAsksOf } from '../../../../shared/bots/personal/questions'
 import { cardOf, MAX_CARD_TITLE_CHARS, MAX_CHECKLIST_ITEMS, MAX_CHECKLIST_TEXT_CHARS, MAX_FACT_LABEL_CHARS, MAX_FACT_ROWS, MAX_FACT_VALUE_CHARS, MAX_GALLERY_CAPTION_CHARS, MAX_GALLERY_FILES, MAX_PROGRESS_LABEL_CHARS, MAX_PROGRESS_NOTE_CHARS } from '../../../../shared/bots/personal/cards'
@@ -18,6 +18,8 @@ import { DEFAULT_WATCHER_MINUTES, MAX_WATCHER_MINUTES } from '../../../bots/watc
 import { TERMINAL_READ_DEFAULT_LINES, TERMINAL_READ_MAX_LINES, terminalPage } from '../../../terminals/terminalText'
 import type { BotActivityContext, BotActivitySink, BotToolHost, BotWorkModel } from '../../../bots/seams'
 import type { BotImageMaker } from '../../../bots/images/BotImageMaker'
+import { botProfileText } from '../../../bots/profile'
+import { BOT_ACCESSORIES, BOT_COLOURS, BOT_EYE_COLOURS, BOT_EYES, BOT_KINDS, type BotLook } from '../../../../shared/bots/personal/look'
 import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
 
 /**
@@ -28,7 +30,7 @@ import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallCont
  * - `consult` asks one of the bot's context threads;
  * - `bot_schedule_add`, `bot_schedule_remove`, `bot_schedule_list` keep the bot's own schedules (in
  *   `bots.db`; the job scheduler's tools already own the `schedule_*` names);
- * - `set_profile` renames it or changes its description;
+ * - `set_profile` renames it or changes its description or its look, and `get_profile` reads its whole profile;
  * - `set_depth` and `use_model` change how much time it takes and, in words the owner used, its
  *   model (#673: a level, and a pick among the Runs on choices); a model change shows as a chip
  *   and on About → Runs on, and never names the model in the chat.
@@ -167,11 +169,23 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'set_profile',
-    description: `Change your name (at most ${MAX_BOT_NAME_CHARS} characters) or your description (at most ${MAX_BOT_DESCRIPTION_CHARS}), when the owner asks.`,
+    description: `Change your name (at most ${MAX_BOT_NAME_CHARS} characters), your description (at most ${MAX_BOT_DESCRIPTION_CHARS}) or your look, when the owner asks. A look takes only the fields given; the rest stay. Your face in the app and your face picture change with it.`,
     parameters: Type.Object({
       name: Type.Optional(Type.String()),
-      description: Type.Optional(Type.String())
+      description: Type.Optional(Type.String()),
+      look: Type.Optional(Type.Object({
+        kind: Type.Optional(Type.Union(BOT_KINDS.map((value) => Type.Literal(value)), { description: 'mouse, or mousse: the Mousse logo as a character, mousse in a goblet.' })),
+        colour: Type.Optional(Type.Union(BOT_COLOURS.map((value) => Type.Literal(value)))),
+        accessory: Type.Optional(Type.Union(BOT_ACCESSORIES.map((value) => Type.Literal(value)))),
+        eyes: Type.Optional(Type.Union(BOT_EYES.map((value) => Type.Literal(value)), { description: 'The eye shape.' })),
+        eyeColour: Type.Optional(Type.Union(BOT_EYE_COLOURS.map((value) => Type.Literal(value))))
+      }, { additionalProperties: false }))
     })
+  },
+  {
+    name: BOT_PROFILE_TOOL,
+    description: 'Your own profile: who you are (name, description, look and the path of your face picture), how you run (your models and level), what you can reach (devices, MCP servers, the names of keys and secrets you were given) and what you may do. Read it when your owner asks about you, or before you use your picture.',
+    parameters: Type.Object({})
   },
   {
     name: 'set_depth',
@@ -207,12 +221,12 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'model_list',
-    description: 'The models your owner has that work can run on, by provider entry, with each model\'s reasoning levels; the entries your work can\'t run on, and why; and the models your work usually runs on. In the chat: use it when the owner asks for a piece of work on a particular model ("do this one with Opus"), to find the one they mean, then pass it to work_start as model; if you can\'t tell which one they mean, ask them. In your work: pick a model for a subagent from it (subagent_start\'s model).',
+    description: 'The models your owner has that work can run on, by provider entry, with each model\'s reasoning levels; the entries your work can\'t run on, and why; and the models your work usually runs on. In the chat: use it when the owner asks for a piece of work on a particular model ("do this one with Opus"), to find the one they mean, then pass it to thread_create (kind "subagent") as model; if you can\'t tell which one they mean, ask them. In your work: pick a model for a subagent from it (thread_create\'s model).',
     parameters: Type.Object({})
   },
   {
     name: 'subagent_start',
-    description: `Start a subagent: a helper that does one part of this job on its own and returns its result to you, never to the owner. Use it to split a job into parts that can go on at once, or to give one part a model better suited to it. title is a short name you address it by ("Price check"); brief is the whole task, standing on its own (it sees neither your memory nor this conversation), at most 32,768 characters: a longer one is refused whole, never cut. It can do only what you can, and it can't ask the owner for anything. It runs on your model unless you give model: an instanceId and a model, and maybe effort, from model_list; one that isn't offered there is refused and nothing starts. Keep it on your model unless the part needs another. On another entry it may run without something you have (lacks says what) or not start at all, when that entry would hold it less tightly than yours. It returns at once, and you are told when it finishes. Before you report, wait for the ones you need (subagent_wait) and stop the rest: one still running when you report is stopped. You stay responsible for the result: check what they return. There is no count of how many you start and no limit on their time; start as many as the job needs.`,
+    description: `Start a subagent: a helper that does one part of this job on its own and returns its result to you, never to the owner. Use it to split a job into parts that can go on at once, or to give one part a model better suited to it. title is a short name you address it by ("Price check"); brief is the whole task, standing on its own (it sees neither your memory nor this conversation), at most 32,768 characters: a longer one is refused whole, never cut. It can do only what you can, and it can't ask the owner for anything. It runs on your model unless you give model: an instanceId and a model, and maybe effort, from model_list; one that isn't offered there is refused and nothing starts. Keep it on your model unless the part needs another. On another entry it may run without something you have (lacks says what) or not start at all, when that entry would hold it less tightly than yours. It returns at once, and you are told when it finishes. Before you report, wait for the ones you need (thread_wait) and stop the rest: one still running when you report is stopped. You stay responsible for the result: check what they return. There is no count of how many you start and no limit on their time; start as many as the job needs.`,
     parameters: Type.Object({
       title: Type.String({ description: 'A short name for it, unique in this work.' }),
       brief: Type.String({ maxLength: 32_768, description: 'The whole task, standing on its own, and what its result should contain. At most 32,768 characters; a longer one is refused, not cut.' }),
@@ -225,13 +239,13 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'subagent_send',
-    description: 'Send one of your subagents a message, by its title. One that has finished takes it as more work: it carries on in its own thread with what it already did, and you are told when it finishes. Read what it returned first (subagent_result): more work replaces that result. One still working takes it in at its next step, to correct or add to what it does. At most 32,768 characters: a longer message is refused whole, never cut.',
-    parameters: Type.Object({ subagent: Type.String({ description: 'Its title.' }), message: Type.String({ maxLength: 32_768, description: 'What to do next, or what changed, standing on its own. At most 32,768 characters; a longer one is refused, not cut.' }) })
+    description: 'Send one of your subagents a message (content), by its title. One that has finished takes it as more work: it carries on in its own thread with what it already did, and you are told when it finishes. Read what it returned first (thread_wait with timeoutSeconds 0): more work replaces that result. One still working takes it in at its next step, to correct or add to what it does. At most 32,768 characters: a longer message is refused whole, never cut.',
+    parameters: Type.Object({ subagent: Type.String({ description: 'Its title.' }), content: Type.String({ maxLength: 32_768, description: 'What to do next, or what changed, standing on its own. At most 32,768 characters; a longer one is refused, not cut.' }) })
   },
   {
     name: 'subagent_wait',
     description: 'Wait until a subagent finishes (by its title), or, without one, until all of yours that are running now have; at most timeoutSeconds (600 at most). Returns each one\'s state and what it returned.',
-    parameters: Type.Object({ subagent: Type.Optional(Type.String()), timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 600 })) })
+    parameters: Type.Object({ subagent: Type.Optional(Type.String()), timeoutSeconds: Type.Optional(Type.Integer({ minimum: 0, maximum: 600, description: '0: no wait: its state and what it returned now (from pages a long result).' })) })
   },
   {
     name: 'subagent_result',
@@ -250,15 +264,15 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'work_stop',
-    description: 'Stop a piece of your work by its id (see work_list), when the owner asks or it is no longer needed.',
-    parameters: Type.Object({ workId: Type.String() })
+    description: 'Stop a piece of your work by its id (runId, from thread_list with scope "bot_work"), when the owner asks or it is no longer needed.',
+    parameters: Type.Object({ runId: Type.String({ description: 'The work\'s id.' }) })
   },
   {
     name: 'work_note',
-    description: 'When the owner adds to or changes something you are working on (running or waiting; its id is in work_list), give it to that work: you take it into account there and your report leads with what changed. If their words could fit more than one piece of work, ask them which first. If they changed the task entirely, stop the work and start new work instead. Its answer says what is now true, in words you can tell the owner as your own.',
+    description: 'When the owner adds to or changes something you are working on (running or waiting; its id is in thread_list with scope "bot_work"), give it to that work as a note (intent "note", runId): you take it into account there and your report leads with what changed. If their words could fit more than one piece of work, ask them which first. If they changed the task entirely, stop the work and start new work instead. Its answer says what is now true, in words you can tell the owner as your own.',
     parameters: Type.Object({
-      workId: Type.String(),
-      note: Type.String({ description: 'What the owner added, standing on its own, as you will follow it ("Use the browser tab that is already open").' })
+      runId: Type.String({ description: 'The work\'s id.' }),
+      content: Type.String({ description: 'What the owner added, standing on its own, as you will follow it ("Use the browser tab that is already open").' })
     })
   },
   {
@@ -436,6 +450,31 @@ function otherNames(option: BotModelOption): string[] {
   return [...new Set(option.names ?? [])].filter((name) => !own.has(name)).slice(0, 4).map((name) => plainLabel(name, 60))
 }
 
+/** A row's pick in plain words, as Runs on names it: "Opus 5.5 on Claude, high reasoning"; null is Mousse's choice. */
+function pickName(choices: BotWorkChoices): (pick: BotModelPick | null) => string {
+  return (pick) => {
+    if (!pick) return 'chosen by Mousse'
+    const option = choices.options.find((candidate) => candidate.instanceId === pick.instanceId && candidate.model === pick.model)
+    const name = option ? `${modelName(option)} on ${plainLabel(option.entry, 40)}` : plainLabel(pick.model)
+    return pick.effort ? `${name}, ${pick.effort} reasoning` : name
+  }
+}
+
+const LOOK_VALUES: Record<keyof BotLook, readonly string[]> = { kind: BOT_KINDS, colour: BOT_COLOURS, accessory: BOT_ACCESSORIES, eyes: BOT_EYES, eyeColour: BOT_EYE_COLOURS }
+
+/** `set_profile`'s look: the fields given, each one of its values, or why not. */
+function lookChange(value: unknown): Partial<BotLook> | string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'look is an object with kind, colour, accessory, eyes or eyeColour.'
+  const change: Partial<BotLook> = {}
+  for (const [key, given] of Object.entries(value)) {
+    const values = LOOK_VALUES[key as keyof BotLook]
+    if (!values) return `look has no field ${key}: it takes kind, colour, accessory, eyes and eyeColour.`
+    if (typeof given !== 'string' || !values.includes(given)) return `look.${key} is one of: ${values.join(', ')}.`
+    change[key as keyof BotLook] = given
+  }
+  return Object.keys(change).length ? change : 'look needs at least one of kind, colour, accessory, eyes or eyeColour.'
+}
+
 /**
  * `model_list`' answer: each entry the bot's work can run on, its models and their reasoning levels, in the order Runs
  * on lists them; the owner's other entries with why work can't run there; and the bot's Work rows by name.
@@ -448,12 +487,7 @@ export function workModelListing(choices: BotWorkChoices, rows: BotModelSlots): 
     entry.models.push({ model: option.model, name: modelName(option), ...(option.efforts.length ? { efforts: option.efforts } : {}), ...(also.length ? { also } : {}) })
     entries.set(option.instanceId, entry)
   }
-  const named = (pick: BotModelPick | null) => {
-    if (!pick) return 'chosen by Mousse'
-    const option = choices.options.find((candidate) => candidate.instanceId === pick.instanceId && candidate.model === pick.model)
-    const name = option ? `${modelName(option)} on ${plainLabel(option.entry, 40)}` : plainLabel(pick.model)
-    return pick.effort ? `${name}, ${pick.effort} reasoning` : name
-  }
+  const named = pickName(choices)
   const usual = (key: BotWorkLevel) => named(rows[pickSourceOf(rows, key) ?? key])
   return {
     entries: [...entries.values()],
@@ -461,13 +495,13 @@ export function workModelListing(choices: BotWorkChoices, rows: BotModelSlots): 
     // A Work row left unpicked runs on the row it borrows from (Medium work's, else Talk's model).
     usualWork: { light: usual('light'), medium: usual('medium'), hard: usual('hard') },
     note: entries.size
-      ? 'Use one only when the owner asks for it for a piece of work: pass its instanceId, model and (if they asked for one) effort to work_start as model. It is for that work only. If the owner names an entry under cantRunWork, tell them plainly why it can\'t run your work.'
+      ? 'Use one only when the owner asks for it for a piece of work: pass its instanceId, model and (if they asked for one) effort to thread_create (kind "subagent") as model. It is for that work only. If the owner names an entry under cantRunWork, tell them plainly why it can\'t run your work.'
       : 'Your owner has no model your work can run on here other than through Runs on. Tell them plainly.'
   }
 }
 
 /** `model_list`' note in a run's main turn: the list is for its subagents. */
-const SUBAGENT_MODELS_NOTE = 'For a subagent you start: keep it on your own model unless a part needs another; then pass an entry\'s instanceId, a model and (if you want one) one of its efforts to subagent_start as model. Another entry is another provider: it is sent your instructions and the brief. Mind that a stronger model costs your owner more. subagentLacks says what a subagent there would run without, because that entry holds it less tightly than yours; subagentCantRun, why one can\'t run there. If an entry is under cantRunWork, a subagent can\'t run there either.'
+const SUBAGENT_MODELS_NOTE = 'For a subagent you start: keep it on your own model unless a part needs another; then pass an entry\'s instanceId, a model and (if you want one) one of its efforts to thread_create (kind "subagent") as model. Another entry is another provider: it is sent your instructions and the brief. Mind that a stronger model costs your owner more. subagentLacks says what a subagent there would run without, because that entry holds it less tightly than yours; subagentCantRun, why one can\'t run there. If an entry is under cantRunWork, a subagent can\'t run there either.'
 
 /** Why work can't start on a model, after which nothing starts: a sentence the bot passes on to the owner. */
 const NOTHING_STARTED = 'Nothing was started. Tell the owner plainly, and ask what they want.'
@@ -840,31 +874,56 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
     }),
     ownTool(byName.get('set_profile')!, deps, {
       class: 'mutation',
-      describe: () => 'Change name or description',
+      describe: () => 'Change name, description or look',
       handler: async (args, ctx) => {
         const call = botCall(deps, ctx)
         if (isOutcome(call)) return call
         if (call.lane !== 'chat') return error(OWNER_ONLY)
         const name = typeof args.name === 'string' ? args.name.replace(/\s+/g, ' ').trim() : undefined
         const description = typeof args.description === 'string' ? args.description.trim() : undefined
-        if (name === undefined && description === undefined) return error('set_profile needs a name or a description.')
+        const look = args.look === undefined ? undefined : lookChange(args.look)
+        if (typeof look === 'string') return error(look)
+        if (name === undefined && description === undefined && look === undefined) return error('set_profile needs a name, a description or a look.')
         if (name !== undefined && (!name || name.length > MAX_BOT_NAME_CHARS)) return error(`A name is 1 to ${MAX_BOT_NAME_CHARS} characters.`)
         if (description !== undefined && (!description || description.length > MAX_BOT_DESCRIPTION_CHARS)) return error(`A description is 1 to ${MAX_BOT_DESCRIPTION_CHARS} characters.`)
-        // The name first and on its own: a description the owner wrote in About is refused, and the name still changes.
-        let renamed = false
+        // The name and the look first, on their own: a description the owner wrote in About is refused, and they still change.
+        const changed: string[] = []
         try {
           if (name !== undefined) {
             call.deps.host.setProfile(call.botId, { name })
-            renamed = true
+            changed.push(`Your name is now ${name}.`)
+          }
+          if (look !== undefined) {
+            call.deps.host.setProfile(call.botId, { look })
+            changed.push('Your look changed.')
           }
           if (description !== undefined) call.deps.host.setProfile(call.botId, { description })
         } catch (failure) {
           const message = failure instanceof Error ? failure.message : String(failure)
-          return error(renamed ? `Your name is now ${name}. ${message}` : message)
+          return error([...changed, message].join(' '))
         }
         const result = { ok: true as const }
         call.deps.activity?.onAppResult(call.activity, 'set_profile', result)
         return json(result)
+      }
+    }),
+    // Every lane reads it: it only reads the bot's own settings, and names its secrets, never their values.
+    ownTool(byName.get(BOT_PROFILE_TOOL)!, deps, {
+      class: 'read',
+      describe: () => 'Read own profile',
+      handler: async (_args, ctx) => {
+        const call = botCall(deps, ctx)
+        if (isOutcome(call)) return call
+        if (!call.deps.host.profile) return error('Your profile can\'t be read here.')
+        let facts
+        try {
+          facts = call.deps.host.profile(call.botId)
+        } catch (failure) {
+          return error(failure instanceof Error ? failure.message : String(failure))
+        }
+        // The models by the names the owner sees in Runs on; one no entry offers now by its own name.
+        const choices = await workChoicesOf(call.deps).catch(() => ({ options: [], unavailable: [] }))
+        return { text: botProfileText(facts, pickName(choices)) }
       }
     }),
     ownTool(byName.get('set_depth')!, deps, {
@@ -906,7 +965,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (isOutcome(call)) return call
         if (call.lane !== 'chat') return error(CHAT_ONLY)
         const brief = typeof args.brief === 'string' ? args.brief.trim().slice(0, MAX_WORK_BRIEF_CHARS) : ''
-        if (!brief) return error('work_start needs a brief that stands on its own.')
+        if (!brief) return error('Work needs a brief that stands on its own.')
         const title = typeof args.title === 'string' ? args.title : ''
         const level = workLevelOf(args.level)
         if (args.level !== undefined && !level) return error('level is light, medium or hard.')
@@ -938,13 +997,13 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
           const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${requestKey}`, ...(level ? { level } : {}), ...(model ? { model } : {}), ...(slot !== undefined ? { slot } : {}) })
           const where = model ? ` It runs on ${model.name.name} on ${model.name.entry}${model.name.effort ? `, ${model.name.effort} reasoning` : ''}, for this work only.` : ''
           const note = started.status === 'ended'
-            ? 'This work already ended; nothing new was started. work_list has its result.'
+            ? 'This work already ended; nothing new was started. thread_list with scope "bot_work" has its result.'
             : started.status === 'queued'
               ? `${started.replayed ? 'This work is already queued; nothing new was started. ' : ''}You start on it when there is room, after: ${started.ahead.join('; ')}. Tell the owner you'll get to it after that.`
               : started.replayed
                 ? 'This work is already in progress; nothing new was started. Tell the owner you are already on it; its report reaches them by itself.'
                 : 'You are on it now, beside anything else you are working on. Tell the owner in one short line that you are on it; when you finish, your report reaches them by itself.'
-          const result = { ...started, note: note + where }
+          const result = { ...withRunId(started), note: note + where }
           call.deps.activity?.onAppResult(call.activity, 'work_start', started)
           return json(result)
         } catch (failure) {
@@ -980,7 +1039,8 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
       handler: async (_args, ctx) => {
         const call = botCall(deps, ctx)
         if (isOutcome(call)) return call
-        return json(call.deps.host.work.list(call.botId))
+        const list = call.deps.host.work.list(call.botId)
+        return json({ now: list.now.map(withRunId), recent: list.recent.map(withRunId) })
       }
     }),
     ownTool(byName.get('work_stop')!, deps, {
@@ -990,11 +1050,11 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const call = botCall(deps, ctx)
         if (isOutcome(call)) return call
         if (call.lane !== 'chat') return error(CHAT_ONLY)
-        if (typeof args.workId !== 'string' || !args.workId) return error('work_stop needs a work id (see work_list).')
-        const title = workTitleOf(call, args.workId)
-        const result = await call.deps.host.work.stop(call.botId, args.workId)
+        if (typeof args.runId !== 'string' || !args.runId) return error(`Stopping work needs its id as runId (see ${WORK_LIST}).`)
+        const title = workTitleOf(call, args.runId)
+        const result = await call.deps.host.work.stop(call.botId, args.runId)
         call.deps.activity?.onAppResult(call.activity, 'work_stop', { result, ...(title ? { title } : {}) })
-        if (result === 'not_found') return error('You have no work with that id. See work_list.')
+        if (result === 'not_found') return error(`You have no work with that id. See ${WORK_LIST}.`)
         return json({ result, note: result === 'stopped' ? `You stopped${title ? ` "${title}"` : ' it'}. Tell the owner as yourself ("I've stopped…").` : 'You had already finished it, so there was nothing to stop. Tell the owner so, as yourself.' })
       }
     }),
@@ -1005,20 +1065,20 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const call = botCall(deps, ctx)
         if (isOutcome(call)) return call
         if (call.lane !== 'chat') return error(CHAT_ONLY)
-        if (typeof args.workId !== 'string' || !args.workId || typeof args.note !== 'string' || !args.note.trim()) return error('work_note needs a work id and the note.')
-        const title = workTitleOf(call, args.workId)
-        const result = call.deps.host.work.note(call.botId, args.workId, args.note, call.activationId)
+        if (typeof args.runId !== 'string' || !args.runId || typeof args.content !== 'string' || !args.content.trim()) return error('A note to work needs its id as runId and the note as content.')
+        const title = workTitleOf(call, args.runId)
+        const result = call.deps.host.work.note(call.botId, args.runId, args.content, call.activationId)
         call.deps.activity?.onAppResult(call.activity, 'work_note', { result, ...(title ? { title } : {}) })
-        if (result === 'not_found') return error('You have no work with that id. See work_list.')
+        if (result === 'not_found') return error(`You have no work with that id. See ${WORK_LIST}.`)
         // Who is behind the note decides what the bot is told to say, refused or not: a turn the owner did not start (a
         // wake, a job notice) passes on its own update, so the owner is never told they said it, nor offered a rerun.
         const provenance = call.deps.host.work.fromOwner?.(call.botId, call.activationId) === false ? { fromOwner: false } : undefined
-        if (result !== 'noted') return json({ result, note: workNoteAnswer(result, args.note, title, provenance) })
+        if (result !== 'noted') return json({ result, note: workNoteAnswer(result, args.content, title, provenance) })
         // When the work takes it in, truly: the bot tells the owner that, as its own, when the owner's message asked for it.
-        const reaches = call.deps.host.work.reach?.(call.botId, args.workId) ?? 'step_end'
+        const reaches = call.deps.host.work.reach?.(call.botId, args.runId) ?? 'step_end'
         // The owner's own correction also reaches the work's subagents still working, through the bot port (§2.5).
-        const subagents = provenance ? [] : call.deps.host.work.noteSubagents?.(call.botId, args.workId, args.note) ?? []
-        return json({ result, reaches, note: workNoteAnswer(reaches, args.note, title, provenance), ...(subagents.length ? { subagents } : {}) })
+        const subagents = provenance ? [] : call.deps.host.work.noteSubagents?.(call.botId, args.runId, args.content) ?? []
+        return json({ result, reaches, note: workNoteAnswer(reaches, args.content, title, provenance), ...(subagents.length ? { subagents } : {}) })
       }
     }),
     ownTool(byName.get('remind')!, deps, {
@@ -1439,7 +1499,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
       handler: async (args, ctx) => {
         const subagents = ctx.turn.bot?.subagents
         if (!subagents) return error(SUBAGENTS_WORK_ONLY)
-        if (typeof args.title !== 'string' || typeof args.brief !== 'string') return error('subagent_start needs a title and a brief.')
+        if (typeof args.title !== 'string' || typeof args.brief !== 'string') return error('A subagent needs a title and a brief.')
         // A model of model_list' choices, matched as work_start matches one; nothing else is ever chosen in its place.
         let model: Parameters<typeof subagents.start>[0]['model']
         if (args.model !== undefined && args.model !== null) {
@@ -1463,8 +1523,8 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
       handler: async (args, ctx) => {
         const subagents = ctx.turn.bot?.subagents
         if (!subagents) return error(SUBAGENTS_WORK_ONLY)
-        if (typeof args.subagent !== 'string' || typeof args.message !== 'string') return error('subagent_send needs a subagent\'s title and the message.')
-        const sent = await subagents.send({ subagent: args.subagent, message: args.message })
+        if (typeof args.subagent !== 'string' || typeof args.content !== 'string') return error('A message to a subagent needs its title (subagent) and the message (content).')
+        const sent = await subagents.send({ subagent: args.subagent, message: args.content })
         if ('refused' in sent) return error(sent.refused)
         return json({ ...sent.sent, ...(sent.lacks?.length ? { lacks: sent.lacks } : {}), note: sent.note })
       }
@@ -1501,14 +1561,25 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
       handler: async (args, ctx) => {
         const subagents = ctx.turn.bot?.subagents
         if (!subagents) return error(SUBAGENTS_WORK_ONLY)
-        if (typeof args.subagent !== 'string') return error('subagent_stop needs a subagent\'s title.')
-        const stopped = subagents.stop({ subagent: args.subagent })
+        if (typeof args.subagent !== 'string') return error('Stopping a subagent needs its title (subagent).')
+        const stopped = subagents.stop({ subagent: args.subagent, ...(ctx.toolCallId ? { toolCallId: ctx.toolCallId } : {}) })
         if ('refused' in stopped) return error(stopped.refused)
         return json(stopped.stopped)
       }
     })
   ]
 }
+
+/**
+ * A piece of work as the bot reads it: its id is the `runId` that `thread_send` and `thread_stop` take (S7d4a), and
+ * `workId` as well while bots still call `work_note` and `work_stop` by it: the same id.
+ */
+function withRunId<T extends { workId: string }>({ workId, ...rest }: T): Omit<T, 'workId'> & { runId: string; workId: string } {
+  return { runId: workId, workId, ...rest }
+}
+
+/** How a bot lists its work (`work_list`, the bot's variant of `thread_list`). */
+const WORK_LIST = 'thread_list with scope "bot_work"'
 
 /** The longest brief a piece of work or a work reminder takes. */
 const MAX_WORK_BRIEF_CHARS = 32 * 1024

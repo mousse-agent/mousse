@@ -233,6 +233,12 @@ export interface BotSummary {
    * too, when the bot's menu offers Make private. Absent from older services and from what other devices get.
    */
   reach?: BotDeviceAccessMode
+  /**
+   * Its face picture (`face.png` in its files folder): `key` is what the saved one was drawn from, absent when none is
+   * saved. The app draws and saves it (`bots.facePicture.save`) when the key it would draw differs. Absent from older
+   * services, which save none.
+   */
+  facePicture?: { key?: string }
 }
 
 /** How many of a bot's tasks its summary carries. */

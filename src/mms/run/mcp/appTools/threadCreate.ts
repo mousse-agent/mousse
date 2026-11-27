@@ -14,8 +14,8 @@ import type { JsonSchema, MousseTool, ToolOutcome, ToolVariant, VariantSite } fr
  *   for) and always shows in the person's sidebar; `hidden` is a personal bot's (#2004, #2003).
  *
  * The tool is listed and held where either kind is. A call that names no kind (an older caller) is a thread, as it was.
- * A bot's turn starts threads only: its subagents and its work start through the bot port (`subagent_start`,
- * `work_start`).
+ * A bot's `kind: subagent` is its own: the work its chat starts (`work_start`) or its work's subagent
+ * (`subagent_start`), which the registry runs through the bot port (`toolVariant`), never `delegate_task`.
  */
 export type ThreadCreateKind = 'subagent' | 'thread'
 
@@ -39,7 +39,8 @@ export function threadCreateTool(kinds: { subagent: MousseTool; thread?: MousseT
     description: `Start a subagent or a thread; kind is required. kind "subagent": ${kinds.subagent.description}${kinds.thread ? ` kind "thread": ${kinds.thread.description}` : ''}`,
     inputSchema: { type: 'object', properties: { kind: KIND_SCHEMA, ...mergedProperties(properties.subagent, properties.thread) }, required: ['kind'] },
     // A bot's thread lists the thread kind only, as a bot uses it (`asBotTool`).
-    ...(kinds.thread ? { botDescription: kinds.thread.botDescription ?? kinds.thread.description, botInputSchema: kinds.thread.botInputSchema ?? kinds.thread.inputSchema, botClass: kinds.thread.class } : {}),
+    // Its kind is named, so a bot whose own work is kind "subagent" (S7d4a) is offered both.
+    ...(kinds.thread ? { botDescription: kinds.thread.botDescription ?? kinds.thread.description, botInputSchema: withThreadKind(kinds.thread.botInputSchema ?? kinds.thread.inputSchema), botClass: kinds.thread.class } : {}),
     describe: () => 'Start a subagent or a thread',
     variants: Object.values(variants) as MousseTool[],
     variantOf: (args, site) => kindOf(args, site, variants, properties),
@@ -47,6 +48,12 @@ export function threadCreateTool(kinds: { subagent: MousseTool; thread?: MousseT
       throw new Error('thread_create runs as the kind its call names (variantOf).')
     }
   }
+}
+
+/** A bot's thread kind's schema, naming its kind: "thread", the default. */
+function withThreadKind(schema: JsonSchema): JsonSchema {
+  const { properties = {}, ...rest } = schema as { properties?: Record<string, JsonSchema> }
+  return { ...rest, properties: { kind: { type: 'string', enum: ['thread'], description: 'thread: the default.' }, ...properties } } as JsonSchema
 }
 
 /**
@@ -57,7 +64,7 @@ function kindOf(args: Record<string, unknown>, site: VariantSite, variants: Part
   if (args.kind !== undefined && args.kind !== 'subagent' && args.kind !== 'thread') return { refused: refused('invalid_arguments', 'kind must be "subagent" or "thread".') }
   const kind: ThreadCreateKind = args.kind ?? 'thread'
   if (site.turn.bot && kind === 'subagent')
-    return { refused: refused('not_granted', 'A bot starts its subagents with subagent_start, and its work with work_start: thread_create starts threads (kind "thread").', { variant: 'delegate_task' }) }
+    return { refused: refused('not_granted', 'Your work and its subagents start here only on a turn that has them: thread_create starts threads (kind "thread").', { variant: 'delegate_task' }) }
   const tool = variants[kind]
   if (!tool) return { refused: refused('unavailable', `kind "${kind}" is not available here.`) }
   // An argument of the other kind only is a mistake about the kind, never one to drop.

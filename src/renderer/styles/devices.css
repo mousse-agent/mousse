@@ -385,29 +385,6 @@
   padding: var(--space-8) 16px 12px;
 }
 
-/* A device that was asked for from elsewhere in the app: a background mark, no edge bar. */
-.devices-row-picked {
-  background: var(--ui-hover);
-}
-
-/* A device row opens its detail from anywhere on the row; the chevron button is the control. */
-.settings-item:has(> .settings-item-control > .devices-row-toggle) {
-  position: relative;
-  cursor: pointer;
-}
-
-.devices-row-toggle::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-}
-
-/* A row's own button (Connect) stays above the click area that opens the detail. */
-.settings-item-control:has(> .devices-row-toggle) > .settings-btn {
-  position: relative;
-  z-index: 1;
-}
-
 /* A device's detail and the account's notes line up with the name, past the kind glyph (28px + 12px). */
 .devices-group .settings-group-rows > .settings-item.indent,
 .account-group .settings-group-rows > .settings-item.indent {
