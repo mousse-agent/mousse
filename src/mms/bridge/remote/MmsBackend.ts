@@ -12,11 +12,17 @@ import { DomainRpcError } from '../../protocol/domainRegistry'
 import { NetError, type NodeId } from '../../../shared/net'
 import { REMOTE_MESSAGE_IMAGES_MAX_CHARS } from './RemoteApi'
 import { normalizePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
-import { keepImagesWithin, messagesBefore, newestMessages, type EarlierMessages } from '../../protocol/transcriptPaging'
+import { keepImagesWithin, messagesBefore, newestPage, type EarlierMessages } from '../../protocol/transcriptPaging'
+import { cursorAt } from '../../../shared/pageCursor'
 import { isOpenActivityRow } from '../../run/restartNote'
 import { listPendingQueue } from '../../queue/ThreadMessageQueue'
 import type { MessagePageResult } from '../../data/ThreadDataStore'
-import { PHONE_MESSAGES_PAGE_BYTES, PHONE_SNAPSHOT_MESSAGE_BYTES, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../../shared/bridge/routed'
+import {
+  PHONE_MESSAGES_PAGE_BYTES,
+  PHONE_SNAPSHOT_MESSAGE_BYTES,
+  ROUTED_SNAPSHOT_MESSAGE_BYTES,
+  ROUTED_SNAPSHOT_MESSAGES_MAX
+} from '../../../shared/bridge/routed'
 import type { RemoteBackendPort, RemoteChatExtras } from './RemoteApi'
 import { mmsJson } from './jsonOutput'
 import type { BridgeOrdinaryMethod } from './capabilities'
@@ -68,7 +74,7 @@ export function withoutImageData<T extends { images?: unknown }>(item: T): T {
  * `REMOTE_MESSAGE_IMAGES_MAX_CHARS` is used up, and every older image keeps only its name and
  * type, so a remote snapshot or event stays small however many images the thread holds.
  */
-export function withImageBudget<T extends { images?: unknown }>(items: T[]): T[] {
+export function withImageBudget<T extends { images?: unknown }>(items: readonly T[]): T[] {
   let remaining = REMOTE_MESSAGE_IMAGES_MAX_CHARS
   const trimmed = items.slice()
   for (let index = trimmed.length - 1; index >= 0; index -= 1) {
@@ -111,9 +117,30 @@ const MATCH_CONCURRENCY = 4
 const MATCH_CANDIDATES_SHOWN = 10
 
 
-/** The bytes of messages a snapshot holds: 16 MiB for another computer of the user (`newestOnly`), 8 MiB for a phone. */
-function snapshotBudget(options: { newestOnly?: boolean }): number {
-  return options.newestOnly ? ROUTED_SNAPSHOT_MESSAGE_BYTES : PHONE_SNAPSHOT_MESSAGE_BYTES
+/**
+ * The messages a snapshot holds: for another computer of the user (`newestOnly`) the newest 200 at most, within 16 MiB;
+ * for a phone, or a stream any device may read, as many as fit 8 MiB.
+ */
+function snapshotLimits(options: { newestOnly?: boolean }): { maxBytes: number; limit: number } {
+  return options.newestOnly
+    ? { maxBytes: ROUTED_SNAPSHOT_MESSAGE_BYTES, limit: ROUTED_SNAPSHOT_MESSAGES_MAX }
+    : { maxBytes: PHONE_SNAPSHOT_MESSAGE_BYTES, limit: Number.MAX_SAFE_INTEGER }
+}
+
+/**
+ * The newest messages of a loaded transcript, at most `limit` within `maxBytes`, as a remote reader sees them
+ * (`withImageBudget`), and where the older ones begin. Only the newest `limit` are budgeted and measured; of the older
+ * ones only the ids are compared, for the cursor. The same result as budgeting the whole transcript first: the image
+ * budget runs from the newest message back.
+ */
+export function newestForSnapshot(
+  messages: readonly ChatMessage[],
+  limits: { maxBytes: number; limit: number }
+): { messages: ChatMessage[]; earlier?: EarlierMessages } {
+  const tail = messages.length > limits.limit ? messages.slice(messages.length - limits.limit) : messages
+  const kept = newestPage(withImageBudget(tail), limits.limit, limits.maxBytes).messages
+  const left = messages.length - kept.length
+  return left > 0 ? { messages: kept, earlier: { before: cursorAt(messages, left), count: left } } : { messages: kept }
 }
 
 function failure(error: unknown): { ok: false; error: string } {
@@ -522,11 +549,12 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     const s = this.services
     if (!this.remoteThread(threadId) || s.orchestrator.hasSession(threadId)) return
     if (s.threads.usesThreadDb(threadId)) {
-      const budget = snapshotBudget(options)
+      const { maxBytes: budget, limit } = snapshotLimits(options)
       // Counted before the read: a save by this process after it means the page may miss what was saved.
       const saves = s.threads.threadDbSaveCount(threadId)
+      // An index range of the newest rows: the older ones are not read.
       const page = await s.threads.readMessagePage(threadId, {
-        limit: Number.MAX_SAFE_INTEGER,
+        limit,
         maxBytes: budget,
         images: true,
         imageBudget: REMOTE_MESSAGE_IMAGES_MAX_CHARS
@@ -591,8 +619,9 @@ export class MmsRemoteBackend implements RemoteBackendPort {
 
   /**
    * What a reader is given on opening a thread: the newest part of a long transcript, so a thread of any
-   * length opens. `newestOnly` is for another computer of the user, which gets 16 MiB and pages the rest
-   * with `thread.messages`; a phone gets 8 MiB. `earlier` says where the rest begins and how much is left.
+   * length opens. `newestOnly` is for another computer of the user, which gets the newest 200 messages at most,
+   * within 16 MiB, and pages the rest with `thread.messages`; a phone gets 8 MiB. `earlier` says where the rest
+   * begins and how much is left.
    */
   snapshot(
     threadId: string,
@@ -605,12 +634,12 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     const thread = found && withLegacySettledAt(withHiddenBots(found, s.botReach?.hiddenFor(options.reader)))
     if (!thread) throw new NetError('stream_unknown', 'Thread not found.')
     const pause = s.orchestrator.getTurnState(threadId).pause
-    const budget = snapshotBudget(options)
+    const limits = snapshotLimits(options)
     // The newest page `warm` read is the same messages, image budget and `earlier` as the loaded thread would give.
-    const page = this.warmPage(threadId, budget)
+    const page = this.warmPage(threadId, limits.maxBytes)
     const kept = page
       ? { messages: page.messages, ...(page.earlier ? { earlier: page.earlier } : {}) }
-      : newestMessages(withImageBudget(s.orchestrator.getMessages(threadId)), budget)
+      : newestForSnapshot(s.orchestrator.getMessages(threadId), limits)
     const queue = page
       ? listPendingQueue(s.threads.loadMessageQueue(threadId)).filter((item) => !item.internal)
       : s.orchestrator.listQueue(threadId)

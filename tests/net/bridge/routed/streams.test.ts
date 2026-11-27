@@ -809,6 +809,68 @@ describe('a long thread on a private stream', () => {
     expect(newest.length).toBeGreaterThan(20)
     expect(snapshot.earlier).toEqual({ before: newest[0].id, count: 80 - newest.length })
   }, 180_000)
+
+  /** Pages back from `earlier` with `thread.messages` as the viewer does on scroll, oldest first. */
+  async function pageBack(ok: (method: string, params: unknown) => Promise<any>, threadId: string, earlier: { before: string; count: number }) {
+    const older: Array<{ id: string }> = []
+    let before = earlier.before
+    for (let reads = 0; reads < 20; reads += 1) {
+      const page = await ok('thread.messages', { threadId, before })
+      older.unshift(...(page.messages as Array<{ id: string }>))
+      if (!page.earlier) return older
+      expect(page.earlier.count).toBe(earlier.count - older.length)
+      before = page.earlier.before
+    }
+    throw new Error('paging did not reach the first message')
+  }
+
+  it('carries the newest 200 of 450 loaded messages without budgeting or measuring the older ones', async () => {
+    const { ok, thread, f } = await routedOwner({ streams: true })
+    const t = thread()
+    // Each message records when its images are looked at or it is serialized: what budgeting and measuring do.
+    const touched = new Set<number>()
+    const all = Array.from({ length: 450 }, (_, index) => {
+      const plain = message(index, `${index}:`.padEnd(64, 'x'))
+      return Object.defineProperties({ ...plain }, {
+        images: { get: () => void touched.add(index), enumerable: false },
+        toJSON: { value: () => (touched.add(index), plain), enumerable: false }
+      })
+    })
+    f.mms.orchestrator.getOrCreateSession(t.id).messages = all as never
+
+    const opened = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
+    const { snapshot } = readStream(f, (opened.descriptor as { id: never }).id, t.id)
+    const newest = (snapshot.messages as Array<{ id: string }>).map((row) => row.id)
+    expect(newest).toEqual(all.slice(250).map((row) => row.id))
+    expect(snapshot.earlier).toEqual({ before: 'm-250', count: 250 })
+    expect([...touched].filter((index) => index < 250)).toEqual([])
+
+    const older = await pageBack(ok, t.id, snapshot.earlier)
+    expect([...older.map((row) => row.id), ...newest]).toEqual(all.map((row) => row.id))
+  }, 180_000)
+
+  it('carries the newest 200 of 450 messages kept in thread.db, read without loading the thread', async () => {
+    const { ok, f } = await routedOwner({ streams: true })
+    f.mms.threads.setSqliteStoreEnabled(true)
+    const t = f.mms.threads.createThread('Long', undefined, undefined, { started: true })
+    const all = Array.from({ length: 450 }, (_, index) => message(index, `${index}:`.padEnd(64, 'x')))
+    f.mms.threads.mutateThreadData(t.id, () => ({ messages: all as never }))
+    expect(f.mms.threads.usesThreadDb(t.id)).toBe(true)
+    f.mms.threads.forgetThreadData(t.id)
+    const wholeReads = vi.spyOn(f.mms.orchestrator, 'getMessages'),
+      loads = vi.spyOn(f.mms.threads, 'warmThread')
+
+    const opened = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
+    expect(wholeReads).not.toHaveBeenCalled()
+    expect(loads).not.toHaveBeenCalled()
+    const { snapshot } = readStream(f, (opened.descriptor as { id: never }).id, t.id)
+    const newest = (snapshot.messages as Array<{ id: string }>).map((row) => row.id)
+    expect(newest).toEqual(all.slice(250).map((row) => row.id))
+    expect(snapshot.earlier).toEqual({ before: 'm-250', count: 250 })
+
+    const older = await pageBack(ok, t.id, snapshot.earlier)
+    expect([...older.map((row) => row.id), ...newest]).toEqual(all.map((row) => row.id))
+  }, 180_000)
 })
 
 /**

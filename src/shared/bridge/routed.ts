@@ -909,6 +909,11 @@ export const ROUTED_PTY_MAX_ROWS = 256
 
 /** Newest part of a transcript a snapshot carries, and the most a page of older messages carries. */
 export const ROUTED_SNAPSHOT_MESSAGE_BYTES = 16 * 1024 * 1024
+/**
+ * Most messages another computer's snapshot of a thread carries (within `ROUTED_SNAPSHOT_MESSAGE_BYTES`). The owner
+ * reads only these, never the older ones; the viewer loads those with `thread.messages` as it scrolls back.
+ */
+export const ROUTED_SNAPSHOT_MESSAGES_MAX = 200
 export const ROUTED_MESSAGES_PAGE_BYTES = 8 * 1024 * 1024
 /**
  * Newest part of a transcript a phone's snapshot carries. A phone holds 8-10 times a snapshot's size while it

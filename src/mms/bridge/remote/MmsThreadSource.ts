@@ -16,7 +16,7 @@ export interface MmsThreadSourceOptions {
   /**
    * The source of one computer of the user's private stream, not of a phone's. Its questions keep
    * "Always for this thread" where the device's permission limit allows the rule, it is given the
-   * newest 16 MiB of a long transcript instead of failing past 32 MiB, and it also carries what a
+   * newest 200 messages (16 MiB at most) of a long transcript, and it also carries what a
    * window of this computer would be told about the thread: its subagents, agents, tasks, pull
    * request and saved files and workspace.
    */
