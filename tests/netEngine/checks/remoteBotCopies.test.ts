@@ -115,3 +115,67 @@ describe('bots of another computer on the viewing computer', () => {
     await vi.waitFor(() => expect(streamCopies()).toEqual([]), { timeout: 20_000 })
   }, 120_000)
 })
+
+describe('bots of a computer whose pairing no longer accepts the viewing computer', () => {
+  const fabric = new Fabric()
+  let owner: Computer
+  let viewer: Computer
+  let viewerOnOwner: NodeId
+  let ownerOnViewer: NodeId
+  let keeper: string
+  const registry = (): RemoteBotRegistry => viewer.mms.bridge.remoteBots
+
+  beforeAll(async () => {
+    owner = await fabric.computer('owner')
+    viewer = await fabric.computer('viewer')
+    const paired = await fabric.pair(owner, viewer)
+    viewerOnOwner = paired.callerOnOwner
+    ownerOnViewer = paired.ownerOnCaller
+    await fabric.settle()
+    await fabric.connect(viewer, ownerOnViewer)
+    vi.spyOn(owner.mms.personalBots!, 'enqueueChat').mockResolvedValue(undefined as never)
+    keeper = (await owner.mms.personalBots!.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Server keeper', description: 'keeper', clientRequestId: 'removed-bot-1' })).bot.id
+    owner.mms.botDeviceAccess.set(keeper, { mode: 'chosen', nodes: [viewerOnOwner] })
+    await owner.dispatch('netEngine.workOnThreads', { enabled: false }, true)
+  }, 300_000)
+  afterAll(() => fabric.close(), 60_000)
+
+  it('loses them when the owner removes the pairing: not kept as offline', async () => {
+    await vi.waitFor(() => expect(registry().rows().map((row) => [row.botId, row.offline])).toEqual([[keeper, undefined]]), { timeout: 30_000 })
+    await registry().chats.open(ownerOnViewer, keeper)
+    owner.mms.personalBots!.events.emit('message', {
+      botId: keeper,
+      message: { id: 'bm_removed_1', seq: 1, at: new Date().toISOString(), author: 'bot', kind: 'reply', text: 'The servers are up.', chips: [] },
+      botName: 'bot',
+      quiet: false
+    })
+    const store = () => new SqliteRemoteBots(registry().copyPath)
+    const chats = () => {
+      const opened = store()
+      try {
+        return opened.chats().map((chat) => chat.bot)
+      } finally {
+        opened.close()
+      }
+    }
+    await vi.waitFor(() => expect(chats()).toEqual([keeper]), { timeout: 20_000 })
+
+    // The owner removes the pairing; the viewer still lists it, and learns at its next dial that it is not accepted.
+    await owner.mms.netEngine.pairing().remove(viewerOnOwner)
+    void viewer.mms.netEngine.dial(ownerOnViewer).catch(() => undefined)
+    await vi.waitFor(() => expect(registry().rows()).toEqual([]), { timeout: 60_000 })
+    const opened = store()
+    try {
+      expect({ feeds: opened.feeds(), chats: opened.chats() }).toEqual({ feeds: [], chats: [] })
+    } finally {
+      opened.close()
+    }
+    await vi.waitFor(
+      () =>
+        expect(
+          viewer.mms.net.runtime().db.database.prepare("SELECT entity FROM net_bridge_hub_threads WHERE target=? AND entity LIKE 'private:mousse:bot%'").all(ownerOnViewer)
+        ).toEqual([]),
+      { timeout: 20_000 }
+    )
+  }, 180_000)
+})

@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { NodeId } from '../../../shared/net'
@@ -20,7 +20,10 @@ export interface RemoteBotCopyLimits {
   messageBytes: number
   /** One bot's chat in all; its oldest messages go first. */
   chatBytes: number
-  /** Every chat of every computer together; the chats read least recently go first, whole. */
+  /**
+   * Every chat of every computer together; the chats written least recently go first, whole, with the Bridge's copy of
+   * their streams. A chat open here is never taken, so only chats open at once can hold the total over it.
+   */
   totalChatBytes: number
 }
 
@@ -33,6 +36,12 @@ export const REMOTE_BOT_COPY_LIMITS: Readonly<RemoteBotCopyLimits> = Object.free
   chatBytes: 2 * 1024 * 1024,
   totalChatBytes: 16 * 1024 * 1024
 })
+
+/** One bot's chat: its computer, and its id there. */
+export interface ChatRef {
+  node: NodeId
+  bot: string
+}
 
 export interface CachedBotFeed {
   node: NodeId
@@ -108,6 +117,11 @@ export class SqliteRemoteBots {
     }
   }
 
+  /** Whether there is a copy to read: the file is open, or on disk from before. Never creates it. */
+  exists(): boolean {
+    return !!this.opened || existsSync(this.path)
+  }
+
   close(): void {
     this.closed = true
     try {
@@ -168,25 +182,28 @@ export class SqliteRemoteBots {
       .map((row) => ({ node: String(row.node) as NodeId, bot: String(row.bot), messages: Number(row.messages), bytes: Number(row.bytes) }))
   }
 
-  /** The chat as the bot's computer has it now (a stream's snapshot): it takes the place of the copy. */
-  replaceChat(node: NodeId, bot: string, messages: readonly RemoteBotMessage[]): void {
-    this.transaction((db) => {
+  /**
+   * The chat as the bot's computer has it now (a stream's snapshot): it takes the place of the copy. Returns the other
+   * chats the total cap took (never one in `open`).
+   */
+  replaceChat(node: NodeId, bot: string, messages: readonly RemoteBotMessage[], open: readonly ChatRef[] = []): ChatRef[] {
+    return this.transaction((db) => {
       db.prepare('DELETE FROM remote_bot_messages WHERE node=? AND bot=?').run(node, bot)
       this.touch(db, node, bot)
       const write = this.writer(db)
       // Newest first, so the caps keep the newest.
       const sorted = [...messages].sort((a, b) => b.seq - a.seq).slice(0, this.limits.chatMessages)
       for (const message of sorted) write(node, bot, message)
-      this.trim(db, node, bot)
+      return this.trim(db, node, bot, open)
     })
   }
 
-  /** A message added or changed in the chat. */
-  putMessage(node: NodeId, bot: string, message: RemoteBotMessage): void {
-    this.transaction((db) => {
+  /** A message added or changed in the chat. Returns the other chats the total cap took (never one in `open`). */
+  putMessage(node: NodeId, bot: string, message: RemoteBotMessage, open: readonly ChatRef[] = []): ChatRef[] {
+    return this.transaction((db) => {
       this.touch(db, node, bot)
       this.writer(db)(node, bot, message)
-      this.trim(db, node, bot)
+      return this.trim(db, node, bot, open)
     })
   }
 
@@ -207,13 +224,14 @@ export class SqliteRemoteBots {
     })
   }
 
-  /** Forgets everything kept of computers not in `keep` (they left the user's computers, or were blocked). */
-  dropOthers(keep: readonly NodeId[]): void {
-    const kept = new Set<string>(keep)
-    const known = new Set<string>()
+  /** Forgets everything kept of the computers `keep` says no to (they left the user's computers, or were blocked). */
+  dropOthers(keep: (node: NodeId) => boolean): NodeId[] {
+    const known = new Set<NodeId>()
     for (const table of ['remote_bot_feeds', 'remote_bot_chats', 'remote_bot_messages'])
-      for (const row of this.db.prepare(`SELECT DISTINCT node FROM ${table}`).all()) known.add(String(row.node))
-    for (const node of known) if (!kept.has(node)) this.dropComputer(node as NodeId)
+      for (const row of this.db.prepare(`SELECT DISTINCT node FROM ${table}`).all()) known.add(String(row.node) as NodeId)
+    const dropped = [...known].filter((node) => !keep(node))
+    for (const node of dropped) this.dropComputer(node)
+    return dropped
   }
 
   // ------------------------------------------------------------------ inside
@@ -248,8 +266,11 @@ export class SqliteRemoteBots {
     }
   }
 
-  /** Holds the caps: the bot's newest `chatMessages` within `chatBytes`, then every chat within `totalChatBytes`. */
-  private trim(db: DatabaseSync, node: NodeId, bot: string): void {
+  /**
+   * Holds the caps: the bot's newest `chatMessages` within `chatBytes`, then every chat within `totalChatBytes`.
+   * Returns the chats the total took.
+   */
+  private trim(db: DatabaseSync, node: NodeId, bot: string, open: readonly ChatRef[]): ChatRef[] {
     db.prepare(
       'DELETE FROM remote_bot_messages WHERE node=? AND bot=? AND id NOT IN (SELECT id FROM remote_bot_messages WHERE node=? AND bot=? ORDER BY seq DESC LIMIT ?)'
     ).run(node, bot, node, bot, this.limits.chatMessages)
@@ -265,17 +286,23 @@ export class SqliteRemoteBots {
       }
     }
     let total = sizeOf('SELECT coalesce(sum(bytes),0) AS bytes FROM remote_bot_messages')
-    if (total <= this.limits.totalChatBytes) return
-    // The chats read least recently go first, whole; never the one being written.
+    const dropped: ChatRef[] = []
+    if (total <= this.limits.totalChatBytes) return dropped
+    // The chats written least recently go first, whole; never the one being written, nor one open here.
+    const kept = new Set(open.map((chat) => `${chat.node}\u0000${chat.bot}`))
     const others = db
       .prepare('SELECT node,bot FROM remote_bot_chats WHERE NOT (node=? AND bot=?) ORDER BY used_at ASC')
       .all(node, bot)
     for (const row of others) {
       if (total <= this.limits.totalChatBytes) break
-      const size = sizeOf('SELECT coalesce(sum(bytes),0) AS bytes FROM remote_bot_messages WHERE node=? AND bot=?', String(row.node), String(row.bot))
-      db.prepare('DELETE FROM remote_bot_messages WHERE node=? AND bot=?').run(String(row.node), String(row.bot))
-      db.prepare('DELETE FROM remote_bot_chats WHERE node=? AND bot=?').run(String(row.node), String(row.bot))
+      const other = { node: String(row.node) as NodeId, bot: String(row.bot) }
+      if (kept.has(`${other.node}\u0000${other.bot}`)) continue
+      const size = sizeOf('SELECT coalesce(sum(bytes),0) AS bytes FROM remote_bot_messages WHERE node=? AND bot=?', other.node, other.bot)
+      db.prepare('DELETE FROM remote_bot_messages WHERE node=? AND bot=?').run(other.node, other.bot)
+      db.prepare('DELETE FROM remote_bot_chats WHERE node=? AND bot=?').run(other.node, other.bot)
       total -= size
+      dropped.push(other)
     }
+    return dropped
   }
 }

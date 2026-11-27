@@ -4,7 +4,7 @@
  * is under the test's control. What the disk holds is read through a second store on the same file, as a restart
  * would read it. The same flows over two real daemons are `tests/netEngine/checks/remoteBotCopies.test.ts`.
  */
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -38,21 +38,33 @@ function harness(options: { limits?: Partial<RemoteBotCopyLimits> } = {}) {
   cleanups.push(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
   const path = join(dir, 'bots', 'other-computers.db')
   const node = newId('node') as NodeId
-  const roster: { list: Array<{ node: NodeId; name: string }> | undefined } = { list: [{ node, name: 'Mac mini' }] }
+  const roster: { list: Array<{ node: NodeId; name: string }> | undefined; unsure?: (node: NodeId) => boolean } = { list: [{ node, name: 'Mac mini' }] }
   const online = new Set<NodeId>([node])
-  /** The Bridge's attachments, by `<node> <subject>`, and what the bot's computer answers to an open. */
+  const bridge = { on: true }
+  /** The Bridge's attachments, by `<node> <subject>`. */
   const attached = new Map<string, Attached>()
-  const refuse = { feed: undefined as NetError | undefined }
+  /**
+   * What the bot's computer answers an open with (`refuse.feed`, `refuse.chat`), and what this computer's own Bridge
+   * fails an attach with before asking it (`local`).
+   */
+  const refuse = { feed: undefined as NetError | undefined, chat: undefined as NetError | undefined, local: undefined as NetError | undefined }
+  const client = {
+    rpc: vi.fn(async (method: string) => {
+      const no = method === 'bridge.bots.open' ? refuse.feed : refuse.chat
+      if (no) throw new NetError(no.code, no.message, { details: no.details })
+      return {}
+    })
+  }
   const hub = {
-    attach: vi.fn(async (ref: { nodeId: NodeId; entityId: string }, update: Attached['update'], error: Attached['error'], _options: unknown, delta?: Attached['delta']) => {
-      if (ref.entityId === PRIVATE_BOTS_SUBJECT && refuse.feed) throw refuse.feed
+    attach: vi.fn(async (ref: { nodeId: NodeId; entityId: string }, update: Attached['update'], error: Attached['error'], options: { open(): Promise<unknown> }, delta?: Attached['delta']) => {
+      if (refuse.local) throw refuse.local
+      await options.open()
       const close = vi.fn()
       attached.set(`${ref.nodeId} ${ref.entityId}`, { update, error, delta, close })
       return { close, descriptor: {} as never }
     }),
-    dropCopy: vi.fn(async () => true)
+    dropCopy: vi.fn(async (_ref: { nodeId: NodeId; entityId: string }, _options: unknown) => true)
   }
-  const client = { rpc: vi.fn(async () => ({})) }
   const stores: SqliteRemoteBots[] = []
   const open = (): RemoteBotRegistry => {
     const store = new SqliteRemoteBots(path, Date, options.limits)
@@ -61,9 +73,9 @@ function harness(options: { limits?: Partial<RemoteBotCopyLimits> } = {}) {
       hub: hub as never,
       client: () => client as never,
       store,
-      computers: () => roster.list,
+      computers: () => roster.list && { computers: roster.list, ...(roster.unsure ? { unsure: roster.unsure } : {}) },
       online: (each) => online.has(each),
-      enabled: () => true,
+      enabled: () => bridge.on,
       // Long enough that a test sees what is written at once, not on the timer.
       saveSettleMs: 60_000
     })
@@ -103,8 +115,14 @@ function harness(options: { limits?: Partial<RemoteBotCopyLimits> } = {}) {
     chat(KEEPER).update({ kind: 'snapshot', value: chatOf(KEEPER, [message(1), message(2)]) })
     away(registry)
   }
-  return { node, roster, online, hub, refuse, open, disk, feed, chat, listed, away, back, path }
+  /** The Bridge's copies of streams dropped so far, by subject. */
+  const droppedCopies = () => h.hub.dropCopy.mock.calls.map(([ref]) => ref.entityId)
+  const h = { node, roster, online, bridge, hub, client, refuse, open, disk, feed, chat, listed, away, back, path, droppedCopies, store: () => stores.at(-1)! }
+  return h
 }
+
+const BOTS_OFF = new NetError('forbidden', 'Bots are off for this device.', { details: { reason: 'bots_off' } })
+const GONE = new NetError('stream_unknown', 'This bot is gone.')
 
 describe('the bots of another computer', () => {
   it('are listed under qualified ids, with the computer they live on', async () => {
@@ -152,15 +170,32 @@ const losses: Array<{ name: string; lost: string[]; lose(h: ReturnType<typeof ha
     lose: (h, registry) => {
       // The feed is opened again (it ended while the session stayed up), and the computer refuses it now.
       h.feed().error('cancelled')
-      h.refuse.feed = new NetError('forbidden', 'Bots are off for this device.', { details: { reason: 'bots_off' } })
+      h.refuse.feed = BOTS_OFF
       registry.nodeOnline(h.node)
     }
   },
-  { name: 'its bots feed ends with forbidden', lost: [KEEPER, WRITER], lose: (h) => h.feed().error('forbidden') },
+  {
+    name: 'its bots feed ends, and the computer refuses to open it again',
+    lost: [KEEPER, WRITER],
+    lose: (h) => {
+      h.refuse.feed = BOTS_OFF
+      h.feed().error('forbidden')
+    }
+  },
   { name: 'it leaves the user’s computers', lost: [KEEPER, WRITER], lose: async (h, registry) => { h.roster.list = []; await registry.reconcile() } },
   { name: 'its feed no longer lists the bot', lost: [KEEPER], lose: (h) => h.feed().update({ kind: 'snapshot', value: feedOf(WRITER) }) },
-  { name: 'the bot’s chat ends with forbidden', lost: [KEEPER], lose: (h) => h.chat(KEEPER).error('forbidden') },
-  { name: 'the bot’s chat ends as a stream that is not there (the bot was deleted)', lost: [KEEPER], lose: (h) => h.chat(KEEPER).error('stream_unknown') }
+  ...[
+    ['refuses to open the bot’s chat', BOTS_OFF],
+    ['answers the bot’s chat is not there (the bot was deleted, or this one may not reach it)', GONE]
+  ].map(([what, answer]) => ({
+    name: `the bot’s computer ${what as string}`,
+    lost: [KEEPER],
+    lose: async (h: ReturnType<typeof harness>, registry: RemoteBotRegistry) => {
+      h.chat(KEEPER).error('cancelled')
+      h.refuse.chat = answer as NetError
+      await expect(registry.chats.open(h.node, KEEPER)).rejects.toMatchObject({ code: (answer as NetError).code })
+    }
+  }))
 ]
 
 describe('losing bots of another computer', () => {
@@ -224,7 +259,7 @@ describe('the copy of a bot’s chat', () => {
     expect(registry.chats.messages(h.node, KEEPER).map((each) => each.seq)).toEqual([11, 12, 13])
   })
 
-  it('keeps every chat together within the total: another chat goes, whole, never the one being written', async () => {
+  it('keeps every chat together within the total: another chat goes, whole, with the Bridge’s copy of its stream; never one open', async () => {
     const limits = { totalChatBytes: 3_000 }
     const h = harness({ limits })
     const registry = h.open()
@@ -232,14 +267,20 @@ describe('the copy of a bot’s chat', () => {
     await h.back(registry)
     // About 1 100 bytes each.
     const big = (seq: number) => message(seq, 'z'.repeat(1_000))
-    await registry.chats.open(h.node, WRITER)
+    const writing = await registry.chats.open(h.node, WRITER)
     h.chat(WRITER).update({ kind: 'snapshot', value: chatOf(WRITER, [big(1), big(2)]) })
     expect(h.disk().chats.map((chat) => chat.bot).sort()).toEqual([KEEPER, WRITER])
+    // While WRITER's chat is open it is not taken, though written before KEEPER's.
     h.chat(KEEPER).update({ kind: 'snapshot', value: chatOf(KEEPER, [big(1)]) })
     h.chat(KEEPER).update({ kind: 'event', type: 'bots.message', data: { botId: KEEPER, message: big(2) } })
+    expect(h.disk().chats.map((chat) => chat.bot).sort()).toEqual([KEEPER, WRITER])
+    expect(h.droppedCopies()).toEqual([])
+    writing.close()
+    h.chat(KEEPER).update({ kind: 'snapshot', value: chatOf(KEEPER, [big(3)]) })
     const chats = h.disk().chats
     expect(chats.map((chat) => chat.bot)).toEqual([KEEPER])
     expect(chats.reduce((sum, chat) => sum + chat.bytes, 0)).toBeLessThanOrEqual(limits.totalChatBytes)
+    await vi.waitFor(() => expect(h.droppedCopies()).toEqual([botChatSubject(WRITER)]))
   })
 
   it('has named defaults for every cap', () => {
@@ -271,5 +312,169 @@ describe('a feed', () => {
     h.feed().update({ kind: 'snapshot', value: feedOf(KEEPER, 'bot-a', 'bot-b', 'bot-c') })
     h.away(registry)
     expect(h.disk().feeds).toEqual([])
+  })
+})
+
+/** Ways a stream fails that are this computer's own (its Bridge's checks of its copy), or an end it can't read a no from. */
+const ownFailures: Array<{ name: string; fail(h: ReturnType<typeof harness>, registry: RemoteBotRegistry): Promise<void> | void; reset: (h: ReturnType<typeof harness>) => string }> = [
+  {
+    name: 'the feed ends with forbidden, and the computer opens it again',
+    fail: (h) => h.feed().error('forbidden'),
+    reset: () => PRIVATE_BOTS_SUBJECT
+  },
+  {
+    name: 'the feed ends as a stream that is not there, and the computer opens it again',
+    fail: (h) => h.feed().error('stream_unknown'),
+    reset: () => PRIVATE_BOTS_SUBJECT
+  },
+  {
+    name: 'the Bridge fails to open the feed with forbidden, before the computer is asked',
+    fail: (h, registry) => {
+      h.feed().error('cancelled')
+      h.refuse.local = new NetError('forbidden')
+      registry.nodeOnline(h.node)
+    },
+    reset: () => PRIVATE_BOTS_SUBJECT
+  },
+  { name: 'the chat ends with forbidden', fail: (h) => h.chat(KEEPER).error('forbidden'), reset: () => botChatSubject(KEEPER) },
+  { name: 'the chat ends as a stream that is not there', fail: (h) => h.chat(KEEPER).error('stream_unknown'), reset: () => botChatSubject(KEEPER) },
+  {
+    name: 'the Bridge fails to open the chat as a stream that is not there, before the computer is asked',
+    fail: async (h, registry) => {
+      h.chat(KEEPER).error('cancelled')
+      h.refuse.local = new NetError('stream_unknown')
+      await expect(registry.chats.open(h.node, KEEPER)).rejects.toMatchObject({ code: 'stream_unknown' })
+      h.refuse.local = undefined
+    },
+    reset: () => ''
+  }
+]
+
+describe('a failure of this computer’s own', () => {
+  for (const failure of ownFailures)
+    it(`keeps the bots and their chat copies when ${failure.name}`, async () => {
+      const h = harness()
+      const registry = h.open()
+      await h.listed(registry)
+      await h.back(registry)
+      const before = h.disk()
+      await failure.fail(h, registry)
+      const reset = failure.reset(h)
+      // The Bridge's copy of the stream is read fresh; nothing of the bots goes.
+      if (reset) await vi.waitFor(() => expect(h.droppedCopies()).toEqual([reset]))
+      else await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(registry.rows().map((bot) => bot.botId)).toEqual([KEEPER, WRITER])
+      expect(registry.chats.messages(h.node, KEEPER).map((each) => each.id)).toEqual(['bm_1', 'bm_2'])
+      expect(h.disk()).toEqual(before)
+      if (!reset) expect(h.droppedCopies()).toEqual([])
+    })
+})
+
+describe('a drop that does not go through', () => {
+  it('is tried again on the next pass, and what it holds is never listed meanwhile', async () => {
+    const h = harness()
+    const registry = h.open()
+    const store = h.store()
+    // The copy can't be read for now, so it is not read before the drop.
+    const feeds = vi.spyOn(store, 'feeds').mockImplementation(() => {
+      throw new Error('busy')
+    })
+    await registry.reconcile()
+    await vi.waitFor(() => expect(h.feed()).toBeDefined())
+    h.feed().update({ kind: 'snapshot', value: feedOf(KEEPER, WRITER) })
+    h.away(registry)
+    expect(h.disk().feeds).toEqual([{ node: h.node, bots: [KEEPER, WRITER] }])
+    // It leaves the user's computers while the disk is full and the Bridge busy.
+    const dropComputer = vi.spyOn(store, 'dropComputer').mockImplementation(() => {
+      throw new Error('disk full')
+    })
+    h.hub.dropCopy.mockRejectedValueOnce(new NetError('cancelled'))
+    h.roster.list = []
+    await registry.reconcile()
+    expect(h.disk().feeds).toHaveLength(1)
+    expect(registry.pendingDropNodes()).toEqual([h.node])
+    // The copy can be read again: what the drop holds is not listed from it.
+    feeds.mockRestore()
+    dropComputer.mockRestore()
+    expect(registry.rows()).toEqual([])
+    // The next pass drops it, on disk and in the Bridge.
+    await registry.reconcile()
+    expect(h.disk()).toEqual({ feeds: [], chats: [] })
+    // The Bridge's part goes on a later pass, once the one that failed has ended.
+    await vi.waitFor(async () => {
+      await registry.reconcile()
+      expect(registry.pendingDropNodes()).toEqual([])
+    })
+    expect(h.droppedCopies().filter((subject) => subject === PRIVATE_BOTS_SUBJECT).length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+describe('what does not forget another computer’s bots', () => {
+  it('Bridge off: nothing is attached, the rows stay listed offline, and the copies stay', async () => {
+    const h = harness()
+    const registry = h.open()
+    await h.listed(registry)
+    await h.back(registry)
+    const attaches = h.hub.attach.mock.calls.length
+    const before = h.disk()
+    h.bridge.on = false
+    await registry.reconcile()
+    await registry.reconcile()
+    expect(registry.rows().map((bot) => [bot.botId, bot.offline])).toEqual([[KEEPER, true], [WRITER, true]])
+    expect(h.disk()).toEqual(before)
+    expect(h.hub.attach.mock.calls.length).toBe(attaches)
+    expect(h.droppedCopies()).toEqual([])
+  })
+
+  it('Bridge off at start with no copy yet: the copy is not made', async () => {
+    const h = harness()
+    h.bridge.on = false
+    const registry = h.open()
+    await registry.reconcile()
+    expect(registry.rows()).toEqual([])
+    expect(existsSync(h.path)).toBe(false)
+  })
+
+  it('computers that can’t be known now (the engine starting, the roster unreadable): nothing changes', async () => {
+    const h = harness()
+    const registry = h.open()
+    await h.listed(registry)
+    const before = h.disk()
+    h.roster.list = undefined
+    await registry.reconcile()
+    expect(registry.rows().map((bot) => bot.botId)).toEqual([KEEPER, WRITER])
+    expect(h.disk()).toEqual(before)
+    expect(h.droppedCopies()).toEqual([])
+  })
+
+  it('a computer not listed while it can’t be told gone (a v1 device, its roster unreadable): its bots and copies stay', async () => {
+    const h = harness()
+    const registry = h.open()
+    await h.listed(registry)
+    const before = h.disk()
+    h.roster.list = []
+    h.roster.unsure = (node) => node === h.node
+    await registry.reconcile()
+    expect(registry.rows().map((bot) => bot.botId)).toEqual([KEEPER, WRITER])
+    expect(h.disk()).toEqual(before)
+    // After a restart too.
+    const after = h.open()
+    await after.reconcile()
+    expect(after.rows().map((bot) => bot.botId)).toEqual([KEEPER, WRITER])
+    expect(h.disk()).toEqual(before)
+    expect(h.droppedCopies()).toEqual([])
+  })
+})
+
+describe('a computer removed while this one was not running', () => {
+  it('loses its bots on the first pass: rows, chat copies and the Bridge’s copies of their streams', async () => {
+    const h = harness()
+    await h.listed(h.open())
+    h.roster.list = []
+    const after = h.open()
+    await after.reconcile()
+    expect(after.rows()).toEqual([])
+    expect(h.disk()).toEqual({ feeds: [], chats: [] })
+    await vi.waitFor(() => expect(h.droppedCopies().sort()).toEqual([PRIVATE_BOTS_SUBJECT, botChatSubject(KEEPER), botChatSubject(WRITER)].sort()))
   })
 })

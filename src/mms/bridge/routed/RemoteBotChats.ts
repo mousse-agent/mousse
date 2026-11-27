@@ -13,8 +13,41 @@ const isRecord = (value: unknown): value is Json => !!value && typeof value === 
 const isMessage = (value: unknown): value is RemoteBotMessage =>
   isRecord(value) && typeof value.id === 'string' && value.id !== '' && Number.isSafeInteger(value.seq)
 
-/** What a bot's chat stream ending with says: the bot's computer no longer lets this one reach the bot. */
-export const LOST_BOT_CODES: ReadonlySet<string> = new Set(['forbidden', 'stream_unknown'])
+/** The errors the bot's computer itself answered an open with, as opposed to this computer's own checks. */
+const ownerAnswers = new WeakSet<object>()
+
+/** Runs a call to the bot's computer, marking what it answers with as its answer. */
+export async function askOwner<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return await call()
+  } catch (error) {
+    if (error && typeof error === 'object') ownerAnswers.add(error)
+    throw error
+  }
+}
+
+/**
+ * What the bot's computer said when asked to open a bots stream: `refused` when it does not let this one reach its
+ * bots (`forbidden`, with its reason such as `bots_off`, or a blocked computer), `gone` when the bot is not there or not
+ * reachable by this one (`stream_unknown`: the owner answers both the same, word for word). Undefined for anything
+ * else, and for every error this computer raised itself (the Bridge's checks of its copy, a dropped session): those
+ * never lose a bot.
+ */
+export function ownerSaid(error: unknown): 'refused' | 'gone' | undefined {
+  if (!error || typeof error !== 'object' || !ownerAnswers.has(error)) return undefined
+  const code = (error as { code?: unknown }).code
+  if (code === 'forbidden' || code === 'computer_forbidden') return 'refused'
+  if (code === 'stream_unknown') return 'gone'
+  return undefined
+}
+
+/**
+ * How a stream that ended for a passing reason ends: the session went, a deadline, a full room. Any other end while
+ * the computer is reached (the Bridge's copy no longer checks, or the bot's computer closed the stream) drops the
+ * Bridge's copy of the stream; whether the bots are still reached is the computer's answer to the next open, never the
+ * bare code of the end, which this computer's own checks raise too.
+ */
+export const PASSING_END_CODES: ReadonlySet<string> = new Set(['cancelled', 'peer_offline', 'computer_offline', 'deadline_exceeded', 'rate_limited'])
 
 /** What a window showing a remote bot's chat hears while it is open. */
 export interface RemoteBotChatListener {
@@ -35,8 +68,15 @@ export interface RemoteBotChatsOptions {
   store: SqliteRemoteBots
   /** Whether a chat of `botId` may be opened now: its computer lists it, is reached, and did not refuse this one. */
   openable(node: NodeId, botId: string): boolean
-  /** The bot's computer ended its chat because this computer no longer reaches the bot. */
+  /** The bot's computer refused to open its chat: this computer no longer reaches the bot. */
   lost(node: NodeId, botId: string): void
+  /** Whether `node` is reached now. */
+  online(node: NodeId): boolean
+  /**
+   * The Bridge's copy of these chats' streams is to be reset (the chat's copy went to keep the total, or the stream
+   * ended in a way that leaves the copy in doubt). The caller keeps it until it is done.
+   */
+  resetStreamCopies(node: NodeId, botIds: readonly string[]): void
   /** Best effort writes say what failed, once until they work again. */
   safely<T>(what: string, work: () => T): T | undefined
 }
@@ -100,6 +140,8 @@ export class RemoteBotChats {
       }))
     } catch (error) {
       this.release(chat, listener)
+      // The bot's computer said no to this bot: its row and copy go. The Bridge's own failures lose nothing.
+      if (ownerSaid(error)) this.options.lost(node, botId)
       throw error
     }
     return release
@@ -130,7 +172,7 @@ export class RemoteBotChats {
     return {
       room: 'bots' as const,
       open: async () => {
-        const opened = await this.options.client(node).rpc('bridge.bot.open', { botId }, { id: newId('rpc'), deadlineMs: 30_000 })
+        const opened = await askOwner(() => this.options.client(node).rpc('bridge.bot.open', { botId }, { id: newId('rpc'), deadlineMs: 30_000 }))
         const { descriptor, head } = (isRecord(opened) ? opened : {}) as { descriptor?: StreamDescriptor; head?: { epoch: number; seq: number } }
         return { descriptor: descriptor as StreamDescriptor, head: head as { epoch: number; seq: number } }
       }
@@ -140,7 +182,7 @@ export class RemoteBotChats {
   private snapshot(chat: OpenChat, value: unknown): void {
     if (!isRecord(value) || value.kind !== 'mousse.bot' || !isRecord(value.page) || !Array.isArray(value.page.messages)) return
     const messages = value.page.messages.filter(isMessage)
-    this.options.safely('copy a bot chat', () => this.options.store.replaceChat(chat.node, chat.botId, messages))
+    this.trimmed(this.options.safely('copy a bot chat',() => this.options.store.replaceChat(chat.node, chat.botId, messages, this.kept())))
     if (isRecord(value.bot)) this.each(chat, (listener) => listener.row?.(value.bot as unknown as BotFeedRow))
     this.each(chat, (listener) => listener.changed?.())
   }
@@ -150,20 +192,41 @@ export class RemoteBotChats {
     if (type === 'bots.message') {
       const { message } = data as unknown as BotStreamEvents['bots.message']
       if (!isMessage(message)) return
-      this.options.safely('copy a bot chat message', () => this.options.store.putMessage(chat.node, chat.botId, message))
+      this.trimmed(this.options.safely('copy a bot chat message', () => this.options.store.putMessage(chat.node, chat.botId, message, this.kept())))
       this.each(chat, (listener) => listener.changed?.())
     } else if (type === 'bots.changed' && isRecord(data.bot)) {
       this.each(chat, (listener) => listener.row?.(data.bot as unknown as BotFeedRow))
     }
   }
 
+  /** The chats open here, which the total cap never takes. */
+  private kept(): Array<{ node: NodeId; bot: string }> {
+    return [...this.chats.values()].map((chat) => ({ node: chat.node, bot: chat.botId }))
+  }
+
+  /** Chats the total cap took from the copy: the Bridge's copy of their streams goes too, so the cap holds on disk. */
+  private trimmed(dropped: Array<{ node: NodeId; bot: string }> | undefined): void {
+    const byNode = new Map<NodeId, string[]>()
+    for (const each of dropped ?? []) byNode.set(each.node, [...(byNode.get(each.node) ?? []), each.bot])
+    for (const [other, bots] of byNode) this.options.resetStreamCopies(other, bots)
+  }
+
+  /**
+   * The chat stream ended. The copy stays: a bot is lost only when its computer says so, by its feed or by refusing
+   * the next open, never on the bare code of an end, which this computer's own checks raise too. An end for a passing
+   * reason keeps the Bridge's copy of the stream; any other, while the computer is reached, resets it.
+   */
   private ended(chat: OpenChat, code: NetErrorCode | string): void {
     chat.handle = undefined
     if (this.chats.get(keyOf(chat.node, chat.botId)) === chat) this.chats.delete(keyOf(chat.node, chat.botId))
     this.each(chat, (listener) => listener.ended?.(code))
     chat.listeners.clear()
-    // The bot's computer no longer lets this one reach the bot (or the bot is gone): the row and the copy go with it.
-    if (LOST_BOT_CODES.has(code)) this.options.lost(chat.node, chat.botId)
+    if (!PASSING_END_CODES.has(code) && this.options.online(chat.node)) this.options.resetStreamCopies(chat.node, [chat.botId])
+  }
+
+  /** Resets the Bridge's copy of a bot chat's stream (the next open reads it fresh). */
+  dropStreamCopy(node: NodeId, botId: string): Promise<boolean> {
+    return this.options.hub.dropCopy({ nodeId: node, entityId: botChatSubject(botId) }, this.streamOptions(node, botId))
   }
 
   private each(chat: OpenChat, call: (listener: RemoteBotChatListener) => void): void {
@@ -186,24 +249,19 @@ export class RemoteBotChats {
   }
 
   /**
-   * This computer lost the bot (its computer dropped it from the feed or refused this one): its open chat ends, and
-   * its copy goes at once, with the copy of its stream the Bridge kept. Nothing of the chat is left on disk.
+   * This computer lost the bot (its computer dropped it from the feed or refused this one): its open chat ends. The
+   * copies, on disk and the Bridge's, are dropped by the caller (`RemoteBotRegistry`), which tries again until they go.
    */
   lose(node: NodeId, botIds: Iterable<string>): void {
     for (const botId of botIds) {
       const chat = this.chats.get(keyOf(node, botId))
-      if (chat) {
-        this.chats.delete(keyOf(node, botId))
-        const handle = chat.handle
-        chat.handle = undefined
-        handle?.close()
-        this.each(chat, (listener) => listener.ended?.('stream_unknown'))
-        chat.listeners.clear()
-      }
-      this.options.safely('drop a bot chat copy', () => this.options.store.dropChat(node, botId))
-      void this.options.hub
-        .dropCopy({ nodeId: node, entityId: botChatSubject(botId) }, this.streamOptions(node, botId))
-        .catch(() => false)
+      if (!chat) continue
+      this.chats.delete(keyOf(node, botId))
+      const handle = chat.handle
+      chat.handle = undefined
+      handle?.close()
+      this.each(chat, (listener) => listener.ended?.('stream_unknown'))
+      chat.listeners.clear()
     }
   }
 

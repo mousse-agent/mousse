@@ -687,7 +687,12 @@ export class BridgeProfileService {
       client: (node) => this.peers.client(node),
       store: new SqliteRemoteBots(join(services.getProfileHomeDir(), 'bots', REMOTE_BOTS_DB), this.clock),
       // While the engine is still starting (or the roster can't be read) the computers are not known: none is forgotten.
-      computers: () => (this.peers.accountDevices() === undefined ? undefined : this.router.pairedComputers()),
+      // With the engine on and the v1 roster unreadable, the v1 devices are neither listed nor forgotten.
+      computers: () => {
+        const known = this.peers.botComputers()
+        if (!known) return undefined
+        return { computers: known.computers, ...(known.v1Unknown ? { unsure: (node: NodeId) => !this.peers.isEngine(node) } : {}) }
+      },
       online: (node) => this.router.isOnline(node),
       enabled: () => this.bridgeOn(),
       clock: this.clock

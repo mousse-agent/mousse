@@ -199,7 +199,7 @@ function dropStagedData(request: { method: string; params: unknown }): void {
  * (the bots feed, one bot's chat) takes the bot records instead.
  */
 const projectionTypes = (options?: HubAttachOptions): readonly string[] =>
-  options?.open ? (options.room === 'bots' ?BOT_STREAM_EVENT_TYPES : BRIDGE_ROUTED_EVENT_TYPES) : []
+  options?.open ? (options.room === 'bots' ? BOT_STREAM_EVENT_TYPES : BRIDGE_ROUTED_EVENT_TYPES) : []
 /** Lets other work run between two steps of background work. */
 const pause = (ms: number): Promise<void> =>
   new Promise<void>((resolve) => (ms > 0 ? setTimeout(resolve, ms) : setImmediate(resolve)))
