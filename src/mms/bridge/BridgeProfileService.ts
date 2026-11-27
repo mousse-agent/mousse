@@ -40,6 +40,8 @@ import { PeerDirectory } from './peers'
 import { EditorAsks } from './routed/editorAsks'
 import { ThreadRouter } from './routed/ThreadRouter'
 import { MergedLists } from './routed/mergedLists'
+import { RemoteBotRegistry } from './routed/RemoteBotRegistry'
+import { REMOTE_BOTS_DB, SqliteRemoteBots } from './routed/remoteBotStore'
 import { RemoteAutomations } from './routed/remoteAutomations'
 import { PrivateSources, raiseStreamListenerLimits } from './routed/privateSources'
 import { RoutedStaging } from './routed/staging'
@@ -65,6 +67,8 @@ export class BridgeProfileService {
   readonly router: ThreadRouter
   /** The other computers' threads, projects and statuses as one list with this computer's (behind `netBridgeThreads`). */
   readonly lists: MergedLists
+  /** The bots of the other computers this one reaches, and the copies of their chats (not used by a window yet). */
+  readonly remoteBots: RemoteBotRegistry
   private readonly routerStop = new AbortController()
   readonly dispatch: DispatchService
   private readonly remote: RemoteApi
@@ -676,6 +680,29 @@ export class BridgeProfileService {
     const offPolicy = rt.policy.onChange(() => void this.lists.reconcile())
     const offConnections = rt.connections.onChange(() => void this.lists.reconcile())
     this.lists.start()
+    // The bots of the other computers: each one's bots feed, kept with a copy on disk for when it is out of reach. Its
+    // first look runs in the background; the copy is opened then, never on a start.
+    this.remoteBots = new RemoteBotRegistry({
+      hub: this.hub,
+      client: (node) => this.peers.client(node),
+      store: new SqliteRemoteBots(join(services.getProfileHomeDir(), 'bots', REMOTE_BOTS_DB), this.clock),
+      // While the engine is still starting (or the roster can't be read) the computers are not known: none is forgotten.
+      computers: () => (this.peers.accountDevices() === undefined ? undefined : this.router.pairedComputers()),
+      online: (node) => this.router.isOnline(node),
+      enabled: () => this.bridgeOn(),
+      clock: this.clock
+    })
+    const offBotPolicy = rt.policy.onChange(() => void this.remoteBots.reconcile())
+    const offBotConnections = rt.connections.onChange(() => void this.remoteBots.reconcile())
+    // An engine pairing removed or released: its bots go at once.
+    const offBotPeers = this.peers.onChange(() => void this.remoteBots.reconcile())
+    this.remoteBots.start()
+    this.disposers.add(() => {
+      offBotPolicy()
+      offBotConnections()
+      offBotPeers()
+      this.remoteBots.close()
+    })
     this.disposers.add(() => {
       offPolicy()
       offConnections()
@@ -872,6 +899,7 @@ export class BridgeProfileService {
               .then(() => {
                 this.router.nodeOnline(node)
                 this.lists.nodeOnline(node)
+                this.remoteBots.nodeOnline(node)
               })
           )
         }
@@ -880,6 +908,7 @@ export class BridgeProfileService {
         if (this.stopped) return
         try {
           this.lists.nodeOffline(session.peer.node)
+          this.remoteBots.nodeOffline(session.peer.node)
         } catch {
           // The session never authenticated: it never listed anything.
         }
@@ -927,6 +956,7 @@ export class BridgeProfileService {
         .then(() => {
           this.router.nodeOnline(node)
           this.lists.nodeOnline(node)
+          this.remoteBots.nodeOnline(node)
           this.peers.changed()
         })
     )
@@ -935,6 +965,7 @@ export class BridgeProfileService {
   peerOffline(node: NodeId): void {
     if (this.stopped) return
     this.lists.nodeOffline(node)
+    this.remoteBots.nodeOffline(node)
     this.peers.changed()
   }
   /** Everything held here for one computer ends: its private streams, pages, staged values and terminals. */
