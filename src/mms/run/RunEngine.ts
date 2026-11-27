@@ -114,6 +114,13 @@ export type RunCommand =
        * notices are about and adds none of its own. It is not an agent's message.
        */
       noticeHops?: number
+      /** With `noticeHops`: the chain of the messages the notices are about; the turn stays in it (issue #1442). */
+      noticeChain?: string
+      /**
+       * A message held at its chain's budget that the person's Continue sends (issue #1443): its hold is settled and the
+       * message counted with the run, in one transaction, so it stays held until its run exists and is never sent twice.
+       */
+      chainHold?: string
       /**
        * A person's message that waits behind a usage-limit pause instead of ending it: on a paused thread the run
        * is created `queued`, the pause and its timer stay, and the result says so (`heldByPause`). The sender
@@ -2293,6 +2300,9 @@ un_time_limits). */
       // request is settled and the run exists, or nothing is (SPEC §17.3).
       // A continue turn that would deliver nothing (a send already took the group) is not a run.
       if (command.bindDelivery && this.approvals.deliverableCount(command.bindDelivery.requestIds) === 0) return refuse('approvals_already_delivered')
+      const hold = command.chainHold ? this.chains.getHold(command.chainHold) : null
+      if (command.chainHold && (!hold || !this.chains.settleHold(command.chainHold, 'continued'))) return refuse('hold_settled')
+      if (hold) this.chains.count(hold.chainId)
       const settlement = command.settleApprovals ? this.approvals.settleForSend(command.threadId, command.settleApprovals) : null
       const continuationOf = command.continuationOfRunId
       // A run that carries on agent work (a provider's continuation, the resume after a pause) keeps the count of agent
@@ -2302,15 +2312,18 @@ un_time_limits). */
         : command.noticeHops !== undefined
           ? (command.noticeHops > 0 ? command.noticeHops : undefined)
           : inheritedAgentHops(store, command.threadId, command.source, continuationOf)
-      // The chain (issue #1442): an agent's message joins its sender's; a run that carries on work (a wake, a settle
-      // notice, a continuation, a resume) stays in the chain of the run it carries on. A person's message starts its own
-      // and gives the chain the thread was in a new budget.
+      // The chain (issue #1442): an agent's message joins its sender's, and a follow-up on a subagent its parent run's; a
+      // settle notice stays in the chain of the messages it reports on, and a run that carries on work (a continuation, a
+      // resume) in the chain of the run it carries on. A person's message starts its own and gives the chain the thread
+      // was in a new budget.
       const latest = store.listRuns(command.threadId, { limit: 1 })[0]
       const chain = command.actor || command.agentOrigin
         ? (command.actor ?? command.agentOrigin)!.chain
-        : command.noticeHops !== undefined
-          ? latest && chainIdOf(store, latest.runId)
-          : inheritedAgentChain(store, command.threadId, command.source, continuationOf)
+        : command.delegation
+          ? chainIdOf(store, command.delegation.parentRunId)
+          : command.noticeHops !== undefined
+            ? command.noticeChain ?? (latest && chainIdOf(store, latest.runId))
+            : inheritedAgentChain(store, command.threadId, command.source, continuationOf)
       if (!command.actor && !command.agentOrigin && latest && isFollowUpSource(command.source)) this.chains.renew(chainIdOf(store, latest.runId))
       const outcome: RunOutcome = {
         ...(continuationOf ? { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } : {}),

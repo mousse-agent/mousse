@@ -2168,7 +2168,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         const actor = actorOf(ctx)
         let sent
         try {
-          sent = await host.sendToThread(threadId, { content: args.content, mode }, { clientRequestId: sendKey, actor })
+          // A message held for the person keeps its notify watch: Continue makes it when it sends the message.
+          sent = await host.sendToThread(threadId, { content: args.content, mode }, { clientRequestId: sendKey, actor, ...(notify && !ctx.turn.bot ? { notify: { messageKey: requestKey } } : {}) })
         } catch (error) {
           // Past its chain's budget the message waits for the person's Continue or Stop: nothing was dropped.
           if (isAgentMessageHeld(error)) return json(heldResult(threadId, 'work', error))
@@ -2801,7 +2802,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           : `thread_create:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
         let created: AgentCreatedThread
         try {
-          created = await host.createThread(request, { clientRequestId: requestKey, actor })
+          created = await host.createThread(request, { clientRequestId: requestKey, actor, ...(notify && !bot ? { notify: { messageKey: requestKey } } : {}) })
         } catch (error) {
           throw sendConflict(error) ?? error
         }

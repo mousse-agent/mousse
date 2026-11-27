@@ -710,6 +710,37 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
         expect(w.d.engine.chains.heldFor(chainId)).toEqual([])
       })
 
+      it('while Continue sends, what it has not sent yet stays held, and a message the chain sends meanwhile waits behind it and goes last', async () => {
+        const { w, chainId } = await heldWorld()
+        const [, second] = w.d.engine.chains.heldFor(chainId)
+        const gate = deferred()
+        const seen: { held?: string[]; late?: string } = {}
+        const dispatch = w.d.engine.dispatch.bind(w.d.engine)
+        vi.spyOn(w.d.engine, 'dispatch').mockImplementation(async (command, options) => {
+          if (command.kind === 'send' && command.chainHold === second!.holdId && !seen.held) {
+            // What a restart now would find: the second message, not sent yet, still held.
+            seen.held = w.d.engine.chains.heldFor(chainId).map((hold) => hold.holdId)
+            // The chain sends again meanwhile: it waits behind what Continue has not sent yet.
+            const late = w.d.engine.chains.admit({
+              chainId, senderThreadId: second!.senderThreadId, senderRunId: second!.senderRunId, targetThreadId: w.other.id, kind: 'work', requestKey: 'late',
+              payload: { ...(second!.payload as Record<string, unknown>), input: { content: 'Sent meanwhile.', mode: 'agent' }, clientRequestId: 'late' }
+            })
+            seen.late = late.status
+            await gate.promise
+          }
+          return dispatch(command, options)
+        })
+        const answering = w.d.orch.answerChainHold(w.parent.id, chainId, 'continue')
+        await waitFor(() => seen.held !== undefined, 'the second held message to be sent')
+        expect(seen.held).toEqual([second!.holdId])
+        expect(seen.late).toBe('held')
+        gate.resolve()
+        expect(await answering).toMatchObject({ sent: 3, failed: 0 })
+        await waitFor(() => w.turnsOf(w.other.id).length === 3, 'all three to run', 30_000)
+        expect(w.turnsOf(w.other.id).map((turn) => String(turn.prompt))).toEqual([expect.stringContaining('First held.'), expect.stringContaining('Second held.'), expect.stringContaining('Sent meanwhile.')])
+        expect(w.d.engine.chains.get(chainId)?.used).toBe(3)
+      })
+
       it('Stop drops what was held, once, and tells the sender with a note that starts no turn', async () => {
         const { w, chainId } = await heldWorld()
         const [first, second] = await answerTwice(w, chainId, 'stop')

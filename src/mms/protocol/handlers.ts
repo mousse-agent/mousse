@@ -3246,7 +3246,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'threads.chainHold': {
       // The person's Continue or Stop on a chain of agent messages held at its budget (issue #1443), asked on the thread
-      // the chain started in.
+      // the chain started in. Only a person answers it: an agent, an automation or the CLI never lets a chain go on.
+      if (!isPerson(ctx.connection)) throw new DomainRpcError('forbidden', 'Only a person at a Mousse window answers a held chain of agent messages')
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'chainId', 'answer'])
       const threadId = asString(p.threadId, 'threadId', 256)

@@ -335,6 +335,47 @@ describe('the settle notice: an agent that sends with notify is told when the wo
     expect(w.noticeTurns(w.parent.id)).toHaveLength(3)
   }, 90_000)
 
+  it('a notice turn stays in the chain of the message sent with notify, though the sender has run in another chain since', async () => {
+    const otherGate = deferred()
+    const sent: Array<Record<string, unknown>> = []
+    const w = world(async (input, mcp, _d, adapter) => {
+      if (input.threadId === w.other.id) {
+        await adapter.hold(input, otherGate.promise)
+        return 'done'
+      }
+      if (input.threadId === w.parent.id && input.prompt === GO) sent.push(parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'work', notify: true })))
+      return 'ok'
+    })
+    await w.attach()
+    await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+    await waitFor(() => sent.length === 1 && w.d.engine.listRuns(w.parent.id).every((run) => run.status === 'completed'), 'the send')
+    const chainId = `chain:${w.d.engine.listRuns(w.parent.id)[0]!.runId}`
+    // A person writes in the sender meanwhile: its latest run starts a chain of its own.
+    await w.d.orch.send('something else', false, { threadId: w.parent.id, clientRequestId: 'person' })
+    await waitFor(() => w.d.engine.listRuns(w.parent.id).length === 2 && w.d.engine.listRuns(w.parent.id).every((run) => run.status === 'completed'), 'the person\'s turn')
+    otherGate.resolve()
+    await waitFor(() => w.noticeTurns(w.parent.id).length === 1, 'the notice turn')
+    expect(w.d.engine.listRuns(w.parent.id).find((run) => run.source === 'thread-notice')?.outcome?.agentChain).toBe(chainId)
+  })
+
+  it('a message held at its chain\'s budget keeps its notify: when the person\'s Continue sends it, the sender is told when it settles', async () => {
+    const held: Array<Record<string, unknown>> = []
+    const w = world(async (input, mcp, d) => {
+      if (input.threadId === w.parent.id && input.prompt === GO) {
+        spendChain(d.engine, `chain:${input.runId}`, w.parent.id, w.other.id)
+        held.push(parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'held work', notify: true })))
+      }
+      return 'ok'
+    })
+    await w.attach()
+    await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+    await waitFor(() => held.length === 1 && w.d.engine.listRuns(w.parent.id).every((run) => run.status === 'completed'), 'the held send')
+    expect(held[0]).toMatchObject({ status: 'held', delivery: 'held_for_person' })
+    expect(await w.d.orch.answerChainHold(w.parent.id, String(held[0]!.chainId), 'continue')).toMatchObject({ sent: 1 })
+    await waitFor(() => w.noticeTurns(w.parent.id).length === 1, 'the notice turn', 30_000)
+    expect(w.noticeTurns(w.parent.id)[0]!.prompt).toContain(`mousse://thread/${w.other.id}`)
+  })
+
   describe('it never starts a turn where the sender must not be woken; it waits in the sender\'s queue', () => {
     it('in a sender a person stopped after it subscribed; the person\'s next turn lets it run after', async () => {
       const otherGate = deferred()
