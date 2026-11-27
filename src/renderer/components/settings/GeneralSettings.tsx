@@ -4,7 +4,7 @@ import type { UpdateState } from '../../../shared/updates'
 import { subscribeToUpdates, updateActions, useUpdateStore } from '../../stores/updateStore'
 import { InstallConfirm } from '../updates/InstallConfirm'
 import { UpdateErrorNotice } from '../updates/UpdateErrorNotice'
-import { AlertTriangle, Download, Info, Loader2, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
+import { AlertTriangle, Check, Copy, Download, Info, Loader2, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
 import { normalizeErrorReportSettings } from '../../../shared/bugReports'
 import { FiledReportsList } from '../bugReports/FiledReports'
 import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permissionMode'
@@ -106,12 +106,29 @@ function updateStatus(state: UpdateState): string | undefined {
   }
 }
 
-/** Colours only outcomes: up to date, or an update ready to install. A failure shows in UpdateErrorNotice. */
+/** Colours only an update ready to install; up to date stays quiet. A failure shows in UpdateErrorNotice. */
 function updateStatusClass(state: UpdateState): string | undefined {
   if (state.phase === 'error' || state.error) return undefined
   if (state.notAppliedVersion && state.notAppliedVersion === state.availableVersion) return undefined
-  if (state.phase === 'up-to-date' || state.phase === 'downloaded') return 'settings-status-ok'
+  if (state.phase === 'downloaded') return 'settings-status-ok'
   return undefined
+}
+
+/** Copies the installed version, for a bug report or a message; a check says it was copied. */
+function CopyVersionButton({ version }: { version: string }) {
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), 1500)
+    return () => clearTimeout(timer)
+  }, [copied])
+  const label = copied ? 'Copied' : 'Copy version'
+  return (
+    <button type="button" className="settings-title-icon-btn" title={label} aria-label={label}
+      onClick={() => void navigator.clipboard?.writeText(version).then(() => setCopied(true), () => undefined)}>
+      {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
+    </button>
+  )
 }
 
 /** The installed version, with the update check and its progress in the same row. */
@@ -165,6 +182,7 @@ function AboutRow() {
       <SettingsRow
         title={version ? `Mousse ${version}` : 'Mousse'}
         anchor="general-updates"
+        titleAction={version ? <CopyVersionButton version={version} /> : undefined}
         description={status && <span role="status" className={updateStatusClass(state)}>{status}</span>}
         control={control}
       >
