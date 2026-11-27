@@ -821,3 +821,55 @@ describe('the chat while pictures arrive', () => {
     act(() => pictures.unmount())
   })
 })
+
+describe('the side panel\'s width', () => {
+  it('widens past half the window, as far as the chat keeps 240 px beside it', async () => {
+    fake.chats.noobesh = [message(1, { text: 'Here it is.', activationId: 'act1' })]
+    await open()
+    await click(button('Expand Noobesh\'s browser'))
+    const panel = host.querySelector<HTMLElement>('.bot-side')!
+    const row = host.querySelector<HTMLElement>('.bot-side-slide')!.parentElement!
+    row.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1600, height: 900, right: 1600, bottom: 900, x: 0, y: 0, toJSON: () => ({}) })
+    const handle = host.querySelector<HTMLElement>('[role="separator"][aria-label="Resize side panel"]')!
+    const widen = async (times: number) => {
+      for (let index = 0; index < times; index += 1) {
+        await act(async () => { handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true })) })
+      }
+    }
+    // From 380 to 1100: over 720 (the old cap) and over half of 1600.
+    await widen(45)
+    expect(panel.style.width).toBe('1100px')
+    // Never past the chat's 240.
+    await widen(30)
+    expect(panel.style.width).toBe('1360px')
+  })
+})
+
+
+describe('the chat while pictures arrive', () => {
+  it('a new picture re-renders only the picture: the chat, which keeps the browser\'s state, stays still', async () => {
+    const { useBotBrowser } = await import('../../src/renderer/stores/botBrowserStore')
+    let renders = 0
+    const Chat = () => {
+      renders += 1
+      useBotBrowser('noobesh')
+      return null
+    }
+    await act(async () => root.render(createElement(Chat)))
+    await act(async () => {})
+    const element = { current: document.createElement('div') }
+    const Picture = () => { useBotBrowserWatch('noobesh', element, { width: 480, fps: 5 }); return null }
+    const pictures = createRoot(document.createElement('div'))
+    await act(async () => pictures.render(createElement(Picture)))
+    await act(async () => {})
+    const before = renders
+    await push({ frame: { ...FRAME, id: 2, at: Date.now() }, cursor: { x: 10, y: 10, action: 'move', at: Date.now(), viewport: { width: 1280, height: 720 } } })
+    await push({ frame: { ...FRAME, id: 3, at: Date.now() } })
+    expect(useBotBrowserStore.getState().views.noobesh!.frame!.id).toBe(3)
+    expect(renders).toBe(before)
+    // Something else changing (the tab) still reaches it.
+    await push({ tab: { url: 'https://bank.example.com/other', title: 'Other' } })
+    expect(renders).toBe(before + 1)
+    act(() => pictures.unmount())
+  })
+})

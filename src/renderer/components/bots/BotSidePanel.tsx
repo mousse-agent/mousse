@@ -160,18 +160,20 @@ export function useBotSidePanel(botId: string): BotSidePanelState {
 const WIDTH_KEY = 'mousse:bot-about-width'
 const DEFAULT_WIDTH = 380
 const MIN_WIDTH = 300
-const MAX_WIDTH = 720
-/** The chat keeps at least this much beside the panel. */
-const MIN_CHAT_WIDTH = 420
+/**
+ * The chat keeps at least this much beside the panel; the panel takes the rest, as the app's side panel does (a browser
+ * there is used at nearly the window's width). Full screen is for the whole pane.
+ */
+const MIN_CHAT_WIDTH = 240
 
 function usePanelWidth(profileId: string) {
   const key = profileId ? profilePreferenceKey(profileId, WIDTH_KEY) : WIDTH_KEY
   const [width, setWidth] = useState(() => {
     const stored = Number.parseInt(window.localStorage.getItem(key) ?? '', 10)
-    return Number.isFinite(stored) ? Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, stored)) : DEFAULT_WIDTH
+    return Number.isFinite(stored) ? Math.max(MIN_WIDTH, stored) : DEFAULT_WIDTH
   })
   const update = useCallback((next: number, rowWidth?: number) => {
-    const max = Math.min(MAX_WIDTH, rowWidth ? Math.max(MIN_WIDTH, rowWidth - MIN_CHAT_WIDTH) : MAX_WIDTH)
+    const max = rowWidth ? Math.max(MIN_WIDTH, rowWidth - MIN_CHAT_WIDTH) : Infinity
     const value = Math.round(Math.min(max, Math.max(MIN_WIDTH, next)))
     setWidth(value)
     window.localStorage.setItem(key, String(value))
