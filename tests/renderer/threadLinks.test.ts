@@ -248,6 +248,19 @@ describe('a thread link in a thread\'s reply', () => {
       expect(select).toHaveBeenCalledWith(remote)
     })
 
+    it('naming this computer, as another computer writes it, is the thread here', async () => {
+      const SELF = 'nod_here0000000000000000000000'
+      const here = { ...device('open'), node: SELF, name: 'Laptop', self: true }
+      installPreload(fake, { threads: { select }, platformRequest: { request: vi.fn(async (method: string) => method === 'net.status'
+        ? { enabled: true, self: { node: SELF }, keystore: 'unlocked', features: { netBridge: true, netBridgeThreads: true } }
+        : { nodes: [here, device('open')] }) } })
+      render(`Moved to mousse://thread/${SELF}:t-fix`)
+      await act(async () => {})
+      expect(links()[0]!.textContent).toBe('Fix the login page')
+      await click(links()[0]!)
+      expect(select).toHaveBeenCalledWith('t-fix')
+    })
+
     it('says its computer is offline, or not sharing, from what the window already holds', async () => {
       computers('closed')
       // Listed, but its computer is not connected: the row says so.

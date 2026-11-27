@@ -118,18 +118,28 @@ describe('request_answer', () => {
     expect(relay).not.toHaveBeenCalled()
   })
 
-  it('a relay answers only the question its id names: one no work of the bot asked is no such request, kind or not', async () => {
-    const relay = vi.fn(() => ({ ok: true as const, title: 'Flats' }))
+  it('a relay answers only the question its id names, and an unknown id meets the relay\'s own checks first', async () => {
+    const NO_WORK = 'No work of yours waits on that question.'
+    const relay = vi.fn((_bot: string, _activation: string, id: string) => (id === 'q-1' ? { ok: true as const, title: 'Flats' } : { ok: false as const, text: NO_WORK }))
     const host = { activationOf: () => ({ botId: 'b1', activationId: 'act-1', lane: 'chat' as const }), questions: { relay, asked: (_bot: string, id: string) => id === 'q-1' } } as unknown as BotToolHost
     const { call } = await world({ bot: botAuthority(['question_answer']) }, () => ({ host }))
     // A conflicting old questionId never redirects the answer to another question.
     expect(refusalOf(await call('request_answer', { requestId: 'q-1', questionId: 'q-2', answer: 'Flat B' }))).toMatchObject({ code: 'invalid_arguments' })
-    // An id no work of this bot asked: the caller's `kind` (or the old name that adds it) picks no branch.
-    expect(await call('request_answer', { requestId: 'q-2', answer: 'Flat B' })).toEqual(noSuchRequest('q-2'))
-    expect(await call('question_answer', { questionId: 'q-2', answer: 'Flat B' })).toEqual(noSuchRequest('q-2'))
     expect(relay).not.toHaveBeenCalled()
+    // An id no work of this bot asked, from a turn that holds the relay: the relay's handler (the bot's own lookup of
+    // its questions) refuses it, as question_answer did, naming no thread.
+    expect(await call('request_answer', { requestId: 'q-2', answer: 'Flat B' })).toMatchObject({ isError: true, text: expect.stringContaining(NO_WORK) })
     expect(JSON.parse((await call('request_answer', { requestId: 'q-1', answer: 'Flat B' })).text)).toMatchObject({ ok: true })
-    expect(relay).toHaveBeenCalledWith('b1', 'act-1', 'q-1', 'Flat B', expect.any(String))
+    expect(relay).toHaveBeenLastCalledWith('b1', 'act-1', 'q-1', 'Flat B', expect.any(String))
+  })
+
+  it('a caller\'s kind picks no branch for an id found nowhere, outside a bot\'s relay', async () => {
+    const { call, host, delegation } = await world()
+    expect(await call('question_answer', { questionId: 'q-2', answer: 'Flat B' })).toEqual(noSuchRequest('q-2'))
+    expect(await call('answer_subagent', { requestId: 'q-2', answers: ALLOW })).toEqual(noSuchRequest('q-2'))
+    expect(await call('request_answer', { requestId: 'q-2', answers: ALLOW })).toEqual(noSuchRequest('q-2'))
+    expect(delegation.answerSubagent).not.toHaveBeenCalled()
+    expect(host.answerApproval).not.toHaveBeenCalled()
   })
 
   it('an approval found by id alone never names a thread the caller may not reach', async () => {
