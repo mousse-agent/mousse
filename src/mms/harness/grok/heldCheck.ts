@@ -324,6 +324,8 @@ function acpClient(child: ChildProcess, onRequest: (method: string, params: Reco
 }
 
 function deadline<T>(promise: Promise<T>, ms: number, signal: AbortSignal): Promise<T> {
+  // A request the check stopped waiting for may still fail (Grok exits when it is stopped): that is not an error of its own.
+  promise.catch(() => undefined)
   return new Promise<T>((resolve, reject) => {
     if (signal.aborted) return reject(new Stopped('stopped'))
     const timer = setTimeout(() => reject(new Error('timeout')), ms)
