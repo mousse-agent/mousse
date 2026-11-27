@@ -12,13 +12,15 @@ function frameSrc(view: Pick<WatchedBrowserView, 'frame'>): string | undefined {
  * The picture of a watched browser's tab at its page's shape, with the agent cursor over it. Its user
  * styles it (`watched-browser-frame`) and lays its own controls over it (`children`).
  */
-export function WatchedBrowserFrame({ label, view, children, className, ...handlers }: {
+export function WatchedBrowserFrame({ label, view, children, className, title, ...handlers }: {
   /** The picture's name while its tab has none (the browser's own name). */
   label: string
   /** `setup`: the browser is being set up on this computer (its first use), and how far. */
   view: Pick<WatchedBrowserView, 'open' | 'frame' | 'cursor' | 'tab'> & { setup?: { percent?: number } }
   children?: ReactNode
   className?: string
+  /** The picture's tooltip (what a click on it does). */
+  title?: string
   onPointerDown?(event: PointerEvent<HTMLDivElement>): void
   onPointerMove?(event: PointerEvent<HTMLDivElement>): void
   onPointerUp?(event: PointerEvent<HTMLDivElement>): void
@@ -31,7 +33,7 @@ export function WatchedBrowserFrame({ label, view, children, className, ...handl
   const { frameRef, ...events } = handlers
   // The page's shape: the large view fits the whole picture in its stage by it (`--watched-frame-aspect`).
   const shape = { aspectRatio: `${viewport.width} / ${viewport.height}`, '--watched-frame-aspect': viewport.width / viewport.height } as CSSProperties
-  return <div ref={frameRef} className={`watched-browser-frame${className ? ` ${className}` : ''}`} style={shape} {...events}>
+  return <div ref={frameRef} className={`watched-browser-frame${className ? ` ${className}` : ''}`} style={shape} title={title} {...events}>
     {src
       ? <img src={src} alt={view.tab?.title || label} draggable={false} />
       : <div className="watched-browser-frame-empty">{!view.setup && <Globe size={22} aria-hidden />}</div>}
