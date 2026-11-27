@@ -329,6 +329,12 @@ function updateStep(snapshot: InstanceSnapshot): NextStep | null {
   return { action: 'update', label: update.manual ? 'Update manually' : 'Update', command: update.command }
 }
 
+/** The signed-in account's label when it is an email address, which shows only hidden until clicked. */
+export function accountEmail(label: string | undefined): string | undefined {
+  const trimmed = label?.trim()
+  return trimmed && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed) ? trimmed : undefined
+}
+
 function withLabel(headline: string, label: string | undefined): string {
   return label ? `${headline} · ${label}` : headline
 }
@@ -493,7 +499,8 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
   }
 
   const headline = auth.state === 'signed_in'
-    ? withLabel('Signed in', auth.account?.label ?? auth.methodLabel)
+    // An email is never in the headline: the Status row shows it hidden beside it.
+    ? withLabel('Signed in', (accountEmail(auth.account?.label) ? undefined : auth.account?.label) ?? auth.methodLabel)
     : 'Available'
   // Allowed anyway: it runs, and the card keeps saying why it may not work.
   const allowed = problem?.allowed
