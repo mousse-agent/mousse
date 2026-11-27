@@ -131,6 +131,8 @@ export interface ProviderToolEvent {
   record?: SubagentCallRecord
   /** The typed fields the provider has. */
   activity?: ActivityPatch
+  /** The call's arguments, already bounded (`capRecord`), for a runtime whose events have no typed fields for them. */
+  input?: Record<string, unknown>
   /** The provider's id of the call this one ran under (a subagent's child). */
   parentCallId?: string
   /**
