@@ -2660,7 +2660,7 @@ it('answers only the bot, the card id, digest and choice, then redraws a changed
   expect(host.textContent).toContain('Changed email')
   expect(button('Send', host.querySelector('[aria-label="Action to review"]')!)?.disabled).toBe(false)
   await click(button('Not now'))
-  expect(answer).toHaveBeenLastCalledWith('held-1', 'new-digest', 'not_now')
+  expect(answer).toHaveBeenLastCalledWith('inbox', 'held-1', 'new-digest', 'not_now')
 })
 it.each([
   ['open', 'Send'], ['approved', 'Waiting for Mail…'], ['running', 'Sending'], ['done', 'Sent ·'],
