@@ -6,6 +6,7 @@ import type { AutomationInbox, InboxCounts, InboxRun, TuningNote } from '../../.
 import type { TurnPhase, TurnState } from '../../../../shared/types'
 import { createAutomationsClient, type AutomationsClient } from '../../../services/automationsClient'
 import { useAppStore } from '../../../stores/appStore'
+import { selectOrSettle } from '../../../lib/threadActions'
 import { quietThreadToasts, threadToastKey } from '../../../lib/threadToasts'
 import { dismissToastByKey } from '../../ui/Toast'
 
@@ -384,7 +385,7 @@ export function inboxPageClosed(): void {
   openedByInbox.clear()
   if (saved.threadId && saved.threadId !== app.activeThreadId) {
     app.switchToThread(saved.threadId)
-    void window.mousse.threads.select(saved.threadId).catch(() => undefined)
+    void selectOrSettle(saved.threadId).catch(() => undefined)
   }
   // Opening the run's thread moved the sidebar off Chats; giving the workspace back to Chats moves the tab with it.
   if (saved.sidebarMode !== useAppStore.getState().sidebarMode) useAppStore.getState().setSidebarMode(saved.sidebarMode)
@@ -398,7 +399,7 @@ export function openRun(run: Pick<InboxRun, 'id' | 'threadId'>): void {
   if (app.activeThreadId === run.threadId) return
   openedByInbox.add(run.threadId)
   app.switchToThread(run.threadId)
-  void window.mousse.threads.select(run.threadId).catch(() => undefined)
+  void selectOrSettle(run.threadId).catch(() => undefined)
 }
 
 export function openManage(expanded: string | null = null): void {

@@ -101,6 +101,7 @@ import { localProjectsOf } from '../hooks/useLocalProjects'
 import { localDeviceName, runOnLabel } from './sideCard/deviceMenu'
 import { ComputerNotice } from './ComputerNotice'
 import { ThreadComputerBar } from './ThreadComputerBar'
+import { ThreadOpeningView, useOpenFailedShown } from './ThreadOpening'
 import { ThreadStartedByBar } from './ThreadStartedByBar'
 import { ThreadModeBar } from './ThreadModeBar'
 import { EarlierMessagesBar } from './EarlierMessagesBar'
@@ -250,6 +251,8 @@ export function OrchestratorChat() {
   const messages = useAppStore((s) => s.messages)
   const loading = useAppStore((s) => s.loading)
   const transcriptPending = useAppStore((s) => s.transcriptPending)
+  // A thread whose transcript could not be read says so (ThreadOpeningView) rather than looking like a new thread.
+  const openFailed = useOpenFailedShown()
   const setLoading = useAppStore((s) => s.setLoading)
   const chatMode = useAppStore((s) => s.chatMode)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
@@ -443,6 +446,16 @@ export function OrchestratorChat() {
   const [voiceMessages, setVoiceMessagesState] = useState<VoiceMessage[]>(
     () => mediaByThreadRef.current[activeMediaKeyRef.current]?.voice ?? []
   )
+  // Staged media swap with the thread in the render that shows it, matching composerDrafts / browser chips: no frame,
+  // and no send, offers one thread's files or voice notes under another's heading. The thread left keeps its own in
+  // the map (its setters mirror them there); React draws this render again with the restored ones before showing it.
+  const mediaKey = composerMediaKey(activeThreadId)
+  if (activeMediaKeyRef.current !== mediaKey) {
+    activeMediaKeyRef.current = mediaKey
+    const restored = mediaByThreadRef.current[mediaKey] ?? EMPTY_COMPOSER_MEDIA
+    setAttachedFilesState(restored.files)
+    setVoiceMessagesState(restored.voice)
+  }
   const setAttachedFiles = useCallback(
     (update: AttachedFile[] | ((prev: AttachedFile[]) => AttachedFile[])) => {
       setAttachedFilesState((prev) => {
@@ -815,19 +828,6 @@ export function OrchestratorChat() {
         ?.focus()
     }
   }, [showQuestions, renderQuestions])
-
-  // Swap staged media with the thread, matching composerDrafts / browser chips.
-  useEffect(() => {
-    const nextKey = composerMediaKey(activeThreadId)
-    const prevKey = activeMediaKeyRef.current
-    if (nextKey === prevKey) return
-    // Current thread's files/voice are already mirrored into the map by the
-    // setters; only the displayed state needs to change.
-    activeMediaKeyRef.current = nextKey
-    const restored = mediaByThreadRef.current[nextKey] ?? EMPTY_COMPOSER_MEDIA
-    setAttachedFilesState(restored.files)
-    setVoiceMessagesState(restored.voice)
-  }, [activeThreadId])
 
   // A deleted thread's staged files and voice notes (a recovered queued edit's images among them) are let go.
   useEffect(() => useAppStore.subscribe((state, previous) => {
@@ -2172,7 +2172,7 @@ export function OrchestratorChat() {
   // A subagent thread is never the new-chat empty screen either.
   const newChatAnimations = useAppStore((s) => s.newChatAnimations)
   const hidePermissionsWhileRunning = useAppStore((s) => s.hidePermissionsWhileRunning)
-  const emptyThread = !isSubagent && shownMessages.length === 0 && !transcriptPending && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
+  const emptyThread = !isSubagent && shownMessages.length === 0 && !transcriptPending && !openFailed && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
   // A new thread's settings (project above the composer, where it runs and Private / Archive after below) leave once the first send starts.
   const newThreadSettings = newChat && !turnActive && !loading && !firstSendShown
   // The first message shows in the transcript while its thread is made: the locked composer that still holds it (to
@@ -2200,6 +2200,7 @@ export function OrchestratorChat() {
       {emptyThread && newChatAnimations && <AmbientGlow since={continuesWarmEmpty ? warmEmpty.since : undefined} />}
       <SubagentParentBar />
       <ThreadComputerBar />
+      <ThreadOpeningView />
       <ThreadStartedByBar />
       <ThreadModeBar />
       <EarlierMessagesBar />

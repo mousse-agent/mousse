@@ -48,6 +48,17 @@ export function usePermissionRequests(
   // request is answered once whichever is pressed.
   const [chosen, setChosen] = useState<Record<string, string>>({})
   const [inView, setInView] = useState<Record<string, boolean>>({})
+  // The requests belong to the thread they were read for. A switch clears them in the render that shows the next
+  // thread, so no frame offers one thread's approval under another's heading.
+  const [owner, setOwner] = useState(threadId)
+  if (owner !== threadId) {
+    setOwner(threadId)
+    setWaiting([])
+    setSaved([])
+    setAnswered({})
+    setChosen({})
+    setInView({})
+  }
   const threadRef = useRef(threadId)
   threadRef.current = threadId
   const onRefusedRef = useRef(onRefused)
@@ -69,11 +80,6 @@ export function usePermissionRequests(
   }, [])
 
   useEffect(() => {
-    setWaiting([])
-    setSaved([])
-    setAnswered({})
-    setChosen({})
-    setInView({})
     refresh()
     const orchestrator = window.mousse?.orchestrator
     if (!orchestrator) return

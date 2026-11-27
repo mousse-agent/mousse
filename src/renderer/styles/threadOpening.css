@@ -1,0 +1,87 @@
+/* A thread slow to open (components/ThreadOpening.tsx): its row's mark, the title while it is held, and the
+   transcript's waiting or failed state. Nothing here moves but the loader's ring. */
+
+.thread-opening-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+}
+
+.titlebar-path-opening {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--ui-faint);
+  pointer-events: none;
+}
+
+.titlebar-path-opening-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Over the empty transcript, centred in the space above the composer. */
+.thread-opening-view {
+  position: absolute;
+  top: 38%;
+  left: 50%;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: min(420px, calc(100% - 48px));
+  transform: translate(-50%, -50%);
+  text-align: center;
+}
+
+.thread-opening-line {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ui-faint);
+}
+
+.thread-opening-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--ui-line-strong, var(--border));
+  border-radius: var(--ui-control-radius, 8px);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.thread-opening-retry:hover:not(:disabled) {
+  background: var(--ui-hover);
+}
+
+.thread-opening-retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.thread-opening-retry:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
+/* On a card the ring takes the status's place at the end of the card's top line. */
+.threads-sidebar-card-meta > .thread-opening-mark {
+  margin-left: auto;
+  flex-shrink: 0;
+}
