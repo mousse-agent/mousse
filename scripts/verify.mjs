@@ -28,6 +28,7 @@ Rerunning with the same fingerprint replaces the entry for the same command; any
 
 const TYPECHECKS = { web: 'tsconfig.web.json', node: 'tsconfig.node.json' };
 const KNOWN_FAILURES = 'tests/known-failures.json';
+const UNHANDLED = /unhandled (error|rejection)/i;
 
 // ---------- pure digesting ----------
 
@@ -111,9 +112,14 @@ export function summarizeVitestJson(report, { maxFailures = 3, known = [] } = {}
   return { ok, summary, failures: shown, known: excused, stale, knownOnly: ok && failures.length > 0 };
 }
 
-/** Vitest exits non-zero whenever a test fails, so a run whose only failures are known ones still passes. */
-export function vitestPassed(summary, exitStatus) {
-  return summary.ok && (exitStatus === 0 || summary.knownOnly === true);
+/**
+ * Vitest exits non-zero whenever a test fails, so a run whose only failures are known ones still passes. An
+ * unhandled error also exits non-zero and is not in the report, so its mention in the output keeps the run failed.
+ */
+export function vitestPassed(summary, exitStatus, output = '') {
+  if (!summary.ok) return false;
+  if (exitStatus === 0) return true;
+  return summary.knownOnly === true && !UNHANDLED.test(output);
 }
 
 /** Summarises tsc output: error count plus the first errors. */
@@ -162,11 +168,17 @@ function runVitest(root, files, maxFailures, known) {
   const dir = mkdtempSync(join(tmpdir(), 'verify-'));
   const outputFile = join(dir, 'report.json');
   try {
-    const { result, ms } = runTool(root, vitest, ['run', ...files, '--reporter=json', `--outputFile=${outputFile}`], { timeout: 20 * 60_000 });
+    // The JSON report leaves out unhandled errors; the dot reporter prints them, which vitestPassed looks for.
+    const { result, ms } = runTool(root, vitest, ['run', ...files, '--reporter=json', '--reporter=dot', `--outputFile.json=${outputFile}`], { timeout: 20 * 60_000 });
     if (existsSync(outputFile)) {
       try {
         const summary = summarizeVitestJson(JSON.parse(readFileSync(outputFile, 'utf8')), { maxFailures, known });
-        return { command, ...summary, ok: vitestPassed(summary, result.status), ms };
+        const output = `${result.stderr ?? ''}\n${result.stdout ?? ''}`;
+        const ok = vitestPassed(summary, result.status, output);
+        const failures = summary.knownOnly && !ok
+          ? ['  x vitest reported an unhandled error besides the known failures; run the file directly to see it']
+          : summary.failures;
+        return { command, ...summary, failures, ok, ms };
       } catch { /* fall through to the raw tail */ }
     }
     const tail = trimText(stripAnsi(`${result.stderr ?? ''}\n${result.stdout ?? ''}`).split('\n').slice(-30).join('\n'), { maxLines: 8 });

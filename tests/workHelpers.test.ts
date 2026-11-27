@@ -276,6 +276,7 @@ describe('output digesting', () => {
       expect(vitestPassed({ ok: true, knownOnly: false }, 1)).toBe(false)
       expect(vitestPassed({ ok: true, knownOnly: false }, 0)).toBe(true)
       expect(vitestPassed({ ok: false, knownOnly: false }, 0)).toBe(false)
+      expect(vitestPassed({ ok: true, knownOnly: true }, 1, 'Unhandled Rejection\nError: boom')).toBe(false)
     })
 
     it('reads the list for this platform, and treats a list it cannot read as empty', () => {
