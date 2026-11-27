@@ -20,7 +20,8 @@ import type { ApprovalRefusal } from '../../approvalRights'
 import type { SteerStrategy } from '../../CommandPolicy'
 import type { RunEngine } from '../../RunEngine'
 import type { AnsweredBy } from '../../ThreadApprovals'
-import type { AgentActor, ModeCeiling } from '../../types'
+import type { AgentActor, AgentNotePayload, ModeCeiling } from '../../types'
+import type { HeldMessage } from '../../AgentChains'
 import type { AppearanceToolHost } from './appearance'
 import type { DelegationToolsHost } from './delegation'
 import type { LacksReport, LiveRunGate } from './registry'
@@ -181,7 +182,7 @@ export interface AgentCreatedThread {
   /** The mode the thread's turns run in: no wider than the creator's. */
   permissionMode: PermissionMode
   /** The first message: what became of it. Absent when none was asked for. */
-  firstMessage?: ({ sent: true } & AgentSendResult) | { sent: false; reason: string }
+  firstMessage?: ({ sent: true } & AgentSendResult) | { sent: false; reason: string; held?: HeldMessage }
   /** The same `clientRequestId` created this thread before; nothing new was made. */
   replayed: boolean
 }
@@ -491,6 +492,11 @@ export interface AppToolHost extends DelegationToolsHost {
    * `clientRequestId` returns the first result.
    */
   sendToThread?(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentSendResult>
+  /**
+   * Counts a note that asks for attention as one message of `actor`'s chain (issue #1442). Past the chain's budget the
+   * note is kept for the person's Continue or Stop and `AgentMessageHeld` is thrown.
+   */
+  admitAgentNote?(threadId: string, requestKey: string, payload: AgentNotePayload, actor: AgentActor): void
   /**
    * Watches the message `messageKey` sent to `targetThreadId` (`notify` on `thread_send` and `thread_create`): Mousse
    * tells the sending thread when the work it started waits on a person (once) and when it ends (SPEC §15.1). Once per

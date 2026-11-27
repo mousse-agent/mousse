@@ -23,6 +23,7 @@ import { agentMessageWords } from '../../src/shared/agentMessageWords'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import { refusalOfResponse as refusal } from './appToolsFixture'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
+import { spendChain } from './chainFixture'
 
 vi.setConfig({ testTimeout: 60_000 })
 
@@ -832,7 +833,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       return sent.runId
     }
 
-    it('carries the writing run\'s hop count and mode limit, counts in its sender\'s cap of three, waits behind a usage pause, and runs as an agent\'s run; an agent at its hop limit cannot start a fresh chain through its own queue', async () => {
+    it('carries the writing run\'s hop count and mode limit, counts in its sender\'s cap of three, waits behind a usage pause, and runs as an agent\'s run; and stays in the chain of the run that wrote it: its own queue counts nothing and starts no fresh chain', async () => {
       const w = world(async () => 'ok')
       await w.attach()
       const writer = agentRun(w, 2)
@@ -842,9 +843,9 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
 
       const first = enqueue('note to myself', 'k1')
       expect(first).toMatchObject({ outcome: 'enqueued', item: { content: 'note to myself', source: 'mcp', permissionMode: 'ask', origin: { kind: 'agent', threadId: w.other.id, runId: writer.runId, hops: 3 } } })
-      // A run that is the third agent message in a row cannot queue another, on its own thread too.
-      const third = agentRun(w, 3)
-      expect(() => enqueue('one hop too many', 'k5', third.runId)).toThrow(expect.objectContaining({ code: 'agent_hops_exceeded' }))
+      // The item keeps the writer's chain, and a note in its own queue is no message of that chain.
+      expect(first.item?.origin).toMatchObject({ chain: `chain:${writer.runId}` })
+      expect(w.d.engine.chains.get(`chain:${writer.runId}`)).toBeNull()
       enqueue('second note', 'k2')
       enqueue('third note', 'k3')
       // The cap of three queued messages per sending thread counts them, whoever's thread they are on.
@@ -863,11 +864,10 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       await waitFor(() => w.turnsOf(w.other.id).length === 3, 'the three notes to run', 30_000)
       // Each runs as an agent's message with the limit it carries, and its run counts the hops that led to it.
       expect(w.turnsOf(w.other.id)[0]).toMatchObject({ prompt: 'note to myself', fromAgent: true, permissionMode: 'ask' })
-      const noteRun = w.d.engine.listRuns(w.other.id).find((run) => run.outcome?.sentByAgent && run.outcome.agentHops === 3 && run.status !== 'queued' && run.runId !== third.runId && run.runId !== writer.runId)!
+      const noteRun = w.d.engine.listRuns(w.other.id).find((run) => run.outcome?.sentByAgent && run.outcome.agentHops === 3 && run.status !== 'queued' && run.runId !== writer.runId)!
       expect(noteRun).toBeDefined()
-      // The chain does not restart: what the note's turn sends is the fourth agent message in a row, and is refused.
-      expect(() => host.queueCommand!(w.parent.id, { op: 'enqueue', content: 'start over', mode: 'agent', expectedRevision: host.queueSnapshot!(w.parent.id).revision }, { clientRequestId: 'k6', actor: actorOf(w, noteRun.runId) }))
-        .toThrow(expect.objectContaining({ code: 'agent_hops_exceeded' }))
+      // The chain does not restart: the note's turn is in the writer's chain.
+      expect(noteRun.outcome?.agentChain).toBe(`chain:${writer.runId}`)
     })
 
     it('is held while the user has a question or approval waiting, and a person\'s Stop clears it, leaving what a person queued', async () => {
@@ -1270,10 +1270,11 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       release.resolve()
     })
 
-    it('the chain of agent messages in a row has a limit that queueing and editing respect: a run that is the third hop cannot queue or edit another agent\'s message', async () => {
+    it('a chain at its budget cannot queue or edit a message on another thread (neither can wait for the person); under it, a message queued there counts', async () => {
       const w = world(async () => 'ok')
       await w.attach()
       const third = w.d.engine.store.createRun({ threadId: w.parent.id, source: 'mcp', outcome: { sentByAgent: true, agentHops: 3 } })
+      spendChain(w.d.engine, `chain:${third.runId}`, w.parent.id, w.other.id)
       const second = w.d.engine.store.createRun({ threadId: w.parent.id, source: 'mcp', outcome: { sentByAgent: true, agentHops: 2 } })
       const typed = w.typed(w.other.id, 'a note I typed')
       const host = w.d.orch.mcpToolHost()
@@ -1287,7 +1288,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       expect(w.queue(w.other.id).map((item) => item.content)).toEqual(['a note I typed'])
       // The second hop may: its message is the third, and it carries the count.
       const ok = host.queueCommand!(w.other.id, { op: 'enqueue', content: 'the third hop', mode: 'agent', expectedRevision: revision() }, options(second.runId, 'k3'))
-      expect(ok.item?.origin).toMatchObject({ kind: 'agent', hops: 3 })
+      expect(ok.item?.origin).toMatchObject({ kind: 'agent', hops: 3, chain: `chain:${second.runId}` })
+      expect(w.d.engine.chains.get(`chain:${second.runId}`)?.used).toBe(1)
     })
   })
 })

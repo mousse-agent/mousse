@@ -22,6 +22,7 @@ import type { ChatMessage } from '../../src/shared/types'
 import { agentMessageWords } from '../../src/shared/agentMessageWords'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import { refusalOfResponse } from './appToolsFixture'
+import { spendChain } from './chainFixture'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 vi.setConfig({ testTimeout: 60_000 })
@@ -195,7 +196,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
     const stored = messages(other.id).find((message) => message.role === 'user')!
     expect(stored.content).toBe(labelled)
     // The origin says where the sender's words are in that text, and the sender's title then, so the chat shows only the words.
-    expect(stored.origin).toEqual({ kind: 'agent', threadId: parent.id, runId: latestRun(parent.id).runId, hops: 1, title: 'Parent', body: { head: labelled.indexOf(text), tail: '\n\n[End of message from an agent]'.length } })
+    expect(stored.origin).toEqual({ kind: 'agent', threadId: parent.id, runId: latestRun(parent.id).runId, hops: 1, chain: `chain:${latestRun(parent.id).runId}`, title: 'Parent', body: { head: labelled.indexOf(text), tail: '\n\n[End of message from an agent]'.length } })
     expect(agentMessageWords(stored.content, stored.origin)).toBe(text)
     expect(stored.workflowInvocationId).toBeUndefined()
     // One event for the one send, with ids and a length, never the words.
@@ -631,31 +632,96 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(sends(w.other.id)).toHaveLength(1)
     })
 
-    it('a chain of agents answering each other ends at the hop limit: the fourth message in a row, with no person in between, is refused', async () => {
-      const refusal: { first?: Awaited<ReturnType<typeof rpc>> } = {}
-      const sent: string[] = []
+    it('a handoff from A to B to C to D, and D\'s report back to A, all go in A\'s chain: the fourth agent message is not refused', async () => {
+      const replies: Array<Record<string, unknown>> = []
+      const threads: string[] = []
+      const w = world(async (input, mcp) => {
+        const at = threads.indexOf(input.threadId)
+        // A's second turn reads D's report and ends the handoff.
+        if (at === 0 && input.prompt !== GO) return 'done'
+        replies.push(parse(await call(mcp!, 'thread_send', { threadId: threads[(at + 1) % threads.length], content: `handoff from ${at}` })))
+        return 'passed on'
+      })
+      threads.push(w.parent.id, w.other.id, w.thread('C').id, w.thread('D').id)
+      await w.attach()
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      await waitFor(() => w.turnsOf(w.parent.id).length === 2, 'D\'s report to reach A', 60_000)
+      const chainId = `chain:${w.d.engine.listRuns(w.parent.id).at(-1)!.runId}`
+      expect(replies.map((reply) => reply.delivery)).toEqual(['started', 'started', 'started', 'started'])
+      expect(replies.map((reply) => w.d.engine.getRun(String(reply.runId))?.outcome?.agentChain)).toEqual(Array(4).fill(chainId))
+      expect(w.d.engine.chains.get(chainId)).toMatchObject({ rootThreadId: w.parent.id, used: 4 })
+    })
+
+    it('the message past the chain\'s budget is held, not dropped: its sender is told to end its turn, a retry finds the same hold, and the target gets nothing', async () => {
+      const seen: Record<string, Record<string, unknown>> = {}
       const w = world(async (input, mcp, d) => {
-        const target = input.threadId === w.parent.id ? w.other.id : w.parent.id
-        // Each hop says something new: the same words again would be refused as a repeat, before the hop limit.
-        const reply = await call(mcp!, 'thread_send', { threadId: target, content: `hop from ${input.threadId === w.parent.id ? 'A' : 'B'} in ${input.runId}` })
-        if (refusalOfResponse(reply)) refusal.first ??= reply
-        else sent.push((parse(reply) as { runId: string }).runId)
-        // The run the message started carries how many agent messages led to it.
-        return `${d.engine.getRun(input.runId)?.outcome?.agentHops ?? 0}`
+        if (input.threadId !== w.parent.id) return 'ok'
+        // One message is left in this chain's budget, as if eleven went before.
+        spendChain(d.engine, `chain:${input.runId}`, w.parent.id, w.other.id, 1)
+        seen.last = parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Message twelve.', clientRequestId: 'twelve' }))
+        seen.held = parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Message thirteen.', clientRequestId: 'thirteen' }))
+        seen.retry = parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Message thirteen.', clientRequestId: 'thirteen' }))
+        return 'ok'
       })
       await w.attach()
-      // A person starts the chain on A: A's run has no agent hops, B's has 1, A's next 2, B's next 3.
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      await waitFor(() => refusal.first !== undefined, 'the chain to stop', 30_000)
-      expect(sent).toHaveLength(3)
-      expect(refusalOfResponse(refusal.first!)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_hops_exceeded' } })
-      expect(sent.map((runId) => w.d.engine.getRun(runId)?.outcome?.agentHops)).toEqual([1, 2, 3])
-      const hopsOf = (runId: string) => w.d.engine.getRun(runId)?.outcome?.agentHops
-      expect(w.d.engine.listRuns(w.parent.id).map((run) => hopsOf(run.runId)).reverse()).toEqual([undefined, 2])
-      expect(w.d.engine.listRuns(w.other.id).map((run) => hopsOf(run.runId)).reverse()).toEqual([1, 3])
-      // A person's message ends the chain: a run of theirs counts from zero again.
-      const first = w.d.engine.listRuns(w.parent.id).at(-1)!
-      expect(first.outcome?.agentHops).toBeUndefined()
+      await waitFor(() => seen.retry !== undefined, 'the sends')
+      const chainId = `chain:${w.d.engine.listRuns(w.parent.id).at(-1)!.runId}`
+      expect(seen.last).toMatchObject({ delivery: 'started' })
+      expect(seen.held).toMatchObject({ status: 'held', delivery: 'held_for_person', chainId, rootThreadId: w.parent.id, replayed: false })
+      expect(String(seen.held.note)).toContain('End your turn')
+      expect(seen.retry).toMatchObject({ status: 'held', holdId: seen.held.holdId, replayed: true })
+      // Kept with what Continue needs to send it.
+      expect(w.d.engine.chains.heldFor(chainId)).toMatchObject([{ holdId: seen.held.holdId, targetThreadId: w.other.id, payload: { input: { content: 'Message thirteen.' } } }])
+      await waitFor(() => w.d.engine.listRuns(w.other.id).every((run) => run.status === 'completed'), 'the twelfth message to run')
+      expect(w.turnsOf(w.other.id).map((turn) => String(turn.prompt))).toEqual([expect.stringContaining('Message twelve.')])
+    })
+
+    describe('the person answers a held chain', () => {
+      /** A world whose parent, at `GO`, spends its chain's budget and sends two messages to `other`, both held. */
+      const heldWorld = async () => {
+        const held: Array<Record<string, unknown>> = []
+        const w = world(async (input, mcp, d) => {
+          if (input.threadId === w.parent.id && input.prompt === GO) {
+            spendChain(d.engine, `chain:${input.runId}`, w.parent.id, w.other.id)
+            for (const content of ['First held.', 'Second held.']) held.push(parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content })))
+          }
+          return 'ok'
+        })
+        await w.attach()
+        await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+        await waitFor(() => held.length === 2, 'both messages to be held')
+        expect(held.map((reply) => reply.status)).toEqual(['held', 'held'])
+        await waitFor(() => w.d.engine.listRuns(w.parent.id).every((run) => run.status === 'completed'), 'the sender\'s turn to end')
+        return { w, chainId: String(held[0].chainId) }
+      }
+      const answerTwice = (w: Awaited<ReturnType<typeof heldWorld>>['w'], chainId: string, answer: 'continue' | 'stop') =>
+        Promise.allSettled([w.d.orch.answerChainHold(w.parent.id, chainId, answer), w.d.orch.answerChainHold(w.parent.id, chainId, answer)])
+
+      it('Continue sends what was held, in order and once, in a new budget', async () => {
+        const { w, chainId } = await heldWorld()
+        const [first, second] = await answerTwice(w, chainId, 'continue')
+        expect(first).toMatchObject({ status: 'fulfilled', value: { sent: 2, stopped: 0, failed: 0 } })
+        expect(second).toMatchObject({ status: 'rejected', reason: { reason: 'conflict' } })
+        await waitFor(() => w.turnsOf(w.other.id).length === 2 && w.d.engine.listRuns(w.other.id).every((run) => run.status === 'completed'), 'both held messages to run', 30_000)
+        expect(w.turnsOf(w.other.id).map((turn) => String(turn.prompt))).toEqual([expect.stringContaining('First held.'), expect.stringContaining('Second held.')])
+        expect(w.d.engine.listRuns(w.other.id).map((run) => run.outcome?.agentChain)).toEqual([chainId, chainId])
+        expect(w.d.engine.chains.get(chainId)?.used).toBe(2)
+        expect(w.d.engine.chains.heldFor(chainId)).toEqual([])
+      })
+
+      it('Stop drops what was held, once, and tells the sender with a note that starts no turn', async () => {
+        const { w, chainId } = await heldWorld()
+        const [first, second] = await answerTwice(w, chainId, 'stop')
+        expect(first).toMatchObject({ status: 'fulfilled', value: { sent: 0, stopped: 2, failed: 0 } })
+        expect(second).toMatchObject({ status: 'rejected', reason: { reason: 'conflict' } })
+        expect(w.d.engine.listRuns(w.other.id)).toEqual([])
+        const told = w.d.engine.inbox.listPending(w.parent.id).map((row) => row.payload as { from?: string; attention?: string; text?: string })
+        expect(told).toMatchObject([{ from: 'relay', attention: 'none' }, { from: 'relay', attention: 'none' }])
+        expect(told.map((payload) => payload.text)).toEqual([expect.stringContaining('First held.'), expect.stringContaining('Second held.')])
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        expect(w.turnsOf(w.parent.id)).toHaveLength(1)
+      })
     })
 
     it('a thread holds only a few messages from each sending thread in its queue: the next is refused, another sender still gets in, and a person\'s Stop clears them, leaving what a person queued', async () => {

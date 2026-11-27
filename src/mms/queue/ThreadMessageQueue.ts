@@ -185,6 +185,7 @@ function normalizeOrigin(raw: unknown): QueuedMessage['origin'] {
       threadId: agent.threadId,
       runId: agent.runId,
       ...hops,
+      ...(typeof agent.chain === 'string' && agent.chain ? { chain: agent.chain } : {}),
       ...words,
       ...(typeof agent.title === 'string' && agent.title ? { title: agent.title } : {}),
       ...(agent.bot && typeof agent.bot === 'object' && typeof agent.bot.id === 'string' && agent.bot.id && typeof agent.bot.name === 'string'

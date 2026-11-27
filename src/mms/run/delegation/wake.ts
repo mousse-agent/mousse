@@ -4,7 +4,7 @@ import { RunStoreError } from '../db/RunStoreError'
 import { Delegations } from '../Delegations'
 import { toEffect, type EffectOutbox } from '../EffectOutbox'
 import { Inbox } from '../Inbox'
-import { inheritedAgentHops } from '../agentHops'
+import { inheritedAgentChain, inheritedAgentHops } from '../agentHops'
 import type { RunStore } from '../RunStore'
 import { writeTerminalRun } from '../terminal'
 import {
@@ -269,11 +269,13 @@ export function wakeThreads(
           if (rows.every(isQuietNoteRow)) return
           // The wake carries on the work that delegated: a chain of agent messages is not reset by it (SPEC §15.1).
           const carriedHops = inheritedAgentHops(store, threadId, 'wake')
+          // Nor does it start a chain of its own: it stays in the chain of the run it carries on (issue #1442).
+          const chain = inheritedAgentChain(store, threadId, 'wake')
           const run = store.createRun({
             threadId,
             source: 'wake',
             clientRequestId: `wake:${rows[0].inboxId}`,
-            ...(carriedHops !== undefined ? { outcome: { agentHops: carriedHops } } : {})
+            ...(carriedHops !== undefined || chain ? { outcome: { ...(carriedHops !== undefined ? { agentHops: carriedHops } : {}), ...(chain ? { agentChain: chain } : {}) } } : {})
           })
           const payload: WakeTurnPayload = {
             kind: 'wake',

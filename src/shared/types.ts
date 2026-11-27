@@ -1361,6 +1361,8 @@ export interface AgentOrigin {
    * plus one). A message that would pass the limit is refused, so a chain of agents cannot run unwatched.
    */
   hops?: number
+  /** The chain of agent messages it belongs to, so a queued message keeps it until it runs. */
+  chain?: string
   /**
    * Where the sending agent's own words sit in the stored text: after the header Mousse wrote and before its closing
    * line (`agentMessageWords`). Lengths, not positions: text another computer reads is re-encoded inside the words,

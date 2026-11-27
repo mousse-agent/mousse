@@ -82,6 +82,12 @@ export interface RunOutcome {
    */
   sentByAgent?: true
   agentHops?: number
+  /**
+   * The chain of agent messages this run belongs to (`AgentChains`): the chain of the agent message that started it, or
+   * of the run it carries on (a wake, a settle notice, a provider's continuation, a resume, a subagent's task). Absent on
+   * a run a person or a schedule started: it starts a chain of its own (`chainIdOf`).
+   */
+  agentChain?: string
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
   continuationOf?: string
   /** Set while the run is `paused`, and kept after the pause ended. */
@@ -433,6 +439,8 @@ export interface AgentActor {
   toolCallId: string
   /** How many agent messages in a row led to this one (the sender's own count plus one); set by the thread owner. */
   hops?: number
+  /** The chain of agent messages it belongs to (`AgentChains`); set by the thread owner for a sender on this computer. */
+  chain?: string
   /**
    * Set when the agent is on another of the user's computers (a routed call marked as an agent's): `threadId` and `runId`
    * are then its ids on that computer, and nothing about the sender is looked up here. `node` is the calling computer
