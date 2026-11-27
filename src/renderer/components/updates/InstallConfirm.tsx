@@ -25,6 +25,10 @@ const OTHER_PROCESSES_DETAIL =
 function useRunningTurns(open: boolean): number {
   const here = useAppStore((s) => Object.values(s.turnStates).filter((turn) => isTurnActivePhase(turn.phase)).length)
   const [service, setService] = useState<number | null>(null)
+  // Cleared only when the prompt closes: a change here keeps the last count until the service answers again.
+  useEffect(() => {
+    if (!open) setService(null)
+  }, [open])
   useEffect(() => {
     if (!open) return
     let live = true
@@ -35,7 +39,6 @@ function useRunningTurns(open: boolean): number {
       .catch(() => undefined)
     return () => {
       live = false
-      setService(null)
     }
   }, [open, here])
   return service ?? here

@@ -52,12 +52,13 @@
 .update-prompt-line { margin: 0; color: var(--text-secondary); }
 .update-prompt .rollout-rows:last-child { margin-bottom: 0; }
 .update-prompt .rollout-row-status { min-width: 0; }
+/* The control tokens live on page scopes; a dialog sits outside them, so each falls back to the same value. */
 .update-prompt .modal-footer .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 28px;
-  padding: 0 12px;
+  height: var(--settings-control-h, 28px);
+  padding: 0 var(--space-12, 12px);
   border-radius: var(--ui-control-radius);
-  font-size: 12.5px;
+  font-size: var(--settings-fs-small, 12.5px);
 }
