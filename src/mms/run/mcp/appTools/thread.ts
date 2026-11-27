@@ -15,7 +15,7 @@ import { familyRelation, threadFamily } from './family'
 import { heldResult, noteDelivery, noteFrom, noteInboxId, postNote, runtimeOwnedResult, type SendDelivery } from './threadNotes'
 import { isAgentMessageHeld } from '../../AgentChains'
 import type { AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentRunCommandResult, AgentThreadRequest, AppToolHost, ApprovalRequestInfo } from './host'
-import type { BotAppToolDeps } from './bots'
+import { BOT_HELD_NOTE, type BotAppToolDeps } from './bots'
 import { threadLink } from '../../../../shared/threadLink'
 import { PARENT_MESSAGE_MAX_CHARS } from '../../../../shared/bots/personal/jobs'
 import { MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER } from '../../../../shared/bots/personal/botMessages'
@@ -1074,6 +1074,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     const brief = `Thread ${title ? `"${oneLine(title, 120)}"` : threadId} finished the work you sent it${said ? ` ("${said}")` : ''}. Read its result (thread_read) and tell your owner what it did.`
     try {
       const wake = await deps.host.wakes.add(activation.botId, activation.activationId, { brief, event: { kind: 'thread', threadId } })
+      if ('held' in wake) return { notify: { set: false, why: `${BOT_HELD_NOTE} Use thread_wait when you need the result.` } }
       return { notify: { wakeId: wake.wakeId, next: BOT_NOTIFY_NEXT } }
     } catch (error) {
       return { notify: { set: false, why: error instanceof Error ? error.message : String(error) } }

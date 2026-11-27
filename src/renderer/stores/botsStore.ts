@@ -185,6 +185,8 @@ interface BotsState {
    * was not sent (the error says why, or the service has no buttons for questions).
    */
   answerAction(botId: string, actionId: string, digest: string, answer: 'send' | 'not_now'): Promise<BotActionRefusal | null>
+  /** The owner's Continue or Stop on what the bot holds for them (`BotSummary.chainHold`). Rejects with why it did nothing. */
+  answerChainHold(botId: string, holdId: string, answer: 'continue' | 'stop'): Promise<void>
   answerQuestion(botId: string, questionId: string, choice: string): Promise<boolean>
   /**
    * The owner's reaction on one of the bot's messages: shown at once, and put back as it was when the service refuses
@@ -711,6 +713,15 @@ export const useBotsStore = create<BotsState>((set, get) => {
         // A gone row unmounts its card, so its refusal belongs in the chat's existing notice.
         if (owner === epoch && !get().chats[botId]?.messages.some(message => message.action?.actionId === actionId)) fail(owner, refusal ? { message: refusal.text } : cause, botId)
         return refusal ?? { reason: String((cause as { code?: unknown } | null)?.code ?? 'request_failed'), text: errorText(cause) }
+      }
+    },
+    async answerChainHold(botId, holdId, answer) {
+      const owner = epoch
+      try {
+        await bots().answerChainHold(botId, holdId, answer)
+      } finally {
+        // Sent, stopped or answered elsewhere first: the chat and the card follow what the service holds now.
+        if (owner === epoch) { void get().loadChat(botId); void get().refresh() }
       }
     },
     async answerQuestion(botId, questionId, choice) {

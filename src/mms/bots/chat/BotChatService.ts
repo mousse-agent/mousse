@@ -832,6 +832,11 @@ export class BotChatService {
     return {}
   }
 
+  /** `bots.chainHold.answer`: the owner's Continue or Stop on what the bot holds past the limit between bots. */
+  answerChainHold(botId: string, holdId: string, answer: 'continue' | 'stop'): Promise<{ sent: number; stopped: number; failed: number }> {
+    return this.engine.answerChainHold(botId, holdId, answer)
+  }
+
   /** `bots.asks.answer` (§5.4). */
   async answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<{ message: BotChatMessage }> {
     this.engine.definitionOf(botId)

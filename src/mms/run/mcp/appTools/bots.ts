@@ -549,6 +549,9 @@ const CHAT_ONLY = 'Only your chat hands out, stops and adds to work, and sets wa
 const ANSWER_CHAT_ONLY = 'Only your chat passes on your owner\'s answers to your work.'
 /** `show_card` where it is never offered (a consult, a subagent): what it would show goes in words. */
 const CARDS_OFF = "You can't show cards from here: say it in words."
+/** What a bot is told of a step held for its owner (issue #1443): it waits for their Continue or Stop. */
+export const BOT_HELD_NOTE = 'Your owner sees it with Continue and Stop: Continue sends it, Stop drops it and you are told. Do not send it again. End your turn, and tell your owner in a few words where things stand.'
+
 /** `bot_list` and `bot_send` where they are never offered (a run started by hand, a consult, a subagent). */
 const BOT_MESSAGES_OFF = "You can't message your owner's other bots from here. Say in your report what you would have told them."
 const OWNER_ONLY = 'Only the owner can change this, in your chat. Suggest it in your report instead.'
@@ -1121,6 +1124,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         }
         try {
           const added = await wakes.add(call.botId, call.activationId, input)
+          if ('held' in added) return json({ status: 'held', holdId: added.held.holdId, note: `You set this same wake-up again and again since your owner last wrote, so it waits for them. ${BOT_HELD_NOTE}` })
           const when = reminderLabel(new Date(added.dueAt))
           const result = { wakeId: added.wakeId, ...(added.label ? { waitsFor: added.label, givesUpAt: when } : { when }) }
           call.deps.activity?.onAppResult(call.activity, 'wake', result)
@@ -1358,6 +1362,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
           if (typeof args.bot !== 'string' || !args.bot.trim() || typeof args.message !== 'string' || !args.message.trim()) return error("bot_send needs the bot's name and a message.")
           try {
             const sent = await call.deps.host.bots.send(call.botId, call.activationId, { to: args.bot, message: args.message })
+            if (sent.held) return json({ status: 'held', to: sent.to, holdId: sent.held.holdId, note: `Your bots have messaged each other a lot since your owner last wrote, so this message to ${sent.to} waits for them. ${BOT_HELD_NOTE}` })
             call.deps.activity?.onAppResult(call.activity, BOT_SEND_TOOL, { to: sent.to })
             return json({
               sent: true,

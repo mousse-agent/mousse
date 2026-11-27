@@ -8,8 +8,9 @@
  * - a message: the row in the receiving chat, the turn it starts and what that turn is told; the sender's chip
  * - who may send: a chat turn, work, a scheduled run (#1360); never a run started by hand
  * - refusals: an unknown name, itself, a paused bot, an empty or too long message; nothing is posted
- * - loops: no count in a row or a day; the same message to the same bot again before the owner writes is refused; the
- *   chain of turns without the owner is still counted (through chat, work and wakes)
+ * - loops: no count in a row or a day; the same message to the same bot again before the owner writes is refused; past
+ *   the limit a message waits for the owner (botChainHolds.test.ts); the chain of turns without the owner is still
+ *   counted (through chat, work and wakes)
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ownerChatTurn } from '../../src/mms/bots/activation/BotEngine'
@@ -195,7 +196,7 @@ describe('a message that can\'t go', () => {
 })
 
 describe('bots can\'t loop on each other', () => {
-  it(`ping-pong stops: two bots answering each other with new words stop once one has had ${MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER} messages from bots without its owner; that turn is told not to answer, and the owner's next message lets it send again`, async () => {
+  it(`ping-pong stops: two bots answering each other with new words stop once one has had ${MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER} messages from bots without its owner; that turn is told not to answer, what it sends waits for the owner's Continue, and the owner's next message lets it send again`, async () => {
     const first = await chat(plusy, 'Tell Alpha.', 'm1')
     expect(await send(plusy, first.activation.id, 'Alpha')).toEqual({ to: 'Alpha' })
     await finish(f, first.payload, 'completed', { text: 'Told Alpha.' })
@@ -208,7 +209,8 @@ describe('bots can\'t loop on each other', () => {
       const before = messageRows(to).length
       const answer = send(from, got.activation.id, name, `Answer ${sent + 1}: a new finding.`)
       if (got.prepared.prompt.includes("Don't answer")) {
-        await expect(answer).rejects.toThrow(`${MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER} messages from other bots since your owner last wrote`)
+        // Held for its owner, not sent (issue #1443).
+        expect(await answer).toMatchObject({ to: name, held: { holdId: expect.any(String) } })
         expect(messageRows(to)).toHaveLength(before)
         break
       }
@@ -225,6 +227,10 @@ describe('bots can\'t loop on each other', () => {
     expect(from).toBe(alpha)
     expect(sent).toBe(2 * MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER - 1)
     await finish(f, got.payload, 'completed', { text: 'I stopped here.' })
+    // The owner chooses Continue in Alpha's chat: what waited reaches Plusy.
+    const before = messageRows(plusy).length
+    expect(await f.bots.service.answerChainHold(alpha, f.bots.service.list().bots.find((bot) => bot.id === alpha)!.chainHold!.holdId, 'continue')).toEqual({ sent: 1, stopped: 0, failed: 0 })
+    expect(messageRows(plusy)).toHaveLength(before + 1)
     // The owner writes to Alpha: it may tell Plusy again.
     const again = await chat(alpha, 'Go on, tell Plusy.', 'm2')
     expect(await send(alpha, again.activation.id, 'Plusy', 'Here is where things stand.')).toEqual({ to: 'Plusy' })
@@ -267,7 +273,7 @@ describe('bots can\'t loop on each other', () => {
     await send(plusy, first.activation.id, 'Alpha')
     await finish(f, first.payload, 'completed', { text: 'Told Alpha.' })
     const got = await messageTurn(alpha)
-    const set = await f.bots.tools.wakes!.add(alpha, got.activation.id, { brief: 'Check again.', dueAt: new Date(f.clock.now + 60_000).toISOString() })
+    const set = await f.bots.tools.wakes!.add(alpha, got.activation.id, { brief: 'Check again.', dueAt: new Date(f.clock.now + 60_000).toISOString() }) as { wakeId: string }
     expect(f.store.reminder(set.wakeId)?.chain).toBe(2)
     await finish(f, got.payload, 'completed', { text: 'I will check again.' })
     f.clock.now += 60_000

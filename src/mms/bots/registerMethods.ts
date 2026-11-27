@@ -37,6 +37,7 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.chat.react': ['botId', 'messageId', 'emoji'],
   'bots.asks.answer': ['botId', 'askId', 'answer'],
   'bots.actions.answer': ['actionId', 'digest', 'answer'],
+  'bots.chainHold.answer': ['botId', 'holdId', 'answer'],
   'bots.questions.answer': ['botId', 'questionId', 'choice', 'clientRequestId'],
   'bots.permissions.set': ['botId', 'permissionId', 'enabled'],
   'bots.permissions.revoke': ['botId', 'permissionId'],
@@ -180,6 +181,9 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
       if (typeof p.askId !== 'string' || !ASK_ID.test(p.askId)) throw new DomainRpcError('invalid_params', 'An ask id is required')
       if (p.answer !== 'allow' && p.answer !== 'not_now') throw new DomainRpcError('invalid_params', 'The answer must be allow or not_now')
       break
+    case 'bots.chainHold.answer':
+      if (!text(p.holdId, 100) || (p.answer !== 'continue' && p.answer !== 'stop')) throw new DomainRpcError('invalid_params', 'Name the held batch and Continue or Stop.')
+      break
     case 'bots.actions.answer':
       if (!text(p.actionId, 100) || !text(p.digest, 64) || (p.answer !== 'send' && p.answer !== 'not_now')) throw new DomainRpcError('invalid_params', 'Name the held action, its digest and Send or Not now.')
       break
@@ -261,6 +265,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.chat.markRead': return bots.markRead(botId, p.seq as number)
     case 'bots.chat.react': return bots.react(botId, p.messageId as string, p.emoji as string | null)
     case 'bots.asks.answer': return bots.answer(botId, p.askId as string, p.answer as 'allow' | 'not_now')
+    case 'bots.chainHold.answer': return bots.answerChainHold(botId, p.holdId as string, p.answer as 'continue' | 'stop')
     case 'bots.actions.answer': return bots.answerAction({ actionId: p.actionId as string, digest: p.digest as string, answer: p.answer as 'send' | 'not_now' })
     case 'bots.questions.answer': return bots.answerQuestion({ botId, questionId: p.questionId as string, choice: p.choice as string, clientRequestId: p.clientRequestId as string })
     case 'bots.permissions.set': return bots.setPermission(botId, p.permissionId as string, p.enabled as boolean)
@@ -296,6 +301,10 @@ export function registerPersonalBotMethods(domains: DomainHandlerRegistry, botsF
       async handle(_context, params, binding) {
         if (method === 'bots.permissions.set' && (_context.connection?.clientType !== 'gui' || _context.connection?.bridgeCaller))
           throw new DomainRpcError('forbidden', 'Change permissions in the app window.')
+        // Only the owner lets bots go on messaging each other (issue #1443): a person at a window on this computer, never
+        // an agent, the CLI or another device (none has the method; `REMOTE_BOT_METHODS` leaves it out).
+        if (method === 'bots.chainHold.answer' && (_context.connection?.clientType !== 'gui' || _context.connection?.bridgeCaller))
+          throw new DomainRpcError('forbidden', 'Answer this in the Mousse window on the computer that runs the bot.')
         try {
           const bots = await botsForProfile(binding!.profileId)
           // The profile's bots.db could not be opened: bots are unavailable, nothing else is affected.

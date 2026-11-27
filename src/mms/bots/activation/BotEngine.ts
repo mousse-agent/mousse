@@ -134,8 +134,8 @@ import { isCodexBotRefusal } from '../../../shared/harness/codexBotVersion'
 import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
 import { BOT_CHAT_TURN_END_KEY, BOT_FOLD_LINE_PREFIX, BOT_FOLD_LINE_TEXT } from '../../../shared/bots/personal/memory'
 import { rollUpChips, type BotChipCall } from '../../../shared/bots/personal/chips'
-import type { BotActivityCalls, BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkModel, BotWorkStarted } from '../seams'
-import { MERGED_END_REASON, deriveBotProvenance, workWaits, type BotActivationProvenance, type BotActivationRow, type BotDispatchRow, type BotSubagentSpec, type BotSubagentRunRow, type BotEntryLimit, type BotEscalationRow, type BotGrantRow, type BotMessageRow, type BotModelState, type BotQuestionRow, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
+import type { BotActivityCalls, BotActivityContext, BotChainHeld, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkModel, BotWorkStarted } from '../seams'
+import { MERGED_END_REASON, deriveBotProvenance, workWaits, type BotActivationProvenance, type BotActivationRow, type BotDispatchRow, type BotSubagentSpec, type BotSubagentRunRow, type BotEntryLimit, type BotEscalationRow, type BotGrantRow, type BotMessageRow, type BotModelState, type BotQuestionRow, type BotReminderRow, type BotStore, type BotStoredError, type BotChainHold } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
@@ -187,6 +187,11 @@ function replyMayCarryPicture(text: string): boolean {
 }
 
 type HeldChatDraft = { n: number; text: string; replyTo?: string; chips: BotChip[] }
+
+/** A held `bot_send` (`bot_chain_holds`), with what Continue needs to send it as it was sent. */
+interface HeldBotMessage { to: string; toName: string; message: string; sender: BotMessageSender }
+/** A held wake: what `addWake` would have set. */
+interface HeldWake { brief: string; dueAt: string; event: BotWakeEvent | null; hours: number; chain: number; replyTo: string | null }
 
 export class BotEngineError extends Error {
   constructor(readonly code: string, message: string, readonly details?: Record<string, unknown>) {
@@ -679,6 +684,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * only: after a restart that dispatch has ended.
    */
   private readonly askedIn = new Map<string, number>()
+  /** Bots whose held steps an answer sends or drops now: one answer at a time (`answerChainHold`). */
+  private readonly answeringHolds = new Set<string>()
   /**
    * `changed` with `{botId?, activationId?}` after every change (`bots.changed`), `message` with
    * `{botId, message}` for every new or changed chat row (`bots.message`), `activity` with
@@ -9734,7 +9741,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     },
     wakes: {
       add: (botId, from, input) => this.addWake(botId, from, input),
-      wait: (botId, from, input) => this.addWake(botId, from, input, true)
+      // A work wait is never held: its loop is refused (`addWake`).
+      wait: async (botId, from, input) => await this.addWake(botId, from, input, true) as { wakeId: string; dueAt: string; label: string }
     },
     watchers: {
       start: (botId, from, input) => this.startWatcher(botId, from, input),
@@ -10468,7 +10476,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * again with no progress is refused (`refuseWakeLoop`). A wake on an event gives up after `hours` (default a day,
    * at most a week) and then wakes once anyway, saying why. Its turn starts when it is due, at any hour.
    */
-  async addWake(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }, workWait = false): Promise<{ wakeId: string; dueAt: string; label: string }> {
+  async addWake(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }, workWait = false): Promise<{ wakeId: string; dueAt: string; label: string } | BotChainHeld> {
     this.entry(botId)
     const brief = input.brief.trim()
     if (brief.length > MAX_WAKE_BRIEF_CHARS) throw new BotEngineError('invalid_params', `Keep the brief to ${MAX_WAKE_BRIEF_CHARS.toLocaleString('en-US')} characters: say what to do more briefly, then try again.`)
@@ -10498,6 +10506,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (due < this.now() - 60_000) throw new BotEngineError('invalid_params', 'That time has passed. Pick a time from now on.')
       if (due > this.now() + MAX_EVENT_WAKE_HOURS * HOUR_MS) throw new BotEngineError('invalid_params', `A wake-up is at most ${MAX_EVENT_WAKE_HOURS / 24} days ahead. For later, use remind or a schedule.`)
       dueAt = new Date(Math.max(due, this.now())).toISOString()
+    }
+    // The chat's same wake again and again is held for the owner (issue #1443); a work wait's loop is refused.
+    if (!workWait && this.sameWakes(botId, brief, event) >= MAX_SAME_WAKES) {
+      const key = wakeLoopKey(brief, event)
+      if (this.store.heldChainSteps(botId).some((hold) => hold.kind === 'wake' && wakeLoopKey((hold.payload as HeldWake).brief, (hold.payload as HeldWake).event) === key))
+        throw new BotEngineError('wake_loop', 'This same wake-up already waits for your owner. Nothing more was set: end your turn, and tell your owner where things stand.')
+      const hours = input.hours === undefined ? DEFAULT_EVENT_WAKE_HOURS : input.hours
+      const hold = this.store.holdChainStep(botId, 'wake', { brief, dueAt, event, hours, chain, replyTo: this.ownerMessageOf(from) ?? null } satisfies HeldWake)
+      this.changed({ botId })
+      return { held: { holdId: hold.holdId } }
     }
     this.refuseWakeLoop(botId, brief, event, workWait ? from : undefined)
     const wakeId = `rem_${randomUUID()}`
@@ -10536,12 +10554,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Cancelled ones count, so cancelling and setting it again is no way round it. Throws, in words for the bot.
    */
   private refuseWakeLoop(botId: string, brief: string, event: BotWakeEvent | null, workId?: string): void {
-    const key = wakeLoopKey(brief, event)
-    const after = workId ? Number(this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:action-owner:${workId}`)?.value ?? 0) : 0
-    const same = after ? this.store.all('SELECT text, event_json FROM bot_reminders WHERE bot_id = ? AND work_id = ? AND rowid > ? AND created_at >= ?', botId, workId!, after, this.store.ownerLastWroteAt(botId)).filter(wake => wakeLoopKey(String(wake.text), wake.event_json ? JSON.parse(String(wake.event_json)) : null) === key).length
-      : this.store.wakesSetSince(botId, this.store.ownerLastWroteAt(botId), workId).filter((wake) => wakeLoopKey(wake.text, wake.event) === key).length
+    const same = this.sameWakes(botId, brief, event, workId)
     if (same >= MAX_SAME_WAKES)
       throw new BotEngineError('wake_loop', `You have set this same wake-up ${same} times since your owner last wrote, with nothing new in it: that is a loop. Don't set it again: tell your owner where things stand and what you are waiting on, and carry on when they write. If something did change, say what in the brief.`)
+  }
+
+  /** How many times this same wake was set since the owner last wrote, or chose Continue on the chat's held steps. */
+  private sameWakes(botId: string, brief: string, event: BotWakeEvent | null, workId?: string): number {
+    const key = wakeLoopKey(brief, event)
+    const after = workId ? Number(this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:action-owner:${workId}`)?.value ?? 0) : 0
+    return after ? this.store.all('SELECT text, event_json FROM bot_reminders WHERE bot_id = ? AND work_id = ? AND rowid > ? AND created_at >= ?', botId, workId!, after, this.store.ownerLastWroteAt(botId)).filter(wake => wakeLoopKey(String(wake.text), wake.event_json ? JSON.parse(String(wake.event_json)) : null) === key).length
+      : this.store.wakesSetSince(botId, workId ? this.store.ownerLastWroteAt(botId) : this.store.chainBudgetFrom(botId).at, workId).filter((wake) => wakeLoopKey(wake.text, wake.event) === key).length
   }
 
   // -- Background commands (`watch_start`) ---------------------------------------------------------------------------
@@ -10735,7 +10758,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER` messages from bots since its owner last wrote (ping-pong). There is no count of
    * messages in a day, and none on what the owner asked it to send.
    */
-  async sendBotMessage(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string }> {
+  async sendBotMessage(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string; held?: { holdId: string } }> {
     const row = this.store.activation(from)
     if (!row || row.botId !== botId || !turnRightsOf(row).botSend) throw new BotEngineError('invalid_params', "Only your chat, your work and your scheduled runs message your owner's other bots. Say in your report what you would have told it.")
     if (row.status !== 'running') throw new BotEngineError('invalid_params', 'This turn has ended; nothing was sent.')
@@ -10758,25 +10781,106 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Loop detection, the one limit on messages between bots: the same words to the same bot again before the owner writes.
     if (this.store.botMessageRowAfter(target.botId, botMessageRowText(sender.name, message), this.store.ownerLastWroteSeq(botId)))
       throw new BotEngineError('bot_message_loop', `You already sent ${target.name} this same message since your owner last wrote. Nothing was sent: that would be a loop. Tell your owner where things stand instead.`)
-    // Ping-pong: bots that keep answering each other with new words. A bot that has had `MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER`
-    // messages from other bots since its owner last wrote sends no more to bots until its owner writes.
-    const received = this.store.botMessagesReceivedAfter(botId, this.store.ownerLastWroteSeq(botId))
-    if (received >= MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER)
-      throw new BotEngineError('bot_message_exchange', `You have had ${received} messages from other bots since your owner last wrote, with no person in between. Nothing was sent: tell your owner where things stand, and carry on when they write.`)
-    // The turn this message starts is told when it is the last its bot may answer before its owner writes.
-    const last = this.store.botMessagesReceivedAfter(target.botId, this.store.ownerLastWroteSeq(target.botId)) + 1 >= MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER
-    const messageId = randomUUID()
+    // Ping-pong: bots that keep answering each other with new words. Past `MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER` messages
+    // from other bots since its owner last wrote or chose Continue, the message is held for the owner (issue #1443), and
+    // while the bot holds a message, what it sends next waits behind it, so Continue sends them in order.
+    const held = this.store.heldChainSteps(botId).filter((hold) => hold.kind === 'message')
+    if (held.some((hold) => hold.kind === 'message' && (hold.payload as HeldBotMessage).to === target.botId && (hold.payload as HeldBotMessage).message === message))
+      throw new BotEngineError('bot_message_loop', `This same message to ${target.name} already waits for your owner. Nothing more was sent.`)
+    if (held.length || this.store.botMessagesReceivedAfter(botId, this.store.chainBudgetFrom(botId).seq) >= MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER) {
+      const hold = this.store.holdChainStep(botId, 'message', { to: target.botId, toName: target.name, message, sender } satisfies HeldBotMessage)
+      this.changed({ botId })
+      return { to: target.name, held: { holdId: hold.holdId } }
+    }
     const activationId = newActivationId()
-    const refused = this.store.db.transaction(() => {
-      const error = this.queueChatInTx(target.botId, botMessageKey(botId, messageId), botMessageInput({ fromName: sender.name, message, last }), activationId, undefined, sender)
-      // The owner reads it in the receiving bot's chat, labelled as the sender's.
-      if (!error) this.chat.post({ id: botMessageRowId(botId, messageId), botId: target.botId, author: 'bot', kind: 'notice', text: botMessageRowText(sender.name, message), lane: 'chat' })
-      return error
-    })
+    const refused = this.store.db.transaction(() => this.deliverBotMessageInTx(botId, target.botId, sender, message, activationId))
     if (refused) throw new BotEngineError(refused.code, `${target.name} can't take messages now. Nothing was sent: tell your owner instead.`)
     this.changed({ botId: target.botId })
     await this.startQueuedChat(target.botId, activationId)
     return { to: target.name }
+  }
+
+  /** Posts a bot's message in `to`'s chat, labelled as the sender's, and queues the chat turn that reads it. */
+  private deliverBotMessageInTx(botId: string, to: string, sender: BotMessageSender, message: string, activationId: string): BotEngineError | undefined {
+    // The turn this message starts is told when it is the last its bot may answer before its owner writes.
+    const last = this.store.botMessagesReceivedAfter(to, this.store.chainBudgetFrom(to).seq) + 1 >= MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER
+    const messageId = randomUUID()
+    const error = this.queueChatInTx(to, botMessageKey(botId, messageId), botMessageInput({ fromName: sender.name, message, last }), activationId, undefined, sender)
+    // The owner reads it in the receiving bot's chat, labelled as the sender's.
+    if (!error) this.chat.post({ id: botMessageRowId(botId, messageId), botId: to, author: 'bot', kind: 'notice', text: botMessageRowText(sender.name, message), lane: 'chat' })
+    return error
+  }
+
+  /**
+   * The owner's Continue or Stop on what bot `botId` holds (issue #1443), named by the card's batch (`holdId`, its oldest
+   * held step): one for a batch already settled is refused (`hold_settled`). Continue gives the bot's chain a new budget
+   * and sends what it holds, oldest first; each step leaves `held` in the transaction that sends it, so after a crash
+   * Continue sends what was not sent yet and nothing twice. Stop drops it. Either way a step that did not go leaves a line
+   * in the bot's chat, which it reads with its next turn.
+   */
+  async answerChainHold(botId: string, holdId: string, answer: 'continue' | 'stop'): Promise<{ sent: number; stopped: number; failed: number }> {
+    this.entry(botId)
+    const batch = this.store.chainHold(holdId)
+    if (batch?.botId !== botId || batch.status !== 'held') throw new BotEngineError('hold_settled', 'These were already answered. The chat shows what waits now.')
+    if (this.answeringHolds.has(botId)) throw new BotEngineError('conflict', 'This was already answered; what was held is being sent.')
+    const counts = { sent: 0, stopped: 0, failed: 0 }
+    const settle = (hold: BotChainHold, status: 'stopped' | 'failed', line: string, reason?: string) => this.store.db.transaction(() => {
+      if (!this.store.settleChainHold(hold.holdId, status, reason)) return false
+      const what = hold.kind === 'wake' ? `the wake-up "${plainLabel((hold.payload as HeldWake).brief, 120)}"` : `the message to ${(hold.payload as HeldBotMessage).toName}`
+      this.chat.post({ id: `bm_chainhold_${hold.holdId}`, botId, author: 'bot', kind: 'notice', text: line.replace('{what}', what), lane: 'chat' })
+      return true
+    })
+    this.answeringHolds.add(botId)
+    try {
+      if (answer === 'stop') {
+        for (const hold of this.store.heldChainSteps(botId)) if (settle(hold, 'stopped', 'Not sent, as you chose Stop: {what}.')) counts.stopped += 1
+        return counts
+      }
+      this.store.renewChainBudget(botId)
+      for (let hold = this.store.heldChainSteps(botId)[0]; hold; hold = this.store.heldChainSteps(botId)[0]) {
+        const current = hold
+        try {
+          if (await this.continueHeld(current)) counts.sent += 1
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error)
+          if (settle(current, 'failed', `Continue could not send {what}: ${reason}`, reason)) counts.failed += 1
+        }
+      }
+      return counts
+    } finally {
+      this.answeringHolds.delete(botId)
+      this.changed({ botId })
+    }
+  }
+
+  /** Sends one held step, settling it in the same transaction; false when something else settled it first. */
+  private async continueHeld(hold: BotChainHold): Promise<boolean> {
+    if (hold.kind === 'wake') {
+      const wake = hold.payload as HeldWake
+      const dueAt = new Date(wake.event ? this.now() + wake.hours * HOUR_MS : Math.max(Date.parse(wake.dueAt), this.now())).toISOString()
+      const set = this.store.db.transaction(() => {
+        if (!this.store.settleChainHold(hold.holdId, 'continued')) return false
+        this.store.insertReminder({ id: `rem_${randomUUID()}`, botId: hold.botId, dueAt, text: wake.brief, work: null, replyTo: wake.replyTo, createdAt: this.store.now(), wake: true, event: wake.event, chain: wake.chain, ownerSet: false })
+        return true
+      })
+      if (set) this.armDue()
+      return set
+    }
+    const message = hold.payload as HeldBotMessage
+    const target = this.otherBots(hold.botId).find((bot) => bot.botId === message.to)
+    if (!target) throw new BotEngineError('bot_not_found', `${message.toName} is no longer one of your owner's bots.`)
+    if (target.paused) throw new BotEngineError('bot_paused', `${target.name} is paused.`)
+    const activationId = newActivationId()
+    const sent = this.store.db.transaction(() => {
+      if (!this.store.settleChainHold(hold.holdId, 'continued')) return false
+      const refused = this.deliverBotMessageInTx(hold.botId, target.botId, message.sender, message.message, activationId)
+      if (refused) throw new BotEngineError(refused.code, `${target.name} can't take messages now.`)
+      return true
+    })
+    if (!sent) return false
+    this.changed({ botId: target.botId })
+    await this.startQueuedChat(target.botId, activationId)
+    return true
   }
 
   /**
