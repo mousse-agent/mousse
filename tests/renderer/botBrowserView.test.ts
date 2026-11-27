@@ -477,6 +477,36 @@ describe('the split view\'s size', () => {
   })
 })
 
+describe('the zoom of a narrow split view', () => {
+  beforeEach(() => {
+    ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver = class { observe() {} disconnect() {} }
+    const size = (element: HTMLElement, side: 'width' | 'height') => element.classList.contains('watched-browser-stage') ? { width: 380, height: 700 }[side] : 0
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get(this: HTMLElement) { return size(this, 'width') } })
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get(this: HTMLElement) { return size(this, 'height') } })
+  })
+  afterEach(() => {
+    delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver
+    delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth
+    delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight
+  })
+
+  it('zooms in only as far as the narrowest page fills the view, and says the zoom it shows', async () => {
+    fake.chats.noobesh = [message(1, { text: 'Here it is.', activationId: 'act1' })]
+    await open()
+    await click(button('Expand Noobesh\'s browser'))
+    await click(button('Browser menu'))
+    const zoomIn = () => document.querySelector<HTMLButtonElement>('[aria-label="Zoom in"]')!
+    for (let step = 0; step < 6 && !zoomIn().disabled; step += 1) await click(zoomIn())
+    // 380 px wide: the page is never under 320 px, so 119% is the most this view shows; the page keeps the view's shape.
+    expect(zoomIn().disabled).toBe(true)
+    expect(document.querySelector('.watched-browser-zoom-value')!.textContent).toBe('119%')
+    expect(watches().at(-1)!.page).toEqual({ width: 320, height: 589, scale: 1.25 })
+    // A step out goes from what is shown.
+    await click(document.querySelector('[aria-label="Zoom out"]'))
+    expect(document.querySelector('.watched-browser-zoom-value')!.textContent).toBe('109%')
+  })
+})
+
 describe('the person\'s input in the split view', () => {
   /** The split view of a browser this window holds. */
   async function held(extra: Partial<BotBrowserView> = {}) {

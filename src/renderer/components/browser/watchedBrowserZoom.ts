@@ -1,5 +1,5 @@
-import { useCallback, useState } from 'react'
-import { watchedBrowserPageSize, type WatchedBrowserPageSize } from '../../../shared/browser/watched'
+import { useCallback, useRef, useState } from 'react'
+import { WATCHED_BROWSER_PAGE, watchedBrowserPageSize, type WatchedBrowserPageSize } from '../../../shared/browser/watched'
 
 /**
  * The zoom of a browser without a window as a person watches it (a bot's, a thread agent's): the page is laid out at
@@ -28,12 +28,38 @@ function storedZoom(): number {
   }
 }
 
-/** The zoom, and a change of it: `in` and `out` by a step, `reset` back to the default. */
-export function useWatchedBrowserZoom(): [number, (change: 'in' | 'out' | 'reset') => void] {
-  const [zoom, setZoom] = useState(storedZoom)
+/**
+ * The zooms a view of `stage` can show: the page keeps the service's bounds (`WATCHED_BROWSER_PAGE`), so a narrow view
+ * cannot zoom in past the zoom that lays its page out at the narrowest page (320 px), nor a large one out past the
+ * widest. Within those, and the zoom's own bounds.
+ */
+export function zoomRange(stage: WatchedBrowserPageSize | null | undefined): { min: number; max: number } {
+  const { min, max } = WATCHED_BROWSER_ZOOM
+  if (!stage) return { min, max }
+  const page = WATCHED_BROWSER_PAGE
+  const most = Math.min(max, stage.width / page.min.width, stage.height / page.min.height)
+  const least = Math.max(min, stage.width / page.max.width, stage.height / page.max.height)
+  return { min: Math.min(least, most), max: Math.max(least, most) }
+}
+
+/**
+ * The zoom a view shows, and a change of it: `in` and `out` by a step from the zoom shown, `reset` back to the default.
+ * The zoom chosen is kept; the one shown is within what the view's size allows (`range`), so a view that grows shows
+ * more of it again. `canIn` and `canOut` say whether a step would change what is shown.
+ */
+export function useWatchedBrowserZoom(range: { min: number; max: number } = WATCHED_BROWSER_ZOOM): {
+  zoom: number
+  change(how: 'in' | 'out' | 'reset'): void
+  canIn: boolean
+  canOut: boolean
+} {
+  const [chosen, setZoom] = useState(storedZoom)
+  const zoom = Math.min(range.max, Math.max(range.min, chosen))
+  const shown = useRef(zoom)
+  shown.current = zoom
   const change = useCallback((how: 'in' | 'out' | 'reset') => {
-    setZoom((current) => {
-      const next = how === 'reset' ? WATCHED_BROWSER_ZOOM.default : clampZoom(current + (how === 'in' ? 1 : -1) * WATCHED_BROWSER_ZOOM.step)
+    setZoom(() => {
+      const next = how === 'reset' ? WATCHED_BROWSER_ZOOM.default : clampZoom(shown.current + (how === 'in' ? 1 : -1) * WATCHED_BROWSER_ZOOM.step)
       try {
         window.localStorage.setItem(ZOOM_KEY, String(next))
       } catch {
@@ -42,7 +68,7 @@ export function useWatchedBrowserZoom(): [number, (change: 'in' | 'out' | 'reset
       return next
     })
   }, [])
-  return [zoom, change]
+  return { zoom, change, canIn: zoom < range.max - 0.005, canOut: zoom > range.min + 0.005 }
 }
 
 /**
@@ -52,6 +78,9 @@ export function useWatchedBrowserZoom(): [number, (change: 'in' | 'out' | 'reset
  */
 export function pageAtZoom(stage: WatchedBrowserPageSize, zoom: number): WatchedBrowserPageSize {
   if (zoom === 1) return stage
+  // Within what the stage allows: width and height divided alike, so the page keeps the stage's shape and fills it.
+  const range = zoomRange(stage)
+  zoom = Math.min(range.max, Math.max(range.min, zoom))
   return watchedBrowserPageSize({ width: stage.width / zoom, height: stage.height / zoom, scale: Math.ceil(stage.scale * zoom * 4) / 4 })
 }
 

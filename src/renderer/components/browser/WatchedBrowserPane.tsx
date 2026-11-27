@@ -13,7 +13,7 @@ import { useAppStore } from '../../stores/appStore'
 import { localDeviceName } from '../sideCard/deviceMenu'
 import { WatchedBrowserFrame } from './WatchedBrowserFrame'
 import { useBrowserInput } from './useBrowserInput'
-import { pageAtZoom, useWatchedBrowserZoom, WATCHED_BROWSER_ZOOM } from './watchedBrowserZoom'
+import { pageAtZoom, useWatchedBrowserZoom, zoomRange } from './watchedBrowserZoom'
 import './watchedBrowser.css'
 
 /**
@@ -325,7 +325,6 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   const frame = useRef<HTMLDivElement>(null)
   const stage = useRef<HTMLDivElement>(null)
   const keys = useRef<HTMLTextAreaElement>(null)
-  const [zoom, changeZoom] = useWatchedBrowserZoom()
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | 'bar' | null>(null)
   const menuButton = useRef<HTMLButtonElement>(null)
   useEffect(() => { if (!editing.current) setAddress(url) }, [url])
@@ -342,6 +341,7 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   // Watched once it is measured; where it cannot be, the page keeps its size and the picture is 960 px wide.
   // At the view's zoom: the page is laid out larger (zoomed out) or smaller, and the picture stays the stage's size.
   const measured = useStagePageSize(stage)
+  const { zoom, change: changeZoom, canIn, canOut } = useWatchedBrowserZoom(zoomRange(measured))
   const page = measured ? pageAtZoom(measured, zoom) : measured
   const width = measured ? Math.min(WATCHED_BROWSER_PANE.maxWidth, Math.round(measured.width * measured.scale)) : UNMEASURED_WIDTH
   const fps = owner ? WATCHED_BROWSER_PANE.heldFps : WATCHED_BROWSER_PANE.fps
@@ -508,9 +508,9 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
       </>}
       <div className="browser-menu-zoom" role="group" aria-label="Zoom">
         <span>Zoom</span>
-        <button type="button" aria-label="Zoom out" title="Zoom out" disabled={zoom <= WATCHED_BROWSER_ZOOM.min} onClick={() => changeZoom('out')}><Minus size={14} aria-hidden="true" /></button>
+        <button type="button" aria-label="Zoom out" title="Zoom out" disabled={!canOut} onClick={() => changeZoom('out')}><Minus size={14} aria-hidden="true" /></button>
         <button type="button" className="watched-browser-zoom-value" aria-label="Reset zoom" title="Reset zoom" onClick={() => changeZoom('reset')}>{Math.round(zoom * 100)}%</button>
-        <button type="button" aria-label="Zoom in" title="Zoom in" disabled={zoom >= WATCHED_BROWSER_ZOOM.max} onClick={() => changeZoom('in')}><Plus size={14} aria-hidden="true" /></button>
+        <button type="button" aria-label="Zoom in" title="Zoom in" disabled={!canIn} onClick={() => changeZoom('in')}><Plus size={14} aria-hidden="true" /></button>
       </div>
     </BrowserMenu>}
   </aside>
