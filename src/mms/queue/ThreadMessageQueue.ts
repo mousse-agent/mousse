@@ -40,6 +40,7 @@ export interface EnqueueMessageInput {
   subagentNotice?: QueuedMessage['subagentNotice']
   settleNotice?: SettleNoticeItem[]
   settleHops?: number
+  settleChain?: string
   heldNotice?: boolean
   stopGeneration?: number
   permissionMode?: PermissionMode
@@ -185,6 +186,7 @@ function normalizeOrigin(raw: unknown): QueuedMessage['origin'] {
       threadId: agent.threadId,
       runId: agent.runId,
       ...hops,
+      ...(typeof agent.chain === 'string' && agent.chain ? { chain: agent.chain } : {}),
       ...words,
       ...(typeof agent.title === 'string' && agent.title ? { title: agent.title } : {}),
       ...(agent.bot && typeof agent.bot === 'object' && typeof agent.bot.id === 'string' && agent.bot.id && typeof agent.bot.name === 'string'
@@ -260,6 +262,7 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       ...(Array.isArray(item.subagentNotice) && item.subagentNotice.length ? { subagentNotice: item.subagentNotice } : {}),
       ...(readSettleNotice(item.settleNotice) ? { settleNotice: readSettleNotice(item.settleNotice) } : {}),
       ...(typeof item.settleHops === 'number' && Number.isSafeInteger(item.settleHops) && item.settleHops >= 0 ? { settleHops: item.settleHops } : {}),
+      ...(typeof item.settleChain === 'string' && item.settleChain ? { settleChain: item.settleChain } : {}),
       ...(item.heldNotice === true && state === 'pending' ? { heldNotice: true as const } : {}),
       ...(typeof item.stopGeneration === 'number' && Number.isSafeInteger(item.stopGeneration) && item.stopGeneration >= 0 ? { stopGeneration: item.stopGeneration } : {}),
       ...(item.heldAfterStop === true ? { heldAfterStop: true as const } : {}),
@@ -381,7 +384,7 @@ export function enqueueMessage(
     ...(input.continuationOfRunId ? { continuationOfRunId: input.continuationOfRunId } : {}),
     ...(input.inboxIds?.length ? { inboxIds: input.inboxIds } : {}),
     ...(input.subagentNotice?.length ? { subagentNotice: input.subagentNotice } : {}),
-    ...(input.settleNotice?.length ? { settleNotice: input.settleNotice, settleHops: input.settleHops ?? 0 } : {}),
+    ...(input.settleNotice?.length ? { settleNotice: input.settleNotice, settleHops: input.settleHops ?? 0, ...(input.settleChain ? { settleChain: input.settleChain } : {}) } : {}),
     ...(input.settleNotice?.length && input.heldNotice ? { heldNotice: true as const } : {}),
     ...(input.stopGeneration !== undefined ? { stopGeneration: input.stopGeneration } : {}),
     ...(input.permissionMode ? { permissionMode: input.permissionMode } : {}),
@@ -840,6 +843,8 @@ export interface SettleNoticeInput {
   text: string
   /** The watched run's count of agent messages in a row. */
   hops: number
+  /** The chain of the message sent with notify. */
+  chain?: string
   mode?: ChatMode
   /** It must not start a turn by itself (`QueuedMessage.heldNotice`). */
   held: boolean
@@ -875,6 +880,7 @@ export function mergeSettleNotice(items: QueuedMessage[], input: SettleNoticeInp
       source: SETTLE_NOTICE_SOURCE,
       settleNotice: [input.item],
       settleHops: input.hops,
+      ...(input.chain ? { settleChain: input.chain } : {}),
       heldNotice: input.held
     })
     return { ...made, changed: true }
@@ -885,6 +891,8 @@ export function mergeSettleNotice(items: QueuedMessage[], input: SettleNoticeInp
     content: `${waiting.content}\n\n${input.text}`,
     settleNotice: [...(waiting.settleNotice ?? []), input.item],
     settleHops: Math.max(waiting.settleHops ?? 0, input.hops),
+    // Notices that meet run as one turn, in the chain of the first.
+    ...(waiting.settleChain ?? input.chain ? { settleChain: waiting.settleChain ?? input.chain } : {}),
     ...(waiting.heldNotice && input.held ? { heldNotice: true as const } : {})
   }
   return { items: items.map((entry) => (entry.id === waiting.id ? joined : entry)), item: joined, changed: true }

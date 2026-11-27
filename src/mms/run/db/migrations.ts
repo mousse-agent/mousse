@@ -851,5 +851,41 @@ CREATE TABLE tree_revisions(
 ) STRICT;
 CREATE INDEX tree_revisions_thread ON tree_revisions(thread_id, created_at);
 `
+  },
+  {
+    // The chain of agent messages (issue #1442): what a person or a schedule started, followed through every agent
+    // message, wake, settle notice and delegation it led to. A run names its chain in outcome.agentChain; one that names
+    // none starts its own ('chain:<runId>'). used counts messages since the budget began (a person's message or Continue
+    // begins a new one); total counts them all. A hold is a message kept at the budget for the person's Continue or Stop
+    // (issue #1443): held, then continued (sent), stopped (dropped) or failed (Continue could not send it).
+    version: 31,
+    sql: `
+CREATE TABLE agent_chains(
+  chain_id          TEXT PRIMARY KEY,
+  root_thread_id    TEXT NOT NULL,
+  root_run_id       TEXT NOT NULL,
+  used              INTEGER NOT NULL DEFAULT 0 CHECK(used >= 0),
+  total             INTEGER NOT NULL DEFAULT 0 CHECK(total >= 0),
+  budget_started_at TEXT NOT NULL,
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL
+) STRICT;
+CREATE INDEX agent_chains_root ON agent_chains(root_thread_id);
+CREATE TABLE agent_chain_holds(
+  hold_id          TEXT PRIMARY KEY,
+  chain_id         TEXT NOT NULL,
+  request_key      TEXT NOT NULL UNIQUE,
+  kind             TEXT NOT NULL CHECK(kind IN ('work','note')),
+  sender_thread_id TEXT NOT NULL,
+  sender_run_id    TEXT,
+  target_thread_id TEXT NOT NULL,
+  payload          TEXT NOT NULL,
+  status           TEXT NOT NULL CHECK(status IN ('held','continued','stopped','failed')),
+  result           TEXT,
+  created_at       TEXT NOT NULL,
+  settled_at       TEXT
+) STRICT;
+CREATE INDEX agent_chain_holds_chain ON agent_chain_holds(chain_id, status);
+`
   }
 ]

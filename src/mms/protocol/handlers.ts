@@ -3244,6 +3244,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         throw error
       }
     }
+    case 'threads.chainHold': {
+      // The person's Continue or Stop on a chain of agent messages held at its budget (issue #1443), asked on the thread
+      // the chain started in. Only a person answers it: an agent, an automation or the CLI never lets a chain go on.
+      if (!isPerson(ctx.connection)) throw new DomainRpcError('forbidden', 'Only a person at a Mousse window answers a held chain of agent messages')
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'chainId', 'answer'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const chainId = asString(p.chainId, 'chainId', 256)
+      const answer = asString(p.answer, 'answer', 16)
+      if (answer !== 'continue' && answer !== 'stop') throw new DomainRpcError('invalid_params', 'answer must be continue or stop')
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      return asRpcRejection(() => ctx.mms.orchestrator.answerChainHold(threadId, chainId, answer))
+    }
     case 'runs.cancelPause': {
       // End a pause without continuing: the run is cancelled and the thread's held messages go on.
       const p = isObject(params) ? params : {}
