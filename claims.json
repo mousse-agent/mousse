@@ -101,6 +101,19 @@
       "expiresAt": "2026-11-27T07:04:49.257Z"
     },
     {
+      "task": "t3/queue-tool-api-unification",
+      "session": "LAPTOP-HIEROJK7-3ef729",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "t3/queue-tool-api-unification",
+      "paths": [
+        "src/shared/toolAliases.ts",
+        "src/mms/run/mcp/appTools/thread.ts",
+        "src/mms/agentDefinitions/definitionGate.ts"
+      ],
+      "claimedAt": "2026-11-27T11:50:47.108Z",
+      "expiresAt": "2026-11-27T13:50:47.108Z"
+    },
+    {
       "task": "t3/remote-subagent-nesting",
       "session": "LAPTOP-HIEROJK7-51885a",
       "machine": "LAPTOP-HIEROJK7",
