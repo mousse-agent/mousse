@@ -101,6 +101,7 @@ import { localProjectsOf } from '../hooks/useLocalProjects'
 import { localDeviceName, runOnLabel } from './sideCard/deviceMenu'
 import { ComputerNotice } from './ComputerNotice'
 import { ThreadComputerBar } from './ThreadComputerBar'
+import { ThreadOpeningView, useOpenFailedShown } from './ThreadOpening'
 import { ThreadStartedByBar } from './ThreadStartedByBar'
 import { ThreadModeBar } from './ThreadModeBar'
 import { EarlierMessagesBar } from './EarlierMessagesBar'
@@ -250,6 +251,8 @@ export function OrchestratorChat() {
   const messages = useAppStore((s) => s.messages)
   const loading = useAppStore((s) => s.loading)
   const transcriptPending = useAppStore((s) => s.transcriptPending)
+  // A thread whose transcript could not be read says so (ThreadOpeningView) rather than looking like a new thread.
+  const openFailed = useOpenFailedShown()
   const setLoading = useAppStore((s) => s.setLoading)
   const chatMode = useAppStore((s) => s.chatMode)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
@@ -2172,7 +2175,7 @@ export function OrchestratorChat() {
   // A subagent thread is never the new-chat empty screen either.
   const newChatAnimations = useAppStore((s) => s.newChatAnimations)
   const hidePermissionsWhileRunning = useAppStore((s) => s.hidePermissionsWhileRunning)
-  const emptyThread = !isSubagent && shownMessages.length === 0 && !transcriptPending && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
+  const emptyThread = !isSubagent && shownMessages.length === 0 && !transcriptPending && !openFailed && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
   // A new thread's settings (project above the composer, where it runs and Private / Archive after below) leave once the first send starts.
   const newThreadSettings = newChat && !turnActive && !loading && !firstSendShown
   // The first message shows in the transcript while its thread is made: the locked composer that still holds it (to
@@ -2200,6 +2203,7 @@ export function OrchestratorChat() {
       {emptyThread && newChatAnimations && <AmbientGlow since={continuesWarmEmpty ? warmEmpty.since : undefined} />}
       <SubagentParentBar />
       <ThreadComputerBar />
+      <ThreadOpeningView />
       <ThreadStartedByBar />
       <ThreadModeBar />
       <EarlierMessagesBar />
