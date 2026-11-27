@@ -5998,9 +5998,9 @@ export class OrchestratorService extends EventEmitter {
       createdByThreadId: intent.createdByThreadId,
       // The bot that started it, by its name then: the thread says so after the bot is renamed or deleted.
       ...(intent.bot ? { startedByBot: intent.bot } : {}),
-      // An agent's thread starts out of the person's sidebar: a bot's chat lists it, and so does the side panel of the
-      // thread that launched it. One the agent starts as independent (hidden: false) shows there from the start.
-      ...(intent.request.hidden !== false ? { hidden: true } : {}),
+      // A bot's thread starts out of its owner's sidebar unless it asked otherwise (hidden: false): its chat lists it. An
+      // agent's is a handoff and shows there from the start (#2004): its own work out of the person's sight is a subagent.
+      ...(intent.bot && intent.request.hidden !== false ? { hidden: true } : {}),
       localOnly: intent.localOnly === true
     })
     // The marker: a thread is complete only once this event exists. Ids and names, never the message.
@@ -6190,9 +6190,9 @@ export class OrchestratorService extends EventEmitter {
         title,
         remoteProjectId: project.projectId,
         worktree: input.workspace === 'new_worktree',
-        // A bot's sends hidden only when it named it; none shows the thread there, as before. An agent's is hidden unless
-        // it asked otherwise.
-        hidden: bot ? input.hidden ?? null : input.hidden !== false,
+        // A bot's sends hidden only when it named it; none shows the thread there, as before. An agent's is a handoff and
+        // shows there (#2004).
+        hidden: bot ? input.hidden ?? null : false,
         instanceId: input.instanceId ?? null,
         // That computer's `threads.setModel` reads a level packed with the model, as every computer does.
         model: input.model ? agentModelId(input.model, input.effort) : null,

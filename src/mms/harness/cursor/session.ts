@@ -326,7 +326,7 @@ export function cursorToolActivity(toolCall: unknown): ActivityPatch | undefined
     const failed = result?.status === 'error' || value?.isError === true
     const text = records(value?.content).map((block) => str(record(block.text)?.text) ?? '').join('\n')
     if (!isGuardedCall(cua)) {
-      if (subagentToolName(name)) return undefined
+      if (subagentToolName(name, args)) return undefined
       const kept = args && Object.keys(args).length > 0 ? capRecord(args) : undefined
       const plain = { ...(kept ? { input: kept } : {}), ...(ended && text ? { output: text } : {}), ...(ended && failed ? { status: 'failed' } : {}) }
       return Object.keys(plain).length ? ({ kind: 'generic', ...plain } as ActivityPatch) : undefined

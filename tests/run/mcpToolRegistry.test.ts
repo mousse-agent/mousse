@@ -18,7 +18,6 @@ import { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessage } from '../../src
 
 /** The tools a credential lists before the app tools joined (still listed, still these classes). */
 const PHASE5_TOOLS: Record<string, string> = {
-  delegate_task: 'actsAsCaller',
   request_answer: 'actsAsCaller',
   question_ask: 'actsAsCaller',
   task_create: 'actsAsCaller',
@@ -27,7 +26,8 @@ const PHASE5_TOOLS: Record<string, string> = {
   thread_read: 'readsOthers',
   thread_wait: 'readsOthers',
   thread_send: 'managesOthers',
-  thread_create: 'managesOthers',
+  // Listed as its widest kind, the subagent (`delegate_task`'s): a call of kind thread is held to `managesOthers`.
+  thread_create: 'actsAsCaller',
   thread_stop: 'managesOthers',
   queue_list: 'readsOthers',
   queue_enqueue: 'managesOthers',

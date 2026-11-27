@@ -52,7 +52,7 @@ describe('addressing a subagent by title (issue #142)', () => {
   it('a subagent whose thread is gone is trashed when addressed by id, unknown by title', async () => {
     const { sources, titles, reviewer } = await world()
     titles.delete(reviewer.childThreadId)
-    expect(resolveSubagent(sources, 'parent-a', reviewer.childThreadId)).toMatchObject({ ok: false, code: 'subagent_trashed', message: expect.stringContaining('delegate_task') })
+    expect(resolveSubagent(sources, 'parent-a', reviewer.childThreadId)).toMatchObject({ ok: false, code: 'subagent_trashed', message: expect.stringContaining('thread_create (kind "subagent")') })
     expect(resolveSubagent(sources, 'parent-a', reviewer.delegationId)).toMatchObject({ ok: false, code: 'subagent_trashed' })
     expect(resolveSubagent(sources, 'parent-a', 'API reviewer')).toMatchObject({ ok: false, code: 'unknown_subagent' })
     expect(visibleSubagents(sources, 'parent-a').map((child) => child.title)).toEqual(['Docs writer'])
