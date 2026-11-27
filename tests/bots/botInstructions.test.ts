@@ -38,6 +38,16 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
     expect(BOT_BASE_INSTRUCTIONS).not.toMatch(/shell commands/i)
   })
 
+  // A chat told the owner it was "using my own browser" before its work had opened one, then sent its work a note to
+  // "surface the browser session", which the work spent its first steps looking for.
+  it('tells the chat its owner sees its work\'s browser by itself, with no session to pass on; not while the browser is switched off', () => {
+    const allowed = { shell: false, browser: true, threads: false, web: true, automation: [] }
+    const line = 'no session or link to pass on to your work'
+    expect(botInstructions({ name: 'Pip', description: 'Mail.', lane: 'chat', allowed })).toContain(line)
+    expect(botInstructions({ name: 'Pip', description: 'Mail.', lane: 'chat', allowed: { ...allowed, browser: false, off: { browser: true } } })).not.toContain(line)
+    expect(botInstructions({ name: 'Pip', description: 'Mail.', lane: 'run', allowed })).not.toContain(line)
+  })
+
   it('tells the chat to always say what it is doing in one line before a slow step, work_start and thread tools included', () => {
     const text = botInstructions({ name: 'Inbox helper', description: 'Mail.', lane: 'chat' })
     expect(text).toContain('Before every step that takes a while (a search, a page, a long read, work_start, a thread tool), always write one short line first')

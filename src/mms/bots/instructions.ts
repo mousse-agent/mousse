@@ -80,6 +80,9 @@ What you can't do yet
 - With the browser, a site that needs a sign-in can be signed in to by the owner in your browser (they open it from your message); ask them, and it stays signed in for you.
 - Make pictures, unless your owner picked an image model for you: then you have make_image (the showing group). Without it, tell them they can pick one in About → Runs on, in the Images row.`
 
+/** The chat's line on where its owner sees its work's browser; left out while the browser is switched off. */
+const BOT_CHAT_BROWSER_LINE = "- Your owner sees your work's browser by itself once it opens: no session or link to pass on to your work. Until then, say you will use the browser, not that you are."
+
 /**
  * A chat turn. It answers in moments and does anything longer as work beside it, so the owner can always talk to it; it
  * speaks of that work as its own (`BOT_BASE_INSTRUCTIONS`, How you talk).
@@ -92,6 +95,7 @@ export const BOT_CHAT_INSTRUCTIONS = `In the chat you answer at once, and do lon
 - A quick lookup while a long job runs is its own small piece of work: start it with work_start beside the job; never tell the owner to wait for the job to finish.
 - Quick calls you make yourself: a web search, a page or two, a secret_fetch read, one of your owner's MCP tools (the mcp group). Each has 15 seconds, a turn's together 45; longer jobs go to work_start, as does a call that timed out. Never resend one that may have gone through.
 - Your work has every permission listed under "What your owner allows now". The chat itself never uses the browser, commands or apps on this computer: when a job needs one of them and the list says yes, hand it to work_start at once; never say you can't, and never ask for it again.
+${BOT_CHAT_BROWSER_LINE}
 - If the work needs a permission the list says no to, ask with escalate first; hand the work off once the owner has answered.
 - While you work, keep talking: answer other questions. When the owner adds to or changes something you are working on, call work_note so your work takes it in (or stop it with work_stop and start again if the task changed). Then tell them, as yourself, what you'll do now and when, as work_note's answer says ("I'll use that tab from here on"). If their words could fit more than one job, ask which one first. "How's it going?" is answered from your work list, in the first person ("I'm comparing prices now").
 - Quick answers you know, or that are in your memory or your files, need no work: just answer.
@@ -267,7 +271,8 @@ export function baseInstructionsWithout(off?: BotSwitchedOff): string {
 function chatInstructionsWithout(off?: BotSwitchedOff): string {
   if (!off?.shell && !off?.browser) return BOT_CHAT_INSTRUCTIONS
   const uses = [...(off.browser ? [] : ['the browser']), ...(off.shell ? [] : ['commands'])]
-  return BOT_CHAT_INSTRUCTIONS
+  const text = off.browser ? BOT_CHAT_INSTRUCTIONS.replace(`\n${BOT_CHAT_BROWSER_LINE}`, '') : BOT_CHAT_INSTRUCTIONS
+  return text
     .replace('work_start: the browser, commands, research,', `work_start: ${[...uses, 'research'].join(', ')},`)
     .replace('never uses the browser, commands or apps on this computer:', `never uses ${uses.length ? `${uses.join(', ')} or ` : ''}apps on this computer:`)
 }

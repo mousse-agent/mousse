@@ -276,11 +276,19 @@ type CodexConfigValue = string | boolean | string[] | { [key: string]: CodexConf
  * reading `profile.base` and `profile.readable`, writing `writableRoots`, denying `profile.closed` (a deny wins over a
  * read or write of a folder around it, and a write of a folder inside it opens that folder again), with no network.
  * Otherwise the same `workspaceWrite` sandbox as its turns (`codexTurnPolicy`). Either way nothing in the user's
- * `config.toml` widens it while the thread loads.
+ * `config.toml` widens it while the thread loads. And Codex's own skills list stays out of its prompt
+ * (`CODEX_BOT_NO_SKILLS`).
  */
 export function codexBotSandboxConfig(sandbox: CodexBotSandbox): Record<string, CodexConfigValue> {
-  return { ...Object.fromEntries(CODEX_BOT_FEATURES_OFF.map((feature) => [`features.${feature}`, false])), ...codexBotSandboxOnly(sandbox) }
+  return { ...Object.fromEntries(CODEX_BOT_FEATURES_OFF.map((feature) => [`features.${feature}`, false])), ...CODEX_BOT_NO_SKILLS, ...codexBotSandboxOnly(sandbox) }
 }
+
+/**
+ * Keeps Codex's own skills list out of a bot's prompt: the owner's `~/.agents/skills` and `$CODEX_HOME/skills`, and
+ * Codex's built-in ones. A bot's skills are the ones its owner granted, through Mousse's `list_skills` and `load_skill`;
+ * a list from Codex named skills the bot can't load, and the bot spent turns trying them. Checked on Codex 0.162.1.
+ */
+export const CODEX_BOT_NO_SKILLS: Readonly<Record<string, CodexConfigValue>> = { 'skills.include_instructions': false }
 
 function codexBotSandboxOnly(sandbox: CodexBotSandbox): Record<string, CodexConfigValue> {
   if (!sandbox.shell) return Object.fromEntries(CODEX_COMMAND_FEATURES.map((feature) => [`features.${feature}`, false]))

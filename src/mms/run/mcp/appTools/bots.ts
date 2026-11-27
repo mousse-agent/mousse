@@ -195,7 +195,7 @@ export const BOT_TOOLS: Tool[] = [
     description: 'Start work that takes more than a moment, so you stay free to talk: the browser, running commands, research, writing a document, several steps, or a call that ran out of time here. You do it beside this chat, and when you finish, your report reaches the owner by itself, as a reply to their message. A quick lookup can start beside a long job: each piece of work runs at once. While you work on it you see your memory but not this chat, so the brief must stand on its own: what to do, everything the owner told you that matters, and what the report should contain. Then tell the owner in one short line that you are on it.',
     parameters: Type.Object({
       title: Type.String({ description: 'A few words the owner will recognise, like "Vacuum comparison".' }),
-      brief: Type.String({ description: 'The whole task, standing on its own.' }),
+      brief: Type.String({ description: 'The whole task, standing on its own: what to do, not how (your work has its own tools and guidance).' }),
       level: Type.Optional(Type.Union(BOT_WORK_LEVELS.map((level) => Type.Literal(level)), { description: 'How hard it is: light for a quick lookup or a small routine job, medium for most work, hard for research, a long or difficult problem, or when the owner asks you to think harder. Left out: your usual level.' })),
       model: Type.Optional(Type.Object({
         instanceId: Type.String({ description: 'The entry\'s instanceId from work_models.' }),

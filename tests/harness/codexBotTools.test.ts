@@ -219,6 +219,26 @@ for (const BINARY of BINARIES) describe.skipIf(!BINARY)(`what Codex ${BINARY ? v
     expect(offered((await botTurn(model!.id, ['read', 'shell']))[0])).not.toContain('web_search')
   }, 120_000)
 
+  // Codex lists the owner's skills (`$CODEX_HOME/skills`, `~/.agents/skills`) and its built-in ones in every session's
+  // prompt. A bot's skills are its grant's, through Mousse's tools: a list from Codex named ones it can't load. The
+  // control: the owner's own thread on the same Codex is shown them.
+  it('a bot\'s turn is shown no skills list of Codex\'s own; the owner\'s own thread is', async () => {
+    const skill = join(root, 'codex-home', 'skills', 'owner-probe-skill')
+    mkdirSync(skill, { recursive: true })
+    writeFileSync(join(skill, 'SKILL.md'), '---\nname: owner-probe-skill\ndescription: OWNER PROBE SKILL\n---\nBody.\n')
+    first = undefined
+    child = undefined
+    const model = modelWith(null)!.id
+    const bot = JSON.stringify((await botTurn(model, ['read']))[0] ?? {})
+    expect(bot).not.toContain('OWNER PROBE SKILL')
+    expect(bot).not.toContain('### Available skills')
+    requests = []
+    const own = join(root, 'own')
+    mkdirSync(own, { recursive: true })
+    await service.chat({ threadId: `owner-${threads++}`, cwd: own, model, prompt: 'Go.', mcp: null, onText: () => undefined })
+    expect(JSON.stringify(requests[0] ?? {})).toContain('OWNER PROBE SKILL')
+  }, 120_000)
+
   it('the control: the same bot with the web is offered the hosted search', async () => {
     first = undefined
     child = undefined
