@@ -469,7 +469,7 @@ export class AttachedThreads {
               {
                 type,
                 data: qualified(type, {
-                  messages: data.messages,
+                  messages: change?.messages ?? data.messages,
                   ...(data.replace ? { replace: true } : {})
                 })
               }
