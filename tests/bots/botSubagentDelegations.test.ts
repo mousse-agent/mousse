@@ -418,7 +418,12 @@ describe('a bot\'s work subagents as delegations', () => {
     // The files as the previous build left them: Run DB v28 (no bot columns on delegations) and bots.db v14.
     const previous = new DatabaseSync(':memory:')
     for (const migration of RUN_MIGRATIONS.filter((entry) => entry.version <= 28)) previous.exec(migration.sql)
+    const previousBots = new DatabaseSync(':memory:')
+    for (const migration of BOTS_MIGRATIONS.filter((entry) => entry.version <= 14)) previousBots.exec(migration.sql)
+    // Every table too: a later migration the rewind below does not undo shows here, not as a failed migration at boot.
+    const tables = (db: DatabaseSync) => db.prepare('SELECT name FROM sqlite_master WHERE type = \'table\' AND name NOT IN (\'run_schema_migrations\') AND name NOT LIKE \'sqlite_%\' ORDER BY name').all()
     const shape = (db: DatabaseSync) => ({
+      tables: tables(db),
       columns: db.prepare('SELECT name, type, "notnull", dflt_value FROM pragma_table_info(\'delegations\') ORDER BY cid').all(),
       indexes: db.prepare('SELECT name FROM sqlite_master WHERE type = \'index\' AND tbl_name = \'delegations\' ORDER BY name').all()
     })
@@ -426,7 +431,8 @@ describe('a bot\'s work subagents as delegations', () => {
       crashed: true,
       whileDown: (paths) => {
         const run = new DatabaseSync(paths.runDb)
-        run.exec(`DROP TABLE tree_revisions; DELETE FROM run_schema_migrations WHERE version = 30;
+        run.exec(`DROP TABLE agent_chain_holds; DROP TABLE agent_chains; DELETE FROM run_schema_migrations WHERE version = 31;
+          DROP TABLE tree_revisions; DELETE FROM run_schema_migrations WHERE version = 30;
           DROP INDEX delegations_by_root_activation; DROP INDEX delegations_child_run;
           ALTER TABLE delegations DROP COLUMN bot_id; ALTER TABLE delegations DROP COLUMN root_activation_id;
           ALTER TABLE delegations DROP COLUMN bot_access; ALTER TABLE delegations DROP COLUMN bot_read_only;
@@ -434,11 +440,14 @@ describe('a bot\'s work subagents as delegations', () => {
         expect(shape(run)).toEqual(shape(previous))
         run.close()
         const bots = new DatabaseSync(paths.botsDb)
-        bots.exec('DROP TABLE bot_subagent_runs; DELETE FROM run_schema_migrations WHERE version = 15; PRAGMA user_version = 14;')
+        bots.exec(`DROP TABLE bot_chain_holds; DELETE FROM run_schema_migrations WHERE version = 16;
+          DROP TABLE bot_subagent_runs; DELETE FROM run_schema_migrations WHERE version = 15; PRAGMA user_version = 14;`)
+        expect(tables(bots)).toEqual(tables(previousBots))
         bots.close()
       }
     })
     previous.close()
+    previousBots.close()
     expect(f.runs.store.db.statement('PRAGMA user_version').get()).toEqual({ user_version: RUN_MIGRATIONS.at(-1)!.version })
     expect(f.store.get('PRAGMA user_version')).toEqual({ user_version: BOTS_MIGRATIONS.at(-1)!.version })
     // The older subagent: its run ended at the boot, charged once up to its last heartbeat.

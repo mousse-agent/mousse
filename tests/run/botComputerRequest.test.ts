@@ -146,7 +146,7 @@ describe('a bot run calling the setup request', () => {
     }
   })
 
-  it('the computer group of its catalogue says to ask once when the driver is not set up here, and to escalate without the permission', async () => {
+  it('the computer group of its catalogue says to ask once when the driver is not set up here, and to ask for the permission without it', async () => {
     const listing = await run({ ownerRequested: true })
     const r = await run({ ownerRequested: true, catalogue: 'use_tool' })
     const without = await run({ computer: false, catalogue: 'use_tool' })
@@ -159,7 +159,7 @@ describe('a bot run calling the setup request', () => {
       expect(text).toMatch(/Call computer_use_request once/)
       expect(text).toContain('## computer_use_request')
       const asks = (await without.call('tool_catalogue', { group: 'computer' })).text
-      expect(asks).toMatch(/escalate/)
+      expect(asks).toMatch(/Ask for "use the computer" with permission_ask \(tool computer\)/)
       expect(asks).not.toMatch(/Call computer_use_request once/)
     } finally {
       listing.fx.dispose()

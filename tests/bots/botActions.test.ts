@@ -2911,8 +2911,11 @@ it('C4 authority compiler fences every registered Mousse tool for held work and 
     const threadId = `fence-${index}`
     const turns = new AppToolTurns()
     turns.register(appTurn({ threadId, runId: 'r1', turnToken: 'tt', bot }))
+    // The run store keeps only what addressed calls record (`recordAddress`): no thread here has a run.
+    const receipts = new Map<string, { commandKind: string; result: unknown }>()
+    const store = { getReceipt: (key: string) => receipts.get(key) ?? null, putReceipt: (row: { clientRequestId: string; commandKind: string; result: unknown }) => receipts.set(row.clientRequestId, row) }
     const { registry } = createAppToolRegistry({
-      host: fakeAppToolHost().host, engine: {} as never, turns, botMemory: {} as never,
+      host: fakeAppToolHost().host, engine: { store } as never, turns, botMemory: {} as never,
       options: { activeRunId: () => 'r1', botMcp: t.mcp,
         userMcp: { list: async () => [], allowed: async () => ({ allowed: true }), call: async () => { throw new Error('ordinary proxy must not run') } } as never,
         access: { botReach: () => ({ scope: 'manage' }), threadExists: () => true, relation: () => 'descendant' } }
@@ -4689,8 +4692,10 @@ it('E1 restart tells the run an uncertain automatic outcome, finishes, and admit
   f.clock.now += 60_000
   const id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
   const turn = await start(f, id)
-  vi.mocked(t.manager.callTool).mockImplementationOnce(() => new Promise(() => {}))
-  void callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'interrupted', signal: new AbortController().signal })
+  // The send that was in flight when Mousse stopped: settled once the restart has judged it, before the fixture closes.
+  let late!: (value: unknown) => void
+  vi.mocked(t.manager.callTool).mockImplementationOnce(() => new Promise(resolve => { late = resolve }))
+  const inFlight = callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'interrupted', signal: new AbortController().signal })
   await flush()
   const action = f.bots.actions.forWork(id)!
   expect(action.status).toBe('running')
@@ -4704,6 +4709,10 @@ it('E1 restart tells the run an uncertain automatic outcome, finishes, and admit
   expect(f.store.activation(id)?.status).toBe('done')
   expect(f.store.message(action.message_id)).toBeUndefined()
   expect((await aloneNext(t)).action.status).toBe('done')
+  // Its result arriving after the restart changes nothing: the run was already told it is uncertain.
+  late({ content: [{ type: 'text', text: 'delivered late' }] })
+  await inFlight
+  expect(f.bots.actions.get(action.id)?.status).toBe('uncertain')
 })
 it('E1 an uncertain automatic call gets a card under a new call id in the same run', async () => {
   const t = await aloneAsk()
@@ -4930,12 +4939,16 @@ it.each(['restart', 'same-run', 'sent-card'] as const)('E1 r2 uncertain target r
     f.clock.now += 60_000
     id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
     turn = await start(f, id)
-    vi.mocked(t.manager.callTool).mockImplementationOnce(afterSend(() => new Promise(() => {})))
-    void callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'r2-interrupted', signal: new AbortController().signal })
+    // The send in flight when Mousse stopped: settled once the restart has judged it, before the fixture closes.
+    let late!: (value: unknown) => void
+    vi.mocked(t.manager.callTool).mockImplementationOnce(afterSend(() => new Promise(resolve => { late = resolve })))
+    const inFlight = callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'r2-interrupted', signal: new AbortController().signal })
     await flush()
     f.runs.markTerminal(turn.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     f.bots.close(); f.bots = new BotEngine(f.host)
     await f.bots.reconcileOnStartup(); await flush()
+    late({ content: [{ type: 'text', text: 'delivered late' }] })
+    await inFlight
     turn = await start(f, id, 2)
   } else {
     vi.mocked(t.manager.callTool).mockImplementationOnce(afterSend(() => { throw new Error('Connection closed after dispatch') }))

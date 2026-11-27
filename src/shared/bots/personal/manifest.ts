@@ -7,7 +7,7 @@ import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 import { BOT_MEMORY_TOOLS } from './memory'
 import { BOT_ITEM_TOOLS } from './items'
 import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from './catalogue'
-import { canonicalGrantName, canonicalToolName, isRunningVariant } from '../../toolAliases'
+import { canonicalGrantName, canonicalToolCall, canonicalToolName, isBotVariant, isRunningVariant, toolVariants } from '../../toolAliases'
 
 /**
  * A bot manifest's canonical form, the subset rule of approval, and the plain words the approval
@@ -77,7 +77,8 @@ export const BOT_MCP_LIST_TOOL = 'mcp_servers'
 /**
  * The bot's own profile (`get_profile`): who it is (name, description, look and face picture), how it runs, what it can
  * reach (devices, MCP servers, the names of its secrets, never their values) and what it may do. It reads only the bot's
- * own settings, so like memory it is always on and never grantable, on a bot's main turns; never a consult or a subagent.
+ * own settings, so like memory and `mcp_servers` it is always on and never grantable: a bot's main turns and a consult;
+ * never a subagent.
  */
 export const BOT_PROFILE_TOOL = 'get_profile'
 
@@ -433,15 +434,24 @@ export function isBotTurnHeldTool(name: string): boolean {
 export function botGrantTool(name: string): string {
   // An old name asks for, and is granted as, the tool it was renamed to. A variant a bot holds by its old name
   // (`approval_respond`) stays that variant; any other variant (`thread_steer`, `queue_edit`) falls under its new tool's
-  // permission, as before. A variant only a thread's own turn runs (`task_cancel`) is no bot's tool, so it keeps its name.
+  // permission, as before. A variant only a thread's own turn runs (`task_cancel`) is no bot's tool, so it keeps its name;
+  // so does one whose call a bot's turn runs as its own tool instead (`delegate_task` is `thread_create` kind "subagent",
+  // which a bot runs as `subagent_start`): "use your threads" would not give it.
   const variant = canonicalGrantName(name)
-  const tool = isRunningVariant(name) || BOT_APP_TOOLS.has(variant) || isBotTurnHeldTool(variant) || BROWSER_TOOLS.has(variant) ? variant : canonicalToolName(name)
+  const tool = isRunningVariant(name) || runsAsBotsOwn(name) || BOT_APP_TOOLS.has(variant) || isBotTurnHeldTool(variant) || BROWSER_TOOLS.has(variant) ? variant : canonicalToolName(name)
   if (BROWSER_TOOLS.has(tool)) return BOT_BROWSER_PERMISSION
   if (PROFILER_TOOL_SET.has(tool)) return BOT_PROFILER_PERMISSION
   if (THEME_TOOL_SET.has(tool)) return BOT_THEMES_PERMISSION
   const grouped = GROUPED_TOOLS.get(tool)
   if (grouped) return grouped
   return THREAD_TOOL_NAMES.has(tool) ? BOT_THREADS_PERMISSION : tool
+}
+
+/** Whether an old thread tool's call is, on a bot's turn, one of the bot's own tools (`toolVariants`) instead. */
+function runsAsBotsOwn(name: string): boolean {
+  if (name === canonicalToolName(name) || isBotVariant(name)) return false
+  const call = canonicalToolCall(name, {})
+  return toolVariants(call.name, call.args, 'bot').length > 0
 }
 
 /** Whether `tool` is one of the bot's own tools: not a permission, never listed in About. */

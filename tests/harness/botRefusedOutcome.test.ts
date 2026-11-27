@@ -8,7 +8,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { RunCounters } from '../../src/mms/harness/budget'
 import { ClaudeLockedGate, CLAUDE_NATIVE_TOOLS } from '../../src/mms/harness/claude/locked'
@@ -135,8 +135,10 @@ describe('the Mousse app-tool registry', () => {
     const { authority } = runAuthority({ tools: [], appTools: ['task_create'], asks: (call) => call.kind === 'app' && call.tool === 'thread_wait' })
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, bot: authority }))
     const ctx = () => request({ threadId: 'thread-a', runId: run.runId })
-    expect(await registry.call('task_status', { taskId: 'd1' }, ctx())).toEqual(refused('not_granted', ASKED))
-    expect(fake.host.delegation).not.toHaveBeenCalled()
+    // A call that names a thread is the thread tool's own, never one of the bot's (its subagents' `subagent_wait`).
+    const handler = vi.spyOn(registry.list().find((tool) => tool.name === 'thread_wait')!, 'handler')
+    expect(await registry.call('thread_wait', { threadId: 'thread-b' }, ctx())).toEqual(refused('not_granted', ASKED))
+    expect(handler).not.toHaveBeenCalled()
     expect((await registry.call('task_create', { description: 'fine' }, ctx())).isError).toBe(false)
     expect(fx.engine.getRun(run.runId)?.status).toBe('running')
   })
