@@ -213,7 +213,7 @@ describe('removal rows', () => {
       presence.info(node, { v: 1, version: '0.9.0', platform: 'linux', arch: 'x64', protoMinor: 0 })
       db.database
         .prepare(
-          'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,work,created_at) VALUES(?,0,?,1,0,1,?,1,?)'
+          "INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,work,created_at) VALUES(?,0,?,1,0,'use',?,1,?)"
         )
         .run(node, 'ask', 'launched', now)
       const stream = newId('stream') as StreamId
@@ -248,7 +248,7 @@ describe('removal rows', () => {
     // A late write of an aborted handler under the tombstoned id goes with the sweep, then the tombstone.
     db.database
       .prepare(
-        'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,work,created_at) VALUES(?,0,?,1,0,1,?,1,?)'
+        "INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,work,created_at) VALUES(?,0,?,1,0,'use',?,1,?)"
       )
       .run(gone.localId, 'ask', 'launched', now)
     expect(peers.sweep()).toEqual([gone.localId])

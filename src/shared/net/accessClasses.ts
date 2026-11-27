@@ -11,9 +11,10 @@ import { botMethodAccess } from '../bots/personal/methodTable'
  *
  * - `view`: reads threads, lists and what a transcript already shows, and the connection's own traffic. Passes for
  *   every device this computer serves.
- * - `bots_chat`: a bot's chat, its replies, asks and pictures; held to the device's Bots switch and each bot's Devices
- *   choice, and runs within the bot's own permissions.
- * - `bots_manage`: makes a bot or changes one (its name, look, permissions, memory, schedules, pause).
+ * - `bots_use`: a bot's chat, its replies, questions, held actions and pictures, its memory read; runs within the bot's
+ *   own permissions. `bots_full`: makes a bot or sets one up (its name, look, permissions and asks, memory edits,
+ *   schedules, pause). Both are the `level` of their `BOT_METHODS` row, held to the device's bot level here and each
+ *   bot's Devices choice in `remoteBotMethods`' one wrapper; no thread switch governs them.
  * - `speech`: dictation and read-aloud for any message, on this computer's speech models. Passes for every device this
  *   computer serves, View and chat included; it never follows bot access.
  * - `work`: starts, sends to, steers, stops or changes threads, their queue, settings, files and Git, projects,
@@ -23,10 +24,10 @@ import { botMethodAccess } from '../bots/personal/methodTable'
  * - `update`: installs an update of Mousse here, which stops every turn and the service. Only a device with Full
  *   control that is not blocked reaches it (`checkNodePolicy`), whatever its grant says.
  *
- * "Work on threads from this device" off (`net_node_policy.work`) refuses `work` and `bots_manage` in every family,
- * with the reason `work_off`. Kept apart from the rows of `ROUTED_METHODS` and keyed by the Net method name.
+ * "Work on threads from this device" off (`net_node_policy.work`) refuses `work` in every family, with the reason
+ * `work_off`. Kept apart from the rows of `ROUTED_METHODS` and keyed by the Net method name.
  */
-export const ACCESS_CLASSES = ['view', 'bots_chat', 'bots_manage', 'speech', 'work', 'terminal', 'editor', 'update'] as const
+export const ACCESS_CLASSES = ['view', 'bots_use', 'bots_full', 'speech', 'work', 'terminal', 'editor', 'update'] as const
 export type AccessClass = (typeof ACCESS_CLASSES)[number]
 
 const routed = (classes: Record<string, AccessClass>): Record<string, AccessClass> =>
@@ -364,10 +365,9 @@ export const ROUTED_STREAM_ACCESS: Readonly<Record<RoutedStreamKind, AccessClass
   terminal: 'terminal'
 })
 
-/** A method with no class counts as work: a device that may only view and chat with bots never reaches it. */
+/** A method with no class counts as work: a device that may only view threads never reaches it. */
 export const methodAccess = (method: string): AccessClass =>
   Object.hasOwn(METHOD_ACCESS, method) ? METHOD_ACCESS[method]! : 'work'
 
-/** The classes "Work on threads from this device" governs: off, each is refused. */
-export const needsWork = (access: AccessClass): boolean =>
-  access === 'work' || access === 'bots_manage'
+/** The classes "Work on threads from this device" governs: off, each is refused. Bot access is not among them. */
+export const needsWork = (access: AccessClass): boolean => access === 'work'

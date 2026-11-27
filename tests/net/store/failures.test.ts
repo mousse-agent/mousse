@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { SqliteNetStore } from '../../../src/mms/net/store'
+import { NET_SCHEMA_VERSION } from '../../../src/mms/net/store/database'
 import { FileKeyStore, NetIdentityService } from '../../../src/mms/net/identity'
 import { NetError, newId } from '../../../src/shared/net'
 import { profile, fixture } from './helpers'
@@ -125,13 +126,13 @@ describe('storage failure and migration boundaries', () => {
     const store = open(path)
     store.close()
     const database = new DatabaseSync(join(path, 'net', 'net.db'))
-    database.exec('PRAGMA user_version=2')
+    database.exec(`PRAGMA user_version=${NET_SCHEMA_VERSION + 1}`)
     database.close()
     expect(() => open(path)).toThrowError(
       expect.objectContaining({ code: 'downgrade_unsupported' })
     )
     const intact = new DatabaseSync(join(path, 'net', 'net.db'))
-    expect(intact.prepare('PRAGMA user_version').get()!.user_version).toBe(2)
+    expect(intact.prepare('PRAGMA user_version').get()!.user_version).toBe(NET_SCHEMA_VERSION + 1)
     intact.close()
   })
   it('rolls back an interrupted schema migration and can initialize it on retry', () => {

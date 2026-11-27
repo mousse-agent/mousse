@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { NetService, type NetRuntime } from '../../src/mms/net/NetService'
 import { NodeStreamAuthority } from '../../src/mms/net/sync/nodeAuthority'
 import { systemClock } from '../../src/mms/net/clock'
+import { NET_SCHEMA_VERSION } from '../../src/mms/net/store/database'
 import { encodeEnvelope, parseProtocolJson } from '../../src/mms/net/sync/codec'
 import type { SyncSupervisor } from '../../src/mms/net/sync/supervisor'
 import { SpaceProfileService } from '../../src/mms/spaces/SpaceProfileService'
@@ -299,7 +300,7 @@ describe('how a device becomes connected', () => {
     expect(await device(c.net, b.node)).toMatchObject({ connection: 'none' })
   }, 90_000)
 
-  it('a store from before the record connects every listed device once, with the key store locked, and an older build still opens it', async () => {
+  it('a store from before the record connects every listed device once, with the key store locked, and takes no schema step of its own', async () => {
     const a = await keeper(),
       b = await member(a, 'Laptop'),
       c = await member(a, 'Desk PC')
@@ -320,8 +321,8 @@ describe('how a device becomes connected', () => {
     await restarted.shutdown()
     const again = service(b.path)
     expect(again.runtime().connections.state(c.node)).toBe('disconnected')
-    // The schema version did not move, so an older build opens the store.
-    expect(again.runtime().db.database.prepare('PRAGMA user_version').get()!.user_version).toBe(1)
+    // The records take no schema step of their own: the version is the one this build writes anyway.
+    expect(again.runtime().db.database.prepare('PRAGMA user_version').get()!.user_version).toBe(NET_SCHEMA_VERSION)
   }, 90_000)
 
   it('signed in to Mousse ID, a device of the account is connected when it appears, and one disconnected stays so across sign-out and sign-in', async () => {

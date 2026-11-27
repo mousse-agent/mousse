@@ -2,7 +2,7 @@ import { AppError } from '../../shared/errors'
 import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
 import { NET_ERRORS, NetError } from '../../shared/net'
 import type { AccessPresetFields } from '../../shared/net/accessPresets'
-import { isAgentReach } from '../../shared/net/local'
+import { isAgentReach, isBotLevel } from '../../shared/net/local'
 import { isPermissionMode } from '../../shared/permissionMode'
 import {
   isNetEngineWay,
@@ -60,9 +60,10 @@ const strings = (value: unknown): value is string[] =>
 function accessFields(value: unknown): value is AccessPresetFields {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const fields = value as Record<string, unknown>
-  const keys: Array<keyof AccessPresetFields> = ['work', 'terminal', 'editor', 'maxPermissionMode', 'agentReach']
+  const keys: Array<keyof AccessPresetFields> = ['work', 'terminal', 'editor', 'maxPermissionMode', 'agentReach', 'bots']
   return (
     Object.keys(fields).every((key) => (keys as string[]).includes(key)) &&
+    isBotLevel(fields.bots) &&
     typeof fields.work === 'boolean' &&
     typeof fields.terminal === 'boolean' &&
     typeof fields.editor === 'boolean' &&

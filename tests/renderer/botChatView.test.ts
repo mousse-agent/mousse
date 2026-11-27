@@ -3038,10 +3038,10 @@ it('C4 integration approved review names what it will send while waiting for the
   expect(card.textContent).not.toContain('What it is sending')
 })
 
-it.each(['Send', 'Not now'])('keeps the stored review intact when the device Work gate refuses %s', async label => {
+it.each(['Send', 'Not now'])('keeps the stored review intact when the device bot level refuses %s', async label => {
   fake.chats.inbox = [held()]
-  const text = 'Home lets this computer view threads and chat with bots only.'
-  Object.assign(fake.client, { answerAction: vi.fn(async () => { throw Object.assign(new Error(text), { code: 'forbidden', details: { reason: 'work_off' } }) }) })
+  const text = "Home doesn't let this device reach its bots."
+  Object.assign(fake.client, { answerAction: vi.fn(async () => { throw Object.assign(new Error(text), { code: 'forbidden', details: { reason: 'bots_off' } }) }) })
   await open()
   await click(button(label, host.querySelector('[aria-label="Action to review"]')!))
   const card = host.querySelector('[aria-label="Action to review"]')!

@@ -171,10 +171,10 @@ const openAccess = async (name: string) => {
 describe('Settings → Devices → Bots on this computer', () => {
   const nodes = [
     { node: 'nod_self', name: 'Desk', caps: ['read', 'chat', 'write', 'settings'], keyEpoch: 1, expiresAt: 0, kind: 'computer', self: true, revoked: false, state: 'open' },
-    { node: 'nod_pocket', name: 'Pocket', caps: ['read', 'chat', 'write'], keyEpoch: 1, expiresAt: 0, kind: 'phone', self: false, revoked: false, state: 'open', policy: { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: true } },
+    { node: 'nod_pocket', name: 'Pocket', caps: ['read', 'chat', 'write'], keyEpoch: 1, expiresAt: 0, kind: 'phone', self: false, revoked: false, state: 'open', policy: { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: 'use' } },
     { node: 'nod_old', name: 'Old laptop', caps: ['read'], keyEpoch: 1, expiresAt: 0, kind: 'phone', self: false, revoked: false, state: 'open', policy: { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false } }
   ]
-  const request = vi.fn(async (method: string, params?: { node?: string; bots?: boolean }) => {
+  const request = vi.fn(async (method: string, params?: { node?: string; bots?: string }) => {
     switch (method) {
       case 'netEngine.status': return { enabled: false, on: false, helper: { state: 'off' }, devices: [], approvals: [] }
       case 'net.status': return { enabled: true, keystore: 'unlocked', protected: true, self: { node: 'nod_self', isAuthority: true }, transports: [], peers: [], routes: [], workOnThreads: true }
@@ -197,23 +197,31 @@ describe('Settings → Devices → Bots on this computer', () => {
       editorAsks: { list: async () => [], onChanged: () => () => undefined }
     }
   })
-  const toggle = () => host.querySelector<HTMLElement>('[role="switch"][aria-label="Bots on this computer for Pocket"]')
+  const picker = () => host.querySelector<HTMLElement>('[role="radiogroup"][aria-label="Bots on this computer for Pocket"]')
+  const picked = () => picker()?.querySelector('[aria-checked="true"]')?.textContent
+  const choice = (label: string) => [...picker()!.querySelectorAll<HTMLElement>('[role="radio"]')].find((item) => item.textContent === label)!
 
-  it('a phone has the switch, on at first; off is saved for that device alone and reads Off', async () => {
+  it('a phone has the Off / Use / Full picker; each choice is saved for that device alone and its line follows', async () => {
     await act(async () => root.render(createElement(EngineDevicesSection)))
     await flush()
-    // The switch is in each device's detail, one open at a time.
+    // The picker is in each device's detail, one open at a time.
     const details = (name: string) => openAccess(name)
-    // A service from before the switch sends none for a device, and shows no switch for it.
+    // A service from before bot levels sends none for a device, and shows no picker for it.
     await details('Old laptop')
     expect(host.querySelector('[aria-label="Bots on this computer for Old laptop"]')).toBeNull()
     await details('Pocket')
-    expect(toggle()?.getAttribute('aria-checked')).toBe('true')
-    expect(host.textContent).toContain('On · reaches this computer\'s bots')
-    await click(toggle())
-    expect(request).toHaveBeenCalledWith('bridge.policy', { node: 'nod_pocket', bots: false })
-    expect(request.mock.calls.filter(([method]) => method === 'bridge.policy')).toHaveLength(1)
-    expect(toggle()?.getAttribute('aria-checked')).toBe('false')
-    expect(host.textContent).toContain('Off · sees none of this computer\'s bots')
+    expect(picked()).toBe('Use')
+    expect(host.textContent).toContain('Chats and answers')
+    // What each choice allows is in its tooltip, not on the row.
+    expect(choice('Use').title).toContain("can't rename, set up, pause, delete or make one")
+    await click(choice('Off'))
+    expect(request).toHaveBeenCalledWith('bridge.policy', { node: 'nod_pocket', bots: 'off' })
+    expect(picked()).toBe('Off')
+    expect(host.textContent).toContain('Sees none of them')
+    await click(choice('Full'))
+    expect(request).toHaveBeenCalledWith('bridge.policy', { node: 'nod_pocket', bots: 'full' })
+    expect(request.mock.calls.filter(([method]) => method === 'bridge.policy')).toHaveLength(2)
+    expect(picked()).toBe('Full')
+    expect(host.textContent).toContain('Uses and sets them up')
   })
 })

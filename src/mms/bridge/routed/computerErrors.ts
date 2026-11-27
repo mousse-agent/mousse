@@ -34,9 +34,10 @@ const FORBIDDEN_WORDS: Record<ComputerForbiddenReason, (name: string) => string>
     `This computer is not allowed to work on threads on ${name}. Turn on Works on threads for this computer in Settings, Devices, on the computer that manages your devices.`,
   terminal_off: terminalOffMessage,
   not_connected: (name) => `${name} hasn't connected this computer.`,
-  work_off: (name) => `${name} lets this computer view threads and chat with bots only.`,
+  work_off: (name) => `${name} lets this computer view threads only.`,
   full_control_needed: (name) => `Only a computer with Full control on ${name} can update it.`,
   bots_off: (name) => `${name} doesn't let this device reach its bots.`,
+  bots_full_needed: (name) => `${name} lets this device use its bots, not set them up.`,
   unknown: (name) => `${name} refused this request.`
 }
 

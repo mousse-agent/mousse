@@ -86,7 +86,7 @@ export interface BotDeviceChoice {
   node: string
   name: string
   kind: 'computer' | 'phone' | 'unknown'
-  /** Its switch for bots on this computer (Settings, Devices) is off: it reaches no bot here, whatever is picked. */
+  /** Its bot level on this computer (Settings, Devices) is Off: it reaches no bot here, whatever is picked. */
   botsOff?: true
 }
 

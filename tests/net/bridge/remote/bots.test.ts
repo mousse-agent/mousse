@@ -32,6 +32,8 @@ import { aloneKey, argumentContract } from '../../../../src/mms/bots/actions/Bot
 import { botManifestDigest } from '../../../../src/mms/bots/grants/compile'
 import { getDefaultSettings } from '../../../../src/shared/settings'
 import { BotDeviceAccessStore } from '../../../../src/mms/bots/definitions/BotDeviceAccessStore'
+import { BOT_FULL_TRUST_PERMISSION } from '../../../../src/shared/bots/personal/manifest'
+import type { BotLevel } from '../../../../src/shared/net/local'
 
 const at = '2026-11-07T09:00:00.000Z'
 const BOT = 'bot-0123456789ab'
@@ -451,12 +453,8 @@ describe('bot methods on a real bot', () => {
   })
 })
 
-describe('"Bots on this computer" off for the calling device', () => {
-  it('every method refuses before it reads anything', async () => {
-    let reads = 0
-    const port = new Proxy({}, { get: () => () => { reads++; return {} } }) as RemoteBotsPort
-    const methods = remoteBotMethods({ bots: () => port, reach: { deviceOn: () => false, canReach: () => true } })
-    const params: Record<RemoteBotMethod, unknown> = {
+describe('the bot level of the calling device', () => {
+  const params: Record<RemoteBotMethod, unknown> = {
       'bots.get': { botId: BOT },
       'bots.chat.list': { botId: BOT },
       'bots.chat.attachment': { botId: BOT, messageId: 'm1', index: 0 },
@@ -479,14 +477,114 @@ describe('"Bots on this computer" off for the calling device', () => {
       'bots.permissions.revoke': { botId: BOT, permissionId: 'p1' },
       'bots.memory.forget': { botId: BOT, id: 'm1' },
       'bots.memory.edit': { botId: BOT, id: 'm1', text: 'Call me Sam.' }
+  }
+  const names = Object.keys(REMOTE_BOT_METHODS) as RemoteBotMethod[]
+  /** The rows another device may call at Use; every other remote row needs Full. */
+  const USE_ROWS = ['bots.get', 'bots.chat.list', 'bots.chat.attachment', 'bots.memory.list', 'bots.chat.send', 'bots.chat.stop', 'bots.work.stop', 'bots.chat.markRead', 'bots.questions.answer', 'bots.reminders.snooze', 'bots.actions.answer']
+  /** Methods over a port that counts every read, for a device at `level`. */
+  const counted = (level: BotLevel) => {
+    const seen = { reads: 0 }
+    const port = new Proxy({}, { get: () => () => { seen.reads++; return {} } }) as RemoteBotsPort
+    return { seen, methods: remoteBotMethods({ bots: () => port, reach: { level: () => level, canReach: () => true } }) }
+  }
+  /** The gate's refusal of `name`, at every way in: a new call, its run, and its saved result's lookup. */
+  const gateRefusals = async (methods: RpcMethod[], name: RemoteBotMethod): Promise<unknown[]> => {
+    const method = methods.find((entry) => entry.method === name)!
+    const reasons: unknown[] = []
+    const reason = (error: unknown) => (error as NetError).details && ((error as NetError).details as { reason?: unknown }).reason
+    await call(methods, name, params[name]).catch((error) => reasons.push(reason(error)))
+    // The handler refuses too, for a call admitted just before the level went down.
+    await Promise.resolve().then(() => method.handle(params[name], context)).catch((error) => reasons.push(reason(error)))
+    try {
+      method.authorizeResult!('exec-1', context.caller)
+    } catch (error) {
+      reasons.push(reason(error))
     }
-    for (const name of Object.keys(REMOTE_BOT_METHODS) as RemoteBotMethod[]) {
+    return reasons
+  }
+
+  it('Off: every method refuses before it reads anything', async () => {
+    const { seen, methods } = counted('off')
+    for (const name of names) {
       const error = await refused(() => call(methods, name, params[name]))
       expect(error).toMatchObject({ code: 'forbidden', details: { reason: 'bots_off' } })
-      // The handler refuses too, for a call admitted just before the switch went off.
-      await expect(methods.find((entry) => entry.method === name)!.handle(params[name], context)).rejects.toMatchObject({ code: 'forbidden' })
+      expect(await gateRefusals(methods, name), name).toEqual(['bots_off', 'bots_off', 'bots_off'])
     }
-    expect(reads).toBe(0)
+    expect(seen.reads).toBe(0)
+  })
+
+  it('Use: chat, answers, stop and reading pass; every other row refuses with its own reason before it reads anything', async () => {
+    const { seen, methods } = counted('use')
+    for (const name of names.filter((item) => !USE_ROWS.includes(item))) {
+      const error = await refused(() => call(methods, name, params[name]))
+      expect(error, name).toMatchObject({ code: 'forbidden', details: { reason: 'bots_full_needed' } })
+      expect(await gateRefusals(methods, name), name).toEqual(['bots_full_needed', 'bots_full_needed', 'bots_full_needed'])
+    }
+    expect(seen.reads).toBe(0)
+    for (const name of USE_ROWS as RemoteBotMethod[]) {
+      // Past the gate the fake port answers nonsense, so a call may still fail, but never on the device's level.
+      for (const reason of await gateRefusals(methods, name)) expect(String(reason), name).not.toMatch(/^bots_/)
+    }
+    expect(seen.reads).toBeGreaterThan(0)
+  })
+
+  it('Full: no row is refused for the level', async () => {
+    const { methods } = counted('full')
+    for (const name of names) for (const reason of await gateRefusals(methods, name)) expect(String(reason), name).not.toMatch(/^bots_/)
+  })
+
+  it('reads the level on every call, so a lowered level applies to the next request', async () => {
+    let level: BotLevel = 'full'
+    const port = new Proxy({}, { get: () => () => ({}) }) as RemoteBotsPort
+    const methods = remoteBotMethods({ bots: () => port, reach: { level: () => level, canReach: () => true } })
+    const pause = methods.find((entry) => entry.method === 'bots.personal.pause')!
+    pause.authorize!(params['bots.personal.pause'], context)
+    level = 'use'
+    await expect(Promise.resolve().then(() => pause.handle(params['bots.personal.pause'], context))).rejects.toMatchObject({ details: { reason: 'bots_full_needed' } })
+  })
+})
+
+describe('Full bot access never widens thread access', () => {
+  let f: BotFixture
+  let botId: string
+  beforeEach(async () => {
+    f = botFixture()
+    botId = (await createBot(f, { name: 'Penny', reply: 'Hello.' })).botId
+  })
+  afterEach(() => f.close())
+  const at = (level: BotLevel, limit: PermissionMode) =>
+    remoteBotMethods({ bots: () => f.bots.service, deviceLimit: () => limit, reach: { level: () => level, canReach: () => true } })
+
+  it('a Full device whose thread ceiling is below Full access sets the bot up, but cannot turn on Allow everything', async () => {
+    const methods = at('full', 'accept_edits')
+    expect(await call(methods, 'bots.update', { botId, name: 'Pip' })).toMatchObject({ bot: { name: 'Pip' } })
+    expect(await call(methods, 'bots.personal.pause', { botId })).toMatchObject({ bot: { state: 'paused' } })
+    const error = await refused(() => call(methods, 'bots.permissions.set', { botId, permissionId: BOT_FULL_TRUST_PERMISSION, enabled: true }))
+    expect(error).toMatchObject({ code: 'forbidden', message: 'Allow this on the computer.' })
+    expect(f.bots.service.get(botId).fullTrust).not.toBe(true)
+    // With a Full access ceiling it may, and turning it off needs no ceiling.
+    await call(at('full', 'full'), 'bots.permissions.set', { botId, permissionId: BOT_FULL_TRUST_PERMISSION, enabled: true })
+    expect(f.bots.service.get(botId).fullTrust).toBe(true)
+    await call(methods, 'bots.permissions.set', { botId, permissionId: BOT_FULL_TRUST_PERMISSION, enabled: false })
+    expect(f.bots.service.get(botId).fullTrust).toBe(false)
+    // A Use device cannot, whatever its ceiling.
+    const use = await refused(() => call(at('use', 'full'), 'bots.permissions.set', { botId, permissionId: BOT_FULL_TRUST_PERMISSION, enabled: true }))
+    expect(use).toMatchObject({ code: 'forbidden', details: { reason: 'bots_full_needed' } })
+  })
+
+  it('a Full device whose thread ceiling is below Full access cannot Allow "use your threads"; a Use device answers no ask', async () => {
+    await f.bots.service.chatSend({ botId, text: 'Start a thread', clientRequestId: 'ceiling-1' })
+    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { payload, prepared } = await start(f, activation.id)
+    prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'You asked me to start one.' })
+    await finish(f, payload, 'completed', { text: 'May I?' })
+    const card = chatOf(f, botId).at(-1)!.ask!
+    const allow = { botId, askId: card.askId, answer: 'allow' }
+    expect(await refused(() => call(at('full', 'auto'), 'bots.asks.answer', allow))).toMatchObject({ code: 'forbidden', message: 'Allow this on the computer.' })
+    expect(await refused(() => call(at('use', 'full'), 'bots.asks.answer', allow))).toMatchObject({ details: { reason: 'bots_full_needed' } })
+    expect(f.store.activeGrant(botId)!.manifest.appTools).not.toContain('threads')
+    const answered = (await call(at('full', 'full'), 'bots.asks.answer', allow)) as { message: BotChatMessage }
+    expect(answered.message.ask).toMatchObject({ askId: card.askId, status: 'allowed' })
   })
 })
 
@@ -599,20 +697,3 @@ function listsServices(bots: unknown): ListsServices {
     personalBots: bots
   } as unknown as ListsServices
 }
-
-describe('device presets and bot answers', () => {
-  it('holds both held-action choices to the same Work gate as ordinary permission answers', async () => {
-    const { ACCESS_PRESETS } = await import('../../../../src/shared/net/accessPresets')
-    const { methodAccess, needsWork } = await import('../../../../src/shared/net/accessClasses')
-    for (const preset of ACCESS_PRESETS) {
-      // NetService's authorizeMethod reads this same decision on calls AND saved-result lookups.
-      const mayAnswer = (method: string) => preset.fields.work || !needsWork(methodAccess(method))
-      expect(mayAnswer('bots.chat.list'), preset.label).toBe(true)
-      expect(mayAnswer('bots.chat.send'), preset.label).toBe(true)
-      for (const choice of ['send', 'not_now']) {
-        expect(mayAnswer('bots.actions.answer'), `${preset.label}: ${choice}`).toBe(mayAnswer('bots.asks.answer'))
-        expect(mayAnswer('bots.actions.answer'), `${preset.label}: ${choice}`).toBe(preset.fields.work)
-      }
-    }
-  })
-})

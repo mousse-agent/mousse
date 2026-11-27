@@ -18,7 +18,7 @@ import { NODE_CAPABILITIES, type NodeCapability } from '../../shared/net/capabil
 import { NET_ERRORS, isNetErrorCode, type NetErrorCode } from '../../shared/net/errors'
 import { isId } from '../../shared/net/ids'
 import { isJoinVia } from '../../shared/net/via'
-import { isAgentReach } from '../../shared/net/local'
+import { isAgentReach, isBotLevel } from '../../shared/net/local'
 import { isPermissionMode } from '../../shared/permissionMode'
 
 export const NET_HELP = `Usage:
@@ -103,7 +103,7 @@ export const BRIDGE_HELP = `Usage:
   mousse-cli bridge connect <node-id>
   mousse-cli bridge disconnect <node-id>
   mousse-cli bridge limits <node-id> [--max-mode ask|accept_edits|auto|full] [--terminal on|off]
-    [--editor on|off] [--bots on|off] [--agent-reach none|launched|all] [--work on|off]
+    [--editor on|off] [--bots off|use|full] [--agent-reach none|launched|all] [--work on|off]
   mousse-cli bridge caps <node-id> --caps read,chat,write,settings
   mousse-cli bridge kind <node-id> computer|phone
   mousse-cli bridge threads [on|off]
@@ -130,10 +130,11 @@ threads turns on (or off) whether your other computers may work on this computer
 without an argument it shows the setting. It is on by default and only changes this computer.
 Only the current authority can invite, revoke or rename nodes, change capabilities or set a
 device's kind. block, unblock and limits act on this computer only, on any computer: a blocked
-device is refused every Bridge call and stream here until unblocked. limits --bots off keeps
-one device from every personal bot on this computer. limits --work off lets one device view
-threads and chat with bots only: it can't start, send to, change or stop threads, or make or
-change bots, here.
+device is refused every Bridge call and stream here until unblocked. limits --bots sets one
+device's reach to the personal bots on this computer: off reaches none, use chats with them,
+answers their questions, stops them and reads their chat, memory, browser and applets, and full
+also renames, sets up, pauses, deletes and makes them. limits --work off lets one device view
+threads only: it can't start, send to, change or stop threads here.
 connect and disconnect also act on this computer only: a device of your list that is not
 connected here gets nothing from it, and two computers open no session until each connected the
 other. Disconnect ends the device's streams and editor connections here; what it started runs on.
@@ -695,7 +696,7 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
         work === undefined
       )
         invalid(
-          'bridge limits requires --max-mode ask|accept_edits|auto|full, --terminal on|off, --editor on|off, --bots on|off, --agent-reach none|launched|all and/or --work on|off.'
+          'bridge limits requires --max-mode ask|accept_edits|auto|full, --terminal on|off, --editor on|off, --bots off|use|full, --agent-reach none|launched|all and/or --work on|off.'
         )
       if (mode !== undefined) {
         if (!isPermissionMode(mode)) invalid('--max-mode requires ask, accept_edits, auto or full.')
@@ -710,8 +711,8 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
         params.editor = editor === 'on'
       }
       if (bots !== undefined) {
-        if (bots !== 'on' && bots !== 'off') invalid('--bots requires on or off.')
-        params.bots = bots === 'on'
+        if (!isBotLevel(bots)) invalid('--bots requires off, use or full.')
+        params.bots = bots
       }
       if (reach !== undefined) {
         if (!isAgentReach(reach)) invalid('--agent-reach requires none, launched or all.')

@@ -16,7 +16,7 @@ const { SERVICE_ANSWERED_LATE, SERVICE_STOPPED_ANSWERING } = await import('../..
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { NO_COMPUTERS, useComputersStore } = await import('../../src/renderer/lib/computers')
 
-const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: true }
+const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: 'use' }
 /** A set-up computer that manages its devices, with one other computer and a phone. */
 const daemon = {
   error: undefined as string | undefined,

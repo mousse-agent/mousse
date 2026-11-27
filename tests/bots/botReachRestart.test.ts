@@ -75,7 +75,7 @@ describe('a crash after a new bot\'s choice is saved and before the bot is publi
     const reach = createBotReach({
       access: (botId) => store.get(botId).access,
       choices: () => store.choices(),
-      deviceOn: () => true,
+      level: () => 'use',
       devices: () => [PHONE, TABLET],
       changes: [(listener) => store.onChange(listener)]
     })

@@ -18,6 +18,7 @@ import { NetError, STORE_TXN_MAX_BYTES, STORE_TXN_MAX_ROWS } from '../../../shar
 import type { Clock } from '../contracts'
 import { systemClock } from '../clock'
 import { canonicalJson } from '../sync/codec'
+import { accessPreset } from '../../../shared/net/accessPresets'
 import { syncDirectory } from './directorySync'
 
 export type StoreFault = (point: string) => void
@@ -117,7 +118,7 @@ export class NetDatabase {
       if (integrity.length !== 1 || Object.values(integrity[0])[0] !== 'ok')
         fail('storage_corrupt', 'Net database failed its integrity check; recovery is required.')
       const version = Number(this.database.prepare('PRAGMA user_version').get()!.user_version)
-      if (version > 1) fail('downgrade_unsupported', 'Net database has a newer schema.')
+      if (version > NET_SCHEMA_VERSION) fail('downgrade_unsupported', 'Net database has a newer schema.')
       this.database.exec('BEGIN IMMEDIATE')
       try {
         // A store this transaction creates is born with every one-time step already done.
@@ -126,16 +127,18 @@ export class NetDatabase {
           .get()
         this.database.exec(SCHEMA)
         this.addMissingColumns()
+        this.migrateBotLevels()
         if (created)
           for (const marker of BORN_MARKERS)
             this.database
               .prepare('INSERT OR IGNORE INTO net_local_markers VALUES(?,?)')
               .run(marker, integer(this.clock.now()))
-        this.database
-          .prepare('INSERT OR IGNORE INTO net_schema_migrations VALUES(1,?)')
-          .run(integer(this.clock.now()))
+        for (let step = 1; step <= NET_SCHEMA_VERSION; step++)
+          this.database
+            .prepare('INSERT OR IGNORE INTO net_schema_migrations VALUES(?,?)')
+            .run(step, integer(this.clock.now()))
         this.checkpoint('database.migration.beforeCommit')
-        this.database.exec('PRAGMA user_version=1; COMMIT')
+        this.database.exec(`PRAGMA user_version=${NET_SCHEMA_VERSION}; COMMIT`)
       } catch (error) {
         this.database.exec('ROLLBACK')
         throw error
@@ -201,8 +204,8 @@ export class NetDatabase {
       this.database.exec(
         'ALTER TABLE net_node_policy ADD COLUMN editor INTEGER NOT NULL DEFAULT 0 CHECK(editor IN (0,1))'
       )
-    // "Bots on this computer" for each device: on for every device that already has a row, as before the switch. An
-    // older build's insert names its columns and gets this default; its update leaves the column as it is.
+    // "Bots on this computer" for each device, as builds before bot levels kept it: on for every device that already
+    // has a row, as before the switch. `migrateBotLevels` then turns it into a level.
     if (!has('net_node_policy', 'bots'))
       this.database.exec(
         'ALTER TABLE net_node_policy ADD COLUMN bots INTEGER NOT NULL DEFAULT 1 CHECK(bots IN (0,1))'
@@ -220,6 +223,35 @@ export class NetDatabase {
     // Who made a routed call: null for a person on the device, `agent` for a call marked as an agent's.
     if (!has('bridge_audit', 'actor'))
       this.database.exec('ALTER TABLE bridge_audit ADD COLUMN actor TEXT')
+  }
+
+  /**
+   * Schema 2: each device's bot access becomes a level (`off`, `use` or `full`) in place of the on/off "Bots on this
+   * computer" switch. Off stays off. On becomes Full for a device at Full control (`accessPresetOf`, which the bot level
+   * never decides) and Use for every other, so no device gains a right it did not have. A device with no row keeps the
+   * default, Use; one that "Share bots with other devices" off left out without a row is switched off by
+   * `NetService.keepBotsUnshared` at each start while its marker stays. The table is rebuilt in the open transaction,
+   * since SQLite can't change a column's type or check. Only while the column is still a number, so it runs once.
+   */
+  private migrateBotLevels(): void {
+    const column = this.database
+      .prepare('PRAGMA table_info(net_node_policy)')
+      .all()
+      .find((row) => row.name === 'bots')
+    if (!column || String(column.type).toUpperCase() !== 'INTEGER') return
+    const full = accessPreset('full').fields
+    this.database.exec(nodePolicyTable('net_node_policy_levels'))
+    this.database
+      .prepare(
+        'INSERT INTO net_node_policy_levels(node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,work,created_at) ' +
+          "SELECT node,blocked,max_permission_mode,terminal,editor,CASE WHEN bots IS NOT 1 THEN 'off' " +
+          "WHEN work=? AND terminal=? AND editor=? AND max_permission_mode=? AND agent_reach=? THEN 'full' ELSE 'use' END," +
+          'agent_reach,work,created_at FROM net_node_policy'
+      )
+      .run(full.work ? 1 : 0, full.terminal ? 1 : 0, full.editor ? 1 : 0, full.maxPermissionMode, full.agentReach)
+    this.database.exec(
+      'DROP TABLE net_node_policy; ALTER TABLE net_node_policy_levels RENAME TO net_node_policy'
+    )
   }
 
   get inTransaction(): boolean {
@@ -461,6 +493,16 @@ export class NetDatabase {
 export const CONNECTIONS_MARKER = 'connections.v1'
 const BORN_MARKERS = [CONNECTIONS_MARKER]
 
+/**
+ * The schema `user_version` this build writes; a database with a newer one is refused. 2: bot levels in
+ * `net_node_policy` (`migrateBotLevels`).
+ */
+export const NET_SCHEMA_VERSION = 2
+
+/** What this computer lets each other device do here (`SqliteNodePolicy`), named so the bot level migration can rebuild it. */
+const nodePolicyTable = (name: string): string =>
+  `CREATE TABLE IF NOT EXISTS ${name}(node TEXT PRIMARY KEY, blocked INTEGER NOT NULL CHECK(blocked IN (0,1)), max_permission_mode TEXT NOT NULL, terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), editor INTEGER NOT NULL DEFAULT 0 CHECK(editor IN (0,1)), bots TEXT NOT NULL DEFAULT 'use' CHECK(bots IN ('off','use','full')), agent_reach TEXT NOT NULL DEFAULT 'launched', work INTEGER NOT NULL DEFAULT 1 CHECK(work IN (0,1)), created_at INTEGER NOT NULL) STRICT;`
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS net_schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS net_streams(id TEXT PRIMARY KEY, descriptor TEXT NOT NULL, space_id TEXT, kind TEXT NOT NULL, epoch INTEGER NOT NULL, head INTEGER NOT NULL, cursor INTEGER NOT NULL, retained INTEGER NOT NULL, active_generation TEXT NOT NULL) STRICT;
@@ -488,7 +530,7 @@ CREATE TABLE IF NOT EXISTS net_quota_reservations(scope TEXT NOT NULL REFERENCES
 CREATE TABLE IF NOT EXISTS net_rate_config(scope TEXT NOT NULL, principal TEXT NOT NULL, max_units INTEGER NOT NULL, window_ms INTEGER NOT NULL, last_now INTEGER NOT NULL, PRIMARY KEY(scope,principal)) STRICT;
 CREATE TABLE IF NOT EXISTS net_rate_charges(scope TEXT NOT NULL, principal TEXT NOT NULL, id TEXT NOT NULL, created_at INTEGER NOT NULL, units INTEGER NOT NULL, PRIMARY KEY(scope,principal,id), FOREIGN KEY(scope,principal) REFERENCES net_rate_config(scope,principal)) STRICT;
 CREATE INDEX IF NOT EXISTS net_rate_window ON net_rate_charges(scope,principal,created_at);
-CREATE TABLE IF NOT EXISTS net_node_policy(node TEXT PRIMARY KEY, blocked INTEGER NOT NULL CHECK(blocked IN (0,1)), max_permission_mode TEXT NOT NULL, terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), editor INTEGER NOT NULL DEFAULT 0 CHECK(editor IN (0,1)), bots INTEGER NOT NULL DEFAULT 1 CHECK(bots IN (0,1)), agent_reach TEXT NOT NULL DEFAULT 'launched', work INTEGER NOT NULL DEFAULT 1 CHECK(work IN (0,1)), created_at INTEGER NOT NULL) STRICT;
+${nodePolicyTable('net_node_policy')}
 CREATE TABLE IF NOT EXISTS bridge_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, node TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('change','refused')), method TEXT NOT NULL, thread TEXT, project TEXT, outcome TEXT NOT NULL, actor TEXT) STRICT;
 CREATE INDEX IF NOT EXISTS bridge_audit_node ON bridge_audit(node,kind,id);
 CREATE TABLE IF NOT EXISTS bridge_audit_reads(node TEXT NOT NULL, hour INTEGER NOT NULL, calls INTEGER NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY(node,hour)) STRICT;

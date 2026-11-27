@@ -32,7 +32,7 @@ const refusedWith = (reason: string) => ({ code: 'forbidden', details: { reason 
 
 describe('what this computer may do there', () => {
   it('reports the defaults, and the work they allow passes', async () => {
-    expect(await access()).toMatchObject({ v: 1, blocked: false, threads: true, work: true, terminal: false, editor: false, bots: true, maxPermissionMode: 'accept_edits' })
+    expect(await access()).toMatchObject({ v: 1, blocked: false, threads: true, work: true, terminal: false, editor: false, bots: 'use', maxPermissionMode: 'accept_edits' })
     const thread = t.thread('Plan')
     expect(await call('routed.threads.pin', { threadId: thread.id, pinned: true })).toMatchObject({ ok: true })
   }, 60_000)
@@ -52,9 +52,29 @@ describe('what this computer may do there', () => {
   it('after the keeper picks Full control, reports terminals and editor connections on', async () => {
     await t.owner.net.request('bridge.policy', { node: t.callerNode, ...accessPreset('full').fields })
     try {
-      expect(await access()).toMatchObject({ threads: true, work: true, terminal: true, editor: true, maxPermissionMode: 'full', agentReach: 'all' })
+      expect(await access()).toMatchObject({ threads: true, work: true, terminal: true, editor: true, maxPermissionMode: 'full', agentReach: 'all', bots: 'full' })
+      // The bot level on its own: reported as set, and the rest stays Full control.
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, bots: 'off' })
+      expect(await access()).toMatchObject({ terminal: true, editor: true, maxPermissionMode: 'full', bots: 'off' })
     } finally {
       await t.owner.net.request('bridge.policy', { node: t.callerNode, ...accessPreset('work').fields })
+    }
+  }, 60_000)
+
+  it('a device at bots Full whose grant has no write reports Use, as its real Full calls are refused', async () => {
+    const nodes = (await t.owner.net.request('bridge.nodes', {})) as { nodes: Array<{ node: string; caps: string[] }> }
+    const caps = nodes.nodes.find((row) => row.node === t.callerNode)!.caps
+    await t.owner.net.request('bridge.policy', { node: t.callerNode, bots: 'full' })
+    try {
+      expect(await access()).toMatchObject({ bots: 'full' })
+      for (const narrowed of [['read'], ['read', 'chat']]) {
+        await t.owner.net.request('bridge.setCaps', { node: t.callerNode, caps: narrowed })
+        expect(await access(), narrowed.join(',')).toMatchObject({ bots: 'use' })
+        await expect(call('bots.update', { botId: 'bot-0123456789ab', name: 'Pip' })).rejects.toMatchObject({ code: 'forbidden' })
+      }
+    } finally {
+      await t.owner.net.request('bridge.setCaps', { node: t.callerNode, caps })
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, bots: 'use' })
     }
   }, 60_000)
 

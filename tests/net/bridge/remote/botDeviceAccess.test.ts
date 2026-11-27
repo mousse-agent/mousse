@@ -81,14 +81,17 @@ async function outcome(methods: RpcMethod[], name: RemoteBotMethod, params: unkn
   }
 }
 
-/** A reach over a real store, with each device's switch and the devices on the account set by the test. */
+/**
+ * A reach over a real store, with each device's bot level and the devices on the account set by the test: Full (so no
+ * row is refused for its level here; the levels have their own tests) or Off.
+ */
 function reachOver(store: BotDeviceAccessStore, devices = [PHONE, LAPTOP]) {
   const off = new Set<string>()
   const changes = new Set<() => void>()
   const reach = createBotReach({
     access: (botId) => store.get(botId).access,
     choices: () => store.choices(),
-    deviceOn: (node) => !off.has(node),
+    level: (node) => (off.has(node) ? 'off' : 'full'),
     devices: () => devices,
     changes: [(listener) => store.onChange(listener), (listener) => { changes.add(listener); return () => changes.delete(listener) }]
   })

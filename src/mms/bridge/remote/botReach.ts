@@ -1,6 +1,7 @@
 import type { BotReachPort } from '../../protocol/botReachPort'
 import { botDeviceAllowed, HIDDEN_BOT_NAME, type StoredBotDeviceAccess } from '../../../shared/bots/personal/deviceAccess'
 import type { NodeDelegation, NodeId, Roster } from '../../../shared/net'
+import { isBotLevel, type BotLevel } from '../../../shared/net/local'
 import type { NetIdentityService } from '../../net/identity/NetIdentityService'
 import type { BotDeviceAccessStore } from '../../bots/definitions/BotDeviceAccessStore'
 
@@ -32,14 +33,14 @@ export function accountDevices(
 }
 
 /**
- * The one test of which device reaches which bot here. `access` is the bot's Devices choice (About), `deviceOn` the
- * device's switch for bots (Settings, Devices), `devices` the account's other devices that may read this computer's
+ * The one test of which device reaches which bot here. `access` is the bot's Devices choice (About), `level` the
+ * device's bot level (Settings, Devices), `devices` the account's other devices that may read this computer's
  * streams (not blocked here). The device list is read again after any of `changes` fires.
  */
 export function createBotReach(options: {
   access(botId: string): StoredBotDeviceAccess
   choices(): { others: StoredBotDeviceAccess; bots: StoredBotDeviceAccess[] }
-  deviceOn(node: string): boolean
+  level(node: string): BotLevel
   devices(): readonly string[] | undefined
   changes: Array<(listener: () => void) => () => void>
 }): Omit<BotReachPort, 'devices'> & { close(): void } {
@@ -60,13 +61,15 @@ export function createBotReach(options: {
     }
   }
   const offs = options.changes.map((subscribe) => subscribe(changed))
-  const deviceOn = (node: string): boolean => {
+  const level = (node: string): BotLevel => {
     try {
-      return options.deviceOn(node)
+      const read = options.level(node)
+      return isBotLevel(read) ? read : 'off'
     } catch {
-      return false
+      return 'off'
     }
   }
+  const deviceOn = (node: string): boolean => level(node) !== 'off'
   const access = (botId: string): StoredBotDeviceAccess => {
     try {
       return options.access(botId)
@@ -92,7 +95,7 @@ export function createBotReach(options: {
   }
   return {
     canReach,
-    deviceOn,
+    level,
     everyone,
     hiddenFor: (reader) => {
       if (reader !== undefined) {
@@ -122,11 +125,11 @@ export function createBotReach(options: {
  */
 export function keepMakerInReach(
   store: Pick<BotDeviceAccessStore, 'saved' | 'set'>,
-  reach: Pick<BotReachPort, 'canReach' | 'deviceOn'>,
+  reach: Pick<BotReachPort, 'canReach' | 'level'>,
   changed?: (botId: string) => void
 ): (botId: string, node: string) => void {
   return (botId, node) => {
-    if (store.saved(botId) || reach.canReach(botId, node) || !reach.deviceOn(node)) return
+    if (store.saved(botId) || reach.canReach(botId, node) || reach.level(node) === 'off') return
     store.set(botId, { mode: 'chosen', nodes: [node] })
     changed?.(botId)
   }

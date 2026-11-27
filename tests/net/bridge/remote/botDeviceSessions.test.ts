@@ -140,6 +140,8 @@ it('a phone left out of a bot\'s list finds no such bot, a phone switched off fi
 
   // About → Devices: only the owner's phone.
   o.services.botDeviceAccess.set(bot.id, { mode: 'chosen', nodes: [mine.node] })
+  // At Full bot access, so even a Full row (renaming) answers as for a bot that is not there.
+  await o.net.request('bridge.policy', { node: sisters.node, bots: 'full' })
   const before = reached.length
   for (const [method, params] of [
     ['bots.get', { botId: bot.id }],
@@ -153,11 +155,13 @@ it('a phone left out of a bot\'s list finds no such bot, a phone switched off fi
   expect(reached.length).toBe(before)
   expect(await mine.answer('bots.get', { botId: bot.id })).toMatchObject({ ok: { summary: { name: 'Server keeper' } } })
 
-  // Settings → Devices → Bots on this computer, off for the owner's own phone: it reaches no bot either.
-  await o.net.request('bridge.policy', { node: mine.node, bots: false })
+  // Settings → Devices → Bots on this computer, Off for the owner's own phone: it reaches no bot either. At Use it
+  // reads the bot again, but may not rename it.
+  await o.net.request('bridge.policy', { node: mine.node, bots: 'off' })
   expect(await mine.answer('bots.get', { botId: bot.id })).toMatchObject({ code: 'forbidden', details: { reason: 'bots_off' } })
-  await o.net.request('bridge.policy', { node: mine.node, bots: true })
+  await o.net.request('bridge.policy', { node: mine.node, bots: 'use' })
   expect(await mine.answer('bots.get', { botId: bot.id })).toMatchObject({ ok: { summary: { id: bot.id } } })
+  expect(await mine.answer('bots.update', { botId: bot.id, name: 'Mine now' })).toMatchObject({ code: 'forbidden', details: { reason: 'bots_full_needed' } })
 
   // Each phone opens lists of its own; the other phone can't read them, even knowing the stream's id.
   const ownLists = (await mine.rpc('bridge.lists.open', {})) as { descriptor: StreamDescriptor }

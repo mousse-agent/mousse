@@ -69,6 +69,7 @@ import type {
   BridgeAccessThere,
   BridgeNodeConnection,
   BridgeNodePolicy,
+  BotLevel,
   EditorProbeResult,
   NetInitInput,
   NetLinkCheck,
@@ -79,6 +80,7 @@ import type {
   NetStatus,
   SshUpdateResult
 } from '../../shared/net/local'
+import { isBotLevel } from '../../shared/net/local'
 import type { PermissionMode } from '../../shared/permissionMode'
 import { routedVersions } from '../../shared/bridge/routed'
 import { bridgeRemoteMethodNames } from '../bridge/remote/capabilities'
@@ -591,7 +593,7 @@ export class NetService {
         if (cfg.workOnThreads !== undefined && typeof cfg.workOnThreads !== 'boolean')
           throw new NetError('storage_corrupt')
         // "Share bots with other devices" is gone: a computer that had it off keeps every device out of its bots
-        // through each device's own Bots switch (`keepBotsUnshared`, below), and the key is dropped.
+        // through each device's own bot level, Off (`keepBotsUnshared`, below), and the key is dropped.
         const legacy = cfg as NetConfiguration & { shareBots?: unknown }
         if (legacy.shareBots !== undefined && typeof legacy.shareBots !== 'boolean')
           throw new NetError('storage_corrupt')
@@ -1010,11 +1012,12 @@ export class NetService {
   }
   /**
    * Once, for a computer that had "Share bots with other devices" off: every device it knows (its user's list, every
-   * device with a record here, every engine pairing) gets its Bots switch off, so none reaches a bot it could not reach
+   * device with a record here, every engine pairing) gets its bot level Off, so none reaches a bot it could not reach
    * before, and the configuration is saved without the old switch in the same transaction, so this never runs again.
    * A list that cannot be read now is left for the next start, as the connections record does: the devices known
-   * otherwise are switched off at once, `shareBots: false` stays stored, and each later start switches off the listed
-   * devices that still have no row of their own (a device with one has the owner's choice since), until the list reads.
+   * otherwise are set to Off at once, `shareBots: false` stays stored with the `bots-unshared.partial` marker, and each
+   * later start sets to Off the listed devices that still have no row of their own (a device with one has the owner's
+   * choice since, or the level the bot level migration gave its switch), until the list reads.
    */
   private keepBotsUnshared(db: NetDatabase, identity: NetIdentityService, policy: SqliteNodePolicy): void {
     const listed = listedOwnNodes(identity)
@@ -1030,7 +1033,7 @@ export class NetService {
         for (const row of db.database.prepare('SELECT local_id FROM net_engine_peers').all()) nodes.add(String(row.local_id))
     }
     db.transaction(() => {
-      for (const node of nodes) if (isId('node', node)) policy.set(node as NodeId, { bots: false })
+      for (const node of nodes) if (isId('node', node)) policy.set(node as NodeId, { bots: 'off' })
       this.botsUnsharedPending = listed === undefined
       if (this.botsUnsharedPending)
         db.database
@@ -1371,7 +1374,7 @@ export class NetService {
               : { maxPermissionMode: params.maxPermissionMode as PermissionMode }),
             ...(params.terminal === undefined ? {} : { terminal: params.terminal as boolean }),
             ...(params.editor === undefined ? {} : { editor: params.editor as boolean }),
-            ...(params.bots === undefined ? {} : { bots: params.bots as boolean }),
+            ...(params.bots === undefined ? {} : { bots: params.bots as BotLevel }),
             ...(params.work === undefined ? {} : { work: params.work as boolean }),
             ...(params.agentReach === undefined
               ? {}
@@ -2531,7 +2534,7 @@ export class NetService {
     // A device this computer blocked reads, fetches and writes none of its Bridge streams. A device of this user's
     // list that is not connected here has none of its streams, its Spaces' included (another user's device is
     // governed by its Space membership alone).
-    // A stream whose kind is work (none is today) is not for a device that may only view and chat with bots; the
+    // A stream whose kind is work (none is today) is not for a device that may only view threads; the
     // class is read first, so the record-by-record check costs no query for the kinds every device reads.
     const streamWorkOff = (stream: StreamId, peer: { node: NodeId }): boolean => {
       const kind = store.getStream(stream)?.kind
@@ -3154,7 +3157,7 @@ export class NetService {
    * `bridge.access.mine`: what this computer lets `caller` do here now. Each answer is a real call's checks, run through
    * the dispatcher's own authorization (the grant, connected here, the block, "Let my other computers work here", the
    * per-device switches) without running anything, plus the checks a method makes in its handler: an editor
-   * connection's (`deviceRefusal`) and the bots' (the device's Bots switch).
+   * connection's (`deviceRefusal`) and the bots' (the device's bot level, which `remoteBotMethods` checks).
    */
   private accessMine(caller: RpcCaller): BridgeAccessMine {
     const rt = this.requireEnrolled(),
@@ -3179,7 +3182,9 @@ export class NetService {
         threads &&
         passes('routed.editor.folder') &&
         (isEngineCaller(caller) || this.deviceRefusal(caller.node) === undefined),
-      bots: passes('bots.chat.list') && policy.bots,
+      // The level the gate lets through: Off where no bot call passes (blocked, or no read in the grant), and Full only
+      // where a Full call passes too (its grant has write), else Use.
+      bots: !passes('bots.chat.list') ? 'off' : policy.bots === 'full' && !passes('bots.update') ? 'use' : policy.bots,
       maxPermissionMode: policy.maxPermissionMode,
       agentReach: policy.agentReach
     }
@@ -3213,7 +3218,9 @@ export class NetService {
     try {
       const answer = (await session.rpc('bridge.access.mine', {}, { id: newId('rpc'), deadlineMs: 10_000 })) as BridgeAccessMine
       if (answer?.v !== 1) return { state: 'unknown', reason: 'older' }
-      return { state: 'known', access: answer }
+      // An answer without a bot level gives no bot access.
+      const bots: BotLevel = isBotLevel(answer.bots) ? answer.bots : 'off'
+      return { state: 'known', access: { ...answer, bots } }
     } catch (error) {
       if (error instanceof NetError && error.code === 'forbidden') {
         const reason = forbiddenReason(error.details)

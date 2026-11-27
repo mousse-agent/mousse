@@ -16,7 +16,7 @@ const { useUpdateStore } = await import('../../src/renderer/stores/updateStore')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { NO_COMPUTERS, useComputersStore } = await import('../../src/renderer/lib/computers')
 
-const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: true, agentReach: 'launched', work: true }
+const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: 'use', agentReach: 'launched', work: true }
 const row = (node: string, name: string, extra: Record<string, unknown>) => ({
   node,
   name,
