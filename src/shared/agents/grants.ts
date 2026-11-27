@@ -1,3 +1,4 @@
+import { canonicalToolName } from '../toolAliases'
 import type { AgentIntegrationLookup } from './types'
 import type {
   AgentBuiltinToolsSettings,
@@ -129,9 +130,11 @@ export function resolveBuiltinToolGrants(
   const profileTools = lookup.listProfileBuiltinToolIds()
   const grants: EffectiveAgentGrantEntry[] = []
   const denied: DeniedAgentGrant[] = []
-  const allow = new Set(settings.allowlist)
+  // A definition saved before a tool was renamed names its old name; it grants the new one.
+  const allowlist = [...new Set(settings.allowlist.map(canonicalToolName))]
+  const allow = new Set(allowlist)
 
-  const candidates = settings.mode === 'inherit' ? profileTools : settings.allowlist
+  const candidates = settings.mode === 'inherit' ? profileTools : allowlist
   for (const toolId of candidates) {
     if (settings.mode === 'inherit' && allow.size > 0 && !allow.has(toolId)) {
       denied.push({ kind: 'tool', id: toolId, reason: 'Built-in tool is not on the definition allowlist.' })
@@ -143,7 +146,7 @@ export function resolveBuiltinToolGrants(
     }
     grants.push({
       id: toolId,
-      source: settings.mode === 'inherit' && !settings.allowlist.includes(toolId) ? 'inherited' : settings.mode === 'inherit' ? 'inherited' : 'explicit'
+      source: settings.mode === 'inherit' && !allowlist.includes(toolId) ? 'inherited' : settings.mode === 'inherit' ? 'inherited' : 'explicit'
     })
   }
   return { grants, denied }

@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { Type, type Tool } from '@earendil-works/pi-ai'
 import { TASK_STATUSES, type TaskStatus } from '../../shared/types'
 import type { TaskQueue } from './TaskQueue'
@@ -68,14 +67,9 @@ export class TaskControlTools {
     return this.getToolDefinitions().some((tool) => tool.name === name)
   }
 
-  /**
-   * `requestKey`: the call's key (the Mousse MCP server's `clientRequestId`, whichever name the tool was called by).
-   * `task_create` makes its task under an id taken from it, so a retry returns the task the first call made.
-   */
   async execute(
     name: string,
-    args: Record<string, unknown>,
-    requestKey?: string
+    args: Record<string, unknown>
   ): Promise<{ text: string; isError: boolean }> {
     try {
       switch (name) {
@@ -92,8 +86,7 @@ export class TaskControlTools {
           if (args.status !== undefined) {
             status = String(args.status) as TaskStatus
           }
-          const id = requestKey ? `task-${createHash('sha256').update(requestKey).digest('hex').slice(0, 20)}` : undefined
-          const task = this.tasks.createTask({ ...(id ? { id } : {}), description, agentId, status })
+          const task = this.tasks.createTask({ description, agentId, status })
           return { text: JSON.stringify(task, null, 2), isError: false }
         }
         case 'task_update': {

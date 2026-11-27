@@ -4,6 +4,9 @@
  * so a retry under either name is the same request.
  */
 import { afterEach, describe, expect, it } from 'vitest'
+import { claudeChildToolDenial } from '../../src/mms/harness/vendors/claude/childPolicy'
+import { StaticAgentIntegrationLookup } from '../../src/mms/agentDefinitions/lookups'
+import { resolveBuiltinToolGrants } from '../../src/shared/agents/grants'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import { readRefusal } from '../../src/mms/run/mcp/appTools'
@@ -77,5 +80,28 @@ describe('an old tool name', () => {
     expect(readRefusal(refusedNew.text)).not.toBeNull()
     expect(refusedOld).toEqual(refusedNew)
     expect(tasks.list()).toEqual([])
+  })
+})
+
+describe("an agent definition's saved grant of an old tool name", () => {
+  const lookup = new StaticAgentIntegrationLookup({ builtinToolIds: ['skill_list', 'read'] })
+
+  it('grants the new tool when the definition lists its tools', () => {
+    const { grants } = resolveBuiltinToolGrants({ mode: 'explicit', allowlist: ['list_skills'] }, lookup)
+    expect(grants.map((grant) => grant.id)).toEqual(['skill_list'])
+  })
+
+  it('keeps the new tool when the definition narrows the tools it inherits', () => {
+    const { grants } = resolveBuiltinToolGrants({ mode: 'inherit', allowlist: ['list_skills'] }, lookup)
+    expect(grants.map((grant) => grant.id)).toEqual(['skill_list'])
+  })
+})
+
+describe("a read-only Claude subagent's call under an old name", () => {
+  it('passes the gate its new name passes', () => {
+    for (const [old, renamed] of [['list_models', 'model_list'], ['load_skill', 'skill_load'], ['list_skills', 'skill_list'], ['list_computers', 'computer_list']]) {
+      expect(claudeChildToolDenial({ readOnly: true }, `mcp__mousse__${renamed}`), renamed).toBeUndefined()
+      expect(claudeChildToolDenial({ readOnly: true }, `mcp__mousse__${old}`), old).toBeUndefined()
+    }
   })
 })

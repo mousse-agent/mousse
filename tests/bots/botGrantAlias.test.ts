@@ -13,7 +13,7 @@ vi.mock('../../src/shared/toolAliases', () => {
 })
 
 import { botManifestDigest, compileBotThread } from '../../src/mms/bots/grants/compile'
-import { botGrantTool, botStarterManifest, canonicalManifest, manifestProblem } from '../../src/shared/bots/personal/manifest'
+import { botGrantTool, botStarterManifest, canonicalManifest, intersectManifest, manifestProblem } from '../../src/shared/bots/personal/manifest'
 
 describe("a bot's grant under a tool's old name", () => {
   const starter = botStarterManifest()
@@ -40,5 +40,11 @@ describe("a bot's grant under a tool's old name", () => {
     expect(canonicalManifest(stored).appTools).toContain('web_lookup')
     expect(botManifestDigest(stored)).not.toBe(botManifestDigest({ ...withoutSearch, appTools: [...withoutSearch.appTools, 'web_search'] }))
     expect(botGrantTool('web_lookup')).toBe('web_search')
+  })
+
+  it("keeps the tool when a revision that asks for its new name runs inside the stored grant", () => {
+    const revision = { ...withoutSearch, appTools: [...withoutSearch.appTools, 'web_search'] }
+    expect(intersectManifest(revision, stored).appTools).toContain('web_search')
+    expect(intersectManifest(stored, revision).appTools).toContain('web_search')
   })
 })

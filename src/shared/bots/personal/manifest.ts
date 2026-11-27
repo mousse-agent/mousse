@@ -692,7 +692,8 @@ export function intersectManifest(wanted: BotManifest, granted: BotManifest): Bo
   }
   return {
     tools: within(wanted.tools, granted.tools, (tool) => tool),
-    appTools: within(wanted.appTools, granted.appTools, (tool) => tool),
+    // Under the names tools have now: a grant stored under an old name holds its new one (`canonicalToolName`).
+    appTools: within([...new Set(wanted.appTools.map(canonicalToolName))], granted.appTools.map(canonicalToolName), (tool) => tool),
     mcp: within(wanted.mcp, granted.mcp, mcpIdentity).map(pair => ({ ...pair, ...(granted.mcp.find(g => mcpIdentity(g) === mcpIdentity(pair))?.level === 'asks_first' ? { level: 'asks_first' as const } : {}) })),
     skills: within(wanted.skills, granted.skills, (skill) => skill),
     workspace: null,
