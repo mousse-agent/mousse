@@ -20,9 +20,10 @@ import { atomicWriteJsonSync } from '../../data/AtomicFs'
  * - Version 2: each list is explicit. A bot without an entry reaches this computer alone, so a new bot starts there and a
  *   device linked later reaches no bot until the owner ticks it.
  * - No file, or version 1 (an earlier build's, where "All my devices" and a bot without an entry meant every device):
- *   read as it was until the one-time snapshot (`snapshot`), which writes version 2 with every such bot's list set to
- *   the devices linked at that moment, so nobody loses a bot they reached. It runs once, as soon as the account's
- *   devices can be read, before Bridge serves any device; a file at version 2 is never snapshotted again.
+ *   such a bot reaches this computer alone until the one-time snapshot (`snapshot`), which writes version 2 with every
+ *   such bot's list set to the devices linked at that moment, so nobody loses a bot they reached. It runs once: when the
+ *   bots open on a profile with no networking set up (with no devices), else as soon as the account's devices can be
+ *   read; a file at version 2 is never snapshotted again.
  * - A file or an entry that can't be read (not JSON, a version this build does not know, a value it does not know): this
  *   computer alone for the bots it covers. A file that can't be read at all covers every bot, and the first change after
  *   it (the snapshot too) puts it aside (`device-access.json.corrupt-<time>`) and writes version 2, so the other bots
@@ -62,6 +63,11 @@ function copyOf<T extends StoredBotDeviceAccess>(access: T): T {
   return (access.mode === 'chosen' ? { mode: 'chosen', nodes: [...access.nodes] } : { mode: access.mode }) as T
 }
 
+/** A choice as it is read: an earlier build's every device, not snapshotted yet, is this computer alone. */
+function closed(access: StoredBotDeviceAccess): BotDeviceAccess {
+  return access.mode === 'all' ? { mode: 'this_computer' } : copyOf(access)
+}
+
 /** A version 1 entry: what version 2 knows, or every device. */
 function legacyProblem(value: unknown): string | undefined {
   if (plain(value) && value.mode === 'all' && Object.keys(value).length === 1) return undefined
@@ -83,13 +89,13 @@ export class BotDeviceAccessStore {
 
   /**
    * The bot's choice; `unreadable` when it stands at this computer alone because what is stored can't be read. Before
-   * the snapshot, an older file's every device reads as `{ mode: 'all' }`.
+   * the snapshot, an older file's every device reads as this computer alone: only the snapshot turns it into devices.
    */
-  get(botId: string): { access: StoredBotDeviceAccess; unreadable: boolean } {
+  get(botId: string): { access: BotDeviceAccess; unreadable: boolean } {
     const state = this.read()
     const entry = state.bots.get(botId)
-    if (entry) return { access: copyOf(entry.access), unreadable: entry.unreadable }
-    return { access: copyOf(state.missing), unreadable: state.broken }
+    if (entry) return { access: closed(entry.access), unreadable: entry.unreadable }
+    return { access: closed(state.missing), unreadable: state.broken }
   }
 
   /**
@@ -101,9 +107,9 @@ export class BotDeviceAccessStore {
   }
 
   /** Every stored choice, and what a bot without one has: enough to tell quickly that no bot is held from anyone. */
-  choices(): { others: StoredBotDeviceAccess; bots: StoredBotDeviceAccess[] } {
+  choices(): { others: BotDeviceAccess; bots: BotDeviceAccess[] } {
     const state = this.read()
-    return { others: copyOf(state.missing), bots: [...state.bots.values()].map((entry) => copyOf(entry.access)) }
+    return { others: closed(state.missing), bots: [...state.bots.values()].map((entry) => closed(entry.access)) }
   }
 
   /** Whether the one-time snapshot is still to run: no file yet, or an earlier build's (version 1). */

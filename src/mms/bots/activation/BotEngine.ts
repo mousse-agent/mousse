@@ -370,7 +370,7 @@ export interface BotEngineHost {
    * Which devices reach each bot (`BotDeviceAccessStore`): a new bot's choice is saved here before the bot is published,
    * and the bot's menu reads it (Make private). Absent: no bot is given a choice when it is made, and none is listed with one.
    */
-  deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget'>
+  deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget' | 'needsSnapshot'>
   /** The owner's other devices, for New bot's Devices step (`BotReachPort.devices`); undefined while Bridge is off. */
   devices?(): Promise<BotDeviceChoice[] | undefined>
   /**

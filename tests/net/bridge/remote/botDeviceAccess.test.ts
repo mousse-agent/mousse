@@ -26,7 +26,7 @@ import { DomainHandlerRegistry } from '../../../../src/mms/protocol/domainRegist
 import { classifyRoutedMethod } from '../../../../src/shared/bridge/routed'
 import { BRIDGE_REMOTE_METHODS } from '../../../../src/mms/bridge/remote/capabilities'
 import { NET_LOCAL_METHODS } from '../../../../src/shared/net/local'
-import { BOT_DEVICE_METHODS, botDeviceAllowed as botAllowed, type BotDeviceAccess } from '../../../../src/shared/bots/personal/deviceAccess'
+import { BOT_DEVICE_METHODS, type BotDeviceAccess } from '../../../../src/shared/bots/personal/deviceAccess'
 import type { BotReachPort } from '../../../../src/mms/protocol/botReachPort'
 import { botFixture, chatOf, createBot, type BotFixture } from '../../../bots/botFixture'
 
@@ -463,24 +463,22 @@ describe('what is stored', () => {
     return new BotDeviceAccessStore(dir)
   }
   it.each([
-    ['All my devices, with two linked', { version: 1, bots: { [A]: { mode: 'all' } } }, [PHONE, LAPTOP], { mode: 'chosen', nodes: [PHONE, LAPTOP] }],
-    ['no choice stored, with two linked', { version: 1, bots: {} }, [PHONE, LAPTOP], { mode: 'chosen', nodes: [PHONE, LAPTOP] }],
-    ['no file at all, with two linked', undefined, [PHONE, LAPTOP], { mode: 'chosen', nodes: [PHONE, LAPTOP] }],
-    ['All my devices, with none linked', { version: 1, bots: { [A]: { mode: 'all' } } }, [], { mode: 'this_computer' }],
-    ['this computer', { version: 1, bots: { [A]: { mode: 'this_computer' } } }, [PHONE, LAPTOP], { mode: 'this_computer' }],
-    ['chosen devices', { version: 1, bots: { [A]: { mode: 'chosen', nodes: [LAPTOP] } } }, [PHONE, LAPTOP], { mode: 'chosen', nodes: [LAPTOP] }],
-    ['a value it can\'t read', { version: 1, bots: { [A]: { mode: 'everyone' } } }, [PHONE, LAPTOP], { mode: 'this_computer' }],
-    ['no choice, after a file that could not be read', { version: 1, bots: {}, missing: 'this_computer' }, [PHONE, LAPTOP], { mode: 'this_computer' }]
-  ] as const)('on update, %s: the bot keeps exactly whom it reached', (_name, file, devices, after) => {
+    ['All my devices, with two linked', { version: 1, bots: { [A]: { mode: 'all' } } }, [PHONE, LAPTOP], { mode: 'this_computer' }, { mode: 'chosen', nodes: [PHONE, LAPTOP] }],
+    ['no choice stored, with two linked', { version: 1, bots: {} }, [PHONE, LAPTOP], { mode: 'this_computer' }, { mode: 'chosen', nodes: [PHONE, LAPTOP] }],
+    ['no file at all, with two linked', undefined, [PHONE, LAPTOP], { mode: 'this_computer' }, { mode: 'chosen', nodes: [PHONE, LAPTOP] }],
+    ['All my devices, with none linked', { version: 1, bots: { [A]: { mode: 'all' } } }, [], { mode: 'this_computer' }, { mode: 'this_computer' }],
+    ['this computer', { version: 1, bots: { [A]: { mode: 'this_computer' } } }, [PHONE, LAPTOP], { mode: 'this_computer' }, { mode: 'this_computer' }],
+    ['chosen devices', { version: 1, bots: { [A]: { mode: 'chosen', nodes: [LAPTOP] } } }, [PHONE, LAPTOP], { mode: 'chosen', nodes: [LAPTOP] }, { mode: 'chosen', nodes: [LAPTOP] }],
+    ['a value it can\'t read', { version: 1, bots: { [A]: { mode: 'everyone' } } }, [PHONE, LAPTOP], { mode: 'this_computer' }, { mode: 'this_computer' }],
+    ['no choice, after a file that could not be read', { version: 1, bots: {}, missing: 'this_computer' }, [PHONE, LAPTOP], { mode: 'this_computer' }, { mode: 'this_computer' }]
+  ] as const)('on update, %s: no other device reaches it until the snapshot, which gives it the devices linked then', (_name, file, devices, before, after) => {
     const fresh = earlier(file)
-    // Until the snapshot, an earlier build's every device still reads as it did: nobody loses the bot in between.
-    const before = fresh.get(A).access
+    // Until the snapshot, an earlier build's every device reads as this computer alone: no device reaches it in between.
+    expect(fresh.get(A).access).toEqual(before)
     expect(fresh.needsSnapshot()).toBe(true)
     expect(fresh.snapshot([A], devices)).toBe(true)
     expect(fresh.get(A).access).toEqual(after)
     expect(JSON.parse(readFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), 'utf8'))).toMatchObject({ version: 2 })
-    // Every device that reached it before still does, and none that did not.
-    for (const node of devices) expect(botAllowed(fresh.get(A).access, node), node).toBe(botAllowed(before, node))
   })
 
   it('the snapshot runs once: a restart, or a device linked since, changes nothing; a bot without a choice after it reaches this computer alone', () => {

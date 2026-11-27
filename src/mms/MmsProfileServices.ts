@@ -385,13 +385,15 @@ export class MmsProfileServices {
   /**
    * The one-time move to explicit Devices lists (`BotDeviceAccessStore.snapshot`): every bot that reached every device
    * ("All my devices", or no choice stored) gets the owner's other devices linked now, so nobody loses a bot they reached
-   * and a device linked later reaches none. It waits until both the bots and the account's devices can be read: it is
-   * tried when the bots open and whenever Bridge reads the devices (with its own directory), before Bridge serves any
-   * device. Once written, it never runs again.
+   * and a device linked later reaches none. Until then such a bot reaches this computer alone. A profile with no
+   * networking set up (no `net.db`) has no other device: it runs when the bots open, so a device linked later is in no
+   * list. Otherwise it waits until the account's devices can be read, tried whenever Bridge reads them (with its own
+   * directory). Once written, it never runs again.
    */
   snapshotBotDevices(
-    // `peers` is set later in construction than the bots may open: until then, the devices are not known.
-    linked: () => readonly string[] | undefined = () => (this.peers as PeerDirectory | undefined)?.accountDevices()
+    // `peers` is set later in construction than the bots open: until then, the devices are not known.
+    linked: () => readonly string[] | undefined = () =>
+      existsSync(join(this.homeDir, 'net', 'net.db')) ? (this.peers as PeerDirectory | undefined)?.accountDevices() : []
   ): void {
     const store = this.botStore
     if (!store || !this.botDeviceAccess.needsSnapshot()) return

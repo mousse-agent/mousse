@@ -255,7 +255,7 @@ export class BotChatService {
     /** The person's other computers, online or not. */
     otherComputers?(): Array<{ node: string; name: string; online: boolean }>
     /** Which devices reach each bot (`BotEngineHost.deviceAccess`). */
-    deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget'>
+    deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget' | 'needsSnapshot'>
     /** The owner's other devices New bot's Devices step lists (`BotReachPort.devices`); undefined while Bridge is off. */
     devices?(): Promise<BotDeviceChoice[] | undefined>
   }) {}
@@ -404,7 +404,7 @@ export class BotChatService {
     const store = this.options.deviceAccess
     if (!store) return false
     const stored = store.get(botId)
-    if (access.mode === 'this_computer' && stored.access.mode === 'this_computer' && !stored.unreadable) return false
+    if (access.mode === 'this_computer' && !store.needsSnapshot() && stored.access.mode === 'this_computer' && !stored.unreadable) return false
     try {
       store.set(botId, access)
     } catch {

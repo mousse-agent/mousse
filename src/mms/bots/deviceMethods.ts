@@ -23,16 +23,12 @@ export interface BotDevicesSource {
   changed?(botId: string): void
 }
 
-/**
- * The choice as About shows it: devices no longer on the account are left out of the list. Before the one-time snapshot,
- * an earlier build's every device shows every device listed now, as the snapshot will save it.
- */
+/** The choice as About shows it: devices no longer on the account are left out of the list. */
 async function view(source: BotDevicesSource, botId: string): Promise<BotDevicesView> {
   const { access, unreadable } = source.store.get(botId)
   const devices = (await source.devices().catch(() => undefined)) ?? []
   const known = new Set(devices.map((device) => device.node))
-  const nodes = access.mode === 'chosen' ? access.nodes.filter((node) => known.has(node)) : access.mode === 'all' ? [...known] : []
-  const shown: BotDeviceAccess = access.mode === 'this_computer' || !nodes.length ? { mode: 'this_computer' } : { mode: 'chosen', nodes }
+  const shown: BotDeviceAccess = access.mode === 'chosen' ? { mode: 'chosen', nodes: access.nodes.filter((node) => known.has(node)) } : access
   return { access: shown, devices, ...(unreadable ? { unreadable: true } : {}) }
 }
 
