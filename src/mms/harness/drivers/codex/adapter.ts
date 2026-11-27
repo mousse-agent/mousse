@@ -40,7 +40,7 @@ function sinkUsage(usage: CodexTurnUsage): Parameters<TurnSink['usage']>[0] {
 export type CodexClient = Pick<
   CodexProviderService,
   'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'userSetup'
-> & Partial<Pick<CodexProviderService, 'commitInterrupted' | 'stopThread' | 'stopHelper'>>
+> & Partial<Pick<CodexProviderService, 'commitInterrupted' | 'failedThreadKept' | 'stopThread' | 'stopHelper'>>
 
 /** How Codex 0.162.1 begins the message of a turn its `auth.command` failed (wire test). */
 const TOKEN_COMMAND_FAILED = 'provider auth command '
@@ -192,7 +192,12 @@ export class CodexAdapter implements ProviderAdapter {
     const bot = host.bot
     // A bot's turn works in its files folder: what Codex runs there without asking stays the bot's own.
     const cwd = (bot ? bot.workspace?.files ?? bot.workspace?.scratch : undefined) ?? input.cwd ?? service.standaloneWorkspace(input.threadId)
-    let history = host.context.prepareNativeContext(input.llmProvider, input.model)?.nativeHistory ?? input.nativeHistory
+    // A turn that continues a failed one resumes the Codex thread that failure left, at the history the turn carries now:
+    // nothing is compacted in between, so the thread is the one Codex holds.
+    let history = input.continuesFailedRequest
+      ? input.nativeHistory
+      : host.context.prepareNativeContext(input.llmProvider, input.model)?.nativeHistory ?? input.nativeHistory
+    if (input.continuesFailedRequest) service.commitInterrupted?.(input.threadId, history ?? '')
     const streams = promptStreams(sink)
     // One per turn: it follows each call by its id, so a computer use call's row stays held on every event.
     const toolRows = createRuntimeToolMapper({ aborted: () => input.signal.aborted })
@@ -308,6 +313,9 @@ export class CodexAdapter implements ProviderAdapter {
       // A turn that failed otherwise leaves the record as it was.
       const limited = readUsageLimit(error) !== undefined
       if ((input.signal.aborted || limited) && host.context.nativeHistoryNow) service.commitInterrupted?.(input.threadId, host.context.nativeHistoryNow())
+      // A turn that failed otherwise keeps its Codex thread only for a turn that continues it (`continuesFailedRequest`):
+      // the next turn of the thread still starts a fresh one, as before.
+      else if (!input.signal.aborted && service.failedThreadKept?.(input.threadId)) sink.sessionKept?.()
       // A managed run still reports the failure behind a usage limit to the harness gateway, which maps it itself.
       // The typed limit stays on the mapped error as its cause: that is how the run's pause reads the reset time and window.
       if (this.options.managed && !input.signal.aborted) {

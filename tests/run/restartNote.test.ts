@@ -280,7 +280,7 @@ describe('closeStaleActivity', () => {
   })
 
   it('closes a provider retry row left counting as stopped', () => {
-    const retrying: ChatMessage = { id: 'p1', role: 'assistant', kind: 'provider_retry', content: 'Provider error · retrying 3/10', streaming: true, timestamp: at,
+    const retrying: ChatMessage = { id: 'p1', role: 'assistant', kind: 'provider_retry', content: 'Retrying provider… (3/10)', streaming: true, timestamp: at,
       providerRetry: { status: 'retrying', attempt: 3, maxAttempts: 10, cause: 'connection error' } }
     const closed = closeStaleActivity([retrying], endedAt)
     expect(closed.get('p1')).toMatchObject({ content: 'Stopped retrying the provider after 3 retries', streaming: false, providerRetry: { status: 'stopped', attempt: 3 } })

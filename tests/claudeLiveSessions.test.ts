@@ -2681,8 +2681,9 @@ describe('result routing and steering edge cases', () => {
       process.emit(resultFrame({ uuids: [String(message.uuid)], error: 'rate limit' }))
     f.cli.reply = failing as never
     await expect(f.chat({ history: 'h' })).rejects.toThrow('rate limit')
-    // The adapter reports what the failed turn left: the history with its request in it.
-    f.service.commitFailed('thread', 'h + failed request')
+    // The adapter reports what the failed turn left: the history with its request in it. The process holds it, so a
+    // turn that continues the failed one may go on there.
+    expect(f.service.commitFailed('thread', 'h + failed request')).toBe(true)
     f.cli.reply = (message, process) => process.answer(String(message.uuid), 'again')
     // The conversation was undone back to before the failed request: the process still holds it.
     await expect(f.chat({ history: 'h' })).rejects.toMatchObject({ message: expect.stringContaining('conversation changed') })

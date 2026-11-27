@@ -2643,14 +2643,20 @@ export class ClaudeSubscriptionProviderService {
    * A turn failed (not a stop) after its message reached Claude. `history` is the canonical history as
    * the failed turn left it, which is what the next request will carry unless something is undone first.
    * A turn a usage limit ended also leaves its session resumable, like a stopped one.
+   *
+   * True when the thread's live process holds the turn up to the failure: a request that carries `history` continues it
+   * there (`reusableLive`), with what Claude answered and every tool result.
    */
-  commitFailed(threadId: string, history: string): void {
-    this.recordBoundary(threadId, history)
+  commitFailed(threadId: string, history: string): boolean {
+    const kept = this.recordBoundary(threadId, history)
     this.fingerprintInterruptedSession(threadId, history)
+    return kept
   }
-  private recordBoundary(threadId: string, history: string): void {
+  private recordBoundary(threadId: string, history: string): boolean {
     const live = this.live.get(threadId)
-    if (live && !live.dead && live.meta.pushedFailed === true) live.meta.expectedKey = historyKey(history)
+    if (!live || live.dead || live.meta.pushedFailed !== true) return false
+    live.meta.expectedKey = historyKey(history)
+    return true
   }
   private commitObligations(threadId: string): void {
     const pending = this.liveCommits.get(threadId)

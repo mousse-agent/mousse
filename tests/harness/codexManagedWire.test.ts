@@ -24,7 +24,9 @@ import { instanceEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { spawnCodexAppServer, type CodexLaunch, type CodexProcess } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
 import { CODEX_MAX_LOADED_THREADS, CodexTurnFailure, CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
-import { codexHarnessError } from '../../src/mms/harness/drivers/codex/adapter'
+import { codexHarnessError, type CodexAdapter } from '../../src/mms/harness/drivers/codex/adapter'
+import type { AdapterHost, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
+import { continuationPrompt } from '../../src/mms/orchestrator/turnRetry'
 import { FakeIssuer, plainCodec } from './chatgpt/fakeIssuer'
 import { signIn } from './chatgpt/signInFlow'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
@@ -544,6 +546,68 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
     }
     expect(observed).toMatchSnapshot()
   }, 180_000)
+
+  it('a request refused with an opaque 400 after a tool ran (#1999) continues on the same Codex thread: the tool result is kept, the tool does not run again', async () => {
+    const run = await setup()
+    const adapter = run.runtime.adapter as unknown as CodexAdapter
+    const COMMAND = /^(shell|exec_command|local_shell|unified_exec)$/
+    const marker = 'wire-continue-marker'
+    // 1: the model runs a command. 2: the request after its result is refused as in #1999. 3: the continuation answers.
+    openai.answer = (request, index) => {
+      if (index === 1) return { status: 400, body: { error: { message: 'Bad Request', type: null, code: null, param: null }, status: 400 } }
+      if (index > 1) return { status: 200, sse: reply('Picked up and done.', `resp_${index + 1}`) }
+      const tools = ((request.body?.tools as Array<{ name?: string }> | undefined) ?? []).map((tool) => tool.name ?? '')
+      const tool = tools.find((name) => COMMAND.test(name))!
+      const args = tool === 'shell' ? { command: process.platform === 'win32' ? ['cmd', '/c', `echo ${marker}`] : ['bash', '-c', `echo ${marker}`] } : { cmd: `echo ${marker}` }
+      const item = { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: tool, arguments: JSON.stringify(args), status: 'completed' }
+      return {
+        status: 200,
+        sse: sse([
+          { type: 'response.created', response: { id: 'resp_1' } },
+          { type: 'response.output_item.added', output_index: 0, item: { ...item, arguments: '', status: 'in_progress' } },
+          { type: 'response.output_item.done', output_index: 0, item },
+          { type: 'response.completed', response: { id: 'resp_1', usage: { input_tokens: 10, input_tokens_details: { cached_tokens: 0 }, output_tokens: 2, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 12 } } }
+        ])
+      }
+    }
+    const workspace = join(run.dir, 'work')
+    let history = 'user: Run the command.'
+    const host: AdapterHost = {
+      tools: {},
+      context: {
+        recoverOverflow: () => null,
+        prepareNativeContext: () => null,
+        nativeHistoryAfterTurn: (text) => (history = `${history}
+assistant: ${text}`),
+        nativeHistoryNow: () => history
+      }
+    }
+    const kept: boolean[] = []
+    const sink = { text() {}, thinking() {}, tool() {}, nativeMessages() {}, compaction() {}, retry() {}, progress() {}, usage() {}, providerRef() {}, steerAccepted() {}, providerMetrics() {}, lineEdits() {}, sessionKept: () => void kept.push(true) } satisfies TurnSink
+    const control = { drainSteer: () => undefined, heartbeat: () => {} }
+    const input = (over: Partial<TurnInput>): TurnInput => ({
+      runId: 'run-1', attemptId: 'attempt-1', threadId: 'wire-continue', cwd: workspace, instanceId: run.instanceId, model: 'gpt-wire',
+      llmProvider: 'codex', modelPinned: true, mode: 'agent', permissionMode: 'full', prompt: 'Run the command.', messages: [],
+      signal: new AbortController().signal, ...over
+    })
+
+    const failed = await adapter.startTurn(input({ nativeHistory: '' }), sink, control, host).then(() => undefined, (caught: unknown) => caught)
+    expect(failed).toMatchObject({ code: 'provider_api_error', message: '400 · Bad Request', details: { status: 400 } })
+    expect(kept).toEqual([true])
+
+    const result = await adapter.startTurn(input({ nativeHistory: history, prompt: continuationPrompt('error 400'), continuesFailedRequest: true }), sink, control, host)
+    expect(result.text).toContain('Picked up and done.')
+    const requests = openai.responses()
+    expect(requests).toHaveLength(3)
+    const items = requests[2]!.body!.input as Array<{ type?: string; role?: string; output?: unknown; content?: unknown }>
+    const text = JSON.stringify(items)
+    // The same Codex thread: the original request, the command and its result are in it, then the note to continue.
+    expect(text).toContain('Run the command.')
+    expect(items.filter((item) => item.type === 'function_call')).toHaveLength(1)
+    expect(JSON.stringify(items.filter((item) => item.type === 'function_call_output'))).toContain(marker)
+    expect(text).toContain('Continue the task from where you stopped')
+    expect(text).not.toContain('Previous conversation')
+  })
 
   describe('a bot turn: what the real Codex offers and lets a command reach', () => {
     /** Codex's tools that run a command, by the names the pinned Codex gives them. */
