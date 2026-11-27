@@ -75,13 +75,13 @@ const RUN_DEFINITION: Tool = {
   })
 }
 
-/** Offered where `question_ask` is: the thread's own agent in Agent and Plan mode, never a subagent. */
+/** Offered where `question_ask` is: the thread's own agent in Agent mode or a read-only mode, never a subagent. */
 function requestOffered(turn: AppToolTurn): boolean {
   return turn.modeFacts.readOnly || (!turn.subagent && turn.modeFacts.agent)
 }
 
 function runAvailable(turn: AppToolTurn): true | string {
-  if (turn.modeFacts.readOnly) return 'secret_run runs a command, which this mode does not allow. Ask for the secret now, and use it once the plan is approved.'
+  if (turn.modeFacts.readOnly) return 'secret_run runs a command, which this mode does not allow. Ask for the secret now, and use it in a turn that may run commands.'
   // A personal bot runs it from its files folder, as its commands run.
   if (turn.bot) return turn.bot.workspace?.files ? true : 'secret_run needs your files folder, and this bot has none.'
   if (!turn.projectPath) return 'secret_run needs a project folder, and this thread has none.'
@@ -220,7 +220,7 @@ export function secretTools(host: AppToolHost): MousseTool[] {
       inputSchema: plainSchema(RUN_DEFINITION),
       definition: () => RUN_DEFINITION,
       // It runs a command in the caller's own workspace: like a shell command, it asks first unless the run's permission
-      // mode allows edits, and a Plan turn or a read-only child cannot call it.
+      // mode allows edits, and a read-only turn or a read-only child cannot call it.
       access: 'editsWorkspace',
       permissionKey: 'mousse:secret_run',
       approvalPrompt: 'Allow the agent to run this command with a secret you gave this thread?',

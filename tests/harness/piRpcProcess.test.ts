@@ -3,7 +3,6 @@ import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createAgentToolAccess } from '../../src/mms/agents/WorkspaceAccessPolicy'
-import type { TurnInput } from '../../src/mms/harness/adapter'
 import { isRetriesExhausted } from '../../src/shared/harness/types'
 import { harness, script, setup as setupEngine, type SetupOptions } from './piRpcEngineFixture'
 
@@ -32,15 +31,16 @@ describe('Pi RPC engine with the real Pi child', () => {
     expect(commands).not.toContain('bash')
   }, 60_000)
 
-  it('plan mode offers no write tool, and the gate refuses a read-only child’s read outside its workspace', async () => {
+  it('a read-only child gets no write tool, and the gate refuses its read outside its workspace', async () => {
     const { engine, recorder, project } = await setup()
     recorder.respond(script([{ tool: { name: 'write', args: { path: 'denied.txt', content: 'x' } } }, { text: 'done' }]))
-    // Plan mode: read-only built-ins only; Pi has no `write` this turn.
-    const plan = harness(project, { mode: 'plan' as TurnInput['mode'] })
-    expect((await engine.startTurn(plan.input, plan.sink, plan.ctl, plan.host)).text).toBe('done')
+    // Read-only built-ins only; Pi has no `write` this turn.
+    const reader = harness(project, { threadId: 'reader', child: { readOnly: true } })
+    reader.host.tools.toolAccess = createAgentToolAccess({ version: 1, workspace: 'shared', access: 'read-only' }, project)
+    expect((await engine.startTurn(reader.input, reader.sink, reader.ctl, reader.host)).text).toBe('done')
     expect(existsSync(join(project, 'denied.txt'))).toBe(false)
 
-    // A shared (read-only) child: its workspace capability checks paths at the gate.
+    // Its workspace capability checks paths at the gate.
     const outside = join(project, '..', 'outside.txt')
     writeFileSync(outside, 'secret')
     recorder.respond(script([{ tool: { name: 'read', args: { path: outside } } }, { text: 'refused' }]))

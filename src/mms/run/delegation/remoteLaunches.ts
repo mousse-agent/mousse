@@ -28,8 +28,8 @@ export interface RemoteLaunchRecord {
   computerName: string
   /** The thread's name there. */
   title: string
-  /** The project there that is the same repository as the launcher's. */
-  remoteProjectId: string
+  /** The project there that is the same repository as the launcher's; null for a thread in no project there. */
+  remoteProjectId: string | null
   worktree: boolean
   /**
    * The `hidden` the create sends that computer: whether it keeps the thread out of its sidebar. Null sends none (a
@@ -42,7 +42,7 @@ export interface RemoteLaunchRecord {
   permissionMode: PermissionMode
   /** The mode it was set to there, once set. */
   remoteMode: PermissionMode | null
-  firstMessage: { content: string; mode: 'agent' | 'plan' } | null
+  firstMessage: { content: string } | null
   /** The agent mark every write of the launch carries, fixed at launch (the launcher's run, title, hops and mode). */
   mark: RoutedAgentMark
   /**
@@ -136,14 +136,15 @@ function fromRow(row: Row): RemoteLaunchRecord {
     node: String(row.node),
     computerName: String(row.computer_name),
     title: String(row.title),
-    remoteProjectId: String(row.remote_project_id),
+    remoteProjectId: str(row.remote_project_id) || null,
     worktree: int(row.worktree) === 1,
     hidden: row.hidden === null || row.hidden === undefined ? null : int(row.hidden) === 1,
     instanceId: str(row.instance_id),
     model: str(row.model),
     permissionMode: isPermissionMode(mode) ? mode : 'ask',
     remoteMode: remoteMode && isPermissionMode(remoteMode) ? remoteMode : null,
-    firstMessage: content === null ? null : { content, mode: row.first_message_mode === 'plan' ? 'plan' : 'agent' },
+    // A row's first_message_mode is retired (Plan mode is gone): a first message always runs as an agent turn.
+    firstMessage: content === null ? null : { content },
     mark: parseMark(row.mark),
     ...(parseSenderBot(row.mark) ? { senderBot: parseSenderBot(row.mark) } : {}),
     remoteThreadId: str(row.remote_thread_id),
@@ -192,14 +193,15 @@ export class RemoteLaunchRecords {
         input.node,
         input.computerName,
         input.title,
-        input.remoteProjectId,
+        // The column is NOT NULL: a thread in no project there is stored as ''.
+        input.remoteProjectId ?? '',
         input.worktree ? 1 : 0,
         input.hidden === null ? null : input.hidden ? 1 : 0,
         input.instanceId,
         input.model,
         input.permissionMode,
         input.firstMessage?.content ?? null,
-        input.firstMessage?.mode ?? null,
+        input.firstMessage ? 'agent' : null,
         JSON.stringify({ ...input.mark, ...(input.senderBot ? { bot: input.senderBot } : {}) }),
         input.firstMessage ? 'pending' : 'none',
         now,

@@ -74,7 +74,7 @@ function setup(options: { botAuthority?: boolean; gaps?: readonly string[]; defa
       sink: { text: noop, thinking: noop, tool: noop, nativeMessages: noop, compaction: noop, retry: noop, progress: noop, usage: noop, providerRef: noop, steerAccepted: noop, providerMetrics: noop, lineEdits: noop },
       control: { drainSteer: () => undefined, heartbeat: noop },
       host: { tools: {}, context: { recoverOverflow: () => null, prepareNativeContext: () => null, nativeHistoryAfterTurn: () => '' } },
-      app: { turnToken: 'turn-token', modeCeiling: 'default', mcpEligible: true, instructions: () => ({ sessionInstructions: 'S', turnPreamble: 'P' }), ...(binding.policy.authority?.kind === 'bot' ? { bot: APP_BOT } : {}) },
+      app: { turnToken: 'turn-token', mcpEligible: true, instructions: () => ({ sessionInstructions: 'S', turnPreamble: 'P' }), ...(binding.policy.authority?.kind === 'bot' ? { bot: APP_BOT } : {}) },
       ...(attemptOrdinal ? { attemptOrdinal } : {})
     }
   }
@@ -87,12 +87,12 @@ function stored(binding: ExecutionBinding): ExecutionBinding {
 }
 
 describe('bind with a policy', () => {
-  it('records the caller\'s policy with the mode and origin, frozen, with the digest of its canonical JSON', async () => {
+  it('records the caller\'s policy with its origin, frozen, with the digest of its canonical JSON', async () => {
     const s = setup()
     const caller = structuredClone(BOT_POLICY)
     const binding = await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: caller })
-    expect(binding.policy).toEqual({ ...BOT_POLICY, mode: 'default', origin: 'bot', permissionMode: 'ask' })
-    const expected = createHash('sha256').update(stableStringify({ ...BOT_POLICY, mode: 'default', origin: 'bot', permissionMode: 'ask' })).digest('hex')
+    expect(binding.policy).toEqual({ ...BOT_POLICY, origin: 'bot', permissionMode: 'ask' })
+    const expected = createHash('sha256').update(stableStringify({ ...BOT_POLICY, origin: 'bot', permissionMode: 'ask' })).digest('hex')
     expect(binding.policyDigest).toBe(expected)
     expect(policyDigest(binding.policy)).toBe(expected)
     // Frozen to its leaves; the caller's own object stays the caller's.
@@ -117,7 +117,7 @@ describe('bind with a policy', () => {
   it('keeps approvals as the shorthand, and records no digest without a policy', async () => {
     const s = setup()
     const plain = await s.harness.bind(s.resolved(), { mode: 'agent', approvals: 'never' })
-    expect(plain.policy).toEqual({ mode: 'default', approvals: 'never', origin: 'interactive', permissionMode: 'ask' })
+    expect(plain.policy).toEqual({ approvals: 'never', origin: 'interactive', permissionMode: 'ask' })
     expect(plain.policyDigest).toBeUndefined()
     expect(Object.isFrozen(plain.policy)).toBe(true)
     const both = await s.harness.bind(s.resolved(), { mode: 'agent', approvals: 'never', policy: { approvals: 'grants' } })
@@ -125,9 +125,9 @@ describe('bind with a policy', () => {
   })
 
   it('needs exact tool control for a host authority', () => {
-    const policy = { mode: 'default' as const, approvals: 'ask' as const, authority: { kind: 'bot' as const, digest: 'd' } }
-    expect(checkPolicy({ ...CLAUDE_SUBSCRIPTION_CAPABILITIES, planMode: true, contextUsage: 'reported', toolControl: 'exact', budgets: 'unsupported', spendLimits: 'unsupported' }, policy, undefined, undefined, { botRuntimeGaps: [] })).toEqual({ ok: true })
-    expect(checkPolicy({ ...CLAUDE_SUBSCRIPTION_CAPABILITIES, planMode: true, contextUsage: 'reported', toolControl: 'approval_only', budgets: 'unsupported', spendLimits: 'unsupported' }, policy, undefined, undefined, { botRuntimeGaps: [] }))
+    const policy = { approvals: 'ask' as const, authority: { kind: 'bot' as const, digest: 'd' } }
+    expect(checkPolicy({ ...CLAUDE_SUBSCRIPTION_CAPABILITIES, contextUsage: 'reported', toolControl: 'exact', budgets: 'unsupported', spendLimits: 'unsupported' }, policy, undefined, undefined, { botRuntimeGaps: [] })).toEqual({ ok: true })
+    expect(checkPolicy({ ...CLAUDE_SUBSCRIPTION_CAPABILITIES, contextUsage: 'reported', toolControl: 'approval_only', budgets: 'unsupported', spendLimits: 'unsupported' }, policy, undefined, undefined, { botRuntimeGaps: [] }))
       .toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['toolControl'] } })
   })
 })
@@ -140,9 +140,9 @@ describe('approvals answered by the host', () => {
     expect(binding.policyDigest).not.toBe((await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: BOT_POLICY })).policyDigest)
     await expect(s.harness.startTurn(s.spec(binding)).result).rejects.toMatchObject({ code: 'policy_unenforceable', details: { missing: ['toolControl'], reason: HOST_APPROVALS_UNAVAILABLE } })
     expect(s.hosts).toHaveLength(0)
-    const exact = { ...CLAUDE_SUBSCRIPTION_CAPABILITIES, planMode: true, contextUsage: 'reported' as const, toolControl: 'exact' as const, budgets: 'hard' as const, spendLimits: 'unsupported' as const }
-    expect(checkPolicy(exact, { mode: 'default', approvals: 'grants', approve: 'host' })).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['toolControl'], reason: HOST_APPROVALS_UNAVAILABLE } })
-    expect(checkPolicy(exact, { mode: 'default', approvals: 'grants' })).toEqual({ ok: true })
+    const exact = { ...CLAUDE_SUBSCRIPTION_CAPABILITIES, contextUsage: 'reported' as const, toolControl: 'exact' as const, budgets: 'hard' as const, spendLimits: 'unsupported' as const }
+    expect(checkPolicy(exact, { approvals: 'grants', approve: 'host' })).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['toolControl'], reason: HOST_APPROVALS_UNAVAILABLE } })
+    expect(checkPolicy(exact, { approvals: 'grants' })).toEqual({ ok: true })
   })
 })
 
@@ -159,7 +159,7 @@ describe('approvals answered by a bot authority (PR 6 6c-1)', () => {
     expect(s.hosts).toHaveLength(1)
     // The authority comes only from the app context; one the caller put on the host is dropped.
     expect(s.hosts[0].bot).toBe(authority)
-    expect(s.harness.checkPolicy('claude', { mode: 'default', origin: 'bot', ...BOT_POLICY, approve: 'host' })).toEqual({ ok: true })
+    expect(s.harness.checkPolicy('claude', { origin: 'bot', ...BOT_POLICY, approve: 'host' })).toEqual({ ok: true })
   })
 
   it('a bot policy without its bot authority never reaches the runtime, nor does a bot authority on another policy', async () => {
@@ -180,7 +180,7 @@ describe('approvals answered by a bot authority (PR 6 6c-1)', () => {
     const binding = await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: { ...BOT_POLICY, approve: 'host' } })
     await expect(s.harness.startTurn(s.spec(binding)).result).rejects.toMatchObject({ code: 'policy_unenforceable', details: { missing: ['containment'], reason: botRuntimeGapReason(gaps) } })
     expect(s.hosts).toHaveLength(0)
-    expect(s.harness.checkPolicy('claude', { mode: 'default', origin: 'bot', ...BOT_POLICY, approve: 'host' })).toMatchObject({ ok: false, error: { missing: ['containment'] } })
+    expect(s.harness.checkPolicy('claude', { origin: 'bot', ...BOT_POLICY, approve: 'host' })).toMatchObject({ ok: false, error: { missing: ['containment'] } })
   })
 
   it('no piece is missing any more (Bot Phase 1 §5.9): by default a runtime that holds bots admits a bot turn', async () => {
@@ -191,7 +191,7 @@ describe('approvals answered by a bot authority (PR 6 6c-1)', () => {
   })
 
   it('canHoldBot: a bot policy on a runtime that holds a bot authority, and nothing else', () => {
-    const policy = { mode: 'default' as const, origin: 'bot' as const, ...BOT_POLICY, approve: 'host' as const }
+    const policy = { origin: 'bot' as const, ...BOT_POLICY, approve: 'host' as const }
     expect(setup({ botAuthority: true }).harness.canHoldBot('claude', policy)).toEqual({ ok: true })
     // A runtime without a bot gate (Codex, an interactive Claude Code entry).
     expect(setup().harness.canHoldBot('claude', policy)).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['toolControl'], instanceId: 'claude' } })
@@ -221,9 +221,9 @@ describe('approvals answered by a bot authority (PR 6 6c-1)', () => {
 
   it('are refused on the same runtime for anything but a bot authority', () => {
     const s = setup({ botAuthority: true })
-    expect(s.harness.checkPolicy('claude', { mode: 'default', approvals: 'grants', approve: 'host', authority: { kind: 'definition', digest: 'd' } }))
+    expect(s.harness.checkPolicy('claude', { approvals: 'grants', approve: 'host', authority: { kind: 'definition', digest: 'd' } }))
       .toMatchObject({ ok: false, error: { reason: HOST_APPROVALS_UNAVAILABLE } })
-    expect(s.harness.checkPolicy('missing', { mode: 'default', approvals: 'ask' })).toMatchObject({ ok: false, error: { code: 'policy_unenforceable' } })
+    expect(s.harness.checkPolicy('missing', { approvals: 'ask' })).toMatchObject({ ok: false, error: { code: 'policy_unenforceable' } })
   })
 })
 

@@ -107,7 +107,7 @@ async function run(options: { definition?: (project: string) => DefinitionAuthor
     const call = JSON.parse(raw) as { id: string; params: { name: string; arguments: Record<string, unknown> } }
     const { clientRequestId, ...args } = call.params.arguments
     const outcome = await registry.call(call.params.name, args, {
-      credential: { threadId: 't1', runId: 'r1', provider: 'pi', modeCeiling: 'default', binding: 'per_call', current: () => true },
+      credential: { threadId: 't1', runId: 'r1', provider: 'pi', binding: 'per_call', current: () => true },
       toolCallId: `mcp:${String(clientRequestId)}`,
       signal: new AbortController().signal
     }).catch((error: unknown) => ({ text: error instanceof Error ? error.message : String(error), isError: true }))

@@ -41,7 +41,7 @@ const ANSWER_TOOLS: readonly string[] = Object.values(REQUEST_ANSWER_KINDS).map(
 export * from './types'
 export * from './refusal'
 export * from './registry'
-export { compileTool, heldBeforeArguments, holdsPerson, parentHolds, plannedFromAbove, toolNeeds, unattendedRefusal, type CompiledTool, type RunProvenance, type ToolEffect, type ToolNeeds } from './authority'
+export { compileTool, heldBeforeArguments, holdsPerson, parentHolds, toolNeeds, unattendedRefusal, type CompiledTool, type RunProvenance, type ToolEffect, type ToolNeeds } from './authority'
 export * from './turns'
 export type { AgentAccessResult, AgentActionDetails, AgentApprovalResult, AgentArchiveResult, AgentArchiveOwnResult, AgentCreatedThread, AgentRemoteThreadRequest, AgentRemoteThreadResult, RemoteProjectCandidate, AgentQueueCommand, AgentQueueResult, AgentScheduleHost, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, ApprovalRequestInfo, AppToolHost, QueueSnapshot, RemoteThreadsHost, ThreadSearchHit } from './host'
 export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessage, agentMessageText, cleanRemoteSenderTitle, BOT_MESSAGE_END, BOT_MESSAGE_PREFIX, botMessage, botMessageText, isPersonMessage, personTurnRequest } from './agentMessage'
@@ -114,8 +114,6 @@ export function createAppToolRegistry(input: {
     awaitLiveRun: host.awaitLiveRun ? (threadId) => host.awaitLiveRun!(threadId) : undefined,
     toolLedger: host.toolLedger ? (runId) => host.toolLedger!(runId) : undefined,
     readOnlyThread: host.readOnlyThread ? (threadId) => host.readOnlyThread!(threadId) : undefined,
-    threadCeiling: host.threadCeiling ? (threadId) => host.threadCeiling!(threadId) : undefined,
-    liveCeiling: host.liveCeiling ? (threadId) => host.liveCeiling!(threadId) : undefined,
     subagentThread: host.subagentThread ? (threadId) => host.subagentThread!(threadId) : undefined,
     personHeld: host.personHeld ? (caller) => host.personHeld!(caller) : undefined,
     parentThread: host.parentThread ? (threadId) => host.parentThread!(threadId) : undefined,

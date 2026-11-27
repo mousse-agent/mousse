@@ -76,7 +76,7 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     })
     const orch = d.orch as unknown as {
       createThreadAsAgent(input: Record<string, unknown>, options: Record<string, unknown>): Promise<AgentCreatedThread>
-      sendToThreadAsAgent(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options: Record<string, unknown>): Promise<{ runId: string }>
+      sendToThreadAsAgent(threadId: string, input: { content: string; mode?: 'agent' }, options: Record<string, unknown>): Promise<{ runId: string }>
       stopRunAsAgent(threadId: string, runId: string, options: Record<string, unknown>): Promise<unknown>
       setThreadArchivedAsAgent(threadId: string, archived: boolean, options: Record<string, unknown>): Promise<unknown>
       setThreadHiddenAsAgent(threadId: string, hidden: boolean, options: Record<string, unknown>): { hidden: boolean; changed: boolean }

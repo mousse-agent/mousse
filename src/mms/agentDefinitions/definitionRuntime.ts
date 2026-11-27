@@ -206,7 +206,6 @@ export function definitionRunPolicy(
 ): RunPolicy {
   const { budget } = request
   return {
-    mode: 'default',
     origin: request.origin,
     approvals: 'grants',
     tools: { allow: definitionToolNames(request.grants, toolNames) },

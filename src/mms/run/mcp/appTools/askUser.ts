@@ -58,7 +58,7 @@ function openQuestionText(questionId: string): string {
 }
 
 /**
- * `question_ask` is offered in Plan mode and in Agent mode alike. Subagents and Build/Skill modes go without it so
+ * `question_ask` is offered in Agent mode and in a read-only mode. Subagents and Build/Skill modes go without it so
  * workers implement instead of stopping to ask.
  */
 function offeredInMode(turn: AppToolTurn): boolean {

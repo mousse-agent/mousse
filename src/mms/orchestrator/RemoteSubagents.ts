@@ -518,6 +518,8 @@ export class RemoteSubagents {
     const name = this.computerName(record.node)
     let remoteThreadId = record.remoteThreadId
     try {
+      if (record.readOnly)
+        throw new DomainRpcError('read_only_not_remote', 'This task was started read-only, and a subagent on another computer can no longer be held read-only.')
       await this.markedForm(record)
       const deadlineMinutes = await this.runningLimitThere(record)
       const port = this.deps.port()
@@ -550,7 +552,6 @@ export class RemoteSubagents {
         mark: this.markOf(record),
         message: {
           content: record.prompt,
-          mode: record.chatMode,
           clientRequestId: `remote-subagent:${record.delegationId}`,
           // A follow-up on a thread that may be paused by a usage limit refuses, as a follow-up on one computer does.
           // A thread made for this task has never run, so the first task sends nothing extra to an older computer.

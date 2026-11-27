@@ -140,7 +140,7 @@ describe('execution bindings', () => {
     expect(bindingOf(run.runId)).toEqual({
       instanceId: 'claude', driver: 'claude', accountGeneration: 0, homeId: 'default', configRevision: 0, model: 'sonnet',
       accountId: expect.stringMatching(/^[0-9a-f]{32}$/),
-      policy: { mode: 'default', approvals: 'ask', permissionMode: 'accept_edits', origin: 'interactive' },
+      policy: { approvals: 'ask', permissionMode: 'accept_edits', origin: 'interactive' },
       // The caps the attempt runs on, frozen with the binding.
       caps: expect.objectContaining({ steer: 'interrupt_restart', toolControl: 'approval_only' }),
       factsRevision: 0
@@ -369,7 +369,7 @@ describe('execution bindings', () => {
     expect(adapter.turns).toHaveLength(1)
     expect(adapter.turns[0]).toMatchObject({ instanceId: 'claude', model: 'bound-model', mode: 'agent' })
     expect(engine.store.getAttempt(retryAttempt!)?.executionBinding).toEqual(bound)
-    expect(bound.policy).toEqual({ mode: 'default', approvals: 'ask', permissionMode: 'ask', origin: 'interactive' })
+    expect(bound.policy).toEqual({ approvals: 'ask', permissionMode: 'ask', origin: 'interactive' })
   })
 
   it('a turn on a runtime that resolves `default` runs and records the bound model, and recovery keeps it', async () => {
@@ -402,35 +402,6 @@ describe('execution bindings', () => {
     await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
     expect(codex.turns).toEqual([])
     expect(engine.listRuns(thread.id).map((run) => [run.status, run.outcome?.error])).toEqual([['failed', expect.stringMatching(/model_unavailable.*Refresh models/)]])
-  })
-
-  it('a plan-mode binding is never run with an agent-mode input', async () => {
-    const thread = store.createThread('plan retry')
-    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
-    const bound = await harness.bind(harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'sonnet' }, { purpose: 'turn' }), { mode: 'plan' })
-    expect(bound.policy).toEqual({ mode: 'plan', approvals: 'ask', permissionMode: 'ask', origin: 'interactive' })
-    const markStarting = engine.markStarting.bind(engine)
-    engine.markStarting = (runId) => {
-      const run = markStarting(runId)
-      engine.store.setAttemptBinding(run.activeAttemptId!, bound)
-      engine.store.createAttempt({ runId, reason: 'retry' })
-      return engine.getRun(runId)!
-    }
-    // The replayed request is in agent mode; the runtime would take bypass permissions from it.
-    await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
-    expect(adapter.turns).toEqual([])
-    const [run] = engine.listRuns(thread.id)
-    expect(run.status).toBe('failed')
-    expect(run.outcome?.error).toMatch(/default mode but its binding is plan mode/)
-  })
-
-  it('a plan-mode send records a plan policy and runs the input in plan mode', async () => {
-    const thread = store.createThread('plan')
-    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
-    await orch.send({ content: 'one', mode: 'plan' }, false, { threadId: thread.id, clientRequestId: 'send-a' })
-    const [run] = engine.listRuns(thread.id)
-    expect(bindingOf(run.runId)?.policy).toEqual({ mode: 'plan', approvals: 'ask', permissionMode: 'accept_edits', origin: 'interactive' })
-    expect(adapter.turns.map((turn) => turn.mode)).toEqual(['plan'])
   })
 
   it('a recovery attempt whose binding no longer matches the instance config fails typed instead of running', async () => {

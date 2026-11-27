@@ -84,7 +84,7 @@ describe('skill_list and skill_load over MCP', () => {
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, projectPath: '/work', enabledSkills: [REVIEW, GATED, GONE] }))
     server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
     await server.start()
-    const mcp = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!
+    const mcp = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, binding: 'drained_turn', generation: 'g' })!
 
     const listed = await callTool(mcp, 'skill_list')
     expect(listed.error).toBeUndefined()
@@ -155,7 +155,7 @@ describe('skill_list and skill_load over MCP', () => {
       }))
       server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
       await server.start()
-      const mcp = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!
+      const mcp = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, binding: 'drained_turn', generation: 'g' })!
       const load = (skill: string) => callTool(mcp, 'skill_load', { skill })
 
       expect((await load('inherited-review')).text).toContain('Granted instructions.')

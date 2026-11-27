@@ -1169,34 +1169,18 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
   })
 
   describe('what an agent\'s send does with the target\'s own chat mode', () => {
-    it('a thread a person keeps in Plan takes the message as a plan turn, whatever mode the sender asked for', async () => {
+    it('a thread whose last message was stored in the retired Plan mode takes the message as an agent turn', async () => {
       const seen: Record<string, unknown> = {}
       const w = world(async (input, mcp) => {
-        if (input.threadId === w.parent.id) seen.send = parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'implement it', mode: 'agent' }))
+        if (input.threadId === w.parent.id) seen.send = parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'implement it' }))
         return 'ok'
       })
       await w.attach()
       await w.d.orch.send({ content: 'let us plan first', mode: 'plan' }, false, { threadId: w.other.id, clientRequestId: 'plan' })
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
       await waitFor(() => w.turnsOf(w.other.id).length === 2, 'the agent message turn')
-      expect(w.turnsOf(w.other.id)[1].mode).toBe('plan')
-      expect(seen.send).toMatchObject({ mode: 'plan' })
-    })
-  })
-
-  describe('a plan turn', () => {
-    it('cannot start an agent turn on another thread, and may wait for one', async () => {
-      const seen: Record<string, Awaited<ReturnType<typeof rpc>>> = {}
-      const w = world(async (_input, mcp) => {
-        seen.send = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'x' })
-        seen.wait = await call(mcp!, 'thread_wait', { threadId: w.other.id })
-        return 'planned'
-      })
-      await w.attach()
-      await w.d.orch.send({ content: 'Plan it', mode: 'plan' }, false, { threadId: w.parent.id, clientRequestId: 'plan' })
-      expect(refusalOfResponse(seen.send!)).toMatchObject({ code: 'mousse_ceiling_exceeded', refused: { code: 'ceiling_exceeded', retry: 'never' } })
-      expect(parse(seen.wait!)).toMatchObject({ status: 'idle' })
-      expect(w.d.engine.listRuns(w.other.id)).toEqual([])
+      expect(w.turnsOf(w.other.id).map((turn) => turn.mode)).toEqual(['agent', 'agent'])
+      expect(seen.send).not.toHaveProperty('mode')
     })
   })
 

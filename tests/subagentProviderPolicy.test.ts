@@ -57,22 +57,21 @@ describe('policy table: permission decisions', () => {
   const SUPERVISED = { approvalPolicy: 'untrusted', sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false } }
   const FULL = { approvalPolicy: 'never', sandbox: 'danger-full-access', sandboxPolicy: { type: 'dangerFullAccess' } }
   it.each([
-    ['agent turn asking', 'default', undefined, 'ask', SUPERVISED],
-    ['agent turn accepting edits', 'default', undefined, 'accept_edits', SUPERVISED],
-    ['agent turn with full access', 'default', undefined, 'full', FULL],
-    // A plan turn and a read-only child stay read-only whatever the permission mode says.
-    ['plan turn', 'plan', undefined, 'full', READ_ONLY],
-    ['isolated child asking', 'default', ISOLATED, 'ask', SUPERVISED],
-    ['isolated child with full access', 'default', ISOLATED, 'full', FULL],
-    ['shared child', 'default', SHARED, 'full', READ_ONLY],
-    ['shared child in plan mode', 'plan', SHARED, 'ask', READ_ONLY]
-  ] as const)('Codex sandbox and approvals for a %s', (_name, mode, child, permissionMode, expected) => {
-    expect(codexTurnPolicy(mode, child, permissionMode)).toEqual(expected)
+    ['agent turn asking', undefined, 'ask', SUPERVISED],
+    ['agent turn accepting edits', undefined, 'accept_edits', SUPERVISED],
+    ['agent turn with full access', undefined, 'full', FULL],
+    // A read-only child stays read-only whatever the permission mode says.
+    ['isolated child asking', ISOLATED, 'ask', SUPERVISED],
+    ['isolated child with full access', ISOLATED, 'full', FULL],
+    ['shared child', SHARED, 'full', READ_ONLY],
+    ['shared child asking', SHARED, 'ask', READ_ONLY]
+  ] as const)('Codex sandbox and approvals for a %s', (_name, child, permissionMode, expected) => {
+    expect(codexTurnPolicy(child, permissionMode)).toEqual(expected)
   })
 
   it('a bot turn asks (untrusted): read-only without "run commands", workspace-write over its own folders with it', () => {
-    expect(codexTurnPolicy('default', undefined, 'ask', { shell: false, writableRoots: [] })).toEqual(SUPERVISED)
-    expect(codexTurnPolicy('default', undefined, 'ask', { shell: true, writableRoots: ['/p/files/b1', '/home/me/site'] })).toEqual({
+    expect(codexTurnPolicy(undefined, 'ask', { shell: false, writableRoots: [] })).toEqual(SUPERVISED)
+    expect(codexTurnPolicy(undefined, 'ask', { shell: true, writableRoots: ['/p/files/b1', '/home/me/site'] })).toEqual({
       approvalPolicy: 'untrusted',
       sandbox: 'workspace-write',
       sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/p/files/b1', '/home/me/site'], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true }
@@ -183,7 +182,6 @@ describe('Claude Subscription children', () => {
     await service.chat(input({ child: SHARED, history: 'history' }))
     expect(options[1].resume).toBe('vendor-session')
     for (const turn of options) {
-      // Not plan mode: that would inject the planning and ExitPlanMode flow into a research task.
       expect(turn.permissionMode).toBe('default')
       expect(turn).not.toHaveProperty('allowDangerouslySkipPermissions')
       untouched(turn)
@@ -194,19 +192,14 @@ describe('Claude Subscription children', () => {
     expect(seen).toEqual([{ hook, canUse }, { hook, canUse }])
   })
 
-  it('the hook answers "ask" for a shared child exactly as for a plan turn, so the user\'s own allow rules cannot skip canUseTool', async () => {
-    const plan = fixture()
-    await plan.service.chat(plan.input({ mode: 'plan' }))
+  it('the hook answers "ask" for a shared child, so the user\'s own allow rules cannot skip canUseTool', async () => {
     const shared = fixture()
     await shared.service.chat(shared.input({ child: SHARED }))
-    const [planSeen, sharedSeen] = seen
+    const [sharedSeen] = seen
     // Every tool the read-only allowlist lets through is routed to canUseTool by an "ask" decision;
     // without it, an allow rule in the user's settings.json would approve the call before the
-    // callback ran. The same decision for both kinds of turn.
-    for (const tool of ['Read', 'mcp__mousse__thread_read']) {
-      expect(planSeen.hook[tool], tool).toBe('ask')
-      expect(sharedSeen.hook[tool], tool).toBe('ask')
-    }
+    // callback ran.
+    for (const tool of ['Read', 'mcp__mousse__thread_read']) expect(sharedSeen.hook[tool], tool).toBe('ask')
     expect(sharedSeen.canUse.Read).toBe('allow')
     expect(shared.options[0].canUseTool).toBeTypeOf('function')
     // A tool outside the allowlist is denied by the hook itself, which also beats an allow rule.

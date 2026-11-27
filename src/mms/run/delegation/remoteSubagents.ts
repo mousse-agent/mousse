@@ -25,8 +25,11 @@ export interface RemoteSubagentRecord {
    * to the limit it set for this one (`RemoteSubagents.advanceStart`), so Full access is used only when both allow it.
    */
   permissionMode: PermissionMode
-  /** `plan` for a read-only task (`readOnly`, or a plan ceiling): it plans and reads, never edits. */
-  chatMode: 'agent' | 'plan'
+  /**
+   * A task an older version started read-only (its row's `chat_mode` is `plan`). That computer can no longer hold a
+   * thread read-only, so such a task is never started or continued again; every new task is an agent's.
+   */
+  readOnly: boolean
   /** The far thread works in a worktree of its own (`workspace: 'isolated'`). */
   worktree: boolean
   /** The far project that is the same repository as the parent's; null for a thread with no project. */
@@ -98,7 +101,7 @@ function fromRow(row: Row): RemoteSubagentRecord {
     node: String(row.node),
     prompt: String(row.prompt),
     permissionMode: isPermissionMode(mode) ? mode : 'ask',
-    chatMode: row.chat_mode === 'agent' ? 'agent' : 'plan',
+    readOnly: row.chat_mode === 'plan',
     worktree: int(row.worktree) === 1,
     projectId: str(row.project_id),
     instanceId: str(row.instance_id),
@@ -141,7 +144,7 @@ const COLUMNS: Record<keyof RemoteSubagentPatch, string> = {
 export class RemoteSubagentRecords {
   constructor(private readonly store: RunStore) {}
 
-  create(input: Omit<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'limitMinutes' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'marked' | 'hidden' | 'subagent' | 'createdAt' | 'updatedAt'> & {
+  create(input: Omit<RemoteSubagentRecord, 'readOnly' | 'remoteThreadId' | 'remoteRunId' | 'limitMinutes' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'marked' | 'hidden' | 'subagent' | 'createdAt' | 'updatedAt'> & {
     limitMinutes?: number | null
     /** A follow-up on a subagent whose far thread already exists. */
     remoteThreadId?: string | null
@@ -160,7 +163,8 @@ export class RemoteSubagentRecords {
         input.node,
         input.prompt,
         input.permissionMode,
-        input.chatMode,
+        // The column is retired: every new task runs as an agent there.
+        'agent',
         input.worktree ? 1 : 0,
         input.projectId,
         input.instanceId,

@@ -42,7 +42,7 @@ export function assertHarnessConformance(result: ScenarioResult, options: { stop
     accountGeneration: 0,
     configRevision: 0,
     // The scenarios run in Full access (nothing asks), which binds as a grant.
-    policy: { mode: 'default', approvals: 'grants' }
+    policy: { approvals: 'grants' }
   })
   const ref = attempts.find((attempt) => attempt.providerRef)?.providerRef
   if (ref) expect(ref.instanceId ?? binding?.instanceId).toBe(expected.instanceId)

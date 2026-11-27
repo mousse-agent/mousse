@@ -60,7 +60,7 @@ describe('Pi extension → Mousse MCP registry', () => {
     server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
     await server.start()
     const first = turns.register(appTurn({ threadId: 'thread-a', runId: run.runId }))
-    const bearer = (runId: string) => server!.bearerForTurn({ threadId: 'thread-a', instanceId: 'pi:openrouter', runId, modeCeiling: 'default', binding: 'per_call', generation: 'pi|private:pi:openrouter|0|0' })!
+    const bearer = (runId: string) => server!.bearerForTurn({ threadId: 'thread-a', instanceId: 'pi:openrouter', runId, binding: 'per_call', generation: 'pi|private:pi:openrouter|0|0' })!
     const attachment = bearer(run.runId)
     let turn: PiTurnResponse = {
       attemptToken: first.turn.turnToken, sessionInstructions: '', activeBuiltins: [], catalogRevision: 1,

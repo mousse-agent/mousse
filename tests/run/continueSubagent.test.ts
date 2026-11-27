@@ -215,29 +215,6 @@ describe('continue_subagent and the title address (issue #142)', () => {
       expect(out.two).toMatchObject({ delegationId: out.one.delegationId, replayed: true })
       expect(d.engine.delegations.listForChildThread(out.first.childThreadId)).toHaveLength(2)
     })
-
-    it('narrows to the subagent\'s own ceiling: a plan subagent stays plan under a default caller, and a plan caller makes a plan follow-up', async () => {
-      const { d, adapter, steps, out, say, start, settled } = world()
-      steps['go'] = async (tools) => { out.planChild = await start(tools, 'Planner', { modeCeiling: 'plan' }) }
-      steps['default-continue'] = async (tools) => { out.fromDefault = await tools.continueSubagent({ subagent: 'Planner', prompt: 'Again' }, { toolCallId: 'c1' }) as Json }
-      await say('go')
-      await settled(out.planChild.childRunId)
-      await say('default-continue')
-      await settled(out.fromDefault.childRunId)
-      expect(d.engine.delegations.get(out.fromDefault.delegationId)).toMatchObject({ modeCeiling: 'plan' })
-      expect(adapter.turns.filter((turn) => turn.threadId === out.planChild.childThreadId).map((turn) => turn.mode)).toEqual(['plan', 'plan'])
-
-      // A default subagent continued by a plan-ceiling caller runs the follow-up in plan mode.
-      const world2 = world()
-      world2.steps['go'] = async (tools) => { world2.out.child = await world2.start(tools, 'Builder', { workspace: 'isolated', role: 'implement' }) }
-      await world2.say('go')
-      await world2.settled(world2.out.child.childRunId)
-      const planCaller = (world2.d.orch as any).delegationTools(world2.d.orch.getOrCreateSession(world2.parent.id), world2.d.engine.listRuns(world2.parent.id)[0].runId, 'plan') as DelegationToolHost
-      const followUp = await planCaller.continueSubagent({ subagent: 'Builder', prompt: 'Plan the next step' }, { toolCallId: 'c9' }) as Json
-      await world2.settled(followUp.childRunId)
-      expect(world2.d.engine.delegations.get(followUp.delegationId)).toMatchObject({ modeCeiling: 'plan', workspace: 'isolated', role: 'implement' })
-      expect(world2.adapter.turns.filter((turn) => turn.threadId === world2.out.child.childThreadId).map((turn) => turn.mode)).toEqual(['agent', 'plan'])
-    })
   })
 
   describe('integrate_delegation by title', () => {
@@ -270,24 +247,21 @@ describe('continue_subagent and the title address (issue #142)', () => {
   })
 
   describe('nested subagents (issue #142)', () => {
-    it('a subagent starts subagents of its own, and its authority only narrows down the tree', async () => {
+    it('a subagent starts subagents of its own, each in its own title namespace', async () => {
       const seen: Json = {}
       const { d, adapter, steps, out, say, start, settled } = world(async (input, tools) => {
-        if (!input.prompt.endsWith('Review Planner')) return `done: ${input.prompt}`
-        // The subagent is itself a caller: it cannot widen the plan ceiling it was given.
-        seen.broader = await tools!.delegateTask({ prompt: 'Edit', title: 'Editor', workspace: 'isolated', modeCeiling: 'default' } as never, { toolCallId: 'g0' }).catch((error: { code?: string }) => ({ code: error.code }))
+        if (!input.prompt.endsWith('Review Lead')) return `done: ${input.prompt}`
         seen.grandchild = await tools!.delegateTask({ prompt: 'Survey', title: 'Surveyor', workspace: 'shared', role: 'research' } as never, { toolCallId: 'g1' })
         seen.taken = await tools!.delegateTask({ prompt: 'Survey', title: ' surveyor', workspace: 'shared', role: 'research' } as never, { toolCallId: 'g2' })
-        return 'Planned.'
+        return 'Led.'
       })
-      steps['go'] = async (tools) => { out.child = await start(tools, 'Planner', { modeCeiling: 'plan' }) }
+      steps['go'] = async (tools) => { out.child = await start(tools, 'Lead') }
       await say('go')
       await settled(out.child.childRunId)
       await settled(seen.grandchild.childRunId)
-      expect(seen.broader).toEqual({ code: 'mousse_ceiling_exceeded' })
-      // The grandchild inherited the plan ceiling and ran in plan mode.
-      expect(d.engine.delegations.get(seen.grandchild.delegationId)).toMatchObject({ parentThreadId: out.child.childThreadId, modeCeiling: 'plan' })
-      expect(adapter.turns.find((turn) => turn.threadId === seen.grandchild.childThreadId)?.mode).toBe('plan')
+      // The grandchild is the child's own subagent.
+      expect(d.engine.delegations.get(seen.grandchild.delegationId)).toMatchObject({ parentThreadId: out.child.childThreadId, workspace: 'shared' })
+      expect(adapter.turns.find((turn) => turn.threadId === seen.grandchild.childThreadId)?.mode).toBe('agent')
       // Titles are unique per parent: the child's own subagents have their own namespace.
       expect(seen.taken).toMatchObject({ started: false, code: 'title_taken' })
       // The grandchild is the child's subagent, not the main thread's: the main thread cannot reach it.

@@ -488,6 +488,8 @@ export function knownToolName(rawName: string | undefined): string | undefined {
     case 'skilllist':
     case 'loadskill':
     case 'listskills':
+    case 'skillload':
+    case 'skilllist':
       return 'Skill'
     case 'agent':
       return 'Agent'

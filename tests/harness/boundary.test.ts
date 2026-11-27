@@ -165,7 +165,7 @@ describe('driver-name literals', () => {
     expect(hit(`if (['x'].includes('codex'))`)).toBe(true)
     expect(hit(`instanceId.startsWith('pi')`)).toBe(true)
     expect(hit(`const LABELS = { codex: 'Codex' }`)).toBe(false)
-    expect(hit(`if (caps.planMode) return`)).toBe(false)
+    expect(hit(`if (caps.mcp) return`)).toBe(false)
   })
 
   it('every allowlisted file still exists', () => {

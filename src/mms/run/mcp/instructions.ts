@@ -12,7 +12,6 @@ export function mousseOrchestrationInstructions(): string {
     '',
     ...mcpDelegationInstructions(),
     '- clientRequestId: pass a fresh clientRequestId for every new action that changes state (delegate_task, thread_send, request_answer). Reuse the same value only when retrying the same call after an error or timeout; Mousse then returns the first result instead of acting twice.',
-    '- A delegated task can never exceed your own mode ceiling: a planning turn may only start planning children.',
     '- Use question_ask for clarifying questions; use thread_read to read your thread\'s run events (and those of your parent or children).',
     '- message_parent (a subagent, or a thread a personal bot started) messages your parent while you work. Use it only when you need its input (a question, a blocker) or it must know something now; not for progress updates, which your final answer covers.',
     '- terminal_read reads the terminals the user has open in your thread\'s terminal panel (read-only). Use it when the user refers to their terminal ("the error in my terminal", "is the server up?") instead of asking them to paste the output, and before you start a dev server or watcher that may already run there.',

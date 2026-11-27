@@ -64,7 +64,7 @@ describe('MousseMcpServer relay path', () => {
     await server.start()
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId }))
     const attachment = server.bearerForTurn({
-      threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'codex|default|0|0', relay: { approvals: 'runtime' }
+      threadId: 'thread-a', instanceId: 'codex', runId: run.runId, binding: 'drained_turn', generation: 'codex|default|0|0', relay: { approvals: 'runtime' }
     })!
     return { run, server, attachment, catalog, manager, credentials }
   }

@@ -109,7 +109,7 @@ describe('a bot\'s profiler tools', () => {
       // A refusal reads as its words; its shape is checked in toolRefusalShape.test.ts.
       return { error: outcome.isError === true, text: refusalOf(outcome)?.message ?? outcome.text }
     }
-    const listed = () => profilerNames(registry.listForThread('home', 'default', homeRun.runId).map((tool) => tool.name))
+    const listed = () => profilerNames(registry.listForThread('home', homeRun.runId).map((tool) => tool.name))
     return { compiled, call, listed, runId: homeRun.runId, registry }
   }
 

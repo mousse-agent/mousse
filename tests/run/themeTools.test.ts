@@ -1,7 +1,7 @@
 /**
  * The agents' theme tools (#1142) through the registry the Mousse MCP server serves, over a real settings store:
  * theme_read gives the themes and the guide; theme_set switches themes or saves a user theme and switches to it. It
- * changes settings, so a read-only turn, a read-only child and a Plan ceiling are refused, and under Ask the person
+ * changes settings, so a read-only turn and a read-only child are refused, and under Ask the person
  * is asked first.
  */
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
@@ -31,7 +31,7 @@ describe('theme_read and theme_set', () => {
     home = undefined
   })
 
-  const setup = async (options: { mode?: 'ask' | 'accept_edits' | 'full'; answer?: 'allow' | 'reject'; readOnlyTurn?: boolean; readOnlyChild?: boolean; ceiling?: 'plan' | 'default'; subagent?: boolean; unattended?: boolean; importWallpaper?: AppearanceToolHost['importWallpaper'] } = {}) => {
+  const setup = async (options: { mode?: 'ask' | 'accept_edits' | 'full'; answer?: 'allow' | 'reject'; readOnlyTurn?: boolean; readOnlyChild?: boolean; subagent?: boolean; unattended?: boolean; importWallpaper?: AppearanceToolHost['importWallpaper'] } = {}) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-theme-tools-'))
     const settings = new SettingsStore(MousseConfigStore.load(home))
     const saves: unknown[] = []
@@ -63,14 +63,13 @@ describe('theme_read and theme_set', () => {
       }
     })
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
-    const ceiling = options.ceiling ?? 'default'
     turns.register(appTurn({
-      threadId: 'parent', runId: run.runId, modeCeiling: ceiling, subagent: options.subagent ?? false,
+      threadId: 'parent', runId: run.runId, subagent: options.subagent ?? false,
       ...(options.unattended ? { approvals: 'never' as const } : {}),
-      ...(options.readOnlyTurn ? { mode: 'plan', modeFacts: { readOnly: true, agent: false, build: false } } : {})
+      ...(options.readOnlyTurn ? { mode: 'reviewer', modeFacts: { readOnly: true, agent: false, build: false } } : {})
     }))
     const call = (name: string, args: Record<string, unknown> = {}) =>
-      registry.call(name, args, request({ threadId: 'parent', runId: run.runId, modeCeiling: ceiling }))
+      registry.call(name, args, request({ threadId: 'parent', runId: run.runId }))
     const parsed = async (name: string, args: Record<string, unknown> = {}) => {
       const outcome = await call(name, args)
       if (outcome.isError) throw new Error(outcome.text)
@@ -159,26 +158,19 @@ describe('theme_read and theme_set', () => {
     expect(read.guide).toContain('[data-mousse="sidebar"]')
   })
 
-  it('a read-only turn (Plan) is refused and nothing changes', async () => {
+  it('a read-only turn (a mode that denies edits) is refused and nothing changes', async () => {
     const { call, saves, asked } = await setup({ readOnlyTurn: true })
     await expect(call('theme_set', { theme: 'light' })).resolves.toMatchObject({ isError: true, text: expect.stringContaining('read-only') })
     expect(saves).toEqual([])
     expect(asked).toEqual([])
   })
 
-  it('a read-only child and a Plan ceiling are refused before anything runs, and are not offered the tool', async () => {
+  it('a read-only child is refused before anything runs, and are not offered the tool', async () => {
     const child = await setup({ readOnlyChild: true })
     expect(await denied(child.call('theme_set', { theme: 'light' }))).toMatchObject({ code: 'mousse_read_only' })
     expect(child.registry.listForThread('parent').map((tool) => tool.name)).toContain('theme_read')
     expect(child.registry.listForThread('parent').map((tool) => tool.name)).not.toContain('theme_set')
     expect(child.saves).toEqual([])
-    fx?.dispose()
-    fx = undefined
-
-    const plan = await setup({ ceiling: 'plan' })
-    expect(await denied(plan.call('theme_set', { theme: 'light' }))).toMatchObject({ code: 'mousse_ceiling_exceeded' })
-    expect(plan.registry.listFor({ readOnly: false, modeCeiling: 'plan' }).map((tool) => tool.name)).not.toContain('theme_set')
-    expect(plan.saves).toEqual([])
   })
 
   it('a subagent is refused: only the thread\'s own agent changes the theme', async () => {

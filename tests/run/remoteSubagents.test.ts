@@ -141,7 +141,8 @@ describe('remote subagents (issue #469)', () => {
     expect(mac.calls[2].params).toMatchObject({ threadId: 'far-thread-1' })
     expect(['ask', 'accept_edits']).toContain(mac.calls[2].params.mode)
     const send = mac.calls[3].params
-    expect(send).toMatchObject({ threadId: 'far-thread-1', mode: 'agent' })
+    expect(send).toMatchObject({ threadId: 'far-thread-1' })
+    expect(send).not.toHaveProperty('mode')
     expect(String(send.content)).toContain('started by an agent on another of the user\'s computers')
     expect(String(send.content)).toContain('Review Mac tester')
 
@@ -560,28 +561,36 @@ describe('remote subagents (issue #469)', () => {
   })
 
   // Issue #1160: the mode there is the narrowest of the parent thread's mode, its run and the limit that computer set
-  // for this one, with no fixed cap. A read-only task is still sent in Plan mode.
-  const MODE_ROWS: Array<{ name: string; parent: PermissionMode; limit: PermissionMode; workspace?: 'shared'; readOnly?: boolean; mode: PermissionMode; chatMode: 'agent' | 'plan' }> = [
-    { name: 'Full access when both sides allow it', parent: 'full', limit: 'full', mode: 'full', chatMode: 'agent' },
-    { name: 'the default device limit narrows a Full access parent', parent: 'full', limit: 'accept_edits', mode: 'accept_edits', chatMode: 'agent' },
-    { name: 'a lower device limit narrows it', parent: 'full', limit: 'ask', mode: 'ask', chatMode: 'agent' },
-    { name: 'a stricter parent narrows a Full access limit', parent: 'accept_edits', limit: 'full', mode: 'accept_edits', chatMode: 'agent' },
-    { name: 'a read-only task is still Plan', parent: 'full', limit: 'full', workspace: 'shared', readOnly: true, mode: 'full', chatMode: 'plan' },
-    { name: 'a shared task not asked read-only is Agent', parent: 'full', limit: 'full', workspace: 'shared', mode: 'full', chatMode: 'agent' }
+  // for this one, with no fixed cap. The task runs there as an ordinary agent turn.
+  const MODE_ROWS: Array<{ name: string; parent: PermissionMode; limit: PermissionMode; workspace?: 'shared'; mode: PermissionMode }> = [
+    { name: 'Full access when both sides allow it', parent: 'full', limit: 'full', mode: 'full' },
+    { name: 'the default device limit narrows a Full access parent', parent: 'full', limit: 'accept_edits', mode: 'accept_edits' },
+    { name: 'a lower device limit narrows it', parent: 'full', limit: 'ask', mode: 'ask' },
+    { name: 'a stricter parent narrows a Full access limit', parent: 'accept_edits', limit: 'full', mode: 'accept_edits' },
+    { name: 'a shared task not asked read-only', parent: 'full', limit: 'full', workspace: 'shared', mode: 'full' }
   ]
-  it.each(MODE_ROWS)('the mode there: $name', async ({ parent: parentMode, limit, workspace, readOnly, mode, chatMode }) => {
+  it.each(MODE_ROWS)('the mode there: $name', async ({ parent: parentMode, limit, workspace, mode }) => {
     const { d, parent, steps, out, say, mac, startOnMac } = remoteWorld()
     d.orch.setThreadPermissionMode(parent.id, parentMode)
     mac.limit = limit
     steps['go'] = async (tools) => {
-      out.started = await startOnMac(tools, 'Mac tester', workspace ? { workspace, role: 'research', ...(readOnly ? { readOnly } : {}) } : {})
+      out.started = await startOnMac(tools, 'Mac tester', workspace ? { workspace, role: 'research' } : {})
     }
     await say('go')
     expect(out.started).toMatchObject({ title: 'Mac tester', computer: 'Studio Mac' })
     expect(mac.calls.find((call) => call.method === 'threads.setPermissionMode')!.params.mode).toBe(mode)
-    expect(mac.calls.find((call) => call.method === 'orchestrator.send')!.params.mode).toBe(chatMode)
-    // Only a read-only task reads that computer's project folder itself; one that may edit gets a worktree there.
-    expect(mac.calls[0]!.params.worktreeEnabled).toBe(!readOnly)
+    expect(mac.calls.find((call) => call.method === 'orchestrator.send')!.params).not.toHaveProperty('mode')
+    expect(mac.calls[0]!.params.worktreeEnabled).toBe(true)
+  })
+
+  it('a read-only task is not started on another computer, which cannot hold it read-only', async () => {
+    const { steps, out, say, mac, startOnMac } = remoteWorld()
+    steps['go'] = async (tools) => {
+      out.started = await startOnMac(tools, 'Mac reader', { workspace: 'shared', role: 'research', readOnly: true })
+    }
+    await say('go')
+    expect(out.started).toMatchObject({ started: false, code: 'read_only_not_remote' })
+    expect(mac.calls).toEqual([])
   })
 
   it('a follow-up runs no looser than the run that sends it', async () => {

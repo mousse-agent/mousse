@@ -18,10 +18,9 @@ import { ACP_NATIVE_TOOLS } from '../acp/botApprovals'
  */
 const SIGN_IN_SUBJECT = 'mousse-google-sign-in'
 
-/** Antigravity publishes no context window, and Mousse offers no Plan mode for it. */
+/** Antigravity publishes no context window. */
 export const ANTIGRAVITY_CAPS: HarnessCaps = Object.freeze({
   ...ANTIGRAVITY_CAPABILITIES,
-  planMode: false,
   contextUsage: 'none',
   // The agent asks Mousse for every tool permission and file write.
   toolControl: 'approval_only',

@@ -49,7 +49,6 @@ export interface BotModelResolverDeps {
  * list as bot model choices. Each activation's own compiled policy is checked again when it resolves.
  */
 export const REPRESENTATIVE_BOT_POLICY: RunPolicy = Object.freeze({
-  mode: 'default',
   origin: 'bot',
   approvals: 'grants',
   approve: 'host',

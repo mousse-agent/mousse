@@ -80,7 +80,6 @@ function setup() {
   harness.setMcpAttachment(provider)
   const app = (overrides: Partial<TurnAppContext> = {}): TurnAppContext => ({
     turnToken: 'turn-token',
-    modeCeiling: 'default',
     mcpEligible: true,
     instructions: (mcp, relay) => ({ sessionInstructions: `mcp=${mcp} relay=${relay === true}`, turnPreamble: '' }),
     ...overrides

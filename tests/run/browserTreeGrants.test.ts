@@ -283,7 +283,7 @@ describe('a tab has one driver', () => {
 })
 
 describe('what a turn that only reads pages may call', () => {
-  it('a Plan turn lists tabs and observes; opening a tab is refused for lacking browser.act', async () => {
+  it('a read-only turn lists tabs and observes; opening a tab is refused for lacking browser.act', async () => {
     fx = delegationFixture()
     const run = await fx.runningRun('thread-a')
     const dispatched: string[] = []
@@ -302,11 +302,11 @@ describe('what a turn that only reads pages may call', () => {
       maxToolCalls: 100, maxElapsedMs: 60_000
     })
     turns.register(appTurn({
-      threadId: 'thread-a', runId: run.runId, mode: 'plan', modeFacts: { readOnly: true, agent: false, build: false }, modeCeiling: 'plan',
+      threadId: 'thread-a', runId: run.runId, mode: 'reviewer', modeFacts: { readOnly: true, agent: false, build: false },
       browser: { mode: 'structured', vision: false, policy,
         execution: { profileId: PROFILE, threadId: 'thread-a', turnId: run.runId, runId: run.runId, actor: { kind: 'main' }, policySnapshotId: policy.id, source: 'gui', cancellationId: run.runId } }
     }))
-    const ctx = () => request({ threadId: 'thread-a', runId: run.runId, modeCeiling: 'plan' })
+    const ctx = () => request({ threadId: 'thread-a', runId: run.runId })
 
     expect((await registry.call('browser_tabs', { sessionId: 'session-1' }, ctx())).isError).toBeFalsy()
     expect((await registry.call('browser_observe', { sessionId: 'session-1' }, ctx())).isError).toBeFalsy()

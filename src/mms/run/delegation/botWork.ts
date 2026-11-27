@@ -86,7 +86,6 @@ export function projectBotWork(store: RunStore, work: BotWorkState): boolean {
       result,
       createdAt: before ? String(before.created_at) : work.createdAt,
       completedAt: work.status === 'running' ? null : work.endedAt ?? new Date(store.db.clock()).toISOString(),
-      modeCeiling: null,
       accessLevel: null,
       workspace: null,
       role: null
@@ -151,7 +150,6 @@ function toWorkRecord(row: Row): DelegationRecord {
     result: json<DelegationResult>(row.result),
     createdAt: String(row.created_at),
     completedAt: str(row.completed_at),
-    modeCeiling: null,
     accessLevel: null,
     workspace: null,
     role: null

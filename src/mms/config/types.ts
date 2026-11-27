@@ -82,7 +82,6 @@ export interface ScheduledJobDefinition {
   selection?: ScheduledJob['selection']
   agent?: ScheduledJob['agent']
   bot?: ScheduledJob['bot']
-  mode?: ScheduledJob['mode']
   workspace?: ScheduledJob['workspace']
   permissionMode?: ScheduledJob['permissionMode']
   permissionCeiling?: ScheduledJob['permissionCeiling']

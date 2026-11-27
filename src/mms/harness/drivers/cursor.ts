@@ -27,8 +27,6 @@ export const CURSOR_LABEL = 'Cursor'
 
 export const CURSOR_CAPS: HarnessCaps = Object.freeze({
   ...CURSOR_CAPABILITIES,
-  // `mode: 'plan'` on the SDK.
-  planMode: true,
   // Usage per turn, but no context window.
   contextUsage: 'none',
   toolControl: 'uncontrolled',

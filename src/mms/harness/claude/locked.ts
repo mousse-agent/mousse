@@ -66,7 +66,7 @@ export const CLAUDE_BUILTIN_TOOLS: readonly string[] = Object.freeze([
   'WebSearch', 'Workflow', 'Write'
 ])
 
-/** Claude Code's own plan-mode tools, turned off on every turn: Mousse's Plan mode is a read-only turn that replies with the plan. */
+/** Claude Code's own plan-mode tools, turned off on every turn: their approval flow would hold the turn. */
 export const CLAUDE_PLAN_TOOLS: readonly string[] = Object.freeze(['EnterPlanMode', 'ExitPlanMode'])
 
 /** Variables that hold Claude Code's credential: never visible to a sandboxed command. */
@@ -92,7 +92,6 @@ export function claudeLockedCaps(base: HarnessCaps, input: { platform: NodeJS.Pl
     hasContainmentEvidence({ driver: 'claude', kind, platform: input.platform, cliVersion: input.cliVersion, ...(kind === 'tools' ? { items: CLAUDE_LOCKED_TOOLS_ITEMS } : {}) }, input.evidence)
   return Object.freeze({
     ...base,
-    planMode: false,
     // A locked turn runs in Claude Code's default mode under Mousse's grant gate: never its auto mode.
     autoPermissionMode: false,
     toolControl: proven('tools') ? 'exact' : 'approval_only',

@@ -11,7 +11,7 @@ import { openThread } from '../../../lib/openThread'
 import { closeRailPages } from '../../../lib/railPages'
 import { useAppStore } from '../../../stores/appStore'
 import { useChatsStore } from '../../../stores/chatsStore'
-import { draftFromJob, EMPTY_CATALOG, isUnchanged, modelGroups, patchOf, type ScheduledCatalog } from '../../scheduled/jobDraft'
+import { draftFromJob, EMPTY_CATALOG, isUnchanged, patchOf, type ScheduledCatalog } from '../../scheduled/jobDraft'
 import { errorText } from '../../scheduled/scheduledLabels'
 import { AutomationDetail } from '../AutomationDetail'
 import { PausePicker } from '../AutomationDialogs'
@@ -19,7 +19,6 @@ import { KeyDialog } from '../KeyDialog'
 import type { RequestApi } from '../RequestTrigger'
 import { viewerTimeZone } from '../automationTime'
 import { computerChoicesOf } from '../computerChoice'
-import { useAutomationLibrary } from '../WhoDoPickers'
 import { closePane, refreshInbox, useInboxStore } from './inboxStore'
 
 function browserRequestApi(): RequestApi {
@@ -50,7 +49,6 @@ export function EditDetailsPane({ item, onDelete }: { item: AutomationItem; onDe
   const [addingKey, setAddingKey] = useState<{ name?: string } | null>(null)
   const [storedKeys, setStoredKeys] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
-  const { library } = useAutomationLibrary(profileId)
   const requestApi = useMemo(browserRequestApi, [])
   const viewerZone = useMemo(viewerTimeZone, [])
 
@@ -67,7 +65,7 @@ export function EditDetailsPane({ item, onDelete }: { item: AutomationItem; onDe
       setSettings(current)
       setJobs(list)
       setCatalog({
-        models: modelGroups(options.llmProviders),
+        providers: options.llmProviders,
         projects,
         threads: threads.filter((thread) => !thread.lineage && !thread.archivedAt),
         defaultPermissionMode: normalizePermissionMode(current.permissions?.defaultMode)
@@ -84,7 +82,7 @@ export function EditDetailsPane({ item, onDelete }: { item: AutomationItem; onDe
 
   // Another computer's automation is edited from the record it sent with the list.
   const job = [...jobs, ...(index?.remoteJobs ?? [])].find((entry) => entry.id === item.id)
-  const initial = useMemo(() => (job ? draftFromJob(job, catalog, providers) : null), [job, catalog, providers])
+  const initial = useMemo(() => (job ? draftFromJob(job) : null), [job])
   if (!job || !initial) return <div className="inbox-edit" data-testid="inbox-edit">{error ? <p className="scheduled-action-error" role="alert">{error}</p> : null}</div>
 
   const act = async (work: () => Promise<unknown>) => {
@@ -114,18 +112,17 @@ export function EditDetailsPane({ item, onDelete }: { item: AutomationItem; onDe
     <div className="inbox-edit" data-testid="inbox-edit">
       <div className="automations-column">
         <AutomationDetail
-          key={`${job.id}:${job.updatedAt}:${catalog.models.length}`}
+          key={`${job.id}:${job.updatedAt}`}
           job={job}
           item={item}
           initial={initial}
           catalog={catalog}
-          library={library}
           defaultName={defaultName}
           profileId={profileId}
           viewerZone={viewerZone}
           computers={computers}
           save={async (draft) => {
-            const change = patchOf(initial, draft, catalog)
+            const change = patchOf(initial, draft)
             if (!isUnchanged(change)) await window.mousse.scheduled.update(job.id, change)
             void refreshInbox()
           }}

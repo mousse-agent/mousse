@@ -20,7 +20,7 @@ function setup() {
   const registry = new ToolRegistry({ activeRunId: () => 'r1', turns, userMcp: userMcpProxy(manager) })
   turns.register(appTurn({ threadId: 't1', runId: 'r1', turnToken: 'tt' }))
   const call = (name: string) => registry.call(name, { text: 'hi', [TURN_TOKEN_KEY]: 'tt' }, {
-    credential: { threadId: 't1', runId: 'r1', provider: 'pi', modeCeiling: 'default', binding: 'per_call', current: () => true },
+    credential: { threadId: 't1', runId: 'r1', provider: 'pi', binding: 'per_call', current: () => true },
     toolCallId: 'mcp:c1',
     signal: new AbortController().signal
   })

@@ -342,7 +342,6 @@ export class OpencodeSessions {
     const { label, store } = this.options
     input.signal?.throwIfAborted()
     if (input.continuation) return ''
-    if (input.mode === 'plan') throw new Error(`Use ${label}'s own plan agent in a chat turn`)
     this.interrupted.delete(input.threadId)
     const release = this.options.server.hold()
     try {

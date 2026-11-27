@@ -4,7 +4,7 @@
  * What the sending agent sees is observed where it sees it: the turns its runtime is given, its transcript and its queue.
  *
  * Inputs covered: the target idle or busy; the work ends, waits on a person first, or is re-queued by a person's edit;
- * the sender idle, busy, stopped by a person after it subscribed, kept in Plan, or a subagent; several watched threads
+ * the sender idle, busy, stopped by a person after it subscribed, or a subagent; several watched threads
  * settling together; a chain of sends answered by notices; a daemon restart.
  */
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
@@ -404,19 +404,6 @@ describe('the settle notice: an agent that sends with notify is told when the wo
       await w.d.orch.send('next', false, { threadId: w.parent.id, clientRequestId: 'next' })
       await waitFor(() => w.noticeTurns(w.parent.id).length === 1, 'the notice after the person\'s turn')
       expect(w.turnsOf(w.parent.id).map((turn) => turn.prompt.startsWith(NOTICE) ? 'notice' : turn.prompt)).toEqual([GO, 'next', 'notice'])
-    })
-
-    it('in a sender kept in Plan', async () => {
-      const w = world(async (input, mcp) => {
-        if (input.threadId === w.parent.id && !input.prompt.startsWith(NOTICE)) parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'work', mode: 'plan', notify: true }))
-        return 'ok'
-      })
-      await w.attach()
-      await w.d.orch.send({ content: GO, mode: 'plan' }, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      await waitFor(() => w.queue(w.parent.id).some((item) => item.settleNotice), 'the queued notice')
-      await settle()
-      expect(w.noticeTurns(w.parent.id)).toHaveLength(0)
-      expect(w.queue(w.parent.id).find((item) => item.settleNotice)).toMatchObject({ heldNotice: true })
     })
 
     it('in a subagent\'s thread, whose result is its parent\'s', async () => {

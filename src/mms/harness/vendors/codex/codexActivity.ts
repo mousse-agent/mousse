@@ -302,11 +302,11 @@ export function planSteps(plan: unknown): Array<{ step: string; status: string }
 }
 
 export function planStart(callId: string, steps: Array<{ step: string; status: string }>): ProviderToolEvent {
-  return { phase: 'start', callId, title: 'Plan', toolName: 'update_plan', activity: { kind: 'plan', steps } }
+  return { phase: 'start', callId, title: 'To-dos', toolName: 'update_plan', activity: { kind: 'plan', steps } }
 }
 
 export function planUpdate(callId: string, steps: Array<{ step: string; status: string }>): ProviderToolEvent {
-  return { phase: 'update', callId, title: 'Plan', toolName: 'update_plan', activity: { kind: 'plan', steps } }
+  return { phase: 'update', callId, title: 'To-dos', toolName: 'update_plan', activity: { kind: 'plan', steps } }
 }
 
 // ---------------------------------------------------------------------------------------------

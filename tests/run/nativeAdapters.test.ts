@@ -228,14 +228,14 @@ describe('ClaudeSubscriptionAdapter', () => {
     const sink = recordingSink()
     const turnHost = host({ prepareNativeContext: () => ({ messages: [], nativeHistory: 'compacted history' }) })
     const result = await new ClaudeSubscriptionAdapter(() => client).startTurn(
-      input({ mode: 'plan', cwd: null }),
+      input({ cwd: null }),
       sink,
       control('steer text'),
       turnHost
     )
     const chat = client.chat.mock.calls[0][0]
+    expect(chat).not.toHaveProperty('mode')
     expect(chat).toMatchObject({
-      mode: 'plan',
       threadId: 'thread-1',
       cwd: '/standalone/thread-1',
       model: 'sonnet',
@@ -495,7 +495,7 @@ describe('AntigravityAdapter', () => {
     return { chat: vi.fn(chat), commitConversation: vi.fn(), configured: () => true } satisfies AntigravityClient
   }
 
-  it('declares sparse events, publishes no context and refuses plan mode or a missing workspace', async () => {
+  it('declares sparse events, publishes no context and refuses a missing workspace', async () => {
     const service = client(async () => 'never')
     const adapter = antigravityAdapter(() => service)
     expect(adapter.driver).toBe('antigravity')
@@ -503,9 +503,6 @@ describe('AntigravityAdapter', () => {
     expect(adapter.describe('m')).toEqual({ contextUsage: 'none' })
     expect(adapter.configured()).toBe(true)
     const turn = { instanceId: 'antigravity', llmProvider: 'antigravity', model: 'm' }
-    await expect(adapter.startTurn(input({ ...turn, mode: 'plan' }), recordingSink(), control(), host())).rejects.toThrow(
-      'Use Antigravity’s /plan command in a chat turn'
-    )
     await expect(adapter.startTurn(input({ ...turn, cwd: null }), recordingSink(), control(), host())).rejects.toThrow(
       'antigravity requires a project workspace'
     )

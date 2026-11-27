@@ -109,7 +109,7 @@ describe('the generic ACP driver', () => {
     expect(added.instanceId).toBe('acp:fake-agent')
     await vi.waitFor(async () => {
       const [snapshot] = await harness.instances.snapshots({ kind: 'device' })
-      expect(snapshot).toMatchObject({ runs: { state: 'yes' }, binary: { version: '1.2.3', source: 'override' }, caps: { toolControl: 'uncontrolled', planMode: false }, auth: { state: 'not_required' } })
+      expect(snapshot).toMatchObject({ runs: { state: 'yes' }, binary: { version: '1.2.3', source: 'override' }, caps: { toolControl: 'uncontrolled' }, auth: { state: 'not_required' } })
       expect(snapshot?.models.entries.some((model) => model.id === 'listed')).toBe(true)
       expect(agent.connections.map(({ request, killed }) => [request.purpose, killed])).toEqual([['handshake', true], ['models', true]])
     })

@@ -63,7 +63,7 @@ function setup(caps: Partial<HarnessCaps> = {}) {
 
 const authority = (id: string) => ({ policy: { definitionId: id }, grants: { skills: [], mcpTools: [], builtinTools: [], denied: [] } }) as unknown as DefinitionAuthority
 const app = (definition?: DefinitionAuthority): NonNullable<TurnSpec['app']> => ({
-  turnToken: 'tt', modeCeiling: 'default', mcpEligible: false, instructions: () => ({ sessionInstructions: '', turnPreamble: '' }), ...(definition ? { definition } : {})
+  turnToken: 'tt', mcpEligible: false, instructions: () => ({ sessionInstructions: '', turnPreamble: '' }), ...(definition ? { definition } : {})
 })
 
 describe('count budgets through the gateway', () => {

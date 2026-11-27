@@ -127,7 +127,7 @@ describe('a bot\'s pictures', () => {
   async function make(authority: BotAuthority, args: Record<string, unknown>) {
     const threadId = f.store.dispatch(authority.activationId, 1)!.threadId!
     const ctx = {
-      caller: { threadId, runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+      caller: { threadId, runId: 'r1', provider: 'pi', accessLevel: 'lineage' },
       turn: { threadId, bot: authority } as ToolCallContext['turn'],
       toolCallId: `call-${Math.random().toString(16).slice(2)}`,
       signal: new AbortController().signal
@@ -139,7 +139,7 @@ describe('a bot\'s pictures', () => {
   /** What a runtime is shown of `make_image` for this turn: its tool list (Claude Code, Codex) and per-turn offer (Pi). */
   function shown(authority: BotAuthority) {
     const { registry } = createAppToolRegistry({ host: fakeAppToolHost().host, bots: () => deps })
-    const listed = registry.listFor({ readOnly: false, modeCeiling: 'default', botRole: 'activation', botTurnTools: authority.appTools }).some((tool) => tool.name === 'make_image')
+    const listed = registry.listFor({ readOnly: false, botRole: 'activation', botTurnTools: authority.appTools }).some((tool) => tool.name === 'make_image')
     const offered = tools.get('make_image')!.offered!({ threadId: 't', bot: authority } as ToolCallContext['turn'])
     return { listed, offered, allowed: authority.check({ kind: 'app', tool: 'make_image', args: {} }).ok }
   }

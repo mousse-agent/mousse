@@ -43,9 +43,9 @@ export function mainBrowserBinding(services: MmsProfileServices, turn: MainBrows
   const project = thread.projectId ? services.projects.getProject(thread.projectId) : undefined
   const descriptor = typeof turn.mode === 'string' ? services.modeRegistry.getModeSync(turn.mode, { projectPath: project?.path }) : undefined
   const workspace = (thread as { workspaceBinding?: { policy?: string; access?: string } }).workspaceBinding
-  // A Plan turn, a mode that denies edits or commands, and a read-only subagent hold `browser.read` only: no tab of their
+  // A mode that denies edits or commands, and a read-only subagent, hold `browser.read` only: no tab of their
   // own, and no tool or argument that acts in a page.
-  const readOnly = turn.mode === 'plan' || descriptor?.permission?.edit === 'deny' || descriptor?.permission?.bash === 'deny' ||
+  const readOnly = descriptor?.permission?.edit === 'deny' || descriptor?.permission?.bash === 'deny' ||
     (workspace?.policy === 'shared' && workspace.access === 'read-only')
   const tools = BROWSER_AUTOMATION_TOOLS.filter((tool) => settings.enabledTools.includes(tool) && (!readOnly || browserToolReads(tool)))
   if (!tools.length) return undefined

@@ -17,7 +17,6 @@ import type {
   DelegationWorkspace,
   LineageRecord,
   LineageRelationship,
-  ModeCeiling,
   RunRecord
 } from './types'
 
@@ -104,7 +103,6 @@ export class Delegations {
     model?: string | null
     prompt: string
     wake: DelegationWake
-    modeCeiling?: ModeCeiling | null
     accessLevel?: AgentAccessLevel | null
     workspace?: DelegationWorkspace | null
     role?: string | null
@@ -126,7 +124,6 @@ export class Delegations {
         result: null,
         createdAt: this.now(),
         completedAt: null,
-        modeCeiling: input.modeCeiling ?? null,
         accessLevel: input.accessLevel ?? null,
         workspace: input.workspace ?? null,
         role: input.role ?? null,
@@ -153,7 +150,8 @@ export class Delegations {
           null,
           record.createdAt,
           null,
-          record.modeCeiling,
+          // mode_ceiling is retired (Plan mode is gone): new rows leave it empty, and nothing reads it.
+          null,
           record.workspace,
           record.role,
           record.accessLevel,
@@ -364,7 +362,6 @@ function toDelegation(row: Row): DelegationRecord {
     result: json<DelegationResult>(row.result),
     createdAt: String(row.created_at),
     completedAt: str(row.completed_at),
-    modeCeiling: row.mode_ceiling === 'plan' || row.mode_ceiling === 'default' ? row.mode_ceiling : null,
     accessLevel: isAgentAccessLevel(row.access_level) ? row.access_level : null,
     workspace: row.workspace === 'isolated' || row.workspace === 'shared' ? row.workspace : null,
     role: str(row.role),

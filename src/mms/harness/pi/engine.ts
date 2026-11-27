@@ -1727,7 +1727,7 @@ export class PiRpcEngine implements ProviderAdapter {
   ): Promise<TurnResult> {
     const ref: ProviderRef = { ...baseRef, ...(thread.sessionId ? { sessionId: thread.sessionId } : {}) }
     if (thread.sessionId) sink.providerRef(ref)
-    let builtins = !input.cwd ? [] : input.mode === 'plan' || input.child?.readOnly ? PI_READ_ONLY_BUILTINS : PI_ALL_BUILTINS
+    let builtins = !input.cwd ? [] : input.child?.readOnly ? PI_READ_ONLY_BUILTINS : PI_ALL_BUILTINS
     let tools = host.bridge?.mcp ? this.options.mousseTools?.(input.threadId, input.runId) ?? [] : []
     // The user's own MCP servers reach Pi's agent through Mousse's MCP server, like the app tools.
     if (host.bridge?.mcp && host.bridge.userMcp === 'proxy' && this.options.userMcpTools) {

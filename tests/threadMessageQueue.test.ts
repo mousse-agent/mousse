@@ -419,7 +419,7 @@ describe('editing, the queue revision and a promotion bound to a run', () => {
   const agent = { kind: 'agent' as const, threadId: 'sender', runId: 'run-s', hops: 1 }
   const seed = () => {
     let items = enqueueMessage([], { threadId: 't1', content: 'first', mode: 'agent' }).items
-    items = enqueueMessage(items, { threadId: 't1', content: 'second', mode: 'plan', images: [{ data: 'aGk=', mimeType: 'image/png' }] }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'second', mode: 'build', images: [{ data: 'aGk=', mimeType: 'image/png' }] }).items
     return { items, first: items[0], second: items[1] }
   }
 
@@ -432,7 +432,7 @@ describe('editing, the queue revision and a promotion bound to a run', () => {
       const changes: Array<[string, QueuedMessage[]]> = [
         ['an add', enqueueMessage(items, { threadId: 't1', content: 'third' }).items],
         ['an edit of the text', editQueuedMessage(items, first.id, { content: 'first, edited' }).items],
-        ['an edit of the mode', editQueuedMessage(items, first.id, { mode: 'plan' }).items],
+        ['an edit of the mode', editQueuedMessage(items, first.id, { mode: 'build' }).items],
         ['a mode limit', editQueuedMessage(items, first.id, { permissionMode: 'ask' }).items],
         ['an origin', editQueuedMessage(items, first.id, { origin: agent }).items],
         ['a removal', removeQueuedMessage(items, first.id).items],

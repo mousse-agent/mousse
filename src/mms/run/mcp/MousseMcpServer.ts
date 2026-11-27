@@ -336,12 +336,12 @@ export class MousseMcpServer implements McpAttachmentProvider {
       { capabilities: { tools: {} }, ...(registry.isBotThread(resolved.threadId) ? {} : { instructions: mousseOrchestrationInstructions() }) }
     )
     server.setRequestHandler(ListToolsRequestSchema, async () => {
-      // For the thread's ceiling, not the turn's mode; the call-time check refuses a tool the list left out in any case.
+      // For the thread, not the turn's mode; the call-time check refuses a tool the list left out in any case.
       // A bot's thread tools follow the run the credential acts for now (`ToolListing.botTurnTools`).
       const current = credentials.current(resolved.tokenHash) ?? resolved
       const compact = (this.options.compactToolSchemas ?? isCompactSchemaProvider)(current.provider)
       return {
-        tools: registry.listForThread(resolved.threadId, 'default', current.runId).map((tool) => listedTool(tool, { compact }))
+        tools: registry.listForThread(resolved.threadId, current.runId).map((tool) => listedTool(tool, { compact }))
       }
     })
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
@@ -424,8 +424,8 @@ export class MousseMcpServer implements McpAttachmentProvider {
   }
 
   /**
-   * Runs one tool call under the credential as it stands for it (the run it is bound to now, its
-   * ceiling and relay grant), counted as received and running for the drained-turn check; a
+   * Runs one tool call under the credential as it stands for it (the run it is bound to now and its
+   * relay grant), counted as received and running for the drained-turn check; a
    * refusal becomes an error result in the refusal shape, and a fault a JSON-RPC error.
    */
   private async tracked(resolved: CredentialRecord, run: (authority: McpCredentialAuthority) => Promise<McpOutcome>) {
@@ -437,7 +437,6 @@ export class MousseMcpServer implements McpAttachmentProvider {
       threadId: record.threadId,
       runId: record.runId,
       provider: record.provider,
-      modeCeiling: record.modeCeiling,
       accessLevel: record.accessLevel,
       binding: record.binding,
       ...(record.relay ? { relay: record.relay } : {}),

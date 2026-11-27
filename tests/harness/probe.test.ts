@@ -50,7 +50,7 @@ const driver: HarnessDriver = {
   canInstall: false,
   methodLabel: 'Fake sign-in',
   decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
-  caps: () => ({ steer: 'queue_only', interrupt: false, rollback: 'none', fork: 'portable', events: 'sparse', containment: 'weak', historyInjection: 'prompt', mcp: false, planMode: false, contextUsage: 'none' }),
+  caps: () => ({ steer: 'queue_only', interrupt: false, rollback: 'none', fork: 'portable', events: 'sparse', containment: 'weak', historyInjection: 'prompt', mcp: false, contextUsage: 'none' }),
   updateCommand: (owner) => (owner === 'npm' ? 'npm install -g fakecli@latest' : undefined),
   create: () => runtime()
 }

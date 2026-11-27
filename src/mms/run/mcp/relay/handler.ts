@@ -87,23 +87,20 @@ export class RelayHandler {
 
   /**
    * Runs a relayed tool for the credential the request resolved to. The turn is admitted as every
-   * Mousse call is; a bot, definition, read-only or plan turn is refused before anything else (an
+   * Mousse call is; a bot, definition or read-only turn is refused before anything else (an
    * error result in the refusal shape, no ledger row, nobody asked); the tool resolves through the catalogue and the
    * manager re-checks it is enabled now. Under `approvals: 'mousse'` the user is asked unless the
    * run's permission mode is Full access; a rejection runs nothing and writes no ledger row.
    */
   async call(name: string, rawArgs: Record<string, unknown>, request: McpCallRequest): Promise<ToolOutcome> {
     const { credential } = request
-    const { threadId, active, turn, args, caller } = await this.host.registry.admit(rawArgs, request)
+    const { threadId, active, turn, args } = await this.host.registry.admit(rawArgs, request)
     const grant = credential.relay
     if (!grant) throw unknownTool(name)
     // A bot's turn: its grant decides, on every call, before the server sees anything; nobody is asked.
     if (turn.bot) return this.callForBot(turn.bot, name, args, active, request, turn.toolImages === true)
     if (turn.definition) throw new McpToolError('mousse_scope_denied', 'A definition run cannot call relayed MCP tools.')
     if (this.host.readOnlyThread?.(threadId)) throw new McpToolError('mousse_read_only', `${name} is a relayed MCP tool; a read-only subagent cannot call it.`)
-    // The caller's ceiling is the credential's narrowed by what is above the thread now (`ToolRegistry.admit`): a thread
-    // above that switched to Plan holds this call to Plan too.
-    if (turn.modeCeiling === 'plan' || caller.modeCeiling === 'plan') throw planCeiling(name)
     const tool = this.host.catalog.resolve(this.host.projectPathFor(threadId), name)
     if (!tool) throw unknownTool(name)
     const allowed = await this.host.manager.isToolCallAllowed(tool.providerName, turn.projectPath, turn.actor)
@@ -116,13 +113,7 @@ export class RelayHandler {
         if (turn.approvals === 'never') return { text: APPROVALS_REFUSED_MESSAGE, isError: true }
         const refusal = await this.askBeforeRunning(threadId, tool, args, turn.projectPath, request)
         if (refusal) return refusal
-        // Asking took time: a thread above that switched to Plan while the person answered holds the call to Plan.
-        if (this.host.registry.ceilingNow?.(threadId, credential.modeCeiling) === 'plan') throw planCeiling(name)
       }
-    }
-    // Connecting takes time too, asked or not: the ceiling is read once more right before the server gets the call.
-    const beforeDispatch = () => {
-      if (this.host.registry.ceilingNow?.(threadId, credential.modeCeiling) === 'plan') throw planCeiling(name)
     }
 
     // The call's own timeout starts here, after any approval wait.
@@ -132,11 +123,10 @@ export class RelayHandler {
     try {
       // The call is the work of the caller's thread (`OwnedWorkBarrier` scopes): a delete of another thread neither
       // waits for it nor is refused by it, while a delete of this thread still is.
-      const result = await runInWorkScope(threadScope(threadId), () => this.host.manager.callTool(tool.providerName, args, turn.projectPath, request.signal, turn.actor, undefined, { timeoutMs: RELAY_CALL_TIMEOUT_MS, beforeDispatch }))
+      const result = await runInWorkScope(threadScope(threadId), () => this.host.manager.callTool(tool.providerName, args, turn.projectPath, request.signal, turn.actor, undefined, { timeoutMs: RELAY_CALL_TIMEOUT_MS }))
       outcome = capped(userMcpOutcome(result))
     } catch (error) {
       if (ledgerId) ledger?.failed(ledgerId)
-      // Refused before the server saw it (`beforeDispatch`): the refusal, as any other.
       if (error instanceof McpToolError) throw error
       return { text: redactSensitiveText(error instanceof Error ? error.message : String(error)).slice(0, MAX_ERROR_CHARS), isError: true }
     }
@@ -204,9 +194,6 @@ export class RelayHandler {
   }
 }
 
-function planCeiling(name: string): McpToolError {
-  return new McpToolError('mousse_ceiling_exceeded', `${name} is a relayed MCP tool, whose effects are unknown; a plan ceiling cannot call it.`)
-}
 
 function unknownTool(name: string): McpToolError {
   return new McpToolError('mousse_unknown_tool', `No relayed MCP tool named ${name}.`)

@@ -19,7 +19,7 @@ function snapshot(overrides: Overrides = {}): InstanceSnapshot {
     binary: { path: '/usr/local/bin/claude', version: '2.1.0', source: 'path' },
     caps: {
       steer: 'native', interrupt: true, rollback: 'none', fork: 'native', events: 'rich',
-      containment: 'weak', historyInjection: 'native', mcp: true, childPolicy: 'enforced', planMode: true, contextUsage: 'reported'
+      containment: 'weak', historyInjection: 'native', mcp: true, childPolicy: 'enforced', contextUsage: 'reported'
     },
     models: { entries: [], source: 'live' },
     checkedAt: '2026-10-25T10:00:00.000Z',
