@@ -1671,6 +1671,10 @@ const api = {
     /** Puts a picture, as PNG bytes, on the clipboard as an image that other apps paste. */
     writeImage: (png: Uint8Array): Promise<void> => ipcRenderer.invoke('clipboard:writeImage', png)
   },
+  zoom: {
+    /** A page the window draws (a browser without a window) has the keyboard, or no longer: its zoom keys are its own then. */
+    pageKeyboard: (on: boolean): Promise<void> => ipcRenderer.invoke('zoom:pageKeyboard', on === true)
+  },
   dialog: {
     /** Native open-file dialog; resolves to the chosen absolute path, or null when cancelled. */
     pickExecutable: (options?: { title?: string; defaultPath?: string }): Promise<string | null> =>

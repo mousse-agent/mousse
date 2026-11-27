@@ -102,6 +102,7 @@ import {
 import { surfaceToWindowBackground } from '../../shared/accentPalette'
 import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu, writePngToClipboard } from '../contextMenu'
+import { setPageKeyboard } from '../zoomShortcuts'
 import { pickExecutable } from './pickExecutable'
 import { stageBotAttachment, stageThreadAttachment } from './botAttachments'
 import { chooseBrowserViewFiles, type BrowserViewFilesDeps } from './browserViewFiles'
@@ -4280,6 +4281,7 @@ export function registerGuiIpc(
     showCopyMenu(getWindow, x, y, text)
   })
   registerHandler('clipboard:writeImage', (_e, png: unknown) => { writePngToClipboard(png) })
+  registerHandler('zoom:pageKeyboard', (event, on: unknown) => { setPageKeyboard(event.sender.id, on === true) })
 
   return { syncDaemonTurnSnapshot }
 }
