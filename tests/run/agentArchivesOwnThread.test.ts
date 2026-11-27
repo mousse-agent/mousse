@@ -170,19 +170,18 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
     await waitFor(() => w.adapter.prompts.includes('child work'), 'the subagent ran its queued turn')
   })
 
-  it('a thread it launched that is still working keeps the thread open, and its run goes on', async () => {
+  it('a thread it handed work to is not its work: the thread is archived, and the handed-off run goes on', async () => {
     const w = world()
     const launched = w.d.store.createThread('Launched', w.thread.projectId, undefined, { started: true, createdByThreadId: w.thread.id })
     const run = w.d.engine.store.createRun({ threadId: launched.id, source: 'mcp', outcome: { sentByAgent: true, agentHops: 1 } })
     w.d.engine.markStarting(run.runId)
     w.d.engine.markRunning(run.runId)
     await w.send('archive yourself when done')
-    await w.idle()
+    await waitFor(() => w.archived(), 'archived after the turn')
     await afterTurnEnd()
-    expect(w.archived()).toBe(false)
-    expect(w.lines()).toContain(ARCHIVE_AFTER_TURN_KEPT)
     expect(w.d.engine.getRun(run.runId)).toMatchObject({ status: 'running' })
     expect(w.d.engine.getRun(run.runId)?.outcome?.stopRequested).toBeFalsy()
+    expect(w.d.store.getThread(launched.id)?.archivedAt).toBeUndefined()
   })
 
   it('a background command the provider still runs keeps the thread open', async () => {
@@ -193,30 +192,6 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
     await afterTurnEnd()
     expect(w.archived()).toBe(false)
     expect(w.lines()).toContain(ARCHIVE_AFTER_TURN_KEPT)
-  })
-
-  it('a turn started while the other computers are asked about its launches keeps the thread open, and runs on', async () => {
-    const w = world()
-    // The question to the other computers is the one wait before the archive: a person's message starts a turn meanwhile.
-    let answer: ((working: number) => void) | undefined
-    const asked = new Promise<void>((resolve) => {
-      vi.spyOn((w.d.orch as unknown as { remoteThreads: { working: (id: string) => Promise<number> } }).remoteThreads, 'working').mockImplementation(() => {
-        resolve()
-        return new Promise<number>((done) => { answer = done })
-      })
-    })
-    await w.send('archive yourself when done')
-    await asked
-    const sent = w.send('wait for this')
-    await waitFor(() => w.adapter.release !== undefined, 'the new turn running')
-    answer!(0)
-    await afterTurnEnd()
-    expect(w.archived()).toBe(false)
-    expect(w.lines()).toContain(ARCHIVE_AFTER_TURN_KEPT)
-    w.adapter.release!()
-    await sent
-    await w.idle()
-    expect(w.d.orch.getOrCreateSession(w.thread.id).messages.some((message) => message.role === 'assistant' && message.content === 'reply to wait for this')).toBe(true)
   })
 
   it('a turn that fails after asking leaves the thread open', async () => {
