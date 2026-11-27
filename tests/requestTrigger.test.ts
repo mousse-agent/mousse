@@ -51,7 +51,8 @@ describe('the Request trigger', () => {
     expect(requestRefusal({ ...manual, createdBy: { threadId: 't' } })).toBeNull()
     expect(takesRequests({ createdBy: { threadId: 't' } })).toBe(true)
     expect(requestRefusal({ schedule: { kind: 'once', runAt: '2026-11-15T00:00:00.000Z' } })).toMatch(/On demand/)
-    expect(requestRefusal({ ...manual, bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' } })).toMatch(/bot/)
+    // A bot's automation takes requests too: each starts the bot's run.
+    expect(requestRefusal({ ...manual, bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' } })).toBeNull()
   })
 
   it('words each outcome the way the log shows it', () => {

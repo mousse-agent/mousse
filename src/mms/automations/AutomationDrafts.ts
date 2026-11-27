@@ -89,7 +89,7 @@ export interface AutomationDraftsDeps {
   /** Whether the bot exists (and is not deleted). */
   botExists?(botId: string): boolean
   /** Turn on with a bot as Who: the bot's schedule, made the way its own schedules are (`BotScheduleBook.add`). */
-  addBotSchedule?(botId: string, input: { schedule: JobSchedule; prompt: string; name: string; tellMe: TellMe }): ScheduledJob
+  addBotSchedule?(botId: string, input: { schedule: JobSchedule; prompt: string; name: string; tellMe: TellMe; cliName?: string }): ScheduledJob
   /** The mode the person holds for a run on this thread (or the profile's): Turn on holds the draft to it. */
   personCeiling(threadId?: string): PermissionMode
   /** One reusable thread for every run of an automation (Result: reuse). */
@@ -354,8 +354,11 @@ export class AutomationDrafts {
 
     if (bot) {
       if (this.deps.botExists && !this.deps.botExists(bot)) problems.push('That bot is gone. Pick another Who.')
+      // A bot runs on a repeating time (at most once a minute), once, when it is run (Run now, the CLI) or on a request
+      // URL. Its runs are its own, in its lane: it does not wake on another thread's pull request.
+      if (trigger.kind === 'thread_event') problems.push('A bot does not wake on a pull request. Pick another When, or ask it in its chat to watch one.')
       const when = trigger.kind === 'time' ? botWhenOf(trigger.schedule) : undefined
-      const problem = when ? botScheduleProblem(when, prompt || 'x') : 'A bot repeats: give it a time that repeats, at most once a minute.'
+      const problem = when ? botScheduleProblem(when, prompt || 'x') : undefined
       if (problem) problems.push(problem)
     }
     if (!prompt.trim()) problems.push('Say what it should do.')
@@ -583,7 +586,7 @@ export class AutomationDrafts {
     const who = job.draft!.who
     if (who?.kind === 'bot') {
       if (!this.deps.addBotSchedule) fail('Bots are not available now.')
-      const made = this.deps.addBotSchedule(who.botId, { schedule: job.schedule, prompt: job.prompt, name: job.name, tellMe: tellMeOf(job) })
+      const made = this.deps.addBotSchedule(who.botId, { schedule: job.schedule, prompt: job.prompt, name: job.name, tellMe: tellMeOf(job), ...(job.cliName ? { cliName: job.cliName } : {}) })
       try {
         this.deps.meta?.move(job.id, made.id)
       } catch {

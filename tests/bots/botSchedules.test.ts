@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
-import { botJobId, botScheduleProblem, scheduleProblem } from '../../src/mms/scheduled/botJobs'
+import { botJobId, botScheduleProblem, scheduleProblem, type BotJobWhen } from '../../src/mms/scheduled/botJobs'
 import { nextOccurrenceAfter } from '../../src/mms/scheduled/computeNextRun'
 import { slotsAllOn } from '../../src/shared/bots/personal/modelSlots'
 import type { NotifyLevel, RunLevel } from '../../src/shared/automationInbox'
@@ -166,7 +166,7 @@ describe('bot schedules in the shared scheduler', () => {
     expect(() => f.book.update(job, { projectId: 'p1' })).toThrow(/stay the bot's/)
     expect(() => f.book.update(job, { permissionMode: 'full' })).toThrow(/stay the bot's/)
     expect(() => f.book.update(job, { prompt: '/release-notes' })).toThrow(/workflow/)
-    expect(() => f.book.update(job, { schedule: { kind: 'once', runAt: iso(T0 + MIN) } })).toThrow(/A bot repeats/)
+    expect(() => f.book.update(job, { schedule: { kind: 'once', runAt: iso(T0 - MIN) } })).toThrow(/in the past/)
     expect(() => f.book.update(job, { schedule: { kind: 'interval', minutes: 0 } })).toThrow(/at least 1/)
     f.book.update(job, { name: 'Tidy up', prompt: 'Tidy the blog.', tellMe: 'problems' })
     expect(entry()).toMatchObject({ name: 'Tidy up', prompt: 'Tidy the blog.', tellMe: 'needs_you' })
@@ -417,5 +417,70 @@ describe('bot schedules in the shared scheduler', () => {
     const every5 = { kind: 'interval' as const, minutes: 5 }
     expect(nextOccurrenceAfter(every5, iso(T0), new Date(T0 + 1000))).toBe(iso(T0 + 5 * MIN))
     expect(nextOccurrenceAfter(every5, iso(T0), new Date(T0 + 30 * MIN))).toBe(iso(T0 + 35 * MIN))
+  })
+})
+
+/**
+ * A bot's automation the owner turned on from the Automations page may run once, only when it is run (Run now, the
+ * CLI) or on a request URL; a schedule the bot adds itself still repeats. Each start is one run in the bot's lane, and
+ * the schedule stays the bot's while it runs (a schedule that is gone cancels its runs).
+ */
+describe('a bot automation that does not repeat', () => {
+  const ownerAdds = (when: BotJobWhen, extra: { prompt?: string; cliName?: string } = {}) => f.book.add(botId, { when, prompt: 'Tidy the site.', ...extra }, 'owner')
+
+  it('on demand: nothing runs by itself; Run now starts one run, and the job waits for its next start', async () => {
+    await f.bots.reconcileOnStartup()
+    const added = ownerAdds({ kind: 'manual' }, { cliName: 'tidy' })
+    expect(added).toMatchObject({ when: { kind: 'manual' }, label: 'when you run it' })
+    expect(added.nextAt).toBeUndefined()
+    expect(f.scheduler.getJob(added.jobId)).toMatchObject({ schedule: { kind: 'manual' }, state: 'scheduled', nextRunAt: null, cliName: 'tidy' })
+    expect((await f.tickSchedules(new Date(T0 + 60 * MIN))).inserted).toEqual([])
+    // Run now (and `mousse automation run tidy`) makes it due now, on the real clock.
+    f.scheduler.triggerJob(added.jobId)
+    const { inserted } = await f.tickSchedules(new Date(Date.now() + MIN))
+    expect(inserted).toHaveLength(1)
+    expect(f.store.activation(inserted[0]!)).toMatchObject({ lane: 'run', trigger: { kind: 'schedule', input: 'Tidy the site.', scheduleId: added.scheduleId } })
+    expect(f.scheduler.getJob(added.jobId)).toMatchObject({ state: 'scheduled', nextRunAt: null, lastStatus: 'ok' })
+    expect(f.scheduler.getJob(added.jobId)!.lastError).toBeUndefined()
+    f.bots.schedulesEdited(botId)
+    expect(f.book.get(botId, added.scheduleId)).toBeDefined()
+    expect(f.store.activation(inserted[0]!)!.status).not.toBe('cancelled')
+  })
+
+  it('once: runs at its time and completes, and stays the bot\'s while its run goes on', async () => {
+    await f.bots.reconcileOnStartup()
+    const added = ownerAdds({ kind: 'once', runAt: iso(T0 + 30 * MIN) })
+    expect(added.nextAt).toBe(iso(T0 + 30 * MIN))
+    expect((await f.tickSchedules(new Date(T0 + 29 * MIN))).inserted).toEqual([])
+    const { inserted } = await f.tickSchedules(new Date(T0 + 30 * MIN))
+    expect(inserted).toHaveLength(1)
+    expect(f.scheduler.getJob(added.jobId)).toMatchObject({ state: 'completed', nextRunAt: null, lastStatus: 'ok' })
+    f.bots.schedulesEdited(botId)
+    expect(f.book.get(botId, added.scheduleId)).toBeDefined()
+    expect(f.store.activation(inserted[0]!)!.status).not.toBe('cancelled')
+    expect((await f.tickSchedules(new Date(T0 + 90 * MIN))).inserted).toEqual([])
+    expect(() => ownerAdds({ kind: 'once', runAt: iso(T0) })).toThrow(/in the past/)
+  })
+
+  it('a request URL starts the bot\'s run with the request\'s fields, and never moves its timer', async () => {
+    await f.bots.reconcileOnStartup()
+    const added = ownerAdds({ kind: 'manual' }, { prompt: 'Look at {{body.title}}.' })
+    f.jobStore.setWebhookTrigger(added.jobId, { scheme: 'mousse', secretRef: `scheduled-webhook-${added.jobId}`, createdAt: iso(T0) })
+    const now = Date.now()
+    expect(f.jobStore.triggerFromWebhook(added.jobId, { ts: Math.floor(now / 1000), sig: 'a'.repeat(64), body: Buffer.from('{"title":"Fix the cache"}'), now })).toMatchObject({ kind: 'accepted' })
+    const { inserted } = await f.tickSchedules(new Date(now))
+    expect(inserted).toHaveLength(1)
+    const row = f.store.activation(inserted[0]!)!
+    expect(row.trigger).toMatchObject({ kind: 'schedule', scheduleId: added.scheduleId, occurrenceAt: iso(now) })
+    expect(row.trigger.kind === 'schedule' && row.trigger.input).toContain('Fix the cache')
+    expect(f.scheduler.getJob(added.jobId)).toMatchObject({ state: 'scheduled', nextRunAt: null })
+    expect(f.jobStore.listWebhookDeliveries(added.jobId)[0]).toMatchObject({ outcome: 'completed' })
+  })
+
+  it('a schedule the bot adds itself still repeats', () => {
+    expect(() => f.book.add(botId, { when: { kind: 'manual' }, prompt: 'p' }, 'bot')).toThrow(/A bot repeats/)
+    expect(() => f.book.add(botId, { when: { kind: 'once', runAt: iso(T0 + MIN) }, prompt: 'p' }, 'bot')).toThrow(/A bot repeats/)
+    const own = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'p' }, 'bot')
+    expect(() => f.book.update(f.scheduler.getJob(own.jobId)!, { schedule: { kind: 'manual' } })).toThrow(/A bot repeats/)
   })
 })

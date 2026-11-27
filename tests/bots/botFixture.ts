@@ -44,6 +44,8 @@ export interface BotFixture {
   host: BotEngineHost
   /** The one shared scheduler (a real `ScheduledJobService` over a temporary home), on the fixture's clock. */
   scheduler: ScheduledJobService
+  /** The scheduler's store, for what only it does (a request URL's delivery). */
+  jobStore: ScheduledJobStore
   /** Bots' schedules in the shared store. */
   book: BotScheduleBook
   /** The Automations run log the scheduler records into, as in the app: where a run's `run_report` level is kept. */
@@ -229,6 +231,7 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'device
   scheduler.setRunLedger(automationRuns)
   host.runLevel = (activationId) => automationRuns.levelOfActivation(activationId)
   fixture.scheduler = scheduler
+  fixture.jobStore = jobStore
   fixture.book = book
   fixture.automationRuns = automationRuns
   fixture.host = host

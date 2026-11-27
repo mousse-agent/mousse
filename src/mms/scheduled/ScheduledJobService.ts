@@ -883,7 +883,8 @@ export class ScheduledJobService extends EventEmitter {
     const claim = job.runClaim
     if (!claim) return
     const now = this.clock()
-    let occurrenceAt = claim.occurrenceKey
+    // A request delivery's key is its id, not a time: it happens now, and fills the prompt's placeholders from its body.
+    let occurrenceAt = claim.webhookOccurrenceId ? now.toISOString() : claim.occurrenceKey
     let outcome: ReturnType<ScheduledBotRunner['runOccurrence']>
     try {
       const existing = this.botRunner?.findOccurrence({ botId: job.bot.botId, scheduleId: job.bot.scheduleId, occurrenceKey: claim.occurrenceKey })
@@ -927,8 +928,9 @@ export class ScheduledJobService extends EventEmitter {
         }
         const expired = next && now.getTime() - Date.parse(occurrenceAt) >= Date.parse(next) - now.getTime()
         const missedReason = `Missed ${new Date(occurrenceAt).toLocaleDateString('en-US', { weekday: 'short' })} ${clockTime(occurrenceAt)} (computer off)`
-        outcome = expired ? { kind: 'skipped', reason: missedReason } : this.botRunner
-          ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, ...(job.bot.say !== undefined ? { say: job.bot.say, ownerAsked: job.bot.ownerAsked } : {}), occurrenceAt, occurrenceKey: claim.occurrenceKey, ...(claim.missed ? { missed: claim.missed } : {}), now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
+        const rendered = this.promptFor(job, claim)
+        outcome = expired ? { kind: 'skipped', reason: missedReason } : rendered.error !== undefined ? { kind: 'skipped', reason: rendered.error } : this.botRunner
+          ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: rendered.prompt, ...(job.bot.say !== undefined ? { say: job.bot.say, ownerAsked: job.bot.ownerAsked } : {}), occurrenceAt, occurrenceKey: claim.occurrenceKey, ...(claim.missed ? { missed: claim.missed } : {}), now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
           : { kind: 'skipped', reason: 'bots_unavailable' }
       }
     } catch (error) {

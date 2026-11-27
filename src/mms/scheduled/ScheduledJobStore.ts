@@ -1442,7 +1442,9 @@ export class ScheduledJobStore {
   /**
    * A bot's occurrence was handed to the bot, whose run lane runs it, or was skipped (`skipped` says why). The claim
    * ends without a run record (the bot's activations are its runs) and the schedule moves on; occurrences missed while
-   * Mousse was closed collapse into this one, so a backlog never runs.
+   * Mousse was closed collapse into this one, so a backlog never runs. A request URL's delivery never moves the timer and
+   * its log row ends with the hand-over; an on-demand job waits for its next start; a one-time job has run its time (Run
+   * now starts it again).
    */
   finishBotClaim(id: string, claimToken: string, outcome: { skipped?: string; occurrenceAt?: string; checked?: boolean }, now: Date = new Date()): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
@@ -1450,7 +1452,8 @@ export class ScheduledJobStore {
       const job = jobs.find((entry) => entry.id === id)
       const claim = job?.runClaim
       if (!job?.bot || !claim || job.state !== 'running' || claim.token !== claimToken) return null
-      const occurrenceAt = outcome.occurrenceAt ?? claim.occurrenceKey
+      const delivery = webhookIdOfOccurrence(claim.occurrenceKey) !== undefined
+      const occurrenceAt = outcome.occurrenceAt ?? (delivery ? now.toISOString() : claim.occurrenceKey)
       job.runClaim = undefined
       job.botSkip = outcome.skipped ? { at: occurrenceAt, reason: outcome.skipped } : undefined
       if (!outcome.skipped && !outcome.checked) {
@@ -1458,11 +1461,19 @@ export class ScheduledJobStore {
         job.lastStatus = 'ok'
         job.lastError = undefined
       }
-      job.nextRunAt = nextOccurrenceAfter(job.schedule, occurrenceAt, now)
-      job.state = job.nextRunAt ? 'scheduled' : 'error'
-      if (!job.nextRunAt) job.lastError = 'Failed to compute next run'
+      if (delivery) {
+        job.state = 'scheduled'
+      } else if (job.schedule.kind === 'manual' || job.schedule.kind === 'once') {
+        job.nextRunAt = null
+        job.state = stateWithoutNextRun(job)
+      } else {
+        job.nextRunAt = nextOccurrenceAfter(job.schedule, occurrenceAt, now)
+        job.state = job.nextRunAt ? 'scheduled' : 'error'
+        if (!job.nextRunAt) job.lastError = 'Failed to compute next run'
+      }
       job.updatedAt = now.toISOString()
       this.saveJobs(jobs)
+      if (delivery) this.settleWebhookDelivery(job.id, claim.occurrenceKey, outcome.skipped ? { outcome: 'dispatch_failed', error: `Skipped: ${outcome.skipped}` } : { outcome: 'completed' })
       return job
     })
   }
@@ -1682,6 +1693,17 @@ export class ScheduledJobStore {
         job.runClaim = undefined
         job.state = 'scheduled'
         job.nextRunAt = claim.occurrenceKey
+        job.updatedAt = nowIso
+        interrupted.push({ ...job })
+        dirty = true
+        continue
+      }
+      // A bot's request delivery is replayed the same way: the same occurrence id, so the same activation is found.
+      const botDelivery = job.bot ? webhookIdOfOccurrence(claim?.occurrenceKey) : undefined
+      if (botDelivery) {
+        job.runClaim = undefined
+        job.state = 'scheduled'
+        job.pendingTrigger = { occurrenceId: botDelivery, receivedAt: nowIso }
         job.updatedAt = nowIso
         interrupted.push({ ...job })
         dirty = true

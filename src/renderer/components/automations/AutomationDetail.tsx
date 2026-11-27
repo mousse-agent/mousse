@@ -49,12 +49,15 @@ const BUILDER_KINDS: Array<{ value: BuilderKind; label: string }> = [
   { value: 'once', label: 'Once' },
   { value: 'manual', label: 'On demand' }
 ]
-/** A bot repeats: Once and On demand are something you ask it in its chat. */
-const BOT_BUILDER_KINDS = BUILDER_KINDS.filter((option) => option.value !== 'once' && option.value !== 'manual')
+/** A schedule the bot added itself repeats: Once and On demand are for a bot automation you added. */
+const REPEATING_BUILDER_KINDS = BUILDER_KINDS.filter((option) => option.value !== 'once' && option.value !== 'manual')
 
-/** Why a bot can't keep this When, by field; empty when it can. Its interval follows every job's (at least a minute). */
-export function botScheduleErrors(draft: JobDraft): Partial<Record<DraftField, string>> {
-  if (draft.scheduleKind === 'once' || draft.scheduleKind === 'manual') return { schedule: 'A bot repeats. For one run, ask it in its chat.' }
+/**
+ * Why a bot's automation can't keep this When, by field; empty when it can. One you added runs on any When; one the bot
+ * added itself repeats. Its interval follows every job's (at least a minute).
+ */
+export function botScheduleErrors(draft: JobDraft, createdBy: 'owner' | 'bot' = 'owner'): Partial<Record<DraftField, string>> {
+  if (createdBy === 'bot' && (draft.scheduleKind === 'once' || draft.scheduleKind === 'manual')) return { schedule: 'A schedule the bot added repeats. For one run, ask it in its chat.' }
   return {}
 }
 
@@ -216,7 +219,7 @@ export function AutomationDetail({
   const errors = useMemo(
     () => ({
       ...validateDraft(draft, { hasWebhook: Boolean(job.trigger?.webhook), requireName: true, ...(choosingPermission ? { held: held.mode } : {}) }),
-      ...(job.bot ? botScheduleErrors(draft) : {})
+      ...(job.bot ? botScheduleErrors(draft, job.bot.createdBy) : {})
     }),
     [draft, job, choosingPermission, held.mode]
   )
@@ -359,7 +362,7 @@ export function AutomationDetail({
         </button>
         <h2 className="automation-detail-name">{draft.name.trim() || job.name}</h2>
         <div className="automation-detail-actions">
-          {bot ? null : <button type="button" className="settings-btn" onClick={onRunNow} disabled={Boolean(item?.active && item.active.state !== 'waiting')}>Run now</button>}
+          <button type="button" className="settings-btn" onClick={onRunNow} disabled={Boolean(item?.active && item.active.state !== 'waiting')}>Run now</button>
           {paused
             ? <button type="button" className="settings-btn" onClick={onResume} data-testid="automation-detail-resume">Resume</button>
             : <button type="button" className="settings-btn" onClick={onPause} title="Pause…" data-testid="automation-detail-pause">Pause</button>}
@@ -371,7 +374,7 @@ export function AutomationDetail({
         <FormRow label="When" labelId={id('when-label')} extra={builderOpen && !wakesOn ? (
           <div className="scheduled-builder automation-builder">
             <div className="scheduled-segmented" role="radiogroup" aria-label="When" {...field('schedule')}>
-              {(bot ? BOT_BUILDER_KINDS : BUILDER_KINDS).map((option) => (
+              {(job.bot?.createdBy === 'bot' ? REPEATING_BUILDER_KINDS : BUILDER_KINDS).map((option) => (
                 <button
                   key={option.value}
                   type="button"
@@ -489,7 +492,7 @@ export function AutomationDetail({
 
         <FormRow label="Task" htmlFor={id('prompt')} wide extra={
           <>
-            {job.trigger?.webhook && !bot ? <RequestFields prompt={draft.prompt} promptRef={promptRef} onChange={(prompt) => patch({ prompt })} /> : null}
+            {job.trigger?.webhook ? <RequestFields prompt={draft.prompt} promptRef={promptRef} onChange={(prompt) => patch({ prompt })} /> : null}
             {fieldError('prompt')}
           </>
         }>
@@ -585,7 +588,7 @@ export function AutomationDetail({
       <button type="button" className="scheduled-disclosure automation-form-more" aria-expanded={moreOpen} aria-controls={id('more')} onClick={() => setMoreOpen((open) => !open)} data-testid="automation-more">
         <ChevronRight size={13} aria-hidden="true" className="scheduled-disclosure-chevron" />
         More
-        <span className="automation-more-hint">{bot ? 'name · added by' : 'name · thread · mode · keys · request URL'}</span>
+        <span className="automation-more-hint">{bot ? 'name · request URL · added by' : 'name · thread · mode · keys · request URL'}</span>
       </button>
 
       {moreOpen ? (
@@ -643,11 +646,6 @@ export function AutomationDetail({
             </FormRow>
           )}
 
-          {/* A request URL is served by the computer that runs it, and set up there. */}
-          <FormRow label="Request URL" testId="request-row" wide>
-            {remoteNode ? <span className="automation-form-value">{`Set up on ${owner.name}`}</span> : <RequestSetup job={job} request={item?.request} prompt={draft.prompt} api={requestApi} />}
-          </FormRow>
-
           {job.createdBy ? (
             <FormRow label="Added by" testId="agent-row">
               <span className="automation-form-value">
@@ -659,6 +657,10 @@ export function AutomationDetail({
             </FormRow>
           ) : null}
           </>}
+          {/* A request URL is served by the computer that runs it, and set up there. A bot's request starts its run. */}
+          <FormRow label="Request URL" testId="request-row" wide>
+            {remoteNode ? <span className="automation-form-value">{`Set up on ${owner.name}`}</span> : <RequestSetup job={job} request={item?.request} prompt={draft.prompt} api={requestApi} />}
+          </FormRow>
           {bot ? <FormRow label="Added by" testId="bot-added-by"><span className="automation-form-value">{job.bot?.createdBy === 'bot' ? bot.name : 'You'}</span></FormRow> : null}
         </div>
       ) : null}
