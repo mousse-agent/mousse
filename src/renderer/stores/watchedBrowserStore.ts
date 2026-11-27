@@ -428,7 +428,8 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
       send: legacy ? (inputs) => sendOneByOne(key, inputs) : (inputs) => call(config.methods.send, params(key, { viewId: viewId(), holdId: hold.id, inputs })),
       health: (health) => setInput(key, { health }),
       answered: (ack, input) => {
-        if (ack.copied !== undefined && input.kind === 'copy') void writeClipboard(ack.copied)
+        // Nothing selected copies nothing: the clipboard keeps what it had, as in a browser.
+        if (ack.copied && input.kind === 'copy') void writeClipboard(ack.copied)
         // A duplicate of one refused before says why it was.
         if (sayRefusal(ack) && worthSaying(input)) setInput(key, { note: ack.text ?? 'That did not reach the page', ...(ack.detail ? { detail: ack.detail } : {}) })
       }
