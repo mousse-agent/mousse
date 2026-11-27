@@ -1466,6 +1466,22 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
    * a thread outside the caller's family): today's rules, a subagent only from its own lineage and never a run looser
    * than the caller's.
    */
+  /**
+   * A bot's chat reaching its own running work, its child in the thread tree (`delegation/botWork.ts`): a message is the
+   * owner's note to the work and a Stop stops it, both through the bot port (`RunEngine.noteBotWork`, `stopBotWork`),
+   * never the work thread's inbox or runs. Any other caller or target is left to the tool's own rules.
+   */
+  const ownBotWork = (threadId: string, ctx: ToolCallContext): boolean =>
+    ctx.turn.bot !== undefined && engine.runningBotWork(threadId)?.parentThreadId === ctx.caller.threadId
+  const noteOwnBotWork = (threadId: string, args: Record<string, unknown>, ctx: ToolCallContext): ToolOutcome => {
+    if (typeof args.content !== 'string' || !args.content.trim()) throw new Error('thread_send requires content')
+    // Credited to the turn that sent it, as `work_note` is, and noted once per request.
+    const activationId = ctx.turn.bot!.activationId
+    const outcome = engine.noteBotWork(threadId, args.content, { from: activationId, requestKey: `${botRequestPrefix('thread_send', ctx.caller.threadId, activationId)}${toolRequestId(args, ctx)}` })
+    if (outcome !== 'noted') throw new McpToolError('mousse_conflict', `The work did not take the message (${outcome}).`, { conflict: `bot_work_${outcome}` })
+    return json({ threadId, work: 'noted' })
+  }
+
   const steerAsAgent = async (threadId: string, runId: string, text: string, args: Record<string, unknown>, ctx: ToolCallContext, tool: 'thread_steer' | 'thread_send', requestKey?: string): Promise<{ runId: string; sequence: number; replayed: boolean; followUp?: true }> => {
     const bot = botThreadCall(bots, ctx)
     if (bot) requireBotReach(host, engine, ctx.caller.threadId, threadId)
@@ -2085,6 +2101,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       handler: async (args, ctx) => {
         const threadId = requiredId(args, 'threadId')
         if (args.intent !== undefined && args.intent !== 'work' && args.intent !== 'note') throw new Error('intent must be work or note')
+        if (ownBotWork(threadId, ctx)) return noteOwnBotWork(threadId, args, ctx)
         if (args.intent === 'note') return sendNote(threadId, args, ctx)
         for (const key of ['attention', 'runId', 'interrupt'] as const)
           if (args[key] !== undefined) throw new Error(`${key} applies to notes only (intent "note")`)
@@ -2359,6 +2376,13 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       handler: async (args, ctx) => {
         const threadId = requiredId(args, 'threadId')
         if (isQualifiedId(threadId)) return interruptOnComputer(threadId, args, ctx)
+        if (ownBotWork(threadId, ctx)) {
+          // The run it names must be the work's active turn, as for any Stop: an old turn's Stop stops nothing.
+          const runId = requiredId(args, 'runId')
+          const work = await engine.stopBotWork(threadId, { runId })
+          if (work === null) throw new McpToolError('mousse_conflict', `Run ${runId} is not the work's running turn, so nothing was stopped. Read the thread again and name its active run.`, { conflict: 'run_not_active', expectedRunId: runId })
+          return json({ threadId, work })
+        }
         const runId = requiredId(args, 'runId')
         if (!host.stopRun) return notAvailable('thread_interrupt')
         if (threadId === ctx.caller.threadId) throw new Error('thread_interrupt is for other threads; stop your own work by ending your turn.')

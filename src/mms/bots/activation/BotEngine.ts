@@ -118,6 +118,7 @@ import type { NeutralTool } from '../../../shared/harness/tools'
 import type { RunEngine } from '../../run/RunEngine'
 import { TERMINAL_RUN_STATUSES, type BotDelegation, type BotTurnPayload, type DelegationRecord, type RunRecord } from '../../run/types'
 import type { BotSubagentOutcome } from '../../run/delegation/botPort'
+import { botWorkProjections, endMissingBotWork, projectBotWork } from '../../run/delegation/botWork'
 import { readRunResultText } from '../../run/delegation/hold'
 import { botSubagentStartsWith, recordRevision, type TreeDelivery } from '../../run/delegation/treeCorrection'
 import { priceFor } from '../../usageHistory/pricing'
@@ -637,6 +638,8 @@ const ESCALATABLE: ReadonlySet<WallReason['kind']> = new Set(['tool', 'skill', '
 
 export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly live = new Map<string, LiveDispatch>()
+  /** Work whose run database projection reads `running` (`projectWork`): each change looks at it again until it ends. */
+  private readonly projectedWork = new Set<string>()
   /** Per context thread, the consult that runs or waits there last: consults there run one at a time. */
   private readonly lanes = new Map<string, Promise<void>>()
   /** Consults waiting for their run's final message, by `<activationId>:<n>`. */
@@ -1153,6 +1156,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   private changed(event: { botId?: string; activationId?: string }): void {
     this.alone?.cleanPending(event.botId)
+    // The thread tree's projection of the bot's work follows bots.db once it committed: this change's work, the bot's
+    // standing work, and work still projected as running.
+    this.store.db.afterCommit(() => {
+      try {
+        this.projectWork([
+          ...(event.activationId ? [event.activationId] : []),
+          ...(event.botId ? this.store.laneActivations(event.botId, 'run', NOT_ENDED).map((row) => row.id) : []),
+          ...this.projectedWork
+        ])
+      } catch {
+        // Written at the next change or startup.
+      }
+    })
     const ended = event.activationId ? this.store.activation(event.activationId) : undefined
     if (ended && ENDED_ACTIVATION_STATUSES.has(ended.status)) this.postScheduleCompleted(ended)
     // A change may take "run commands" away (a Remove, a switch): background commands stop with it.
@@ -8548,6 +8564,50 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
+  /**
+   * The run database's projection of run-lane work (`delegation/botWork.ts`), written from bots.db, which stays the
+   * source of truth: idempotent, so writing it again changes nothing. Work with no thread yet is not in the tree; work
+   * bots.db no longer has ends there. Never throws: a projection that could not be written is written at the next change
+   * or startup.
+   */
+  private projectWork(ids: Iterable<string>): void {
+    const runs = this.host.runs()
+    if (!runs) return
+    for (const id of new Set(ids)) {
+      try {
+        const row = this.store.activation(id)
+        const home = row ? this.store.registry(row.botId)?.homeThreadId : undefined
+        if (!row) endMissingBotWork(runs.store, id)
+        else if (row.lane === 'run' && row.threadId && home) {
+          const status = row.status === 'done' || row.status === 'failed' || row.status === 'cancelled' ? row.status : 'running'
+          projectBotWork(runs.store, { activationId: id, homeThreadId: home, threadId: row.threadId, status, createdAt: row.createdAt, endedAt: row.endedAt, error: row.endReason })
+          if (status === 'running') {
+            this.projectedWork.add(id)
+            continue
+          }
+        }
+        this.projectedWork.delete(id)
+      } catch (error) {
+        console.warn('a bot work could not be shown in the thread tree yet', { activationId: id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+  }
+
+  /** `BotExecutionPort.stopBotWork`: a Stop of the work's row in the thread tree stops the work as `work_stop` does. */
+  async stopBotWork(activationId: string): Promise<'stopped' | 'ended' | 'not_found'> {
+    const row = this.store.activation(activationId)
+    return row ? this.stopWork(row.botId, activationId) : 'not_found'
+  }
+
+  /**
+   * `BotExecutionPort.noteBotWork`: a message to the work's row reaches the work as `work_note` does, credited to the
+   * turn that sent it (`from`: only a turn its owner started speaks for the owner), once per request (`requestKey`).
+   */
+  noteBotWork(activationId: string, text: string, options: { from?: string; requestKey?: string } = {}): ReturnType<BotEngine['noteWork']> {
+    const row = this.store.activation(activationId)
+    return row ? this.noteWork(row.botId, activationId, text, options.from, options.requestKey) : 'not_found'
+  }
+
   private async reconcileAll(): Promise<void> {
     const runs = this.host.runs()
     if (!runs) return
@@ -8593,6 +8653,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     // Waiting work whose answer was lost (Mousse stopped between it and the work's own update) ends with a line.
     this.settleStrandedWork()
+    // The thread tree's projection of the bots' work, rebuilt from bots.db: what a crash left between a work's change
+    // and its projection is written now. Work still projected running is looked at whatever bots.db says of it, and
+    // work with a thread but no projection (ended before it was written, or before this build) gets one.
+    try {
+      const projected = botWorkProjections(runs.store)
+      const unprojected = this.store.all("SELECT id FROM bot_activations WHERE lane = 'run' AND thread_id IS NOT NULL").map((row) => String(row.id)).filter((id) => !projected.has(id))
+      this.projectWork([...[...projected].flatMap(([id, status]) => status === 'running' ? [id] : []), ...this.store.activationsWith([...NOT_ENDED]).map((row) => row.id), ...unprojected])
+    } catch (error) {
+      console.warn('the bots\' work could not be shown in the thread tree at startup', { error: error instanceof Error ? error.message : String(error) })
+    }
     for (const botId of this.waitingBots()) this.pumpLater(botId)
   }
 
@@ -10173,7 +10243,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * turn ends, before it reports (`advance`); `noteReach` says which. Ended work can't take it, nor work that waits for
    * the owner's answer to its question: the answer is the way on (`question_answer`).
    */
-  noteWork(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found' | 'question' | 'approval' | 'waiting' {
+  noteWork(botId: string, workId: string, note: string, from?: string, requestKey?: string): 'noted' | 'held' | 'ended' | 'not_found' | 'question' | 'approval' | 'waiting' {
     const text = note.trim()
     const row = this.store.activation(workId)
     if (!row || row.botId !== botId || row.lane !== 'run' || !text) return 'not_found'
@@ -10184,6 +10254,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (current.status === 'blocked' && wait && !wait.takesNotes(current)) return wait.noteRefusal
       // Only work that will take it: waiting, running, or waiting to go on. Other paused or blocked work may never continue.
       if (!['queued', 'running', 'waiting_grant'].includes(current.status) && !workWaits(current)) return 'held' as const
+      // A retry of the same request (`requestKey`) was noted already: it adds nothing.
+      if (requestKey && !this.store.run("INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, '1')", botId, `work-note-request:${workId}:${requestKey}`)) return 'noted' as const
       // The note keeps the owner's message it came from (the chat turn's), so a forget of that message reaches it.
       if (from && this.store.activation(from) && ownerChatTurn(this.store.activation(from)!)) this.resetWorkWaitChain(workId)
       this.store.addWorkNote(workId, botId, text, from ? this.noteSourceOf(from) : undefined)
