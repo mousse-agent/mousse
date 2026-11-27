@@ -66,6 +66,8 @@ export interface PersonalBotsClient {
   wipeMemory(botId: string, keep?: 'saved'): Promise<{ forgotten: number }>
   /** A fresh start: chat, memory, schedules and reminders go; name, look, permissions and models stay. */
   reset(botId: string): Promise<BotSummary>
+  /** Saves the bot's face picture (a PNG in base64) drawn from `key`. Only a service whose summaries carry `facePicture` has it. */
+  saveFacePicture(botId: string, key: string, png: string): Promise<{ path: string }>
   /** What New bot's Runs on line offers before the bot exists; an older service lacks it and rejects. */
   modelChoices(): Promise<BotsPersonalV2Result<'bots.model.choices'>>
   removeSchedule(botId: string, scheduleId: string): Promise<BotDetail>
@@ -120,6 +122,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     clearChat: async (botId) => { await call('bots.chat.clear', { botId }) },
     wipeMemory: (botId, keep) => call('bots.memory.wipe', { botId, ...(keep ? { keep } : {}) }),
     reset: async (botId) => (await call('bots.reset', { botId })).bot,
+    saveFacePicture: (botId, key, png) => call('bots.facePicture.save', { botId, key, png }),
     modelChoices: () => call('bots.model.choices', {}),
     removeSchedule: (botId, scheduleId) => call('bots.schedules.remove', { botId, scheduleId }),
     cancelReminder: (botId, reminderId) => call('bots.reminders.cancel', { botId, reminderId }),

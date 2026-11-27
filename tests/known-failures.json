@@ -1,4 +1,7 @@
 [
+  { "file": "tests/run/terminalRead.test.ts", "test": "quotes the error a failed command printed", "issue": 2068, "how": "npm prints Missing script: bild without the quotes the test expects", "platform": "win32" },
+  { "file": "tests/run/terminalRead.test.ts", "test": "pages back through long output by line number", "issue": 2068, "how": "the shell loop prints 14 lines, not 300: fromLine 1, toLine 14", "platform": "win32" },
+  { "file": "tests/run/terminalRead.test.ts", "test": "hides a secret that a long line's cut would split", "issue": 2068, "how": "intermittent on Windows", "platform": "win32" },
   { "file": "tests/net/bridge/routed/routerReview.test.ts", "test": "keeps a claimed item out of the queue it is also in", "issue": 2036, "how": "intermittent: the queue still reads [] when the 1 s wait for ['i1'] gives up" },
   { "file": "tests/run/threadSettleNoticeDaemon.test.ts", "test": "waits behind the sender's running turn, and notices that meet there run as one turn", "issue": 2021, "how": "intermittent under load (several daemon files in one run): timed out waiting for both notices queued" },
   { "file": "tests/net/bridge/routed/remoteSubagents.test.ts", "issue": 1967, "how": "intermittent: all tests pass, then the cleanup hook times out" },

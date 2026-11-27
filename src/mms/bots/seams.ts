@@ -83,7 +83,10 @@ export interface BotToolHost {
     done?(threadId: string, why: string): void
     list(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; leftOff?: string }>
   }
-  setProfile(botId: string, p: { name?: string; description?: string }): void
+  /** `look`: the fields given replace the bot's own, the rest stay. */
+  setProfile(botId: string, p: { name?: string; description?: string; look?: Partial<import('../../shared/bots/personal/look').BotLook> }): void
+  /** `get_profile`: the bot's own profile, read where each part is kept. Absent: no profile here. */
+  profile?(botId: string): import('./profile').BotProfileFacts
   /**
    * `set_depth` and `use_model` (#673). `now`: this activation only, by a reload; `always`: saved as a revision with no
    * re-approval. A depth is the activation's level (`now`) or the bot's standing level (`always`); a pick is one of the

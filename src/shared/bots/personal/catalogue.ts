@@ -94,7 +94,8 @@ const COMMANDS_GUIDANCE = [
 const YOU_GUIDANCE = [
   "When the owner asks you to think harder or be quicker from now on, use set_depth with always; say \"I'll take more time\" or \"I'll be quicker\" only when its answer says something changed, and otherwise say what it tells you.",
   'Use use_model only when the owner names a model; you may repeat their words, and if it isn\'t available, say so plainly.',
-  'set_profile changes your name or description, when your owner asks.'
+  'get_profile reads your whole profile: your name, description and look, the path of your face picture, your models, the devices that reach you, the names of the keys and secrets you were given, and what you may do. Read it when your owner asks about you, and before you say you can\'t reach something of your own, such as your picture.',
+  'set_profile changes your name, your description or your look (kind, colour, accessory, eyes, eye colour; only the fields given change), when your owner asks. Your face in the app and your face picture change with it.'
 ].join('\n')
 
 const MEMORY_GUIDANCE = 'memory_list lists your saved entries; memory_forget removes one the owner wants gone, or that is wrong and has no replacement (replace a wrong one with memory_save instead).'
@@ -167,7 +168,7 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
     tools: ['watch_start', 'watch_list', 'watch_stop', 'running_list'],
     guidance: COMMANDS_GUIDANCE
   },
-  { id: 'you', line: 'how much time you take, your model, your name and description', tools: ['set_depth', 'use_model', 'set_profile'], guidance: YOU_GUIDANCE },
+  { id: 'you', line: 'your profile (get_profile), how much time you take, your model, your name, description and look', tools: ['get_profile', 'set_depth', 'use_model', 'set_profile'], guidance: YOU_GUIDANCE },
   { id: 'memory', line: 'list or forget memory entries', tools: ['memory_list', 'memory_forget'], guidance: MEMORY_GUIDANCE },
   { id: 'showing', line: 'applets and pictures under your message', tools: ['publish_applet', 'make_image'], guidance: SHOWING_GUIDANCE },
   { id: 'bots', line: "your owner's other bots", tools: [BOT_LIST_TOOL, BOT_SEND_TOOL], guidance: BOTS_GUIDANCE },

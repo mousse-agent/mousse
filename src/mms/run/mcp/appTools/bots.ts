@@ -5,7 +5,7 @@ import { Type, type Tool } from '@earendil-works/pi-ai'
 import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule, type BotWorkLevel } from '../../../../shared/bots/personal/definition'
 import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, pickReasonText, pickSourceOf, plainLabel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
 import type { BotModelOption, BotWorkChoices } from '../../../../shared/bots/personal/methods'
-import { BOT_CARD_TOOL, BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_QUESTION_WITHDRAW_TOOL } from '../../../../shared/bots/personal/manifest'
+import { BOT_CARD_TOOL, BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, BOT_PROFILE_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_QUESTION_WITHDRAW_TOOL } from '../../../../shared/bots/personal/manifest'
 import type { BotSubagentView } from '../../../../shared/bots/personal/authority'
 import { DEFAULT_ANSWER_AFTER_MINUTES, DEFAULT_NUDGE_AFTER_MINUTES, MAX_CHOICE_DETAIL_CHARS, MAX_CHOICE_LABEL_CHARS, MAX_FOLLOW_UP_MINUTES, MAX_QUESTION_CHARS, MAX_QUESTION_CHOICES, MAX_QUESTIONS_PER_CALL, MIN_FOLLOW_UP_MINUTES, MIN_QUESTION_CHOICES, QUESTION_NOT_OFFERED_TEXT, questionAsksOf } from '../../../../shared/bots/personal/questions'
 import { cardOf, MAX_CARD_TITLE_CHARS, MAX_CHECKLIST_ITEMS, MAX_CHECKLIST_TEXT_CHARS, MAX_FACT_LABEL_CHARS, MAX_FACT_ROWS, MAX_FACT_VALUE_CHARS, MAX_GALLERY_CAPTION_CHARS, MAX_GALLERY_FILES, MAX_PROGRESS_LABEL_CHARS, MAX_PROGRESS_NOTE_CHARS } from '../../../../shared/bots/personal/cards'
@@ -18,6 +18,8 @@ import { DEFAULT_WATCHER_MINUTES, MAX_WATCHER_MINUTES } from '../../../bots/watc
 import { TERMINAL_READ_DEFAULT_LINES, TERMINAL_READ_MAX_LINES, terminalPage } from '../../../terminals/terminalText'
 import type { BotActivityContext, BotActivitySink, BotToolHost, BotWorkModel } from '../../../bots/seams'
 import type { BotImageMaker } from '../../../bots/images/BotImageMaker'
+import { botProfileText } from '../../../bots/profile'
+import { BOT_ACCESSORIES, BOT_COLOURS, BOT_EYE_COLOURS, BOT_EYES, BOT_KINDS, type BotLook } from '../../../../shared/bots/personal/look'
 import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
 
 /**
@@ -28,7 +30,7 @@ import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallCont
  * - `consult` asks one of the bot's context threads;
  * - `bot_schedule_add`, `bot_schedule_remove`, `bot_schedule_list` keep the bot's own schedules (in
  *   `bots.db`; the job scheduler's tools already own the `schedule_*` names);
- * - `set_profile` renames it or changes its description;
+ * - `set_profile` renames it or changes its description or its look, and `get_profile` reads its whole profile;
  * - `set_depth` and `use_model` change how much time it takes and, in words the owner used, its
  *   model (#673: a level, and a pick among the Runs on choices); a model change shows as a chip
  *   and on About → Runs on, and never names the model in the chat.
@@ -167,11 +169,23 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'set_profile',
-    description: `Change your name (at most ${MAX_BOT_NAME_CHARS} characters) or your description (at most ${MAX_BOT_DESCRIPTION_CHARS}), when the owner asks.`,
+    description: `Change your name (at most ${MAX_BOT_NAME_CHARS} characters), your description (at most ${MAX_BOT_DESCRIPTION_CHARS}) or your look, when the owner asks. A look takes only the fields given; the rest stay. Your face in the app and your face picture change with it.`,
     parameters: Type.Object({
       name: Type.Optional(Type.String()),
-      description: Type.Optional(Type.String())
+      description: Type.Optional(Type.String()),
+      look: Type.Optional(Type.Object({
+        kind: Type.Optional(Type.Union(BOT_KINDS.map((value) => Type.Literal(value)), { description: 'mouse, or mousse: the Mousse logo as a character, mousse in a goblet.' })),
+        colour: Type.Optional(Type.Union(BOT_COLOURS.map((value) => Type.Literal(value)))),
+        accessory: Type.Optional(Type.Union(BOT_ACCESSORIES.map((value) => Type.Literal(value)))),
+        eyes: Type.Optional(Type.Union(BOT_EYES.map((value) => Type.Literal(value)), { description: 'The eye shape.' })),
+        eyeColour: Type.Optional(Type.Union(BOT_EYE_COLOURS.map((value) => Type.Literal(value))))
+      }, { additionalProperties: false }))
     })
+  },
+  {
+    name: BOT_PROFILE_TOOL,
+    description: 'Your own profile: who you are (name, description, look and the path of your face picture), how you run (your models and level), what you can reach (devices, MCP servers, the names of keys and secrets you were given) and what you may do. Read it when your owner asks about you, or before you use your picture.',
+    parameters: Type.Object({})
   },
   {
     name: 'set_depth',
@@ -436,6 +450,31 @@ function otherNames(option: BotModelOption): string[] {
   return [...new Set(option.names ?? [])].filter((name) => !own.has(name)).slice(0, 4).map((name) => plainLabel(name, 60))
 }
 
+/** A row's pick in plain words, as Runs on names it: "Opus 5.5 on Claude, high reasoning"; null is Mousse's choice. */
+function pickName(choices: BotWorkChoices): (pick: BotModelPick | null) => string {
+  return (pick) => {
+    if (!pick) return 'chosen by Mousse'
+    const option = choices.options.find((candidate) => candidate.instanceId === pick.instanceId && candidate.model === pick.model)
+    const name = option ? `${modelName(option)} on ${plainLabel(option.entry, 40)}` : plainLabel(pick.model)
+    return pick.effort ? `${name}, ${pick.effort} reasoning` : name
+  }
+}
+
+const LOOK_VALUES: Record<keyof BotLook, readonly string[]> = { kind: BOT_KINDS, colour: BOT_COLOURS, accessory: BOT_ACCESSORIES, eyes: BOT_EYES, eyeColour: BOT_EYE_COLOURS }
+
+/** `set_profile`'s look: the fields given, each one of its values, or why not. */
+function lookChange(value: unknown): Partial<BotLook> | string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'look is an object with kind, colour, accessory, eyes or eyeColour.'
+  const change: Partial<BotLook> = {}
+  for (const [key, given] of Object.entries(value)) {
+    const values = LOOK_VALUES[key as keyof BotLook]
+    if (!values) return `look has no field ${key}: it takes kind, colour, accessory, eyes and eyeColour.`
+    if (typeof given !== 'string' || !values.includes(given)) return `look.${key} is one of: ${values.join(', ')}.`
+    change[key as keyof BotLook] = given
+  }
+  return Object.keys(change).length ? change : 'look needs at least one of kind, colour, accessory, eyes or eyeColour.'
+}
+
 /**
  * `model_list`' answer: each entry the bot's work can run on, its models and their reasoning levels, in the order Runs
  * on lists them; the owner's other entries with why work can't run there; and the bot's Work rows by name.
@@ -448,12 +487,7 @@ export function workModelListing(choices: BotWorkChoices, rows: BotModelSlots): 
     entry.models.push({ model: option.model, name: modelName(option), ...(option.efforts.length ? { efforts: option.efforts } : {}), ...(also.length ? { also } : {}) })
     entries.set(option.instanceId, entry)
   }
-  const named = (pick: BotModelPick | null) => {
-    if (!pick) return 'chosen by Mousse'
-    const option = choices.options.find((candidate) => candidate.instanceId === pick.instanceId && candidate.model === pick.model)
-    const name = option ? `${modelName(option)} on ${plainLabel(option.entry, 40)}` : plainLabel(pick.model)
-    return pick.effort ? `${name}, ${pick.effort} reasoning` : name
-  }
+  const named = pickName(choices)
   const usual = (key: BotWorkLevel) => named(rows[pickSourceOf(rows, key) ?? key])
   return {
     entries: [...entries.values()],
@@ -840,31 +874,56 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
     }),
     ownTool(byName.get('set_profile')!, deps, {
       class: 'mutation',
-      describe: () => 'Change name or description',
+      describe: () => 'Change name, description or look',
       handler: async (args, ctx) => {
         const call = botCall(deps, ctx)
         if (isOutcome(call)) return call
         if (call.lane !== 'chat') return error(OWNER_ONLY)
         const name = typeof args.name === 'string' ? args.name.replace(/\s+/g, ' ').trim() : undefined
         const description = typeof args.description === 'string' ? args.description.trim() : undefined
-        if (name === undefined && description === undefined) return error('set_profile needs a name or a description.')
+        const look = args.look === undefined ? undefined : lookChange(args.look)
+        if (typeof look === 'string') return error(look)
+        if (name === undefined && description === undefined && look === undefined) return error('set_profile needs a name, a description or a look.')
         if (name !== undefined && (!name || name.length > MAX_BOT_NAME_CHARS)) return error(`A name is 1 to ${MAX_BOT_NAME_CHARS} characters.`)
         if (description !== undefined && (!description || description.length > MAX_BOT_DESCRIPTION_CHARS)) return error(`A description is 1 to ${MAX_BOT_DESCRIPTION_CHARS} characters.`)
-        // The name first and on its own: a description the owner wrote in About is refused, and the name still changes.
-        let renamed = false
+        // The name and the look first, on their own: a description the owner wrote in About is refused, and they still change.
+        const changed: string[] = []
         try {
           if (name !== undefined) {
             call.deps.host.setProfile(call.botId, { name })
-            renamed = true
+            changed.push(`Your name is now ${name}.`)
+          }
+          if (look !== undefined) {
+            call.deps.host.setProfile(call.botId, { look })
+            changed.push('Your look changed.')
           }
           if (description !== undefined) call.deps.host.setProfile(call.botId, { description })
         } catch (failure) {
           const message = failure instanceof Error ? failure.message : String(failure)
-          return error(renamed ? `Your name is now ${name}. ${message}` : message)
+          return error([...changed, message].join(' '))
         }
         const result = { ok: true as const }
         call.deps.activity?.onAppResult(call.activity, 'set_profile', result)
         return json(result)
+      }
+    }),
+    // Every lane reads it: it only reads the bot's own settings, and names its secrets, never their values.
+    ownTool(byName.get(BOT_PROFILE_TOOL)!, deps, {
+      class: 'read',
+      describe: () => 'Read own profile',
+      handler: async (_args, ctx) => {
+        const call = botCall(deps, ctx)
+        if (isOutcome(call)) return call
+        if (!call.deps.host.profile) return error('Your profile can\'t be read here.')
+        let facts
+        try {
+          facts = call.deps.host.profile(call.botId)
+        } catch (failure) {
+          return error(failure instanceof Error ? failure.message : String(failure))
+        }
+        // The models by the names the owner sees in Runs on; one no entry offers now by its own name.
+        const choices = await workChoicesOf(call.deps).catch(() => ({ options: [], unavailable: [] }))
+        return { text: botProfileText(facts, pickName(choices)) }
       }
     }),
     ownTool(byName.get('set_depth')!, deps, {

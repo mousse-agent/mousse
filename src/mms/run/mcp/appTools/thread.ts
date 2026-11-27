@@ -24,6 +24,7 @@ import { isQualifiedId, parseQualifiedId } from '../../../../shared/threadRef'
 import { archivedAtOf } from '../../../../shared/archivedAt'
 import { RemoteThreadRefusal, SEARCH_MS, type RemoteComputerReach, type RemoteTarget, type RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
 import { cutEnd, messageRows, nextAfterIndexOf, textOffsetProblem, type MessageRow } from './messageRows'
+import { fitPage as fitBytes, makeCursor, pageEnd, readCursor } from './paging'
 import { lastCompletedAt, modelOf, pullRequestOf, recentTurns, RECENT_ANSWER_CHARS, RECENT_PROMPT_CHARS, RECENT_REMOTE_LOOKBACK, RECENT_REMOTE_MESSAGES, RECENT_STEP_CHARS, RECENT_TURNS_DEFAULT, RECENT_TURNS_MAX, SUMMARY_NEXT, type ViewRow } from './threadViews'
 import type { BotActivityContext, BotActivitySink } from '../../../bots/seams'
 import {
@@ -424,21 +425,23 @@ function boundedInt(value: unknown, name: string, min: number, max: number, fall
 
 const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), 'utf8')
 
-/**
- * The rows of a `thread_read` page that fit in `THREAD_READ_MAX_BYTES` together with `envelope` (the rest of the
- * response): whole rows in order, always the first, until the next would pass the cap. `capped` says rows were left out.
- */
+/** The rows of a page that fit in `THREAD_READ_MAX_BYTES` together with `envelope` (`paging.ts`). */
 function fitPage<T>(rows: Iterable<T>, envelope: Record<string, unknown>): { taken: T[]; capped: boolean } {
-  // The envelope as the response will carry it, with room for the numbers and hints the page adds.
-  let used = jsonBytes(envelope) + 512
-  const taken: T[] = []
-  for (const row of rows) {
-    const size = jsonBytes(row) + 1
-    if (taken.length > 0 && used + size > THREAD_READ_MAX_BYTES) return { taken, capped: true }
-    taken.push(row)
-    used += size
-  }
-  return { taken, capped: false }
+  return fitBytes(rows, envelope, THREAD_READ_MAX_BYTES)
+}
+
+/** `thread_list`'s order: newest first, then by id, so a cursor's last row has one place in it. */
+const listOrder = (a: { updatedAt: string; id: string }, b: { updatedAt: string; id: string }): number =>
+  a.updatedAt > b.updatedAt ? -1 : a.updatedAt < b.updatedAt ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+
+/**
+ * Where a `thread_list` page after `after` (the sort key of the last row of the page before) starts in `threads`: at
+ * the first thread past that key, whether that row is still listed, or was updated since and moved up.
+ */
+function resumeAt(threads: ReadonlyArray<{ id: string; updatedAt: string }>, after: { id: string; updatedAt: string } | undefined): number {
+  if (!after) return 0
+  const at = threads.findIndex((thread) => listOrder(thread, after) > 0)
+  return at >= 0 ? at : threads.length
 }
 
 const RESULT_READ_ON = 'The full text is the run\'s last answer in the thread\'s transcript: read it with thread_read view "messages", and read on in a long message with textOffset.'
@@ -466,9 +469,17 @@ function boundedEvent(event: ThreadEvent): ThreadEvent {
   return { ...out, payload: { truncated: true, bytes: Buffer.byteLength(raw, 'utf8'), preview: raw.slice(0, cutEnd(raw, THREAD_EVENT_PREVIEW_CHARS)) } }
 }
 
+/** Each message cut short with the call that reads on in it: that message alone, from where it was cut. */
+function* withReadMore(rows: Iterable<MessageRow>, threadId: unknown): Generator<MessageRow & { readMore?: { tool: string; args: Record<string, unknown> } }> {
+  for (const row of rows)
+    yield row.truncated && typeof threadId === 'string'
+      ? { ...row, readMore: { tool: 'thread_read', args: { threadId, view: 'messages', afterIndex: row.index, textOffset: row.nextTextOffset, limit: 1 } } }
+      : row
+}
+
 /** A page of `thread_read` view `messages`: the rows that fit the byte cap, and how to read on. */
 function messagesPage(envelope: Record<string, unknown>, rows: Iterable<MessageRow>, afterIndex: number): Record<string, unknown> {
-  const { taken: messages, capped } = fitPage(rows, envelope)
+  const { taken: messages, capped } = fitPage(withReadMore(rows, envelope.threadId), envelope)
   const truncated = messages.some((message) => 'truncated' in message)
   // Rows keep their transcript index and empty system rows are left out (`messageRows`): the next page starts after the last row.
   const nextAfterIndex = nextAfterIndexOf(messages, afterIndex, typeof envelope.total === 'number' ? envelope.total : undefined)
@@ -1932,18 +1943,19 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_list',
-      description: `List the profile's threads with their project, activity and what is waiting on them. Subagent threads are folded under their parents unless includeSubagents. Threads you launched are listed even before they start; archived threads, launched by you or not, only with includeArchived. A row says archived: true (with archivedAt) when the thread is archived, and hidden: true when it is out of the sidebar; an open, shown thread has neither. ${REMOTE_LISTS} It is read there at this call; a response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB (capped: true says rows were left out). scope "family" lists your subagents instead, one row per subagent: title, childThreadId, state, latest delegationId, whether a result is unread, workspace, provider and model, and for one on another computer, that computer and remoteThreadId, its thread there (the id thread_read and the other thread tools take).`,
+      description: `List the profile's threads with their project, activity and what is waiting on them. Subagent threads are folded under their parents unless includeSubagents. Threads you launched are listed even before they start; archived threads, launched by you or not, only with includeArchived. A row says archived: true (with archivedAt) when the thread is archived, and hidden: true when it is out of the sidebar; an open, shown thread has neither. ${REMOTE_LISTS} It is read there at this call; a response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB (capped: true says rows were left out). Here, a page ends with nextCursor (pass it as cursor for the next page; null on the last) and complete. scope "family" lists your family instead, as items, yourself first: one row per thread with thread, title, relation (self, parent, sibling, child, descendant, native) and parentThread; a row of one of your subagents adds its state, latest delegationId, whether a result is unread, workspace, provider and model, and for one on another computer, that computer and remoteThreadId, its thread there (the id thread_read and the other thread tools take). Only threads you can read are listed.`,
       inputSchema: {
         type: 'object',
         properties: {
-          scope: { type: 'string', enum: ['all', 'family'], description: 'all (default): the profile\'s threads. family: your subagents; the other filters do not apply.' },
+          scope: { type: 'string', enum: ['all', 'family'], description: 'all (default): the profile\'s threads. family: you, your parent, your siblings, your subagents at any depth and their helpers; only limit and cursor apply.' },
           computer: { type: 'string', description: 'List another of the user\'s computers: a name or id from computer_list.' },
           projectId: { type: 'string', description: 'Only this project (with computer: a project id from that computer\'s list).' },
           status: { type: 'string', enum: ['active', 'idle', 'awaiting_input'], description: 'active: a run of it or of a subagent below it is going; awaiting_input: a question in it or below it waits for an answer; idle: neither. A row whose own turn ended while its subagents still work or ask says waitingOnSubagents.' },
           includeUnstarted: { type: 'boolean', description: 'Include empty drafts (default false).' },
           includeArchived: { type: 'boolean', description: 'Include archived threads (default false).' },
           includeSubagents: { type: 'boolean', description: 'Include subagent threads (default false).' },
-          limit: { type: 'integer', minimum: 1, maximum: THREAD_LIST_MAX_LIMIT, description: `Most recently updated first; default ${THREAD_LIST_DEFAULT_LIMIT}.` }
+          limit: { type: 'integer', minimum: 1, maximum: THREAD_LIST_MAX_LIMIT, description: `Most recently updated first; default ${THREAD_LIST_DEFAULT_LIMIT}.` },
+          cursor: { type: 'string', description: 'nextCursor of the page before, to read the next page: from the same thread, with the same arguments.' }
         }
       },
       access: 'readsOthers',
@@ -1963,6 +1975,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           if (args[key] !== undefined && typeof args[key] !== 'boolean') throw new Error(`${key} must be a boolean`)
         const bot = ctx.turn.bot
         const limit = boundedInt(args.limit, 'limit', 1, THREAD_LIST_MAX_LIMIT, THREAD_LIST_DEFAULT_LIMIT)
+        const cursor = readCursor(ctx.caller.threadId, 'thread_list', args)
+        if ('refused' in cursor) return cursor.refused
+        const after = cursor.position && typeof cursor.position.u === 'string' && typeof cursor.position.i === 'string' ? { updatedAt: cursor.position.u, id: cursor.position.i } : undefined
         const manage = ctx.scope === 'manage' && !bot
         // A personal bot lists the subagents below the threads it reaches, as an agent does (#1365); it only reads them.
         if (args.includeSubagents === true && !manage && !bot)
@@ -1978,17 +1993,39 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           if (!launched && args.includeUnstarted !== true && !thread.startedAt) return false
           // Archived only when asked for, even one the caller launched.
           return includeArchivedOf(args) || !thread.archivedAt
-        }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+        }).sort(listOrder)
         const projectNames = new Map(host.listProjects().map((project) => [project.id, project.name]))
         const below = subagentDescendantsIn(all)
-        const rows = []
+        // The page: the rows after the cursor, one more looked for to know whether the list goes on, then the byte cap.
+        const page = <R extends { id: string; updatedAt: string }>(row: (thread: Thread) => R | undefined, envelope: Record<string, unknown>) => {
+          const rows: R[] = []
+          let more = false
+          for (const thread of candidates.slice(resumeAt(candidates, after))) {
+            const built = row(thread)
+            if (!built) continue
+            if (rows.length >= limit) {
+              more = true
+              break
+            }
+            rows.push(built)
+          }
+          const { taken, capped } = fitPage(rows, envelope)
+          const last = taken.at(-1)
+          return {
+            threads: taken,
+            ...(capped ? { capped: true, hint: `This page stopped at ${THREAD_READ_MAX_BYTES / 1024} KB after ${taken.length} threads; pass nextCursor for the rest.` } : {}),
+            ...pageEnd(more || capped, () => makeCursor(ctx.caller.threadId, 'thread_list', args, { u: last!.updatedAt, i: last!.id }))
+          }
+        }
         // A personal bot: a handle and one line each, the projects it may start threads in and, when this turn may start
         // one, the models a thread can run on. Framed as data from the owner's threads.
         if (bot) {
-          for (const thread of candidates) {
+          const models = bot.appTools.has('thread_create') ? host.threadModels?.() ?? [] : undefined
+          const projects = [...projectNames].map(([id, name]) => ({ id, name }))
+          const listed = page((thread) => {
             const { status, waitingOnSubagents } = standingOf(thread.id, below(thread.id))
-            if (args.status !== undefined && args.status !== status) continue
-            rows.push({
+            if (args.status !== undefined && args.status !== status) return undefined
+            return {
               id: thread.id,
               link: threadLink(thread.id),
               title: oneLine(thread.name),
@@ -2000,20 +2037,15 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
               // Archived, or out of the owner's sidebar (`thread_update hidden`).
               ...listedFlags(thread),
               ...(thread.lineage ? { lineage: { parentThreadId: thread.lineage.parentThreadId } } : {})
-            })
-            if (rows.length >= limit) break
-          }
-          const models = bot.appTools.has('thread_create') ? host.threadModels?.() ?? [] : undefined
-          return botData('Your owner\'s threads', {
-            threads: rows,
-            projects: [...projectNames].map(([id, name]) => ({ id, name })),
-            ...(models ? { models } : {})
-          })
+            }
+          }, { projects, ...(models ? { models } : {}) })
+          return botData('Your owner\'s threads', { ...listed, projects, ...(models ? { models } : {}) })
         }
-        for (const thread of candidates) {
+        const projects = [...projectNames].map(([id, name]) => ({ id, name }))
+        const listed = page((thread) => {
           const { status, activity, activeRunId, waitingOnSubagents } = standingOf(thread.id, below(thread.id))
-          if (args.status !== undefined && args.status !== status) continue
-          rows.push({
+          if (args.status !== undefined && args.status !== status) return undefined
+          return {
             id: thread.id,
             link: threadLink(thread.id),
             name: thread.name,
@@ -2033,11 +2065,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
             ...(manage && activity.pendingQuestions.length ? { pendingQuestions: activity.pendingQuestions } : {}),
             createdByThreadId: thread.createdByThreadId ?? null,
             ...(thread.lineage ? { lineage: { parentThreadId: thread.lineage.parentThreadId } } : {})
-          })
-          if (rows.length >= limit) break
-        }
-        const projects = [...projectNames].map(([id, name]) => ({ id, name }))
-        return json({ threads: rows, projects })
+          }
+        }, { projects })
+        return json({ ...listed, projects })
       }
     },
     {
@@ -2873,6 +2903,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           claimed: snapshot.claimed.map(view),
           revision: snapshot.revision,
           open: snapshot.open,
+          // The whole queue, always: no page follows.
+          nextCursor: null,
+          complete: true,
           ...(snapshot.blockedReason ? { blockedReason: snapshot.blockedReason } : {})
         }
         // A personal bot reads what waits in its owner's thread as data from that thread.
