@@ -425,7 +425,8 @@ describe('a bot\'s work subagents as delegations', () => {
       crashed: true,
       whileDown: (paths) => {
         const run = new DatabaseSync(paths.runDb)
-        run.exec(`DROP INDEX delegations_by_root_activation; DROP INDEX delegations_child_run;
+        run.exec(`DROP TABLE tree_revisions; DELETE FROM run_schema_migrations WHERE version = 30;
+          DROP INDEX delegations_by_root_activation; DROP INDEX delegations_child_run;
           ALTER TABLE delegations DROP COLUMN bot_id; ALTER TABLE delegations DROP COLUMN root_activation_id;
           ALTER TABLE delegations DROP COLUMN bot_access; ALTER TABLE delegations DROP COLUMN bot_read_only;
           DELETE FROM run_schema_migrations WHERE version = 29; PRAGMA user_version = 28;`)
