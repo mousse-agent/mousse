@@ -559,7 +559,7 @@ describe('CodexProviderService options (managed Codex)', () => {
   type Turn = { status: 'completed' | 'failed'; error?: unknown }
 
   /** A server that runs turns: threads answer with `provider`, every turn ends as `turn` says. */
-  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null; compact?: () => Turn | 'unknown'; resume?: 'missing' | 'another'; beforeOpen?: (message: Message) => boolean; account?: (launchIndex: number) => Reply; authStatus?: (launchIndex: number) => Reply; authStore?: string | ((launch: number) => string) } = {}) {
+  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null; compact?: () => Turn | 'unknown'; resume?: 'missing' | 'another'; beforeOpen?: (message: Message) => boolean; account?: (launchIndex: number) => Reply; authStatus?: (launchIndex: number) => Reply; authStore?: string | ((launch: number) => string); unsubscribe?: (message: Message) => Reply | undefined } = {}) {
     let threads = 0
     const server = scriptedServer((message, launchIndex) => {
       const method = message.method!
@@ -593,6 +593,7 @@ describe('CodexProviderService options (managed Codex)', () => {
         })
         return { result: {} }
       }
+      if (method === 'thread/unsubscribe' && options.unsubscribe) return options.unsubscribe(message)
       if (method === 'thread/list') return { error: { code: -32601, message: 'unknown method' } }
       return { result: {} }
     })
@@ -1818,36 +1819,41 @@ describe('CodexProviderService options (managed Codex)', () => {
       expect(server.launches).toHaveLength(2)
     })
 
-    it('reserves the last loaded-thread slot once across parallel sign-in checks while a turn is active', async () => {
+    it('a Send at the cap starts at once, unloading idle threads in parallel while Codex is slow to let them go', async () => {
       const account = { kind: 'signed_in' as const, planType: 'plus', email: null, subject: 'chatgpt:account' }
       const reads: Array<(result: typeof account) => void> = []
       let holdReads = false
       let holdTurn = false
-      const server = turnServer({ provider: () => MANAGED, turn: () => holdTurn ? null : { status: 'completed' } })
+      // Codex neither answers an unsubscribe nor closes a thread during this test (it waits out an idle grace, a minute by default).
+      const server = turnServer({ provider: () => MANAGED, turn: () => holdTurn ? null : { status: 'completed' }, unsubscribe: () => undefined })
       const service = managed(server, { account: { read: async () => holdReads ? new Promise((resolve) => reads.push(resolve)) : account } })
       const lifetime = new AbortController()
       const start = (threadId: string) => chat(service, { threadId, signal: lifetime.signal })
       const pending: Array<Promise<unknown>> = []
+      const unloaded = () => server.requests('thread/unsubscribe').map((message) => (message.params as { threadId: string }).threadId)
       try {
-        for (let index = 0; index < CODEX_MAX_LOADED_THREADS - 2; index++) await start('idle' + index)
+        for (let index = 0; index < CODEX_MAX_LOADED_THREADS - 1; index++) await start('idle' + index)
         holdTurn = true
         pending.push(start('active'))
-        await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS - 1))
-
+        await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS))
+        const active = (server.requests('turn/start').at(-1)!.params as { threadId: string }).threadId
         holdTurn = false
+
+        // At the cap, the next Send runs to the end while its unsubscribe is still unanswered.
+        await start('next')
+        expect(unloaded()).toEqual(['thr-1'])
+
+        // Two Sends admitted together each free one more idle thread: the unloads are in flight side by side.
         holdReads = true
-        pending.push(start('parallel-a'), start('parallel-b'))
+        const both = [start('parallel-a'), start('parallel-b')]
+        pending.push(...both)
         await vi.waitFor(() => expect(reads).toHaveLength(2))
         holdReads = false
         for (const reply of reads) reply(account)
-        await vi.waitFor(() => expect(server.requests('thread/unsubscribe')).toHaveLength(1))
-        expect(server.requests('thread/start')).toHaveLength(CODEX_MAX_LOADED_THREADS)
-        expect(server.launches).toHaveLength(1)
-
-        const victim = (server.requests('thread/unsubscribe')[0]!.params as { threadId: string }).threadId
-        server.processes[0]!.stdout.write(JSON.stringify({ method: 'thread/closed', params: { threadId: victim } }) + '\n')
-        await Promise.all(pending.slice(1))
-        expect(server.requests('thread/start')).toHaveLength(CODEX_MAX_LOADED_THREADS + 1)
+        await Promise.all(both)
+        expect(server.requests('thread/start')).toHaveLength(CODEX_MAX_LOADED_THREADS + 3)
+        expect(unloaded()).toEqual(['thr-1', 'thr-2', 'thr-3'])
+        expect(unloaded()).not.toContain(active)
         expect(server.launches).toHaveLength(1)
       } finally {
         lifetime.abort()
@@ -1899,69 +1905,56 @@ describe('CodexProviderService options (managed Codex)', () => {
       }
     )
 
-    it('admits a queued ninth Send after a stopped turn finishes settling', async () => {
+    it('with every loaded thread busy, a ninth Send loads over the cap at once; the next Send after they end unloads the surplus together', async () => {
       let holdTurn = true
       const server = turnServer({ provider: () => MANAGED, turn: () => holdTurn ? null : { status: 'completed' } })
-      let reads = 0
-      const service = managed(server, { account: { read: async () => {
-        reads += 1
-        return { kind: 'signed_in', planType: 'plus', email: null, subject: 'chatgpt:account' }
-      } } })
+      const service = managed(server)
       const lifetime = new AbortController()
-      const stop = new AbortController()
       const pending: Array<Promise<unknown>> = []
-      const start = (threadId: string, signal = lifetime.signal) => {
-        const turn = chat(service, { threadId, signal })
+      const start = (threadId: string) => {
+        const turn = chat(service, { threadId, signal: lifetime.signal })
         void turn.catch(() => undefined)
         pending.push(turn)
         return turn
       }
+      const unloaded = () => server.requests('thread/unsubscribe').map((message) => (message.params as { threadId: string }).threadId)
       try {
-        const stopped = start('stopped', stop.signal)
-        await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(1))
-        const victim = (server.requests('turn/start')[0]!.params as { threadId: string }).threadId
-        for (let index = 1; index < CODEX_MAX_LOADED_THREADS; index++) start('active-' + index)
+        for (let index = 0; index < CODEX_MAX_LOADED_THREADS; index++) start('busy-' + index)
         await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS))
-
-        const readsBefore = reads
-        const queued = start('ninth')
-        await vi.waitFor(() => expect(reads).toBeGreaterThan(readsBefore))
-        expect(server.requests('thread/start')).toHaveLength(CODEX_MAX_LOADED_THREADS)
-
-        stop.abort(new Error('Stopped'))
-        await expect(stopped).rejects.toThrow('Stopped')
-        expect(server.requests('turn/interrupt').map((message) => message.params)).toContainEqual({ threadId: victim, turnId: 'turn-1' })
-        expect(server.requests('thread/unsubscribe')).toHaveLength(0)
+        start('ninth')
+        await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS + 1))
+        expect(unloaded()).toEqual([])
 
         const notify = (method: string, params: unknown) => server.processes[0]!.stdout.write(JSON.stringify({ method, params }) + '\n')
-        notify('turn/completed', { threadId: victim, turn: { id: 'turn-1', status: 'interrupted', error: null } })
-        await vi.waitFor(() => expect(server.requests('thread/unsubscribe').map((message) => message.params)).toEqual([{ threadId: victim }]))
+        for (const message of server.requests('turn/start'))
+          notify('turn/completed', { threadId: (message.params as { threadId: string }).threadId, turn: { id: 'turn-1', status: 'completed', error: null } })
+        await Promise.all(pending)
         holdTurn = false
-        notify('thread/closed', { threadId: victim })
-
-        expect((await queued).codexThreadId).not.toBe(victim)
-        expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS + 1)
+        await start('tenth')
+        expect(unloaded()).toEqual(['thr-1', 'thr-2'])
         expect(server.launches).toHaveLength(1)
       } finally {
-        stop.abort()
         lifetime.abort()
         await service.stop()
         await Promise.allSettled(pending)
       }
     })
 
-    it('recycles when unsubscribe acknowledges without confirming unload', async () => {
-      const server = turnServer({ provider: () => MANAGED })
+    it('keeps the process when Codex acknowledges an unsubscribe without closing the thread yet', async () => {
+      const server = turnServer({ provider: () => MANAGED, unsubscribe: () => ({ result: { status: 'unsubscribed' } }) })
       const service = managed(server)
+      const unloaded = () => server.requests('thread/unsubscribe').map((message) => (message.params as { threadId: string }).threadId)
       // Reuse t0 just before the ninth turn, so thr-2 is the least recently used.
       for (let index = 0; index < CODEX_MAX_LOADED_THREADS; index++) await chat(service, { threadId: 't' + index })
       service.commitConversation('t0', 'h')
       await chat(service, { threadId: 't0', history: 'h' })
       await chat(service, { threadId: 'overflow' })
-      expect(server.requests('thread/unsubscribe').map((request) => request.params)).toContainEqual({ threadId: 'thr-2' })
-      expect(server.processes[0].signalCode).toBe('SIGTERM')
+      expect(unloaded()).toEqual(['thr-2'])
+      expect(server.processes[0].signalCode).toBeNull()
+      // The thread still closing no longer counts: the next one unloads the next least recently used.
       await chat(service, { threadId: 'later' })
-      expect(server.launches).toHaveLength(2)
+      expect(unloaded()).toEqual(['thr-2', 'thr-3'])
+      expect(server.launches).toHaveLength(1)
     })
 
     it('one process serves turns on different threads for the whole idle window, and closes once it has passed', async () => {

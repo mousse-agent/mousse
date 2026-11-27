@@ -145,7 +145,12 @@ const TREE_MAX_PAGES = 100
 export const CODEX_IDLE_CLOSE_MS = idleCloseFromEnv('MOUSSE_CODEX_IDLE_CLOSE_MS', 15 * 60_000)
 /** ...or after a sign-in check or model listing that started it. */
 export const CODEX_CHECK_CLOSE_MS = 5_000
-/** Mousse-opened threads, including current turns and opens whose replies have yet to arrive. */
+/**
+ * How many Mousse-opened threads (current turns and opens whose replies have yet to arrive included) the
+ * process keeps loaded, for its memory: a new thread beyond it unloads that many idle ones at once. It
+ * never holds a turn back: a thread being unloaded no longer counts, and with every thread busy the
+ * new one loads anyway.
+ */
 export const CODEX_MAX_LOADED_THREADS = 8
 /**
  * A chat held open only by its native helpers is released when none of them has reported anything
@@ -1685,12 +1690,15 @@ export class CodexProviderService {
           const savedId = prepared?.saved?.codexThreadId ?? options.savedId
           const loaded = savedId && !app.unloading.has(savedId) ? this.loaded.get(savedId) : undefined
           const reuse = Boolean(loaded && (prepared ? this.canReuseThread(prepared, loaded, owner) : true))
-          // No await between checking capacity and pinning a loaded thread or reserving a new slot.
-          if ((reuse && this.canAdmitThread(app)) || this.hasThreadCapacity(app)) {
+          // No await between checking admission and pinning a loaded thread or reserving a new slot.
+          if (this.canAdmitThread(app)) {
             if (savedId && loaded) reserved.add(savedId)
-            return { conn, prepared, reuse, release: this.holdThreads(app, reserved, !reuse) }
+            const release = this.holdThreads(app, reserved, !reuse)
+            // The cap never holds a turn back: idle threads over it are unloaded alongside.
+            if (!reuse) this.unloadIdleOverCap(app)
+            return { conn, prepared, reuse, release }
           }
-          await this.awaitThreadCapacity(app, signal, savedId)
+          await this.awaitRecycle(app, signal)
           continue
         }
       } catch (error) {
@@ -3364,19 +3372,39 @@ export class CodexProviderService {
     this.wakeCapacityWaiters(app)
   }
 
+  /** Loaded threads no turn holds and none is unloading, least recently used first. */
   private idleThreadIds(app: CodexApp): string[] {
     const reserved = new Set([...app.threadUsers].flatMap((ids) => [...ids]))
-    return [...new Set([...this.loaded.keys(), ...app.unloading.keys()])].filter((id) => !this.turns.has(id) && !reserved.has(id))
+    return [...this.loaded.keys()].filter((id) => !this.turns.has(id) && !reserved.has(id) && !app.unloading.has(id))
   }
 
   private canAdmitThread(app: CodexApp): boolean {
     return !app.recycleRequired && !(app.terminal?.coldOnly && app.terminal.admitted)
   }
 
-  private hasThreadCapacity(app: CodexApp): boolean {
-    if (!this.canAdmitThread(app)) return false
-    const ids = new Set([...this.loaded.keys(), ...app.unloading.keys(), ...[...app.threadUsers].flatMap((held) => [...held])])
-    return ids.size + app.opening.size < CODEX_MAX_LOADED_THREADS
+  /**
+   * The threads counted against `CODEX_MAX_LOADED_THREADS`: loaded or held ones, plus opens whose ids
+   * have yet to arrive. One whose unload was asked for no longer counts, however long Codex takes to
+   * close it (it waits for an idle grace, a minute by default, before `thread/closed`).
+   */
+  private loadedThreadCount(app: CodexApp): number {
+    const ids = new Set([...this.loaded.keys(), ...[...app.threadUsers].flatMap((held) => [...held])])
+    for (const id of app.unloading.keys()) ids.delete(id)
+    return ids.size + app.opening.size
+  }
+
+  /**
+   * Brings the loaded threads back to `CODEX_MAX_LOADED_THREADS` after an admission, unloading every idle
+   * thread over it at once (delegated children first, then the least recently used). Nothing waits for
+   * the unloads; with too few idle threads the process stays over the cap until turns end.
+   */
+  private unloadIdleOverCap(app: CodexApp): void {
+    if (this.app !== app || app.terminal?.coldOnly) return
+    const over = this.loadedThreadCount(app) - CODEX_MAX_LOADED_THREADS
+    if (over <= 0) return
+    const idle = this.idleThreadIds(app)
+    const order = [...idle.filter((id) => this.loaded.get(id)?.delegated), ...idle.filter((id) => !this.loaded.get(id)?.delegated)]
+    for (const id of order.slice(0, over)) void this.unloadThread(app.conn, id)
   }
 
   private wakeCapacityWaiters(app: CodexApp): void {
@@ -3384,15 +3412,9 @@ export class CodexProviderService {
     app.capacityWaiters.clear()
   }
 
-  private async awaitThreadCapacity(app: CodexApp, signal: AbortSignal, savedId?: string): Promise<void> {
-    let unsubscribing: Promise<void> | undefined
-    if (!app.recycleRequired && !app.terminal?.coldOnly && !app.unloading.size) {
-      const idle = this.idleThreadIds(app).filter((id) => id !== savedId)
-      const victim = idle.find((id) => this.loaded.get(id)?.delegated) ?? idle[0]
-      if (victim) unsubscribing = this.unloadThread(app.conn, victim)
-    }
-    if (unsubscribing) await abortable(unsubscribing, signal)
-    if (this.app !== app || this.hasThreadCapacity(app)) return
+  /** Waits for a process that must be replaced (`canAdmitThread` refuses) to drain, or replaces it when nothing uses it. */
+  private async awaitRecycle(app: CodexApp, signal: AbortSignal): Promise<void> {
+    if (this.app !== app || this.canAdmitThread(app)) return
     if (!app.threadUsers.size && !this.turns.size) {
       await abortable(this.drainProcess(app.conn), signal)
       return
