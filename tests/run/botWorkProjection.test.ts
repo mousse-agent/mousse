@@ -88,8 +88,8 @@ describe('a bot work\'s row and the generic Stop paths, with a real orchestrator
     await d.orch.send('first', false, { threadId: work.id, clientRequestId: 'first' })
     await waitFor(() => d.engine.getActiveRun(work.id) === null && d.engine.listRuns(work.id).length === 1, 'first turn ended')
     const ended = d.engine.listRuns(work.id)[0]!.runId
-    // Its turn is held until the test ends, so the send is not awaited.
-    void d.orch.send('second', false, { threadId: work.id, clientRequestId: 'second' })
+    // Its turn is held until the test ends, so the send is not awaited; the daemon's stop may end it either way.
+    void d.orch.send('second', false, { threadId: work.id, clientRequestId: 'second' }).catch(() => undefined)
     await waitFor(() => d.engine.getActiveRun(work.id) !== null, 'second turn running')
     const current = d.engine.getActiveRun(work.id)!.runId
     projectBotWork(d.engine.store, { activationId: 'act-9', homeThreadId: chat.id, threadId: work.id, status: 'running', createdAt: '2026-11-27T10:00:00.000Z', endedAt: null })
