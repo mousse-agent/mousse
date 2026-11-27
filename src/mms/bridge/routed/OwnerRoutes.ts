@@ -94,7 +94,7 @@ export interface OwnerRoutesOptions {
    * `authorizedMethod` checks a caller again as a call is checked when it arrives (the delegation current, the grant,
    * the device not blocked); a stream that opens after a read off the event loop is checked with it once more.
    */
-  rpc: RpcDispatcher & { authorizedMethod?(name: string, caller: RpcContext['caller']): unknown }
+  rpc: RpcDispatcher & { authorizedMethod(name: string, caller: RpcContext['caller']): unknown }
   /** What this computer lets each device do here. */
   policy: Pick<SqliteNodePolicy, 'get' | 'list' | 'onChange'>
   audit: Pick<SqliteBridgeAudit, 'record' | 'countRead' | 'has' | 'countAgentCalls'>
@@ -509,7 +509,7 @@ export class OwnerRoutes {
       // device was blocked), and the thread is still one this computer shares.
       const stillAllowed = (): void => {
         if (context.signal.aborted) throw new NetError('cancelled')
-        this.options.rpc.authorizedMethod?.(routedNetMethod('stream.open'), context.caller)
+        this.options.rpc.authorizedMethod(routedNetMethod('stream.open'), context.caller)
         shared()
       }
       if (request.kind === 'terminal') {
