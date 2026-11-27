@@ -4,7 +4,7 @@ import { shortModelName } from '../../shared/modelNames'
 import { listingServes } from '../../shared/providerInstances'
 import type { ModelPickTarget } from './ModelFamilyMenu'
 import { applyEffortToModelId, findModelFamily, getModelSpeedOptions, parseModelVariant, parseThinkingSuffixFromModelId, reasoningLevelLabel, resolveModelVariant, resolveReasoning, speedLabel } from '../../shared/modelVariants'
-import { Check, Zap } from '../lib/icons'
+import { Check, Workflow, Zap } from '../lib/icons'
 import { FloatingPortal, useClosestAnchor, useFloatingPosition } from '../lib/floatingLayer'
 import { describePermissionMode } from '../../shared/permissionMode'
 import { permissionModeIcon } from '../lib/permissionModeIcon'
@@ -129,9 +129,20 @@ export interface RunSettingsTarget extends Selection {
   selected: boolean
 }
 
-/** Whether a target's model has reasoning levels. */
+const ULTRACODE_LEVEL = 'ultracode'
+
+/** Reasoning levels shown in the column (Ultracode lives in the footer as its own toggle). */
+function columnLevels(levels: readonly string[]): string[] {
+  return levels.filter((level) => level !== ULTRACODE_LEVEL)
+}
+
+function supportsUltracode(target: Selection): boolean {
+  return resolveReasoning(target.providerId, target.modelId, target.models).levels.includes(ULTRACODE_LEVEL)
+}
+
+/** Whether a target's model has reasoning levels for the column. */
 export function hasReasoningLevels(target: RunSettingsTarget): boolean {
-  return resolveReasoning(target.providerId, target.modelId, target.models).levels.length > 0
+  return columnLevels(resolveReasoning(target.providerId, target.modelId, target.models).levels).length > 0
 }
 
 /** The reasoning column's header. The model it is for is the checked row, so it is not named again. */
@@ -170,15 +181,16 @@ function ReasoningLevels({ target, label, onSelect, onClose }: {
   // Picking the level the thread runs at by default saves it as chosen, so it carries to the next model.
   const chosen = parseThinkingSuffixFromModelId(target.modelId).effort
   const unsupported = reasoning.unsupported
+  const levels = columnLevels(reasoning.levels)
   return <div className="model-picker-run-settings" role="menu" aria-label={`Reasoning for ${label}`} onKeyDown={moveFocus}>
     <ReasoningHead />
-    {reasoning.levels.length === 0 ? <div className="model-picker-run-empty">None for this model</div> : null}
-    {reasoning.levels.map((value) => <button key={value} type="button" role="menuitemradio" aria-checked={effort === value} title={reasoning.descriptions[value]} className={`composer-mode-menu-item model-picker-level${effort === value ? ' selected' : ''}`} onClick={() => { onClose(); if (!target.selected || value !== chosen) pickEffort(value) }}>
+    {levels.length === 0 ? <div className="model-picker-run-empty">None for this model</div> : null}
+    {levels.map((value) => <button key={value} type="button" role="menuitemradio" aria-checked={effort === value} title={reasoning.descriptions[value]} className={`composer-mode-menu-item model-picker-level${effort === value ? ' selected' : ''}`} onClick={() => { onClose(); if (!target.selected || value !== chosen) pickEffort(value) }}>
       <span>{reasoningLevelLabel(value)}</span>
       {value === reasoning.defaultLevel ? <span className="composer-mode-menu-item-meta">Default</span> : null}
       <span className="model-picker-level-check" aria-hidden="true">{effort === value ? <Check size={14} /> : null}</span>
     </button>)}
-    {unsupported && reasoning.levels.length > 0 ? <div className="composer-run-menu-note" role="note" aria-live="polite">{levelNote(unsupported, model, reasoning, effort)}</div> : null}
+    {unsupported && levels.length > 0 ? <div className="composer-run-menu-note" role="note" aria-live="polite">{levelNote(unsupported, model, reasoning, effort)}</div> : null}
   </div>
 }
 
@@ -197,9 +209,16 @@ export function SpeedToggle({ target, onSelect, onClose }: {
   const move = (event: ReactKeyboardEvent<HTMLElement>) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
     const items = [...event.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]')]
-    const next = items[items.indexOf(document.activeElement as HTMLElement) + (event.key === 'ArrowRight' ? 1 : -1)]
+    const index = items.indexOf(document.activeElement as HTMLElement)
+    const next = items[index + (event.key === 'ArrowRight' ? 1 : -1)]
     event.preventDefault()
-    next?.focus()
+    if (next) {
+      next.focus()
+      return
+    }
+    if (event.key === 'ArrowRight') {
+      event.currentTarget.parentElement?.querySelector<HTMLElement>('.model-picker-ultracode')?.focus()
+    }
   }
   return <div className="model-picker-speed" role="radiogroup" aria-label="Speed" onKeyDown={move}>
     {speeds.options.map((option) => {
@@ -215,6 +234,54 @@ export function SpeedToggle({ target, onSelect, onClose }: {
       </button>
     })}
   </div>
+}
+
+/**
+ * The picker footer's Ultracode toggle: runs the model with multi-agent workflows when on, and
+ * returns to the model's default level (keeping speed) when turned off.
+ */
+export function UltracodeToggle({ target, onSelect, onClose }: {
+  target: RunSettingsTarget
+  onSelect: (providerId: string, modelId: string, instanceId?: string) => void
+  onClose: () => void
+}) {
+  const pick = (providerId: string, modelId: string) => onSelect(providerId, modelId, target.instanceId)
+  const { reasoning, effort, pickEffort } = useRunOptions(target, pick)
+  if (!reasoning.levels.includes(ULTRACODE_LEVEL)) return null
+  const on = effort === ULTRACODE_LEVEL
+  const toggle = () => {
+    onClose()
+    if (!on) {
+      pickEffort(ULTRACODE_LEVEL)
+      return
+    }
+    const others = columnLevels(reasoning.levels)
+    const fallback = (reasoning.defaultLevel && reasoning.defaultLevel !== ULTRACODE_LEVEL ? reasoning.defaultLevel : undefined)
+      ?? (others.includes('medium') ? 'medium' : others[0])
+    if (fallback) {
+      pickEffort(fallback)
+      return
+    }
+    pick(target.providerId, parseThinkingSuffixFromModelId(target.modelId).baseId)
+  }
+  return <button
+    type="button"
+    aria-pressed={on}
+    title={reasoning.descriptions[ULTRACODE_LEVEL] ?? reasoningLevelLabel(ULTRACODE_LEVEL)}
+    className={`model-picker-ultracode${on ? ' selected' : ''}`}
+    onClick={toggle}
+    onKeyDown={(event) => {
+      if (event.key !== 'ArrowLeft') return
+      const radios = event.currentTarget.parentElement?.querySelectorAll<HTMLElement>('.model-picker-speed [role="radio"]')
+      const last = radios?.[radios.length - 1]
+      if (!last) return
+      event.preventDefault()
+      last.focus()
+    }}
+  >
+    <Workflow size={14} aria-hidden="true" />
+    <span>{reasoningLevelLabel(ULTRACODE_LEVEL)}</span>
+  </button>
 }
 
 /**
@@ -319,7 +386,7 @@ export function modelPickerRunSettings({ providers, onSelect, onClose, footerEnd
     pick: (target: ModelPickTarget) => resolveTarget(target).modelId,
     picked: (target: ModelPickTarget) => {
       const resolved = resolveTarget(target)
-      if (!hasReasoningLevels(resolved) && !getModelSpeedOptions(resolved.providerId, resolved.modelId, resolved.models)) onClose()
+      if (!hasReasoningLevels(resolved) && !getModelSpeedOptions(resolved.providerId, resolved.modelId, resolved.models) && !supportsUltracode(resolved)) onClose()
     },
     // Beside the list: the selected model's reasoning levels, whenever any model the picker lists has
     // levels, so the column stays in place while you search or switch providers.
@@ -330,21 +397,23 @@ export function modelPickerRunSettings({ providers, onSelect, onClose, footerEnd
     // Room for the longest level list, so the picker keeps its size whichever model is selected.
     rows: (all: ModelPickTarget[]) => Math.max(1, ...all.map((entry) => {
       const resolved = resolveTarget(entry)
-      return resolveReasoning(resolved.providerId, resolved.modelId, resolved.models).levels.length
+      return columnLevels(resolveReasoning(resolved.providerId, resolved.modelId, resolved.models).levels).length
     })),
-    // Under the picker: the selected model's speed on the left, `footerEnd` on the right. The bar
-    // stays while any listed model has speeds, so the picker keeps its size whichever model is selected.
+    // Under the picker: the selected model's speed and Ultracode toggles on the left, `footerEnd` on
+    // the right. The bar stays while any listed model has either, so the picker keeps its size.
     footer: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => {
       const speedsOf = (entry: ModelPickTarget) => {
         const resolved = resolveTarget(entry)
         return getModelSpeedOptions(resolved.providerId, resolved.modelId, resolved.models)
       }
-      if (!footerEnd && !all.some((entry) => speedsOf(entry))) return null
+      if (!footerEnd && !all.some((entry) => speedsOf(entry) || supportsUltracode(resolveTarget(entry)))) return null
       const resolved = target ? resolveTarget(target) : undefined
       const speeds = target ? speedsOf(target) : undefined
+      const ultracode = resolved ? supportsUltracode(resolved) : false
       return <>
         <div className="model-picker-footer-start">
           {resolved && speeds ? <SpeedToggle key={`${resolved.instanceId ?? resolved.providerId}:${resolved.modelId}`} target={resolved} onSelect={onSelect} onClose={onClose} /> : null}
+          {resolved && ultracode ? <UltracodeToggle key={`ultracode:${resolved.instanceId ?? resolved.providerId}:${resolved.modelId}`} target={resolved} onSelect={onSelect} onClose={onClose} /> : null}
         </div>
         {footerEnd}
       </>

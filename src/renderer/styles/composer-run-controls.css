@@ -33,7 +33,7 @@
    it has (--floating-max-height); past that the list scrolls, and growth goes upward. Long names are
    cut short. */
 .model-picker-panel.is-fixed {
-  width: min(432px, calc(100vw - 48px));
+  width: min(520px, calc(100vw - 48px));
   min-width: 0;
   max-width: none;
   max-height: min(400px, var(--floating-max-height, 400px));
@@ -55,15 +55,9 @@
 }
 
 .model-picker-panel.is-fixed .model-picker-shortcut {
-  margin-left: 2px;
-  padding: 0 4px;
+  margin-right: 6px;
+  padding: 1px 5px;
   font-size: 10.5px;
-}
-
-.model-picker-panel.is-fixed .model-picker-star {
-  width: 20px;
-  height: 20px;
-  margin-right: 2px;
 }
 
 /* Opens out of the model button: a quick fade and slight grow from it (transform-origin is set by
@@ -126,8 +120,8 @@
    levels, none, or a note does not resize the picker and slide the rows under the pointer. Anything
    past that scrolls. */
 .model-picker-run {
-  flex: 0 0 156px;
-  width: 156px;
+  flex: 0 0 164px;
+  width: 164px;
   contain: size;
   min-height: calc(35px + 2 * var(--ui-menu-pad) + var(--model-picker-run-rows, 0) * 28px);
   overflow-y: auto;
@@ -210,6 +204,8 @@
 
 .model-picker-footer-start {
   display: flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -251,6 +247,43 @@
 }
 
 .model-picker-speed-option.selected:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-specular);
+  background-image: var(--ui-focus-layer);
+}
+
+/* Ultracode: a single toggle chip beside Speed, same height and material. */
+.model-picker-ultracode {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.model-picker-ultracode:hover {
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  color: var(--text-primary);
+}
+
+.model-picker-ultracode.selected {
+  background: color-mix(in srgb, var(--text-primary) 11%, transparent);
+  box-shadow: var(--ui-specular);
+  color: var(--text-primary);
+}
+
+.model-picker-ultracode:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
+.model-picker-ultracode.selected:focus-visible {
   outline: none;
   box-shadow: var(--ui-specular);
   background-image: var(--ui-focus-layer);
