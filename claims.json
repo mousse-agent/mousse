@@ -2,23 +2,6 @@
   "version": 1,
   "claims": [
     {
-      "task": "background-jobs-shared",
-      "session": "Animatrix-955f26",
-      "machine": "Animatrix",
-      "branch": "background-jobs-shared",
-      "paths": [
-        "src/mms/background",
-        "src/mms/monitors",
-        "src/mms/bots/watchers.ts",
-        "src/mms/wakes",
-        "src/mms/bots/wakeSources.ts",
-        "src/mms/MmsProfileServices.ts",
-        "src/mms/bots/activation/BotEngine.ts"
-      ],
-      "claimedAt": "2026-11-26T06:12:52.524Z",
-      "expiresAt": "2026-11-26T08:12:52.524Z"
-    },
-    {
       "task": "bot-subagents-delegations",
       "session": "LAPTOP-HIEROJK7-ee6868",
       "machine": "LAPTOP-HIEROJK7",
@@ -35,20 +18,6 @@
       ],
       "claimedAt": "2026-11-26T06:11:22.348Z",
       "expiresAt": "2026-11-26T17:29:52.364Z"
-    },
-    {
-      "task": "grok-held-launch",
-      "session": "Animatrix-72e6d9",
-      "machine": "Animatrix",
-      "branch": "grok-held-launch",
-      "paths": [
-        "src/mms/harness/grok",
-        "src/mms/harness/drivers/grok.ts",
-        "src/mms/harness/acp",
-        "src/mms/harness/gateway.ts"
-      ],
-      "claimedAt": "2026-11-27T06:36:43.465Z",
-      "expiresAt": "2026-11-27T08:36:43.465Z"
     },
     {
       "task": "lan-first-paths",
@@ -118,17 +87,6 @@
       ],
       "claimedAt": "2026-11-26T09:12:48.179Z",
       "expiresAt": "2026-11-26T11:12:48.179Z"
-    },
-    {
-      "task": "remote-subagent-result-notice",
-      "session": "Avarnics-Mac-mini.local-1565f6",
-      "machine": "Avarnics-Mac-mini.local",
-      "branch": "remote-subagent-result-notice",
-      "paths": [
-        "src/mms/orchestrator/OrchestratorService.ts"
-      ],
-      "claimedAt": "2026-11-26T06:04:46.302Z",
-      "expiresAt": "2026-11-26T08:04:46.302Z"
     },
     {
       "task": "remote-subagent-thread-id",
