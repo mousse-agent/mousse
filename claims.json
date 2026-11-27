@@ -153,22 +153,6 @@
       "expiresAt": "2026-11-27T06:51:04.771Z"
     },
     {
-      "task": "sidebar-search-other-computers",
-      "session": "Animatrix-bb68e9",
-      "machine": "Animatrix",
-      "branch": "sidebar-search-other-computers",
-      "paths": [
-        "src/renderer/hooks/useThreadMessageMatches.ts",
-        "src/mms/bridge/routed/mergedLists.ts",
-        "src/shared/bridge/routed.ts",
-        "src/mms/protocol/handlers.ts",
-        "src/main/ipc/registerGuiIpc.ts",
-        "src/preload/index.ts"
-      ],
-      "claimedAt": "2026-11-27T04:52:46.521Z",
-      "expiresAt": "2026-11-27T06:52:46.521Z"
-    },
-    {
       "task": "steer-poll-no-queue-file",
       "session": "Avarnics-Mac-mini.local-b17aa1",
       "machine": "Avarnics-Mac-mini.local",
