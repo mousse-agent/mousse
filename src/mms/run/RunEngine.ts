@@ -1571,7 +1571,7 @@ un_time_limits). */
       if (!parent || parent.threadId !== input.parentThreadId)
         fail('bad_request', `Run ${input.parentRunId} is not a run of thread ${input.parentThreadId}.`)
       if (!input.prompt.trim()) fail('bad_request', 'A delegated task needs a prompt.')
-      this.refuseBotNesting(input.parentThreadId)
+      this.refuseBotThreadDelegation(input.parentThreadId)
       if (parent.outcome?.stopRequested)
         reject('parent_stopping', 'The calling run is being stopped; it cannot start subagents.')
       // Admission: a Stop of the parent's thread after this run started fences it off (nothing awaits before the commit below).
@@ -1587,10 +1587,20 @@ un_time_limits). */
     })
   }
 
-  /** A bot's subagent has one level: it starts no subagent of its own, by any tool. */
-  private refuseBotNesting(parentThreadId: string): void {
+  /** A bot's subagent starts its own subagents through its bot's port only (`requestBotDelegation`), never as a thread does. */
+  private refuseBotThreadDelegation(parentThreadId: string): void {
     if (this.delegations.botChildOf(parentThreadId))
-      reject('bot_subagent_nesting', "A bot's subagent can't start subagents of its own. Do this part yourself, or say in your result what would help.")
+      reject('bot_subagent_nesting', "A bot's subagent starts its own subagents with subagent_start, not this tool.")
+  }
+
+  /**
+   * A bot subagent's own subagent (docs/plans/tool-api.md §2.8, "Nesting"), at any depth: only of the same bot's same work.
+   * The port then decides whether that subagent's run may start one now (`authorizeSubagent`).
+   */
+  private refuseForeignBotNesting(parentThreadId: string, bot: BotDelegation): void {
+    const above = this.delegations.botChildOf(parentThreadId)?.bot
+    if (above && (above.botId !== bot.botId || above.rootActivationId !== bot.rootActivationId))
+      reject('bot_subagent_nesting', "A bot's subagent starts subagents only for its own work.")
   }
 
   /**
@@ -1611,7 +1621,7 @@ un_time_limits). */
       if (!parent || parent.threadId !== input.parentThreadId)
         fail('bad_request', `Run ${input.parentRunId} is not a run of thread ${input.parentThreadId}.`)
       if (!input.prompt.trim()) fail('bad_request', 'A delegated task needs a prompt.')
-      this.refuseBotNesting(input.parentThreadId)
+      this.refuseForeignBotNesting(input.parentThreadId, input.bot)
       if (TERMINAL_RUN_STATUSES.has(parent.status) || parent.outcome?.stopRequested || isRunAdmissionStale(this.store, parent.runId))
         reject('parent_stopping', "The work's turn is ending; it can't start subagents now.")
       const authorized = port.authorizeSubagent({ botId: input.bot.botId, rootActivationId: input.bot.rootActivationId, parentRunId: input.parentRunId })

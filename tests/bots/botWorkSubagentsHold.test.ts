@@ -66,6 +66,25 @@ describe('a subagent on another entry is never held less tightly than its work',
   const subagentNs = (activationId: string) => subagentRuns(f, activationId)
   const attemptOf = (runId: string) => f.runs.getRun(runId)!.activeAttemptId!
 
+  it('a subagent\'s own subagent holds no more than it: one that runs without commands starts one that runs without them too, even on the work\'s own entry', async () => {
+    const job = await work('w1', { shell: true })
+    await job.prepared.authority.subagents!.start({ title: 'Reviews', brief: 'Find reviews.', model: cheap })
+    const reviews = await startSubagent(f, subagentNs(job.id)[0])
+    expect(reviews.prepared.authority.check(command)).toMatchObject({ ok: false })
+    // On the work's own entry, which holds commands as tightly as the work: still none, as its parent has none.
+    expect(await reviews.prepared.authority.subagents!.start({ title: 'Deep', brief: 'List the folder.' })).toHaveProperty('started')
+    const deep = await startSubagent(f, subagentNs(job.id)[1])
+    expect(deep.prepared.selection).toEqual(PI)
+    expect(deep.prepared.policy.tools!.allow).not.toContain('bash')
+    expect(deep.prepared.authority.check(command)).toMatchObject({ ok: false, refused: { askId: '' } })
+    expect(deep.prepared.beforeBind!()).toEqual({ policy: deep.prepared.policy })
+    // The control: the work's own subagent on that entry runs them.
+    await job.prepared.authority.subagents!.start({ title: 'Look', brief: 'List the folder.' })
+    const look = await startSubagent(f, subagentNs(job.id)[2])
+    expect(look.prepared.policy.tools!.allow).toContain('bash')
+    expect(look.prepared.authority.check(command)).toEqual({ ok: true })
+  })
+
   it('on an entry that holds commands less tightly it runs without them: no command tool, refused at the call, it is told, the work is told, model_list and the work line say so', async () => {
     const job = await work('w1', { shell: true })
     const subagents = job.prepared.authority.subagents!
