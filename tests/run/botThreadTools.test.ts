@@ -779,7 +779,9 @@ describe('a bot\'s chat reaching its work\'s row in the thread tree (thread_stop
       const sent = await call('thread_send', { threadId: 'work', content: 'Only cordless ones.', ...(intent ? { intent } : {}) })
       expect(sent.isError, intent).toBeFalsy()
     }
-    expect(port.noteBotWork.mock.calls).toEqual([['act-9', 'Only cordless ones.'], ['act-9', 'Only cordless ones.']])
+    // Credited to the bot turn that sent it, once per request.
+    const sentFrom = { from: authority.activationId, requestKey: expect.stringMatching(/^thread_send:home:/) }
+    expect(port.noteBotWork.mock.calls).toEqual([['act-9', 'Only cordless ones.', sentFrom], ['act-9', 'Only cordless ones.', sentFrom]])
     expect(fake.host.sendToThread).not.toHaveBeenCalled()
     expect(fake.host.noteOnThread).not.toHaveBeenCalled()
     expect(engine.store.db.statement("SELECT COUNT(*) AS n FROM inbox WHERE thread_id = 'work'").get()!.n).toBe(0)

@@ -114,5 +114,8 @@ describe('a bot\'s work in the thread tree', () => {
     // Another request is another note.
     expect(f.runs.noteBotWork(job.threadId, 'And quiet.', { requestKey: 'send-2' })).toBe('noted')
     expect(f.store.pendingWorkNotes(job.id)).toHaveLength(2)
+    // Their record goes with the work.
+    await f.bots.stopWork(botId, job.id)
+    expect(f.store.all('SELECT key FROM bot_memory_state WHERE key GLOB ?', `work-note-request:${job.id}:*`)).toEqual([])
   })
 })
