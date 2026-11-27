@@ -31,6 +31,7 @@ import { holdReplyPacing } from "../../../lib/replyPacingSetting";
 import { LiveMarkdown } from "./live-markdown";
 import { THREAD_IMAGES, threadImageUrl } from "./thread-images";
 import { ErrorMessage } from "./error-message";
+import { errorAction } from "../../adapters/mousseToUI";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
@@ -3464,6 +3465,7 @@ const AssistantParts = memo(function AssistantParts({
             key={`${msg.id}-error-${i}`}
             title={part.title}
             message={part.message}
+            action={errorAction(part.code)}
             onRetry={
               retry && retryPromptId && retryTitle !== null
                 ? () => retry(retryPromptId)

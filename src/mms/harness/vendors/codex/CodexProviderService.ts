@@ -51,7 +51,6 @@ import {
 } from './CodexAppServerClient'
 import {
   RPC_METHOD_NOT_FOUND,
-  codexErrorKind,
   codexHttpStatus,
   notificationParams,
   type AccountReadResponse,
@@ -72,8 +71,8 @@ import {
   type TurnError,
   type UserInput
 } from './protocol'
-import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot, trimResetCredits } from './rateLimits'
-import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
+import { isUsageLimitFailure, resetFromSnapshot, trimResetCredits } from './rateLimits'
+import { appLimitError, isAppLimitText, readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_REFUSED, type CodexBotSandbox, codexBotSandbox, codexBotSandboxConfig, codexBotWebOff, codexPackageOf, codexTurnPolicy } from './childPolicy'
@@ -3986,8 +3985,10 @@ export class CodexProviderService {
    */
   private async limitOrFailure(failure: CodexTurnFailure, run: TurnRun, conn: CodexConnection, signal: AbortSignal): Promise<Error> {
     const info = failure.codexErrorInfo
-    // A server that classifies its errors is believed; the message is read only when it sends no kind.
-    if (!(codexErrorKind(info) === undefined ? isUsageLimitText(failure.message) : isUsageLimitInfo(info))) return failure
+    // An app limit is its own failure: the plan may have room, so its windows are not read for a reset.
+    if (isAppLimitText(failure.message, failure.additionalDetails)) return appLimitError('codex', failure)
+    // A kind that names another failure is believed; a transport or generic one leaves the message to say.
+    if (!isUsageLimitFailure(info, failure.message)) return failure
     let fresh: RateLimitSnapshot | undefined
     try {
       fresh = (await conn.request('account/rateLimits/read', undefined, { timeoutMs: 5_000, signal })).rateLimits

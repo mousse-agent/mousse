@@ -1,4 +1,5 @@
 import type { ProviderUsageWindow, UsageResets } from '../../../../shared/providerAuth'
+import { isAppLimitText } from '../../../orchestrator/providerErrors'
 import { codexErrorKind, codexHttpStatus, type CodexErrorInfo, type RateLimitResetCredits, type RateLimitSnapshot, type RateLimitWindow } from './protocol'
 
 /** The limit the windows of a snapshot stand for. `resetsAt` (epoch seconds) is absent when the server did not report every exhausted window's reset. */
@@ -119,6 +120,21 @@ export function isUsageLimitInfo(info: CodexErrorInfo | null | undefined): boole
 /** Older servers send no structured kind; their message is all there is. */
 export function isUsageLimitText(message: string | undefined): boolean {
   return /usage limit|rate limit/i.test(message ?? '')
+}
+
+/** Kinds Codex gives failures that are not a usage limit: believed over a message that mentions one. */
+const NOT_A_LIMIT = new Set(['contextWindowExceeded', 'serverOverloaded', 'internalServerError', 'unauthorized', 'badRequest', 'threadRollbackFailed', 'sandboxError'])
+
+/**
+ * A failed turn that stands for a plan usage limit: Codex classifies it as one, or its message names one
+ * and its kind says only how the request failed (no kind, a dropped stream or connection, too many
+ * failed attempts, `other`, a kind Mousse does not know). An app limit is never one, whatever its kind.
+ */
+export function isUsageLimitFailure(info: CodexErrorInfo | null | undefined, message: string | undefined, additionalDetails?: string | null): boolean {
+  if (isAppLimitText(message, additionalDetails)) return false
+  if (isUsageLimitInfo(info)) return true
+  const kind = codexErrorKind(info)
+  return (kind === undefined || !NOT_A_LIMIT.has(kind)) && isUsageLimitText(message)
 }
 
 /**

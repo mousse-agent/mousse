@@ -3,6 +3,7 @@ import { harnessAppError } from '../src/shared/harness/types'
 import { CodexTurnFailure } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import type { TurnError } from '../src/mms/harness/vendors/codex/protocol'
 import { codexHarnessError, codexProviderError } from '../src/mms/harness/drivers/codex/adapter'
+import { appLimitError } from '../src/mms/orchestrator/providerErrors'
 
 const failure = (error: Partial<TurnError>) => new CodexTurnFailure(error.message ?? 'failed', { message: 'failed', ...error })
 /** How Codex 0.162.1 reports an HTTP failure (recorded by `codexManagedWire.test.ts`). */
@@ -62,6 +63,9 @@ describe('codexHarnessError (managed Codex)', () => {
     expect(codexHarnessError(overflow)).toBe(overflow)
     const plain = new Error('Codex app-server exited')
     expect(codexHarnessError(plain)).toBe(plain)
+    // The service's app limit reaches the transcript as it is, not as a plan limit.
+    const appLimit = appLimitError('codex', failure({ codexErrorInfo: 'other' }))
+    expect(codexHarnessError(appLimit, 'codex-2')).toBe(appLimit)
   })
 })
 
