@@ -3217,9 +3217,8 @@ export class NetService {
     try {
       const answer = (await session.rpc('bridge.access.mine', {}, { id: newId('rpc'), deadlineMs: 10_000 })) as BridgeAccessMine
       if (answer?.v !== 1) return { state: 'unknown', reason: 'older' }
-      // A build from before bot levels says on or off; on there let a device that works on threads set bots up too.
-      const sent: unknown = answer.bots
-      const bots: BotLevel = isBotLevel(sent) ? sent : sent === true ? (answer.work ? 'full' : 'use') : 'off'
+      // An answer without a bot level gives no bot access.
+      const bots: BotLevel = isBotLevel(answer.bots) ? answer.bots : 'off'
       return { state: 'known', access: { ...answer, bots } }
     } catch (error) {
       if (error instanceof NetError && error.code === 'forbidden') {

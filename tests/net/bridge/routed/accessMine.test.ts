@@ -104,19 +104,6 @@ describe('what this computer may do there', () => {
     }
   }, 60_000)
 
-  it('a computer on a build from before bot levels says on or off, read as a level', async () => {
-    const entry = registry().get('bridge.access.mine')!
-    const handle = entry.handle
-    try {
-      for (const [bots, work, level] of [[true, true, 'full'], [true, false, 'use'], [false, true, 'off']] as const) {
-        entry.handle = async (...args) => ({ ...((await handle(...args)) as object), bots, work })
-        expect(await there(), `${bots}, work ${work}`).toMatchObject({ state: 'known', access: { bots: level } })
-      }
-    } finally {
-      entry.handle = handle
-    }
-  }, 60_000)
-
   it('a computer on a build from before the call is unknown', async () => {
     // As a build from before the call: the keeper does not have it, and its net.info does not name it.
     const info = registry().get('net.info')!
