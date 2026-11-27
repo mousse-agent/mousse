@@ -12,6 +12,8 @@ import {
   BRIDGE_THREAD_EVENT_TYPES,
   NetError,
   newId,
+  STORE_TXN_MAX_BYTES,
+  STORE_TXN_MAX_ROWS,
   type NodeId
 } from '../../../shared/net'
 import type { RoutedStreamKind } from '../../../shared/bridge/routed'
@@ -180,7 +182,14 @@ const IDLE_MS = 10 * 60 * 1000,
   BATCH_MS = 4,
   BATCH_MAX_RECORDS = 32,
   /** Well under what one transaction may hold (STORE_TXN_MAX_BYTES, 1 MiB), with the envelopes and signatures counted in. */
-  BATCH_MAX_BYTES = 256 * 1024
+  BATCH_MAX_BYTES = 256 * 1024,
+  /**
+   * Records stored in one transaction at most, and their envelopes and signatures in bytes: half of what the store
+   * allows (each record counts two rows, its own and its stream's head). A snapshot is stored in transactions of this
+   * size: a 32 KiB chunk takes about 44 KiB signed, so about eleven chunks go in each.
+   */
+  TXN_RECORDS = Math.floor(STORE_TXN_MAX_ROWS / 4),
+  TXN_BYTES = STORE_TXN_MAX_BYTES / 2
 const PRIVATE_DELTA_SET: readonly string[] = PRIVATE_DELTA_TYPES
 /**
  * The bytes a record body takes on the wire, or undefined when it has more nodes than one record may carry
@@ -230,6 +239,11 @@ export class ThreadStreamAdapter {
     StreamId,
     { reader: NodeId; kind: RoutedStreamKind } | undefined
   >()
+  /**
+   * Private thread streams whose source is reading ahead (`openPrivateWarm`). A close that matches one (the reader
+   * blocked, its access gone, the stream closed) cancels it: the stream is not opened once the read is done.
+   */
+  private readonly opening = new Set<{ spec: PrivateSpec; cancelled: boolean }>()
   private readonly boot: string
   private sweepTimer?: { cancel(): void }
   private sweepSlow = false
@@ -334,6 +348,38 @@ export class ThreadStreamAdapter {
   }
 
   /**
+   * Opens a private stream as `openPrivate` does. A thread stream not open yet first has its source read what the
+   * snapshot needs off the event loop (`ThreadSourcePort.warm`), so the snapshot does not load the thread. What the
+   * open depends on is checked again after that read: `stillAllowed` (the caller's own checks, such as the thread
+   * still being one this computer shares), no close of the reader's streams in the meantime, and room for the stream.
+   * A stream that is open returns at once; so do the other kinds, whose snapshots are small.
+   */
+  async openPrivateWarm(spec: PrivateSpec, stillAllowed?: () => void): Promise<StreamDescriptor> {
+    const key = privateKey(spec)
+    if (spec.kind !== 'thread' || !this.options.source.warm || this.isOpen(key))
+      return this.openPrivate(spec)
+    // A computer that would be refused for room is refused before anything is read.
+    this.assertPrivateRoom(spec)
+    const pending = { spec, cancelled: false }
+    this.opening.add(pending)
+    try {
+      await this.options.source.warm(key)
+    } catch {
+      // Reading ahead is only to spare the event loop; the snapshot reads what it needs itself.
+    } finally {
+      this.opening.delete(pending)
+    }
+    if (pending.cancelled || this.closed) throw new NetError('cancelled')
+    stillAllowed?.()
+    return this.openPrivate(spec)
+  }
+
+  private isOpen(threadId: string): boolean {
+    for (const thread of this.active.values()) if (thread.threadId === threadId) return true
+    return false
+  }
+
+  /**
    * The node a private stream is bound to, what it carries, and whether it is open now. Undefined for
    * any other stream. A stream that was closed or released is not read until its computer opens it again.
    */
@@ -371,12 +417,13 @@ export class ThreadStreamAdapter {
     return this.readerBindings.get(stream)
   }
 
-  /** The computers that have a private stream open. */
+  /** The computers that have a private stream open, or one opening. */
   privateReaders(): NodeId[] {
     return [
-      ...new Set(
-        [...this.active.values()].flatMap((thread) => (thread.spec ? [thread.spec.reader] : []))
-      )
+      ...new Set([
+        ...[...this.active.values()].flatMap((thread) => (thread.spec ? [thread.spec.reader] : [])),
+        ...[...this.opening].map((pending) => pending.spec.reader)
+      ])
     ]
   }
 
@@ -388,12 +435,15 @@ export class ThreadStreamAdapter {
   closePrivate(
     filter: { reader?: NodeId; kind?: RoutedStreamKind; subject?: string } = {}
   ): StreamId[] {
+    const matches = (spec: PrivateSpec): boolean =>
+      (!filter.reader || spec.reader === filter.reader) &&
+      (!filter.kind || spec.kind === filter.kind) &&
+      (filter.subject === undefined || spec.subject === filter.subject)
+    // A stream still reading ahead is not opened when it is done.
+    for (const pending of this.opening) if (matches(pending.spec)) pending.cancelled = true
     const closed: StreamId[] = []
     for (const thread of [...this.active.values()]) {
-      const spec = thread.spec
-      if (!spec || (filter.reader && spec.reader !== filter.reader)) continue
-      if (filter.kind && spec.kind !== filter.kind) continue
-      if (filter.subject !== undefined && spec.subject !== filter.subject) continue
+      if (!thread.spec || !matches(thread.spec)) continue
       this.deactivate(thread.threadId)
       closed.push(thread.stream)
     }
@@ -577,8 +627,12 @@ export class ThreadStreamAdapter {
           this.flushBatch(thread)
           if (event.ephemeral) {
             if (!deltaTypes.includes(event.type)) throw new NetError('bad_request')
-            // A delta is never stored: a reader that opens the stream later is given a fresh snapshot that has it.
-            thread.published = undefined
+            // A delta is never stored: a reader that opens the stream later is given a fresh snapshot that has it. A
+            // private note (`PRIVATE_DELTA_TYPES`) carries nothing a snapshot has: the reader fetches what it says
+            // changed when it opens the thread, so the published snapshot still serves. A streaming message or the
+            // pending questions are in a fresh snapshot, and a reader that missed the delta might not get another
+            // for minutes (a tool call that runs long, a question that waits), so those still need one.
+            if (!PRIVATE_DELTA_SET.includes(event.type)) thread.published = undefined
             const key = deltaKey(event)
             if (!key) return
             const size = wireSize(body)
@@ -696,12 +750,22 @@ export class ThreadStreamAdapter {
   private append(thread: ActiveThread, type: string, body: unknown): StoredRecord {
     return this.appendMany(thread, type, [body])[0]!
   }
-  /**
-   * Signs and stores records, one after another in one transaction: the roster and this computer's delegation are
-   * checked once, each record is signed on its own, and the records are published after the commit. Each body is
-   * its own record, in the order given, so nothing about a record changes by being stored with others.
-   */
   private appendMany(thread: ActiveThread, type: string, bodies: readonly unknown[]): StoredRecord[] {
+    return this.appendRecords(
+      thread,
+      bodies.map((body) => ({ type, body }))
+    )
+  }
+  /**
+   * Signs and stores records in the order given: the roster and this computer's delegation are checked once, each
+   * record is signed on its own, and they are stored a transaction at a time, each within `TXN_RECORDS` and
+   * `TXN_BYTES`, and published after its commit. Each body is its own record, so nothing about a record changes by
+   * being stored with others.
+   */
+  private appendRecords(
+    thread: ActiveThread,
+    items: Iterable<{ type: string; body: unknown }>
+  ): StoredRecord[] {
     if (this.options.db.database.isTransaction)
       throw new NetError('forbidden', 'Display records cannot escape an enclosing transaction.')
     const identity = this.options.identity,
@@ -724,7 +788,7 @@ export class ThreadStreamAdapter {
       )
     )
       throw new NetError('bad_delegation')
-    const sealed = bodies.map((body) => {
+    const seal = (type: string, body: unknown): { id: Envelope['id']; bytes: Uint8Array; sig: Uint8Array } => {
       const envelope: Envelope = {
         v: 1,
         minor: 0,
@@ -740,7 +804,30 @@ export class ThreadStreamAdapter {
         sig = this.options.keys.signAsNode(bytes)
       identity.verifyAuthor(envelope.author, bytes, sig, this.options.clock.now(), 'newWork')
       return { id: envelope.id, bytes, sig }
-    })
+    }
+    const records: StoredRecord[] = []
+    let batch: Array<ReturnType<typeof seal>> = [],
+      batchBytes = 0
+    const flush = (): void => {
+      if (batch.length) records.push(...this.storeSealed(thread, batch))
+      batch = []
+      batchBytes = 0
+    }
+    for (const { type, body } of items) {
+      const sealed = seal(type, body),
+        size = sealed.bytes.byteLength + sealed.sig.byteLength
+      if (batch.length >= TXN_RECORDS || (batch.length && batchBytes + size > TXN_BYTES)) flush()
+      batch.push(sealed)
+      batchBytes += size
+    }
+    flush()
+    return records
+  }
+  /** Stores signed records in one transaction, then keeps them in the ring and publishes them. */
+  private storeSealed(
+    thread: ActiveThread,
+    sealed: ReadonlyArray<{ id: Envelope['id']; bytes: Uint8Array; sig: Uint8Array }>
+  ): StoredRecord[] {
     const records: StoredRecord[] = []
     const store = (): void => {
       for (const { id, bytes, sig } of sealed) {
@@ -786,23 +873,28 @@ export class ThreadStreamAdapter {
       sha256 = createHash('sha256').update(bytes).digest('base64url'),
       chunks = Math.max(1, Math.ceil(bytes.length / CHUNK_BYTES)),
       previous = this.options.store.head(thread.stream).seq
-    const begin = this.append(thread, 'thread.snapshot.begin', {
-      threadId: thread.subject,
-      snapshot,
-      totalBytes: bytes.length,
-      chunks,
-      sha256
-    })
-    for (let index = 0; index < chunks; index++)
-      this.append(thread, 'thread.snapshot.chunk', {
-        threadId: thread.subject,
-        snapshot,
-        index,
-        data: Buffer.from(bytes.subarray(index * CHUNK_BYTES, (index + 1) * CHUNK_BYTES)).toString(
-          'base64url'
-        )
-      })
-    this.append(thread, 'thread.snapshot.end', { threadId: thread.subject, snapshot, sha256 })
+    const subject = thread.subject
+    // Begin, chunks and end, in order, stored a few chunks to a transaction; each chunk is encoded as it is signed.
+    function* records(): Generator<{ type: string; body: unknown }> {
+      yield {
+        type: 'thread.snapshot.begin',
+        body: { threadId: subject, snapshot, totalBytes: bytes.length, chunks, sha256 }
+      }
+      for (let index = 0; index < chunks; index++)
+        yield {
+          type: 'thread.snapshot.chunk',
+          body: {
+            threadId: subject,
+            snapshot,
+            index,
+            data: Buffer.from(bytes.subarray(index * CHUNK_BYTES, (index + 1) * CHUNK_BYTES)).toString(
+              'base64url'
+            )
+          }
+        }
+      yield { type: 'thread.snapshot.end', body: { threadId: subject, snapshot, sha256 } }
+    }
+    const begin = this.appendRecords(thread, records())[0]!
     if (previous) this.options.store.truncate(thread.stream, previous, { forgetIds: true })
     thread.published = { begin: begin.seq }
   }

@@ -25,6 +25,11 @@ export interface MmsThreadSourceOptions {
     /** The computer that reads the stream: a thread a bot started names that bot only if it reaches it. */
     reader?: string
   }
+  /**
+   * The backend to read through. Sources that share one share the pages `warm` read ahead, so a source made for one
+   * open finds the page another warmed (`PrivateSources` makes a source per call).
+   */
+  backend?: MmsRemoteBackend
 }
 
 /** Actual thread events/snapshots from the already-owned profile, never the old global event ring. */
@@ -35,7 +40,7 @@ export class MmsThreadSource implements ThreadSourcePort {
     revision?: () => number,
     private readonly options: MmsThreadSourceOptions = {}
   ) {
-    this.backend = new MmsRemoteBackend(services, revision)
+    this.backend = options.backend ?? new MmsRemoteBackend(services, revision)
   }
   snapshot(threadId: string): unknown {
     return this.backend.snapshot(

@@ -306,9 +306,10 @@ export class BridgeProfileService {
           const reader = readerOfListsKey(threadId)
           return reader ? listsOf(reader).snapshot() : threadSource.snapshot(threadId)
         },
-        // A phone's thread reads its newest messages before its stream opens; the lists are small.
+        // A thread reads its newest messages before its stream opens, for a phone or another computer; the lists are small.
         warm: async (threadId) => {
-          if (!isPrivateKey(threadId) && threadId !== LISTS_STREAM_THREAD_ID && !readerOfListsKey(threadId))
+          if (isPrivateKey(threadId)) await privateSources.warm(threadId)
+          else if (threadId !== LISTS_STREAM_THREAD_ID && !readerOfListsKey(threadId))
             await threadSource.warm(threadId)
         },
         onThread: (threadId, listener, onError) => {

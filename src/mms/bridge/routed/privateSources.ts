@@ -3,6 +3,7 @@ import { NetError } from '../../../shared/net'
 import type { SqliteNodePolicy } from '../../net/store/nodePolicy'
 import { mmsJson } from '../remote/jsonOutput'
 import { MmsListsSource, type ListsServices } from '../remote/MmsListsSource'
+import { MmsRemoteBackend } from '../remote/MmsBackend'
 import { MmsThreadSource } from '../remote/MmsThreadSource'
 import { parsePrivateKey, terminalParts, type PrivateSpec } from '../remote/privateStreams'
 import type { ThreadSourceEvent } from '../remote/ThreadStreamAdapter'
@@ -47,14 +48,30 @@ function split(text: string): string[] {
  * says which one it is; each kind is sourced from the profile's own services, never from the reader.
  */
 export class PrivateSources {
+  /**
+   * One backend for every thread stream: the page `warm` reads off the event loop is kept there for the snapshot that
+   * opens the stream, which is read through a source made for that call.
+   */
+  private readonly threads: MmsRemoteBackend
   constructor(
     private readonly services: MmsProfileServices,
     /** The device's permission limit is read each time a request is shown, so a change applies at once. */
     private readonly policy: Pick<SqliteNodePolicy, 'get'>
-  ) {}
+  ) {
+    this.threads = new MmsRemoteBackend(services)
+  }
 
   snapshot(key: string): unknown {
     return this.sourceFor(key).snapshot()
+  }
+
+  /**
+   * Reads what the snapshot of a thread stream needs off the event loop (its newest page), so opening the stream does
+   * not load the thread. Nothing for the other kinds, whose snapshots are small.
+   */
+  async warm(key: string): Promise<void> {
+    const spec = parsePrivateKey(key)
+    if (spec?.kind === 'thread') await this.threads.warm(spec.subject, { newestOnly: true })
   }
 
   onThread(
@@ -77,7 +94,8 @@ export class PrivateSources {
     switch (spec.kind) {
       case 'thread': {
         const source = new MmsThreadSource(this.services, undefined, {
-          private: { limit: () => this.policy.get(spec.reader).maxPermissionMode, reader: spec.reader }
+          private: { limit: () => this.policy.get(spec.reader).maxPermissionMode, reader: spec.reader },
+          backend: this.threads
         })
         return {
           snapshot: () => source.snapshot(spec.subject),

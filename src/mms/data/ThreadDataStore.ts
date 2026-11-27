@@ -591,6 +591,14 @@ export class ThreadDataStore extends EventEmitter {
     return { messages: gauge.latest === undefined ? [] : [JSON.parse(gauge.latest) as ChatMessage], llmContext, estimates: gauge.estimates }
   }
 
+  /**
+   * How many times this process saved the thread's database. Read from memory: a caller that read a page off the event
+   * loop compares two counts to learn whether this process changed the thread since, without loading it.
+   */
+  threadDbSaveCount(id: string): number {
+    return this.threadDb().saveCount(this.getThreadDir(id))
+  }
+
   /** The thread database's change sequence and epoch, or undefined for a JSON thread. */
   threadDbPosition(id: string): { seq: number; epoch: number } | undefined {
     const dir = this.getThreadDir(id)

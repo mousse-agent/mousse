@@ -97,6 +97,11 @@ export function remoteThreadEventData(data: unknown): unknown {
 
 /** Newest pages read ahead by `warm` and not yet taken by a snapshot; each is at most 16 MiB. */
 const WARM_PAGES_MAX = 4
+/**
+ * How long a page read ahead may wait for its snapshot. The snapshot follows the read at once; a page left over (an open
+ * that was refused) is not used later, when another process may have written the thread meanwhile.
+ */
+const WARM_PAGE_MAX_AGE_MS = 2000
 
 /** Projects looked at for one match; a profile with more is matched against the first ones. */
 const MATCH_PROJECT_LIMIT = 256
@@ -118,7 +123,7 @@ function failure(error: unknown): { ok: false; error: string } {
 /** Adapts the actual profile services, never a client-supplied ingress/profile/path. */
 export class MmsRemoteBackend implements RemoteBackendPort {
   /** The newest page of a thread `warm` read from its database, by thread and byte budget, for the next snapshot. */
-  private readonly pages = new Map<string, MessagePageResult>()
+  private readonly pages = new Map<string, { page: MessagePageResult; saves: number; readAt: number }>()
   constructor(
     private readonly services: MmsProfileServices,
     private readonly revision: () => number = () => 0,
@@ -518,6 +523,8 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     if (!this.remoteThread(threadId) || s.orchestrator.hasSession(threadId)) return
     if (s.threads.usesThreadDb(threadId)) {
       const budget = snapshotBudget(options)
+      // Counted before the read: a save by this process after it means the page may miss what was saved.
+      const saves = s.threads.threadDbSaveCount(threadId)
       const page = await s.threads.readMessagePage(threadId, {
         limit: Number.MAX_SAFE_INTEGER,
         maxBytes: budget,
@@ -529,7 +536,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       if (page && !page.messages.some(isOpenActivityRow)) {
         const key = `${budget}:${threadId}`
         this.pages.delete(key)
-        this.pages.set(key, page)
+        this.pages.set(key, { page, saves, readAt: Date.now() })
         for (const stale of this.pages.keys()) {
           if (this.pages.size <= WARM_PAGES_MAX) break
           this.pages.delete(stale)
@@ -542,16 +549,22 @@ export class MmsRemoteBackend implements RemoteBackendPort {
 
   /**
    * The page `warm` read for this snapshot, while it is still the thread's newest: the thread was not loaded since
-   * (a loaded thread may hold what its database does not yet) and its database has not changed.
+   * (a loaded thread may hold what its database does not yet), this process has not saved it since, and the read is
+   * recent. Checked from memory: asking the database where it is now would load a thread that is not in memory, on
+   * the event loop, which is what reading ahead avoids. Its messages are masked as a loaded thread's are
+   * (`maskThreadMessages`): a value registered as a secret after they were saved is masked too.
    */
   private warmPage(threadId: string, budget: number): MessagePageResult | undefined {
     const key = `${budget}:${threadId}`
-    const page = this.pages.get(key)
-    if (!page) return undefined
+    const held = this.pages.get(key)
+    if (!held) return undefined
     this.pages.delete(key)
-    if (this.services.orchestrator.hasSession(threadId)) return undefined
-    const now = this.services.threads.threadDbPosition(threadId)
-    return now && now.seq === page.seq && now.epoch === page.epoch ? page : undefined
+    const s = this.services
+    if (s.orchestrator.hasSession(threadId)) return undefined
+    if (s.threads.threadDbSaveCount(threadId) !== held.saves || Date.now() - held.readAt > WARM_PAGE_MAX_AGE_MS)
+      return undefined
+    s.orchestrator.maskThreadMessages(threadId, held.page.messages)
+    return held.page
   }
 
   /**
@@ -571,7 +584,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       await s.threads.warmThread(threadId)
       if (settle) s.orchestrator.getOrCreateSession(threadId)
       page = messagesBefore(s.orchestrator.getMessages(threadId), before, limit, PHONE_MESSAGES_PAGE_BYTES)
-    }
+    } else if (page) s.orchestrator.maskThreadMessages(threadId, page.messages)
     if (!page) throw new NetError('snapshot_required', 'That message is no longer in this thread.')
     return mmsJson({ messages: withImageBudget(page.messages), ...(page.earlier ? { earlier: page.earlier } : {}) })
   }

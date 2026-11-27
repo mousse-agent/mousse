@@ -125,6 +125,8 @@ export class ThreadDbStore {
   private readonly collectedAt = new Map<string, number>()
   /** Per thread folder, the newest sequence this process handed out or saved in full; outlives the cache. */
   private readonly observed = new Map<string, { dbId: string; seq: number }>()
+  /** Saves this process made, per thread folder: two counts tell whether it saved in between, without a worker call. */
+  private readonly saveCounts = new Map<string, number>()
   /** Loads a save or synchronous read had to do without a warm copy; tests assert entry points never cause one. */
   coldLoads = 0
   /** Reads of a thread's small state that did not load the thread (it was not in memory). */
@@ -375,6 +377,11 @@ export class ThreadDbStore {
     return this.fresh(dir).info
   }
 
+  /** How many saves this process made to the thread; read from memory, never from the database. */
+  saveCount(dir: string): number {
+    return this.saveCounts.get(dir) ?? 0
+  }
+
   messageCount(dir: string): number {
     const entry = this.entries.get(dir)
     if (entry) return this.fresh(dir).collections.get(TRANSCRIPT)?.length ?? 0
@@ -411,6 +418,7 @@ export class ThreadDbStore {
         continue
       }
       this.commit(dir, entry, plan, result.rids, result.info)
+      this.saveCounts.set(dir, this.saveCount(dir) + 1)
       const stats: SaveStats = {
         inserted: plan.request.inserts.length,
         updated: plan.request.updates.length,
