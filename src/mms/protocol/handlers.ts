@@ -71,7 +71,8 @@ import {
   botProviderOptions,
   buildAgentTypesFromCatalogs,
   lastUsedChatModel,
-  type MousseSettingsUpdate
+  type MousseSettingsUpdate,
+  type TitleOptions
 } from '../../shared/settings'
 import type { HarnessGateway } from '../harness/gateway'
 import { usageText } from '../providers/usageText'
@@ -4207,6 +4208,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // Fan-out so all clients observe the same daemon-owned settings immediately.
       ctx.emitEvent?.('settings.changed', { settings })
       return { settings }
+    }
+    case 'settings.titleOptions': {
+      // Settings → Agents → Thread titles, from cached state only: no provider check, no bot model read is waited for.
+      const harness = ctx.mms.harness
+      const titleOptions: TitleOptions = {
+        llmProviders: harness?.listedLlmProviders({ kind: 'device' }) ?? [],
+        ...(harness?.titleListing ? { titleListing: harness.titleListing(ctx.mms.settings.get().title) } : {})
+      }
+      return { titleOptions }
     }
     case 'settings.getOptions': {
       await ctx.mms.providerAuth.init()

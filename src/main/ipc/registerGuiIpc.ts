@@ -3914,6 +3914,10 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ options: unknown }>('settings.getOptions')
     return res.options
   })
+  registerHandler('settings:getTitleOptions', async () => {
+    const res = await guiMms.request<{ titleOptions: unknown }>('settings.titleOptions')
+    return res.titleOptions
+  })
 
   registerHandler('lineEdits:getStats', () => guiMms.request('stats.lineEdits'))
   registerHandler('usageStats:getStats', () => guiMms.request('stats.usage'))

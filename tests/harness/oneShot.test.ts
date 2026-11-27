@@ -21,7 +21,9 @@ import { streamSimple as bedrockStreamSimple } from '@earendil-works/pi-ai/api/b
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { CODEX_CAPABILITIES } from '../../src/mms/harness/drivers/codex/adapter'
 import type { ProviderAdapter } from '../../src/mms/harness/adapter'
-import { testHarness } from '../../src/mms/run/testkit/harness'
+import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
+import { legacyOneShotRoute } from '../../src/mms/harness/oneShot/routes'
+import { botDigestOneShot, botNameOneShot } from '../../src/mms/bots/botOneShots'
 
 const homes: string[] = []
 const harnesses: Harness[] = []
@@ -202,8 +204,8 @@ describe('gateway.oneShot refusals', () => {
   })
 
   it('Claude Code and Codex declare one-shots, so their models are offered for titles', () => {
-    expect(claudeCodeDriver().oneShot).toBe(true)
-    expect(codexDriver({ builtIn: () => { throw new Error('unused') } }).oneShot).toBe(true)
+    expect(claudeCodeDriver().oneShotRoute).toBeDefined()
+    expect(codexDriver({ builtIn: () => { throw new Error('unused') } }).oneShotRoute).toBeDefined()
   })
 
   it('refuses an agent runtime without one-shots (`oneShot` absent) with `unsupported`', async () => {
@@ -279,5 +281,147 @@ describe('runPiOneShot cancellation', () => {
     fail(new Error('offline credential refresh failed'))
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(models.streamSimple).not.toHaveBeenCalled()
+  })
+})
+
+describe('a local server model through the gateway', () => {
+  const LOCAL = { ...MODEL, id: 'phi3:medium', name: 'phi3:medium', provider: 'local-ollama', reasoning: false } as unknown as Model<'openai-responses'>
+  function localSetup() {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-one-shot-local-'))
+    homes.push(home)
+    const pi = piModels()
+    pi.models.getModel = (provider: string, id: string) => (provider === 'local-ollama' && id === 'phi3:medium' ? LOCAL : undefined)
+    const credentials = {
+      has: () => true,
+      getConfiguredProviders: () => [{ id: 'local-ollama', label: 'Ollama', authType: 'api_key' as const }],
+      // The server lists only the literal id, which ends like a reasoning level.
+      getConfiguredLlmProviders: () => [{ id: 'local-ollama', label: 'Ollama', models: [{ id: 'phi3:medium', label: 'phi3:medium', local: { tools: 'reported', images: false, loaded: true } }] }],
+      models: pi.models
+    }
+    let stored: unknown = { 'pi:local-ollama': { driver: 'pi', enabled: true } }
+    const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
+    const harness = testHarness({ drivers: [piDriver({ credentials: () => credentials as never })], instances, profileHome: home })
+    harnesses.push(harness)
+    return { harness, pi }
+  }
+
+  it("names its own thread with the exact id it lists, though the id ends like a level; another thread's request is refused", async () => {
+    const s = localSetup()
+    const request = { selection: { instanceId: 'pi:local-ollama', llmProvider: 'local-ollama', model: 'phi3:medium' }, purpose: 'title' as const, system: 'You name chats.', prompt: 'fix the login bug', maxChars: 80 }
+    expect(await s.harness.oneShot({ ...request, localThread: { resident: true } })).toEqual({ text: 'A clear title' })
+    expect(s.pi.requests.map((sent) => sent.model.id)).toEqual(['phi3:medium'])
+    await expect(s.harness.oneShot(request)).rejects.toMatchObject({ code: 'unsupported' })
+    expect(s.pi.requests).toHaveLength(1)
+  })
+})
+
+describe('pi:direct sends one request on the wire', () => {
+  // A Codex model on a loopback server that refuses every request: the pinned pi-ai's own Codex transport, unchanged.
+  it.each([429, 503])('a Codex model answered %i is asked once: no WebSocket attempt, no HTTP fallback, no retry', async (status) => {
+    const { streamSimple: codexStreamSimple } = await import('@earendil-works/pi-ai/api/openai-codex-responses')
+    const contacts: string[] = []
+    const server = createServer((req, res) => {
+      contacts.push(`${req.method} ${req.url}`)
+      res.writeHead(status, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ error: { message: 'busy' } }))
+    })
+    server.on('upgrade', (req, socket) => { contacts.push(`UPGRADE ${req.url}`); socket.destroy() })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as AddressInfo).port
+    try {
+      const codex = { ...MODEL, id: 'gpt-codex', api: 'openai-codex-responses', provider: 'openai-codex', baseUrl: `http://127.0.0.1:${port}` } as unknown as Model<never>
+      const claim = Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acct' } })).toString('base64url')
+      const token = `e30.${claim}.sig`
+      const models = {
+        getModel: (_provider: string, id: string) => (id === 'gpt-codex' ? codex : undefined),
+        getModels: () => [codex],
+        getAuth: async () => ({ apiKey: token }),
+        stream: vi.fn(),
+        streamSimple: (model: Model<never>, context: Context, options: Record<string, unknown>) => codexStreamSimple(model as never, context, { ...options, apiKey: token } as never)
+      }
+      await expect(runPiOneShot(models as never, 'openai-codex', { model: 'gpt-codex', system: 'You name chats.', prompt: 'fix the login bug', onActivity: () => {} }, new AbortController().signal)).rejects.toThrow()
+      expect(contacts).toEqual(['POST /codex/responses'])
+    } finally {
+      server.close()
+    }
+  })
+})
+
+describe('pi:direct streams its answer to the runner', () => {
+  it('an answer past the streaming cap ends the request while it streams, not once it is all buffered', async () => {
+    const s = setup()
+    let pushed = 0
+    s.pi.respond((stream, signal) => {
+      const message = reply('')
+      // Streams 1,000-character parts until stopped; it never finishes on its own.
+      const push = () => {
+        if (signal?.aborted || pushed > 500) return
+        pushed++
+        stream.push({ type: 'text_delta', contentIndex: 0, delta: 'x'.repeat(1_000), partial: message })
+        setImmediate(push)
+      }
+      push()
+    })
+    await expect(s.harness.oneShot(s.request())).rejects.toMatchObject({ code: 'protocol', message: expect.stringContaining('more than') })
+    expect(pushed).toBeLessThan(200)
+  })
+})
+
+describe('pi:direct checks the entry again once its credential is read', () => {
+  it('a sign-in that changed while the credential was read stops the request before it is sent', async () => {
+    const s = setup()
+    const getAuth = s.pi.models.getAuth
+    s.pi.models.getAuth = async (...args: Parameters<typeof getAuth>) => {
+      // Another sign-in lands on the entry while its credential is read.
+      ;(s.harness as unknown as { counters: { bumpAccount(id: string): void } }).counters.bumpAccount('pi:openai')
+      return getAuth(...args)
+    }
+    await expect(s.harness.oneShot(s.request())).rejects.toMatchObject({ code: 'binding_stale' })
+    expect(s.pi.requests).toHaveLength(0)
+  })
+})
+
+describe('the gateway admits from cached state', () => {
+  function entrySetup(options: { config?: Record<string, unknown>; auth?: 'signed_out'; enabled?: false } = {}) {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-one-shot-entry-'))
+    homes.push(home)
+    const oneShot = vi.fn(async () => ({ text: 'An answer' }))
+    const base = adapterDriver(agent, {
+      runtime: {
+        oneShot,
+        llmProvider: () => ({ id: 'codex', label: 'Codex', models: [{ id: 'gpt-5', label: 'GPT-5' }] }),
+        models: () => [{ id: 'gpt-5', label: 'GPT-5' }],
+        ...(options.auth ? { auth: async () => ({ state: options.auth! }) } : {})
+      }
+    })
+    const driver = { ...base, oneShotRoute: legacyOneShotRoute('codex'), ...(options.config ? { decodeConfig: () => ({ ...options.config }) } : {}) }
+    let stored: unknown = { codex: { driver: 'codex', enabled: options.enabled ?? true } }
+    const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
+    const harness = testHarness({ drivers: [driver], instances, profileHome: home })
+    harnesses.push(harness)
+    return { harness, oneShot }
+  }
+  const selection = { instanceId: 'codex', model: 'gpt-5' }
+
+  it("a bot-only entry runs its bots' name and digest through the bots' own callbacks, and refuses a thread's title", async () => {
+    const s = entrySetup({ config: { profile: 'locked', home: 'private' } })
+    expect(await botNameOneShot(s.harness, { selection, prompt: 'Watches the build.' })).toBe('An answer')
+    expect(await botDigestOneShot(s.harness, { selection, system: 'Summarise.', prompt: 'The chat.' })).toBe('An answer')
+    await expect(s.harness.oneShot({ selection: { ...selection, llmProvider: 'codex' }, purpose: 'title', system: 's', prompt: 'p', maxChars: 80 })).rejects.toMatchObject({ code: 'unsupported' })
+    expect(s.oneShot).toHaveBeenCalledTimes(2)
+  })
+
+  it('a turned-off entry is listed for titles with each of its models and why it cannot name threads', () => {
+    const s = entrySetup({ enabled: false })
+    const entry = s.harness.titleListing({ instanceId: 'codex', llmProvider: 'codex', model: 'gpt-5' })
+    expect(entry.entries.find((each) => each.instanceId === 'codex')?.models).toEqual([expect.objectContaining({ id: 'gpt-5', state: 'unavailable', reason: expect.stringContaining('turned off') })])
+    expect(entry.saved).toMatchObject({ instanceId: 'codex', state: 'unavailable' })
+  })
+
+  it('an entry its provider reported signed out is not sent to, once its check has read that', async () => {
+    const s = entrySetup({ auth: 'signed_out' })
+    await s.harness.llmProviders({ kind: 'device' })
+    await expect(s.harness.oneShot({ selection: { ...selection, llmProvider: 'codex' }, purpose: 'title', system: 's', prompt: 'p', maxChars: 80 })).rejects.toMatchObject({ code: 'signed_out' })
+    expect(s.oneShot).not.toHaveBeenCalled()
   })
 })

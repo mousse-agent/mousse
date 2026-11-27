@@ -177,6 +177,7 @@ export const GIT_ACCESS = {
   'settings.get': 'none',
   'settings.set': 'none',
   'settings.getOptions': 'none',
+  'settings.titleOptions': 'none',
   'providers.getUsage': 'none',
   'providers.getSubscriptionUsage': 'none',
   'providers.usageSlots': 'none',

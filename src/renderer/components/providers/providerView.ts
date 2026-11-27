@@ -144,6 +144,7 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     iconId: 'acp',
     family: 'agent',
     description: 'Any agent that speaks the Agent Client Protocol, started from a command you enter.',
+    bestEffortNaming: 'The agent is told not to use tools and runs in an empty folder; its own tools could still run before Mousse stops it.',
     multiInstance: true,
     customModels: false,
     customCommand: true,

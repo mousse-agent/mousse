@@ -126,7 +126,7 @@ describe('OpenCode on its server API', () => {
     const caps = opencodeDriver().caps({ home: 'default' })
     expect(caps.toolControl).toBe('approval_only')
     expect(supportedPermissionModes(caps)).toEqual(['ask', 'accept_edits', 'full'])
-    expect(opencodeDriver().oneShot).toBe(true)
+    expect(opencodeDriver().oneShotRoute).toBeDefined()
   })
 
   it.each([

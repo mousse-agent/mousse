@@ -125,7 +125,7 @@ import type {
 } from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
 import type { WarmStartView } from '../shared/warmStart'
-import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThreadNotificationEvent } from '../shared/settings'
+import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThreadNotificationEvent, TitleOptions } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
   McpConfigSourceDescriptor,
@@ -843,6 +843,8 @@ const api = {
     set: (partial: MousseSettingsUpdate): Promise<MousseSettings> =>
       ipcRenderer.invoke('settings:set', partial),
     getOptions: (): Promise<SettingsOptions> => ipcRenderer.invoke('settings:getOptions'),
+    /** Thread titles' choices from the daemon's cached state: it never waits for a provider check. */
+    getTitleOptions: (): Promise<TitleOptions> => ipcRenderer.invoke('settings:getTitleOptions'),
     onChanged: (cb: (settings: MousseSettings) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, settings: MousseSettings) => cb(settings)
       ipcRenderer.on('settings:changed', handler)

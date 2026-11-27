@@ -46,6 +46,8 @@ import {
 } from '../../shared/settings'
 import { TitleModelCache, type TitleModelSource } from './TitleModelIndex'
 import { extractLimitFromError, shortCooldown, UsageLimitTracker } from '../models/usageLimits'
+import { candidateDeadlineMs, classifyOneShotFailure, oneShotWasSent } from '../harness/oneShot/runner'
+import { isLocalInstanceId } from '../../shared/localServers'
 import { limitFamilyOf } from '../../shared/bots/personal/modelSlots'
 import type { BranchNameRequest } from '../workspace/branchNaming'
 import { piInstanceId, piProviderIdOf, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
@@ -1092,12 +1094,15 @@ function abortPromise(signal: AbortSignal): Promise<never> {
   })
 }
 
-/** A failure Automatic naming does not retry on another model: a stop, a timeout, or a policy that cannot be held. */
-function automaticNamingStops(error: unknown): boolean {
-  if ((error as { name?: unknown } | undefined)?.name === 'AbortError') return true
-  const code = (error as { code?: unknown } | undefined)?.code
-  return code === 'aborted' || code === 'provider_cancelled' || code === 'timeout' || code === 'provider_timeout' || code === 'policy_unenforceable'
+/** The entry a harness error names, when it names one. */
+function errorInstanceId(error: unknown): string | undefined {
+  const details = (error as { details?: unknown } | undefined)?.details
+  const id = details && typeof details === 'object' ? (details as { instanceId?: unknown }).instanceId : undefined
+  return typeof id === 'string' && id ? id : undefined
 }
+
+/** How long Automatic naming leaves an entry alone after it failed without a limit (no answer, an empty or overlong one). */
+const NAMING_FAILURE_COOLDOWN_MS = 60_000
 /** How long a turn's start waits for its running list (`runningNoteFor`) before it starts without the note. */
 const RUNNING_NOTE_BUDGET_MS = 2_500
 
@@ -12765,20 +12770,43 @@ export class OrchestratorService extends EventEmitter {
       })
       return text
     } catch (error) {
+      // A chosen model's limit is kept as Automatic's would be (bots read it too); nothing else is asked instead.
+      const instanceId = selection.instanceId?.trim() || errorInstanceId(error)
+      if (instanceId) this.markNamingLimit(instanceId, selection.model, error)
       this.reportTitleModelRefusal(error)
       throw error
     }
   }
 
   /**
-   * A title or branch name on Automatic's models, best first (`TitleModelCache`). A failed model gives way to the next
-   * one, at most {@link AUTOMATIC_NAMING_ATTEMPTS} in all: a usage limit marks the model or its entry until the reset
-   * (bots skip it too), a model the entry no longer runs moves to its next model, and any other failure moves to
-   * another entry. A stop, a timeout or a policy refusal ends it at once, with no retry. A title gives up after
-   * {@link AUTOMATIC_TITLE_DEADLINE_MS} in all, whatever each request does; a branch's caller bounds its own wait.
+   * Keeps a usage limit a naming request met: a plan or quota limit in the profile's limits (bots skip it too), too many
+   * requests just now in naming's own cooldown. Returns what it held: the model, the entry, or nothing.
+   */
+  private markNamingLimit(instanceId: string, model: string, error: unknown): 'model' | 'instance' | undefined {
+    const limit = extractLimitFromError(error)
+    if (!limit) return undefined
+    const limits = limit.transient ? this.namingCooldowns() : this.usageLimits()
+    if (limit.scope === 'model') {
+      limits.markModelLimited(instanceId, model, limit.until)
+      return 'model'
+    }
+    limits.markInstanceLimited(instanceId, limit.until)
+    return 'instance'
+  }
+
+  /**
+   * A title or branch name on Automatic's models, best first (`TitleModelCache`), at most
+   * {@link AUTOMATIC_NAMING_ATTEMPTS} sent in one pass. Each failure is read from the runner's table
+   * (`classifyOneShotFailure`): a tool the agent tried moves to the next candidate and leaves the entry's other models
+   * eligible; a usage limit marks the model or its entry until the reset (bots skip it too); no answer, an empty or
+   * overlong one gives the entry a short cooldown; a signed-out entry is skipped; a timeout moves on while the pass has
+   * time; a request not admitted was not sent and does not count. A stop ends the pass. A title's pass ends after
+   * {@link AUTOMATIC_TITLE_DEADLINE_MS}, and each candidate gets the smaller of 15 s and what is left minus 3 s
+   * (`candidateDeadlineMs`); a branch's caller bounds its own wait.
    */
   private async automaticTitleText(system: string, prompt: string, options: TitleRequestOptions): Promise<string> {
     const scope = options.scope ?? DEVICE_SCOPE
+    const started = Date.now()
     const deadline = new AbortController()
     const timer = options.task === 'title' ? setTimeout(() => deadline.abort(new DOMException('The title took too long.', 'TimeoutError')), AUTOMATIC_TITLE_DEADLINE_MS) : undefined
     timer?.unref?.()
@@ -12786,12 +12814,16 @@ export class OrchestratorService extends EventEmitter {
     const failedInstances = new Set<string>()
     const tried = new Set<string>()
     let lastError: unknown
+    let sent = 0
     try {
-      for (let attempt = 0; attempt < AUTOMATIC_NAMING_ATTEMPTS; attempt++) {
+      while (sent < AUTOMATIC_NAMING_ATTEMPTS) {
         if (signal.aborted) break
         const candidate = this.titleModels().candidates(scope).find((each) => !failedInstances.has(each.instanceId) && !tried.has(`${each.instanceId}\0${each.model}`))
         if (!candidate) break
         tried.add(`${candidate.instanceId}\0${candidate.model}`)
+        const budgetMs = timer ? candidateDeadlineMs(AUTOMATIC_TITLE_DEADLINE_MS - (Date.now() - started)) : undefined
+        if (budgetMs !== undefined && budgetMs <= 0) break
+        sent++
         try {
           const call = this.harness.oneShot({
             selection: { instanceId: candidate.instanceId, llmProvider: '', model: candidate.model, ...(candidate.effort ? { effort: candidate.effort } : {}) },
@@ -12802,6 +12834,7 @@ export class OrchestratorService extends EventEmitter {
             maxChars: options.maxChars,
             sessionKey: options.sessionKey,
             task: options.task,
+            ...(budgetMs !== undefined ? { deadlineMs: budgetMs } : {}),
             ...(options.namingOrigin ? { namingOrigin: options.namingOrigin } : {}),
             signal
           })
@@ -12811,21 +12844,28 @@ export class OrchestratorService extends EventEmitter {
           return text
         } catch (error) {
           lastError = error
-          if (signal.aborted || automaticNamingStops(error)) break
-          const limit = extractLimitFromError(error)
-          // A plan or quota limit is the profile's (bots skip it too); too many requests just now holds naming alone.
-          const limits = limit?.transient ? this.namingCooldowns() : this.usageLimits()
-          if (limit?.scope === 'model') {
-            limits.markModelLimited(candidate.instanceId, candidate.model, limit.until)
-            continue
-          }
-          if (limit) {
-            limits.markInstanceLimited(candidate.instanceId, limit.until)
+          if (signal.aborted) break
+          const kind = classifyOneShotFailure(error)
+          if (kind === 'cancelled') break
+          // A request that never left (refused at admission, or before its transport sent it) does not count.
+          const wasSent = oneShotWasSent(error)
+          const unsent = wasSent === false || (wasSent === undefined && kind === 'not_admitted')
+          if (unsent) sent--
+          if (kind === 'signed_out') {
             failedInstances.add(candidate.instanceId)
             continue
           }
-          const code = (error as { code?: unknown } | undefined)?.code
-          if (code === 'model_unavailable' || code === 'unsupported') continue
+          // Unsent, only this model is skipped: the entry's other models stay eligible.
+          if (unsent) continue
+          if (kind === 'tool_refused' || kind === 'tool_detected') continue
+          const held = this.markNamingLimit(candidate.instanceId, candidate.model, error)
+          if (held === 'model') continue
+          if (held === 'instance') {
+            failedInstances.add(candidate.instanceId)
+            continue
+          }
+          if (kind === 'unavailable' || kind === 'empty' || kind === 'too_long' || kind === 'retry_detected')
+            this.namingCooldowns().markInstanceLimited(candidate.instanceId, new Date(Date.now() + NAMING_FAILURE_COOLDOWN_MS).toISOString())
           failedInstances.add(candidate.instanceId)
         }
       }
@@ -12847,7 +12887,7 @@ export class OrchestratorService extends EventEmitter {
     try {
       // The model the thread's next turn runs: its own choice, else the default (a cleared override included).
       const session = this.boundSession?.threadId === threadId ? this.boundSession : this.sessions?.get(threadId)
-      const explicit = session?.modelOverride ?? this.threadStore?.getThread(threadId)?.modelOverride
+      const explicit = this.namingBindings().get(threadId) ?? session?.modelOverride ?? this.threadStore?.getThread(threadId)?.modelOverride
       selection = this.harness.instanceMap.migrate(explicit ?? resolveModelForMode(this.settingsStore.get(), 'agent', [
         ...(this.providerAuth.credentials?.listProviderIds() ?? []),
         ...(this.harness.configuredProviderIds?.() ?? [])
@@ -12857,7 +12897,10 @@ export class OrchestratorService extends EventEmitter {
     }
     const instanceId = selection?.instanceId
     const providerId = instanceId ? piProviderIdOf(instanceId) : undefined
-    if (!selection || !instanceId || !providerId || !local.has(providerId)) return undefined
+    if (!selection || !instanceId || !providerId) return undefined
+    // A local server's entry that is gone or no longer local stays this thread's binding: admission refuses it, and the
+    // thread keeps its first line rather than going to a cloud model.
+    if (!local.has(providerId) && !isLocalInstanceId(instanceId)) return undefined
     // A served id that ends like a level (`phi3:medium`) was stored split; the joined id is the model when it is listed.
     const joined = agentModelId(selection.model, selection.effort)
     const model = local.facts(providerId, joined) ? joined : selection.model
@@ -12871,10 +12914,13 @@ export class OrchestratorService extends EventEmitter {
   private async localTitleText(local: { instanceId: string; providerId: string; model: string }, system: string, prompt: string, options: TitleRequestOptions): Promise<string> {
     const deadline = AbortSignal.timeout(AUTOMATIC_TITLE_DEADLINE_MS)
     const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline
-    const resident = await this.providerAuth.local.resident(local.providerId, local.model, { signal, timeoutMs: 600 })
-    if (resident !== true) throw Object.assign(new Error('The local model is not loaded; the thread keeps its first line.'), { code: 'unsupported' })
+    // A server that is gone, or a model not in memory: nothing is asked, and the thread keeps its first line.
+    const resident = this.providerAuth.local.has(local.providerId) && (await this.providerAuth.local.resident(local.providerId, local.model, { signal, timeoutMs: 600 })) === true
+    if (!resident) throw Object.assign(new Error('The local model is not loaded; the thread keeps its first line.'), { code: 'unsupported' })
+    // Admission refuses the binding too when its entry is no longer a local one, before anything is sent.
     const { text } = await this.harness.oneShot({
       selection: { instanceId: local.instanceId, llmProvider: '', model: local.model },
+      localThread: { resident },
       ...(options.scope ? { scope: options.scope } : {}),
       purpose: 'title',
       system,
@@ -13038,6 +13084,32 @@ export class OrchestratorService extends EventEmitter {
    * pass waits for the first request, and two passes never run at once.
    */
   private titleWork = new Map<string, Promise<void>>()
+  /**
+   * The model the turn that started a thread's naming runs (`namingBindingOf`), so a thread whose turn runs on a local
+   * server's model is named by that model only, whatever its saved override or the default says.
+   */
+  private namingBindingStore?: Map<string, ModelOverride>
+  private namingBindings(): Map<string, ModelOverride> {
+    return this.namingBindingStore ??= new Map()
+  }
+
+  /**
+   * What a naming pass was started under: the title setting (model, mode, prompt) and the model the thread's turn runs.
+   * Captured when the pass starts and compared, in the same step as the write, before its answer is applied.
+   */
+  private namingRevision(threadId: string): string {
+    const thread = this.threadStore?.getThread(threadId)
+    return JSON.stringify([this.settingsStore.get().title, this.namingBindings().get(threadId) ?? null, thread?.modelOverride ?? null])
+  }
+
+  /** The selection a send's turn runs, as the turn resolves it (`turnSelection`); undefined when it cannot be read. */
+  private namingBindingOf(session: ThreadSession, input: OrchestratorSendInput, override?: ModelOverride): ModelOverride | undefined {
+    try {
+      return this.turnSelection(session, normalizeSendRequest(input).mode, override) ?? undefined
+    } catch {
+      return undefined
+    }
+  }
 
   private queueTitleWork(threadId: string, work: () => Promise<void>): Promise<void> {
     const next = (this.titleWork.get(threadId) ?? Promise.resolve()).then(work).catch(() => {})
@@ -13082,10 +13154,12 @@ export class OrchestratorService extends EventEmitter {
    * providers have not been checked yet, no model is asked now; the pass after the first reply names it.
    * A model that fails or names nothing leaves it provisional until the pass after the first reply.
    */
-  private nameThreadOnFirstSend(threadId: string, userContent: string, images: number, restoreSignal?: AbortSignal, namingSignal = restoreSignal): void {
+  private nameThreadOnFirstSend(threadId: string, userContent: string, images: number, restoreSignal?: AbortSignal, namingSignal = restoreSignal, binding?: ModelOverride): void {
     if (!this.threadStore || threadId === '__unbound__' || namingSignal?.aborted) return
     const thread = this.threadStore.getThread(threadId)
     if (!thread || !isDefaultThreadName(thread.name) || thread.titleSource === 'user') return
+    // The model this send's turn runs (a per-send choice or a skill's included): naming and its refinement read it.
+    if (binding) this.namingBindings().set(threadId, binding)
     let shown: Thread | undefined
     const restore = (): void => {
       if (shown) this.writeThreadTitle(threadId, shown, thread.name, thread.titleSource)
@@ -13105,6 +13179,7 @@ export class OrchestratorService extends EventEmitter {
     if (!shown || restoreSignal?.aborted || availability === 'automatic_pending') return
     // The request starts once the send's own work has returned to the event loop: the provider reads its launch
     // settings then, not inside the turn's admission.
+    const revision = this.namingRevision(threadId)
     const naming = new Promise<void>((resolve) => setImmediate(resolve)).then(() => {
       namingSignal?.throwIfAborted()
       return this.generateTitleText({ request: userContent, images }, threadId, namingSignal, 'send')
@@ -13112,7 +13187,8 @@ export class OrchestratorService extends EventEmitter {
     void this.queueTitleWork(threadId, async () => {
       try {
         const title = await naming
-        if (title && shown && !namingSignal?.aborted) shown = this.writeThreadTitle(threadId, shown, title, 'auto')
+        // An answer from a pass whose title model or binding has changed since is not applied.
+        if (title && shown && !namingSignal?.aborted && this.namingRevision(threadId) === revision) shown = this.writeThreadTitle(threadId, shown, title, 'auto')
       } catch (error) {
         if (namingSignal?.aborted) return
         this.warnTitleFailure(threadId, error)
@@ -13187,11 +13263,15 @@ export class OrchestratorService extends EventEmitter {
     const context = titleContextOf(this.getMessages(threadId))
     let title: string | null = null
     if (context?.reply && (availability === 'explicit' || availability === 'automatic_ready')) {
+      const revision = this.namingRevision(threadId)
       try {
         title = await this.generateTitleText({ ...context, later: [] }, threadId)
       } catch (error) {
         this.warnTitleFailure(threadId, error)
       }
+      // An answer from a pass whose title model or binding has changed since is not applied: the thread is named once
+      // more after its next finished reply.
+      if (this.namingRevision(threadId) !== revision) return
     }
     // No model named it and the first message's title rules named nothing ("hello there"): the message as written, as
     // with no model at all, rather than "New Chat" for good. Without words (attachments only) the name stays.
@@ -15619,7 +15699,7 @@ export class OrchestratorService extends EventEmitter {
     const namingSignal = AbortSignal.any([setupSignal, turnAbort.signal, draftTitleSignal])
     // Ask before the worktree and snapshot. Stop can cancel naming during either setup or the active turn.
     if (startedAtAdmission && (typeof input === 'string' || !input.workflowInvocationId)) {
-      this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent), draftTitleSignal, namingSignal)
+      this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent), draftTitleSignal, namingSignal, this.namingBindingOf(session, input, opts?.modelOverride))
     }
     this.noteQueueWait(session)
     const turnId = opts?.runId ?? uuidv4()
@@ -15979,7 +16059,7 @@ export class OrchestratorService extends EventEmitter {
 
     // A thread the admission did not name (the transcript changed during the setup) is named now.
     setupSignal.throwIfAborted()
-    if (!reuseLastUser && displayUserMessage && !startedAtAdmission) this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent), draftTitleSignal, namingSignal)
+    if (!reuseLastUser && displayUserMessage && !startedAtAdmission) this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent), draftTitleSignal, namingSignal, this.namingBindingOf(session, input, opts?.modelOverride))
 
     // The mode the turn runs in is known before its message is admitted, so a change reaches the
     // agent with that message and the message records the mode. A bot's turn runs under its grant, never a thread

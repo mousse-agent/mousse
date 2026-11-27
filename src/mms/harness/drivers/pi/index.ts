@@ -7,6 +7,7 @@ import { piInstanceRuntime, type PiCredentials } from './instance'
 import { createRpcRuntime, markLoopConnections, PI_RPC_CAPS, piRpcCaps, piRpcEvidenceOf, type PiRpcDriverOptions } from './engines/rpc'
 import { PI_NATIVE_TOOLS } from '../../pi/nativeTools'
 import { piRetiredOf, piRetiredPrompt } from './retired'
+import { PI_DIRECT_FACTS, PI_LOCAL_FACTS } from '../../oneShot/routes'
 
 export type { PiCredentials } from './instance'
 export { PI_RPC_CAPS, PI_RPC_EXACT_CAPS, PI_RPC_NO_SHELL_CAPS, piRpcCaps, piRpcEvidenceLevel, piRpcHasEvidence, type PiRpcDriverOptions, type PiRpcEvidenceLevel } from './engines/rpc'
@@ -136,8 +137,9 @@ export function piDriver(options: { credentials?: () => PiCredentials | undefine
     canInstall: false,
     // A custom model runs with its provider's transport (`customModelDefinition`).
     customModels: true,
-    // Chat titles: one pi-ai request in Mousse's process (`runPiOneShot`).
-    oneShot: true,
+    // Chat titles and other single requests: one pi-ai request in Mousse's process (`runPiOneShot`), on the runner. A
+    // local server's model names only its own threads.
+    oneShotRoute: ({ listed }) => ({ route: { id: 'pi:direct', facts: listed?.local ? PI_LOCAL_FACTS : PI_DIRECT_FACTS } }),
     methodLabel: 'API key or sign-in',
     // The engine's extension stamps the attempt token on every Mousse call.
     mcpTurnBinding: 'per_call',
