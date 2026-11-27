@@ -132,6 +132,22 @@
       "expiresAt": "2026-11-27T20:14:24.172Z"
     },
     {
+      "task": "remote-bots-share-switch-out",
+      "session": "Avarnics-Mac-mini.local-7f5739",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "remote-bots-share-switch-out",
+      "paths": [
+        "src/shared/net/accessClasses.ts",
+        "src/mms/net/NetService.ts",
+        "src/mms/bridge",
+        "src/mms/protocol/botsSharingPort.ts",
+        "src/renderer/components/netEngine",
+        "src/cli/commands/net.ts"
+      ],
+      "claimedAt": "2026-11-27T19:18:03.050Z",
+      "expiresAt": "2026-11-27T21:18:03.050Z"
+    },
+    {
       "task": "s6a-thread-addressing",
       "session": "LAPTOP-HIEROJK7-34b8fe",
       "machine": "LAPTOP-HIEROJK7",
