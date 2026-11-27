@@ -47,7 +47,7 @@ describe('the access table', () => {
 })
 
 describe('speech (dictation and read-aloud)', () => {
-  it('is admitted for every access preset, with the Bots switch on or off, and refused only to a blocked device', async () => {
+  it('is admitted for every access preset, at every bot level, and refused only to a blocked device', async () => {
     const speech = Object.keys(METHOD_ACCESS).filter((name) => name.startsWith('speech.'))
     expect(speech).toContain('speech.transcribe')
     // Its own class, which no device switch reads: not the bots class it shared before.
@@ -109,7 +109,7 @@ function standInBots(receiver: MousseMainService) {
   return reached
 }
 
-describe('a device that may view threads and chat with bots only', () => {
+describe('a device that may view threads only, at bot level Use', () => {
   // The keeper receives from its member, then a member that is not the keeper receives from the keeper.
   const directions = () => [
     { receiver: t.owner, caller: t.caller, receiverNode: t.node, callerNode: t.callerNode },

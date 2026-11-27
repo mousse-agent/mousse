@@ -3182,8 +3182,9 @@ export class NetService {
         threads &&
         passes('routed.editor.folder') &&
         (isEngineCaller(caller) || this.deviceRefusal(caller.node) === undefined),
-      // The level, where a bot call can pass at all (a blocked device, or one the grant gives no read, is at Off).
-      bots: passes('bots.chat.list') ? policy.bots : 'off',
+      // The level the gate lets through: Off where no bot call passes (blocked, or no read in the grant), and Full only
+      // where a Full call passes too (its grant has write), else Use.
+      bots: !passes('bots.chat.list') ? 'off' : policy.bots === 'full' && !passes('bots.update') ? 'use' : policy.bots,
       maxPermissionMode: policy.maxPermissionMode,
       agentReach: policy.agentReach
     }

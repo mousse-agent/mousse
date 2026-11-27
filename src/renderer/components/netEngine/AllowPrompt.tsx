@@ -6,8 +6,16 @@ import {
   type AccessPresetFields
 } from '../../../shared/net/accessPresets'
 import type { NetEngineApproval } from '../../../shared/netEngine/local'
-import { Switch } from '../settings/SettingsRow'
+import type { BotLevel } from '../../../shared/net/local'
+import { Segmented, Switch, type SegmentedOption } from '../settings/SettingsRow'
 import { ChoiceRow } from './pairingParts'
+
+/** The bot level under Customize, as on a device's row in Devices. */
+const BOT_LEVELS: ReadonlyArray<SegmentedOption<BotLevel>> = [
+  { value: 'off', label: 'Off', title: 'Sees none of this computer’s bots.' },
+  { value: 'use', label: 'Use', title: 'Chats with bots, answers their questions, stops them and reads their chats.' },
+  { value: 'full', label: 'Full', title: 'Also sets bots up, pauses, deletes and makes them.' }
+]
 
 /** The single switches Customize opens, each one field of a preset. */
 const SWITCHES: ReadonlyArray<{
@@ -96,6 +104,16 @@ export function LevelPicker({
               />
             </label>
           ))}
+          <div className="engine-allow-switch">
+            <span>Bots</span>
+            <Segmented
+              value={fields.bots}
+              options={BOT_LEVELS}
+              disabled={busy}
+              ariaLabel="Bots"
+              onChange={(bots) => onChange({ ...fields, bots })}
+            />
+          </div>
         </div>
       ) : (
         <p className="engine-hint">

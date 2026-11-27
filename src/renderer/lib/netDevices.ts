@@ -371,8 +371,9 @@ export function accessHere(device: Device, switches: { workOnThreads: boolean })
   if (policy.blocked) return 'blocked'
   // Each item also needs the signed grant its calls check: reads need read, sends chat, terminals write.
   const has = (cap: NodeCapability) => device.caps.includes(cap)
-  // A service from before bot levels sends none: it let the device chat with its bots.
-  const bots: BotLevel = has('read') ? (policy.bots ?? 'use') : 'off'
+  // As the gate allows: no bot call without read, and Full calls (setting bots up) need write too.
+  const level = policy.bots ?? 'off'
+  const bots: BotLevel = !has('read') ? 'off' : level === 'full' && !has('write') ? 'use' : level
   if (!isComputer(device)) {
     const threads = device.caps.includes('read')
     return { threads, work: threads && device.caps.includes('write') && policy.work !== false, terminal: false, editor: false, bots }

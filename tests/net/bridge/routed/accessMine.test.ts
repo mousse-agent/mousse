@@ -61,6 +61,23 @@ describe('what this computer may do there', () => {
     }
   }, 60_000)
 
+  it('a device at bots Full whose grant has no write reports Use, as its real Full calls are refused', async () => {
+    const nodes = (await t.owner.net.request('bridge.nodes', {})) as { nodes: Array<{ node: string; caps: string[] }> }
+    const caps = nodes.nodes.find((row) => row.node === t.callerNode)!.caps
+    await t.owner.net.request('bridge.policy', { node: t.callerNode, bots: 'full' })
+    try {
+      expect(await access()).toMatchObject({ bots: 'full' })
+      for (const narrowed of [['read'], ['read', 'chat']]) {
+        await t.owner.net.request('bridge.setCaps', { node: t.callerNode, caps: narrowed })
+        expect(await access(), narrowed.join(',')).toMatchObject({ bots: 'use' })
+        await expect(call('bots.update', { botId: 'bot-0123456789ab', name: 'Pip' })).rejects.toMatchObject({ code: 'forbidden' })
+      }
+    } finally {
+      await t.owner.net.request('bridge.setCaps', { node: t.callerNode, caps })
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, bots: 'use' })
+    }
+  }, 60_000)
+
   it('with "Let my other devices work here" off on the keeper, reports no threads, and thread calls are refused', async () => {
     await t.owner.net.request('bridge.workOnThreads', { enabled: false })
     try {

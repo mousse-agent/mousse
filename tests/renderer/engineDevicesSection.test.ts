@@ -706,6 +706,41 @@ describe('Let a device in', () => {
     expect(d.called('netEngine.approve')).toEqual([{ request: 'r1', yes: false }])
   })
 
+  it('sets the bot level under Customize: down from Full control to Use, and back to Full control by hand', async () => {
+    const d = daemon()
+    await mount()
+    await click(button(/Let a device in/))
+    await d.change({ approvals: [{ request: 'r1', invitation: 'inv1', name: 'Laptop', device: 'ffee0011' }] })
+    const picked = () => document.querySelector('[role="radiogroup"][aria-label="Access"] [aria-checked="true"] .engine-choice-label')?.textContent
+    const bots = (label: string) =>
+      [...document.querySelectorAll<HTMLElement>('[role="group"][aria-label="Customize"] [role="radiogroup"][aria-label="Bots"] [role="radio"]')].find((item) => item.textContent === label)
+    await click(radio('Full control'))
+    await click(button('Customize'))
+    expect(bots('Full')?.getAttribute('aria-checked')).toBe('true')
+    await click(bots('Use'))
+    expect(picked()).toBeUndefined()
+    // Every other switch at Full control and the bot level at Full again: Full control is picked.
+    await click(bots('Full'))
+    expect(picked()).toBe('Full control')
+    await click(bots('Use'))
+    await click(button('Allow'))
+    expect(d.called('netEngine.approve')).toEqual([{ request: 'r1', yes: true, access: { ...accessPreset('full').fields, bots: 'use' } }])
+  })
+
+  it('matches Full control from Work on threads by turning every switch on and the bot level to Full', async () => {
+    const d = daemon()
+    await mount()
+    await click(button(/Let a device in/))
+    await d.change({ approvals: [{ request: 'r1', invitation: 'inv1', name: 'Laptop', device: 'ffee0011' }] })
+    await click(button('Customize'))
+    for (const name of ['Terminals', 'Editor connections', 'Full access mode', 'Agents change all threads'])
+      await click(document.querySelector<HTMLElement>(`[role="switch"][aria-label="${name}"]`) ?? undefined)
+    const label = () => document.querySelector('[role="radiogroup"][aria-label="Access"] [aria-checked="true"] .engine-choice-label')?.textContent
+    expect(label()).toBeUndefined()
+    await click([...document.querySelectorAll<HTMLElement>('[role="radiogroup"][aria-label="Bots"] [role="radio"]')].find((item) => item.textContent === 'Full'))
+    expect(label()).toBe('Full control')
+  })
+
   it('ends the invitation when the dialog closes before anyone joined', async () => {
     const d = daemon()
     await mount()

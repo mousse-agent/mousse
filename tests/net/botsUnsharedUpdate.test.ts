@@ -11,7 +11,7 @@ import { accessPreset } from '../../src/shared/net/accessPresets'
 
 /**
  * "Share bots with other devices" is gone. A computer that had it off keeps every device it knows out of its bots on
- * update, through each device's own "Bots on this computer" switch, once; one that had it on (or never set it) changes
+ * update, by setting each device's own bot level to Off, once; one that had it on (or never set it) changes
  * nothing. Real Net stores, restarted between steps, as an update is.
  */
 const cleanups: Array<() => Promise<void> | void> = []
@@ -92,7 +92,7 @@ function switchBuild(path: string): void {
 }
 
 describe('updating from a build with "Share bots with other devices"', () => {
-  it('off: every device it knows, its list too, gets its Bots switch off, nothing else moves, and it happens once', async () => {
+  it('off: every device it knows, its list too, gets bot level Off, nothing else moves, and it happens once', async () => {
     const { path, devices } = await computer(false)
     const updated = service(path)
     for (const [way, node] of Object.entries(devices)) expect(bots(updated, node), way).toBe('off')
@@ -164,7 +164,7 @@ describe('updating from a build with "Share bots with other devices"', () => {
       policy: 'off',
       connection: 'use',
       engine: 'full',
-      // Listed, with no row: the marker the earlier build left still switches it off, once the list reads.
+      // Listed, with no row: the marker the earlier build left still sets it to Off, once the list reads.
       listed: 'off'
     })
     expect(stored(updated)).not.toHaveProperty('shareBots')
@@ -172,7 +172,7 @@ describe('updating from a build with "Share bots with other devices"', () => {
   }, 90_000)
 
   for (const shareBots of [true, undefined])
-    it(`${shareBots === undefined ? 'never set' : 'on'}: every device keeps its Bots switch`, async () => {
+    it(`${shareBots === undefined ? 'never set' : 'on'}: every device keeps its bot level`, async () => {
       const { path, devices } = await computer(shareBots)
       const updated = service(path)
       for (const [way, node] of Object.entries(devices)) expect(bots(updated, node), way).toBe('use')
