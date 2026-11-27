@@ -2,7 +2,7 @@ import type { HarnessCaps, RegistrySourcePatch, RuntimeFacts } from '../../../sh
 import type { KnownBrokenVersions } from '../compatibility'
 import type { InstanceConfig } from '../driver'
 import type { AcpPurpose } from './connection'
-import type { ClassifyOption } from './permissions'
+import type { AllowsUnasked, ClassifyOption } from './permissions'
 import type { AcpQuirks } from './quirks'
 
 /**
@@ -51,5 +51,7 @@ export interface AcpPreset {
   capsFromFacts?(caps: HarnessCaps, facts: RuntimeFacts): HarnessCaps
   /** Labels and scopes of permission options (default: the generic classes). */
   classifyOption?: ClassifyOption
+  /** A request Mousse answers with allow-once without asking anyone: a read in the turn's folder (`AcpSessionsOptions.allowsUnasked`). */
+  allowsUnasked?: AllowsUnasked
   quirks: AcpQuirks
 }

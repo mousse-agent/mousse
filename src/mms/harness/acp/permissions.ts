@@ -196,6 +196,19 @@ function isDescribed(rawInput: unknown): rawInput is Record<string, unknown> {
   return typeof rawInput === 'object' && rawInput !== null && !Array.isArray(rawInput) && Object.keys(rawInput).length > 0
 }
 
+/** A permission request Mousse allows without asking anyone (`AcpPreset.allowsUnasked`); `cwd` is the turn's folder. */
+export type AllowsUnasked = (request: RequestPermissionRequest, cwd: string) => boolean
+
+/** Whether `path` (absolute, or relative to `cwd`) is `cwd` or inside it, also after resolving links. */
+export function insideFolder(cwd: string, path: string): boolean {
+  try {
+    workspacePath({ cwd, aborted: () => false, throwIfAborted: () => {} }, resolve(cwd, path))
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** A path the agent may touch: inside the workspace, also after resolving links. */
 export function workspacePath(scope: AcpRequestScope, path: string): string {
   scope.throwIfAborted()

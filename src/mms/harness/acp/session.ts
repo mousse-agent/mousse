@@ -30,6 +30,7 @@ import {
   readWorkspaceFile,
   writeWorkspaceFile,
   type AcpRequestScope,
+  type AllowsUnasked,
   type ClassifyOption,
   type PermissionPrompter
 } from './permissions'
@@ -674,6 +675,11 @@ export interface AcpSessionsOptions {
   quirks: AcpQuirks
   /** How permission options are labelled and which are shown (default: the generic classes). */
   classifyOption?: ClassifyOption
+  /**
+   * Requests Mousse answers with the agent's allow-once option without asking anyone, in any mode and origin: an agent
+   * that asks before every tool (Grok's held launch) still reads its folder as Claude Code and Codex do, unasked.
+   */
+  allowsUnasked?: AllowsUnasked
   /** Who answers permission requests (default: the thread's questions). */
   prompter?: PermissionPrompter
   /** `_meta` sent with `initialize`. */
@@ -1195,6 +1201,11 @@ export class AcpSessions {
           })
           if (answer.outcome.outcome === 'cancelled') active.cancelRequested = true
           return answer
+        }
+        // A read in the turn's folder goes ahead unasked, as Claude Code's and Codex's do.
+        if (scope.cwd && this.options.allowsUnasked?.(request, scope.cwd) && !scope.aborted()) {
+          const allow = request.options.map(classify).find((option) => option?.kind === 'allow_once')
+          if (allow) return { outcome: { outcome: 'selected', optionId: allow.optionId } }
         }
         // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
         const callId = request.toolCall?.toolCallId

@@ -53,6 +53,8 @@ interface AcpState {
   signedOut?: boolean
   /** The installed files (of the install record `hash`) no longer match it. */
   filesChanged?: { hash: string; message: string }
+  /** The home the saved sessions were made in (`AcpRuntimeHooks.sessionsHome`). */
+  sessionsHome?: string
 }
 
 export interface AcpDriverOptions {
@@ -90,6 +92,12 @@ export interface AcpRuntimeHooks {
   checkInstall?(options: { signal?: AbortSignal; reuse: boolean }): Promise<void>
   /** Whether sign-out may ask the agent to sign out (`logout`); false leaves the agent's own sign-in alone. */
   agentLogout?(): boolean
+  /**
+   * The home the agent keeps its sessions in, when its turns run on one of the preset's choosing (Grok's held home).
+   * Sessions saved under another home cannot be reopened there: they are forgotten, and each thread's next turn hands
+   * its history to a new session.
+   */
+  sessionsHome?: string
 }
 
 /**
@@ -208,6 +216,12 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
   const save = () => {
     mkdirSync(context.stateDir, { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(statePath, state, { mode: 0o600 })
+  }
+  if (hooks.sessionsHome !== undefined && state.sessionsHome !== hooks.sessionsHome) {
+    const had = Boolean(state.sessions && Object.keys(state.sessions).length) || state.sessionsHome !== undefined
+    state.sessions = {}
+    state.sessionsHome = hooks.sessionsHome
+    if (had) save()
   }
   const source = acpSourceOf(context.config)
   const registrySource = source?.kind === 'registry' ? source : undefined
@@ -336,6 +350,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     quirks: preset.quirks,
     ...(options.promptSilenceMs !== undefined ? { promptSilenceMs: options.promptSilenceMs } : {}),
     ...(preset.classifyOption ? { classifyOption: preset.classifyOption } : {}),
+    ...(preset.allowsUnasked ? { allowsUnasked: preset.allowsUnasked } : {}),
     ...(preset.initializeMeta ? { initializeMeta: preset.initializeMeta } : {}),
     urlElicitation: true,
     formElicitation: true,

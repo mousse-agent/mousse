@@ -91,7 +91,7 @@ It ranks every enabled, signed-in model that can run a single request, from what
 (no check is started to rank them):
 
 1. **Provider**, by the first `namingProviders` entry that matches it: a Pi provider by `pi:<provider
-   id>`, then the driver kind (`claude`, `codex`, `antigravity`, `pi`, `opencode`), then `*`. A provider no entry
+   id>`, then the driver kind (`claude`, `codex`, `antigravity`, `pi`, `grok`, `opencode`), then `*`. A provider no entry
    matches comes last.
 2. **Tier**: `small`, then `standard`, then `frontier`, then unknown.
 3. A subscription before an API key.
@@ -99,7 +99,7 @@ It ranks every enabled, signed-in model that can run a single request, from what
 
 A model at a usage limit is skipped until its reset. A failed request tries the next model, at most
 three in all. The bundled list is `claude`, `codex`, `antigravity`, `pi:anthropic`, `pi:openai`,
-`pi:google`, `pi`, `opencode`, `*`.
+`pi:google`, `pi`, `grok`, `opencode`, `*`.
 
 `namingProviders` is a routing policy kept in the catalog: once catalog downloads arrive, a
 downloaded copy can change which provider receives naming requests.
