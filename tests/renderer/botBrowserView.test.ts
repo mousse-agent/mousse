@@ -69,7 +69,11 @@ function hold(op: string) {
   return { browser, hold: HOLD }
 }
 /** Each numbered input applied, in order. */
-const applyAll = (params: BotsBrowserApi['bots.browser.send']['params']) => ({ acks: params.inputs.map((sent) => ({ seq: sent.seq, status: 'applied' as const })), lastSeq: params.inputs.at(-1)!.seq })
+const applyAll = (params: BotsBrowserApi['bots.browser.send']['params']) => ({
+  // A copy reads the page's selection.
+  acks: params.inputs.map((sent) => ({ seq: sent.seq, status: 'applied' as const, ...('input' in sent && sent.input.kind === 'copy' ? { copied: 'the selected words' } : {}) })),
+  lastSeq: params.inputs.at(-1)!.seq
+})
 /** What the window sent on its hold, in order. */
 const sentInputs = () => calls.filter(([method]) => method === 'bots.browser.send').flatMap(([, params]) => (params as BotsBrowserApi['bots.browser.send']['params']).inputs)
 const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 40)) })
@@ -92,6 +96,8 @@ class FakeIntersection {
 }
 
 beforeEach(() => {
+  // The view's zoom is kept across launches: each test starts at the default.
+  localStorage.clear()
   fake = fakeBots()
   installPreload(fake)
   setBotsClient(fake.client)
@@ -422,15 +428,16 @@ describe('the split view\'s size', () => {
     Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 1 })
   })
 
-  it('asks for the page at its own size once it stays put; the chat then shows one line, no second picture, and asks for none; closed, the preview is back', async () => {
+  it('asks for the page at its own size at the view zoom once it stays put; the chat then shows one line, no second picture, and asks for none; closed, the preview is back', async () => {
     fake.chats.noobesh = [message(1, { text: 'Here it is.', activationId: 'act1' })]
     await open()
     expect(host.querySelector('.bot-browser-preview img')).not.toBeNull()
     expect(watches().at(-1)).toMatchObject({ width: 480, fps: 5 })
     const before = watches().length
     await click(button('Expand Noobesh\'s browser'))
-    // The tall, narrow split view: the page at its size, the picture at the screen's pixel ratio.
-    expect(watches().slice(before)).toEqual([expect.objectContaining({ width: 1185, fps: 15, page: { width: 790, height: 1070, scale: 1.5 } })])
+    // The tall, narrow split view: the page at its size over the default zoom (80%: a side panel is far narrower than a
+    // browser window), drawn at no less than the screen's pixel ratio times it; the picture at the stage's size.
+    expect(watches().slice(before)).toEqual([expect.objectContaining({ width: 1185, fps: 15, page: { width: 988, height: 1338, scale: 1.25 } })])
     // In the chat, one line in place of the preview: no picture, nothing watched for it.
     expect(host.querySelector('.bot-browser-preview')).toBeNull()
     expect(host.querySelector('.bot-browser-beside')!.textContent).toBe('Browser open beside the chat')
@@ -442,7 +449,14 @@ describe('the split view\'s size', () => {
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 120)) })
     expect(watches().length).toBe(dragged)
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)) })
-    expect(watches().slice(dragged)).toEqual([expect.objectContaining({ width: 960, page: { width: 640, height: 1070, scale: 1.5 } })])
+    expect(watches().slice(dragged)).toEqual([expect.objectContaining({ width: 960, page: { width: 800, height: 1338, scale: 1.25 } })])
+    // Zoomed to 100% from the menu: the page is laid out at the view's own size, at the screen's pixel ratio.
+    await click(button('Browser menu'))
+    // The menu is drawn over the window, outside the view.
+    await click(document.querySelector('[aria-label="Zoom in"]'))
+    await click(document.querySelector('[aria-label="Zoom in"]'))
+    expect(document.querySelector('.watched-browser-zoom-value')!.textContent).toBe('100%')
+    expect(watches().at(-1)).toMatchObject({ width: 960, page: { width: 640, height: 1070, scale: 1.5 } })
     // Taken over: the person's press lands at the page's point of the tall picture, whatever the pixel ratio.
     browser = { ...browser, frame: { ...FRAME, id: 7, width: 960, height: 1605, viewport: { width: 640, height: 1070 } } }
     await click(button('Take over'))
@@ -794,31 +808,128 @@ describe('the bot browser\'s pictures', () => {
   })
 })
 
-describe('the chat while pictures arrive', () => {
-  it('a new picture re-renders only the picture: the chat, which keeps the browser\'s state, stays still', async () => {
-    const { useBotBrowser } = await import('../../src/renderer/stores/botBrowserStore')
-    let renders = 0
-    const Chat = () => {
-      renders += 1
-      useBotBrowser('noobesh')
-      return null
+describe('the split view used as the thread browser is', () => {
+  const frameOf = () => {
+    const frame = host.querySelector<HTMLElement>('.watched-browser-pane .watched-browser-frame')!
+    frame.getBoundingClientRect = () => ({ left: 100, top: 50, width: 640, height: 360, right: 740, bottom: 410, x: 100, y: 50, toJSON: () => ({}) })
+    return frame
+  }
+  const keys = () => host.querySelector<HTMLTextAreaElement>('.watched-browser-keys')
+  async function expanded() {
+    fake.chats.noobesh = [message(1, { text: 'Here it is.', activationId: 'act1' })]
+    await open()
+    await click(button('Expand Noobesh\'s browser'))
+  }
+  let clipboard: { writeText: ReturnType<typeof vi.fn>; readText: ReturnType<typeof vi.fn> }
+  beforeEach(() => {
+    clipboard = { writeText: vi.fn(async () => undefined), readText: vi.fn(async () => 'from my clipboard') }
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: clipboard })
+  })
+  afterEach(() => {
+    delete (navigator as { clipboard?: unknown }).clipboard
+  })
+
+  it('a click on the page while the bot has it takes the browser over, and the click lands where it was made', async () => {
+    await expanded()
+    await act(async () => {
+      frameOf().dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 420, clientY: 140, button: 0, buttons: 1 }))
+      frameOf().dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 420, clientY: 140, button: 0, buttons: 0 }))
+    })
+    await settle()
+    expect(calls).toContainEqual(['bots.browser.hold', expect.objectContaining({ request: expect.objectContaining({ op: 'take' }) })])
+    expect(button('Give back')).toBeDefined()
+    expect(sentInputs().map((sent) => sent.input)).toEqual([
+      { kind: 'pointer', type: 'move', x: 640, y: 180, button: 'none', buttons: 0 },
+      { kind: 'pointer', type: 'down', x: 640, y: 180, button: 'left', buttons: 1, clicks: 1 },
+      { kind: 'pointer', type: 'up', x: 640, y: 180, button: 'left', buttons: 0, clicks: 1 }
+    ])
+    // The page has the keyboard at once: typing needs no second click.
+    expect(document.activeElement).toBe(keys())
+  })
+
+  it('a press still held once the browser is taken over stays down, so dragging selects text', async () => {
+    await expanded()
+    await act(async () => { frameOf().dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 420, clientY: 140, button: 0, buttons: 1 })) })
+    await settle()
+    await act(async () => {
+      frameOf().dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 520, clientY: 140, button: -1, buttons: 1 }))
+      frameOf().dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 520, clientY: 140, button: 0, buttons: 0 }))
+    })
+    await settle()
+    expect(sentInputs().map((sent) => sent.input)).toEqual([
+      expect.objectContaining({ kind: 'pointer', type: 'down', x: 640, y: 180, button: 'left', buttons: 1 }),
+      expect.objectContaining({ kind: 'pointer', type: 'move', x: 840, y: 180, buttons: 1 }),
+      expect.objectContaining({ kind: 'pointer', type: 'up', x: 840, y: 180, button: 'left', buttons: 0 })
+    ])
+  })
+
+  it('Back while the bot has it takes the browser over and goes back', async () => {
+    await expanded()
+    expect(button('Back')!.disabled).toBe(false)
+    await click(button('Back'))
+    await settle()
+    expect(calls.some(([method]) => method === 'bots.browser.hold')).toBe(true)
+    expect(sentInputs().map((sent) => sent.input)).toEqual([{ kind: 'back' }])
+  })
+
+  it('a right click opens Cut, Copy, Paste and Select all; Copy puts the page\'s selection on the clipboard and Paste sends the clipboard\'s text', async () => {
+    browser = { ...browser, control: 'owner', holder: 'this-view', hold: HOLD }
+    await expanded()
+    await act(async () => useBotBrowserStore.getState().load('noobesh', false))
+    const frame = frameOf()
+    await act(async () => {
+      frame.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 420, clientY: 140, button: 2, buttons: 2 }))
+      frame.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 420, clientY: 140, button: 2, buttons: 0 }))
+      frame.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 420, clientY: 140, button: 2 }))
+    })
+    // The right click reached the page too (its own menu, if it has one).
+    await settle()
+    expect(sentInputs().map((sent) => sent.input)).toEqual([
+      expect.objectContaining({ kind: 'pointer', type: 'down', button: 'right' }),
+      expect.objectContaining({ kind: 'pointer', type: 'up', button: 'right' })
+    ])
+    const menu = document.querySelector('[role="menu"][aria-label="Page menu"]')!
+    expect([...menu.querySelectorAll('[role="menuitem"] > span')].map((entry) => entry.textContent)).toEqual(['Cut', 'Copy', 'Paste', 'Select all'])
+    const item = (name: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((entry) => entry.querySelector('span')?.textContent === name)
+    await click(item('Copy'))
+    await settle()
+    expect(sentInputs().at(-1)!.input).toEqual({ kind: 'copy' })
+    expect(clipboard.writeText).toHaveBeenCalledWith('the selected words')
+    await act(async () => { frame.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 420, clientY: 140, button: 2 })) })
+    await click(item('Paste'))
+    await settle()
+    expect(sentInputs().at(-1)!.input).toEqual({ kind: 'paste', text: 'from my clipboard' })
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+  })
+
+  it('Control with + and - zooms the page, not the app, and is never sent; the zoom is kept for the next view', async () => {
+    const pageKeyboard = vi.fn(async () => undefined)
+    installPreload(fake, { zoom: { pageKeyboard } })
+    browser = { ...browser, control: 'owner', holder: 'this-view', hold: HOLD }
+    await expanded()
+    await act(async () => useBotBrowserStore.getState().load('noobesh', false))
+    // The page has the keyboard: the app's own zoom keys stand aside.
+    await act(async () => { keys()!.focus() })
+    expect(pageKeyboard).toHaveBeenLastCalledWith(true)
+    const press = async (key: string, code: string) => {
+      await act(async () => { keys()!.dispatchEvent(new KeyboardEvent('keydown', { key, code, ctrlKey: true, bubbles: true, cancelable: true })) })
     }
-    await act(async () => root.render(createElement(Chat)))
-    await act(async () => {})
-    const element = { current: document.createElement('div') }
-    const Picture = () => { useBotBrowserWatch('noobesh', element, { width: 480, fps: 5 }); return null }
-    const pictures = createRoot(document.createElement('div'))
-    await act(async () => pictures.render(createElement(Picture)))
-    await act(async () => {})
-    const before = renders
-    await push({ frame: { ...FRAME, id: 2, at: Date.now() }, cursor: { x: 10, y: 10, action: 'move', at: Date.now(), viewport: { width: 1280, height: 720 } } })
-    await push({ frame: { ...FRAME, id: 3, at: Date.now() } })
-    expect(useBotBrowserStore.getState().views.noobesh!.frame!.id).toBe(3)
-    expect(renders).toBe(before)
-    // Something else changing (the tab) still reaches it.
-    await push({ tab: { url: 'https://bank.example.com/other', title: 'Other' } })
-    expect(renders).toBe(before + 1)
-    act(() => pictures.unmount())
+    await press('=', 'Equal')
+    await press('=', 'Equal')
+    await click(button('Browser menu'))
+    expect(document.querySelector('.watched-browser-zoom-value')!.textContent).toBe('100%')
+    await act(async () => { keys()!.focus() })
+    await press('-', 'Minus')
+    expect(document.querySelector('.watched-browser-zoom-value')!.textContent).toBe('90%')
+    await settle()
+    expect(sentInputs()).toEqual([])
+    await act(async () => { keys()!.blur() })
+    expect(pageKeyboard).toHaveBeenLastCalledWith(false)
+    // Closed and opened again: the same zoom.
+    await click(button('Close the browser view'))
+    await click(button('Expand Noobesh\'s browser'))
+    await click(button('Browser menu'))
+    expect(document.querySelector('.watched-browser-zoom-value')!.textContent).toBe('90%')
   })
 })
 
@@ -844,7 +955,6 @@ describe('the side panel\'s width', () => {
     expect(panel.style.width).toBe('1360px')
   })
 })
-
 
 describe('the chat while pictures arrive', () => {
   it('a new picture re-renders only the picture: the chat, which keeps the browser\'s state, stays still', async () => {
