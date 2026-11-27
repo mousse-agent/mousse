@@ -79,7 +79,7 @@ describe('a fork records who made it (#2004 T5)', () => {
   const botList = (threads: ReturnType<ReturnType<typeof world>['threads']>, creator: string) =>
     botLaunchedThreads({ creators: new Set([creator]), threads, activeRuns: [], lastRun: () => undefined, asks: () => false, standing: () => 'never' }).map((row) => row.threadId)
 
-  it('an agent\'s fork is in its thread\'s Started threads, not nested, and still shown in the sidebar', async () => {
+  it('an agent\'s fork is in its thread\'s Started threads, not nested, and shown in the sidebar', async () => {
     const w = world()
     const source = w.d.store.createThread('Source', w.project.id)
     await w.run(source.id, 'completed')
@@ -88,12 +88,17 @@ describe('a fork records who made it (#2004 T5)', () => {
     expect(forked.startedByBot).toBeUndefined()
     expect(forked.lineage).toBeUndefined()
     expect(startedThreads(w.threads(), source.id).map((thread) => thread.id)).toContain(forked.id)
-    // Shown as a person's fork is, unless the call asks otherwise.
+    // Shown as a person's fork is.
     expect(threadInFilter(forked, filter({ show: 'mine' }), context)).toBe(true)
-    const hidden = await w.fork(source.id, { hidden: true })
-    expect(hidden.hidden).toBe(true)
-    expect(threadInFilter(hidden, filter({ show: 'mine' }), context)).toBe(false)
-    expect(startedThreads(w.threads(), source.id).map((thread) => thread.id)).toContain(hidden.id)
+  })
+
+  it('an agent cannot hide its fork: hidden is refused and no fork is made', async () => {
+    const w = world()
+    const source = w.d.store.createThread('Source', w.project.id)
+    await w.run(source.id, 'completed')
+    const before = w.threads().length
+    await expect(w.fork(source.id, { hidden: true })).rejects.toThrow(/hidden is for a personal bot/)
+    expect(w.threads()).toHaveLength(before)
   })
 
   it('a bot\'s fork is in the bot\'s list and the Bot threads filter', async () => {

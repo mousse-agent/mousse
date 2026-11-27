@@ -140,6 +140,15 @@ const BOT_DATA_NOTE = 'Data from your owner\'s threads.'
 /** Name the thread: a bot has no queue, fork or turn of its own here. */
 const BOT_NAMES_THREAD = 'Name one of your owner\'s threads with threadId (thread_list); never your own chat.'
 
+/** `thread_fork`'s arguments for every caller; a personal bot's schema adds `hidden`. */
+const FORK_PROPERTIES = {
+  sourceThreadId: { type: 'string', description: 'Defaults to your thread; otherwise a thread of your lineage.' },
+  atRunOrdinal: { type: 'integer', minimum: 1, description: 'The source run to fork after; the latest finished run when omitted.' },
+  title: { type: 'string' },
+  seedFrom: { type: 'string', enum: ['checkpoint', 'current_head'], description: 'When the fork point has no code checkpoint the fork is refused (fork_point_unavailable) unless this is current_head: start from the source\'s current code.' },
+  clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+}
+
 /** How a personal bot's thread lists the thread controls beyond start, send, stop, archive and hide ("use your threads"). */
 const BOT_THREAD_TOOL_TEXT = {
   thread_steer: `Add guidance to the turn one of your owner's threads is running now, labelled as yours, as Steer in the app does. Name the run you read; if it is not the thread's active run, or is paused, nothing is sent and you are told why. If that turn has just finished its answer, the text runs as the thread's next turn instead (delivery "queued"). Refused while your owner has a question or approval waiting there. It joins that turn in the thread's own mode (or no wider than the device your owner wrote from). thread_send does the same to a running turn without naming the run; use thread_steer when the guidance is only for the run you read. ${BOT_NAMES_THREAD}`,
@@ -3012,16 +3021,15 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     {
       name: 'thread_fork',
       botDescription: BOT_THREAD_TOOL_TEXT.thread_fork,
-      description: 'Fork a thread into a new thread that starts after one of its finished runs (default: the latest completed, failed, interrupted or cancelled run). The fork gets the conversation up to that run and its own worktree seeded from that run\'s code checkpoint when its first message arrives. It is recorded as started by your thread, as a thread_create thread is: your thread\'s side panel lists it under Started threads, never nested under its source. It shows in the person\'s sidebar unless you pass hidden: true.',
-      inputSchema: {
+      description: 'Fork a thread into a new thread that starts after one of its finished runs (default: the latest completed, failed, interrupted or cancelled run). The fork gets the conversation up to that run and its own worktree seeded from that run\'s code checkpoint when its first message arrives. It is recorded as started by your thread, as a thread_create thread is: your thread\'s side panel lists it under Started threads, never nested under its source. It shows in the person\'s sidebar.',
+      inputSchema: { type: 'object', properties: FORK_PROPERTIES },
+      // A personal bot may keep its fork out of its owner's sidebar, as it may a thread it starts. An agent's fork is an
+      // independent thread, and those are always shown.
+      botInputSchema: {
         type: 'object',
         properties: {
-          sourceThreadId: { type: 'string', description: 'Defaults to your thread; otherwise a thread of your lineage.' },
-          atRunOrdinal: { type: 'integer', minimum: 1, description: 'The source run to fork after; the latest finished run when omitted.' },
-          title: { type: 'string' },
-          seedFrom: { type: 'string', enum: ['checkpoint', 'current_head'], description: 'When the fork point has no code checkpoint the fork is refused (fork_point_unavailable) unless this is current_head: start from the source\'s current code.' },
-          hidden: { type: 'boolean', description: 'Defaults to false: the fork shows in the person\'s sidebar. true keeps it out of it; your thread\'s side panel (a personal bot\'s chat) lists it either way.' },
-          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+          ...FORK_PROPERTIES,
+          hidden: { type: 'boolean', description: 'Defaults to false: the fork shows in your owner\'s sidebar. true keeps it out of it; your chat lists it either way.' }
         }
       },
       access: 'startsThreads',
@@ -3041,6 +3049,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (args.title !== undefined && typeof args.title !== 'string') throw new Error('title must be a string')
         if (args.seedFrom !== undefined && args.seedFrom !== 'checkpoint' && args.seedFrom !== 'current_head')
           throw new Error("seedFrom must be 'checkpoint' or 'current_head'")
+        if (args.hidden !== undefined && !bot) throw new Error('hidden is for a personal bot\'s fork only: a fork you make is an independent thread, and it always shows in the person\'s sidebar. Leave hidden out.')
         if (args.hidden !== undefined && typeof args.hidden !== 'boolean') throw new Error('hidden must be true or false')
         const hidden = args.hidden === true
         const forked = await engine.forkThread({
