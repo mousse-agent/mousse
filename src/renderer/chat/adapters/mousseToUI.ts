@@ -12,6 +12,7 @@ import {
 import { commandLabel, knownToolName, normalizeToolName, type AgentActivityItem } from '../../../shared/agentActivity'
 import { nativeSubagentInput } from './nativeSubagents'
 import { subagentToolOfRecord } from '../../../shared/subagentTools'
+import { mousseServerToolOf } from '../../../shared/harness/mcpNames'
 import { splitExitCode } from '../components/agent-elements/utils/bash-output'
 import { getToolStatus } from '../components/agent-elements/utils/format-tool'
 
@@ -211,10 +212,15 @@ function mcpCustomType(rawName: string | undefined): string {
   return `tool-mcp__custom__${mcpToolSlug(rawName)}`
 }
 
-/** A runtime's full MCP tool name (`mcp__<server>__<tool>` for Claude/Codex, `mcp_mousse_<tool>` for Antigravity), split. */
+/**
+ * A runtime's full MCP tool name (`mcp__<server>__<tool>` for Claude/Codex, `mcp_mousse_<tool>` for Antigravity,
+ * `mousse_<12 hex>_<tool>` for OpenCode), split.
+ */
 function splitMcpName(rawName: string | undefined): { server: string; tool: string } | undefined {
   const match = rawName?.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/) ?? rawName?.match(/^mcp_(mousse-relay|mousse)_(.+)$/)
-  return match ? { server: match[1]!, tool: match[2]! } : undefined
+  if (match) return { server: match[1]!, tool: match[2]! }
+  const opencode = rawName && /^mousse_[0-9a-f]{12}_/.test(rawName) ? mousseServerToolOf(rawName) : undefined
+  return opencode ? { server: opencode.server === 'relay' ? 'mousse-relay' : 'mousse', tool: opencode.tool } : undefined
 }
 
 /**
