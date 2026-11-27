@@ -116,6 +116,20 @@
       "expiresAt": "2026-11-27T07:04:49.257Z"
     },
     {
+      "task": "t3/remote-subagent-nesting",
+      "session": "LAPTOP-HIEROJK7-51885a",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "t3/remote-subagent-nesting",
+      "paths": [
+        "src/shared/threadLineage.ts",
+        "src/main/notifications/threadNotificationTarget.ts",
+        "src/renderer/components/ThreadStartedByBar.tsx",
+        "src/renderer/lib/threadPath.ts"
+      ],
+      "claimedAt": "2026-11-27T10:40:41.104Z",
+      "expiresAt": "2026-11-27T12:40:41.104Z"
+    },
+    {
       "task": "thread-blank-until-scroll",
       "session": "Animatrix-29e4c3",
       "machine": "Animatrix",
