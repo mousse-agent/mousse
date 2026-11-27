@@ -5,7 +5,7 @@ import { openViewedPullRequest } from '../stores/pullRequestStore'
 import { visibleThreads } from '../../shared/threadLineage'
 import { parseThreadLink } from '../../shared/threadLink'
 import { isQualifiedId } from '../../shared/threadRef'
-import { selectThread } from '../lib/threadActions'
+import { selectOrSettle, selectThread } from '../lib/threadActions'
 import { showToast } from '../components/ui/Toast'
 
 const UNSAFE_SCHEME = /^(?:javascript|data|vbscript|blob):/i
@@ -220,7 +220,7 @@ export async function openProjectReference(projectId: string): Promise<void> {
   if (thread.id !== expectedThreadId) {
     expectedThreadId = thread.id
     useAppStore.getState().switchToThread(thread.id)
-    await window.mousse.threads.select(thread.id)
+    await selectOrSettle(thread.id)
     if (!stillCurrent()) return
   }
   const current = useAppStore.getState()

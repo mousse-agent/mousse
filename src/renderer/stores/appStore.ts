@@ -110,7 +110,7 @@ export function settleWarmMessages(messages: readonly ChatMessage[]): ChatMessag
  * waits for its view (`transcriptPending`) unless the thread never started. Remembers the transcript left behind.
  * `carry` moves messages shown here to `id`: they leave the transcript left behind and join the one shown.
  */
-function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads'>, id: string, carry: readonly ChatMessage[] = []): Partial<AppState> {
+function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads' | 'openingCueThreadId'>, id: string, carry: readonly ChatMessage[] = []): Partial<AppState> {
   const carried = new Set(carry.map((message) => message.id))
   const left = carried.size ? s.messages.filter((message) => !carried.has(message.id)) : s.messages
   // The warm start's transcript is its newest part only: it is not kept as the thread's transcript.
@@ -125,6 +125,9 @@ function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads'
   return {
     activeThreadId: id,
     openingThreadId: null,
+    // The cue stays with the thread it was shown for (a held one shown while its view is still coming).
+    ...(s.openingCueThreadId !== null && s.openingCueThreadId !== id ? { openingCueThreadId: null } : {}),
+    transcriptFailed: null,
     messages: carry.reduce(upsertMessage, early.reduce(upsertMessage, withoutLandedCopies(cached ?? [], early))),
     // A carried message is the thread's newest: the view that comes joins what it holds.
     transcriptPending: !cached && !carried.size && !(target && !isThreadStarted(target)),
@@ -149,6 +152,17 @@ function opensEmpty(s: Pick<AppState, 'threads'>, id: string): boolean {
   if (messageCache.has(id)) return false
   const target = s.threads.find((thread) => thread.id === id)
   return Boolean(target && isThreadStarted(target))
+}
+
+/**
+ * The thread whose row and title show that it is opening: asked for over `OPENING_CUE_MS` ago and still held
+ * (`openingThreadId`), or shown and still waiting for its transcript. Null while nothing is slow to open.
+ */
+export function openingCueOf(s: Pick<AppState, 'openingCueThreadId' | 'openingThreadId' | 'activeThreadId' | 'transcriptPending'>): string | null {
+  const id = s.openingCueThreadId
+  if (id === null) return null
+  if (s.openingThreadId !== null) return s.openingThreadId === id ? id : null
+  return s.activeThreadId === id && s.transcriptPending ? id : null
 }
 
 /** Cheap identity check to skip identical snapshot applies after a cache hit. */
@@ -507,6 +521,20 @@ interface AppState {
    */
   openingThreadId: string | null
   /**
+   * A thread asked for whose transcript has not shown within `OPENING_CUE_MS` (`showOpeningCue`). Read it through
+   * `openingCueOf`, which also checks the thread is still opening (held, or shown and waiting for its view).
+   */
+  openingCueThreadId: string | null
+  /** The selected thread's transcript could not be read (its select failed): the chat says so, with Retry. */
+  transcriptFailed: { threadId: string; reason?: string } | null
+  /** Marks a thread still opening after `OPENING_CUE_MS`, so its row and the title say it is opening. */
+  showOpeningCue: (threadId: string) => void
+  /**
+   * Reads a failed thread again: the chat waits for its view as it did when it was opened. False (nothing changes)
+   * when it is not the shown failed thread, or another thread is being opened.
+   */
+  retryTranscript: (threadId: string) => boolean
+  /**
    * Opens a thread the person asked for. A never-started thread is shown at once (`switchToThread`). A started one is
    * held in `openingThreadId`, so its row shows as chosen at once while the chat goes on showing the thread before:
    * one with its messages cached (`'cached'`) until the next frame has been drawn (`showOpeningThread`), so the click
@@ -522,7 +550,7 @@ interface AppState {
   /** A message (or a change to one) of the thread being opened, which arrived before its view. */
   holdOpeningMessage: (threadId: string, message: ChatMessage) => void
   /** The selected (or held) thread's transcript will not arrive (its select failed): stop waiting for it. */
-  settleTranscript: (threadId: string) => void
+  settleTranscript: (threadId: string, reason?: string) => void
   setMessages: (messages: ChatMessage[]) => void
   applyThreadMessages: (snapshot: ThreadMessagesSnapshot, profileId: string | null) => void
   addMessage: (message: ChatMessage) => void
@@ -917,7 +945,22 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   messages: [],
   transcriptPending: false,
   openingThreadId: null,
+  openingCueThreadId: null,
+  transcriptFailed: null,
+  showOpeningCue: (threadId) =>
+    set((s) => {
+      const opening = s.openingThreadId === threadId || (s.openingThreadId === null && s.activeThreadId === threadId && s.transcriptPending)
+      return opening && s.openingCueThreadId !== threadId ? { openingCueThreadId: threadId } : s
+    }),
+  retryTranscript: (threadId) => {
+    const s = get()
+    if (s.activeThreadId !== threadId || s.transcriptFailed?.threadId !== threadId || s.openingThreadId !== null) return false
+    set({ transcriptFailed: null, transcriptPending: true, openingCueThreadId: threadId })
+    return true
+  },
   openThreadWhenReady: (id, options) => {
+    // Every open starts without a cue: one that is still opening after a moment gets it again (`showOpeningCue`).
+    if (get().openingCueThreadId !== null) set({ openingCueThreadId: null })
     const s = get()
     const workspace = options?.keepWorkspace ? {} : { sidebarMode: 'projects' as const }
     if (s.activeThreadId === id) {
@@ -950,10 +993,15 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
     const held = openingEarly?.threadId === threadId ? openingEarly.messages : []
     openingEarly = { threadId, messages: upsertMessage(held, message) }
   },
-  settleTranscript: (threadId) =>
+  settleTranscript: (threadId, reason) =>
     set((s) => {
-      if (s.openingThreadId === threadId) return { ...switchPatch(s, threadId), transcriptPending: false }
-      return s.transcriptPending && s.activeThreadId === threadId ? { transcriptPending: false } : s
+      // A thread that was waiting for its transcript shows that it could not be read, never an empty thread.
+      const failed = { transcriptFailed: { threadId, ...(reason ? { reason } : {}) }, openingCueThreadId: null }
+      if (s.openingThreadId === threadId) {
+        const shown = switchPatch(s, threadId)
+        return { ...shown, ...(shown.transcriptPending ? failed : {}), transcriptPending: false }
+      }
+      return s.transcriptPending && s.activeThreadId === threadId ? { transcriptPending: false, ...failed } : s
     }),
   agents: [],
   tasks: [],
@@ -1308,9 +1356,11 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
         if (next) earlierByThread[view.threadId] = next
         else delete earlierByThread[view.threadId]
       }
-      if (!opened && messagesUnchanged && agents === s.agents && tasks === s.tasks && earlierByThread === s.earlierByThread && !s.transcriptPending) return s
+      const settled = s.openingCueThreadId === view.threadId || s.transcriptFailed?.threadId === view.threadId
+      if (!opened && !settled && messagesUnchanged && agents === s.agents && tasks === s.tasks && earlierByThread === s.earlierByThread && !s.transcriptPending) return s
       return {
         ...opened,
+        ...(settled ? { openingCueThreadId: null, transcriptFailed: null } : {}),
         messages: messagesUnchanged ? s.messages : reconciled,
         agents,
         tasks,
@@ -1503,6 +1553,8 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       messages: [],
       transcriptPending: false,
       openingThreadId: null,
+      openingCueThreadId: null,
+      transcriptFailed: null,
       agents: [],
       tasks: [],
       activeThreadId: null,

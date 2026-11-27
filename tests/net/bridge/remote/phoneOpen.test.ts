@@ -7,6 +7,7 @@
  * - a stored event followed it: no, the reader gets the snapshot and the event;
  * - the source replaced it (`{ snapshot: true }`, or an event too large to store): no, it is the fresh one;
  * - a display-only delta went out since (a question, streaming text): yes, a delta is never stored;
+ * - a private stream's note went out since (its workspace changed): no, a snapshot does not carry what a note says;
  * - a snapshot larger than the ring lost its first records when an event was stored: yes.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -24,7 +25,7 @@ import {
   ThreadStreamAdapter,
   type ThreadSourceEvent
 } from '../../../../src/mms/bridge/remote'
-import type { StreamId } from '../../../../src/shared/net'
+import { newId, type StreamId } from '../../../../src/shared/net'
 import type { ChatMessage } from '../../../../src/shared/types'
 import { cleanup, fixture } from '../hub/fixture'
 
@@ -38,11 +39,19 @@ afterEach(async () => {
 const KIB = 1024,
   MIB = 1024 * KIB
 
-async function adapterFixture(content: () => string) {
+async function adapterFixture(content: () => string, { stored }: { stored?: (outer: boolean) => void } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-phone-open-')))
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
   const db = new NetDatabase({ profileDir: dir })
   cleanups.push(() => db.close())
+  if (stored) {
+    // Says, for each transaction, whether it is one of its own or inside another.
+    const transaction = db.transaction.bind(db)
+    db.transaction = ((work: () => unknown) => {
+      stored(!db.database.isTransaction)
+      return transaction(work)
+    }) as typeof db.transaction
+  }
   const keys = new FileKeyStore(dir),
     identity = new NetIdentityService({ database: db.database, keys, clock: systemClock, coordinator: db })
   await identity.bootstrapAuthority('Phone open')
@@ -90,12 +99,21 @@ async function adapterFixture(content: () => string) {
       reader.close()
     }
   }
-  return { adapter, read, emit: (event: ThreadSourceEvent) => emit(event), builds: () => builds }
+  return { adapter, db, read, emit: (event: ThreadSourceEvent) => emit(event), builds: () => builds }
 }
 
 describe('what a reader that opens a thread stream is served', () => {
   // `replaced`: the stream published a new snapshot when it happened. `fresh`: the reader's open publishes another.
-  const rows: Array<{ name: string; size: number; between: ThreadSourceEvent[]; replaced?: true; fresh?: true; events: string[] }> = [
+  const rows: Array<{
+    name: string
+    size: number
+    between: ThreadSourceEvent[]
+    replaced?: true
+    fresh?: true
+    events: string[]
+    /** Read by another computer of the user, through a stream of its own. */
+    private?: true
+  }> = [
     { name: 'nothing happened since', size: 100, between: [], events: [] },
     { name: 'a stored event followed', size: 100, between: [{ type: 'turn.started', data: {} }], events: ['turn.started'] },
     { name: 'the source replaced the snapshot', size: 100, between: [{ snapshot: true }], replaced: true, events: [] },
@@ -114,6 +132,21 @@ describe('what a reader that opens a thread stream is served', () => {
       events: []
     },
     {
+      name: 'a private stream sent a note that its workspace changed',
+      size: 100,
+      between: [{ type: 'workspace.updated', data: { threadId: 't1' }, ephemeral: true }],
+      events: [],
+      private: true
+    },
+    {
+      name: 'a private stream sent streaming text',
+      size: 100,
+      between: [{ type: 'thread.message-updated', data: { message: { id: 'm-1', content: 'partial' } }, ephemeral: true }],
+      fresh: true,
+      events: [],
+      private: true
+    },
+    {
       name: 'a snapshot larger than the ring lost its first records to a stored event',
       size: 3 * MIB,
       between: [{ type: 'turn.started', data: {} }],
@@ -126,7 +159,9 @@ describe('what a reader that opens a thread stream is served', () => {
     it(`${row.name}: ${row.fresh ? 'a fresh snapshot' : 'the one published'}`, async () => {
       let version = 0
       const f = await adapterFixture(() => `${++version}:`.padEnd(row.size, 'x'))
-      const descriptor = f.adapter.activate('t1')
+      const descriptor = row.private
+        ? f.adapter.openPrivate({ reader: newId('node'), kind: 'thread', subject: 't1' })
+        : f.adapter.activate('t1')
       expect(f.builds()).toBe(1)
       for (const event of row.between) f.emit(event)
       const served = f.read(descriptor.id)
@@ -139,6 +174,20 @@ describe('what a reader that opens a thread stream is served', () => {
       expect(f.read(descriptor.id).snapshot.content.startsWith(`${version}:`)).toBe(true)
       expect(f.builds()).toBe(builds)
     })
+})
+
+describe('a large snapshot', () => {
+  it('is stored a few chunks to a transaction, within what one may hold, and read back whole', async () => {
+    let outer = 0
+    const f = await adapterFixture(() => '1:'.padEnd(3 * MIB, 'x'), { stored: (own) => (own ? outer++ : undefined) })
+    const descriptor = f.adapter.activate('t1')
+    const records = f.adapter.store.head(descriptor.id).seq
+    // A begin, 3 MiB in 32 KiB chunks, and an end. Stored one at a time, each would be a transaction of its own; a
+    // transaction past the store's limits (STORE_TXN_MAX_BYTES, STORE_TXN_MAX_ROWS) would have failed the open.
+    expect(records).toBeGreaterThanOrEqual(98)
+    expect(outer).toBeLessThan(records / 5)
+    expect(f.read(descriptor.id).snapshot.content).toBe('1:'.padEnd(3 * MIB, 'x'))
+  }, 60_000)
 })
 
 describe('a phone opening a thread kept in thread.db', () => {

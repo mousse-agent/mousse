@@ -21,6 +21,7 @@ import type { RemoteListsPort } from '../../protocol/remoteListsPort'
 import type { BridgeHub } from '../hub'
 import type { ListsSnapshot } from '../remote/MmsListsSource'
 import { PRIVATE_LISTS_SUBJECT } from '../remote/privateStreams'
+import { marksOf, type ListsMarks } from '../remote/turnMarks'
 import { repositoryIdentitiesFor, type RepositoryIdentity } from '../remote/repositoryIdentity'
 import type { ComputerRef } from './computerErrors'
 import {
@@ -155,6 +156,16 @@ export interface MergedListsOptions {
   fanOutDeadlineMs?: number
   /** How long the copy of a computer's lists waits to be written (default 30 s). */
   cacheSettleMs?: number
+  /**
+   * The bot that `threadId`, a thread of this computer, belongs to: a row of another computer that a bot's thread here
+   * started (`startedFrom.agent`) names that bot (`Thread.startedByBot`), as a thread the bot started here does.
+   */
+  botOf?(threadId: string): { botId: string; name: string } | undefined
+  /**
+   * Rows a bot started (`botOf`) changed status, or their status is no longer known (the computer went offline, its
+   * rows were dropped): called with the bot's threads here that started them, so the bot reads its threads again.
+   */
+  botRowsChanged?(launcherThreadIds: readonly string[]): void
 }
 
 /** The shape every snapshot is checked against before any row is made from it. */
@@ -174,6 +185,13 @@ function listsSnapshot(value: unknown): ListsSnapshot | undefined {
     status: isRecord(value.status) ? (value.status as ListsSnapshot['status']) : {},
     chats: []
   }
+}
+
+/** A thread's status change on another computer, with the marks that computer announces it with (none from an older one). */
+interface Transition {
+  id: string
+  state: ThreadActivityState
+  marks?: ListsMarks
 }
 
 /** Why a computer was not asked or did not answer, as a search names it. */
@@ -269,6 +287,11 @@ export class MergedLists implements RemoteListsPort {
       threads: c.threads.size,
       ...(c.error ? { error: c.error } : {})
     }))
+  }
+
+  /** The name a listed computer goes by. */
+  computerName(node: string): string | undefined {
+    return this.computersByNode.get(node as NodeId)?.name
   }
 
   /** Why the lists of `node` cannot be read now (an error code), while they cannot. */
@@ -384,11 +407,13 @@ export class MergedLists implements RemoteListsPort {
       this.cleared = true
       this.safely(() => this.options.store.dropCaches())
     }
+    const launchers = new Set<string>()
     for (const c of this.computersByNode.values()) {
       this.detach(c, false)
       c.snapshot = undefined
       c.cachedJson = undefined
       if (c.threads.size || c.projects.size) any = true
+      this.botLaunchers(c, c.threads.keys(), launchers)
       c.threads = new Map()
       c.projects = new Map()
       c.activity = new Map()
@@ -396,6 +421,7 @@ export class MergedLists implements RemoteListsPort {
       c.mode = 'none'
     }
     if (any) this.pushLists(true, true, true)
+    this.noteBotRows(launchers)
   }
 
   private forget(node: NodeId): void {
@@ -409,6 +435,7 @@ export class MergedLists implements RemoteListsPort {
       // The rows are gone from the list either way.
     }
     this.pushLists(c.threads.size > 0, c.projects.size > 0, c.activity.size > 0)
+    this.noteBotRows(this.botLaunchers(c, c.threads.keys()))
   }
 
   private detach(c: Computer, keepCache = true): void {
@@ -450,8 +477,10 @@ export class MergedLists implements RemoteListsPort {
   /** What the threads of `c` do is not known now: their statuses go, and the windows are told. */
   private clearActivity(c: Computer): void {
     if (!c.activity.size) return
+    const launchers = this.botLaunchers(c, c.activity.keys())
     c.activity = new Map()
     this.pushLists(false, false, true)
+    this.noteBotRows(launchers)
   }
 
   /**
@@ -465,6 +494,7 @@ export class MergedLists implements RemoteListsPort {
     c.live = false
     // What its threads were doing is not known while it is out of reach.
     const hadActivity = c.activity.size > 0
+    this.noteBotRows(this.botLaunchers(c, c.activity.keys()))
     c.activity = new Map()
     if (!c.threads.size && !c.projects.size) {
       if (hadActivity) this.pushLists(false, false, true)
@@ -850,11 +880,17 @@ export class MergedLists implements RemoteListsPort {
     const threads = new Map<string, Thread>()
     owner.forEach((thread, index) => {
       const id = String(thread.id)
-      const row = threadRow(rows[index]!, c.positions.get(id) ?? ownerOrder(thread), context)
+      const row = this.withBot(threadRow(rows[index]!, c.positions.get(id) ?? ownerOrder(thread), context))
       const known = c.threads.get(row.id)
       threads.set(row.id, known && sameRow(known, row) ? known : row)
     })
     const threadsChanged = !sameMap(c.threads, threads)
+    // The bots whose rows came, went or changed here: each reads its threads again, with their statuses below.
+    const launchers = new Set<string>()
+    if (threadsChanged) {
+      this.botLaunchers(c, [...c.threads.keys()].filter((id) => c.threads.get(id) !== threads.get(id)), launchers)
+      for (const [id, row] of threads) if (c.threads.get(id) !== row) this.botLauncher(row, launchers)
+    }
     c.threads = threads
 
     // Statuses: the change of each thread's, and whether the window may be told as an event.
@@ -865,11 +901,13 @@ export class MergedLists implements RemoteListsPort {
         const state = activityOfStatus(status)
         if (state && threads.has(id)) activity.set(id, state)
       }
-    const transitions: Array<{ id: string; state: ThreadActivityState }> = []
+    // How the computer announces each change (`ListsMarks`), so this one announces it the same way.
+    const marks = live ? marksOf(qualified.marks) : new Map<string, ListsMarks>()
+    const transitions: Transition[] = []
     for (const id of new Set([...c.activity.keys(), ...activity.keys()])) {
       const before = c.activity.get(id)
       const now = activity.get(id)
-      if (before !== now) transitions.push({ id, state: now ?? 'idle' })
+      if (before !== now) transitions.push({ id, state: now ?? 'idle', marks: marks.get(id) })
     }
     // An event only for a change seen on a link that was already live: a first look and a reconnect never notify.
     const asEvents = live && c.live
@@ -883,6 +921,8 @@ export class MergedLists implements RemoteListsPort {
       transitions.length > 0,
       asEvents ? transitions : []
     )
+    this.botLaunchers(c, transitions.map((transition) => transition.id), launchers)
+    this.noteBotRows(launchers)
     if (projectsChanged || (!c.matches.size && this.now() >= c.matchRetryAt)) this.matchProjects(c)
   }
 
@@ -950,6 +990,46 @@ export class MergedLists implements RemoteListsPort {
     }
   }
 
+  // ------------------------------------------------------------------ bots
+
+  /**
+   * A row a bot's thread here started there (`startedFrom.agent` from this computer, not as a subagent) names that bot,
+   * so the bot's "See all", the Bots filter and the thread's "Started by" read it as they read the bot's threads here.
+   */
+  private withBot(row: Thread): Thread {
+    const agent = row.startedFrom?.agent
+    const self = this.options.self()
+    if (!agent || agent.subagent || !self || row.startedFrom?.node !== self || !this.options.botOf) return row
+    try {
+      const bot = this.options.botOf(agent.thread)
+      if (bot) row.startedByBot = { botId: bot.botId, name: bot.name }
+    } catch {
+      // Without its bot the row is listed as it came.
+    }
+    return row
+  }
+
+  /** The bot's thread here that started `row`, added to `into` when a bot started it (`withBot`). */
+  private botLauncher(row: Thread | undefined, into: Set<string>): void {
+    const launcher = row?.startedByBot ? row.startedFrom?.agent?.thread : undefined
+    if (launcher) into.add(launcher)
+  }
+
+  /** The bots' threads here that started the rows `ids` of `c`. */
+  private botLaunchers(c: Computer, ids: Iterable<string>, into = new Set<string>()): Set<string> {
+    for (const id of ids) this.botLauncher(c.threads.get(id), into)
+    return into
+  }
+
+  private noteBotRows(launchers: ReadonlySet<string>): void {
+    if (!launchers.size || !this.options.botRowsChanged) return
+    try {
+      this.options.botRowsChanged([...launchers])
+    } catch {
+      // A bot that reads its threads again never fails the lists.
+    }
+  }
+
   // ------------------------------------------------------------------ events
 
   private push(type: string, data: unknown, threadId?: string): void {
@@ -967,7 +1047,7 @@ export class MergedLists implements RemoteListsPort {
     threads: boolean,
     projects: boolean,
     activity: boolean,
-    transitions: ReadonlyArray<{ id: string; state: ThreadActivityState }> = []
+    transitions: readonly Transition[] = []
   ): void {
     if (this.closed) return
     const { services } = this.options
@@ -975,8 +1055,8 @@ export class MergedLists implements RemoteListsPort {
     if (projects) this.push('projects.updated', { projects: services.projects.listProjects() })
     if (!activity) return
     // The events first, so a window sees each change as one before the snapshot makes it the state.
-    for (const { id, state } of transitions)
-      if (this.notifies(id)) this.push('activity', { threadId: id, state }, id)
+    for (const { id, state, marks } of transitions)
+      if (this.notifies(id)) this.push('activity', { threadId: id, state, ...marks }, id)
     this.push('activity.snapshot', { activity: services.threadRuntimes.getActivitySnapshot() })
   }
 
@@ -1026,10 +1106,12 @@ export class MergedLists implements RemoteListsPort {
     const known =
       qualified && typeof qualified.id === 'string' ? c.threads.get(qualified.id) : undefined
     if (!qualified || !known) return
-    const row = threadRow(qualified, known.order, { node, offline: known.offline === true })
+    const row = this.withBot(threadRow(qualified, known.order, { node, offline: known.offline === true }))
     if (sameRow(known, row)) return
     c.threads.set(known.id, row)
     this.pushLists(true, false, false)
+    // A bot that started it lists its new title (or its archiving) now, not at its next refresh.
+    this.noteBotRows(this.botLaunchers(c, [known.id]))
   }
 
   /** A person sent in the thread from this computer: it moves to the front of its group and notifies. */

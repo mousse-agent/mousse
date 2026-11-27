@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { idleCloseFromEnv } from '../../idleCloseFromEnv'
+import { DELEGATE_IDLE_CLOSE_MS, idleCloseFromEnv } from '../../idleCloseFromEnv'
 import type { ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
@@ -346,6 +346,8 @@ export type CodexServiceDependencies = {
   requestTimeoutMs?: number
   /** Overrides both idle-close delays (tests). */
   idleCloseMs?: number
+  /** Overrides how long a completed delegated child thread stays loaded before `thread/unsubscribe` (tests). */
+  delegateUnloadMs?: number
   /** Overrides how long native helpers may be silent / hold a chat open (tests). */
   helperIdleCapMs?: number
   helperPinCapMs?: number
@@ -441,6 +443,10 @@ interface LoadedCodexThread {
   cwd: string
   childKey: string
   instructionsHash?: string
+  /** True when the thread is a delegated child: unloaded early when idle and evicted first under cap pressure. */
+  delegated?: boolean
+  /** Unloads a completed delegated child thread after `DELEGATE_IDLE_CLOSE_MS` idle, preserving its saved session. */
+  idleUnload?: ReturnType<typeof setTimeout>
 }
 
 interface CodexApp {
@@ -2589,7 +2595,7 @@ export class CodexProviderService {
     if (this.idleClose) clearTimeout(this.idleClose.timer)
     this.idleClose = undefined
     this.app = undefined
-    this.loaded.clear()
+    this.clearLoaded()
     this.orphans.clear()
     // Its commands end with the process.
     this.forgetCommands()
@@ -2633,7 +2639,7 @@ export class CodexProviderService {
     if (this.idleClose) clearTimeout(this.idleClose.timer)
     this.idleClose = undefined
     this.wakeCapacityWaiters(app)
-    this.loaded.clear()
+    this.clearLoaded()
     this.orphans.clear()
     this.forgetCommands()
     // The next process must prove its own sign-in before it gets a turn.
@@ -3314,9 +3320,38 @@ export class CodexProviderService {
     return pending
   }
 
+  private clearLoadedUnload(entry: LoadedCodexThread | undefined): void {
+    if (!entry?.idleUnload) return
+    clearTimeout(entry.idleUnload)
+    entry.idleUnload = undefined
+  }
+
+  private clearLoaded(): void {
+    for (const entry of this.loaded.values()) this.clearLoadedUnload(entry)
+    this.loaded.clear()
+  }
+
+  /** Schedules `thread/unsubscribe` for an idle delegated child thread while keeping its saved conversation resumable. */
+  private scheduleThreadUnload(conn: CodexConnection, threadId: string): void {
+    if (this.stopped || this.app?.conn !== conn) return
+    const entry = this.loaded.get(threadId)
+    if (!entry?.delegated) return
+    this.clearLoadedUnload(entry)
+    const delay = this.dependencies.delegateUnloadMs ?? DELEGATE_IDLE_CLOSE_MS
+    entry.idleUnload = setTimeout(() => {
+      entry.idleUnload = undefined
+      const app = this.app
+      if (this.stopped || app?.conn !== conn || this.loaded.get(threadId) !== entry) return
+      if (!this.idleThreadIds(app).includes(threadId)) return
+      void this.unloadThread(conn, threadId)
+    }, delay)
+    entry.idleUnload.unref?.()
+  }
+
   private threadUnloaded(app: CodexApp, threadId: string): void {
     if (this.app !== app) return
     app.unloading.delete(threadId)
+    this.clearLoadedUnload(this.loaded.get(threadId))
     this.loaded.delete(threadId)
     this.wakeCapacityWaiters(app)
   }
@@ -3344,7 +3379,8 @@ export class CodexProviderService {
   private async awaitThreadCapacity(app: CodexApp, signal: AbortSignal, savedId?: string): Promise<void> {
     let unsubscribing: Promise<void> | undefined
     if (!app.recycleRequired && !app.terminal?.coldOnly && !app.unloading.size) {
-      const victim = this.idleThreadIds(app).find((id) => id !== savedId)
+      const idle = this.idleThreadIds(app).filter((id) => id !== savedId)
+      const victim = idle.find((id) => this.loaded.get(id)?.delegated) ?? idle[0]
       if (victim) unsubscribing = this.unloadThread(app.conn, victim)
     }
     if (unsubscribing) await abortable(unsubscribing, signal)
@@ -3442,7 +3478,7 @@ export class CodexProviderService {
     const saved = this.settings.threads?.[input.threadId]
     const resumable = saved && (saved.instanceId ?? CODEX_INSTANCE_ID) === (input.instanceId ?? CODEX_INSTANCE_ID) &&
       saved.cwd === cwd && saved.historyKey === historyKey(input.history ?? '')
-    return { threadId: input.threadId, saved: resumable ? saved : undefined, params, mcpToken, relayKey, cwd, childKey, instructionsHash, botSandbox, bot: Boolean(input.bot) }
+    return { threadId: input.threadId, saved: resumable ? saved : undefined, params, mcpToken, relayKey, cwd, childKey, instructionsHash, botSandbox, bot: Boolean(input.bot), delegated: Boolean(input.child && !input.bot) }
   }
 
   private canReuseThread(
@@ -3463,7 +3499,8 @@ export class CodexProviderService {
     signal: AbortSignal,
     reserved: Set<string>
   ): Promise<{ codexThreadId: string; model: string | undefined; continued: boolean; instructionsStale?: boolean; botSandbox?: CodexBotSandbox; resumeLost?: true }> {
-    const { threadId, saved, params, mcpToken, relayKey, cwd, childKey, instructionsHash, botSandbox, bot } = prepared
+    const { threadId, saved, params, mcpToken, relayKey, cwd, childKey, instructionsHash, botSandbox, bot, delegated } = prepared
+    const loadedMeta = (): LoadedCodexThread => ({ mcpToken, relayKey, cwd, childKey, instructionsHash, ...(delegated ? { delegated: true } : {}) })
     // A Codex thread belongs to the instance that started it; another instance starts fresh.
     const owner = this.threadOwner(conn)
     if (saved && owner && saved.account === owner && !this.app!.unloading.has(saved.codexThreadId)) {
@@ -3482,10 +3519,12 @@ export class CodexProviderService {
       if (bot && instructionsHash !== undefined && opened !== undefined && opened !== instructionsHash) {
         if (loaded) void this.unloadThread(conn, saved.codexThreadId)
         const fresh = await this.requestThread(conn, 'thread/start', params, signal, reserved)
-        this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
+        this.loaded.set(fresh.thread.id, loadedMeta())
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox }
       }
       if (loaded && reuse) {
+        this.clearLoadedUnload(loaded)
+        loaded.delegated = delegated
         // The most recently used now. New admissions evict the oldest first.
         this.loaded.delete(saved.codexThreadId)
         this.loaded.set(saved.codexThreadId, loaded)
@@ -3499,13 +3538,13 @@ export class CodexProviderService {
         // keep the old config, so fork it: Codex loads the history into a new thread with the new
         // config, and the old thread is released.
         const forked = await this.requestThread(conn, 'thread/fork', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, signal, reserved)
-        this.loaded.set(forked.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
+        this.loaded.set(forked.thread.id, loadedMeta())
         void this.unloadThread(conn, saved.codexThreadId)
         return { codexThreadId: forked.thread.id, model: forked.model, continued: true, botSandbox }
       }
       try {
         const resumed = await this.requestThread(conn, 'thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, signal, reserved)
-        this.loaded.set(resumed.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
+        this.loaded.set(resumed.thread.id, loadedMeta())
         // A resume answered with another thread holds none of the conversation: the history goes in the prompt.
         if (resumed.thread.id !== saved.codexThreadId) {
           console.warn('[codex] Codex was asked to resume a thread and opened another one', { threadId })
@@ -3517,12 +3556,12 @@ export class CodexProviderService {
         conn.signal.throwIfAborted()
         if (!missingCodexThread(error)) throw error
         const fresh = await this.requestThread(conn, 'thread/start', params, signal, reserved)
-        this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
+        this.loaded.set(fresh.thread.id, loadedMeta())
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox, resumeLost: true }
       }
     }
     const fresh = await this.requestThread(conn, 'thread/start', params, signal, reserved)
-    this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
+    this.loaded.set(fresh.thread.id, loadedMeta())
     return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox }
   }
 
@@ -3538,6 +3577,7 @@ export class CodexProviderService {
     const signal = controller.signal
     let scope = this.scope
     let run: TurnRun | undefined
+    let completedDelegateThread: { conn: CodexConnection; id: string } | undefined
     let releaseThreads: (() => Promise<void> | undefined) | undefined
     let unopened: { conn: CodexConnection; id: string } | undefined
     let steerTimer: ReturnType<typeof setInterval> | undefined
@@ -3866,6 +3906,7 @@ export class CodexProviderService {
         this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, account, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID, ...botInstructionsKey(input) } }
         this.save()
         this.readyToCommit.add(input.threadId)
+        if (input.child && !input.bot) completedDelegateThread = { conn, id: codexThreadId }
       }
       return {
         text: current.text,
@@ -3905,6 +3946,7 @@ export class CodexProviderService {
       run?.mute()
       run?.cancelQuestions()
       await releaseThreads?.()
+      if (completedDelegateThread) this.scheduleThreadUnload(completedDelegateThread.conn, completedDelegateThread.id)
       this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
 
     }

@@ -12,7 +12,7 @@ import { harnessAppError } from '../../../shared/harness/types'
 import { compareVersions } from '../../../shared/net/version'
 import type { ContinuationInfo, LiveProcessHost } from '../driver'
 import { interruptWithDeadline, loadWithDeadline, SessionLoadTimeoutError } from '../supervise'
-import { idleCloseFromEnv } from '../idleCloseFromEnv'
+import { DELEGATE_IDLE_CLOSE_MS, idleCloseFromEnv } from '../idleCloseFromEnv'
 import { isAuthRequired } from './auth'
 import { initializeAgent, sessionCapability, type AcpAgentInfo } from './capabilities'
 import { ACP_TERMINAL_METHODS, closeAcpConnection, type AcpClientHandlers, type AcpConnection, type AcpConnectionFactory, type AcpPurpose } from './connection'
@@ -30,6 +30,7 @@ import {
   readWorkspaceFile,
   writeWorkspaceFile,
   type AcpRequestScope,
+  type AllowsUnasked,
   type ClassifyOption,
   type PermissionPrompter
 } from './permissions'
@@ -196,6 +197,11 @@ export const MAX_BACKGROUND_MS = 60 * 60_000
  * closed. Its saved session stays, so the next turn starts a new process and reopens it. `MOUSSE_ACP_IDLE_CLOSE_MS` sets it.
  */
 export const ACP_IDLE_CLOSE_MS = idleCloseFromEnv('MOUSSE_ACP_IDLE_CLOSE_MS', 15 * 60_000)
+/**
+ * Idle ACP agent processes with no turn, background work or reactive continuation kept per instance. Past this cap,
+ * idle delegated children close first, then the least recently used idle processes (saved sessions stay resumable).
+ */
+export const ACP_MAX_IDLE_SESSIONS = 4
 
 /** Out-of-turn session updates that indicate a reactive continuation turn has started. */
 const CONTINUATION_START_UPDATES = new Set(['agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'plan'])
@@ -282,6 +288,10 @@ export interface AcpProcess extends AcpConnection {
   backgroundCapTimer?: ReturnType<typeof setTimeout>
   /** Closes the process kept for its thread once it has been idle for `ACP_IDLE_CLOSE_MS`. */
   idleCloseTimer?: ReturnType<typeof setTimeout>
+  /** Monotonic order when this process became idle, for LRU trimming past `ACP_MAX_IDLE_SESSIONS`. */
+  idleOrder?: number
+  /** True when this thread is a delegated child: shorter idle grace and evicted first under cap pressure. */
+  delegated?: boolean
   /** Last value reported to `liveHost.backgroundWork(threadId, active)`. */
   reportedBackground?: boolean
   /** In-flight reactive continuation started by the agent between turns. */
@@ -608,6 +618,8 @@ export interface AcpChatInput {
   bot?: true
   /** The bot's authority (`AdapterHost.bot`): it answers the turn's permission and file requests (`botApprovals.ts`). */
   botAuthority?: Pick<BotAuthority, 'check'>
+  /** True when the thread is a delegated child (`TurnInput.child`): shorter idle grace and evicted first under cap pressure. */
+  delegated?: true
   onText: (text: string) => void
   /** Mousse put `sep` into the cumulative text at `atOffset` (between prompts' replies): not the agent's words. */
   onTextSeparator?: (atOffset: number, sep: string) => void
@@ -663,6 +675,11 @@ export interface AcpSessionsOptions {
   quirks: AcpQuirks
   /** How permission options are labelled and which are shown (default: the generic classes). */
   classifyOption?: ClassifyOption
+  /**
+   * Requests Mousse answers with the agent's allow-once option without asking anyone, in any mode and origin: an agent
+   * that asks before every tool (Grok's held launch) still reads its folder as Claude Code and Codex do, unasked.
+   */
+  allowsUnasked?: AllowsUnasked
   /** Who answers permission requests (default: the thread's questions). */
   prompter?: PermissionPrompter
   /** `_meta` sent with `initialize`. */
@@ -683,6 +700,10 @@ export interface AcpSessionsOptions {
   maxBackgroundMs?: number
   /** Test seam: how long an idle thread's process is kept before it is closed (`ACP_IDLE_CLOSE_MS`). */
   idleCloseMs?: number
+  /** Test seam: how long an idle delegated child's process is kept before it is closed (`DELEGATE_IDLE_CLOSE_MS`). */
+  delegateIdleCloseMs?: number
+  /** Test seam: how many idle thread processes stay open per instance (`ACP_MAX_IDLE_SESSIONS`). */
+  maxIdleSessions?: number
   /** Client capabilities added to `initialize` (ACP `auth`, `elicitation`). */
   clientCapabilities?: () => Record<string, unknown>
   /** Sign-in links may arrive as URL elicitations (else only through the preset's own channel). */
@@ -722,6 +743,9 @@ export class AcpSessions {
    * commits to it (`commitConversation`), so the next turn resumes it on a new process.
    */
   private readonly stoppedForResume = new Map<string, { sessionId: string; process: AcpProcess }>()
+  /** Sessions whose live process closed due to idle cap eviction right before `commitConversation`. */
+  private readonly evictedForResume = new Map<string, string>()
+  private idleSeq = 0
   private stopped = false
   private liveHost: LiveProcessHost | null = null
   private readonly prompter: PermissionPrompter
@@ -877,6 +901,10 @@ export class AcpSessions {
     this.disarmIdleClose(process)
     const threadId = process.threadId
     if (this.stopped || !threadId || this.sessions.get(threadId) !== process || process.connection.signal.aborted) return
+    process.idleOrder = ++this.idleSeq
+    const delay = process.delegated
+      ? (this.options.delegateIdleCloseMs ?? DELEGATE_IDLE_CLOSE_MS)
+      : (this.options.idleCloseMs ?? ACP_IDLE_CLOSE_MS)
     process.idleCloseTimer = setTimeout(() => {
       process.idleCloseTimer = undefined
       if (this.sessions.get(threadId) !== process) return
@@ -886,8 +914,32 @@ export class AcpSessions {
       }
       this.close(process)
       this.sessions.delete(threadId)
-    }, this.options.idleCloseMs ?? ACP_IDLE_CLOSE_MS)
+    }, delay)
     process.idleCloseTimer.unref?.()
+    if (this.isIdle(process)) this.trimIdle()
+  }
+
+  /** Closes idle processes past `ACP_MAX_IDLE_SESSIONS`, evicting idle delegated children first, then oldest idle ones. */
+  private trimIdle(): void {
+    const cap = this.options.maxIdleSessions ?? ACP_MAX_IDLE_SESSIONS
+    if (this.stopped || !Number.isFinite(cap)) return
+    const idle: Array<[string, AcpProcess]> = []
+    for (const [threadId, active] of this.sessions) {
+      if (this.isIdle(active)) idle.push([threadId, active])
+    }
+    if (idle.length <= cap) return
+    idle.sort(([, a], [, b]) => {
+      if (Boolean(a.delegated) !== Boolean(b.delegated)) return a.delegated ? -1 : 1
+      return (a.idleOrder ?? 0) - (b.idleOrder ?? 0)
+    })
+    for (const [threadId, victim] of idle.slice(0, idle.length - cap)) {
+      this.disarmIdleClose(victim)
+      if (victim.sessionId && this.options.store.saved(threadId)?.sessionId === victim.sessionId) {
+        this.evictedForResume.set(threadId, victim.sessionId)
+      }
+      this.close(victim)
+      this.sessions.delete(threadId)
+    }
   }
 
   private clearBackgroundState(process: AcpProcess): void {
@@ -1150,6 +1202,12 @@ export class AcpSessions {
           if (answer.outcome.outcome === 'cancelled') active.cancelRequested = true
           return answer
         }
+        // A read confined to the turn's folder goes ahead unasked, as Claude Code's and Codex's do; a run that refuses
+        // approvals refuses it too.
+        if (scope.cwd && scope.approvals !== 'never' && !scope.aborted() && this.options.allowsUnasked?.(request, scope.cwd)) {
+          const allow = request.options.map(classify).find((option) => option?.kind === 'allow_once')
+          if (allow) return { outcome: { outcome: 'selected', optionId: allow.optionId } }
+        }
         // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
         const callId = request.toolCall?.toolCallId
         const awaiting = callId ? active?.turnToolAwaiting : undefined
@@ -1400,8 +1458,10 @@ export class AcpSessions {
   commitConversation(threadId: string, history: string): void {
     const saved = this.options.store.saved(threadId)
     const stopped = this.stoppedForResume.get(threadId)
+    const evicted = this.evictedForResume.get(threadId)
     this.stoppedForResume.delete(threadId)
-    if (!saved || !(this.sessions.has(threadId) || stopped?.sessionId === saved.sessionId)) return
+    this.evictedForResume.delete(threadId)
+    if (!saved || !(this.sessions.has(threadId) || stopped?.sessionId === saved.sessionId || evicted === saved.sessionId)) return
     this.options.store.setSaved(threadId, { ...saved, historyKey: this.historyKey(history) })
   }
 
@@ -1416,6 +1476,7 @@ export class AcpSessions {
     const sessionId = this.interrupted.get(threadId)
     this.interrupted.delete(threadId)
     this.stoppedForResume.delete(threadId)
+    this.evictedForResume.delete(threadId)
     const saved = this.options.store.saved(threadId)
     if (!sessionId || !saved || saved.sessionId !== sessionId) return
     this.options.store.setSaved(threadId, { ...saved, historyKey: this.historyKey(history) })
@@ -1424,6 +1485,7 @@ export class AcpSessions {
   /** Drops the saved session of `threadId`; its next turn starts a new one with the history in the prompt. */
   forgetConversation(threadId: string): void {
     this.stoppedForResume.delete(threadId)
+    this.evictedForResume.delete(threadId)
     if (!this.options.store.saved(threadId)) return
     this.options.store.setSaved(threadId, undefined)
   }
@@ -1644,6 +1706,7 @@ export class AcpSessions {
     input.signal?.throwIfAborted()
     this.interrupted.delete(input.threadId)
     this.stoppedForResume.delete(input.threadId)
+    this.evictedForResume.delete(input.threadId)
     const historyKey = this.historyKey(input.history ?? '')
     const instanceId = input.instanceId ?? this.options.defaultInstanceId
     // A native session belongs to the instance that opened it; another instance starts fresh.
@@ -1692,8 +1755,10 @@ export class AcpSessions {
       next.botMcp = input.botAuthority ? input.mcp : undefined
       next.botToolName = input.botAuthority ? (id) => openTools.get(id)?.name : undefined
       next.botRefusals = undefined
+      next.delegated = Boolean(input.delegated)
       this.disarmIdleClose(next)
       this.turning.add(next)
+      this.trimIdle()
       current = next
     }
     adopt(active)
@@ -2627,6 +2692,7 @@ export class AcpSessions {
     }
     this.sessions.clear()
     this.stoppedForResume.clear()
+    this.evictedForResume.clear()
   }
 
   stop(): void {

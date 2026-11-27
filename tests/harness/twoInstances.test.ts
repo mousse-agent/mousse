@@ -391,11 +391,12 @@ describe('two Grok instances', () => {
       instanceMap: instances,
       questions: new UserQuestionService(),
       shellPath: async () => ({ entries: [], source: 'failed' }),
-      drivers: [grokDriver({ systemDir: join(profileHome, 'no-system-config') })]
+      // No held check in a unit test: this fake Grok has no record, so its turns run in Full access.
+      drivers: [grokDriver({ systemDir: join(profileHome, 'no-system-config'), heldCheck: async () => undefined })]
     })
     try {
       const turn = async (instanceId: string, previous?: TurnSpec['binding']) => {
-        const binding = await harness.bind(harness.resolveStored({ instanceId, llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent' })
+        const binding = await harness.bind(harness.resolveStored({ instanceId, llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent', permissionMode: 'full' })
         const spec = turnSpec(instanceId, binding, profileHome)
         await harness.startTurn({ ...spec, ...(previous ? { previous } : {}), input: { ...spec.input, model: 'default', llmProvider: '' } }).result
         return binding
@@ -410,7 +411,10 @@ describe('two Grok instances', () => {
       const own = spawned.filter((entry) => entry.instanceId.startsWith('grok:'))
       expect(new Set(own.map((entry) => entry.purpose))).toEqual(new Set(['version', 'acp-handshake', 'acp-turn', 'acp-models']))
       for (const entry of own) {
-        expect(entry.env.GROK_HOME).toBe(homes[entry.instanceId as 'grok:a' | 'grok:b'])
+        const home = homes[entry.instanceId as 'grok:a' | 'grok:b']
+        // Grok's own processes run on the entry's held home, signing in from its own home's auth.json.
+        if (entry.purpose === 'version') expect(entry.env.GROK_HOME).toBe(home)
+        else expect([entry.env.GROK_HOME, entry.env.GROK_AUTH_PATH]).toEqual([join(home, '..', 'held-home'), join(home, 'auth.json')])
         expect(entry.env.XAI_API_KEY).toBeUndefined()
         expect(entry.env.GROK_AUTH_PROVIDER_COMMAND).toBeUndefined()
         expect(entry.env.GROK_DISABLE_AUTOUPDATER).toBe('1')

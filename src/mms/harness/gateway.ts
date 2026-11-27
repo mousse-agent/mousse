@@ -1128,21 +1128,25 @@ export class Harness implements HarnessGateway {
     const driver = this.drivers.get(resolved.entry.driver)
     if (!driver) fail('bad_request', `No provider adapter for driver ${resolved.entry.driver} (instance ${resolved.instanceId}).`)
     const config = driver.decodeConfig(resolved.entry.config, resolved.instanceId)
+    const version = this.probes.get(resolved.instanceId)?.lastGood?.binary?.version
     // Chat titles are a one-shot request; a driver without one-shots runs turns only.
     if (options.purpose === 'title' && !driver.oneShot)
       harnessFail('unsupported', `${driver.label} cannot name chats. Choose another model for chat titles, or Automatic.`, resolved.instanceId)
+    const oneShotRefused = options.purpose === 'title' && !options.allowDisabled ? driver.oneShotRefusal?.(config, version, resolved.instanceId) : undefined
+    if (oneShotRefused) harnessFail('unsupported', `${oneShotRefused} Choose another model for chat titles, or Automatic.`, resolved.instanceId)
     if (!options.allowDisabled) {
       if (selection.model && hidesModel(this.prefs.get(resolved.instanceId), selection.model))
         harnessFail('model_hidden', `${this.modelName(resolved.instanceId, selection.model)} is hidden. Show it in Settings → Providers or choose another model.`, resolved.instanceId)
     }
-    const version = this.probes.get(resolved.instanceId)?.lastGood?.binary?.version
     const caps = driver.caps(config, version, this.currentFacts(resolved.instanceId), resolved.instanceId)
+    // A driver that proves its one-shot route itself (`oneShotRefusal`) names chats whatever its turns hold.
+    const provenOneShot = options.purpose === 'title' && driver.oneShotRefusal !== undefined
     // An instance that approves tools itself runs only turns a person drives; reading or stopping
     // work already running (`allowDisabled`) is never refused.
-    if (!options.allowDisabled && !purposeAllowed(caps, options.purpose))
+    if (!options.allowDisabled && !provenOneShot && !purposeAllowed(caps, options.purpose))
       throw harnessAppError({
         code: 'policy_unenforceable',
-        message: `${this.labelOf(resolved.instanceId, driver)} approves tools itself, so it runs only chats you drive. Choose another provider for this.`,
+        message: `${driver.toolControlReason?.(config, version, resolved.instanceId) ?? `${this.labelOf(resolved.instanceId, driver)} approves tools itself.`} It runs only chats you drive. Choose another provider for this.`,
         missing: ['toolControl'],
         instanceId: resolved.instanceId
       })
@@ -1641,7 +1645,11 @@ export class Harness implements HarnessGateway {
   /** Whether the instance's driver runs one-shots (`HarnessDriver.oneShot`); read for picker listings. */
   private oneShotAvailable(instanceId: string): boolean {
     const entry = this.instanceMap.get(instanceId)
-    return Boolean(entry && this.drivers.get(entry.driver)?.oneShot)
+    const driver = entry ? this.drivers.get(entry.driver) : undefined
+    if (!entry || !driver?.oneShot) return false
+    if (!driver.oneShotRefusal) return true
+    const record = this.recordOrUndefined(instanceId)
+    return Boolean(record) && !driver.oneShotRefusal(record!.config, this.probes.get(instanceId)?.lastGood?.binary?.version, instanceId)
   }
 
   async oneShot(request: OneShotRequest): Promise<{ text: string }> {
@@ -1752,7 +1760,7 @@ export class Harness implements HarnessGateway {
       harnessFail('protocol', `The turn runs in ${input.permissionMode} permission mode but its binding is ${binding.policy.permissionMode}.`, binding.instanceId)
     // An instance that approves tools itself runs only in Full access, on every dispatch of a run.
     const modeCheck = checkPermissionMode(caps, binding.policy, this.displayName(record), binding.instanceId)
-    if (!modeCheck.ok) throw harnessAppError(modeCheck.error)
+    if (!modeCheck.ok) throw harnessAppError(this.withToolControlReason(record, modeCheck.error))
     // A definition's authority (roots, script rules, unattended policy, approvals), its own
     // instructions and a session of its own are honoured only by a runtime whose tools Mousse
     // controls exactly (PR 4 §4); any other refuses the turn, whatever its policy says.
@@ -1820,13 +1828,24 @@ export class Harness implements HarnessGateway {
     if (spec.session !== 'ephemeral' || spec.instructions?.placement !== 'replace') refuse('its instructions and a session of its own')
   }
 
+  /** Why the entry controls fewer tools than its driver can, in words for the user (`HarnessDriver.toolControlReason`). */
+  private toolControlReasonOf(record: InstanceRecord): string | undefined {
+    return record.driver.toolControlReason?.(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version, record.instanceId)
+  }
+
+  /** A refusal of a mode the entry cannot hold, with the reason its driver gives. */
+  private withToolControlReason<T extends HarnessError>(record: InstanceRecord, error: T): T {
+    const reason = this.toolControlReasonOf(record)
+    return reason ? { ...error, message: `${reason} Set this thread to Full access or pick another agent.`, reason } : error
+  }
+
   /** The first turn of a thread on an instance that approves tools itself says so, once. */
   private toolControlNotice(record: InstanceRecord, threadId: string, previous: ExecutionBinding | undefined): void {
     const key = `${threadId}|${record.instanceId}`
     if (previous?.instanceId === record.instanceId || this.toolNotices.has(key)) return
     this.toolNotices.add(key)
     try {
-      this.liveHost?.notice?.(threadId, `${this.displayName(record)} approves tools itself.`)
+      this.liveHost?.notice?.(threadId, this.toolControlReasonOf(record) ?? `${this.displayName(record)} approves tools itself.`)
     } catch (error) {
       console.warn('[harness] notice failed', errorText(error))
     }
@@ -2544,7 +2563,7 @@ export class Harness implements HarnessGateway {
    * Single-flight probe of one instance; a timeout keeps the last good values (stale). `handshake`
    * (Add, Recheck, after install) also runs the runtime's start-up check, which records its facts.
    */
-  private probe(instanceId: string, force: boolean, options: { handshake?: boolean; refreshModels?: boolean } = {}): Promise<void> {
+  private probe(instanceId: string, force: boolean, options: { handshake?: boolean; refreshModels?: boolean; quiet?: boolean } = {}): Promise<void> {
     const state = this.probeState(instanceId)
     if (options.refreshModels) state.refreshModelsAfterProbe = true
     if (state.probing) return state.probing
@@ -2613,6 +2632,15 @@ export class Harness implements HarnessGateway {
       })
       .finally(() => {
         state.probing = undefined
+        // A version the runtime has not seen may start background work of its own (Grok's held check); a check for
+        // Mousse's own model listings (the startup and scheduled passes) does not.
+        if (!this.stopped && !options.quiet && state.lastGood && state.result === state.lastGood) {
+          try {
+            this.recordOrUndefined(instanceId)?.runtime.probed?.(state.lastGood.binary?.version, { ...(state.lastGood.fingerprint ? { fingerprint: state.lastGood.fingerprint } : {}), soon: force })
+          } catch (error) {
+            console.warn('[harness] after-check work failed', { instanceId, error: errorText(error) })
+          }
+        }
         const refreshModels = state.refreshModelsAfterProbe || detectedSignIn
         delete state.refreshModelsAfterProbe
         if (!this.stopped) this.changed(instanceId)
@@ -2621,6 +2649,11 @@ export class Harness implements HarnessGateway {
         else if (upgraded) this.refreshAfterUpgrade(instanceId)
       })
     return state.probing
+  }
+
+  private toolControlReasonView(driver: HarnessDriver, config: InstanceConfig, version: string | undefined, instanceId: string): { toolControlReason?: string } {
+    const reason = driver.toolControlReason?.(config, version, instanceId)
+    return reason ? { toolControlReason: reason } : {}
   }
 
   private snapshot(instanceId: string, scope: ProviderScope): InstanceSnapshot {
@@ -2696,6 +2729,7 @@ export class Harness implements HarnessGateway {
       ...(update ? { update } : {}),
       ...(shown?.binary ? { binary: shown.binary } : {}),
       caps: driver.caps(config, shown?.binary?.version, this.currentFacts(instanceId), instanceId),
+      ...this.toolControlReasonView(driver, config, shown?.binary?.version, instanceId),
       ...(limits ? { permissionLimits: limits } : {}),
       ...(cacheHour ? { promptCacheHour: cacheHour } : {}),
       config: this.configView(record),
@@ -3387,7 +3421,7 @@ export class Harness implements HarnessGateway {
    * is dropped. Only a driver with known-broken versions is held to this.
    */
   private refuseKnownProblem(record: InstanceRecord): void {
-    if (!record.driver.knownBroken?.length) return
+    if (!record.driver.knownBroken?.length && !record.driver.binaryBoundCaps) return
     const good = this.probes.get(record.instanceId)?.lastGood
     const probed = good?.fingerprint
     if (!good || !probed) return
@@ -3398,7 +3432,7 @@ export class Harness implements HarnessGateway {
       this.checkAgainSoon(record.instanceId)
       harnessFail('binding_stale', `The ${this.displayName(record)} program changed, so Mousse is checking it again. Send the message again in a moment.`, record.instanceId)
     }
-    if (good.compatibility.state !== 'known_broken') return
+    if (!record.driver.knownBroken?.length || good.compatibility.state !== 'known_broken') return
     if (consent) {
       const receipt = good.binary?.source === 'managed' ? record.runtime.managed?.()?.receiptHash : undefined
       if (consent.version === good.binary?.version && sameBinary(consent.binary, now) && consent.receiptHash === receipt) return
@@ -3909,7 +3943,7 @@ export class Harness implements HarnessGateway {
       if (!record || this.retiredSkip(instanceId)) return
       if (when) {
         if (when.reason === 'setup' && !record.runtime.refreshModels) return
-        if (!this.probes.get(instanceId)?.result) await this.probe(instanceId, false)
+        if (!this.probes.get(instanceId)?.result) await this.probe(instanceId, false, { quiet: true })
         if (this.stopped || this.modelRefreshSkip(instanceId) || this.modelsAgeMs(record) < when.minAgeMs) return
       }
       const state = this.probeState(instanceId)

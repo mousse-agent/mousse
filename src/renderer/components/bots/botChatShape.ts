@@ -81,6 +81,31 @@ export function tappedAnswerLine(label: string): string {
 }
 
 /**
+ * The work the owner's newest answer set going again (a tap on, or a reply to, the question it asked them), while it
+ * runs or waits its turn and has posted nothing in the chat since. Such an answer starts no chat turn, so without this
+ * the chat shows nothing until the work's next message; `item` is that work as the bot's summary lists it.
+ */
+export function resumedWork(messages: readonly BotChatMessage[], work: readonly BotWorkItem[] | undefined): BotWorkItem | undefined {
+  if (!work?.length) return undefined
+  const spoke = new Set<string>()
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!
+    if (!message.activationId) continue
+    if (message.author === 'bot') { spoke.add(message.activationId); continue }
+    if (!message.answers) continue
+    if (spoke.has(message.activationId)) return undefined
+    const item = work.find((entry) => entry.id === message.activationId)
+    return item && (item.status === 'running' || item.status === 'queued') ? item : undefined
+  }
+  return undefined
+}
+
+/** The quiet line under that answer: "alpha is back on GitHub App", or "alpha will get back to GitHub App" while it waits its turn. */
+export function resumedWorkLine(botName: string, item: Pick<BotWorkItem, 'title' | 'status'>): string {
+  return item.status === 'queued' ? `${botName} will get back to ${item.title}` : `${botName} is back on ${item.title}`
+}
+
+/**
  * What a bot's handling left on an owner's message: a 👍 for work it started, "Noted" for a note; `title`: the note's
  * hover text (the job a note is for). The 👍's hover text only says who reacted; the reply's words never move here.
  */

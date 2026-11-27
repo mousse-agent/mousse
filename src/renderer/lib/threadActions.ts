@@ -1,5 +1,6 @@
 import type { StartPullRequestThreadInput } from '../../shared/pullRequests'
 import type { NodeId } from '../../shared/net'
+import { isQualifiedId } from '../../shared/threadRef'
 import { expiryPresetMs } from '../../shared/threadExpiry'
 import { composerWorkspaceFor, newThreadWorktree, rememberedChoiceOf, workspacePendingKey, workspaceWithPrivate } from './newThread'
 import { openSubagentParentRow, visibleThreads } from '../../shared/threadLineage'
@@ -21,6 +22,13 @@ import { loadProviderSnapshots, pickerListsModel, pickerProviders, projectScope,
  * it; a thread on another computer can take seconds, and then shows waiting for its messages.
  */
 export const OPEN_THREAD_HOLD_MS = 1000
+
+/**
+ * How long a thread may take to show before its row and the title say it is opening. A thread of another computer
+ * with nothing here is shown then, waiting for its messages, rather than held for `OPEN_THREAD_HOLD_MS`: its view
+ * often takes seconds.
+ */
+export const OPENING_CUE_MS = 150
 
 /** Opens a thread in the main workspace after the navigation guards agree. */
 export async function selectThread(threadId: string): Promise<void> {
@@ -46,24 +54,43 @@ export async function openAndSelect(threadId: string, options?: { keepWorkspace?
     if (store.messages.length > 0 || (thread && !isThreadStarted(thread))) return
   }
   const opening = store.openThreadWhenReady(threadId, options)
-  if (opening === 'held') setTimeout(() => useAppStore.getState().showOpeningThread(threadId), OPEN_THREAD_HOLD_MS)
-  if (opening === 'cached') void afterNextPaint().then(() => useAppStore.getState().showOpeningThread(threadId))
-  await selectOrSettle(threadId)
+  await selectOrSettle(threadId, opening)
 }
 
 let selectionRequest = 0
 
-/** Asks main to select a thread the store already switched to. A failed select sends no view, so the chat stops waiting for one. */
-export async function selectOrSettle(threadId: string): Promise<void> {
+/**
+ * Asks main to select a thread the store already switched to (or holds, `opening`). A failed select sends no view, so
+ * the chat stops waiting for one and says it could not be read. A thread still opening after `OPENING_CUE_MS` gets its
+ * cue. Every timer belongs to this selection: a later one, even of the same thread, makes them do nothing.
+ */
+export async function selectOrSettle(threadId: string, opening: 'cached' | 'held' | false = false): Promise<void> {
   const request = ++selectionRequest
+  const current = () => selectionRequest === request
+  if (opening === 'held') {
+    const hold = isQualifiedId(threadId) ? OPENING_CUE_MS : OPEN_THREAD_HOLD_MS
+    setTimeout(() => { if (current()) useAppStore.getState().showOpeningThread(threadId) }, hold)
+  }
+  if (opening === 'cached') void afterNextPaint().then(() => { if (current()) useAppStore.getState().showOpeningThread(threadId) })
+  // Set only while it is still opening then: a thread that showed sooner gets no cue.
+  else setTimeout(() => { if (current()) useAppStore.getState().showOpeningCue(threadId) }, OPENING_CUE_MS)
   const { profileId } = useAppStore.getState()
   try {
     await window.mousse.threads.select(threadId)
   } catch (error) {
     const store = useAppStore.getState()
-    if (selectionRequest === request && store.profileId === profileId) store.settleTranscript(threadId)
+    if (selectionRequest === request && store.profileId === profileId) store.settleTranscript(threadId, error instanceof Error ? error.message : undefined)
     throw error
   }
+}
+
+/**
+ * Reads a thread whose transcript could not be read again (the chat's Retry), waiting for it as when it was opened.
+ * Nothing happens while another thread is being opened: selecting this one again would cancel that newer choice.
+ */
+export async function retryOpenThread(threadId: string): Promise<void> {
+  if (!useAppStore.getState().retryTranscript(threadId)) return
+  await selectOrSettle(threadId)
 }
 
 /**

@@ -32,7 +32,7 @@ function alive(pid: number): boolean {
   }
 }
 
-function setup(options: { warmMs?: number; promptDeadlineMs?: number; commandDeadlineMs?: number; interruptDeadlineMs?: number; apiKey?: () => string; sweepHook?: () => Promise<void>; onCommand?: (type: string) => void } = {}) {
+function setup(options: { warmMs?: number; delegateWarmMs?: number; maxIdleSessions?: number; promptDeadlineMs?: number; commandDeadlineMs?: number; interruptDeadlineMs?: number; apiKey?: () => string; sweepHook?: () => Promise<void>; onCommand?: (type: string) => void } = {}) {
   const scratch = scratchDir('mousse-pi-life-')
   cleanups.push(() => scratch.cleanup())
   const stateDir = join(scratch.dir, 'state')
@@ -49,6 +49,8 @@ function setup(options: { warmMs?: number; promptDeadlineMs?: number; commandDea
     ...(options.promptDeadlineMs ? { promptDeadlineMs: options.promptDeadlineMs } : {}),
     ...(options.interruptDeadlineMs ? { interruptDeadlineMs: options.interruptDeadlineMs } : {}),
     ...(options.warmMs ? { warmMs: options.warmMs } : {}),
+    ...(options.delegateWarmMs !== undefined ? { delegateWarmMs: options.delegateWarmMs } : {}),
+    ...(options.maxIdleSessions !== undefined ? { maxIdleSessions: options.maxIdleSessions } : {}),
     onSpawn: (pid, threadId) => spawned.push({ pid, threadId }),
     ...(options.apiKey ? { apiKey: options.apiKey } : {}),
     ...(options.sweepHook ? { sweepHook: options.sweepHook } : {}),
@@ -130,6 +132,28 @@ describe('Pi RPC engine lifecycle (stub Pi)', () => {
     const pid = spawned[0].pid
     await vi.waitFor(() => expect(alive(pid)).toBe(false), { timeout: 10_000, interval: 100 })
   }, 30_000)
+
+  it('bounds idle processes per instance (evicting delegated children first) and closes delegated children after the shorter grace', async () => {
+    const { engine, spawned, project } = setup({ warmMs: 60_000, delegateWarmMs: 300, maxIdleSessions: 2 })
+    const cwd = project('p', { events: [{ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }], stopReason: 'stop' } }] })
+    await run(engine, turn(cwd, { threadId: 'i1' }))
+    await run(engine, turn(cwd, { threadId: 'child-1', child: { readOnly: false } }))
+    await run(engine, turn(cwd, { threadId: 'i2' }))
+    const [pidI1, pidChild1, pidI2] = spawned.map((entry) => entry.pid)
+    // Exceeding the cap of 2 evicts the idle delegated child before the older interactive thread i1.
+    await vi.waitFor(() => expect(alive(pidChild1)).toBe(false), { timeout: 10_000, interval: 100 })
+    expect(alive(pidI1)).toBe(true)
+    expect(alive(pidI2)).toBe(true)
+
+    // A second delegated child under a higher cap still closes after its shorter delegate grace while interactive stays warm.
+    const grace = setup({ warmMs: 60_000, delegateWarmMs: 250, maxIdleSessions: 4 })
+    const graceCwd = grace.project('g', { events: [{ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }], stopReason: 'stop' } }] })
+    await run(grace.engine, turn(graceCwd, { threadId: 'interactive' }))
+    await run(grace.engine, turn(graceCwd, { threadId: 'child-2', child: { readOnly: true } }))
+    const [pidInteractive, pidChild2] = grace.spawned.map((entry) => entry.pid)
+    await vi.waitFor(() => expect(alive(pidChild2)).toBe(false), { timeout: 10_000, interval: 100 })
+    expect(alive(pidInteractive)).toBe(true)
+  }, 40_000)
 
   it('flags retriesExhausted only when the last allowed attempt failed; an early refusal keeps its own error', async () => {
     const { engine, project } = setup()

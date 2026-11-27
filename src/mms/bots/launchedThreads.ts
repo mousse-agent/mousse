@@ -1,13 +1,14 @@
 import type { EventEmitter } from 'node:events'
-import { BOT_LAUNCHED_ENDED_SHOWN, compareLaunched, type BotLaunchedThread } from '../../shared/bots/personal/chat'
+import { BOT_LAUNCHED_ENDED_SHOWN, compareLaunched, launchedGoing, type BotLaunchedThread } from '../../shared/bots/personal/chat'
 import type { EffectRecord, RunRecord, ThreadEvent } from '../run/types'
 import type { RunEngine } from '../run/RunEngine'
 import { subagentDescendantsIn } from '../../shared/threadLineage'
 import { listPendingQueue } from '../queue/ThreadMessageQueue'
-import type { ChatMessage, PendingUserQuestions, QueuedMessage, ThreadLineage } from '../../shared/types'
+import type { ChatMessage, PendingUserQuestions, QueuedMessage, Thread, ThreadActivitySnapshot, ThreadActivityState, ThreadLineage } from '../../shared/types'
 import { withoutStandingRules } from '../orchestrator/UserQuestionService'
 import type { BotThreadAsk } from '../../shared/bots/personal/jobs'
 import { jobResultOf, type JobThreadView } from './jobs'
+import type { RemoteListsPort } from '../protocol/remoteListsPort'
 
 /** What the launched-thread lookup reads of a thread: its title, project, times and the thread that started it. */
 export interface LaunchedThreadMeta {
@@ -218,6 +219,96 @@ export function launchedThreadsIn(profile: {
     ...(profile.projectName ? { projectName: profile.projectName } : {}),
     ...(options.doneSince ? { doneSince: options.doneSince } : {})
   })
+}
+
+/** How a thread of another computer stands by its status in the merged lists (`ThreadActivityState`). */
+function remoteStatus(state: ThreadActivityState | undefined, row: Pick<Thread, 'offline' | 'notShared'>): BotLaunchedThread['status'] {
+  switch (state) {
+    case 'processing': return 'running'
+    // Its turn ended, but its subagents or background work still report back to it.
+    case 'waiting': return 'subagents'
+    case 'awaiting_input': return 'needs_input'
+    case 'paused': return 'paused'
+    case 'completed': return 'done'
+    // Not working there; while that computer cannot be reached nothing is known of how its last turn went.
+    default: return row.offline || row.notShared ? 'idle' : 'done'
+  }
+}
+
+/**
+ * The threads `creators` started on the user's other computers (`thread_create` with `computer`), as the bot's list
+ * shows them beside its threads here: the rows of the merged lists a bot started from this computer (`startedByBot`,
+ * set by the lists from `startedFrom.agent`, never on a remote subagent) whose launcher is one of `creators`, each
+ * standing by its status there (`activity`, by qualified id). Subagents and, with `doneSince`, archived rows and rows
+ * not going that were not updated since then, are left out. Its project names the computer: "app on AEONIX".
+ */
+export function remoteLaunchedThreadsOf(input: {
+  creators: ReadonlySet<string>
+  rows: readonly Thread[]
+  activity: ThreadActivitySnapshot
+  computerName?(node: string): string | undefined
+  projectName?(projectId: string): string | undefined
+  doneSince?: string
+}): BotLaunchedThread[] {
+  if (!input.creators.size) return []
+  const out: BotLaunchedThread[] = []
+  for (const row of input.rows) {
+    const launcher = row.startedByBot ? row.startedFrom?.agent?.thread : undefined
+    if (!row.node || row.lineage || !launcher || !input.creators.has(launcher)) continue
+    const status = row.archivedAt ? remoteStatus(undefined, row) : remoteStatus(input.activity[row.id], row)
+    const updatedAt = latest(row.updatedAt, row.createdAt) ?? new Date(0).toISOString()
+    const going = launchedGoing({ status })
+    if (!going && input.doneSince !== undefined && (row.archivedAt || updatedAt < input.doneSince)) continue
+    const project = row.projectId ? input.projectName?.(row.projectId) : undefined
+    const computer = input.computerName?.(row.node)
+    const where = project && computer ? `${project} on ${computer}` : project ?? (computer ? `on ${computer}` : undefined)
+    out.push({
+      threadId: row.id,
+      title: row.name?.trim() || 'Untitled thread',
+      ...(where ? { project: where } : {}),
+      status,
+      startedAt: row.startedAt || row.createdAt || updatedAt,
+      updatedAt
+    })
+  }
+  return out
+}
+
+/**
+ * The bot's threads here and on other computers in one list (`compareLaunched`), at most `BOT_LAUNCHED_ENDED_SHOWN` of
+ * those not going, as `launchedThreadsOf` keeps.
+ */
+export function withRemoteLaunched(local: readonly BotLaunchedThread[], remote: readonly BotLaunchedThread[]): BotLaunchedThread[] {
+  if (!remote.length) return [...local]
+  const all = [...local, ...remote].sort(compareLaunched)
+  let ended = 0
+  return all.filter((thread) => launchedGoing(thread) || ++ended <= BOT_LAUNCHED_ENDED_SHOWN)
+}
+
+/**
+ * The bot's list as its summary carries it: `local`, its threads here (`launchedThreadsIn`), with those it started on the
+ * user's other computers read from the merged lists (`lists`, absent while Bridge is off). The other computers' rows never
+ * fail the list: a read that throws leaves only the threads here.
+ */
+export function launchedHereAndThere(local: readonly BotLaunchedThread[], lists: Pick<RemoteListsPort, 'threads' | 'projects' | 'activity' | 'computerName'> | undefined, creators: ReadonlySet<string>, options: {
+  doneSince?: string
+  /** This computer's project names, for a row that names one of them. */
+  projectName?(projectId: string): string | undefined
+} = {}): BotLaunchedThread[] {
+  if (!lists || !creators.size) return [...local]
+  try {
+    const projects = new Map(lists.projects().map((project) => [project.id, project.name]))
+    return withRemoteLaunched(local, remoteLaunchedThreadsOf({
+      creators,
+      rows: lists.threads(),
+      activity: lists.activity(),
+      computerName: (node) => lists.computerName?.(node),
+      projectName: (id) => projects.get(id) ?? options.projectName?.(id),
+      ...(options.doneSince ? { doneSince: options.doneSince } : {})
+    }))
+  } catch {
+    return [...local]
+  }
 }
 
 /** A request the thread waits on, as its job view lists it: an approval without the "Always" option, which is the owner's. */

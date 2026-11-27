@@ -141,6 +141,7 @@ export class AcpAdapter implements ProviderAdapter {
         mcp: host.bridge?.mcp ?? null,
         orchestrationInstructions: host.bridge?.sessionInstructions || undefined,
         ...(host.bot ? { bot: true as const, botAuthority: host.bot } : {}),
+        ...(input.child && !host.bot ? { delegated: true as const } : {}),
         ...(host.bridge?.permission ? { prompter: host.bridge.permission } : {}),
         drainSteer: () => ctl.drainSteer(),
         // Per drain, with its token (docs/design/steer-and-interruptions.md §2.6, §2.7): read only once the prompt that

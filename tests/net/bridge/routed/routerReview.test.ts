@@ -84,6 +84,18 @@ describe('a window is told what the live stream knows, once it arrives', () => {
     expect(view.read()?.earlier).toEqual({ before: 'm8', count: 7 })
   })
 
+  it('takes from a sync of the whole transcript only the messages from the oldest one it holds of a long thread', () => {
+    const view = new RemoteThreadView()
+    const ids = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, index) => ({ id: `m${from + index}` }))
+    view.install(snapshot('t', { messages: ids(2, 201), earlier: { before: 'm2', count: 2 } }))
+    // An owner that sends its whole transcript when a turn completes.
+    const change = view.apply('thread.messages', { messages: ids(0, 202) })
+    expect(view.read()?.messages.map((row) => row.id)).toEqual(ids(2, 202).map((row) => row.id))
+    expect(view.read()?.earlier).toEqual({ before: 'm2', count: 2 })
+    // A window is told the same messages, not the older ones it pages itself.
+    expect(change?.messages?.map((row) => row.id)).toEqual(ids(2, 202).map((row) => row.id))
+  })
+
   it('puts a window right after the offline copy, and never lets the copy replace a newer live view', async () => {
     const thread = t.thread()
     const id = t.qualified(thread.id)

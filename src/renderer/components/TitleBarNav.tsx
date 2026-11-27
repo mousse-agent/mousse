@@ -20,9 +20,10 @@ import { hiddenSegmentCount, siblingThreads, threadPath, withNativeSubagent, wit
 import { useThreadPathInTitleBar } from '../lib/threadPathSetting'
 import { cardTitle } from '../chat/components/agent-elements/tools/subagent-card-logic'
 import { useNativeSubagents } from '../hooks/useNativeSubagents'
-import { useAppStore } from '../stores/appStore'
+import { openingCueOf, useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
 import { useNativeSubagentViewStore } from '../stores/nativeSubagentViewStore'
+import { ThreadOpeningTitle } from './ThreadOpening'
 import './titleBarNav.css'
 
 const logFailure = (what: string) => (error: unknown) => console.error(`${what} failed`, error)
@@ -342,9 +343,11 @@ export function ThreadPath() {
   const [menu, setMenu] = useState<OpenMenu>(null)
   const menuAnchor = useRef<HTMLElement | null>(null)
   const closeMenu = useCallback(() => setMenu(null), [])
+  // A thread asked for and still held: the title says it is opening instead of naming the thread still shown.
+  const heldCue = useAppStore((s) => s.openingThreadId !== null && openingCueOf(s) === s.openingThreadId)
   const segmentsKey = segments.map((segment) => `${segment.kind}:${segment.id}:${segment.name}`).join('\n')
 
-  useEffect(() => setMenu(null), [activeThreadId, nativeView?.toolCallId])
+  useEffect(() => setMenu(null), [activeThreadId, nativeView?.toolCallId, heldCue])
 
   useLayoutEffect(() => {
     const slot = slotRef.current
@@ -384,7 +387,8 @@ export function ThreadPath() {
     if (slot.parentElement) observer.observe(slot.parentElement)
     observer.observe(document.documentElement)
     return () => observer.disconnect()
-  }, [segmentsKey])
+    // The path is measured again when it comes back after an opening thread's cue.
+  }, [segmentsKey, heldCue])
 
   const openSegment = (segment: PathSegment) => {
     setMenu(null)
@@ -436,7 +440,8 @@ export function ThreadPath() {
 
   return (
     <div ref={slotRef} className="titlebar-path-slot">
-      {segments.length > 0 && (
+      <ThreadOpeningTitle />
+      {segments.length > 0 && !heldCue && (
         <>
           <ThreadPathView
             segments={segments}

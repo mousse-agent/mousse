@@ -33,6 +33,7 @@ import type { ProviderRef } from '../../run/types'
 import type { InstanceEnv } from '../env'
 import { killTree } from '../spawn'
 import { COMMAND_DEADLINE_MS, INTERRUPT_DEADLINE_MS, READY_DEADLINE_MS } from '../supervise'
+import { DELEGATE_IDLE_CLOSE_MS } from '../idleCloseFromEnv'
 import { logWarn } from '../../log/diag'
 import { PiBridge, type PiBridgeRegistration } from './bridge'
 import { longerTtl, writtenCacheTtl } from '../promptCache'
@@ -98,6 +99,8 @@ export const CLEANUP_DEADLINE_MS = 30_000
 export const PI_BOT_MARKER = 'MOUSSE_BOT_ACTIVATION'
 /** How long a thread's process stays after its turn ended (successfully or not). */
 export const PI_WARM_MS = 10 * 60_000
+/** Idle Pi RPC processes kept per instance; excess idle delegated children close first, then oldest idle ones. */
+export const PI_MAX_IDLE_SESSIONS = 4
 /** How long Pi may take to accept a prompt: its preflight can run a compaction (a model request). */
 export const PI_PROMPT_DEADLINE_MS = 120_000
 /** Pi's thinking levels (`--thinking`); Mousse efforts map onto them. */
@@ -162,6 +165,10 @@ export interface PiRpcEngineOptions {
    */
   userMcpTools?: (threadId: string, runId?: string) => Promise<PiMousseTool[]>
   warmMs?: number
+  /** How long an idle delegated child's Pi process stays warm (`DELEGATE_IDLE_CLOSE_MS`). */
+  delegateWarmMs?: number
+  /** How many idle Pi processes stay open per instance (`PI_MAX_IDLE_SESSIONS`). */
+  maxIdleSessions?: number
   readyDeadlineMs?: number
   commandDeadlineMs?: number
   promptDeadlineMs?: number
@@ -610,6 +617,10 @@ class PiThreadProcess {
   /** Reservations not settled yet, by id, with the turn and budget they were made for. */
   readonly reservations = new Map<string, { turn: PiTurn; budget: TurnBudget }>()
   warm: ReturnType<typeof setTimeout> | undefined
+  /** True when this thread is a delegated child: shorter warm grace and evicted first under cap pressure. */
+  delegated = false
+  /** Monotonic order when this process became idle, for LRU trimming past `PI_MAX_IDLE_SESSIONS`. */
+  idleOrder = 0
   sessionId: string | undefined
   /** The stored key it was started with (a rotated key restarts it). */
   keyFingerprint = ''
@@ -695,6 +706,7 @@ export class PiRpcEngine implements ProviderAdapter {
   /** Processes killed or dead whose tree has not finished closing; `stop()` waits for them. */
   private readonly closing = new Set<PiThreadProcess>()
   private readonly starts = new Set<Promise<unknown>>()
+  private idleSeq = 0
   private stopped = false
   /**
    * The `refresh` Pi holds in `auth.json`: opaque, for this instance and this engine only. Every
@@ -820,6 +832,34 @@ export class PiRpcEngine implements ProviderAdapter {
   releaseIdle(): void {
     // Idle: between turns, in its warm period (not starting, not handed to a turn being set up).
     for (const thread of [...this.threads.values()]) if (thread.warm && !thread.turn && !thread.starting) void this.kill(thread)
+  }
+
+  /** Arms the warm idle close timer for `thread` after a turn ends (shorter grace for delegated children). */
+  private armWarm(thread: PiThreadProcess): void {
+    if (thread.warm) clearTimeout(thread.warm)
+    thread.warm = undefined
+    if (!thread.alive || thread.ephemeral || this.stopped) return
+    thread.idleOrder = ++this.idleSeq
+    const delay = thread.delegated
+      ? (this.options.delegateWarmMs ?? DELEGATE_IDLE_CLOSE_MS)
+      : (this.options.warmMs ?? PI_WARM_MS)
+    thread.warm = setTimeout(() => void this.kill(thread), delay)
+    thread.warm.unref?.()
+  }
+
+  /** Closes idle processes past `PI_MAX_IDLE_SESSIONS`, evicting idle delegated children first, then oldest idle ones. */
+  private trimIdle(exclude?: PiThreadProcess): void {
+    const cap = this.options.maxIdleSessions ?? PI_MAX_IDLE_SESSIONS
+    if (this.stopped || !Number.isFinite(cap)) return
+    const idle = [...this.threads.values()].filter(
+      (candidate) => candidate !== exclude && candidate.alive && !candidate.ephemeral && !candidate.turn && !candidate.starting && candidate.warm !== undefined
+    )
+    if (idle.length <= cap) return
+    idle.sort((a, b) => {
+      if (a.delegated !== b.delegated) return a.delegated ? -1 : 1
+      return a.idleOrder - b.idleOrder
+    })
+    for (const victim of idle.slice(0, idle.length - cap)) void this.kill(victim)
   }
 
   /** Pi's private `auth.json` (an OAuth access token) is removed. */
@@ -967,6 +1007,7 @@ export class PiRpcEngine implements ProviderAdapter {
     const existing = this.threads.get(processKey)
     if (existing && existing.alive && existing.ready && existing.cwd === cwd && !existing.turn && resume && existing.sessionId === resume && existing.keyFingerprint === keyFingerprint) {
       starting.thread = existing
+      existing.delegated = Boolean(input.child)
       if (existing.warm) clearTimeout(existing.warm)
       existing.warm = undefined
       if (existing.model !== modelId) {
@@ -984,9 +1025,11 @@ export class PiRpcEngine implements ProviderAdapter {
     // Stopped while the old process went: no replacement.
     if (starting.cancelled || this.stopped) throw protocolError(this.options.instanceId, `${this.options.label} was stopped while it started.`)
     const thread = new PiThreadProcess(processKey, cwd, modelId, thinking, Boolean(ephemeral), ephemeral?.bot)
+    thread.delegated = Boolean(input.child)
     thread.keyFingerprint = keyFingerprint
     starting.thread = thread
     this.threads.set(processKey, thread)
+    this.trimIdle(thread)
     const started = this.start(thread, resume, () => starting.cancelled)
     thread.starting = started
     this.starts.add(started)
@@ -1739,11 +1782,9 @@ export class PiRpcEngine implements ProviderAdapter {
     if (thread.turn === turn) thread.turn = undefined
     // Every ended turn, failed or not, leaves its process for the warm period only (a definition's
     // or a bot's process goes when its turn ends: `ephemeralTurn`).
-    if (thread.alive && !thread.ephemeral) {
-      thread.warm = setTimeout(() => void this.kill(thread), this.options.warmMs ?? PI_WARM_MS)
-      thread.warm.unref?.()
-    }
+    if (thread.alive && !thread.ephemeral) this.armWarm(thread)
     if (failure !== undefined && !stopped) {
+      this.trimIdle()
       if (thread.fatal) throw protocolError(this.options.instanceId, `${this.options.label} could not register its providers, so the turn was stopped before any request.`)
       throw failure
     }
@@ -1758,6 +1799,7 @@ export class PiRpcEngine implements ProviderAdapter {
         // The gauge waits for the next turn.
       }
     }
+    this.trimIdle()
     const totalResponseTimeMs = Math.max(0, Date.now() - turn.startedAt)
     const totalTokensUsed = turn.hasUsage
       ? turn.usage.input + turn.usage.output + turn.usage.cacheRead + turn.usage.cacheWrite

@@ -72,7 +72,7 @@ describe('turning Net or Bridge off', () => {
     // Net comes back: a fresh set of routes counts from zero, and that is true, because nothing of the old is running.
     const again = new OwnerRoutes({
       services: o.f.mms,
-      rpc: { register: () => undefined, methods: () => [], dispatch: async () => null },
+      rpc: { register: () => undefined, methods: () => [], dispatch: async () => null, authorizedMethod: () => undefined },
       policy: o.policy,
       audit: o.audit,
       track: (work) => work

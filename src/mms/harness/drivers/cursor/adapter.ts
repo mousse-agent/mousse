@@ -86,6 +86,7 @@ export class CursorAdapter implements ProviderAdapter {
       mcp: host.bridge?.mcp ?? null,
       ...(host.bridge?.sessionInstructions ? { orchestrationInstructions: host.bridge.sessionInstructions } : {}),
       ...(host.bot ? { bot: true as const } : {}),
+      ...(input.child && !host.bot ? { delegated: true as const } : {}),
       drainSteer: () => ctl.drainSteer(),
       // Per drain, with its token (docs/design/steer-and-interruptions.md §2.6, §2.7): read only once the run that
       // carries it started, handed back otherwise.

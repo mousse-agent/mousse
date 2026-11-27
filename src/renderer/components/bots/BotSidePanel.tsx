@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react'
 import { FolderOpen, Globe, Plus, Settings, X } from '../../lib/icons'
-import type { BotChatMessage, BotSummary } from '../../../shared/bots/personal/chat'
+import type { BotChatMessage, BotLaunchedThread, BotSummary } from '../../../shared/bots/personal/chat'
 import type { BotBrowserView } from '../../../shared/bots/personal/browser'
+import type { ThreadBrowserView } from '../../../shared/browser/threadView'
 import { useBotBrowserStore } from '../../stores/botBrowserStore'
+import { useThreadBrowser, useThreadBrowserStore } from '../../stores/threadBrowserStore'
 import { useBotsStore } from '../../stores/botsStore'
 import { useAppStore } from '../../stores/appStore'
 import { profilePreferenceKey } from '../../lib/profilePreferences'
@@ -12,6 +14,7 @@ import { FileTree } from '../FileTree'
 import { PanelPicker, PanelPickerRow } from '../OpenSurfaceMenu'
 import { BotAboutPanel } from './BotAboutPanel'
 import { BotBrowserPane } from './BotBrowser'
+import { ThreadBrowserPane } from '../browser/ThreadBrowserView'
 import { BotFilePane, fileActions, useBotFiles } from './BotFiles'
 import type { WatchedBrowserFullScreen } from '../browser/WatchedBrowserPane'
 import '../filesPanel.css'
@@ -222,14 +225,65 @@ function FilesView({ bot, folder, file, onFile }: { bot: BotSummary; folder: str
   </div>
 }
 
-function BrowserView({ bot, view, fullScreen }: { bot: BotSummary; view: BotBrowserView | undefined; fullScreen: WatchedBrowserFullScreen }) {
+/**
+ * The threads the bot started whose agent has a browser open (or one that stopped by itself), in the order its header
+ * lists them: each is a tab of the Browser view beside the bot's own browser. Their state is the threads' own
+ * (`browser.view.*`), read only while the Browser view is in front.
+ */
+export function botBrowserThreadTabs(threads: readonly BotLaunchedThread[] | undefined, views: Readonly<Record<string, ThreadBrowserView | undefined>>): BotLaunchedThread[] {
+  return (threads ?? []).filter((thread) => {
+    const view = views[thread.threadId]
+    return Boolean(view && (view.open || view.stopped))
+  })
+}
+
+/** The browser the Browser view shows: the thread tab chosen while it is there, else the bot's own, else the first thread's. Null is the bot's own. */
+export function shownBrowserTab(chosen: string | null, tabs: readonly Pick<BotLaunchedThread, 'threadId'>[], own: boolean): string | null {
+  if (chosen !== null && tabs.some((tab) => tab.threadId === chosen)) return chosen
+  if (own || tabs.length === 0) return null
+  return tabs[0]!.threadId
+}
+
+/** Keeps one started thread's browser state read while the Browser view is in front; draws nothing. */
+function ThreadBrowserProbe({ threadId }: { threadId: string }) {
+  useThreadBrowser(threadId)
+  return null
+}
+
+function BrowserTabs({ bot, tabs, shown, onChoose }: { bot: BotSummary; tabs: readonly BotLaunchedThread[]; shown: string | null; onChoose(threadId: string | null): void }) {
+  return <div className="bot-browser-tabs" role="group" aria-label={`${bot.name}'s browsers`}>
+    <button type="button" className={shown === null ? 'is-on' : undefined} aria-pressed={shown === null} title={`${bot.name}'s browser`} onClick={() => onChoose(null)}>
+      <Globe size={12} aria-hidden /><span>{bot.name}</span>
+    </button>
+    {tabs.map((thread) => <button key={thread.threadId} type="button" className={shown === thread.threadId ? 'is-on' : undefined} aria-pressed={shown === thread.threadId}
+      title={thread.title} onClick={() => onChoose(thread.threadId)}><span>{thread.title}</span></button>)}
+  </div>
+}
+
+function BrowserView({ bot, view, fullScreen, tabs, shown, threadView, onChoose }: {
+  bot: BotSummary
+  view: BotBrowserView | undefined
+  fullScreen: WatchedBrowserFullScreen
+  tabs: readonly BotLaunchedThread[]
+  shown: string | null
+  threadView: ThreadBrowserView | undefined
+  onChoose(threadId: string | null): void
+}) {
   const busy = useBotBrowserStore((state) => state.busy)
-  if (view) return <BotBrowserPane bot={bot} view={view} fullScreen={fullScreen} />
-  return <div className="bot-side-empty">
+  const thread = shown === null ? undefined : tabs.find((tab) => tab.threadId === shown)
+  let pane: ReactNode
+  if (thread && threadView) pane = <ThreadBrowserPane threadId={thread.threadId} view={threadView} label={`${thread.title}: the agent's browser`} fullScreen={fullScreen} />
+  else if (view) pane = <BotBrowserPane bot={bot} view={view} fullScreen={fullScreen} />
+  else pane = <div className="bot-side-empty">
     <Globe size={20} strokeWidth={1.6} aria-hidden />
     <p>{bot.name} hasn’t used its browser yet.</p>
     <button type="button" className="settings-btn" disabled={busy} onClick={() => void useBotBrowserStore.getState().open(bot.id, undefined)}>Open it</button>
   </div>
+  return <>
+    {(bot.threads ?? []).map((item) => <ThreadBrowserProbe key={item.threadId} threadId={item.threadId} />)}
+    {tabs.length > 0 && !fullScreen.on && <BrowserTabs bot={bot} tabs={tabs} shown={shown} onChoose={onChoose} />}
+    {pane}
+  </>
 }
 
 /**
@@ -267,9 +321,22 @@ export function BotSidePanel({ bot, state, browser, folder, file, onFile }: {
     return () => window.clearTimeout(timer)
   }, [open])
 
-  // Full screen holds while the browser is the view in front of an open panel; anything else leaves it.
+  // The Browser view's tabs: the bot's own browser, and one per thread it started whose agent has a browser. The
+  // threads' state is read only while the view is in front.
+  const browserFront = open && view === 'browser'
+  const [chosen, setChosen] = useState<string | null>(null)
+  useEffect(() => { setChosen(null) }, [bot.id])
+  const tabIds = useThreadBrowserStore((s) => (browserFront ? botBrowserThreadTabs(bot.threads, s.views).map((thread) => thread.threadId).join('\n') : ''))
+  const tabs = useMemo(() => {
+    const ids = new Set(tabIds ? tabIds.split('\n') : [])
+    return (bot.threads ?? []).filter((thread) => ids.has(thread.threadId))
+  }, [tabIds, bot.threads])
+  const shownThread = shownBrowserTab(chosen, tabs, Boolean(browser))
+  const threadView = useThreadBrowserStore((s) => (shownThread ? s.views[shownThread] : undefined))
+
+  // Full screen holds while a browser is the view in front of an open panel; anything else leaves it.
   const [full, setFull] = useState(false)
-  const fullScreen = full && open && view === 'browser' && Boolean(browser)
+  const fullScreen = full && browserFront && (shownThread ? Boolean(threadView) : Boolean(browser))
   useEffect(() => { if (full && !fullScreen) setFull(false) }, [full, fullScreen])
 
   // The way a switch moves: from the side of the tab picked.
@@ -311,7 +378,8 @@ export function BotSidePanel({ bot, state, browser, folder, file, onFile }: {
   let body: ReactNode
   if (view === 'settings') body = <BotAboutPanel bot={bot} inPanel />
   // The browser is watched only while the panel is open: sliding out, it asks for no more pictures.
-  else if (view === 'browser') body = open ? <BrowserView bot={bot} view={browser} fullScreen={{ on: fullScreen, toggle: () => setFull(!fullScreen) }} /> : null
+  else if (view === 'browser') body = open ? <BrowserView bot={bot} view={browser} fullScreen={{ on: fullScreen, toggle: () => setFull(!fullScreen) }}
+    tabs={tabs} shown={shownThread} threadView={threadView} onChoose={setChosen} /> : null
   else if (view === 'files') body = <FilesView bot={bot} folder={folder} file={file} onFile={onFile} />
   else body = <PanelPicker>
     {VIEWS.map(({ view: entry, label, icon }) => <li key={entry}><PanelPickerRow icon={icon} label={label} onPick={() => state.show(entry)} /></li>)}

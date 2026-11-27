@@ -12,7 +12,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { classifyGrokOption, GROK_PERMISSION_MODE, grokArgs } from '../../src/mms/harness/acp/presets/grok'
 import type { DriverContext, DriverRuntime } from '../../src/mms/harness/driver'
 import type { AgentInstalls } from '../../src/mms/harness/agents/install'
-import { GROK_AGENT_ID, grokDriver, grokPackageSpec } from '../../src/mms/harness/drivers/grok'
+import { GROK_AGENT_ID, GROK_HELD_CHECK_DELAY_MS, GROK_HELD_RETRY_MS, grokDriver, grokPackageSpec, type GrokDriverOptions } from '../../src/mms/harness/drivers/grok'
+import { fingerprintOf } from '../../src/mms/harness/status'
+import { GROK_HELD_CONFIG } from '../../src/mms/harness/grok/held'
+import { GROK_HELD_CHECK_VERSION, type GrokHeldRecord } from '../../src/mms/harness/grok/heldEvidence'
 import { instanceEnv } from '../../src/mms/harness/env'
 import type { PtyProcess, PtySpawn } from '../../src/mms/harness/pty'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
@@ -40,7 +43,7 @@ afterEach(() => {
 
 const PINNED = ['--permission-mode', 'default', 'agent', '--no-leader', 'stdio']
 
-function setup(options: { home?: 'private' | 'default'; base?: NodeJS.ProcessEnv; pty?: PtySpawn; agents?: AgentInstalls; binaryPath?: string | null; findBinary?: string } = {}) {
+function setup(options: { home?: 'private' | 'default'; base?: NodeJS.ProcessEnv; pty?: PtySpawn; agents?: AgentInstalls; binaryPath?: string | null; findBinary?: string; driver?: Partial<GrokDriverOptions> } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mousse-grok-driver-'))
   dirs.push(root)
   const stateDir = join(root, 'state')
@@ -69,13 +72,15 @@ function setup(options: { home?: 'private' | 'default'; base?: NodeJS.ProcessEnv
     findBinary: () => options.findBinary,
     changed: () => {}
   }
-  const runtime = grokDriver({
+  const driver = grokDriver({
+    ...options.driver,
     ...(options.agents ? { agents: options.agents } : {}),
     systemDir: join(root, 'system'),
     pty: { available: () => Boolean(options.pty), ...(options.pty ? { spawn: options.pty } : {}) }
-  }).create(context)
+  })
+  const runtime = driver.create(context)
   runtimes.push(runtime)
-  return { runtime, home: isPrivate ? home : userHome, stateDir, root, context }
+  return { runtime, driver, home: isPrivate ? home : userHome, stateDir, root, context }
 }
 
 async function turn(runtime: DriverRuntime, cwd: string) {
@@ -133,12 +138,12 @@ describe('the Grok command line', () => {
 })
 
 describe('the Grok environment', () => {
-  it('in a private home drops every inherited sign-in, sets its home, and turns the updater off for checks', async () => {
-    const { runtime, home, root } = setup({ base: { XAI_API_KEY: 'ambient', GROK_AUTH_PROVIDER_COMMAND: 'corp', GROK_MODELS_BASE_URL: 'https://x', GROK_LOCAL_AUTH: '1', GROK_CLI_CHAT_PROXY_BASE_URL: 'https://y' } })
+  it('in a private home drops every inherited sign-in, signs in from its home, and turns the updater off for checks', async () => {
+    const { runtime, home, root, stateDir } = setup({ base: { XAI_API_KEY: 'ambient', GROK_AUTH_PROVIDER_COMMAND: 'corp', GROK_MODELS_BASE_URL: 'https://x', GROK_LOCAL_AUTH: '1', GROK_CLI_CHAT_PROXY_BASE_URL: 'https://y' } })
     await runtime.handshake!(new AbortController().signal).catch(() => undefined)
     await turn(runtime, root)
     const [check, chat] = spawned
-    expect(check!.env).toMatchObject({ GROK_HOME: home, GROK_DISABLE_AUTOUPDATER: '1', GROK_OAUTH2_REFERRER: 'mousse' })
+    expect(check!.env).toMatchObject({ GROK_HOME: join(stateDir, 'held-home'), GROK_AUTH_PATH: join(home, 'auth.json'), GROK_DISABLE_AUTOUPDATER: '1', GROK_OAUTH2_REFERRER: 'mousse' })
     for (const name of ['XAI_API_KEY', 'GROK_AUTH_PROVIDER_COMMAND', 'GROK_MODELS_BASE_URL', 'GROK_LOCAL_AUTH', 'GROK_CLI_CHAT_PROXY_BASE_URL']) {
       expect(check!.env[name]).toBeUndefined()
       expect(chat!.env[name]).toBeUndefined()
@@ -152,11 +157,11 @@ describe('the Grok environment', () => {
     await runtime.handshake!(new AbortController().signal).catch(() => undefined)
     await turn(runtime, root)
     expect(spawned).toHaveLength(2)
-    for (const entry of spawned) expect(entry.env).toMatchObject({ GROK_DISABLE_AUTOUPDATER: '0', GROK_OAUTH2_REFERRER: 'shell' })
+    // The user's own variables stay, but a held process never updates Grok: the executable its check read stays the one that runs.
+    for (const entry of spawned) expect(entry.env).toMatchObject({ GROK_DISABLE_AUTOUPDATER: '1', GROK_OAUTH2_REFERRER: 'shell' })
     const plain = setup({ home: 'default' })
     spawned.length = 0
     await turn(plain.runtime, plain.root)
-    expect(spawned[0]!.env.GROK_DISABLE_AUTOUPDATER).toBeUndefined()
     expect(spawned[0]!.env.GROK_OAUTH2_REFERRER).toBeUndefined()
   })
 
@@ -318,5 +323,185 @@ describe('a managed Grok copy', () => {
     runtimes.push(runtime)
     await runtime.signOut!()
     expect(spawned).toEqual([])
+  })
+})
+
+describe('the held launch', () => {
+  const record = (patch: Partial<GrokHeldRecord> = {}): GrokHeldRecord => ({
+    cliVersion: '9.9.9', platform: 'linux', turns: true, titles: true, tools: ['read_file'], checkVersion: GROK_HELD_CHECK_VERSION, recordedAt: '2026-11-27T00:00:00Z', ...patch
+  })
+  const held = (patch: Partial<GrokDriverOptions> = {}) => ({ driver: { platform: 'linux' as const, shipped: [], ...patch } })
+
+  it('runs turns, listings and checks of the user’s own home on the held home, signing in from the user’s auth.json', async () => {
+    const { runtime, home, root, stateDir } = setup({ home: 'default' })
+    await runtime.handshake!(new AbortController().signal).catch(() => undefined)
+    await runtime.refreshModels!(root).catch(() => undefined)
+    await turn(runtime, root)
+    expect(spawned).toHaveLength(3)
+    for (const entry of spawned) {
+      expect(entry.env).toMatchObject({ GROK_HOME: join(stateDir, 'held-home'), GROK_AUTH_PATH: join(home, 'auth.json'), GROK_WORKTREE_INHERITS_MAIN_APPROVALS: 'false' })
+    }
+    expect(readFileSync(join(stateDir, 'held-home', 'config.toml'), 'utf8')).toBe(GROK_HELD_CONFIG)
+    // The user's own home holds no copy of anything.
+    expect(readdirSync(home)).toEqual([])
+  })
+
+  it('runs on the user’s home when Mousse cannot tell the sign-in, and says why it holds nothing then', async () => {
+    const { runtime, driver, root, home } = setup({ home: 'default', base: { GROK_AUTH_PROVIDER_COMMAND: 'corp-token' }, ...held({ shipped: [record()] }) })
+    await turn(runtime, root)
+    expect(spawned[0]!.env.GROK_HOME).toBe(home)
+    expect(driver.caps({}, '9.9.9', undefined, 'grok:work').toolControl).toBe('uncontrolled')
+    expect(driver.toolControlReason!({}, '9.9.9', 'grok:work')).toMatch(/cannot tell which account/)
+  })
+
+  // Rows: what is known about the running version, and what the entry claims.
+  const rows: Array<{ name: string; version: string | undefined; shipped: GrokHeldRecord[]; local?: GrokHeldRecord[]; turns: boolean; titles: boolean; reason?: RegExp }> = [
+    { name: 'a shipped record for this version', version: '9.9.9', shipped: [record()], turns: true, titles: true },
+    { name: 'a local record for this version', version: '9.9.9', shipped: [], local: [record()], turns: true, titles: true },
+    { name: 'no record yet', version: '9.9.9', shipped: [], turns: false, titles: false, reason: /not yet checked that Grok 9\.9\.9/ },
+    { name: 'no version read', version: undefined, shipped: [record()], turns: false, titles: false, reason: /not read which Grok version/ },
+    { name: 'a record for another platform', version: '9.9.9', shipped: [record({ platform: 'darwin' })], turns: false, titles: false, reason: /not yet checked/ },
+    { name: 'a record of an older check', version: '9.9.9', shipped: [], local: [record({ checkVersion: GROK_HELD_CHECK_VERSION - 1 })], turns: false, titles: false, reason: /not yet checked/ },
+    { name: 'a shipped record of an older check', version: '9.9.9', shipped: [record({ checkVersion: GROK_HELD_CHECK_VERSION - 1 })], turns: false, titles: false, reason: /not yet checked/ },
+    { name: 'a version whose turns did not hold', version: '9.9.9', shipped: [record({ turns: false, reason: 'Grok ran read without asking Mousse first.' })], turns: false, titles: true, reason: /Grok ran read without asking/ },
+    { name: 'a version whose one-shots did not hold', version: '9.9.9', shipped: [record({ titles: false, reason: 'Grok offered tools in a request that runs none.' })], turns: true, titles: false, reason: /offered tools/ }
+  ]
+  for (const row of rows) {
+    it(`claims what is proven: ${row.name}`, () => {
+      const { driver, stateDir } = setup(held({ shipped: row.shipped }))
+      if (row.local) writeFileSync(join(stateDir, 'grok-held.json'), JSON.stringify({ version: 1, records: row.local }))
+      expect(driver.caps({}, row.version, undefined, 'grok:work').toolControl).toBe(row.turns ? 'approval_only' : 'uncontrolled')
+      const turnsWhy = driver.toolControlReason!({}, row.version, 'grok:work')
+      const titlesWhy = driver.oneShotRefusal!({}, row.version, 'grok:work')
+      expect(turnsWhy === undefined).toBe(row.turns)
+      expect(titlesWhy === undefined).toBe(row.titles)
+      if (row.reason) expect([turnsWhy, titlesWhy].filter(Boolean).join(' ')).toMatch(row.reason)
+    })
+  }
+
+  it('checks a version it has no record for once, in the background after a probe, and keeps what the check proved', async () => {
+    let finish: (value: GrokHeldRecord | undefined) => void = () => {}
+    const heldCheck = vi.fn(() => new Promise<GrokHeldRecord | undefined>((resolve) => { finish = resolve }))
+    const changed = vi.fn()
+    const { runtime, driver, context } = setup(held({ heldCheck }))
+    context.changed = changed
+    runtime.probed!('9.9.9', { soon: true })
+    // Returns at once: the check runs on, and a second probe while it runs starts nothing.
+    runtime.probed!('9.9.9', { soon: true })
+    await vi.waitFor(() => expect(heldCheck).toHaveBeenCalledTimes(1))
+    expect(heldCheck.mock.calls[0]![0]).toMatchObject({ command: process.execPath, cliVersion: '9.9.9' })
+    expect(driver.caps({}, '9.9.9', undefined, 'grok:work').toolControl).toBe('uncontrolled')
+    finish(record())
+    await vi.waitFor(() => expect(changed).toHaveBeenCalled())
+    expect(driver.caps({}, '9.9.9', undefined, 'grok:work').toolControl).toBe('approval_only')
+    runtime.probed!('9.9.9', { soon: true })
+    expect(heldCheck).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the last record when a check cannot conclude, and tries that version again only after a while', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const heldCheck = vi.fn(async () => undefined)
+      const { runtime, driver, stateDir } = setup(held({ heldCheck }))
+      writeFileSync(join(stateDir, 'grok-held.json'), JSON.stringify({ version: 1, records: [record({ cliVersion: '9.9.8' })] }))
+      runtime.probed!('9.9.9', { soon: true })
+      await vi.waitFor(() => expect(heldCheck).toHaveBeenCalledTimes(1))
+      await new Promise((resolve) => setImmediate(resolve))
+      runtime.probed!('9.9.9', { soon: true })
+      expect(heldCheck).toHaveBeenCalledTimes(1)
+      // The record of the version it last proved is untouched.
+      expect(driver.caps({}, '9.9.8', undefined, 'grok:work').toolControl).toBe('approval_only')
+      vi.setSystemTime(Date.now() + GROK_HELD_RETRY_MS + 1)
+      runtime.probed!('9.9.9', { soon: true })
+      await vi.waitFor(() => expect(heldCheck).toHaveBeenCalledTimes(2))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('waits before a check no person asked for, and drops it on Stop', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const heldCheck = vi.fn(async () => record())
+      const first = setup(held({ heldCheck }))
+      first.runtime.probed!('9.9.9', { soon: false })
+      await vi.advanceTimersByTimeAsync(GROK_HELD_CHECK_DELAY_MS - 1)
+      expect(heldCheck).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(heldCheck).toHaveBeenCalledTimes(1)
+      // A person's check while one waits starts it at once, and only once.
+      const askedCheck = vi.fn(async () => undefined)
+      const asked = setup(held({ heldCheck: askedCheck }))
+      asked.runtime.probed!('9.9.9', { soon: false })
+      asked.runtime.probed!('9.9.9', { soon: true })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(askedCheck).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(GROK_HELD_CHECK_DELAY_MS * 2)
+      expect(askedCheck).toHaveBeenCalledTimes(1)
+      const second = setup(held({ heldCheck }))
+      second.runtime.probed!('9.9.9', { soon: false })
+      second.runtime.stop()
+      await vi.advanceTimersByTimeAsync(GROK_HELD_CHECK_DELAY_MS * 2)
+      // A check asked for after Stop starts nothing either.
+      second.runtime.probed!('9.9.9', { soon: true })
+      expect(heldCheck).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refuses the held launch on an organisation policy, naming the file, and starts no check', async () => {
+    const heldCheck = vi.fn(async () => record())
+    const { runtime, driver, root } = setup(held({ heldCheck, shipped: [record()] }))
+    mkdirSync(join(root, 'system'), { recursive: true })
+    writeFileSync(join(root, 'system', 'requirements.toml'), '[hooks]\n')
+    await new Promise((resolve) => setTimeout(resolve, 2_100))
+    expect(driver.caps({}, '9.9.9', undefined, 'grok:work').toolControl).toBe('uncontrolled')
+    expect(driver.toolControlReason!({}, '9.9.9', 'grok:work')).toContain(join(root, 'system', 'requirements.toml'))
+    expect(driver.oneShotRefusal!({}, '9.9.9', 'grok:work')).toContain('requirements.toml')
+    runtime.probed!('9.9.8', { soon: true })
+    expect(heldCheck).not.toHaveBeenCalled()
+  })
+
+  it('starts a turn or a title only on the executable its check read', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-grok-binary-'))
+    dirs.push(root)
+    const binary = join(root, process.platform === 'win32' ? 'grok.exe' : 'grok')
+    writeFileSync(binary, 'grok 9.9.9', { mode: 0o755 })
+    const { runtime, stateDir } = setup({ home: 'default', binaryPath: binary, base: { XAI_API_KEY: 'xai-test' }, ...held({ shipped: [record()] }) })
+    runtime.probed!('9.9.9', { fingerprint: fingerprintOf(binary)!, soon: true })
+    await turn(runtime, root)
+    expect(spawned).toHaveLength(1)
+    // A self-update writes another program at the same path.
+    writeFileSync(binary, 'grok 9.9.10, replaced')
+    spawned.length = 0
+    const refused = await runtime.adapter.startTurn(
+      { threadId: 't2', instanceId: 'grok:work', llmProvider: '', model: 'default', mode: 'agent', prompt: 'hi', cwd: root, nativeHistory: '', signal: new AbortController().signal } as never,
+      { text: () => {}, thinking: () => {}, tool: () => {}, progress: () => {}, providerRef: () => {}, steerAccepted: () => {}, usage: () => {} } as never,
+      { drainSteer: () => undefined, heartbeat: () => {} } as never,
+      { mcp: null, context: { nativeHistoryAfterTurn: (text: string) => text } } as never
+    ).then(() => undefined, (error: unknown) => error)
+    expect(refused).toMatchObject({ code: 'binding_stale' })
+    await expect(runtime.oneShot!({ model: 'default', system: 's', prompt: 'p', onActivity: () => {} } as never, new AbortController().signal)).rejects.toMatchObject({ code: 'binding_stale' })
+    expect(spawned).toEqual([])
+    // Nothing was written for the refused title either.
+    expect(existsSync(join(stateDir, 'one-shot'))).toBe(false)
+  })
+
+  it('forgets sessions saved on another home, so the next turn hands its history to a new session', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-grok-sessions-'))
+    dirs.push(root)
+    const stateDir = join(root, 'state')
+    mkdirSync(stateDir, { recursive: true })
+    writeFileSync(join(stateDir, 'acp.json'), JSON.stringify({ sessions: { t: { sessionId: 'native-1', cwd: root, instanceId: 'grok:work' } } }))
+    const context: DriverContext = {
+      instanceId: 'grok:work', builtIn: false, config: { home: 'private', binaryPath: process.execPath },
+      env: instanceEnv({ instanceId: 'grok:work', driver: 'grok', configRevision: 0, home: join(stateDir, 'home'), searchPath: [], base: { PATH: process.env.PATH } }),
+      profileHome: root, installationHome: root, stateDir, questions: new UserQuestionService(), findBinary: () => undefined, changed: () => {}
+    }
+    runtimes.push(grokDriver({ systemDir: join(root, 'system') }).create(context))
+    const saved = JSON.parse(readFileSync(join(stateDir, 'acp.json'), 'utf8')) as { sessions?: Record<string, unknown>; sessionsHome?: string }
+    expect(saved.sessions).toEqual({})
+    expect(saved.sessionsHome).toBe(join(stateDir, 'held-home'))
   })
 })

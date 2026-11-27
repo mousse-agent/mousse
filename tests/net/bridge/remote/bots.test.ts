@@ -23,7 +23,8 @@ import {
   type RemoteBotsPort
 } from '../../../../src/mms/bridge/remote/RemoteBots'
 import { MmsListsSource, type ListsServices } from '../../../../src/mms/bridge/remote/MmsListsSource'
-import type { BotChatMessage, BotSummary } from '../../../../src/shared/bots/personal/chat'
+import type { BotChatMessage, BotLaunchedThread, BotSummary } from '../../../../src/shared/bots/personal/chat'
+import { qualifyId } from '../../../../src/shared/threadRef'
 import type { PermissionMode } from '../../../../src/shared/permissionMode'
 import { botFixture, chatOf, createBot, finish, start, type BotFixture } from '../../../bots/botFixture'
 import { actionDigest } from '../../../../src/mms/bots/actions/BotActions'
@@ -154,6 +155,18 @@ describe('what a phone sees of a bot', () => {
     expect(JSON.stringify(seen)).not.toMatch(/home\/me|claude:bots/)
     const summary = { id: BOT, name: 'Penny', error: { text: 'e', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'claude:bots' } } } as BotSummary
     expect(remoteBotSummary(summary).error).toEqual({ text: 'e', action: { kind: 'sign_in', label: 'Sign in' } })
+  })
+
+  it("never carries a thread the bot started on a further computer, which that computer may not share with the device", () => {
+    const thread = (threadId: string, title: string): BotLaunchedThread => ({ threadId, title, status: 'running', startedAt: at, updatedAt: at })
+    const farNode = qualifyId(newId('node'), 'far')
+    const summary = { id: BOT, name: 'Penny', state: 'working', stateText: 'Managing 2 threads: Here, Secret', threads: [thread('here', 'Here'), thread(farNode, 'Secret')] } as BotSummary
+    const seen = remoteBotSummary(summary)
+    expect(seen.threads?.map((listed) => listed.threadId)).toEqual(['here'])
+    expect(seen.stateText).toBe('Managing Here')
+    expect(JSON.stringify(seen)).not.toContain('Secret')
+    // Only threads here: the summary goes as it is.
+    expect(remoteBotSummary({ ...summary, threads: [thread('here', 'Here')], stateText: 'Managing Here' }).stateText).toBe('Managing Here')
   })
 
   it('a page fits one reply: the newest messages, the older ones on the next page', async () => {

@@ -71,6 +71,7 @@ import { ThreadSpeechIndicator, ThreadSpeechMark, useSpeakingThreadId } from '..
 import { ProjectRunsDot } from './automations/inbox/ProjectRunsDot'
 import { countRender } from '../chat/components/agent-elements/render-counts'
 import { plainThreads, sameListedActivity, ThreadCardStatus, ThreadExpiryIcon, ThreadRowStatusIcon } from './ThreadRowStatus'
+import { ThreadOpeningMark } from './ThreadOpening'
 import '../styles/threads-sidebar.css'
 import '../styles/sidebar-view-motion.css'
 
@@ -337,7 +338,10 @@ export function ThreadCardBody({
           )}
           <span className="threads-sidebar-card-project">{projectName ?? 'No project'}</span>
           {thread.pinnedAt && <Pin size={11} strokeWidth={2} className="threads-sidebar-card-pin" aria-label="Pinned" />}
-          <ThreadCardStatus threadId={threadId} activity={activity} live={liveActivity} awaitsApproval={awaitsApproval} updatedAt={thread.updatedAt} withAge={statusWithAge} setupFailed={thread.setupFailure?.reason} linkStatus={linkStatus} terse={terseStatus} />
+          {/* A thread slow to open shows its ring where the status sits, as a row does in its gutter. */}
+          <ThreadOpeningMark threadId={threadId}>
+            <ThreadCardStatus threadId={threadId} activity={activity} live={liveActivity} awaitsApproval={awaitsApproval} updatedAt={thread.updatedAt} withAge={statusWithAge} setupFailed={thread.setupFailure?.reason} linkStatus={linkStatus} terse={terseStatus} />
+          </ThreadOpeningMark>
           <ThreadModelIcon thread={thread} />
         </span>
         {isRenaming ? (
@@ -1522,7 +1526,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         {/* The status (or draft) in the gap before the title. Two lines: the title across the row, then the computer,
             the branch, the pull requests, the time and the model; a thread with none of the first three has one line,
             with its time and model after the title (ThreadBranchLine's data-single). */}
-        <span className="threads-sidebar-thread-gutter">{renderThreadMark(thread, hasDraft)}</span>
+        <span className="threads-sidebar-thread-gutter"><ThreadOpeningMark threadId={thread.id}>{renderThreadMark(thread, hasDraft)}</ThreadOpeningMark></span>
         <span className="threads-sidebar-thread-text">
           <span className="threads-sidebar-thread-line">
             {thread.pinnedAt && <Pin size={12} strokeWidth={2} className="threads-sidebar-pin-icon" aria-hidden="true" />}

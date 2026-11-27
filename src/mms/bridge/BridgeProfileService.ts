@@ -306,9 +306,10 @@ export class BridgeProfileService {
           const reader = readerOfListsKey(threadId)
           return reader ? listsOf(reader).snapshot() : threadSource.snapshot(threadId)
         },
-        // A phone's thread reads its newest messages before its stream opens; the lists are small.
+        // A thread reads its newest messages before its stream opens, for a phone or another computer; the lists are small.
         warm: async (threadId) => {
-          if (!isPrivateKey(threadId) && threadId !== LISTS_STREAM_THREAD_ID && !readerOfListsKey(threadId))
+          if (isPrivateKey(threadId)) await privateSources.warm(threadId)
+          else if (threadId !== LISTS_STREAM_THREAD_ID && !readerOfListsKey(threadId))
             await threadSource.warm(threadId)
         },
         onThread: (threadId, listener, onError) => {
@@ -602,7 +603,17 @@ export class BridgeProfileService {
       computers: () => this.router.pairedComputers(),
       online: (node) => this.router.isOnline(node),
       enabled: () => this.router.enabled(),
-      clock: this.clock
+      clock: this.clock,
+      // A thread a bot here started there names the bot, and its status changes reach the bot's header and list.
+      botOf: (threadId) => services.personalBots?.botOf(threadId),
+      botRowsChanged: (launchers) => {
+        // After the lists took the change, so the bot reads the rows and statuses as they are now.
+        setImmediate(() => {
+          for (const launcher of launchers) {
+            try { services.personalBots?.launchedThreadChanged(launcher) } catch { /* a status never fails the lists */ }
+          }
+        })
+      }
     })
     this.router.setLists(this.lists)
     services.remoteLists = this.lists

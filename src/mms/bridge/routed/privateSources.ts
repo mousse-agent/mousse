@@ -3,7 +3,8 @@ import { NetError } from '../../../shared/net'
 import type { SqliteNodePolicy } from '../../net/store/nodePolicy'
 import { mmsJson } from '../remote/jsonOutput'
 import { MmsListsSource, type ListsServices } from '../remote/MmsListsSource'
-import { MmsThreadSource } from '../remote/MmsThreadSource'
+import { MmsRemoteBackend } from '../remote/MmsBackend'
+import { MmsThreadSource, type SnapshotBoundary } from '../remote/MmsThreadSource'
 import { parsePrivateKey, terminalParts, type PrivateSpec } from '../remote/privateStreams'
 import type { ThreadSourceEvent } from '../remote/ThreadStreamAdapter'
 
@@ -42,19 +43,43 @@ function split(text: string): string[] {
   return pieces
 }
 
+/** Thread streams whose snapshot boundary is kept: far more than a computer has open at once. */
+const BOUNDARIES_MAX = 1024
+
 /**
  * Where the records of a computer's private streams come from. The key a stream is stored under
  * says which one it is; each kind is sourced from the profile's own services, never from the reader.
  */
 export class PrivateSources {
+  /**
+   * One backend for every thread stream: the page `warm` reads off the event loop is kept there for the snapshot that
+   * opens the stream, which is read through a source made for that call.
+   */
+  private readonly threads: MmsRemoteBackend
+  /**
+   * Where the last snapshot of each thread stream began, by stream key, shared by the sources made for that stream. A
+   * stream whose entry was let go sends whole transcript syncs again, as before snapshots were capped.
+   */
+  private readonly boundaries = new Map<string, SnapshotBoundary>()
   constructor(
     private readonly services: MmsProfileServices,
     /** The device's permission limit is read each time a request is shown, so a change applies at once. */
     private readonly policy: Pick<SqliteNodePolicy, 'get'>
-  ) {}
+  ) {
+    this.threads = new MmsRemoteBackend(services)
+  }
 
   snapshot(key: string): unknown {
     return this.sourceFor(key).snapshot()
+  }
+
+  /**
+   * Reads what the snapshot of a thread stream needs off the event loop (its newest page), so opening the stream does
+   * not load the thread. Nothing for the other kinds, whose snapshots are small.
+   */
+  async warm(key: string): Promise<void> {
+    const spec = parsePrivateKey(key)
+    if (spec?.kind === 'thread') await this.threads.warm(spec.subject, { newestOnly: true })
   }
 
   onThread(
@@ -63,6 +88,21 @@ export class PrivateSources {
     onError?: (error: unknown) => void
   ): () => void {
     return this.sourceFor(key).watch(listener, onError)
+  }
+
+  private boundaryOf(key: string): SnapshotBoundary {
+    let boundary = this.boundaries.get(key)
+    if (boundary) {
+      this.boundaries.delete(key)
+    } else {
+      boundary = {}
+      for (const oldest of this.boundaries.keys()) {
+        if (this.boundaries.size < BOUNDARIES_MAX) break
+        this.boundaries.delete(oldest)
+      }
+    }
+    this.boundaries.set(key, boundary)
+    return boundary
   }
 
   private sourceFor(key: string): {
@@ -76,8 +116,10 @@ export class PrivateSources {
     if (!spec) throw new NetError('bad_request')
     switch (spec.kind) {
       case 'thread': {
+        const boundary = this.boundaryOf(key)
         const source = new MmsThreadSource(this.services, undefined, {
-          private: { limit: () => this.policy.get(spec.reader).maxPermissionMode, reader: spec.reader }
+          private: { limit: () => this.policy.get(spec.reader).maxPermissionMode, reader: spec.reader, boundary },
+          backend: this.threads
         })
         return {
           snapshot: () => source.snapshot(spec.subject),

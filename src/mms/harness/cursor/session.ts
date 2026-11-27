@@ -7,6 +7,7 @@ import { cursorMcpServers } from '../../run/mcp/attachment'
 import { redactCursorText, type CursorAgentSetup, type CursorHostMethods, type CursorUsage } from '../hosts/cursorProtocol'
 import { providerReportedError } from '../../orchestrator/providerErrors'
 import { interruptWithDeadline, LOAD_DEADLINE_MS, loadWithDeadline, recoverActiveRun, SessionLoadTimeoutError } from '../supervise'
+import { DELEGATE_IDLE_CLOSE_MS, idleCloseFromEnv } from '../idleCloseFromEnv'
 import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
 import { CursorHostCallError, CursorHostExitedError, type CursorHostClient, type CursorRunListener } from './hostClient'
 
@@ -70,6 +71,8 @@ export interface CursorChatInput {
    * other ones is not reopened. A new agent gets them and the history in its first prompt, as Codex starts a new thread.
    */
   bot?: true
+  /** True when the thread is a delegated child (`TurnInput.child`): shorter idle grace and evicted first under cap pressure. */
+  delegated?: true
   onText(text: string): void
   /** The session put `sep` into the cumulative text at `atOffset` (between two runs' replies): not the agent's words. */
   onTextSeparator?(atOffset: number, sep: string): void
@@ -131,10 +134,20 @@ export interface CursorSessionsOptions {
   cancelDeadlineMs?: number
   /** Test seam: how long reopening a saved agent may take (`LOAD_DEADLINE_MS`). */
   loadDeadlineMs?: number
+  /** Test seam: how long an idle live agent is kept before closing while preserving saved history (`CURSOR_IDLE_CLOSE_MS`). */
+  idleCloseMs?: number
+  /** Test seam: how long an idle delegated child's live agent is kept before closing (`DELEGATE_IDLE_CLOSE_MS`). */
+  delegateIdleCloseMs?: number
+  /** Test seam: how many idle live agents stay open per instance (`CURSOR_MAX_IDLE_AGENTS`). */
+  maxIdleAgents?: number
 }
 
 /** The model id that lets Cursor choose. */
 export const CURSOR_DEFAULT_MODEL = 'default'
+/** How long an idle Cursor live agent is kept before closing while preserving saved history. `MOUSSE_CURSOR_IDLE_CLOSE_MS` sets it. */
+export const CURSOR_IDLE_CLOSE_MS = idleCloseFromEnv('MOUSSE_CURSOR_IDLE_CLOSE_MS', 15 * 60_000)
+/** Idle live Cursor SDK agents kept per instance; excess idle delegated children close first, then oldest idle agents. */
+export const CURSOR_MAX_IDLE_AGENTS = 4
 const RECORDED_RUNS = 20
 const STEER_POLL_MS = 100
 
@@ -143,6 +156,12 @@ interface LiveAgent {
   cwd: string
   /** Host generation the agent was opened in; a restarted host no longer holds it. */
   generation: number
+  /** True when this thread is a delegated child: shorter idle grace and evicted first under cap pressure. */
+  delegated?: boolean
+  /** Monotonic order when this agent became idle, for LRU trimming past `CURSOR_MAX_IDLE_AGENTS`. */
+  idleOrder: number
+  /** Closes the live agent once idle without forgetting the saved session. */
+  idleTimer?: ReturnType<typeof setTimeout>
 }
 
 interface ActiveRun {
@@ -381,6 +400,9 @@ export class CursorSessions {
   private readonly toPrune = new Set<string>()
   /** Reopens in flight, by agent: a late answer to an abandoned one must not close the agent another turn is reopening. */
   private readonly reopening = new Map<string, number>()
+  /** Agents closed on idle cap eviction right before `commitConversation` saves their history key. */
+  private readonly closedAfterTurn = new Map<string, string>()
+  private idleSeq = 0
   private generation = 0
   /** The thread whose stuck stop or steer is ending the host. */
   private endingFor: string | undefined
@@ -393,8 +415,19 @@ export class CursorSessions {
       this.lastExit = this.endingFor ? { endedFor: this.endingFor } : {}
       this.endingFor = undefined
       this.generation += 1
+      this.clearLiveTimers()
       this.live.clear()
+      this.closedAfterTurn.clear()
     })
+  }
+
+  private clearLiveTimers(): void {
+    for (const live of this.live.values()) {
+      if (live.idleTimer) {
+        clearTimeout(live.idleTimer)
+        live.idleTimer = undefined
+      }
+    }
   }
 
   private historyKey(history: string): string {
@@ -408,12 +441,15 @@ export class CursorSessions {
   /** Record only the history the owning turn durably committed. */
   commitConversation(threadId: string, history: string): void {
     const saved = this.options.store.saved(threadId)
-    if (!saved || !this.live.has(threadId)) return
+    const closedId = this.closedAfterTurn.get(threadId)
+    this.closedAfterTurn.delete(threadId)
+    if (!saved || (!this.live.has(threadId) && closedId !== saved.agentId)) return
     this.options.store.setSaved(threadId, { ...saved, historyKey: this.historyKey(history) })
   }
 
   /** Drops the thread's agent; its next turn starts a new one with the history in the prompt. */
   forgetConversation(threadId: string): void {
+    this.closedAfterTurn.delete(threadId)
     this.closeLive(threadId)
     const saved = this.options.store.saved(threadId)
     if (!saved) return
@@ -444,13 +480,59 @@ export class CursorSessions {
     }
   }
 
-  private closeLive(threadId: string): void {
+  private closeLive(threadId: string, opts?: { preserveCommit?: boolean }): void {
     const live = this.live.get(threadId)
     if (!live) return
+    if (live.idleTimer) {
+      clearTimeout(live.idleTimer)
+      live.idleTimer = undefined
+    }
     this.live.delete(threadId)
+    if (opts?.preserveCommit) this.closedAfterTurn.set(threadId, live.agentId)
     if (live.generation === this.generation && this.options.host.running) {
       void this.options.host.request('close', { agentId: live.agentId }).catch(() => undefined)
     }
+  }
+
+  /** Whether `threadId`'s live agent has no active turn or reopen in flight. */
+  private isLiveIdle(threadId: string, live: LiveAgent): boolean {
+    if (this.turns.has(live.agentId) || (this.reopening.get(live.agentId) ?? 0) > 0) return false
+    for (const turn of this.turns.values()) if (turn.threadId === threadId) return false
+    return true
+  }
+
+  /** Arms the idle close timer for `threadId`'s live agent (preserving its saved session) and trims past the idle cap. */
+  private armIdleClose(threadId: string, delegated: boolean): void {
+    const live = this.live.get(threadId)
+    if (!live || this.stopped || !this.isLiveIdle(threadId, live)) return
+    if (live.idleTimer) clearTimeout(live.idleTimer)
+    live.delegated = delegated
+    live.idleOrder = ++this.idleSeq
+    const delay = delegated
+      ? (this.options.delegateIdleCloseMs ?? DELEGATE_IDLE_CLOSE_MS)
+      : (this.options.idleCloseMs ?? CURSOR_IDLE_CLOSE_MS)
+    live.idleTimer = setTimeout(() => {
+      live.idleTimer = undefined
+      if (this.live.get(threadId) === live && this.isLiveIdle(threadId, live)) this.closeLive(threadId)
+    }, delay)
+    live.idleTimer.unref?.()
+    this.trimIdle()
+  }
+
+  /** Closes idle live agents past `CURSOR_MAX_IDLE_AGENTS`, evicting idle delegated children first, then oldest idle ones. */
+  private trimIdle(): void {
+    const cap = this.options.maxIdleAgents ?? CURSOR_MAX_IDLE_AGENTS
+    if (this.stopped || !Number.isFinite(cap)) return
+    const idle: Array<[string, LiveAgent]> = []
+    for (const [threadId, live] of this.live) {
+      if (this.isLiveIdle(threadId, live)) idle.push([threadId, live])
+    }
+    if (idle.length <= cap) return
+    idle.sort(([, a], [, b]) => {
+      if (Boolean(a.delegated) !== Boolean(b.delegated)) return a.delegated ? -1 : 1
+      return a.idleOrder - b.idleOrder
+    })
+    for (const [threadId] of idle.slice(0, idle.length - cap)) this.closeLive(threadId, { preserveCommit: true })
   }
 
   /** Whether a live agent, a turn or a reopen still uses `agentId`. */
@@ -530,16 +612,25 @@ export class CursorSessions {
     // An agent reads the instructions in its first prompt only: a bot's agent given other ones is replaced.
     const stale = input.bot === true && instructionsHash !== undefined && saved?.instructionsHash !== instructionsHash
     const matches = saved?.cwd === input.cwd && saved.historyKey === historyKey && !stale
+    this.closedAfterTurn.delete(input.threadId)
     const live = this.live.get(input.threadId)
-    if (live && live.generation === this.generation && matches && live.agentId === saved?.agentId) return { agentId: live.agentId, resumed: true }
+    if (live && live.generation === this.generation && matches && live.agentId === saved?.agentId) {
+      if (live.idleTimer) {
+        clearTimeout(live.idleTimer)
+        live.idleTimer = undefined
+      }
+      live.delegated = Boolean(input.delegated)
+      return { agentId: live.agentId, resumed: true }
+    }
     if (live) this.closeLive(input.threadId)
+    this.trimIdle()
     const setup = this.setup(input, apiKey)
     if (saved && matches) {
       const resuming = host.request('resume', { ...setup, agentId: saved.agentId })
       this.reopening.set(saved.agentId, (this.reopening.get(saved.agentId) ?? 0) + 1)
       try {
         const { agentId } = await loadWithDeadline(saved.agentId, stoppable(resuming, stop), () => {}, this.options.loadDeadlineMs ?? LOAD_DEADLINE_MS)
-        this.live.set(input.threadId, { agentId, cwd: input.cwd, generation: this.generation })
+        this.live.set(input.threadId, { agentId, cwd: input.cwd, generation: this.generation, delegated: Boolean(input.delegated), idleOrder: 0 })
         return { agentId, resumed: true }
       } catch (error) {
         if (error instanceof TurnStopped) {
@@ -567,7 +658,7 @@ export class CursorSessions {
     }
     store.setSaved(input.threadId, { agentId, cwd: input.cwd, runIds: [], ...(instructionsHash ? { instructionsHash } : {}) })
     if (saved && saved.agentId !== agentId) this.prune([saved.agentId])
-    this.live.set(input.threadId, { agentId, cwd: input.cwd, generation: this.generation })
+    this.live.set(input.threadId, { agentId, cwd: input.cwd, generation: this.generation, delegated: Boolean(input.delegated), idleOrder: 0 })
     return { agentId, resumed: false }
   }
 
@@ -634,6 +725,7 @@ export class CursorSessions {
       input.signal?.removeEventListener('abort', onAbort)
       this.turns.delete(key)
       if (agentId && this.turns.get(agentId) === turn) this.turns.delete(agentId)
+      if (!this.stopped && this.live.has(input.threadId)) this.armIdleClose(input.threadId, Boolean(input.delegated))
       settle()
     }
   }
@@ -886,7 +978,9 @@ export class CursorSessions {
 
   stop(): void {
     this.stopped = true
+    this.clearLiveTimers()
     this.live.clear()
+    this.closedAfterTurn.clear()
     this.options.host.stop()
   }
 }

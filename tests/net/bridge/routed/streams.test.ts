@@ -7,7 +7,10 @@ import {
   MmsListsSource,
   type ListsServices
 } from '../../../../src/mms/bridge/remote/MmsListsSource'
+import { MmsRemoteBackend } from '../../../../src/mms/bridge/remote/MmsBackend'
+import { ThreadDbClient } from '../../../../src/mms/data/threadDb/threadDbClient'
 import { MmsThreadSource } from '../../../../src/mms/bridge/remote/MmsThreadSource'
+import { RemoteThreadView } from '../../../../src/mms/bridge/routed/threadView'
 import {
   PRIVATE_STREAM_QUOTA,
   PRIVATE_THREAD_STREAMS_TOTAL,
@@ -807,4 +810,231 @@ describe('a long thread on a private stream', () => {
     expect(newest.length).toBeGreaterThan(20)
     expect(snapshot.earlier).toEqual({ before: newest[0].id, count: 80 - newest.length })
   }, 180_000)
+
+  /** Pages back from `earlier` with `thread.messages` as the viewer does on scroll, oldest first. */
+  async function pageBack(ok: (method: string, params: unknown) => Promise<any>, threadId: string, earlier: { before: string; count: number }) {
+    const older: Array<{ id: string }> = []
+    let before = earlier.before
+    for (let reads = 0; reads < 20; reads += 1) {
+      const page = await ok('thread.messages', { threadId, before })
+      older.unshift(...(page.messages as Array<{ id: string }>))
+      if (!page.earlier) return older
+      expect(page.earlier.count).toBe(earlier.count - older.length)
+      before = page.earlier.before
+    }
+    throw new Error('paging did not reach the first message')
+  }
+
+  it('carries the newest 200 of 450 loaded messages without budgeting or measuring the older ones', async () => {
+    const { ok, thread, f } = await routedOwner({ streams: true })
+    const t = thread()
+    // Each message records when its images are looked at or it is serialized: what budgeting and measuring do.
+    const touched = new Set<number>()
+    const all = Array.from({ length: 450 }, (_, index) => {
+      const plain = message(index, `${index}:`.padEnd(64, 'x'))
+      return Object.defineProperties({ ...plain }, {
+        images: { get: () => void touched.add(index), enumerable: false },
+        toJSON: { value: () => (touched.add(index), plain), enumerable: false }
+      })
+    })
+    f.mms.orchestrator.getOrCreateSession(t.id).messages = all as never
+
+    const opened = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
+    const { snapshot } = readStream(f, (opened.descriptor as { id: never }).id, t.id)
+    const newest = (snapshot.messages as Array<{ id: string }>).map((row) => row.id)
+    expect(newest).toEqual(all.slice(250).map((row) => row.id))
+    expect(snapshot.earlier).toEqual({ before: 'm-250', count: 250 })
+    expect([...touched].filter((index) => index < 250)).toEqual([])
+
+    const older = await pageBack(ok, t.id, snapshot.earlier)
+    expect([...older.map((row) => row.id), ...newest]).toEqual(all.map((row) => row.id))
+  }, 180_000)
+
+  it('sends a sync of the whole transcript after a turn only from where the reader holds it', async () => {
+    const { ok, thread, f } = await routedOwner({ streams: true })
+    const t = thread()
+    const session = f.mms.orchestrator.getOrCreateSession(t.id)
+    session.messages = Array.from({ length: 202 }, (_, index) => message(index, `${index}`)) as never
+    const opened = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
+    const stream = (opened.descriptor as { id: never }).id
+    const view = new RemoteThreadView()
+    view.install(readStream(f, stream, t.id).snapshot)
+    expect(view.read()?.earlier).toEqual({ before: 'm-2', count: 2 })
+
+    // A turn completes: one new message, and the whole transcript synced, as the orchestrator does.
+    session.messages = [...session.messages, message(202, 'reply')] as never
+    f.mms.orchestrator.emit('thread-messages', { threadId: t.id, messages: f.mms.orchestrator.getMessages(t.id) })
+    const sync = readStream(f, stream, t.id).events.filter((event) => event.type === 'thread.messages')
+    expect(sync).toHaveLength(1)
+    const sent = (sync[0]!.data.messages as Array<{ id: string }>).map((row) => row.id)
+    expect(sent[0]).toBe('m-2')
+    expect(sent.at(-1)).toBe('m-202')
+    view.apply('thread.messages', sync[0]!.data)
+    expect(view.read()?.messages).toHaveLength(201)
+    expect(view.read()?.earlier).toEqual({ before: 'm-2', count: 2 })
+
+    // The message the reader's part began at is gone (a rewind): a fresh snapshot says where its part begins now.
+    const snapshotId = () => (recordsOf(f, stream).find((record) => record.type === 'thread.snapshot.begin')!.body as { snapshot: string }).snapshot
+    const first = snapshotId()
+    session.messages = (session.messages as Array<{ id: string }>).filter((row) => row.id !== 'm-2') as never
+    f.mms.orchestrator.emit('thread-messages', { threadId: t.id, messages: f.mms.orchestrator.getMessages(t.id) })
+    expect(snapshotId()).not.toBe(first)
+    const { snapshot } = readStream(f, stream, t.id)
+    expect(snapshot.earlier).toEqual({ before: 'm-3', count: 2 })
+  }, 120_000)
+
+  it('carries the newest 200 of 450 messages kept in thread.db, read without loading the thread', async () => {
+    const { ok, f } = await routedOwner({ streams: true })
+    f.mms.threads.setSqliteStoreEnabled(true)
+    const t = f.mms.threads.createThread('Long', undefined, undefined, { started: true })
+    const all = Array.from({ length: 450 }, (_, index) => message(index, `${index}:`.padEnd(64, 'x')))
+    f.mms.threads.mutateThreadData(t.id, () => ({ messages: all as never }))
+    expect(f.mms.threads.usesThreadDb(t.id)).toBe(true)
+    f.mms.threads.forgetThreadData(t.id)
+    const wholeReads = vi.spyOn(f.mms.orchestrator, 'getMessages'),
+      loads = vi.spyOn(f.mms.threads, 'warmThread')
+
+    const opened = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
+    expect(wholeReads).not.toHaveBeenCalled()
+    expect(loads).not.toHaveBeenCalled()
+    const { snapshot } = readStream(f, (opened.descriptor as { id: never }).id, t.id)
+    const newest = (snapshot.messages as Array<{ id: string }>).map((row) => row.id)
+    expect(newest).toEqual(all.slice(250).map((row) => row.id))
+    expect(snapshot.earlier).toEqual({ before: 'm-250', count: 250 })
+
+    const older = await pageBack(ok, t.id, snapshot.earlier)
+    expect([...older.map((row) => row.id), ...newest]).toEqual(all.map((row) => row.id))
+  }, 180_000)
+})
+
+/**
+ * Another computer opening one of this computer's threads that is not open yet. The transcript is read off the event
+ * loop first; what the open depends on is checked again once it is read, as rows:
+ * - nothing changed: the stream opens, from the page read, and the thread is not loaded, not even to learn where its
+ *   database is (the thread is in no cache: the daemon just started);
+ * - a value was registered as the thread's secret after a message holding it was saved: the viewer gets it masked;
+ * - the computer's streams were closed meanwhile (a block, its access gone): it does not open;
+ * - the caller's delegation expired meanwhile: it does not open;
+ * - the thread is no longer one this computer shares: it does not open;
+ * - the stream is open already: it is returned as it is, nothing is read or built.
+ */
+describe('a thread stream opened cold', () => {
+  async function owner(first = '0:') {
+    const o = await routedOwner({ streams: true })
+    o.f.mms.threads.setSqliteStoreEnabled(true)
+    const t = o.f.mms.threads.createThread('Long', undefined, undefined, { started: true })
+    const all = Array.from({ length: 8 }, (_, index) => message(index, (index ? `${index}:` : first).padEnd(512 * 1024, 'x')))
+    o.f.mms.threads.mutateThreadData(t.id, () => ({ messages: all as never }))
+    expect(o.f.mms.threads.usesThreadDb(t.id)).toBe(true)
+    // As after a restart: no thread is held in memory, so a synchronous read of one would load it whole.
+    o.f.mms.threads.forgetThreadData(t.id)
+    return { ...o, t }
+  }
+  /** Holds the transcript read until `release`; `reading` settles once it has started. */
+  function heldRead() {
+    const original = MmsRemoteBackend.prototype.warm
+    let release!: () => void, started!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve)),
+      reading = new Promise<void>((resolve) => (started = resolve))
+    const warm = vi
+      .spyOn(MmsRemoteBackend.prototype, 'warm')
+      .mockImplementation(async function (this: MmsRemoteBackend, ...args) {
+        started()
+        await gate
+        return original.apply(this, args)
+      })
+    return { warm, reading, release }
+  }
+
+  it('reads the newest messages without loading the thread, and builds the snapshot once', async () => {
+    const { ok, f, t, adapter } = await owner()
+    const builds = vi.spyOn(MmsRemoteBackend.prototype, 'snapshot'),
+      wholeReads = vi.spyOn(f.mms.orchestrator, 'getMessages'),
+      loads = vi.spyOn(f.mms.threads, 'warmThread'),
+      waits = vi.spyOn(ThreadDbClient.prototype, 'callSync')
+    const opened = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
+    expect(builds).toHaveBeenCalledTimes(1)
+    expect(wholeReads).not.toHaveBeenCalled()
+    expect(loads).not.toHaveBeenCalled()
+    // Nothing on the event loop waited for the thread to load.
+    expect(waits.mock.calls.filter(([op]) => op === 'load')).toEqual([])
+    expect(f.mms.orchestrator.hasSession(t.id)).toBe(false)
+    const stream = (opened.descriptor as { id: never }).id
+    expect(adapter!.privateAccess(stream)).toMatchObject({ reader: f.callerNode, open: true })
+    const { snapshot } = readStream(f, stream, t.id)
+    expect((snapshot.messages as Array<{ id: string }>).map((row) => row.id)).toEqual(
+      Array.from({ length: 8 }, (_, index) => `m-${index}`)
+    )
+  }, 120_000)
+
+  it('does not open when the streams of that computer are closed while its transcript is read', async () => {
+    const { raw, f, t, adapter } = await owner()
+    const held = heldRead()
+    const opening = raw('stream.open', { kind: 'thread', threadId: t.id })
+    await held.reading
+    // As a block does: everything open, or opening, for that computer closes.
+    expect(adapter!.privateReaders()).toEqual([f.callerNode])
+    adapter!.closePrivate({ reader: f.callerNode })
+    held.release()
+    await expect(opening).rejects.toMatchObject({ code: 'cancelled' })
+    expect(adapter!.privateHead(f.callerNode, t.id)).toBeUndefined()
+  }, 120_000)
+
+  it('masks a value registered as the thread secret after the message holding it was saved', async () => {
+    const { ok, f, t } = await owner('my token is hunter2 ')
+    f.mms.orchestrator.setSecrets({
+      tools: {} as never,
+      masker: (threadId) => (threadId === t.id ? (text) => text.replaceAll('hunter2', '[secret]') : undefined)
+    })
+    const opened = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
+    const { snapshot } = readStream(f, (opened.descriptor as { id: never }).id, t.id)
+    const first = (snapshot.messages as Array<{ content: string }>)[0].content
+    expect(first.startsWith('my token is [secret] ')).toBe(true)
+    expect(JSON.stringify(snapshot)).not.toContain('hunter2')
+  }, 120_000)
+
+  it('does not open when the caller delegation expires while its transcript is read', async () => {
+    const { raw, f, t, adapter } = await owner()
+    const held = heldRead()
+    const opening = raw('stream.open', { kind: 'thread', threadId: t.id })
+    await held.reading
+    // The caller's delegation on this computer's roster has lapsed; this computer's own has not.
+    const verify = f.targetIdentity.verifySigned.bind(f.targetIdentity)
+    vi.spyOn(f.targetIdentity, 'verifySigned').mockImplementation(((signed: never, root: never) => {
+      const value = verify(signed, root) as { subject?: string; expiresAt?: number }
+      return value?.subject === f.callerNode && value.expiresAt !== undefined ? { ...value, expiresAt: 0 } : value
+    }) as never)
+    const builds = vi.spyOn(MmsRemoteBackend.prototype, 'snapshot')
+    held.release()
+    await expect(opening).rejects.toMatchObject({ code: 'bad_delegation' })
+    expect(adapter!.privateHead(f.callerNode, t.id)).toBeUndefined()
+    expect(builds).not.toHaveBeenCalled()
+  }, 120_000)
+
+  it('does not open when the thread is no longer shared once its transcript is read', async () => {
+    const { call, f, t, adapter } = await owner()
+    const held = heldRead()
+    const opening = call('stream.open', { kind: 'thread', threadId: t.id })
+    await held.reading
+    const getThread = f.mms.threads.getThread.bind(f.mms.threads)
+    vi.spyOn(f.mms.threads, 'getThread').mockImplementation((id: string) =>
+      id === t.id ? undefined : getThread(id)
+    )
+    held.release()
+    expect(await opening).toMatchObject({ ok: false, error: { code: 'thread_not_found' } })
+    expect(adapter!.privateHead(f.callerNode, t.id)).toBeUndefined()
+  }, 120_000)
+
+  it('returns a stream that is open already without reading or building again', async () => {
+    const { ok, thread, f } = await routedOwner({ streams: true })
+    const t = thread()
+    f.mms.orchestrator.getOrCreateSession(t.id).messages = [message(0, 'hello')] as never
+    const first = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
+    const warm = vi.spyOn(MmsRemoteBackend.prototype, 'warm'),
+      builds = vi.spyOn(MmsRemoteBackend.prototype, 'snapshot')
+    const again = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
+    expect((again.descriptor as { id: string }).id).toBe((first.descriptor as { id: string }).id)
+    expect(warm).not.toHaveBeenCalled()
+    expect(builds).not.toHaveBeenCalled()
+  }, 120_000)
 })

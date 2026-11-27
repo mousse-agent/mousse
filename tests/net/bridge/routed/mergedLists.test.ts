@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fitSnapshot, isListedComputer } from '../../../../src/mms/bridge/routed/listRows'
 import { MergedLists, type MergedListsOptions } from '../../../../src/mms/bridge/routed/mergedLists'
+import { launchedHereAndThere } from '../../../../src/mms/bots/launchedThreads'
 import { MmsEventBus } from '../../../../src/mms/events'
 import { NetDatabase } from '../../../../src/mms/net/store/database'
 import {
@@ -69,6 +70,8 @@ function harness(
     enabled?: boolean
     deadline?: number
     cacheSettleMs?: number
+    botOf?: MergedListsOptions['botOf']
+    botRowsChanged?: MergedListsOptions['botRowsChanged']
   } = {}
 ) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'merged-lists-')))
@@ -152,7 +155,9 @@ function harness(
       enabled: () => state.enabled,
       clock,
       fanOutDeadlineMs: options.deadline ?? 2_000,
-      cacheSettleMs: options.cacheSettleMs ?? 50
+      cacheSettleMs: options.cacheSettleMs ?? 50,
+      ...(options.botOf ? { botOf: options.botOf } : {}),
+      ...(options.botRowsChanged ? { botRowsChanged: options.botRowsChanged } : {})
     } satisfies MergedListsOptions)
   let lists = make()
   cleanups.push(() => lists.close())
@@ -1466,4 +1471,55 @@ describe('how projects are matched', () => {
     // The places were kept.
     expect(h.store.positions(h.node).get('seeded')).toBe(order('seeded'))
   }, 30_000)
+})
+
+// A bot here that starts a thread on another computer (`thread_create` with `computer`): the row names the bot, so its
+// "See all" and the Bots filter count it, and each change of its status there makes the bot read its threads again.
+describe('a thread a bot here started there', () => {
+  const bots = (h: { self: NodeId }) => ({
+    agent: (thread: string, more: Record<string, unknown> = {}) => ({ node: h.self, agent: { thread, title: 'Mousseroni', mode: 'auto', ...more } })
+  })
+
+  it('names the bot only on a row a bot thread of this computer started, never on its subagent or another computer\'s', async () => {
+    const changed: string[][] = []
+    const self = newId('node')
+    const h = harness({
+      self,
+      botOf: (thread) => (thread === 'bot-chat' ? { botId: 'b1', name: 'Mousseroni' } : undefined),
+      botRowsChanged: (launchers) => changed.push([...launchers])
+    })
+    const from = bots(h)
+    await h.feed(snapshot([
+      { id: 'bots', updatedAt: iso(4), startedFrom: from.agent('bot-chat') },
+      { id: 'agents', updatedAt: iso(3), startedFrom: from.agent('plain-thread') },
+      { id: 'subagent', updatedAt: iso(2), startedFrom: from.agent('bot-chat', { subagent: true }) },
+      { id: 'elsewhere', updatedAt: iso(1), startedFrom: { node: newId('node'), agent: { thread: 'bot-chat', title: 'x', mode: 'auto' } } }
+    ], { status: { bots: { state: 'processing' } } }))
+    const named = Object.fromEntries(h.lists.threads().map((row) => [row.id, row.startedByBot?.botId]))
+    expect(named).toEqual({ [h.q('bots')]: 'b1', [h.q('agents')]: undefined, [h.q('subagent')]: undefined, [h.q('elsewhere')]: undefined })
+    expect(changed.flat()).toContain('bot-chat')
+    // The bot's list shows it, working there, beside its threads here; only its own row, never the plain agent's.
+    expect(launchedHereAndThere([], h.lists, new Set(['bot-chat']))).toMatchObject([{ threadId: h.q('bots'), status: 'running', project: 'on Laptop' }])
+
+    // Its status there changes: the bot hears of it; another row's change does not reach it.
+    changed.length = 0
+    await h.feed(snapshot([
+      { id: 'bots', updatedAt: iso(4), startedFrom: from.agent('bot-chat') },
+      { id: 'agents', updatedAt: iso(3), startedFrom: from.agent('plain-thread') }
+    ], { status: { bots: { state: 'completed' }, agents: { state: 'processing' } } }))
+    expect(changed).toEqual([['bot-chat']])
+
+    // The computer goes offline: what its rows do is no longer known, and the bot hears of that too.
+    changed.length = 0
+    h.online.delete(h.node)
+    h.lists.nodeOffline(h.node)
+    expect(changed).toEqual([['bot-chat']])
+    expect(launchedHereAndThere([], h.lists, new Set(['bot-chat']))).toMatchObject([{ threadId: h.q('bots'), status: 'idle' }])
+
+    // Renamed in view (its stream says so before the lists do): the bot hears of it at once.
+    changed.length = 0
+    h.lists.applyMetadata(h.node, { id: 'bots', name: 'Renamed', createdAt: iso(0), updatedAt: iso(5), startedFrom: from.agent('bot-chat') })
+    expect(changed).toEqual([['bot-chat']])
+    expect(launchedHereAndThere([], h.lists, new Set(['bot-chat']))[0]?.title).toBe('Renamed')
+  })
 })
