@@ -1148,6 +1148,11 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'A goal is set and changed from the desktop composer of the computer that runs the thread (issue #1207).'
   },
   {
+    methods: ['orchestrator.correctSubagents'],
+    reason:
+      'Also tell subagents is sent by a person at a window or the CLI of the computer that runs the thread; the composer of another computer does not offer it (#1959).'
+  },
+  {
     methods: ['threads.setHidden'],
     reason: "Show in sidebar is offered on the computer that runs a hidden thread: in its bot's chat, or in the top bar of a thread an agent started there (issue #1217)."
   },
