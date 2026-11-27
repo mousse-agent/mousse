@@ -2021,6 +2021,12 @@ function jobRefused(message: string): AppError {
   return knownAppError({ code: 'scheduled_job_refused', message }, { category: 'invalid', retryable: false })
 }
 
+/** A draft whose request URL came or went: what keeps Turn on off is worked out again, and the draft read back. */
+function recheckedDraft(ctx: HandlerContext, id: string): ScheduledJob | undefined {
+  ctx.mms.automationDrafts?.recheck(id)
+  return ctx.mms.scheduled.getJob(id) ?? undefined
+}
+
 /** Runs a webhook request; the service's refusals ("already has a webhook", "agent-created jobs ...") reach the caller as readable errors. */
 async function withWebhookRefusals<T>(run: () => Promise<T>): Promise<T> {
   try {
@@ -3244,6 +3250,25 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         throw error
       }
     }
+    case 'threads.chainHold': {
+      // The person's Continue or Stop on a chain of agent messages held at its budget (issue #1443), asked on the thread
+      // the chain started in. Only a person answers it: an agent, an automation or the CLI never lets a chain go on.
+      // A routed call counts only when the calling computer's router marked it a window's (`ROUTED_SEND_WINDOW_KEY`), as it
+      // does for a window and for nothing else: an authenticated device alone is not a person.
+      const p = isObject(params) ? params : {}
+      const routed = ctx.connection?.clientType === 'bridge'
+      if (!isPerson(ctx.connection) || (routed && p[ROUTED_SEND_WINDOW_KEY] !== 'person'))
+        throw new DomainRpcError('forbidden', 'Only a person at a Mousse window answers a held chain of agent messages')
+      rejectUnknownKeys(p, ['threadId', 'chainId', 'holdId', 'answer', ...(routed ? [ROUTED_SEND_WINDOW_KEY] : [])])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const chainId = asString(p.chainId, 'chainId', 256)
+      const holdId = asString(p.holdId, 'holdId', 256)
+      const answer = asString(p.answer, 'answer', 16)
+      if (answer !== 'continue' && answer !== 'stop') throw new DomainRpcError('invalid_params', 'answer must be continue or stop')
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const limit = deviceLimit(ctx)
+      return asRpcRejection(() => ctx.mms.orchestrator.answerChainHold(threadId, chainId, answer, { holdId, ...(limit ? { deviceLimit: limit } : {}) }))
+    }
     case 'runs.cancelPause': {
       // End a pause without continuing: the run is cancelled and the thread's held messages go on.
       const p = isObject(params) ? params : {}
@@ -3853,10 +3878,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         threadId: patch.threadId === undefined ? existing.threadId : patch.threadId ?? undefined,
         projectId: patch.projectId === undefined ? existing.projectId : patch.projectId ?? undefined,
         selection: patch.selection === undefined ? existing.selection : patch.selection ?? undefined,
-        mode: patch.mode === undefined ? existing.mode : patch.mode ?? undefined,
         workspace: patch.workspace === undefined ? existing.workspace : patch.workspace ?? undefined
       }
-      const touchesOptions = ['selection', 'mode', 'workspace', 'threadId', 'projectId'].some((key) => (patch as Record<string, unknown>)[key] !== undefined)
+      const touchesOptions = ['selection', 'workspace', 'threadId', 'projectId'].some((key) => (patch as Record<string, unknown>)[key] !== undefined)
       const checked = touchesOptions ? checkJobOptions(ctx, merged) : {}
       // An edit never raises the job's ceiling above what the editor holds now. The person editing here may raise it
       // to their own mode by choosing a mode on purpose (see `permissionsAfterEdit`). It is worked out inside the store's
@@ -3897,7 +3921,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(patch.projectId !== undefined ? { projectId: patch.projectId === null ? undefined : patch.projectId } : {}),
         ...(patch.selection !== undefined ? { selection: patch.selection === null ? undefined : checked.selection ?? patch.selection } : {}),
         ...(patch.agent !== undefined ? { agent: patch.agent === null ? undefined : patch.agent } : {}),
-        ...(patch.mode !== undefined ? { mode: patch.mode === null ? undefined : patch.mode } : {}),
         ...(patch.workspace !== undefined ? { workspace: patch.workspace === null ? undefined : patch.workspace } : {}),
         ...(patch.tellMe !== undefined ? { tellMe: patch.tellMe } : {}),
         ...(patch.keys !== undefined ? { keys: patch.keys?.length ? patch.keys : undefined } : {}),
@@ -4000,7 +4023,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
       const port = p.port === undefined ? undefined : asBoundedInt(p.port, 'port', { min: 1024, max: 65535 })
-      return withWebhookRefusals(async () => ({ ...(await ctx.mms.enableScheduledWebhook(id, { port })), jobs: ctx.mms.scheduled.listJobs() }))
+      return withWebhookRefusals(async () => {
+        const grant = await ctx.mms.enableScheduledWebhook(id, { port })
+        // A draft that waited for its request URL can be turned on now.
+        const job = grant.job.draft ? recheckedDraft(ctx, id) ?? grant.job : grant.job
+        return { ...grant, job, jobs: ctx.mms.scheduled.listJobs() }
+      })
     }
     case 'scheduled.webhook.rotate': {
       const p = isObject(params) ? params : {}
@@ -4010,7 +4038,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'scheduled.webhook.disable': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
-      return withWebhookRefusals(async () => ({ job: ctx.mms.scheduled.disableWebhook(id), jobs: ctx.mms.scheduled.listJobs() }))
+      return withWebhookRefusals(async () => {
+        const off = ctx.mms.scheduled.disableWebhook(id)
+        const job = off.draft ? recheckedDraft(ctx, id) ?? off : off
+        return { job, jobs: ctx.mms.scheduled.listJobs() }
+      })
     }
     case 'scheduled.webhook.deliveries': {
       const p = isObject(params) ? params : {}

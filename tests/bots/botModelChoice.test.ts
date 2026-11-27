@@ -150,7 +150,7 @@ describe('model tiers', () => {
 })
 
 describe('a usage limit on one model', () => {
-  const policy: RunPolicy = { mode: 'default', origin: 'bot', approvals: 'grants', tools: { allow: ['read'] }, authority: { kind: 'bot', digest: 'd1' } }
+  const policy: RunPolicy = { origin: 'bot', approvals: 'grants', tools: { allow: ['read'] }, authority: { kind: 'bot', digest: 'd1' } }
   const hold: BotRuntimeHold = { canHoldBot: () => ({ ok: true }) } as unknown as BotRuntimeHold
   const models = [listedModel('gemini-4-neon', { capabilities: { efforts: [], images: false } }), listedModel('gemini-4-hydrogen', { capabilities: { efforts: [], images: false } })]
 

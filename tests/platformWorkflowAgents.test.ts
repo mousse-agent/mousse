@@ -58,7 +58,7 @@ async function fixture() {
   const integrations = services.settings.get().integrations
   services.settings.set({
     provider: { llmProvider: modelRef.providerId, model: modelRef.modelId },
-    integrations: { ...integrations, tools: { enabled: true, enabledTools: ['read', 'write', 'ask_user', 'create_task'] } }
+    integrations: { ...integrations, tools: { enabled: true, enabledTools: ['read', 'write', 'question_ask', 'task_create'] } }
   })
   const thread = services.threads.createThread('Workflow agent fixture')
   let manifestOverride: WorkflowRunManifest | undefined

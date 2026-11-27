@@ -1,4 +1,4 @@
-import type { RoutedAgentMark } from '../../../shared/bridge/routed'
+import type { RoutedAgentBot, RoutedAgentMark } from '../../../shared/bridge/routed'
 import { isPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import { int, str, type Row } from '../db/rows'
 import type { RunStore } from '../RunStore'
@@ -28,8 +28,8 @@ export interface RemoteLaunchRecord {
   computerName: string
   /** The thread's name there. */
   title: string
-  /** The project there that is the same repository as the launcher's. */
-  remoteProjectId: string
+  /** The project there that is the same repository as the launcher's; null for a thread in no project there. */
+  remoteProjectId: string | null
   worktree: boolean
   /**
    * The `hidden` the create sends that computer: whether it keeps the thread out of its sidebar. Null sends none (a
@@ -42,9 +42,15 @@ export interface RemoteLaunchRecord {
   permissionMode: PermissionMode
   /** The mode it was set to there, once set. */
   remoteMode: PermissionMode | null
-  firstMessage: { content: string; mode: 'agent' | 'plan' } | null
+  firstMessage: { content: string } | null
   /** The agent mark every write of the launch carries, fixed at launch (the launcher's run, title, hops and mode). */
   mark: RoutedAgentMark
+  /**
+   * The personal bot the first message is sent as (`ROUTED_AGENT_BOT_KEY`), fixed at launch and kept in the mark's column,
+   * never sent in the mark. Absent for an agent's launch, one stored before it, or one to a computer that does not take
+   * it, so every attempt sends the same message.
+   */
+  senderBot?: RoutedAgentBot
   /** The thread's id there (unqualified); null until that computer created it. */
   remoteThreadId: string | null
   /** The run the first message started there; null before, or when it was queued or refused. */
@@ -90,6 +96,19 @@ function parseMark(raw: unknown): RoutedAgentMark {
   }
 }
 
+/** The bot kept beside the mark (`RemoteLaunchRecord.senderBot`); undefined when there is none or it cannot be read. */
+function parseSenderBot(raw: unknown): RoutedAgentBot | undefined {
+  try {
+    const bot = (JSON.parse(String(raw)) as { bot?: unknown }).bot
+    if (!bot || typeof bot !== 'object') return undefined
+    const { id, name, look } = bot as Record<string, unknown>
+    if (typeof id !== 'string' || typeof name !== 'string') return undefined
+    return { id, name, ...(look && typeof look === 'object' ? { look: look as RoutedAgentBot['look'] } : {}) }
+  } catch {
+    return undefined
+  }
+}
+
 function stopOf(row: Row): RemoteLaunchStop | null {
   const state = str(row.stop_state)
   const key = str(row.stop_key)
@@ -117,15 +136,17 @@ function fromRow(row: Row): RemoteLaunchRecord {
     node: String(row.node),
     computerName: String(row.computer_name),
     title: String(row.title),
-    remoteProjectId: String(row.remote_project_id),
+    remoteProjectId: str(row.remote_project_id) || null,
     worktree: int(row.worktree) === 1,
     hidden: row.hidden === null || row.hidden === undefined ? null : int(row.hidden) === 1,
     instanceId: str(row.instance_id),
     model: str(row.model),
     permissionMode: isPermissionMode(mode) ? mode : 'ask',
     remoteMode: remoteMode && isPermissionMode(remoteMode) ? remoteMode : null,
-    firstMessage: content === null ? null : { content, mode: row.first_message_mode === 'plan' ? 'plan' : 'agent' },
+    // A row's first_message_mode is retired (Plan mode is gone): a first message always runs as an agent turn.
+    firstMessage: content === null ? null : { content },
     mark: parseMark(row.mark),
+    ...(parseSenderBot(row.mark) ? { senderBot: parseSenderBot(row.mark) } : {}),
     remoteThreadId: str(row.remote_thread_id),
     remoteRunId: str(row.remote_run_id),
     state: (STATES.has(state) ? state : 'abandoned') as RemoteLaunchState,
@@ -172,15 +193,16 @@ export class RemoteLaunchRecords {
         input.node,
         input.computerName,
         input.title,
-        input.remoteProjectId,
+        // The column is NOT NULL: a thread in no project there is stored as ''.
+        input.remoteProjectId ?? '',
         input.worktree ? 1 : 0,
         input.hidden === null ? null : input.hidden ? 1 : 0,
         input.instanceId,
         input.model,
         input.permissionMode,
         input.firstMessage?.content ?? null,
-        input.firstMessage?.mode ?? null,
-        JSON.stringify(input.mark),
+        input.firstMessage ? 'agent' : null,
+        JSON.stringify({ ...input.mark, ...(input.senderBot ? { bot: input.senderBot } : {}) }),
         input.firstMessage ? 'pending' : 'none',
         now,
         now

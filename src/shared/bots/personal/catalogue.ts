@@ -31,7 +31,7 @@ export const BOT_CORE_TOOLS: readonly string[] = [
   'item_save', 'item_list',
   'work_start', 'work_note', 'work_list',
   'remind', 'wake',
-  'escalate', 'ask_owner',
+  'permission_ask', 'question_ask',
   // A card under a message: listed only in a group, Codex asked the owner instead of showing one (§15).
   'show_card',
   'thread_list', 'thread_read', 'thread_send', 'thread_create', 'thread_archive',
@@ -57,10 +57,10 @@ export interface BotCatalogueGroup {
 }
 
 const THREADS_GUIDANCE = [
-  "These reach your owner's Mousse threads, here and on their other computers that let agents work there (list_computers): search them (thread_search), wait on one (thread_wait), read the terminals open in them (terminal_read), look at their queues and Git status and diffs, steer or stop one's turn, change what waits in its queue, fork one or hand a fork's work back, hide or show a thread you started, and archive one whose work is merged or dropped (and unarchive it again).",
+  "These reach your owner's Mousse threads, here and on their other computers that let agents work there (computer_list): search them (thread_search), wait on one (thread_wait), read the terminals open in them (terminal_read), look at their queues and Git status and diffs, stop one's turn or add a note to it (thread_send with intent note), change what waits in its queue, fork one or hand a fork's work back, hide or show a thread you started, and archive one whose work is merged or dropped (and unarchive it again).",
   'thread_list names their projects and the models a thread can run on. Each thread comes with a link: put it in your reply when you name a thread, and your owner can click it to open it.',
-  "A thread you start stays out of your owner's sidebar, your chat lists it, until your owner writes in it. Start it with hidden: false when they asked to follow, answer or continue that work in their sidebar. thread_hide (or thread_update with hidden) hides or shows a thread you started later.",
-  "In a thread you didn't start, answer an approval (approval_respond) only when your owner asks and lets agents answer approvals, never a question."
+  "A thread you start stays out of your owner's sidebar, your chat lists it, until your owner writes in it. Start it with hidden: false when they asked to follow, answer or continue that work in their sidebar. thread_update with hidden hides or shows a thread you started later.",
+  "In a thread you didn't start, answer an approval (request_answer) only when your owner asks and lets agents answer approvals, never a question."
 ].join('\n')
 
 const BROWSER_GUIDANCE = [
@@ -69,15 +69,15 @@ const BROWSER_GUIDANCE = [
   'A page that is still loading is no failure: carry on with what is there, or wait for it. A cookie banner you may dismiss.',
   'You have no sign-ins of your own: when a page needs one, ask your owner to sign in (they can take over your browser), and it stays signed in for you. When a page shows a human check or a consent wall a person can get past, ask your owner to take over your browser and do it; don\'t retry it or work around it yourself. When a site refused your browser, don\'t retry it: say so in your report, and carry on with the rest.',
   'browser_screenshot saves the picture in your files folder and shows it to your owner by itself, under your next message or with the question you ask them; its result says where, or that it was not kept. Save another copy only when your owner asks for one by name.',
-  'When a page needs your owner (to take it over, to check it before you submit, or for details you don\'t have), ask them with ask_owner when you have it: your work waits with the page open and carries on with their answer (a tap, or their own words with Other…).'
+  'When a page needs your owner (to take it over, to check it before you submit, or for details you don\'t have), ask them with question_ask when you have it: your work waits with the page open and carries on with their answer (a tap, or their own words with Other…).'
 ].join('\n')
 
 const WORK_GUIDANCE = [
   'work_stop stops a piece of work (stop it and start again with work_start if the task changed).',
-  'The owner can ask for one piece of work on a particular model ("do this one with Opus"): find the one they mean with work_models and give it to work_start as model. It is for that work only; their usual models stay as set in Runs on. If it isn\'t there or can\'t run your work, tell them why in plain words and start nothing on another model. Never choose a model for work yourself.',
-  'Your work may wait for the owner\'s answer to a question it asked (your situation lists each one). When they answer it in the chat in their own words, pass their answer on with question_answer; never answer it for them.',
-  'In a run, when a job splits into parts that can go on at once, or a part needs another model, you can hand parts to subagents (subagent_start). Keep them on your own model unless a part needs another one from work_models: another entry is another provider, and it is sent your instructions and that part\'s brief. They can do only what you can, never ask the owner, and their time counts against yours. Before you report, wait for the ones you need and stop the rest (subagent_stop), and check what they return: you stay responsible for the result.',
-  'Keep a checklist of a long job with create_task, list_tasks and update_task; it is yours alone.',
+  'The owner can ask for one piece of work on a particular model ("do this one with Opus"): find the one they mean with model_list and give it to work_start as model. It is for that work only; their usual models stay as set in Runs on. If it isn\'t there or can\'t run your work, tell them why in plain words and start nothing on another model. Never choose a model for work yourself.',
+  'Your work may wait for the owner\'s answer to a question it asked (your situation lists each one). When they answer it in the chat in their own words, pass their answer on with request_answer; never answer it for them.',
+  'In a run, when a job splits into parts that can go on at once, or a part needs another model, you can hand parts to subagents (subagent_start). Keep them on your own model unless a part needs another one from model_list: another entry is another provider, and it is sent your instructions and that part\'s brief. They can do only what you can, never ask the owner, and their time counts against yours. Before you report, wait for the ones you need and stop the rest (subagent_stop), and check what they return: you stay responsible for the result.',
+  'Keep a checklist of a long job with task_create, task_list and task_update; it is yours alone.',
   'consult asks one of your context threads, when you have them.'
 ].join('\n')
 
@@ -123,14 +123,14 @@ const AUTOMATION_GUIDANCE = 'When the owner asks you, from Automations, to set u
 
 const MCP_GUIDANCE = "mcp_servers lists your owner's MCP servers and which ones you can use. You use their tools without asking; one your owner switched off stays off, and asking won't help. The tools you hold now are below. In the chat each call is a quick one, with 15 seconds: a job of several calls goes to work_start. A call that asks your owner first is held for them: end your turn, and its result comes back to this chat. When a call says it can't be told whether it went through, never send it again: tell your owner."
 
-const SKILLS_GUIDANCE = 'list_skills lists your owner\'s skills; load_skill loads one, with its instructions, when a job fits it.'
+const SKILLS_GUIDANCE = 'skill_list lists your owner\'s skills; skill_load loads one, with its instructions, when a job fits it.'
 
 /** The catalogue's groups, in the order the system text lists them. Static: the same text for every bot and turn. */
 export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   {
     id: 'threads',
-    line: "more for your owner's threads: search, wait, steer, hide, fork, queues, terminals, Git, approvals, their other computers (needs \"use your threads\")",
-    tools: ['thread_search', 'thread_wait', 'thread_interrupt', 'thread_steer', 'thread_hide', 'thread_update', 'thread_fork', 'thread_merge_back', 'terminal_read', 'queue_list', 'queue_enqueue', 'queue_edit', 'queue_remove', 'queue_reorder', 'queue_promote_to_steer', 'git_status', 'git_diff', 'list_computers', 'approval_respond'],
+    line: "more for your owner's threads: search, wait, stop, hide, fork, queues, terminals, Git, approvals, their other computers (needs \"use your threads\")",
+    tools: ['thread_search', 'thread_wait', 'thread_stop', 'thread_update', 'thread_fork', 'thread_return', 'terminal_read', 'queue_list', 'queue_enqueue', 'queue_update', 'git_status', 'git_diff', 'computer_list', 'request_answer'],
     guidance: THREADS_GUIDANCE
   },
   {
@@ -149,7 +149,7 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   {
     id: 'work',
     line: 'stop work, pick a model for one piece of work, pass on an answer to work, take back a question, subagents, a task checklist, consults',
-    tools: ['work_stop', 'work_models', 'question_answer', 'question_withdraw', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'create_task', 'list_tasks', 'update_task', 'consult'],
+    tools: ['work_stop', 'model_list', 'request_answer', 'question_withdraw', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'task_create', 'task_list', 'task_update', 'consult'],
     guidance: WORK_GUIDANCE
   },
   {
@@ -186,7 +186,7 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   { id: 'quick_actions', line: 'buttons in your owner\'s Actions list', tools: ['create_quick_action'], guidance: QUICK_ACTIONS_GUIDANCE },
   { id: 'automation', line: 'automation drafts, when your owner asks from Automations', tools: ['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause'], guidance: AUTOMATION_GUIDANCE },
   { id: 'mcp', line: "your owner's MCP servers and their tools", tools: ['mcp_servers'], guidance: MCP_GUIDANCE },
-  { id: 'skills', line: 'your owner\'s skills', tools: ['list_skills', 'load_skill'], guidance: SKILLS_GUIDANCE }
+  { id: 'skills', line: 'your owner\'s skills', tools: ['skill_list', 'skill_load'], guidance: SKILLS_GUIDANCE }
 ]
 
 const GROUPS: ReadonlyMap<string, BotCatalogueGroup> = new Map(BOT_CATALOGUE.map((group) => [group.id, group]))

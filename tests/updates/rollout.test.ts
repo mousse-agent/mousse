@@ -36,6 +36,8 @@ interface Box {
   app: boolean
   /** Its app can install (false: a build that can't update itself). */
   self?: boolean
+  /** Its Mousse predates the update report: it says nothing about updating itself. */
+  noReport?: boolean
   full: boolean
   kind?: string
   revoked?: boolean
@@ -135,7 +137,7 @@ function world(opts: { self?: string; boxes?: Array<Partial<Box> & { node: strin
       revoked: box.revoked ?? false,
       state: box.online ? 'open' : 'closed',
       ...(box.seen ? { version: box.seen } : { olderThanThis: true }),
-      update: { channel: box.channel ?? 'stable', self: box.self ?? true, ...(box.app && box.online ? { requests: true as const } : {}) },
+      ...(box.noReport ? {} : { update: { channel: box.channel ?? 'stable', self: box.self ?? true, ...(box.app && box.online ? { requests: true as const } : {}) } }),
       ...(box.channel && box.channel !== 'stable' ? { otherChannel: true } : {})
     }))
   const records = async (): Promise<SshRecordView[]> =>
@@ -221,7 +223,8 @@ describe('who a rollout targets', () => {
         { node: 'closed-app', app: false },
         { node: 'no-updater', self: false, app: false },
         { node: 'away', online: false },
-        { node: 'ancient', seen: undefined, app: false }
+        { node: 'ancient', seen: undefined, app: false },
+        { node: 'unreported', noReport: true, app: false }
       ],
       ssh: [{ node: 'server', version: '1.0.0' }]
     })
@@ -236,9 +239,12 @@ describe('who a rollout targets', () => {
       'no-updater': 'manual/manual',
       away: 'request/offline',
       ancient: 'manual/manual',
+      unreported: 'manual/manual',
       server: 'ssh/ready'
     })
     expect(plan.find((row) => row.node === 'closed-app')?.error).toBe("Mousse isn't open there")
+    // Online with a version but no report: its build predates update requests, whether its app is open or not.
+    expect(plan.find((row) => row.node === 'unreported')?.error).toBe('Too old to update from here')
   })
 
   it('leaves this computer out when it already runs the target', async () => {

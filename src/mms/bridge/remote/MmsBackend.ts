@@ -35,7 +35,7 @@ import { defaultIntegrationActor } from '../../../shared/integrations/actor'
 import { resolveEffectiveSkills } from '../../integrations/catalog/EffectiveIntegrationResolver'
 
 /** Chat modes a remote composer offers, as in the desktop composer's mode menu. */
-const REMOTE_CHAT_MODES = ['plan', 'agent', 'build'] as const
+const REMOTE_CHAT_MODES = ['agent', 'build'] as const
 
 /** A queued message without its image data, which can be megabytes. */
 function queueRow(item: QueuedMessage): Record<string, unknown> {
@@ -659,6 +659,8 @@ export class MmsRemoteBackend implements RemoteBackendPort {
           // A run that hit a usage limit: when it resets and whether it continues by itself. Absent otherwise.
           ...(pause ? { paused: { runId: pause.runId, until: pause.until, estimated: pause.estimated, autoResume: pause.autoResume, ...(pause.stale ? { stale: true } : {}), ...(pause.limitKind ? { limitKind: pause.limitKind } : {}) } } : {})
         },
+        // The turn as now, with a held chain's card or without one: a stream that starts again shows it, or clears it.
+        turnState: s.orchestrator.getTurnState(threadId),
         revision: this.revision()
       }
     )

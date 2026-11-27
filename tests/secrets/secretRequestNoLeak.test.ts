@@ -80,7 +80,7 @@ describe('a secret given through the card', () => {
     }
     const [request, run] = secretTools({ secrets: () => host } as unknown as AppToolHost)
     const ctx = (threadId: string, cwd?: string): ToolCallContext => ({
-      caller: { threadId, runId: 'r', provider: 'pi', modeCeiling: 'default', accessLevel: 'manage' },
+      caller: { threadId, runId: 'r', provider: 'pi', accessLevel: 'manage' },
       turn: { threadId, runId: 'r', modeFacts: { readOnly: false, agent: true, build: false }, ...(cwd ? { projectPath: cwd } : {}) } as never,
       toolCallId: 'c',
       signal: new AbortController().signal,

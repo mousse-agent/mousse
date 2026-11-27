@@ -14,6 +14,7 @@ import { validateRemoteParams } from '../../../../src/mms/bridge/remote/dto'
 import { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX } from '../../../../src/mms/run/mcp/appTools/agentMessage'
 import { agentMessageWords } from '../../../../src/shared/agentMessageWords'
 import { remoteSubagentPreamble } from '../../../../src/mms/run/delegation/guidance'
+import { AGENT_MESSAGE_MAX_HOPS } from '../../../../src/mms/orchestrator/OrchestratorService'
 import { registerNetMethods } from '../../../../src/mms/net/registerMethods'
 import { DomainHandlerRegistry } from '../../../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../../../src/mms/protocol/handlers'
@@ -209,16 +210,16 @@ describe('a routed call marked as an agent\'s (issue #1160)', () => {
   it('takes the larger hop count: its own count of agent runs in a row, not only what the caller says', async () => {
     standInForTurns()
     policy.set(t.callerNode, { agentReach: 'all' })
-    // A thread whose latest run is the third agent message in a row.
+    // A thread whose latest run is the last agent message in a row the limit allows.
     const thread = t.thread('Busy with agents')
-    const earlier = await t.owner.runEngine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'chain', source: 'mcp', actor: { kind: 'agent', threadId: 'x', runId: 'y', toolCallId: 'z', hops: 3 } })
+    const earlier = await t.owner.runEngine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'chain', source: 'mcp', actor: { kind: 'agent', threadId: 'x', runId: 'y', toolCallId: 'z', hops: AGENT_MESSAGE_MAX_HOPS } })
     if (earlier.status !== 'accepted') throw new Error('not accepted')
     t.owner.runEngine.markStarting(earlier.runId)
     t.owner.runEngine.markTerminal(earlier.runId, 'completed')
     expect(await refusal(call('orchestrator.send', { threadId: thread.id, content: 'one more', clientRequestId: 'hop-1', agent: mark({ hops: 1 }) }))).toBe('agent_hops_exceeded')
     // A carried count past the limit is refused too.
     const fresh = await launched()
-    expect(await refusal(call('orchestrator.send', { threadId: fresh, content: 'deep', clientRequestId: 'hop-2', agent: mark({ hops: 4 }) }))).toBe('agent_hops_exceeded')
+    expect(await refusal(call('orchestrator.send', { threadId: fresh, content: 'deep', clientRequestId: 'hop-2', agent: mark({ hops: AGENT_MESSAGE_MAX_HOPS + 1 }) }))).toBe('agent_hops_exceeded')
   }, 120_000)
 
   it('changes only threads the device\'s agents may reach, and never as a window or a phone', async () => {

@@ -74,7 +74,7 @@ describe('definitions through the gateway', () => {
     orch.setMcpAttachment(mcpServer)
     harness = defs.install(orch, home)
     registry = new AgentDefinitionRegistry({ profileId, profileRoot: join(home, 'profile') })
-    const integrations = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'edit', 'ask_user', 'bash', 'thread_read', 'git_status', 'git_diff'] })
+    const integrations = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'edit', 'question_ask', 'bash', 'thread_read', 'git_status', 'git_diff'] })
     const entry = (instanceId?: string) => ({ ref: { providerId: PROVIDER, modelId: MODEL, ...(instanceId ? { instanceId } : {}) }, available: true, efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: [] })
     resolver = new AgentResolver({ registry, integrationLookup: integrations, modelLookup: new StaticAgentModelLookup([entry(), entry(`pi:${PROVIDER}`), entry(APPROVAL_ONLY_INSTANCE), entry('stubborn'), { ...entry(`pi:${OTHER}`), ref: { providerId: OTHER, modelId: MODEL, instanceId: `pi:${OTHER}` } }] as never) })
   })
@@ -91,10 +91,10 @@ describe('definitions through the gateway', () => {
   function publish(runtimeKind: AgentRuntimeKind, instanceId: string, mutate: (settings: ReturnType<typeof defaultAgentSettings>) => void = () => {}) {
     const settings = defaultAgentSettings({ name: 'Reviewer', slug: `reviewer-${runtimeKind}-${instanceId.replace(/\W/g, '')}` })
     settings.primaryModel.ref = { providerId: PROVIDER, modelId: MODEL, instanceId }
-    settings.tools = { mode: 'explicit', allowlist: ['read', 'write', 'ask_user'] }
+    settings.tools = { mode: 'explicit', allowlist: ['read', 'write', 'question_ask'] }
     mutate(settings)
     const draft = registry.createDraft({ runtimeKind, settings, systemPrompt: 'DEFINITION_SYSTEM_PROMPT' })
-    const published = registry.publish(draft.id, draft.draftHash, { integrationLookup: new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'edit', 'ask_user', 'bash', 'thread_read', 'git_status', 'git_diff'] }) })
+    const published = registry.publish(draft.id, draft.draftHash, { integrationLookup: new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write', 'edit', 'question_ask', 'bash', 'thread_read', 'git_status', 'git_diff'] }) })
     return { id: draft.id, revision: published.revision }
   }
 
@@ -171,13 +171,13 @@ describe('definitions through the gateway', () => {
     expect(input).toMatchObject({ session: 'ephemeral', instructions: { placement: 'replace' }, instanceId: `pi:${PROVIDER}`, cwd: work, prompt: 'review the work' })
     expect(input.instructions!.text).toContain('DEFINITION_SYSTEM_PROMPT')
     expect(host.definition?.grants).toEqual(resolved.grants)
-    expect(host.bridge?.toolPolicy?.allow).toEqual(['ask_user', 'read', 'write'])
+    expect(host.bridge?.toolPolicy?.allow).toEqual(['question_ask', 'read', 'write'])
     // The run is recorded, with the definition's policy on its binding; the stored revision is untouched.
     const runs = engine.listRuns(thread.id)
     expect(runs).toHaveLength(1)
     expect(runs[0]).toMatchObject({ source: 'definition', status: 'completed' })
     expect(engine.bindingForRun(runs[0]!.runId)?.policy).toEqual({
-      mode: 'default', origin: 'definition', approvals: 'grants', tools: { allow: ['ask_user', 'read', 'write'] },
+      origin: 'definition', approvals: 'grants', tools: { allow: ['question_ask', 'read', 'write'] },
       // The default limits are none, so the policy holds no count and any runtime can run it.
       budget: {},
       authority: { kind: 'definition', digest: expect.stringMatching(/^[0-9a-f]{64}$/) },
@@ -225,7 +225,7 @@ describe('definitions through the gateway', () => {
       call('write', { path: 'denied.txt', content: 'x' }),
       call('mcp__srv__drop_table', {}),
       call('read', { path: '../outside.txt' }),
-      call('ask_user', { questions: [{ id: 'q', prompt: 'May I?' }] }),
+      call('question_ask', { questions: [{ id: 'q', prompt: 'May I?' }] }),
       say('done')
     ]
     defs.setNext(async () => {
@@ -511,7 +511,7 @@ describe('definitions through the gateway', () => {
         input: { runId: `foreign-${origin}`, attemptId: `foreign-${origin}:1`, threadId, cwd: work, model: binding.model, instanceId: binding.instanceId, llmProvider: PROVIDER, modelPinned: true, mode: 'agent', prompt: 'plain', messages: [{ role: 'user', content: 'plain', timestamp: Date.now() }], signal: new AbortController().signal },
         sink, control: { drainSteer: () => undefined, heartbeat: noop },
         host: { tools: {}, context: { recoverOverflow: () => null, prepareNativeContext: () => null, nativeHistoryAfterTurn: () => '' } },
-        app: { turnToken: 't', modeCeiling: 'default', mcpEligible: false, instructions: () => ({ sessionInstructions: '', turnPreamble: '' }) }
+        app: { turnToken: 't', mcpEligible: false, instructions: () => ({ sessionInstructions: '', turnPreamble: '' }) }
       })
       await expect(turn.result).rejects.toMatchObject({ code: 'policy_unenforceable' })
     }
@@ -756,7 +756,7 @@ describe('definitions through the gateway', () => {
   })
 
   describe('a browser definition on an instance that runs definitions itself (Pi RPC)', () => {
-    const BROWSER_BUILTINS = ['read', 'write', 'ask_user', 'bash', 'thread_read', 'browser_open', 'browser_observe', 'browser_act', 'browser_screenshot']
+    const BROWSER_BUILTINS = ['read', 'write', 'question_ask', 'bash', 'thread_read', 'browser_open', 'browser_observe', 'browser_act', 'browser_screenshot']
     /** A local browser stand-in: it records what reached it and never loads a page. */
     function localBrowser(label: string) {
       const dispatched: Array<{ label: string; name: string; args: unknown; actor: unknown; runId?: string }> = []
@@ -787,7 +787,7 @@ describe('definitions through the gateway', () => {
           seen.tools = registry.listForTurn(input.threadId, input.runId).map((tool) => tool.name)
           for (const [index, call] of calls.entries()) {
             seen.results.push(await registry.call(call.name, call.args, {
-              credential: { threadId: input.threadId, runId: input.runId, provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'rotate', current: () => true },
+              credential: { threadId: input.threadId, runId: input.runId, provider: 'pi', accessLevel: 'lineage', binding: 'rotate', current: () => true },
               toolCallId: `call-${index}`,
               signal: input.signal
             }))

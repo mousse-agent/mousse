@@ -3,6 +3,7 @@ import {
   ROUTED_JOB_METHODS,
   ROUTED_METHODS,
   ROUTED_AGENT_KEY,
+  ROUTED_AGENT_BOT_KEY,
   ROUTED_SEND_WINDOW_KEY,
   type RoutedRow
 } from '../../../shared/bridge/routed'
@@ -230,6 +231,8 @@ export class ThreadRouter implements ThreadRouterPort {
     // Only a window routes (above): the owner holds its send to the rule for a chat's first message, as for its own.
     if (method === 'orchestrator.send')
       owner[ROUTED_SEND_WINDOW_KEY] = ctx.connection.capabilities.has(FIRST_SEND_BINDING_CAPABILITY) ? 'binds' : 'older'
+    // A held chain's answer is a person's only: the owner takes a routed one only with this mark.
+    if (method === 'threads.chainHold') owner[ROUTED_SEND_WINDOW_KEY] = 'person'
 
     if (method === 'thread.snapshot') {
       const threadId = owner.threadId as string
@@ -334,11 +337,11 @@ export class ThreadRouter implements ThreadRouterPort {
       // computer reads (`AttachedThreads.snapshot`), which already holds the newest messages; older ones page in.
       if (key === 'newest' && method === 'thread.snapshot') continue
       // Set by this router below, never taken from a window.
-      if (key === ROUTED_SEND_WINDOW_KEY && method === 'orchestrator.send') continue
+      if (key === ROUTED_SEND_WINDOW_KEY && (method === 'orchestrator.send' || method === 'threads.chainHold')) continue
       // Only this computer's daemon marks a call as an agent's (remote subagents); a window is a person, so a window that
       // names the key is refused, not passed through (the key is in the row, so the check below would let it go).
-      if (key === ROUTED_AGENT_KEY)
-        throw new DomainRpcError('invalid_params', `${method} does not take ${ROUTED_AGENT_KEY} from a window: only this computer's agents' calls are marked.`)
+      if (key === ROUTED_AGENT_KEY || key === ROUTED_AGENT_BOT_KEY)
+        throw new DomainRpcError('invalid_params', `${method} does not take ${key} from a window: only this computer's agents' calls are marked.`)
       // The owner answers a send once the turn is admitted, however long the turn runs.
       if (key === 'await' && method === 'orchestrator.send') continue
       // Numbers belong to the router: a window never picks one.
@@ -396,7 +399,8 @@ export class ThreadRouter implements ThreadRouterPort {
       if (ref?.node !== node) continue
       const { offline: _offline, notShared: _notShared, ...rest } = thread
       const row = this.lists?.row(thread.id)
-      const listed = row ? { ...rest, node, order: row.order } : { ...rest, node }
+      // The bot here that started it, which the lists name on its row (`MergedLists.withBot`), stays named.
+      const listed = row ? { ...rest, node, order: row.order, ...(row.startedByBot ? { startedByBot: row.startedByBot } : {}) } : { ...rest, node }
       out = { ...out, [key]: listed }
     }
     return out

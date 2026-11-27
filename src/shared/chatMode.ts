@@ -5,6 +5,8 @@ export type { ChatMode } from './types'
 
 export function normalizeChatMode(mode?: ChatMode): ChatMode {
   if (!mode) return DEFAULT_CHAT_MODE
+  // Plan mode is retired: a message, queued item or job stored with it runs as an agent's.
+  if (mode === 'plan') return DEFAULT_CHAT_MODE
   if (typeof mode === 'string') return mode
   if (typeof mode === 'object' && mode.type === 'skill' && mode.skillId) return mode
   return DEFAULT_CHAT_MODE

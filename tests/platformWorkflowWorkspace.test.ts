@@ -431,7 +431,7 @@ async function agentFixture() {
   const integrations = services.settings.get().integrations
   services.settings.set({
     provider: { llmProvider: modelRef.providerId, model: modelRef.modelId },
-    integrations: { ...integrations, tools: { enabled: true, enabledTools: ['read', 'write', 'ask_user', 'create_task'] } }
+    integrations: { ...integrations, tools: { enabled: true, enabledTools: ['read', 'write', 'question_ask', 'task_create'] } }
   })
   const repo = join(root, 'repo')
   const primaryHead = initRepo(repo)

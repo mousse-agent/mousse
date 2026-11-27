@@ -104,7 +104,7 @@ export interface TurnInput {
   /**
    * The permission mode the turn runs in: the binding's (the thread's mode, or the nearest stricter
    * one the instance can enforce). Each adapter enforces it with its runtime's own controls on every
-   * turn; a plan turn carries it unchanged, and it does not matter there.
+   * turn.
    */
   permissionMode: PermissionMode
   /** Set when the thread is a delegated child; adapters apply it on every turn of the thread. */
@@ -117,6 +117,13 @@ export interface TurnInput {
   continuation?: boolean
   /** Which turn the provider started this run is for, when it started several. */
   continuationId?: string
+  /**
+   * This attempt goes on with a turn whose provider request failed after the provider answered or a tool ran: the
+   * runtime's session holds the turn up to that failure (the adapter said so with `TurnSink.sessionKept`), and `prompt`
+   * is only a short note to continue. The adapter resumes that session at `nativeHistory`; it never starts a new one
+   * with the turn's request in it.
+   */
+  continuesFailedRequest?: true
   /**
    * The admitted message was written by another thread's agent: no `/skill` mention in it loads a skill (only a
    * person invokes one). Runtimes that read mentions themselves (the pi loop) skip them for this turn.
@@ -191,6 +198,12 @@ export interface TurnSink {
   retry(attempt: number, detail?: { maxAttempts?: number; delayMs?: number; noResponse?: boolean; cause?: string }): void
   /** The provider produced output; a context-overflow retry is no longer safe. */
   progress(): void
+  /**
+   * The turn is failing, and the runtime kept its own session as the failure left it, with what the provider answered
+   * and every tool result: an attempt with `TurnInput.continuesFailedRequest` and the history as it is now continues it.
+   * Said only by runtimes that can (Codex, Claude Code's live process), just before the adapter throws.
+   */
+  sessionKept?(): void
   /**
    * What the provider is doing while it shows nothing: `waiting`, it has the request; `reasoning`, the model reasons
    * and has shown none of it yet. Output (`progress`) ends either.
@@ -405,6 +418,11 @@ export interface ToolHost {
   browser?: BrowserExecutionBinding
   /** Whether the turn's run is still its thread's active run; an app tool call after that is refused. */
   runActive?: () => boolean
+  /**
+   * A Mousse tool call as the registry will run it (`ToolRegistry.resolveCall`): its canonical name, the variant it is
+   * and the arguments it runs with, or the refusal it gets. A runtime's gate judges that call, never the raw one.
+   */
+  resolveAppCall?: (name: string, args: Record<string, unknown>) => { name: string; variant: string; args: Record<string, unknown> } | { refused: { text: string } }
   /**
    * What hides the secrets the thread may use (and ones removed while it runs), read at each tool result: a runtime that
    * runs its own tools masks their results with it before its model sees them or its session file keeps them.

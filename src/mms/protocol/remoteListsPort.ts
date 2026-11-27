@@ -23,6 +23,8 @@ export interface RemoteListsPort {
   projects(): Project[]
   /** The status of the other computers' threads that are not idle, by qualified thread id. */
   activity(): ThreadActivitySnapshot
+  /** The name a listed computer goes by (its Net node id), when it is listed. */
+  computerName?(node: string): string | undefined
   /**
    * The matches on other computers for a search, each computer asked with a short deadline. A newer search
    * from the same connection ends the older one's calls. `perThread` (the sidebar's filter) names one message hit per

@@ -11,6 +11,7 @@ import { botThreadCount, showBotThreads } from '../../lib/showBotThreads'
 import { launchedGroups, launchedLook, presenceOf, stickerOf, type BotStickerKind, type LaunchedTone } from './botChatShape'
 import { runningFor } from './BotStartedCards'
 import { useThreadRefMenu } from '../ThreadRefMenu'
+import { isQualifiedId } from '../../../shared/threadRef'
 
 /** How long work has run, in plain words: "just now", "4 min", "1 h 20 min". */
 export function workElapsed(startedAt: string, now = Date.now()): string {
@@ -87,7 +88,8 @@ const TONE_ICONS: Record<LaunchedTone, typeof Circle> = { working: CircleDotDash
 /**
  * A thread the bot started, in the header's list: its title, where it stands (an icon and a word, the row tinted to
  * match), its project and when it last changed. The whole row opens it in the bot's chat pane (`openBotThread`). Rows
- * that no longer work are dimmed. A thread the bot keeps out of the sidebar says "Hidden", and has Show in sidebar beside it.
+ * that no longer work are dimmed. A thread the bot keeps out of the sidebar says "Hidden", and has Show in sidebar beside it
+ * when it is a thread of this computer (the computer that runs a thread shows it; `threads.setHidden` is not routed).
  * `tooltip: false` (the hover card): no "Open …" tooltip, which would cover the row above.
  */
 export const BotThreadLine = memo(function BotThreadLine({ botId, thread, now, onOpen, tooltip = true }: { botId: string; thread: BotLaunchedThread; now: number; onOpen(): void; tooltip?: boolean }) {
@@ -110,7 +112,7 @@ export const BotThreadLine = memo(function BotThreadLine({ botId, thread, now, o
       </span>
       <span className="bot-thread-meta">{meta.map((part, index) => <Fragment key={index}>{index > 0 && ' · '}{part}</Fragment>)}</span>
     </button>
-    {thread.hidden && <button type="button" className="bot-thread-show" data-nav aria-label={`Show ${thread.title} in sidebar`} title="Show in sidebar" disabled={showing}
+    {thread.hidden && !isQualifiedId(thread.threadId) && <button type="button" className="bot-thread-show" data-nav aria-label={`Show ${thread.title} in sidebar`} title="Show in sidebar" disabled={showing}
       onClick={() => { setShowing(true); void setThreadHidden(thread.threadId, false).finally(() => setShowing(false)) }}>
       <Eye size={13} aria-hidden />
     </button>}

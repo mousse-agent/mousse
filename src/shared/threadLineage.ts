@@ -1,3 +1,4 @@
+import { qualifyId } from './threadRef'
 import type { Thread, ThreadActivitySnapshot, ThreadActivityState } from './types'
 
 type LineageThread = Pick<Thread, 'id' | 'lineage'>
@@ -48,36 +49,61 @@ function indexById<T extends LineageThread>(threads: readonly T[]): Map<string, 
 }
 
 /**
+ * The parent a thread's agent started it below, when `has` knows that thread on another computer: a remote subagent
+ * (`startedFrom.agent.subagent`, a `delegate_task` with `computer`). Its record on the computer that runs it has no
+ * `lineage`, since its parent is not a thread there. The parent is named by its id on its own computer: qualified on any
+ * computer but that one, plain on it, where only the other computer's row of the subagent is seen (`node`).
+ */
+export function remoteSubagentParentId(thread: Partial<Pick<Thread, 'lineage' | 'node' | 'startedFrom'>>, has: (id: string) => boolean): string | undefined {
+  const from = thread.startedFrom
+  if (thread.lineage || !from?.agent?.subagent) return undefined
+  const qualified = qualifyId(from.node, from.agent.thread)
+  if (has(qualified)) return qualified
+  return thread.node && thread.node !== from.node && has(from.agent.thread) ? from.agent.thread : undefined
+}
+
+/**
+ * The thread a list shows `thread` below, when `has` knows it: a subagent's parent, or a remote subagent's
+ * (`remoteSubagentParentId`). Undefined for a thread listed on its own, which a subagent whose parent is gone is.
+ */
+export function listedParentId(thread: LineageThread & Partial<Pick<Thread, 'node' | 'startedFrom'>>, has: (id: string) => boolean): string | undefined {
+  if (isSubagentThread(thread)) return has(thread.lineage!.parentThreadId) ? thread.lineage!.parentThreadId : undefined
+  return remoteSubagentParentId(thread, has)
+}
+
+/**
  * The threads a list shows once subagents are folded under their parents: every thread except a
- * subagent whose parent is in `inventory`. A subagent whose parent is gone (trashed, purged) has
- * nothing to show under, so it stays in the list as a normal thread; the check is per level, so a
- * nested subagent hides under its parent even when that parent is itself shown as an orphan.
+ * subagent whose parent is in `inventory`, on this computer or another (`listedParentId`). A subagent
+ * whose parent is gone (trashed, purged) has nothing to show under, so it stays in the list as a normal
+ * thread; the check is per level, so a nested subagent hides under its parent even when that parent is
+ * itself shown as an orphan.
  *
  * `inventory` is the complete set of threads the parents are looked up in. Pass it when `threads`
  * is a slice of it (one project, search matches), so a slice never decides a parent is missing.
  */
 export function visibleThreads<T extends LineageThread>(threads: readonly T[], inventory: readonly LineageThread[] = threads): T[] {
   const known = new Set(inventory.map((thread) => thread.id))
+  const has = (id: string) => known.has(id)
   // The Automation manager's thread is opened from Automations ("Open conversation"), never listed; a side chat is
   // opened from its parent's side panel only, even when that parent is gone.
-  return threads.filter((thread) => !(thread as Partial<Pick<Thread, 'automationManager'>>).automationManager && !isSideChatThread(thread) && (!isSubagentThread(thread) || !known.has(thread.lineage!.parentThreadId)))
+  return threads.filter((thread) => !(thread as Partial<Pick<Thread, 'automationManager'>>).automationManager && !isSideChatThread(thread) && listedParentId(thread, has) === undefined)
 }
 
 /**
- * The thread a list shows in place of `threadId`: the thread itself, or for a subagent its nearest
- * ancestor that is not a subagent. A subagent whose parent is not in `threads` (trashed, or not
- * loaded) has nothing above it to show under, so it stands for itself. Undefined for an unknown id.
+ * The thread a list shows in place of `threadId`: the thread itself, or for a subagent (here or on another
+ * computer, `listedParentId`) its nearest ancestor that is not a subagent. A subagent whose parent is not in
+ * `threads` (trashed, or not loaded) has nothing above it to show under, so it stands for itself. Undefined
+ * for an unknown id.
  */
 export function nearestVisibleAncestor(threadId: string, threads: readonly LineageThread[]): string | undefined {
   const byId = indexById(threads)
+  const has = (id: string) => byId.has(id)
   let current = byId.get(threadId)
   if (!current) return undefined
   const seen = new Set<string>()
-  while (isSubagentThread(current) && !seen.has(current.id)) {
+  for (let parentId = listedParentId(current, has); parentId !== undefined && !seen.has(current.id); parentId = listedParentId(current, has)) {
     seen.add(current.id)
-    const parent = byId.get(current.lineage!.parentThreadId)
-    if (!parent) break
-    current = parent
+    current = byId.get(parentId)!
   }
   return current.id
 }
@@ -169,6 +195,15 @@ export function rollUpActivities(threads: readonly LineageThread[], activity: Th
     rows[thread.id] = rolledUp(activity[thread.id] ?? 'idle', descendantsIn(childrenOf, thread.id).map((id) => activity[id]))
   }
   return rows
+}
+
+/**
+ * The owner's bot on this computer that started `thread` (`Thread.startedByBot`). A bot of another computer (`node`) is
+ * named for display only: no bot here has its id, so it decides nothing here (computer use, supervision, its family).
+ */
+export function ownBotOf<T extends { botId: string; node?: string }>(thread: { startedByBot?: T } | undefined): T | undefined {
+  const bot = thread?.startedByBot
+  return bot && !bot.node ? bot : undefined
 }
 
 /**

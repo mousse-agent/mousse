@@ -12,7 +12,7 @@ const CLOSE_MS = 120
 /** How long hiding or showing the checklist takes at Normal speed; keep in step with botTasks.css. */
 const REVEAL_MS = 200
 
-/** A bot's checklist (`create_task`, `update_task`) as to-do rows. */
+/** A bot's checklist (`task_create`, `task_update`) as to-do rows. */
 export function botTaskEntries(tasks: readonly BotTaskItem[] | undefined): TodoEntry[] {
   return (tasks ?? []).map((task) => ({ id: task.id, text: task.text, status: todoStatus(task.status), ...(task.note ? { note: task.note } : {}) }))
 }

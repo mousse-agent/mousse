@@ -9,7 +9,7 @@ import './todoSection.css'
 
 /**
  * The thread's to-do list as its runtime keeps it (Claude Code's tasks or to-dos, Codex's plan) and as its agent keeps it
- * with `create_task`, updated as the turn writes it. Shown only while the thread has one, collapsed to how far it is
+ * with `task_create`, updated as the turn writes it. Shown only while the thread has one, collapsed to how far it is
  * until opened; it opens and closes with the card's collapse motion.
  */
 export function TodoSection({ threadId }: SideCardSectionContext) {

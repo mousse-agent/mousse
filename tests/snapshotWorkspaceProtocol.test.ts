@@ -132,15 +132,6 @@ describe('Undo without Git', () => {
     expect(git(work, 'status', '--porcelain')).toBe('')
   }, 60_000)
 
-  it('does not record a turn that only reads', async () => {
-    const work = folder()
-    agent([() => 'Just talking.'])
-    const { thread, directory } = projectThread(work)
-    await send(thread.id, 'What is here?', 'plan')
-    expect(new ThreadActionService(directory).list().map((action) => action.scope)).toEqual(['conversation'])
-    expect(existsSync(snapshotWorkspacePath(directory))).toBe(false)
-  }, 60_000)
-
   it('runs a turn in a folder that is too large without snapshots, says why, and the next turn is recorded once it fits', async () => {
     const work = folder()
     for (let index = 0; index < 5; index += 1) writeFileSync(join(work, `f${index}.txt`), 'x\n')

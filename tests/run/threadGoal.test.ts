@@ -2,7 +2,7 @@
  * Thread goals (issue #1207): `/goal` keeps a thread working turn after turn until the agent reports the goal met, it
  * is blocked, a limit is reached or the person stops it. A real `OrchestratorService`, Run Engine and effect worker over
  * a temporary profile; the providers are scripted (hand-authored: they prove Mousse's side only). The agent reports the
- * way the real one does, through the `goal_status` app tool's handler over the orchestrator's tool host.
+ * way the real one does, through the `goal_update` app tool's handler over the orchestrator's tool host.
  *
  * What ends a goal turn, as rows: met, blocked, no report twice, the turn limit, a failed turn, a question waiting,
  * Stop, a restart. What runs between goal turns: the person's queued message.
@@ -50,10 +50,10 @@ describe('a thread goal', () => {
     return daemon
   }
 
-  /** What the agent's `goal_status` call does: the registered tool's handler, over the orchestrator's host. */
+  /** What the agent's `goal_update` call does: the registered tool's handler, over the orchestrator's host. */
   const report = (d: Phase6Daemon, input: Pick<TurnInput, 'threadId' | 'runId'>, args: Record<string, unknown>) => {
     const tool = goalTools(d.orch.mcpToolHost())[0]!
-    return tool.handler(args, { caller: { threadId: input.threadId, runId: input.runId, provider: 'test', modeCeiling: 'default', accessLevel: 'manage' }, transport: 'mcp' } as unknown as ToolCallContext)
+    return tool.handler(args, { caller: { threadId: input.threadId, runId: input.runId, provider: 'test', accessLevel: 'manage' }, transport: 'mcp' } as unknown as ToolCallContext)
   }
 
   /** An agent that reports `reports[i]` in its turn i (null: no report) and replies. */
@@ -301,7 +301,7 @@ describe('a thread goal', () => {
     expect(goalOf(d, id)).toMatchObject({ state: 'stopped', stoppedBy: 'user' })
   })
 
-  it('goal_status is refused on a thread without a working goal', async () => {
+  it('goal_update is refused on a thread without a working goal', async () => {
     const d = boot(newHome(), piAdapter(() => 'reply'))
     const { id } = thread(d)
     const tool = goalTools(d.orch.mcpToolHost())[0]!

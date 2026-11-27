@@ -205,7 +205,8 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
       ? { kind: 'saved_agent', name: savedAgentName(job.agent.definitionId, sources), definitionId: job.agent.definitionId }
       : { kind: 'agent', name: job.selection?.model ?? 'Default agent' }
   const wakesOn = job.trigger?.threadEvent
-  const trigger = wakesOn ? 'thread_event' : job.trigger?.webhook && job.schedule.kind === 'manual' ? 'request' : job.schedule.kind === 'manual' ? 'on_demand' : 'time'
+  // A draft that is to take requests shows as one before its URL is set up.
+  const trigger = wakesOn ? 'thread_event' : (job.trigger?.webhook || job.draft?.request) && job.schedule.kind === 'manual' ? 'request' : job.schedule.kind === 'manual' ? 'on_demand' : 'time'
   // A draft is not paused: it has never been on.
   const paused = !job.draft && (job.state === 'paused' || (!job.enabled && job.state !== 'running'))
   const active = jobActiveRun(job, now)

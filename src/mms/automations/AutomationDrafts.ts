@@ -109,6 +109,9 @@ const MAX_OPTIONS = 4
 const MAX_OPTION = 60
 const EVENT_KINDS: readonly ThreadEventKind[] = ['checks_failed', 'checks_passed', 'review', 'comment']
 
+/** What keeps a draft that takes requests off until the person sets up its URL: its secret is shown only to them. */
+export const REQUEST_URL_PROBLEM = 'Set up its request URL in Edit details › Request URL.'
+
 export class AutomationDraftError extends Error {}
 
 /**
@@ -153,7 +156,10 @@ function parseTrigger(value: unknown): DraftTrigger {
     }
     case 'cli':
       return { kind: 'cli', ...(typeof raw.name === 'string' && raw.name.trim() ? { name: cliNameOf(raw.name) } : {}) }
+    // A request URL: `webhook` and `request` are the words people and agents also use for it.
     case 'http':
+    case 'webhook':
+    case 'request':
       return { kind: 'http' }
     case 'thread_event': {
       const events = Array.isArray(raw.events) ? raw.events.filter((event): event is ThreadEventKind => EVENT_KINDS.includes(event as ThreadEventKind)) : []
@@ -161,7 +167,7 @@ function parseTrigger(value: unknown): DraftTrigger {
       return { kind: 'thread_event', threadId: text(raw.threadId, 'trigger.threadId', 256), events: [...new Set(events)] }
     }
     default:
-      return fail('trigger.kind is time, cli, http or thread_event')
+      return fail('trigger.kind is time, cli, http (a webhook) or thread_event')
   }
 }
 
@@ -212,7 +218,8 @@ export function contractOf(job: ScheduledJob, projectName: (id: string) => strin
   const wakesOn = job.trigger?.threadEvent
   const trigger: DraftTrigger = wakesOn
     ? { kind: 'thread_event', threadId: wakesOn.threadId, events: [...wakesOn.events] }
-    : job.trigger?.webhook ? { kind: 'http' }
+    // A draft that is to take requests is one before its URL is set up too, until a person gives it a clock.
+    : job.trigger?.webhook || (job.draft?.request && job.schedule.kind === 'manual') ? { kind: 'http' }
     : job.schedule.kind === 'manual' ? { kind: 'cli', ...(job.cliName ? { name: job.cliName } : {}) }
     : { kind: 'time', schedule: job.schedule }
   const agent: DraftAgent = job.draft?.who
@@ -307,7 +314,7 @@ export class AutomationDrafts {
    * The job a draft's fields make, with what keeps Turn on off. `current` is the job being changed (a draft, or an
    * automation for `update`); its values fill what the fields leave out.
    */
-  private build(fields: DraftFields, current: ScheduledJob | undefined, who: DraftWho | undefined = current?.draft?.who): { job: Partial<ScheduledJob> & { name: string; prompt: string; schedule: JobSchedule }; problems: string[]; reuseThread: boolean } {
+  private build(fields: DraftFields, current: ScheduledJob | undefined, who: DraftWho | undefined = current?.draft?.who): { job: Partial<ScheduledJob> & { name: string; prompt: string; schedule: JobSchedule }; problems: string[]; reuseThread: boolean; request: boolean } {
     const problems: string[] = []
     const before = current ? contractOf(current, this.projectName) : undefined
     const name = fields.name ?? before?.name ?? ''
@@ -337,7 +344,9 @@ export class AutomationDrafts {
         cliName = this.uniqueCliName(trigger.name ?? current?.cliName ?? cliNameOf(name), current?.id)
         break
       case 'http':
-        // A request URL and its secret are set up by a person, in Edit details › More, once it is on.
+        // A request URL and its secret are set up by the person (the secret is shown only to them), in Edit details.
+        // A bot's is set up once it is on: Turn on makes the bot's own schedule, a new automation with its own URL.
+        if (!current?.trigger?.webhook && !bot) problems.push(REQUEST_URL_PROBLEM)
         break
       case 'thread_event': {
         const thread = this.deps.thread(trigger.threadId)
@@ -352,8 +361,12 @@ export class AutomationDrafts {
       }
     }
 
+    // A request URL goes only where its secret is deleted with it: in Edit details, by the person. Refused, not saved.
+    if (trigger.kind !== 'http' && current?.trigger?.webhook) fail('It still has a request URL. Turn it off in Edit details › Request URL first, or keep it on request.')
     if (bot) {
       if (this.deps.botExists && !this.deps.botExists(bot)) problems.push('That bot is gone. Pick another Who.')
+      // Turn on makes a new automation, the bot's, so a draft's request URL (and its secret) would not go with it.
+      if (current?.draft && current.trigger?.webhook) problems.push('Turn off its request URL in Edit details › Request URL first. A bot\'s request URL is set up once it is on.')
       // A bot runs on a repeating time (at most once a minute), once, when it is run (Run now, the CLI) or on a request
       // URL. Its runs are its own, in its lane: it does not wake on another thread's pull request.
       if (trigger.kind === 'thread_event') problems.push('A bot does not wake on a pull request. Pick another When, or ask it in its chat to watch one.')
@@ -387,7 +400,7 @@ export class AutomationDrafts {
       createThread: !boundThread && result.thread === 'new' ? true : undefined,
       ...(fields.permissionMode !== undefined ? { permissionMode: fields.permissionMode } : {})
     }
-    return { job, problems, reuseThread: result.thread === 'reuse' && !boundThread }
+    return { job, problems, reuseThread: result.thread === 'reuse' && !boundThread, request: trigger.kind === 'http' }
   }
 
   /** `automation_draft_save`: makes or changes a draft. Never enables it. */
@@ -399,7 +412,7 @@ export class AutomationDrafts {
     if (current && author.originThreadId && current.draft!.originThreadId !== author.originThreadId) fail(`No draft ${draftId}.`)
     const fields = parseFields(args)
     const who = current ? current.draft!.who : this.pendingWho.get(this.authorKey(author))
-    const { job, problems, reuseThread } = this.build(fields, current, who)
+    const { job, problems, reuseThread, request } = this.build(fields, current, who)
     // Held to what the person holds now, and a draft from an ordinary chat to that chat's mode; Turn on holds it again.
     const ceiling = this.ceilingOf(job.threadId, author.originThreadId ?? current?.draft?.originThreadId)
     const permissionMode = job.permissionMode ? narrowPermissionMode(job.permissionMode, ceiling) : current?.permissionMode
@@ -412,7 +425,9 @@ export class AutomationDrafts {
       ...(who?.kind === 'bot' ? { who } : {}),
       problems,
       // A new save answers the open question unless it asks again (`automation_ask`).
-      ...(reuseThread ? { reuseThread: true as const } : {})
+      ...(reuseThread ? { reuseThread: true as const } : {}),
+      // It takes requests: shown as such, and kept off until the person sets up its URL.
+      ...(request ? { request: true as const } : {})
     }
     if (current) {
       const updated = this.deps.update(current.id, { ...job, permissionMode, permissionCeiling: ceiling, draft: { ...draft, draftId: current.id } })
@@ -528,7 +543,6 @@ export class AutomationDrafts {
     }
     const { job: next, problems, reuseThread } = this.build(fields, job)
     if (problems.length) fail(problems.join(' '))
-    if (fields.trigger?.kind === 'http' && !job.trigger?.webhook) fail('A request URL is set up by the person, in Edit details › More.')
     const permissionMode = next.permissionMode ? narrowPermissionMode(next.permissionMode, job.permissionCeiling ?? 'ask', job.permissionMode) : job.permissionMode
     const threadId = reuseThread ? job.threadId ?? this.deps.reuseThread(job.id, next.name, next.projectId).id : next.threadId
     // A new clock moves the next run with it; a paused automation gets its next run when it resumes.
@@ -627,8 +641,11 @@ export class AutomationDrafts {
   recheck(draftId: string): void {
     const job = this.deps.get(draftId)
     if (!job?.draft) return
-    const { problems } = this.build({}, job)
-    if (JSON.stringify(problems) !== JSON.stringify(job.draft.problems)) this.deps.update(job.id, { draft: { ...job.draft, problems } })
+    // A clock the person gave a request draft replaces its request: On demand afterwards is the CLI, not a request again.
+    const { problems, request } = this.build({}, job)
+    if (JSON.stringify(problems) === JSON.stringify(job.draft.problems) && request === Boolean(job.draft.request)) return
+    const { request: _request, ...rest } = job.draft
+    this.deps.update(job.id, { draft: { ...rest, problems, ...(request ? { request: true as const } : {}) } })
   }
 
   /** Discard: the draft is deleted. */

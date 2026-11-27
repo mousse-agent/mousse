@@ -7,6 +7,7 @@ import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 import { BOT_MEMORY_TOOLS } from './memory'
 import { BOT_ITEM_TOOLS } from './items'
 import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from './catalogue'
+import { canonicalGrantName } from '../../toolAliases'
 
 /**
  * A bot manifest's canonical form, the subset rule of approval, and the plain words the approval
@@ -22,7 +23,7 @@ const BUDGET_KEYS = ['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTok
  * so they are not permissions: every bot has them, they never raise an ask, and About never lists them.
  */
 export const BOT_OWN_APP_TOOLS: readonly string[] = [
-  'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'set_profile', 'set_depth', 'use_model', 'escalate', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS,
+  'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'set_profile', 'set_depth', 'use_model', 'permission_ask', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS,
   // An automation run's report on its own run (the Automations inbox); only a scheduled run has one to give.
   'run_report'
 ]
@@ -32,11 +33,11 @@ export const BOT_OWN_APP_TOOLS: readonly string[] = [
  * keeps one-off reminders and wakes (its own follow-ups). Like memory they are always on and never grantable, so bots made before them have them too;
  * only a chat turn gets them, so work never starts work.
  */
-export const BOT_WORK_TOOLS: readonly string[] = ['work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel', 'wake', 'watch_start', 'watch_list', 'watch_stop']
+export const BOT_WORK_TOOLS: readonly string[] = ['work_start', 'model_list', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel', 'wake', 'watch_start', 'watch_list', 'watch_stop']
 
 /**
  * The tools a bot's work splits a job among subagents with: start one on a title and a brief (on the work's model, or one
- * from `work_models`), send it a follow-up, wait for it, read its result, stop it. Like memory they are always on and
+ * from `model_list`), send it a follow-up, wait for it, read its result, stop it. Like memory they are always on and
  * never grantable: they give no power the work lacks, since each subagent is compiled from the same grant and holds less
  * (`BOT_SUBAGENT_APP_TOOLS`). Only a run's main turn gets them, never the chat, a consult or a subagent: one level.
  */
@@ -97,21 +98,21 @@ export const BOT_IMAGE_TOOL = 'make_image'
 export const BOT_APPLET_TOOL = 'publish_applet'
 
 /**
- * Asking the owner a question with answers to tap (`ask_owner`, issue #1123). It grants nothing (a "Yes" allows no
- * permission: that is `escalate`), so like memory it is always on and never grantable. Offered to a chat turn and to work
+ * Asking the owner a question with answers to tap (`question_ask`, issue #1123). It grants nothing (a "Yes" allows no
+ * permission: that is `permission_ask`), so like memory it is always on and never grantable. Offered to a chat turn and to work
  * the owner asked for (`work_start`, a reminder's work), which waits for the answer; scheduled runs, consults and
  * subagents never get it.
  */
-export const BOT_QUESTION_TOOL = 'ask_owner'
+export const BOT_QUESTION_TOOL = 'question_ask'
 
 /**
  * Passing on to work an answer the owner gave in the chat to the question it waits on (`question_answer`, issue #1123).
- * A chat turn their own message started gets it with `ask_owner`; it grants nothing either.
+ * A chat turn their own message started gets it with `question_ask`; it grants nothing either.
  */
 export const BOT_QUESTION_ANSWER_TOOL = 'question_answer'
 
 /**
- * Taking back a question the bot asked and no longer needs (`question_withdraw`, issue #1446). Held with `ask_owner`,
+ * Taking back a question the bot asked and no longer needs (`question_withdraw`, issue #1446). Held with `question_ask`,
  * wherever a turn may ask; it grants nothing either.
  */
 export const BOT_QUESTION_WITHDRAW_TOOL = 'question_withdraw'
@@ -188,7 +189,7 @@ export const BOT_THREADS_PERMISSION = 'threads'
  * and on the owner's other computers that let agents work there), read their terminals, a thread's queue, its Git status
  * and diffs, and list the owner's computers.
  */
-export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_search', 'thread_read', 'thread_wait', 'terminal_read', 'queue_list', 'git_status', 'git_diff', 'list_computers']
+export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_search', 'thread_read', 'thread_wait', 'terminal_read', 'queue_list', 'git_status', 'git_diff', 'computer_list']
 
 /**
  * What changes threads: start one, message one, steer or stop one's turn, archive or unarchive one, hide one it started
@@ -198,8 +199,8 @@ export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_
  * another bot's message started does not.
  */
 export const BOT_THREAD_ACT_TOOLS: readonly string[] = [
-  'thread_create', 'thread_send', 'thread_interrupt', 'thread_archive', 'thread_hide', 'thread_update', 'thread_steer', 'thread_fork', 'thread_merge_back',
-  'queue_enqueue', 'queue_edit', 'queue_remove', 'queue_reorder', 'queue_promote_to_steer', 'approval_respond'
+  'thread_create', 'thread_send', 'thread_stop', 'thread_archive', 'thread_update', 'thread_fork', 'thread_return',
+  'queue_enqueue', 'queue_update', 'approval_respond'
 ]
 
 /**
@@ -269,10 +270,10 @@ export const BOT_QUICK_ACTIONS_PERMISSION = 'quick_actions'
 export const BOT_QUICK_ACTION_TOOLS: readonly string[] = ['create_quick_action']
 
 /**
- * The task list of the turn's own thread (`create_task`, `list_tasks`, `update_task`): a checklist the agent keeps for
+ * The task list of the turn's own thread (`task_create`, `task_list`, `task_update`): a checklist the agent keeps for
  * itself. It acts on nothing else, so like memory it is always on and never grantable, in every turn but a consult.
  */
-export const BOT_TASK_TOOLS: readonly string[] = ['create_task', 'list_tasks', 'update_task']
+export const BOT_TASK_TOOLS: readonly string[] = ['task_create', 'task_list', 'task_update']
 
 /** Every thread tool a bot can hold, all under "use your threads". */
 export const BOT_THREAD_TOOLS: readonly string[] = [...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS]
@@ -366,7 +367,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   BOT_CARD_TOOL,
   BOT_REPORT_BUG_TOOL,
   ...BOT_MESSAGE_TOOLS,
-  'list_skills', 'load_skill', 'escalate', 'consult',
+  'skill_list', 'skill_load', 'permission_ask', 'consult',
   // The tool catalogue (docs/plans/bot-context.md §15): looking up a group, and calling its tools on Codex and Pi.
   BOT_CATALOGUE_TOOL, BOT_USE_TOOL
 ])
@@ -406,7 +407,9 @@ export function isBotTurnHeldTool(name: string): boolean {
  * `secrets` and `create_quick_action` is `quick_actions`. Any other tool is its own (the heap summary too, which no bot
  * holds).
  */
-export function botGrantTool(tool: string): string {
+export function botGrantTool(name: string): string {
+  // An old name asks for, and is granted as, the tool it was renamed to; one that became a variant, as that variant.
+  const tool = canonicalGrantName(name)
   if (BROWSER_TOOLS.has(tool)) return BOT_BROWSER_PERMISSION
   if (PROFILER_TOOL_SET.has(tool)) return BOT_PROFILER_PERMISSION
   if (THEME_TOOL_SET.has(tool)) return BOT_THEMES_PERMISSION
@@ -417,7 +420,7 @@ export function botGrantTool(tool: string): string {
 
 /** Whether `tool` is one of the bot's own tools: not a permission, never listed in About. */
 export function isOwnBotAppTool(tool: string): boolean {
-  return OWN_APP_TOOLS.has(tool)
+  return OWN_APP_TOOLS.has(canonicalGrantName(tool))
 }
 
 /**
@@ -497,7 +500,8 @@ export function manifestProblem(value: unknown): string | undefined {
   const strings = (list: unknown) => Array.isArray(list) && list.every((item) => typeof item === 'string' && item.length > 0 && item.length <= 256)
   if (!Array.isArray(manifest.tools) || !manifest.tools.every((tool) => typeof tool === 'string' && isNeutralTool(tool))) return 'A built-in tool is not one Mousse knows.'
   if (!strings(manifest.appTools)) return 'An app tool name is invalid.'
-  const refusedApp = (manifest.appTools as string[]).find((tool) => !BOT_APP_TOOLS.has(tool) && !BOT_RETIRED_APP_TOOLS.has(tool))
+  // A grant an older build approved may name a tool by its old name (`canonicalGrantName`): it is that tool (or, for a variant, that variant).
+  const refusedApp = (manifest.appTools as string[]).find((tool) => !BOT_APP_TOOLS.has(canonicalGrantName(tool)) && !BOT_RETIRED_APP_TOOLS.has(tool))
   if (refusedApp !== undefined) return `A bot can't be given the Mousse tool ${refusedApp}: it would reach other threads, act in your name or ask you, outside the bot's permissions.`
   if (!strings(manifest.skills)) return 'A skill id is invalid.'
   if (!Array.isArray(manifest.mcp) || !manifest.mcp.every((pair) => pair && typeof pair === 'object' && typeof pair.serverId === 'string' && typeof pair.tool === 'string' && MCP_PART.test(pair.serverId) && MCP_PART.test(pair.tool))) return 'An MCP tool is invalid.'
@@ -567,8 +571,9 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
   const given = withFullTrust(granted)
   const tools = new Set(given.tools)
   for (const tool of wanted.tools) if (!tools.has(tool)) lines.push(toolLine(tool))
-  const appTools = new Set(given.appTools)
-  for (const tool of wanted.appTools) if (!appTools.has(tool) && !BOT_RETIRED_APP_TOOLS.has(tool)) lines.push(appToolLine(tool))
+  // Under the names tools have now: a grant stored under an old name holds its new one (`canonicalGrantName`).
+  const appTools = new Set(given.appTools.map(canonicalGrantName))
+  for (const tool of wanted.appTools) if (!appTools.has(canonicalGrantName(tool)) && !BOT_RETIRED_APP_TOOLS.has(tool)) lines.push(appToolLine(tool))
   const mcp = new Set(granted.mcp.map(mcpIdentity))
   for (const pair of wanted.mcp) if (!mcp.has(mcpIdentity(pair))) lines.push(mcpLine(pair))
   // A tool the grant holds as asking first, wanted without asking: a looser hold is more, as a new tool is.
@@ -688,7 +693,8 @@ export function intersectManifest(wanted: BotManifest, granted: BotManifest): Bo
   }
   return {
     tools: within(wanted.tools, granted.tools, (tool) => tool),
-    appTools: within(wanted.appTools, granted.appTools, (tool) => tool),
+    // Under the names tools have now: a grant stored under an old name holds its new one (`canonicalGrantName`).
+    appTools: within([...new Set(wanted.appTools.map(canonicalGrantName))], granted.appTools.map(canonicalGrantName), (tool) => tool),
     mcp: within(wanted.mcp, granted.mcp, mcpIdentity).map(pair => ({ ...pair, ...(granted.mcp.find(g => mcpIdentity(g) === mcpIdentity(pair))?.level === 'asks_first' ? { level: 'asks_first' as const } : {}) })),
     skills: within(wanted.skills, granted.skills, (skill) => skill),
     workspace: null,

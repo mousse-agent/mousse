@@ -36,10 +36,10 @@ export function isReadOnlyShared(shared: SharedWorkspace | null | undefined): bo
 
 /**
  * One steer waiting for a live turn to read it. A person's typed steer has only its text. A promoted queue
- * item carries its id, and what the item carried when it was promoted (its mode ceiling, the agent it came
+ * item carries its id, and what the item carried when it was promoted (its permission limit, the agent it came
  * from), so the entry can stand in for the item if the item is gone: a steer the turn never reads becomes a
  * turn of its own with that identity, never merged into a person's text and never under a looser mode. An
- * agent's steer (`thread_steer`) carries the sender and the mode it may run in.
+ * agent's note that joins a run (`thread_send`) carries the sender and the mode it may run in.
  */
 export interface SteerEntry {
   text: string

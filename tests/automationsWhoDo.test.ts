@@ -1,37 +1,14 @@
 /**
- * Who and Do (Path step 2): what the pickers offer and send, a workflow as Do (its inputs and the `/slug --input`
+ * Who and Do (Path step 2): a workflow as Do (its inputs and the `/slug --input`
  * text the scheduler runs), a bot's schedule, and the saved agent a run records.
  */
 import { describe, expect, it } from 'vitest'
-import { libraryFrom, parseWhoKey, whoKey, whoOptions } from '../src/renderer/components/automations/whoDo'
 import { parseWorkflowCommand, workflowCommandText, workflowInputFields } from '../src/shared/workflows/workflowCommand'
 import { tokenizeWorkflowCommand } from '../src/shared/workflows/commandTokenizer'
 import { ranAgent } from '../src/mms/scheduled/ScheduledJobService'
 import { savedAgentRefusal } from '../src/mms/automations/scheduledAgent'
 import { asCreateScheduledJobInput, asScheduledJobPatch } from '../src/mms/protocol/validators'
 import { jobRecordRun } from '../src/shared/automations'
-
-describe('Who', () => {
-  const library = libraryFrom({ bots: [{ id: 'bot_1', name: 'Pip', look: { colour: 'teal', accessory: 'none' } }] })
-
-  it('lists the default agent first, then models and (when asked) bots; never saved agents', () => {
-    const models = [{ label: 'Claude', choices: [{ key: 'claude\u0000sonnet', label: 'Sonnet', selection: { instanceId: 'claude', llmProvider: 'anthropic', model: 'sonnet' } }] }]
-    const options = whoOptions({ defaultName: 'Claude', models, library, withBots: true })
-    expect(options.map((option) => [option.value, option.group ?? ''])).toEqual([
-      ['default', ''], ['model:claude\u0000sonnet', 'Claude'], ['bot:bot_1', 'Bots']
-    ])
-    expect(whoOptions({ defaultName: 'Claude', models, library, withBots: false }).some((option) => option.value.startsWith('bot:'))).toBe(false)
-    // A chosen agent that is gone stays listed, so the choice is never silently lost.
-    expect(whoOptions({ defaultName: 'Claude', models: [], library, withBots: false, current: { key: 'agent:gone', label: 'Old agent' } }).at(-1)).toEqual({ value: 'agent:gone', label: 'Old agent' })
-  })
-
-  it('writes a choice as one value and reads it back', () => {
-    for (const who of [{ kind: 'default' }, { kind: 'model', key: 'claude\u0000sonnet:1' }, { kind: 'agent', id: 'a' }, { kind: 'bot', id: 'bot_1' }] as const) {
-      expect(parseWhoKey(whoKey(who))).toEqual(who)
-    }
-  })
-
-})
 
 describe('Do: a workflow', () => {
   const schema = {

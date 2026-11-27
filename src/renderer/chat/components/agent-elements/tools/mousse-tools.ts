@@ -12,6 +12,7 @@ import {
   sanitizeCuaInput,
   sanitizeCuaOutput,
 } from "../../../../../shared/cuaActivity";
+import { canonicalToolName } from "../../../../../shared/toolAliases";
 
 const MOUSSE_TOOL_PREFIX = "tool-mcp__mousse__";
 const CUSTOM_TOOL_PREFIX = "tool-mcp__custom__";
@@ -77,21 +78,16 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   thread_search: ["search", "threads in Mousse"],
   terminal_read: ["read", "a terminal in Mousse"],
   thread_wait: ["wait", "for a thread in Mousse"],
-  thread_steer: ["steer", "a thread in Mousse"],
-  thread_interrupt: ["stop", "a thread in Mousse"],
+  thread_stop: ["stop", "a thread in Mousse"],
   thread_fork: ["fork", "a thread in Mousse"],
-  thread_merge_back: ["merge", "a thread back in Mousse"],
+  thread_return: ["merge", "a thread back in Mousse"],
   thread_archive: ["archive", "a thread in Mousse"],
-  thread_hide: ["hide", "a thread in Mousse"],
   thread_update: ["update", "a thread in Mousse"],
   // A thread's queue
   queue_list: ["read", "a thread's queue in Mousse"],
   queue_enqueue: ["queue", "a message in Mousse"],
-  queue_edit: ["edit", "a queued message in Mousse"],
-  queue_remove: ["remove", "a queued message in Mousse"],
-  queue_reorder: ["reorder", "queued messages in Mousse"],
-  queue_promote_to_steer: ["steer", "with a queued message in Mousse"],
-  approval_respond: ["answer", "an approval in Mousse"],
+  queue_update: ["change", "a queued message in Mousse"],
+  request_answer: ["answer", "a request in Mousse"],
   // Memory
   memory_save: ["save", "to memory"],
   memory_search: ["search", "memory"],
@@ -121,7 +117,6 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   work_stop: ["stop", "work in Mousse"],
   work_note: ["add", "a note to work in Mousse"],
   work_wait: ["wait", "for work in Mousse"],
-  work_models: ["check", "models in Mousse"],
   watch_start: ["start", "a background command in Mousse"],
   watch_list: ["check", "background commands in Mousse"],
   watch_stop: ["stop", "a background command in Mousse"],
@@ -139,7 +134,6 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   continue_subagent: ["message", "a subagent in Mousse"],
   recall_subagent: ["message", "a subagent in Mousse"],
   subagent_send: ["message", "a subagent in Mousse"],
-  answer_subagent: ["answer", "a subagent in Mousse"],
   task_status: ["check", "a subagent in Mousse"],
   subagent_result: ["check", "a subagent in Mousse"],
   subagent_wait: ["wait", "for a subagent in Mousse"],
@@ -147,18 +141,18 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   subagent_stop: ["stop", "a subagent in Mousse"],
   list_subagents: ["list", "subagents in Mousse"],
   list_delegations: ["list", "subagents in Mousse"],
-  create_task: ["create", "a task in Mousse"],
-  list_tasks: ["list", "tasks in Mousse"],
-  update_task: ["update", "a task in Mousse"],
-  list_computers: ["list", "computers in Mousse"],
+  task_create: ["create", "a task in Mousse"],
+  task_list: ["list", "tasks in Mousse"],
+  task_update: ["update", "a task in Mousse"],
+  computer_list: ["list", "computers in Mousse"],
   computer_tools: ["list", "computer tools"],
   computer_use: ["use", "the computer"],
   computer_use_request: ["request", "computer use setup"],
-  list_models: ["list", "models in Mousse"],
+  model_list: ["list", "models in Mousse"],
   // Asking the person
-  ask_user: ["ask", "you a question"],
-  withdraw_question: ["withdraw", "a question"],
-  escalate: ["ask", "you for a permission"],
+  question_ask: ["ask", "you a question"],
+  question_withdraw: ["withdraw", "a question"],
+  permission_ask: ["ask", "you for a permission"],
   automation_ask: ["ask", "you a question"],
   secret_request: ["ask", "you for a secret"],
   secret_run: ["run", "a command with a secret"],
@@ -168,8 +162,8 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   set_depth: ["change", "how deeply it thinks"],
   set_profile: ["update", "its profile"],
   // Skills, automations and quick actions
-  list_skills: ["list", "skills in Mousse"],
-  load_skill: ["load", "a skill in Mousse"],
+  skill_list: ["list", "skills in Mousse"],
+  skill_load: ["load", "a skill in Mousse"],
   automation_draft_save: ["save", "an automation draft in Mousse"],
   automation_list: ["list", "automations in Mousse"],
   automation_pause: ["pause", "an automation in Mousse"],
@@ -183,7 +177,7 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   browser_open: ["open", "a page in the browser"],
   theme_read: ["read", "themes in Mousse"],
   theme_set: ["change", "the theme in Mousse"],
-  goal_status: ["check", "the goal in Mousse"],
+  goal_update: ["check", "the goal in Mousse"],
   git_status: ["check", "Git status"],
   git_diff: ["read", "the Git diff"],
 };
@@ -201,7 +195,8 @@ export type MousseToolLabels = { running: string; done: string; failed: string }
 
 export function mousseToolLabels(tool: string): MousseToolLabels {
   const family = FAMILIES.find(([prefix]) => tool.startsWith(prefix));
-  const own = TOOLS[tool] ?? (family ? ([family[1], family[2]] as const) : undefined);
+  // A call an older transcript names by a tool's old name reads as the tool it was renamed to.
+  const own = TOOLS[canonicalToolName(tool)] ?? (family ? ([family[1], family[2]] as const) : undefined);
   if (!own) {
     const name = tool.replace(/_/g, " ").trim();
     return { running: `Running ${name} in Mousse`, done: `Ran ${name} in Mousse`, failed: `Couldn't run ${name} in Mousse` };

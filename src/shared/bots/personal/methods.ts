@@ -37,7 +37,7 @@ export interface BotModelOption {
 }
 
 /**
- * What one piece of work may be asked to run on (`work_models`): the Runs on choices (`options`), and each of the
+ * What one piece of work may be asked to run on (`model_list`): the Runs on choices (`options`), and each of the
  * owner's other entries with why a bot's work can't run there (turned off, signed out, not ready, or a runtime that
  * can't hold a bot to its permissions).
  */
@@ -152,7 +152,7 @@ export const BOTS_PERSONAL_V2_METHODS = [
  * there, and an older service that lacks them is still compatible (`guiDaemonCompatibility` lists only the set above).
  */
 export const BOTS_WORK_METHODS = ['bots.reminders.snooze', 'bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots', 'bots.model.setImage', 'bots.chat.react', 'bots.questions.answer', 'bots.memory.edit',
-  'bots.actions.answer', 'bots.chat.clear', 'bots.memory.wipe', 'bots.reset', 'bots.model.setCustom'] as const
+  'bots.actions.answer', 'bots.chat.clear', 'bots.memory.wipe', 'bots.reset', 'bots.model.setCustom', 'bots.chainHold.answer'] as const
 export type BotsPersonalV2Method = (typeof BOTS_PERSONAL_V2_METHODS)[number] | (typeof BOTS_WORK_METHODS)[number]
 export const BOTS_PERSONAL_V2_CAPABILITY = 'bots.personal.v2'
 
@@ -222,6 +222,11 @@ export interface BotsPersonalV2Api {
    * service lacks it: the owner answers with Reply.
    */
   'bots.actions.answer': { params: { actionId: string; digest: string; answer: 'send' | 'not_now' }; result: { status: string } }
+  /**
+   * The owner's Continue or Stop on what the bot holds past the limit between bots (`BotSummary.chainHold`), named by its
+   * batch (`holdId`): one already settled is refused (`hold_settled`). Only from a window on this computer.
+   */
+  'bots.chainHold.answer': { params: { botId: string; holdId: string; answer: 'continue' | 'stop' }; result: { sent: number; stopped: number; failed: number } }
   'bots.questions.answer': { params: { botId: string; questionId: string; choice: string; clientRequestId: string }; result: { message: BotChatMessage; question?: BotChatMessage } }
   /** `permissionId` is a `BotDetail.permissions` item's id (its fingerprint). */
   'bots.permissions.set': { params: { botId: string; permissionId: string; enabled: boolean }; result: BotDetail }

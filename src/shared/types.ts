@@ -3,6 +3,7 @@ import type { AppletReference } from './applets'
 import type { ModelOverride } from './providerInstances'
 import type { ThreadPullRequestLink } from './pullRequests'
 import type { PermissionMode } from './permissionMode'
+import type { BotLook } from './bots/personal/look'
 import type { ProviderRetryState } from './providerRetry'
 export type { PermissionMode } from './permissionMode'
 export type { GitPullRequestInfo, GitPullRequestLookup, PullRequestCheckState } from './pullRequests'
@@ -66,7 +67,6 @@ export interface ScheduledJobRunRecord {
   queueItemId?: string
   /** The model the run actually used (the run's binding), not the job's field. */
   selection?: ModelOverride
-  mode?: 'agent' | 'plan'
   /** The permission mode the run's binding enforced (the stricter of the job, its ceiling and the thread). */
   permissionMode?: PermissionMode
   workspace?: ScheduledJobWorkspace
@@ -303,7 +303,6 @@ export interface ScheduledJob {
   bot?: ScheduledJobBot
   /** A bot's occurrence that did not start, and why (the bot was paused, or its last run still waited). Cleared when one starts. */
   botSkip?: { at: string; reason: string }
-  mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
   /** How much the job's runs may do without asking; never wider than `permissionCeiling`. Absent = the thread's mode. */
   permissionMode?: PermissionMode
@@ -373,6 +372,11 @@ export interface AutomationDraftState {
   ask?: { question: string; options: string[]; at: string }
   /** Turn on gives it one reusable thread for every run (Result: reuse). */
   reuseThread?: true
+  /**
+   * A signed request starts it (an `http` trigger). Its URL and secret are set up by the person (`scheduled.webhook.enable`),
+   * which a draft may have before Turn on; until then it shows as On request and cannot be turned on.
+   */
+  request?: true
 }
 
 /** Profile settings of the scheduler that people choose on the Scheduled page. */
@@ -411,7 +415,6 @@ export interface CreateScheduledJobInput {
   createThread?: boolean
   selection?: ModelOverride
   agent?: ScheduledJobAgent
-  mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
   permissionMode?: PermissionMode
   tellMe?: TellMe
@@ -445,7 +448,6 @@ export interface ScheduledJobPatch {
   selection?: ModelOverride | null
   /** `null` clears it: a model (the selection, else the default agent) does the work again. */
   agent?: ScheduledJobAgent | null
-  mode?: 'agent' | 'plan' | null
   /** `null` clears it: the run follows its thread's mode again. The job's ceiling is not part of a patch. */
   permissionMode?: PermissionMode | null
   workspace?: ScheduledJobWorkspace | null
@@ -674,7 +676,7 @@ export interface PendingUserQuestions {
    */
   helper?: { agentId: string }
   /**
-   * `false`: the agent asked without waiting (`ask_user` with `wait: false`) and keeps working. The question stays
+   * `false`: the agent asked without waiting (`question_ask` with `wait: false`) and keeps working. The question stays
    * open until it is answered, dismissed or withdrawn; a new message does not close it.
    */
   wait?: false
@@ -1256,9 +1258,11 @@ export interface QueuedMessage {
   settleNotice?: import('./settleNotice').SettleNoticeItem[]
   /** With `settleNotice`: the count of agent messages in a row of the runs the notices are about; the turn carries it. */
   settleHops?: number
+  /** With `settleNotice`: the chain of the messages the notices are about (issue #1442); the turn stays in it. */
+  settleChain?: string
   /**
-   * A settle notice that must not start a turn by itself (its thread is a subagent, the person stopped it, it is kept in
-   * Plan, or the notice says Mousse stopped watching): it waits until a person sends it (Send now), a notice that may
+   * A settle notice that must not start a turn by itself (its thread is a subagent, the person stopped it, or the notice
+   * says Mousse stopped watching): it waits until a person sends it (Send now), a notice that may
    * start a turn joins it, or a person's turn of the thread starts and it runs after that turn.
    */
   heldNotice?: true
@@ -1361,6 +1365,8 @@ export interface AgentOrigin {
    * plus one). A message that would pass the limit is refused, so a chain of agents cannot run unwatched.
    */
   hops?: number
+  /** The chain of agent messages it belongs to, so a queued message keeps it until it runs. */
+  chain?: string
   /**
    * Where the sending agent's own words sit in the stored text: after the header Mousse wrote and before its closing
    * line (`agentMessageWords`). Lengths, not positions: text another computer reads is re-encoded inside the words,
@@ -1381,6 +1387,11 @@ export interface AgentOrigin {
 export interface AgentOriginBot {
   id: string
   name: string
+  /**
+   * Its face, for a bot of another computer: a window there has no record of it (`ROUTED_AGENT_BOT_KEY`). Absent on a
+   * bot of this computer, whose window reads its face from the bots it lists.
+   */
+  look?: BotLook
 }
 
 /** The length of the header before an agent's words (`head`) and of the closing line after them (`tail`). */
@@ -1699,8 +1710,12 @@ export interface Thread {
    * Set on a thread one of the owner's bots started ("use your threads"): the bot and its name then, so the thread still
    * says who started it after the bot is renamed or deleted ("Started by Alpha (deleted)"). `createdByThreadId` is the
    * bot's chat thread.
+   *
+   * `node` is set when the bot is one of another computer's (`startedFrom.node`): it started this thread there with
+   * `computer`, and its first message named it (`ROUTED_AGENT_BOT_KEY`). Display only: no bot here has that id, so
+   * nothing that decides what a thread may do reads such a bot (`ownBotOf`).
    */
-  startedByBot?: { botId: string; name: string }
+  startedByBot?: { botId: string; name: string; node?: string }
   /**
    * Set on a thread kept out of the owner's sidebar: an agent started it (`thread_create`, here or from another computer)
    * and did not start it as independent, or a personal bot started it hidden or hid it later (a short background job).
@@ -1894,6 +1909,28 @@ export interface TurnState {
    * In memory, like `step`; set only while the turn is active.
    */
   heldSteer?: HeldSteer
+  /**
+   * A chain of agent messages that started in this thread reached its budget, and its messages wait for the person's
+   * Continue or Stop (issue #1443). Shown through every phase of the thread's own turns, and after a restart, until it
+   * is decided; one chain at a time, the one held longest.
+   */
+  chainHold?: ChainHoldView
+}
+
+/** What the card of a held chain of agent messages shows (`TurnState.chainHold`). */
+export interface ChainHoldView {
+  chainId: string
+  /**
+   * The batch the card answers: its oldest held message. The answer names it, so one that comes after this batch was
+   * settled (a late click, another computer's) is refused (`hold_settled`) and never acts on what the chain held later.
+   */
+  holdId: string
+  /** Messages the agents sent each other since the chain's budget began. */
+  used: number
+  /** Messages waiting for the decision. */
+  held: number
+  /** The threads of the held messages, senders and receivers, with their titles: who is talking. */
+  between: Array<{ threadId: string; title: string | null }>
 }
 
 /** What a held steer waits for (`TurnState.heldSteer`). */

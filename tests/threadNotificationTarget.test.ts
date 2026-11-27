@@ -154,3 +154,38 @@ describe('bodyWithProject', () => {
     expect(bodyWithProject('Agent finished')).toBe('Agent finished')
   })
 })
+
+describe('NotificationThreadIndex and a subagent on another computer', () => {
+  // A agent started it on B. Rows arrive as the window lists them: the other computer's by `<node>:<id>`, with `node`.
+  const A = 'nod_' + 'a'.repeat(26)
+  const B = 'nod_' + 'b'.repeat(26)
+  const from = (subagent: boolean) => ({ node: A, agent: { thread: 'p', title: 'Plan', mode: 'default' as const, ...(subagent ? { subagent: true as const } : {}) } })
+  const lists = {
+    A: [{ id: 'p', name: 'Plan' }, { id: 'stand-in', name: 'Mac build', lineage: subagentOf('p') }, { id: `${B}:x`, name: 'Mac build', node: B, startedFrom: from(true) }],
+    B: [{ id: `${A}:p`, name: 'Plan', node: A }, { id: 'x', name: 'Mac build', startedFrom: from(true) }]
+  }
+  const remoteRow = { A: `${B}:x`, B: 'x' }
+  const parent = { A: 'p', B: `${A}:p` }
+
+  it.each(['A', 'B'] as const)('on %s, its end is quiet and its question is announced under the parent', (on) => {
+    const index = new NotificationThreadIndex()
+    index.note('a', { threads: lists[on] })
+    expect(index.resolve('a', remoteRow[on], 'completed')).toBeNull()
+    expect(index.resolve('a', remoteRow[on], 'idle')).toBeNull()
+    expect(index.resolve('a', remoteRow[on], 'question')).toEqual({ threadId: parent[on], parentName: 'Plan', viaThreadId: remoteRow[on], threadName: 'Plan' })
+    expect(index.listedAs('a', remoteRow[on])).toBe(parent[on])
+  })
+
+  it('a row that comes on its own (`threads.row`) is read the same way', () => {
+    const index = new NotificationThreadIndex()
+    index.note('a', { threads: [lists.B[0]] })
+    index.noteRow('a', { thread: lists.B[1] })
+    expect(index.resolve('a', 'x', 'completed')).toBeNull()
+  })
+
+  it('a thread from a computer that does not mark subagents notifies as itself, as before', () => {
+    const index = new NotificationThreadIndex()
+    index.note('a', { threads: [lists.B[0], { id: 'x', name: 'Mac build', startedFrom: from(false) }] })
+    expect(index.resolve('a', 'x', 'completed')).toEqual({ threadId: 'x', threadName: 'Mac build' })
+  })
+})

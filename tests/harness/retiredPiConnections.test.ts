@@ -237,7 +237,7 @@ describe('retired legacy-only Pi connections', () => {
   it.each([false, true])('startup, the providers page and the usage page make no request (sign-in expired: %s)', async (expired) => {
     const profile = await upgraded({ expired })
     const snapshots = await settledSnapshots(profile)
-    for (const [instanceId, target] of [['pi:openai-codex', 'ChatGPT subscription'], ['pi:cursor', 'Cursor']] as const) {
+    for (const [instanceId, target] of [['pi:openai-codex', 'Codex'], ['pi:cursor', 'Cursor']] as const) {
       const snapshot = snapshots.find((entry) => entry.instanceId === instanceId)!
       // The record and its sign-in as stored; nothing runs, and Move is the next step.
       expect(snapshot).toMatchObject({ driver: 'pi', enabled: { device: true }, auth: { state: 'signed_in' }, runs: { state: 'no' } })
@@ -278,7 +278,7 @@ describe('retired legacy-only Pi connections', () => {
       expect(refusal(() => harness.resolveStored(pinned, { purpose })), purpose).toMatchObject({
         code: 'provider_retired',
         // It says where to go: a caller may have no Move button.
-        message: 'ChatGPT was retired by a Mousse update. Move it to ChatGPT subscription in Settings → Providers to keep chatting. Your chats stay.'
+        message: 'ChatGPT was retired by a Mousse update. Move it to Codex in Settings → Providers to keep chatting. Your chats stay.'
       })
     expect(refusal(() => harness.resolve({ instanceId: 'pi:cursor', model: 'composer-1' }, device, 'turn'))).toMatchObject({ code: 'provider_retired' })
     // Selections from before instances (a provider name only) read retired, never unknown.
@@ -311,11 +311,22 @@ describe('retired legacy-only Pi connections', () => {
     const profile = await upgraded()
     await expect(profile.harness.instances.signIn('pi:openai-codex', 'api_key')).rejects.toMatchObject({ code: 'provider_retired' })
     await expect(profile.harness.instances.signIn('pi:cursor', 'api_key')).rejects.toMatchObject({ code: 'provider_retired' })
-    expect(await profile.providerAuth.runApiKeyLogin(new LoginSession('retired-key'), 'openai-codex')).toMatchObject({ success: false, error: expect.stringContaining('Move it to ChatGPT subscription') })
+    expect(await profile.providerAuth.runApiKeyLogin(new LoginSession('retired-key'), 'openai-codex')).toMatchObject({ success: false, error: expect.stringContaining('Move it to Codex') })
     expect(await profile.providerAuth.runOAuthLogin(new LoginSession('retired-oauth'), 'openai-codex')).toMatchObject({ success: false })
     await expect(profile.providerAuth.setApiKey('cursor', 'typed-key')).rejects.toThrow('Move it to Cursor')
     expect(profile.authUnchanged()).toBe(true)
     expect(requests).toEqual([])
+  })
+
+  it('shows a Codex entry still saved under the old default name as Codex, and keeps a name the person typed', async () => {
+    const profile = await upgraded()
+    profile.harness.instanceMap.setEntry('codex:old-default', { driver: 'codex', enabled: false, config: { displayName: 'ChatGPT subscription 2', setup: 'managed' } })
+    profile.harness.instanceMap.setEntry('codex:typed', { driver: 'codex', enabled: false, config: { displayName: 'ChatGPT subscription for work', setup: 'managed' } })
+    const names = Object.fromEntries((await profile.harness.instances.snapshots(device)).map((entry) => [entry.instanceId, entry.displayName]))
+    expect(names['codex:old-default']).toBe('Codex 2')
+    expect(names['codex:typed']).toBe('ChatGPT subscription for work')
+    // Only what is shown changes: the stored name stays until the person renames the entry.
+    expect(profile.stored()['codex:old-default']).toMatchObject({ config: { displayName: 'ChatGPT subscription 2' } })
   })
 
   it('keeps the history and lets running work be read or stopped', async () => {

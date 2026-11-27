@@ -2,6 +2,7 @@ import { normalizePermissionMode } from '../../../shared/permissionMode'
 import type { Project, Thread, ThreadActivityState } from '../../../shared/types'
 import { archivedAtOf } from '../../../shared/archivedAt'
 import type { ListsStatus } from '../remote/MmsListsSource'
+import { parseQualifiedId } from '../../../shared/threadRef'
 
 /**
  * Pure parts of the merged lists: how another computer's snapshot becomes rows, where a new row sits
@@ -128,6 +129,20 @@ export interface RowContext {
   offline: boolean
   /** Whether the computer has stopped sharing its threads with this one; its rows are what it last said. */
   notShared?: boolean
+  /** This computer: a remote subagent's thread that runs here is named by its own id. */
+  self?: string
+}
+
+/** A remote subagent stand-in's computer and thread (`Thread.runsOn`), as this computer names that thread. */
+function runsOnRow(raw: unknown, self: string | undefined): Thread['runsOn'] | undefined {
+  if (!isRecord(raw) || typeof raw.node !== 'string' || typeof raw.computerName !== 'string') return undefined
+  const ref = typeof raw.ref === 'string' ? raw.ref : undefined
+  const here = ref ? parseQualifiedId(ref) : undefined
+  return {
+    node: raw.node,
+    computerName: raw.computerName,
+    ...(ref ? { ref: here && here.node === self ? here.id : ref } : {})
+  }
 }
 
 export { isListedComputer } from '../../../shared/net/listedComputer'
@@ -171,6 +186,15 @@ export function threadRow(
   if (raw.hidden === true) row.hidden = true
   // Its first message is bound by the window that sends it, as on the computer that runs it.
   if (raw.firstSendPending === true) row.firstSendPending = true
+  // Who started it, so the filters, the Started-by bar and its launcher's Started threads read it as there. The
+  // launcher arrives qualified with its computer, as every thread id of the lists does.
+  if (isRecord(raw.startedByBot) && typeof raw.startedByBot.botId === 'string' && typeof raw.startedByBot.name === 'string')
+    row.startedByBot = { botId: raw.startedByBot.botId, name: raw.startedByBot.name }
+  if (typeof raw.createdByThreadId === 'string') row.createdByThreadId = raw.createdByThreadId
+  if (isRecord(raw.native)) row.native = raw.native as unknown as Thread['native']
+  if (raw.automationManager === true) row.automationManager = true
+  const runsOn = runsOnRow(raw.runsOn, context.self)
+  if (runsOn) row.runsOn = runsOn
   if (context.notShared) row.notShared = true
   else if (context.offline) row.offline = true
   return row

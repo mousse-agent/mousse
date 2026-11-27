@@ -43,7 +43,7 @@ describe('QuickActionTools', () => {
   it('claims only its own tool name', () => {
     const { tools } = makeTools(true)
     expect(tools.isQuickActionTool('create_quick_action')).toBe(true)
-    expect(tools.isQuickActionTool('ask_user')).toBe(false)
+    expect(tools.isQuickActionTool('question_ask')).toBe(false)
   })
 
   it('publishes the action when approved', async () => {

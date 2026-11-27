@@ -75,6 +75,21 @@ describe('a window is told what the live stream knows, once it arrives', () => {
     expect(resync.data).toMatchObject({ replace: true, earlier: { before: 'm8', count: 7 } })
   })
 
+  it("tells a window the owner's turn on a resync, a held chain's card with it, and that the card went", async () => {
+    const thread = t.thread()
+    const id = t.qualified(thread.id)
+    const attachment = inside.obtain(t.node, thread.id)
+    focus(thread.id)
+    const card = { chainId: 'chain:r1', holdId: 'h1', used: 12, held: 1, between: [] }
+    inside.onUpdate(attachment, { kind: 'snapshot', value: snapshot(thread.id, { turnState: { threadId: thread.id, turnId: null, phase: 'idle', updatedAt: '2026-11-27T10:00:00.000Z', chainHold: card } }) })
+    const from = t.events.length
+    inside.onUpdate(attachment, { kind: 'snapshot', value: snapshot(thread.id, { turnState: { threadId: thread.id, turnId: null, phase: 'idle', updatedAt: '2026-11-27T10:00:01.000Z' } }) })
+    const told = t.events.slice(from).filter((event) => event.threadId === id && event.type === 'turn.state')
+    expect(told).toHaveLength(1)
+    expect(told[0]!.data).toMatchObject({ threadId: id, phase: 'idle' })
+    expect((told[0]!.data as { chainHold?: unknown }).chainHold).toBeUndefined()
+  })
+
   it('forgets what was left to load once the owner replaces the transcript with the whole thread (an undo)', () => {
     const view = new RemoteThreadView()
     view.install(snapshot('t', { messages: [{ id: 'm8' }, { id: 'm9' }], earlier: { before: 'm8', count: 7 } }))

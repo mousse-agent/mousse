@@ -71,7 +71,7 @@ describe('Git foundation through daemon protocol', () => {
     expect(f.read(metadata.worktreePath)).toBe('main-agent bytes\n')
     expect(f.read(f.repo)).toBe('base\n')
     expect(adapter.turns[0]!.cwd).toBe(metadata.worktreePath)
-    const followUp = await client.request<{ message: string }>('orchestrator.send', { threadId: thread.id, content: 'Read value.txt without changes.', mode: 'plan' })
+    const followUp = await client.request<{ message: string }>('orchestrator.send', { threadId: thread.id, content: 'Read value.txt without changes.', mode: 'agent' })
     expect(adapter.turns[1]!.cwd).toBe(metadata.worktreePath)
     expect(followUp.message).toContain('main-agent bytes')
     expect((await client.request<{ content: string }>('files.read', { threadId: thread.id, path: 'value.txt' })).content).toContain('main-agent bytes')
@@ -132,7 +132,7 @@ describe('Git foundation through daemon protocol', () => {
     await new ThreadActionService(aDir).runCheckpointedAction({ ...actionOptions(writer.workspacePath!), threadId: a.id }, () => {
       writeFileSync(join(writer.workspacePath!, 'value.txt'), 'task A\n')
     })
-    const reader = await resolver.resolve('plan')
+    const reader = await resolver.resolve('reviewer')
     expect(reader.workspacePath).toBe(writer.workspacePath)
     const fromGui = await client.request<{ path: string; content: string }>('files.read', { threadId: a.id, path: 'value.txt' })
     expect(fromGui.path).toBe('value.txt')

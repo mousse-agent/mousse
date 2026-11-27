@@ -525,8 +525,6 @@ describe('a bot\'s work subagents as delegations', () => {
     const taken = steer.take()!
     steer.accepted(taken.token)
     expect(steer.peek()).toBeUndefined()
-    // A message changes nothing it may do: it starts no subagents of its own.
-    expect(child.prepared.authority.subagents).toBeUndefined()
     // Another work of the same bot knows no such subagent.
     const other = await work('w2')
     expect(await other.prepared.authority.subagents!.send({ subagent: 'Prices', message: 'Stop.' })).toHaveProperty('refused')

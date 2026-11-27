@@ -739,7 +739,7 @@ export class TranscriptAssembler {
    *
    * `asksPerson`: while the thread has a question pending that no provider call reported (`waitingOnPerson` only knows
    * the provider's own approvals and questions), the calls that may be the one asking it: Mousse's own tools that ask
-   * the person (`ask_user`, an approval). The steer answers such a question, as it answers the provider's.
+   * the person (`question_ask`, an approval). The steer answers such a question, as it answers the provider's.
    */
   foregroundTools(waitingOnPerson: ReadonlySet<string> = new Set(), asksPerson?: (toolName: string) => boolean): ForegroundTool[] {
     const tools: ForegroundTool[] = []

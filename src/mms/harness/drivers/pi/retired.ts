@@ -16,7 +16,7 @@ export interface RetiredPiProvider {
 }
 
 export const PI_RETIRED: Readonly<Record<string, RetiredPiProvider>> = Object.freeze({
-  'openai-codex': Object.freeze({ moveTo: 'codex', target: 'ChatGPT subscription' }),
+  'openai-codex': Object.freeze({ moveTo: 'codex', target: 'Codex' }),
   cursor: Object.freeze({ moveTo: 'cursor', target: 'Cursor' })
 })
 

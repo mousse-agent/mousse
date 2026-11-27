@@ -32,7 +32,7 @@ export interface AgentDefinitionDomainServices extends AgentDefinitionServices {
   }) => Promise<DefinitionTryRunResult>
   /**
    * The questions this connection's running Try Runs of a definition wait on (a shell command's
-   * approval, an `ask_user`): the Try Run panel shows them, since their thread is not on screen.
+   * approval, an `question_ask`): the Try Run panel shows them, since their thread is not on screen.
    */
   tryRunPending?: (input: { definitionId: string; connectionId: string }) => DefinitionTryRunPending
   /** Answers (or dismisses) one of those questions; any other request is refused. */

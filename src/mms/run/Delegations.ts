@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { BOT_WORK_ROW_SQL } from './delegation/botWork'
 import { isPermissionMode } from '../../shared/permissionMode'
 import { isAgentAccessLevel, type AgentAccessLevel } from '../../shared/settings'
 import { json, str, type Row } from './db/rows'
@@ -16,7 +17,6 @@ import type {
   DelegationWorkspace,
   LineageRecord,
   LineageRelationship,
-  ModeCeiling,
   RunRecord
 } from './types'
 
@@ -103,7 +103,6 @@ export class Delegations {
     model?: string | null
     prompt: string
     wake: DelegationWake
-    modeCeiling?: ModeCeiling | null
     accessLevel?: AgentAccessLevel | null
     workspace?: DelegationWorkspace | null
     role?: string | null
@@ -125,7 +124,6 @@ export class Delegations {
         result: null,
         createdAt: this.now(),
         completedAt: null,
-        modeCeiling: input.modeCeiling ?? null,
         accessLevel: input.accessLevel ?? null,
         workspace: input.workspace ?? null,
         role: input.role ?? null,
@@ -152,7 +150,8 @@ export class Delegations {
           null,
           record.createdAt,
           null,
-          record.modeCeiling,
+          // mode_ceiling is retired (Plan mode is gone): new rows leave it empty, and nothing reads it.
+          null,
           record.workspace,
           record.role,
           record.accessLevel,
@@ -166,8 +165,12 @@ export class Delegations {
     })
   }
 
+  /**
+   * A bot work's projection is not a task here either (`list`): a task id naming one is unknown, so no generic path
+   * (`task_cancel`, `task_status`, acknowledging, an address) cancels or moves it. Only the bot port reaches the work.
+   */
   get(delegationId: string): DelegationRecord | null {
-    const row = this.db.statement('SELECT * FROM delegations WHERE delegation_id = ?').get(delegationId)
+    const row = this.db.statement(`SELECT * FROM delegations WHERE delegation_id = ? AND NOT ${BOT_WORK_ROW_SQL}`).get(delegationId)
     return row ? toDelegation(row) : null
   }
 
@@ -297,9 +300,10 @@ export class Delegations {
     })
   }
 
+  /** A bot work's projection (`delegation/botWork.ts`) is never among them: it is the bots' to change, not a thread's task. */
   private list(column: 'parent_run_id' | 'parent_thread_id' | 'child_thread_id', value: string): DelegationRecord[] {
     return this.db
-      .statement(`SELECT * FROM delegations WHERE ${column} = ? ORDER BY created_at, rowid`)
+      .statement(`SELECT * FROM delegations WHERE ${column} = ? AND NOT ${BOT_WORK_ROW_SQL} ORDER BY created_at, rowid`)
       .all(value)
       .map(toDelegation)
   }
@@ -358,7 +362,6 @@ function toDelegation(row: Row): DelegationRecord {
     result: json<DelegationResult>(row.result),
     createdAt: String(row.created_at),
     completedAt: str(row.completed_at),
-    modeCeiling: row.mode_ceiling === 'plan' || row.mode_ceiling === 'default' ? row.mode_ceiling : null,
     accessLevel: isAgentAccessLevel(row.access_level) ? row.access_level : null,
     workspace: row.workspace === 'isolated' || row.workspace === 'shared' ? row.workspace : null,
     role: str(row.role),

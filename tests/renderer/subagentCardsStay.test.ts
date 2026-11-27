@@ -186,6 +186,20 @@ describe('a follow-up task given with a thread tool', () => {
     expect(cardRows().every((card) => card.opens)).toBe(true)
   })
 
+  it('thread_send to the subagent by its title shows as that task’s card too', async () => {
+    listed = reviewer([task('d1', 2, { continued: true }), task('d2', 101)])
+    await open([
+      ...first,
+      user('u2', 100, 'Also check the tests'),
+      // The result of a follow-up sent with subagent (the old continue_subagent's): it names the thread as childThreadId.
+      threadTool('s1', 101, 'thread_send', { delegationId: 'd2', childThreadId: CHILD, childRunId: 'run-d2', title: 'API reviewer', status: 'started', note: 'Started.' }),
+      reply('a3', 102, 'Sent.')
+    ])
+    await openFolds()
+    expect(cardRows().map((card) => card.title)).toEqual(['API reviewer', 'API reviewer'])
+    expect(cardRows().every((card) => card.opens)).toBe(true)
+  })
+
   it('thread_update that restarted the subagent now shows as the new task’s card inside Worked for', async () => {
     listed = reviewer([task('d1', 2, { continued: true, outcome: 'interrupted' }), task('d2', 101)])
     await open([

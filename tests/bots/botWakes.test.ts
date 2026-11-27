@@ -235,18 +235,25 @@ describe('limits', () => {
     await expect(wake(turn.activation.id, { brief: 'One more.', dueAt: inMinutes(60) })).resolves.toMatchObject({ wakeId: expect.any(String) })
   })
 
-  it(`a loop is refused: the same wake ${MAX_SAME_WAKES} times since the owner wrote, cancelled ones included; the owner's next message clears it`, async () => {
+  it(`a loop waits for the owner: the same wake ${MAX_SAME_WAKES} times since the owner wrote, cancelled ones included, is held until Continue; the owner's next message clears it`, async () => {
     let turn = await chat('Keep checking the deploy', 'm1')
     for (let n = 0; n < MAX_SAME_WAKES; n += 1) {
       // The same brief however it is spaced or cased, and cancelling it does not reset it.
       const set = await wake(turn.activation.id, { brief: n % 2 ? 'check  the deploy!' : 'Check the deploy.', dueAt: inMinutes(5) })
       f.bots.tools.reminders.cancel(botId, set.wakeId)
     }
-    await expect(wake(turn.activation.id, { brief: 'Check the deploy.', dueAt: inMinutes(5) })).rejects.toThrow('that is a loop')
+    const held = await wake(turn.activation.id, { brief: 'Check the deploy.', dueAt: inMinutes(5) })
+    expect(held).toEqual({ held: { holdId: expect.stringMatching(/^bhold_/) } })
+    await expect(wake(turn.activation.id, { brief: 'check the deploy', dueAt: inMinutes(5) })).rejects.toThrow('already waits for your owner')
+    expect(f.bots.service.list().bots.find((bot) => bot.id === botId)!.chainHold).toMatchObject({ held: 1, wakes: 1, to: [] })
     // Something new to wait for is no loop: another brief, or the same brief on an event.
     await expect(wake(turn.activation.id, { brief: 'Check the deploy: step 2 started.', dueAt: inMinutes(5) })).resolves.toMatchObject({ wakeId: expect.any(String) })
     await expect(wake(turn.activation.id, { brief: 'Check the deploy.', event: { kind: 'pr', repo: 'acme/app', number: 12 } })).resolves.toMatchObject({ wakeId: expect.any(String) })
     await finish(f, turn.payload, 'completed', { text: 'Watching.' })
+    // Continue sets it.
+    const count = f.store.wakesSetSince(botId, '').length
+    expect(await f.bots.service.answerChainHold(botId, (held as { held: { holdId: string } }).held.holdId, 'continue')).toEqual({ sent: 1, stopped: 0, failed: 0 })
+    expect(f.store.wakesSetSince(botId, '').slice(count)).toEqual([expect.objectContaining({ text: 'Check the deploy.' })])
     f.clock.now += MIN
     turn = await chat('Keep checking', 'm2')
     await expect(wake(turn.activation.id, { brief: 'Check the deploy.', dueAt: inMinutes(5) })).resolves.toMatchObject({ wakeId: expect.any(String) })

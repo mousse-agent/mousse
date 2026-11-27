@@ -768,13 +768,13 @@ describe('TranscriptAssembler.foregroundTools (the calls a held steer waits for)
     assembler.tool(start('b1', 'Bash'))
     const asks = (name: string) => name === 'mcp__mousse__ask_user'
     expect(assembler.foregroundTools(new Set(), asks).map((tool) => tool.callId)).toEqual(['b1'])
-    // With no question pending (no predicate), ask_user holds like any call.
+    // With no question pending (no predicate), question_ask holds like any call.
     expect(ids(assembler)).toEqual(['ask', 'b1'])
   })
 
   it('ownCallMayAsk: only the turn\'s own (root) call may be the asker, never one under a subagent', () => {
     const { assembler } = harness()
-    const asks = (name: string) => mousseCallAsksPerson(name, (tool) => (tool === 'ask_user' ? { asksUser: 'question' } : undefined))
+    const asks = (name: string) => mousseCallAsksPerson(name, (tool) => (tool === 'question_ask' ? { asksUser: 'question' } : undefined))
     assembler.tool(agent('a1'))
     assembler.tool(start('sub-ask', 'mcp__mousse__ask_user', { toolName: 'mcp__mousse__ask_user', kind: 'generic' }, 'a1'))
     expect(assembler.ownCallMayAsk(asks)).toBe(false)
@@ -783,10 +783,10 @@ describe('TranscriptAssembler.foregroundTools (the calls a held steer waits for)
   })
 
   it('Mousse\'s asking tools are matched exactly: a look-alike title is no Mousse call', () => {
-    const lookup = (tool: string) => ({ ask_user: { asksUser: 'question' }, thread_read: { access: 'readsOthers' } } as Record<string, { asksUser?: string; access?: string }>)[tool]
-    for (const name of ['mcp__mousse__ask_user', 'mousse/ask_user', 'mousse.ask_user', 'mousse__ask_user', 'mousse: ask_user', 'ask_user (mousse MCP Server)', 'ask_user', 'mcp__mousse-relay__github__create_issue', 'mcp__mousse__newer_tool', 'mousse-relay/github__createIssue', 'mousse-relay.Linear__Create_Issue', 'github__createIssue (mousse-relay MCP Server)'])
+    const lookup = (tool: string) => ({ question_ask: { asksUser: 'question' }, thread_read: { access: 'readsOthers' } } as Record<string, { asksUser?: string; access?: string }>)[tool]
+    for (const name of ['mcp__mousse__ask_user', 'mousse/question_ask', 'mousse.question_ask', 'mousse__ask_user', 'mousse: question_ask', 'question_ask (mousse MCP Server)', 'question_ask', 'mcp__mousse-relay__github__create_issue', 'mcp__mousse__newer_tool', 'mousse-relay/github__createIssue', 'mousse-relay.Linear__Create_Issue', 'github__createIssue (mousse-relay MCP Server)'])
       expect(mousseCallAsksPerson(name, lookup), name).toBe(true)
-    for (const name of ['mousse/docs', 'Mousse.md', 'mousse.md', 'MOUSSE/ask_user', 'mousse/thread_read', 'mcp__mousse__thread_read', 'docs (mousse MCP Server)', 'ask_user.md'])
+    for (const name of ['mousse/docs', 'Mousse.md', 'mousse.md', 'MOUSSE/question_ask', 'mousse/thread_read', 'mcp__mousse__thread_read', 'docs (mousse MCP Server)', 'question_ask.md'])
       expect(mousseCallAsksPerson(name, lookup), name).toBe(false)
     expect(mousseServerToolOf('Mousse.md')).toBeUndefined()
   })

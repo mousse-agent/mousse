@@ -67,12 +67,6 @@ describe('thread_create (SPEC §15.1)', () => {
       // It failed in the handler, so the ledger says so; nothing was made.
       expect(ledger.commit).not.toHaveBeenCalled()
     })
-
-    it('a plan-ceiling caller cannot start a thread', async () => {
-      const { call, denied, host } = await world()
-      expect((await denied(call({ projectId: 'p1' }, { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
-      expect(host.createThread).not.toHaveBeenCalled()
-    })
   })
 
   describe('what it refuses before the host is asked', () => {
@@ -91,9 +85,7 @@ describe('thread_create (SPEC §15.1)', () => {
       [{ projectId: 'p1', model: ' ' }, /model must be/],
       [{ projectId: 'p1', title: 5 }, /title must be a string/],
       [{ projectId: 'p1', title: 'x'.repeat(201) }, /title must be at most/],
-      [{ projectId: 'p1', firstMessage: '   ' }, /firstMessage must be/],
-      [{ projectId: 'p1', mode: 'plan' }, /mode is the mode of firstMessage/],
-      [{ projectId: 'p1', firstMessage: 'x', mode: 'build' }, /mode must be agent or plan/]
+      [{ projectId: 'p1', firstMessage: '   ' }, /firstMessage must be/]
     ])('%o is an error result', async (args, message) => {
       const { call, host } = await world()
       const result = await call(args as Record<string, unknown>)
@@ -112,11 +104,11 @@ describe('thread_create (SPEC §15.1)', () => {
     it('the normalized launch, the caller as the actor with this call, and a key scoped to the caller thread', async () => {
       const { call, host, callerRun } = await world()
       const result = await call({
-        projectId: 'p1', title: '  Fix the build  ', workspace: 'new_worktree', instanceId: ' claude ', model: 'sonnet', firstMessage: 'Please fix it', mode: 'plan'
+        projectId: 'p1', title: '  Fix the build  ', workspace: 'new_worktree', instanceId: ' claude ', model: 'sonnet', firstMessage: 'Please fix it'
       }, { toolCallId: 'mcp:create-1' })
       expect(JSON.parse(result.text)).toMatchObject({ threadId: 'new-1', link: 'mousse://thread/new-1', replayed: false })
       expect(host.createThread).toHaveBeenLastCalledWith(
-        { projectId: 'p1', title: 'Fix the build', workspace: 'new_worktree', instanceId: 'claude', model: 'sonnet', firstMessage: 'Please fix it', mode: 'plan' },
+        { projectId: 'p1', title: 'Fix the build', workspace: 'new_worktree', instanceId: 'claude', model: 'sonnet', firstMessage: 'Please fix it' },
         { clientRequestId: 'thread_create:caller:mcp:create-1', actor: { kind: 'agent', threadId: 'caller', runId: callerRun.runId, toolCallId: 'mcp:create-1' } }
       )
       // Defaults: the project's folder, no title, no message.
@@ -127,7 +119,7 @@ describe('thread_create (SPEC §15.1)', () => {
       )
       // A first message defaults to an agent turn.
       await call({ projectId: 'p1', firstMessage: 'go' })
-      expect(host.createThread).toHaveBeenLastCalledWith({ projectId: 'p1', workspace: 'project', firstMessage: 'go', mode: 'agent' }, expect.anything())
+      expect(host.createThread).toHaveBeenLastCalledWith({ projectId: 'p1', workspace: 'project', firstMessage: 'go' }, expect.anything())
     })
 
     it('adds the transcript row only for the call that created the thread, never for a replay', async () => {

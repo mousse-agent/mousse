@@ -53,6 +53,8 @@ describe('the Request trigger', () => {
     expect(requestRefusal({ schedule: { kind: 'once', runAt: '2026-11-15T00:00:00.000Z' } })).toMatch(/On demand/)
     // A bot's automation takes requests too: each starts the bot's run.
     expect(requestRefusal({ ...manual, bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' } })).toBeNull()
+    // A bot's draft gets its URL once it is on: Turn on makes the bot's own automation, which the draft's would not follow.
+    expect(requestRefusal({ ...manual, draft: { who: { kind: 'bot', botId: 'b' } } })).toMatch(/Turn it on first/)
   })
 
   it('words each outcome the way the log shows it', () => {

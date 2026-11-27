@@ -19,7 +19,6 @@ import type { McpToolDescriptor } from '../../src/shared/integrations'
 import type { AgentRuntimePolicy } from '../../src/shared/agents/execution'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import { BOT_THREADS_PERMISSION, botStarterManifest } from '../../src/shared/bots/personal/manifest'
-import type { ModeCeiling } from '../../src/mms/run/types'
 import { appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture } from './delegationFixture'
 
@@ -71,10 +70,10 @@ interface TurnKind {
   turn: Partial<AppToolTurn>
   /** The owner says a person started the run (`personHeld`); the registry adds that a subagent never holds `person`. */
   person?: boolean
-  /** `subagent`: its lineage says it is a Mousse subagent; `liveCeiling`: what its ancestors' running turns narrow it to. */
-  thread?: { readOnly?: boolean; ceiling?: ModeCeiling; botRole?: 'activation' | 'subagent'; subagent?: boolean; liveCeiling?: ModeCeiling }
+  /** `subagent`: its lineage says it is a Mousse subagent. */
+  thread?: { readOnly?: boolean; botRole?: 'activation' | 'subagent'; subagent?: boolean }
   permissionMode?: PermissionMode
-  credential?: { modeCeiling?: ModeCeiling; binding?: McpTurnBinding; provider?: string }
+  credential?: { binding?: McpTurnBinding; provider?: string }
 }
 
 /** A turn's browser binding that allows the read tools and opening a page, on a model without vision. */
@@ -94,14 +93,12 @@ const KINDS: Record<string, () => TurnKind> = {
   'person, Ask': () => ({ turn: {}, person: true, permissionMode: 'ask' }),
   'person, Full access': () => ({ turn: {}, person: true, permissionMode: 'full' }),
   'person, browser bound without vision': () => ({ turn: { browser: BROWSER }, person: true, permissionMode: 'ask' }),
-  'plan turn': () => ({ turn: { mode: 'plan', modeFacts: { readOnly: true, agent: false, build: false }, modeCeiling: 'plan' }, person: true, permissionMode: 'ask', credential: { modeCeiling: 'plan' } }),
   'build-mode turn': () => ({ turn: { mode: 'build', modeFacts: { readOnly: false, agent: false, build: true } }, person: true, permissionMode: 'edit' }),
   // A subagent of a person's turn: the owner reads its run as the person's, and the registry still never lets `person` pass down.
-  'delegated subagent': () => ({ turn: { subagent: true }, person: true, permissionMode: 'edit', thread: { ceiling: 'default', subagent: true } }),
-  'subagent while its parent plans': () => ({ turn: { subagent: true }, person: true, permissionMode: 'edit', thread: { ceiling: 'default', subagent: true, liveCeiling: 'plan' } }),
+  'delegated subagent': () => ({ turn: { subagent: true }, person: true, permissionMode: 'edit', thread: { subagent: true } }),
   'read-only subagent': () => ({
-    turn: { subagent: true, mode: 'plan', modeFacts: { readOnly: true, agent: false, build: false }, modeCeiling: 'plan', toolAccess: createAgentToolAccess({ version: 1, workspace: 'shared', access: 'read-only' }, process.cwd()) },
-    permissionMode: 'ask', thread: { readOnly: true, ceiling: 'plan', subagent: true }, credential: { modeCeiling: 'plan' }
+    turn: { subagent: true, toolAccess: createAgentToolAccess({ version: 1, workspace: 'shared', access: 'read-only' }, process.cwd()) },
+    permissionMode: 'ask', thread: { readOnly: true, subagent: true }
   }),
   'bot chat': () => ({ turn: { bot: botAuthority('activation', CHAT_BOT_TOOLS), approvals: 'never' }, permissionMode: 'ask', thread: { botRole: 'activation' } }),
   'bot chat, catalogue': () => ({ turn: { bot: botAuthority('activation', { ...CHAT_BOT_TOOLS, catalogue: 'use_tool' }), approvals: 'never' }, permissionMode: 'ask', thread: { botRole: 'activation' } }),
@@ -111,7 +108,7 @@ const KINDS: Record<string, () => TurnKind> = {
     turn: {
       definition: {
         policy: definitionPolicy,
-        grants: { skills: [], mcpTools: [{ id: 'srv__read', source: 'definition' as never }], builtinTools: ['create_task', 'list_tasks', 'ask_user', 'thread_fork', 'thread_read', 'browser_open', 'theme_set'].map((id) => ({ id, source: 'definition' as never })), denied: [] },
+        grants: { skills: [], mcpTools: [{ id: 'srv__read', source: 'definition' as never }], builtinTools: ['task_create', 'task_list', 'question_ask', 'thread_fork', 'thread_read', 'browser_open', 'theme_set'].map((id) => ({ id, source: 'definition' as never })), denied: [] },
         mcpTools: [userMcpTool('read')],
         approve: async () => ({ status: 'denied', reason: 'definition approval asked' })
       } as unknown as DefinitionAuthority,
@@ -124,6 +121,14 @@ const KINDS: Record<string, () => TurnKind> = {
   'Pi turn': () => ({ turn: { attemptToken: 'attempt-1' }, person: true, permissionMode: 'ask', credential: { binding: 'per_call', provider: 'pi' } })
 }
 
+/** The requests `request_answer` is called with, one of each kind, by id: what each row of it is called. */
+const REQUESTS: Record<string, { label: string; threadId?: string }> = {
+  'req-child': { label: 'subagent', threadId: 'thread-child' },
+  'req-b': { label: 'thread-b', threadId: 'thread-b' },
+  'req-private': { label: 'thread-private', threadId: 'thread-private' },
+  'q-1': { label: 'bot question' }
+}
+
 /** What one kind of turn holds of every tool. */
 async function snapshotOf(kind: TurnKind) {
   const fx = delegationFixture({ profileHome: mkdtempSync(join(base, 'profile-')) })
@@ -132,10 +137,8 @@ async function snapshotOf(kind: TurnKind) {
     const asked: string[] = []
     const fake = fakeAppToolHost({
       readOnlyThread: () => kind.thread?.readOnly === true,
-      threadCeiling: () => kind.thread?.ceiling ?? 'default',
       botRole: () => kind.thread?.botRole,
       subagentThread: () => kind.thread?.subagent === true,
-      liveCeiling: () => kind.thread?.liveCeiling,
       personHeld: () => kind.person === true,
       permissionModeFor: () => kind.permissionMode,
       askApproval: async (_threadId, _questions, { approval }) => {
@@ -143,6 +146,8 @@ async function snapshotOf(kind: TurnKind) {
         return { permission: 'reject' }
       },
       threadMeta: (id) => (THREADS[id] ? ({ id, name: id, createdAt: '', updatedAt: '', ...THREADS[id] } as never) : undefined),
+      approvalRequest: (id) => (REQUESTS[id]?.threadId ? { requestId: id, threadId: REQUESTS[id].threadId!, status: 'pending', approval: true, questions: [] } : undefined),
+      parentThread: (id) => (id === 'thread-child' ? THREAD : undefined),
       listThreads: () => [],
       listProjects: () => [],
       browserRuntime: () => ({ resolveTarget: () => ({ backend: 'managed-chromium' }), dispatch: async () => ({}) }) as never,
@@ -157,7 +162,7 @@ async function snapshotOf(kind: TurnKind) {
       goals: { working: () => true } as never
     } as Partial<AppToolHost>)
     const turns = new AppToolTurns()
-    const deps = { host: { activationOf: () => ({ botId: 'b1', activationId: 'act-1', lane: 'run' }) }, activity: { onAppResult: vi.fn(), onAllowed: vi.fn(), drain: () => [] } } as unknown as BotAppToolDeps
+    const deps = { host: { activationOf: () => ({ botId: 'b1', activationId: 'act-1', lane: 'run' }), questions: { asked: (_bot: string, id: string) => id === 'q-1' } }, activity: { onAppResult: vi.fn(), onAllowed: vi.fn(), drain: () => [] } } as unknown as BotAppToolDeps
     const userMcp: UserMcpProxy = {
       list: async () => [userMcpTool('read'), userMcpTool('write')],
       allowed: async () => ({ allowed: true }),
@@ -168,17 +173,20 @@ async function snapshotOf(kind: TurnKind) {
       options: { userMcp, botMcp: { call: async () => ({ text: 'ran' }) as never } }
     })
     const ran = new Set<string>()
+    // A tool of variants (`request_answer`) runs as one of them: reaching any of theirs is reaching it.
     for (const tool of registry.list()) {
-      ;(tool as { handler: unknown }).handler = async () => {
-        ran.add(tool.name)
-        return { text: 'ran' }
+      for (const handled of [tool, ...(tool.variants ?? [])]) {
+        ;(handled as { handler: unknown }).handler = async () => {
+          ran.add(tool.name)
+          return { text: 'ran' }
+        }
       }
     }
     const turn = turns.register(appTurn({ threadId: THREAD, runId: run.runId, turnToken: 'turn-1', ...kind.turn }) as AppToolTurn).turn
     const binding = kind.credential?.binding ?? 'drained_turn'
     const request = (): McpCallRequest => ({
       credential: {
-        threadId: THREAD, runId: run.runId, provider: kind.credential?.provider ?? 'codex', modeCeiling: kind.credential?.modeCeiling ?? turn.modeCeiling,
+        threadId: THREAD, runId: run.runId, provider: kind.credential?.provider ?? 'codex',
         accessLevel: 'manage', binding, current: () => true
       },
       toolCallId: `mcp:call-${Math.random()}`,
@@ -187,13 +195,18 @@ async function snapshotOf(kind: TurnKind) {
     const tokens = binding === 'per_call' ? (turn.attemptToken ? { _mousse_attempt: turn.attemptToken } : { _mousse_turn: turn.turnToken }) : {}
     const words = (text: string) => text.split(run.runId).join('<run>')
     const dispatch: Record<string, string> = {}
-    /** Each tool called with no arguments, and each that takes `threadId` with another thread and a private one. */
-    const calls = registry.list().flatMap((tool) => [
-      { key: tool.name, name: tool.name, args: {} },
-      ...(JSON.stringify(tool.inputSchema).includes('"threadId"')
-        ? ['thread-b', 'thread-private'].map((threadId) => ({ key: `${tool.name} ${threadId}`, name: tool.name, args: { threadId } }))
-        : [])
-    ])
+    /** Each tool called with no arguments, and each that takes `threadId` (or `thread`) with another thread and a private one. */
+    const calls = registry.list().flatMap((tool) => {
+      // `request_answer` is the kind of the request its id names: one call of each kind.
+      if (tool.name === 'request_answer')
+        return Object.entries(REQUESTS).map(([requestId, { label }]) => ({ key: `${tool.name} ${label}`, name: tool.name, args: { requestId } }))
+      const schema = JSON.stringify(tool.inputSchema)
+      const key = schema.includes('"threadId"') ? 'threadId' : schema.includes('"thread"') ? 'thread' : undefined
+      return [
+        { key: tool.name, name: tool.name, args: {} },
+        ...(key ? ['thread-b', 'thread-private'].map((threadId) => ({ key: `${tool.name} ${threadId}`, name: tool.name, args: { [key]: threadId } })) : [])
+      ]
+    })
     for (const { key, name, args } of calls) {
       asked.length = 0
       ran.delete(name)
@@ -213,7 +226,7 @@ async function snapshotOf(kind: TurnKind) {
     const usable = (OrchestratorService.prototype as unknown as { usableAppTools(this: unknown, turn: AppToolTurn): string[] }).usableAppTools
       .call({ mcpToolRegistry: () => registry }, turns.get(run.runId)!)
     return {
-      listed: registry.listForThread(THREAD, 'default', run.runId).map((tool) => tool.name),
+      listed: registry.listForThread(THREAD, run.runId).map((tool) => tool.name),
       pi: registry.listForTurn(THREAD, run.runId).map((tool) => `${tool.name}:${tool.class}`),
       userMcp: (await registry.userMcpForTurn(THREAD, run.runId)).map((tool) => tool.providerName),
       usable,

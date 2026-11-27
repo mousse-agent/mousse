@@ -55,6 +55,63 @@ Grok runs xAI's `grok` CLI over ACP. Every process (version check, start-up chec
 sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdio`, so a home
 `config.toml` that sets always-approve still asks Mousse before each tool.
 
+- **Held launch.** Every chat, model refresh and start-up check runs on a home Mousse owns
+  (`held-home` in the entry's state folder), whatever the thread's mode. Its `config.toml` holds an
+  ask rule for every tool, `remember_tool_approvals = false` and
+  `worktree_inherits_main_approvals = false`; Mousse writes it back if it changes. Grok ranks rules
+  deny, then ask, then allow, across every source, so the ask rule outranks the allow rules Grok
+  also reads from Claude Code's settings and the project, and a saved "always allow" answer no
+  longer stands in for asking. The sign-in stays in the entry's own home: `GROK_AUTH_PATH` points
+  at its `auth.json`, which Grok reads and refreshes in place under that file's own locks (two
+  processes refreshing at once refresh once, with no refused token). Mousse answers a read, a
+  folder listing or a search confined to the thread's folder, and Grok's plan list, itself: the
+  path is checked when Mousse answers, and one that is missing, leaves the folder or its drive,
+  passes through a link or a junction, or (for a search) has a link anywhere under it asks
+  instead; a run that refuses approvals refuses these too. Everything else follows the thread's
+  mode. Sign-in and sign-out run on the entry's own home. An entry whose sign-in Mousse cannot
+  read (below) runs on its own home and holds nothing.
+- **Startup sources.** A held process starts nothing on its own: the hooks, MCP servers, agents,
+  skills and sessions Grok would read from Claude Code, Cursor and Codex are switched off
+  (`GROK_{CLAUDE,CURSOR,CODEX}_*_ENABLED=0`; their rules stay), the held home trusts no folder, so
+  a project's own hooks and MCP servers never load, and it keeps no hook or plugin. An
+  organisation's policy (`requirements.toml` or `managed_config.toml` in `/etc/grok`,
+  `%ProgramData%grok` or the held home, or macOS device management) can add hooks Mousse cannot
+  turn off: then Grok runs only in Full access, and the card names the file.
+- **Bound to one executable.** The proof holds for the executable the last check read. A turn or
+  a title on another one (a self-update, a replaced file) is refused until Grok is checked again,
+  and held processes never update Grok. A check no one asked for (the periodic one) starts the
+  held check a minute later, never at app start, and the startup model listing starts none; Stop
+  cancels a waiting or running check.
+  What runs there is the user's Grok config minus what the held home replaces: MCP servers set up
+  in Mousse still reach Grok through the relay, but servers, plugins and skills set only in Grok's
+  own `config.toml` do not load in Mousse's chats.
+- **Proof per version.** Mousse claims that Grok asks before every tool only for a version and
+  platform with a passing held check (`src/mms/harness/grok/heldCheck.ts`): shipped records for
+  1.0.89 and 1.0.92 on Windows, else a check Mousse runs in the background after a check of the
+  entry finds a new version. The check runs the real `grok` against a stub model on the loopback
+  with a dummy key. Each item must get a permission request for that very tool before any effect,
+  and the effect must not happen (no secret in a later request, no file written or changed, no MCP
+  call, no model request of its own): a read, a listing, a search, a read-only and a writing shell
+  command, a monitor, a write, an edit, an MCP tool, a subagent, a schedule, a workflow, image
+  generation and feedback. It runs them with a Claude Code allow rule for every tool and a saved
+  "always allow" answer present, with inert hooks and MCP servers in every startup source (none
+  may start), in a trusted project whose own config allows everything, and in a worktree whose
+  main checkout has a saved answer. Every tool the version offers must be an item, internal to
+  Grok, or hosted by xAI (`web_search` and `x_search` run on xAI's side, touch nothing on this
+  computer, and are not held). Until a version passes, Grok runs
+  only chats you drive, in Full access, and the entry's Permissions row and every refusal say why.
+  A check that cannot finish keeps the last record and runs again after ten minutes.
+- **Thread titles** and Mousse's other single requests (branch names, pull request drafts, commit
+  messages, a bot's name and digest) run as one headless `grok` request on a home of the request's
+  own: every built-in tool disallowed, a deny rule for every tool, `--max-turns 1`,
+  `models.max_retries = 0`, turn summaries and memory off, Grok's own session title sent to a model
+  at port 0 (Grok still tries it; nothing can receive it there), Mousse's system prompt in place of
+  Grok's, and an empty folder as the person's home, so no Claude Code, Cursor, Codex or user skill,
+  rule or MCP server loads. The held check proves one model request with no tools, Mousse's system
+  text alone, the message as written, no rule or skill from the person's home, and nothing sent
+  anywhere else (every proxy variable points at an observer that must see nothing).
+  Grok comes after Pi in Automatic naming.
+
 - **Status without a process.** Mousse reads the credential Grok would use: an `XAI_API_KEY` (the
   entry's own key wins over an inherited one), else the home's `auth.json`. Any of `GROK_AUTH*`,
   `GROK_OAUTH2_*`, `GROK_OIDC_*`, `GROK_CONFIG`, `GROK_CONFIG_PATH`, `GROK_LOCAL_AUTH`,
@@ -65,8 +122,8 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
 - **Private homes** never inherit those variables or an ambient `XAI_API_KEY`. A device sign-in runs
   in a staging home; its `auth.json` is copied in only when `grok login` succeeds and was not
   cancelled.
-- **Updates.** An entry with its own home runs every process with `GROK_DISABLE_AUTOUPDATER=1` and
-  `GROK_OAUTH2_REFERRER=mousse`. An entry on the user's own home runs Grok as the user set it up.
+- **Updates.** Held processes, and every process of an entry with its own home, run with
+  `GROK_DISABLE_AUTOUPDATER=1`; an entry with its own home also sets `GROK_OAUTH2_REFERRER=mousse`.
   A copy from the official installer offers `grok update`.
 - **Managed copies.** The npm platform package holds only the compressed `grok`; its helpers
   (`grove`, `grove-credential`, `grove-fsmonitor`) are not in it, so Grok fetches them into its
@@ -169,7 +226,7 @@ with it, see [Claude's client name](claude-native-proxy.md).
 
 ## Codex, a second account
 
-- Add provider → ChatGPT subscription → Use my Codex CLI, once the user's own Codex is added, adds
+- Add provider → Codex → Use my Codex CLI, once the user's own Codex is added, adds
   another account on the same `codex` with a home of its own. (A managed entry, which downloads its
   own Codex and signs in with ChatGPT inside Mousse, is a separate setup and is unchanged.) An
   added entry may also be put on the user's own home; it then runs as the built-in does, with the
@@ -249,7 +306,7 @@ with it, see [Claude's client name](claude-native-proxy.md).
 - An agent that gives no reply and no update for 15 minutes fails the turn with a timeout, and its
   process is ended; the next message starts a new session with the chat history. Time the agent
   spends waiting for you does not count: a permission or file request on the connection, or a
-  question from Mousse's own tools (`ask_user`, plans, approvals) on the thread. The bound covers
+  question from Mousse's own tools (`question_ask`, plans, approvals) on the thread. The bound covers
   the prompt only; an agent that hangs while starting or opening a session is not bounded by it.
 - Slash commands. A message that starts with `/` and a command name (`/review src`, not a path
   such as `/tmp/x`) is sent, trimmed, as the first text block, with the chat history as a second

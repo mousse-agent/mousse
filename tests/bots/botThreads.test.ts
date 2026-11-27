@@ -68,7 +68,7 @@ describe('"use your threads" in the bot engine', () => {
     expect(item.note).toBe(THREADS_TEXT.tip)
 
     const owner = await chat('Start it now on Opus.', 'm2')
-    expect(threadTools(owner.prepared.policy.tools!.allow)).toEqual(['thread_archive', 'thread_create', 'thread_fork', 'thread_hide', 'thread_interrupt', 'thread_list', 'thread_merge_back', 'thread_read', 'thread_search', 'thread_send', 'thread_steer', 'thread_update', 'thread_wait'])
+    expect(threadTools(owner.prepared.policy.tools!.allow)).toEqual(['thread_archive', 'thread_create', 'thread_fork', 'thread_list', 'thread_read', 'thread_return', 'thread_search', 'thread_send', 'thread_stop', 'thread_update', 'thread_wait'])
     expect(line(owner.prepared.instructions)).toMatch(/: yes: .*start, message, steer, stop, fork or archive one, or change its queue, when your owner's message asks for it/)
     expect(owner.prepared.instructions).toMatch(/A thread you start runs with full access/)
     // A thread it starts stays out of the sidebar unless the owner asked to follow it (#1534); when to start one visible

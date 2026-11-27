@@ -26,7 +26,6 @@ const READERS = {
   historyInjection: ['handoffDelivery'],
   mcp: ['mcpAttachable'],
   childPolicy: ['subagentTargetRefusal'],
-  planMode: ['planModeAvailable'],
   contextUsage: ['contextGauge'],
   toolControl: ['toolControlLevel'],
   autoPermissionMode: ['autoPermissionModeAvailable'],

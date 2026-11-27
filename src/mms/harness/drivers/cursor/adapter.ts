@@ -76,7 +76,6 @@ export class CursorAdapter implements ProviderAdapter {
       threadId: input.threadId,
       cwd,
       model: input.model,
-      ...(input.mode === 'plan' ? { mode: 'plan' as const } : {}),
       prompt: input.prompt,
       ...(input.images ? { images: input.images } : {}),
       signal: input.signal,

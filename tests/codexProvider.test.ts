@@ -129,11 +129,11 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true })
 })
 
-function create(server: Pick<ReturnType<typeof scriptedServer>, 'launch'>, settings: Record<string, unknown> = {}, options: CodexServiceOptions = {}): CodexProviderService {
+function create(server: Pick<ReturnType<typeof scriptedServer>, 'launch'>, settings: Record<string, unknown> = {}, options: CodexServiceOptions = {}, dependencies: Omit<CodexServiceDependencies, 'launch'> = {}): CodexProviderService {
   mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
   writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, ...settings }))
   // The instance config's launch settings and sign-out flag, as the gateway hands them over.
-  const service = new CodexProviderService(home, questions, { launch: server.launch }, {
+  const service = new CodexProviderService(home, questions, { launch: server.launch, ...dependencies }, {
     launch: () => ({ binaryPath: binary }),
     signedOut: () => signedOut,
     ...options
@@ -319,7 +319,7 @@ describe('CodexProviderService', () => {
     expect(server.methods().filter((method) => method === 'account/read')).toHaveLength(1)
 
     account = { result: { account: null, requiresOpenaiAuth: true } }
-    expect(await service.status({ force: true })).toMatchObject({ state: 'signed_out', message: expect.stringContaining('codex login') })
+    expect(await service.status({ force: true })).toMatchObject({ state: 'signed_out', message: expect.stringContaining('Sign in from Settings') })
     expect(service.configured()).toBe(false)
     expect(server.methods().filter((method) => method === 'account/read')).toHaveLength(2)
 
@@ -502,28 +502,112 @@ describe('CodexProviderService', () => {
     expect(server.launches).toHaveLength(1)
   })
 
-  it('connects through the terminal sign-in: Recheck until signed in, without running a login', async () => {
-    let signedIn = false
-    const server = scriptedServer((message) => {
-      if (message.method === 'account/read') return signedIn ? chatgpt : { result: { account: null, requiresOpenaiAuth: true } }
-      if (message.method === 'model/list') return { error: { code: -32600, message: 'unavailable' } }
-      return { result: {} }
+  /**
+   * Codex's browser sign-in (`account/login/start`, `account/login/completed`, `account/login/cancel`).
+   * Hand-authored from the codex-cli 0.172 v2 app-server schema: it proves Mousse's side only.
+   */
+  describe('browser sign-in on the user\'s own home', () => {
+    const AUTH_URL = 'https://auth.openai.com/oauth/authorize?state=test'
+    /** A server that is signed out until `signedIn()` says otherwise, and answers the sign-in start with `start`. */
+    function signInServer(signedIn: () => boolean, start: Reply = { result: { type: 'chatgpt', loginId: 'login-a', authUrl: AUTH_URL } }) {
+      const starts: number[] = []
+      const server = scriptedServer((message, launchIndex) => {
+        if (message.method === 'account/read') return signedIn() ? chatgpt : { result: { account: null, requiresOpenaiAuth: true } }
+        if (message.method === 'account/login/start') {
+          starts.push(launchIndex)
+          return start
+        }
+        if (message.method === 'account/login/cancel') return { result: { status: 'canceled' } }
+        if (message.method === 'model/list') return { result: { data: [], nextCursor: null } }
+        return { result: {} }
+      })
+      /** Codex's end-of-sign-in notification, on the process the sign-in started on. */
+      const complete = (params: object) => server.processes[starts.at(-1)!].stdout.write(JSON.stringify({ method: 'account/login/completed', params }) + '\n')
+      return { server, starts, complete }
+    }
+
+    it('shows Codex\'s link, waits for its completion, and counts the sign-in only once a fresh check reads signed in', async () => {
+      let signedIn = false
+      const { server, starts, complete } = signInServer(() => signedIn)
+      const service = create(server)
+      const session = new LoginSession('login-1')
+      const events: Array<{ type: string; url?: string; usesCallbackServer?: boolean }> = []
+      session.on('event', (event: { type: string; url?: string; usesCallbackServer?: boolean }) => {
+        events.push(event)
+        if (event.type !== 'auth_url') return
+        // Another sign-in's completion is not this one's.
+        complete({ loginId: 'someone-else', success: true, error: null })
+        signedIn = true
+        complete({ loginId: 'login-a', success: true, error: null })
+      })
+      expect(await service.login(session, home)).toEqual({ success: true, sessionId: 'login-1' })
+      expect(events.filter((event) => event.type === 'auth_url')).toEqual([expect.objectContaining({ url: AUTH_URL, usesCallbackServer: true })])
+      expect(events.some((event) => event.type === 'select')).toBe(false)
+      const startMessage = server.messages.find((message) => message.method === 'account/login/start')
+      expect(startMessage?.params).toEqual({ type: 'chatgpt' })
+      // The process that started the sign-in ran until Codex finished it, then ended; it was never cancelled.
+      expect(server.processes[starts[0]].signalCode).toBe('SIGTERM')
+      expect(server.methods()).not.toContain('account/login/cancel')
+      expect(service.configured()).toBe(true)
+      // The confirming check ran on a process started after the sign-in.
+      expect(server.launches.length).toBeGreaterThan(starts[0] + 1)
     })
-    const service = create(server)
-    const session = new LoginSession('login-1')
-    const prompts: string[] = []
-    session.on('event', (event: { type: string; message?: string }) => {
-      if (event.type !== 'select') return
-      prompts.push(event.message ?? '')
-      signedIn = true
-      session.respond({ sessionId: session.sessionId, kind: 'select', value: 'check' })
+
+    it('fails when Codex reports the sign-in failed, without a check loop', async () => {
+      const { server, complete } = signInServer(() => false)
+      const service = create(server)
+      const session = new LoginSession('login-2')
+      session.on('event', (event: { type: string }) => {
+        if (event.type === 'auth_url') complete({ loginId: 'login-a', success: false, error: 'access denied' })
+        if (event.type === 'select') session.respond({ sessionId: session.sessionId, kind: 'cancel' })
+      })
+      expect(await service.login(session, home)).toMatchObject({ success: false, error: expect.stringContaining('access denied') })
+      expect(service.configured()).toBe(false)
     })
-    expect(await service.login(session, home)).toEqual({ success: true, sessionId: 'login-1' })
-    expect(prompts).toHaveLength(1)
-    expect(prompts[0]).toContain('codex login')
-    expect(service.configured()).toBe(true)
-    expect(server.methods()).not.toContain('account/logout')
-    expect(server.methods().filter((method) => method?.startsWith('account/login'))).toEqual([])
+
+    it('sends account/login/cancel for the started sign-in when the person cancels or it times out', async () => {
+      for (const ending of ['cancel', 'timeout'] as const) {
+        const { server, starts } = signInServer(() => false)
+        const service = create(server, {}, {}, ending === 'timeout' ? { signInTimeoutMs: 20 } : {})
+        const session = new LoginSession(`login-${ending}`)
+        session.on('event', (event: { type: string }) => {
+          if (event.type === 'auth_url' && ending === 'cancel') session.respond({ sessionId: session.sessionId, kind: 'cancel' })
+        })
+        const result = await service.login(session, home)
+        expect(result).toMatchObject({ success: false, error: ending === 'cancel' ? expect.stringMatching(/cancel/i) : expect.stringMatching(/timed out/i) })
+        const cancel = server.messages.find((message) => message.method === 'account/login/cancel')
+        expect(cancel?.params).toEqual({ loginId: 'login-a' })
+        expect(server.processes[starts[0]].signalCode).toBe('SIGTERM')
+        expect(service.configured()).toBe(false)
+      }
+    })
+
+    it('falls back to the terminal sign-in and Check sign-in when this Codex has no account/login/start', async () => {
+      let signedIn = false
+      const { server } = signInServer(() => signedIn, { error: { code: -32601, message: 'method not found' } })
+      const service = create(server)
+      const session = new LoginSession('login-3')
+      const prompts: string[] = []
+      session.on('event', (event: { type: string; message?: string }) => {
+        if (event.type === 'auth_url') throw new Error('no link without a browser sign-in')
+        if (event.type !== 'select') return
+        prompts.push(event.message ?? '')
+        signedIn = true
+        session.respond({ sessionId: session.sessionId, kind: 'select', value: 'check' })
+      })
+      expect(await service.login(session, home)).toEqual({ success: true, sessionId: 'login-3' })
+      expect(prompts).toHaveLength(1)
+      expect(prompts[0]).toContain('codex login')
+      expect(service.configured()).toBe(true)
+      expect(server.methods()).not.toContain('account/logout')
+    })
+
+    it('starts no sign-in when Codex already reads signed in', async () => {
+      const { server } = signInServer(() => true)
+      const service = create(server)
+      expect(await service.login(new LoginSession('login-4'), home)).toEqual({ success: true, sessionId: 'login-4' })
+      expect(server.methods()).not.toContain('account/login/start')
+    })
   })
 
   it('closes the idle process, keeps Codex listed, and starts a new one on the next use', async () => {
@@ -559,7 +643,7 @@ describe('CodexProviderService options (managed Codex)', () => {
   type Turn = { status: 'completed' | 'failed'; error?: unknown }
 
   /** A server that runs turns: threads answer with `provider`, every turn ends as `turn` says. */
-  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null; compact?: () => Turn | 'unknown'; resume?: 'missing' | 'another'; beforeOpen?: (message: Message) => boolean; account?: (launchIndex: number) => Reply; authStatus?: (launchIndex: number) => Reply; authStore?: string | ((launch: number) => string) } = {}) {
+  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null; compact?: () => Turn | 'unknown'; resume?: 'missing' | 'another'; beforeOpen?: (message: Message) => boolean; account?: (launchIndex: number) => Reply; authStatus?: (launchIndex: number) => Reply; authStore?: string | ((launch: number) => string); unsubscribe?: (message: Message) => Reply | undefined } = {}) {
     let threads = 0
     const server = scriptedServer((message, launchIndex) => {
       const method = message.method!
@@ -593,6 +677,7 @@ describe('CodexProviderService options (managed Codex)', () => {
         })
         return { result: {} }
       }
+      if (method === 'thread/unsubscribe' && options.unsubscribe) return options.unsubscribe(message)
       if (method === 'thread/list') return { error: { code: -32601, message: 'unknown method' } }
       return { result: {} }
     })
@@ -1657,12 +1742,39 @@ describe('CodexProviderService options (managed Codex)', () => {
   it('a failed turn throws CodexTurnFailure with the error kind and HTTP status', async () => {
     const server = turnServer({
       provider: () => MANAGED,
-      turn: () => ({ status: 'failed', error: { message: 'usage limit', additionalDetails: null, codexErrorInfo: { responseStreamFailed: { httpStatusCode: 429 } } } })
+      turn: () => ({ status: 'failed', error: { message: 'too many requests', additionalDetails: null, codexErrorInfo: { responseStreamFailed: { httpStatusCode: 429 } } } })
     })
     const service = managed(server)
     const failure = await chat(service).catch((error: unknown) => error)
     expect(failure).toBeInstanceOf(CodexTurnFailure)
-    expect(failure).toMatchObject({ message: 'usage limit', httpStatus: 429, codexErrorInfo: { responseStreamFailed: { httpStatusCode: 429 } } })
+    expect(failure).toMatchObject({ message: 'too many requests', httpStatus: 429, codexErrorInfo: { responseStreamFailed: { httpStatusCode: 429 } } })
+  })
+
+  it('a turn that failed mid-way (#1999) keeps its Codex thread for a turn that continues it, and only for that', async () => {
+    // Recorded shape from Codex 0.162.1: `/v1/responses` answered 400 with a bare "Bad Request" envelope.
+    const envelope = JSON.stringify({ error: { message: 'Bad Request', type: null, code: null, param: null }, status: 400 }, null, 2)
+    const turns: Array<'failed' | 'completed'> = ['failed', 'completed', 'failed', 'completed']
+    const server = turnServer({
+      provider: () => MANAGED,
+      turn: () => turns.shift() === 'failed' ? { status: 'failed', error: { message: envelope, additionalDetails: null, codexErrorInfo: 'other' } } : { status: 'completed' }
+    })
+    const service = managed(server)
+    const threadOf = (message: { params?: unknown }) => (message.params as { threadId: string }).threadId
+
+    await expect(chat(service, { history: 'H1' })).rejects.toBeInstanceOf(CodexTurnFailure)
+    expect(service.failedThreadKept('t')).toBe(true)
+    // The continuation: the adapter fingerprints the history the turn carries now, and the same Codex thread goes on.
+    service.commitInterrupted('t', 'H1 + request')
+    await chat(service, { history: 'H1 + request', prompt: 'continue' })
+    expect(server.requests('thread/start')).toHaveLength(1)
+    expect(server.requests('turn/start').map(threadOf)).toEqual(['thr-1', 'thr-1'])
+    service.commitConversation('t', 'H2')
+
+    // Control: a failed turn nobody continues leaves the thread's next turn on a fresh Codex thread, as before.
+    await expect(chat(service, { history: 'H2' })).rejects.toBeInstanceOf(CodexTurnFailure)
+    await chat(service, { history: 'H2 + request' })
+    expect(server.requests('thread/start')).toHaveLength(2)
+    expect(server.requests('turn/start').map(threadOf).at(-1)).toBe('thr-2')
   })
 
   it('a models source replaces model/list and no fallback model is listed before it', async () => {
@@ -1791,36 +1903,41 @@ describe('CodexProviderService options (managed Codex)', () => {
       expect(server.launches).toHaveLength(2)
     })
 
-    it('reserves the last loaded-thread slot once across parallel sign-in checks while a turn is active', async () => {
+    it('a Send at the cap starts at once, unloading idle threads in parallel while Codex is slow to let them go', async () => {
       const account = { kind: 'signed_in' as const, planType: 'plus', email: null, subject: 'chatgpt:account' }
       const reads: Array<(result: typeof account) => void> = []
       let holdReads = false
       let holdTurn = false
-      const server = turnServer({ provider: () => MANAGED, turn: () => holdTurn ? null : { status: 'completed' } })
+      // Codex neither answers an unsubscribe nor closes a thread during this test (it waits out an idle grace, a minute by default).
+      const server = turnServer({ provider: () => MANAGED, turn: () => holdTurn ? null : { status: 'completed' }, unsubscribe: () => undefined })
       const service = managed(server, { account: { read: async () => holdReads ? new Promise((resolve) => reads.push(resolve)) : account } })
       const lifetime = new AbortController()
       const start = (threadId: string) => chat(service, { threadId, signal: lifetime.signal })
       const pending: Array<Promise<unknown>> = []
+      const unloaded = () => server.requests('thread/unsubscribe').map((message) => (message.params as { threadId: string }).threadId)
       try {
-        for (let index = 0; index < CODEX_MAX_LOADED_THREADS - 2; index++) await start('idle' + index)
+        for (let index = 0; index < CODEX_MAX_LOADED_THREADS - 1; index++) await start('idle' + index)
         holdTurn = true
         pending.push(start('active'))
-        await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS - 1))
-
+        await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS))
+        const active = (server.requests('turn/start').at(-1)!.params as { threadId: string }).threadId
         holdTurn = false
+
+        // At the cap, the next Send runs to the end while its unsubscribe is still unanswered.
+        await start('next')
+        expect(unloaded()).toEqual(['thr-1'])
+
+        // Two Sends admitted together each free one more idle thread: the unloads are in flight side by side.
         holdReads = true
-        pending.push(start('parallel-a'), start('parallel-b'))
+        const both = [start('parallel-a'), start('parallel-b')]
+        pending.push(...both)
         await vi.waitFor(() => expect(reads).toHaveLength(2))
         holdReads = false
         for (const reply of reads) reply(account)
-        await vi.waitFor(() => expect(server.requests('thread/unsubscribe')).toHaveLength(1))
-        expect(server.requests('thread/start')).toHaveLength(CODEX_MAX_LOADED_THREADS)
-        expect(server.launches).toHaveLength(1)
-
-        const victim = (server.requests('thread/unsubscribe')[0]!.params as { threadId: string }).threadId
-        server.processes[0]!.stdout.write(JSON.stringify({ method: 'thread/closed', params: { threadId: victim } }) + '\n')
-        await Promise.all(pending.slice(1))
-        expect(server.requests('thread/start')).toHaveLength(CODEX_MAX_LOADED_THREADS + 1)
+        await Promise.all(both)
+        expect(server.requests('thread/start')).toHaveLength(CODEX_MAX_LOADED_THREADS + 3)
+        expect(unloaded()).toEqual(['thr-1', 'thr-2', 'thr-3'])
+        expect(unloaded()).not.toContain(active)
         expect(server.launches).toHaveLength(1)
       } finally {
         lifetime.abort()
@@ -1872,69 +1989,56 @@ describe('CodexProviderService options (managed Codex)', () => {
       }
     )
 
-    it('admits a queued ninth Send after a stopped turn finishes settling', async () => {
+    it('with every loaded thread busy, a ninth Send loads over the cap at once; the next Send after they end unloads the surplus together', async () => {
       let holdTurn = true
       const server = turnServer({ provider: () => MANAGED, turn: () => holdTurn ? null : { status: 'completed' } })
-      let reads = 0
-      const service = managed(server, { account: { read: async () => {
-        reads += 1
-        return { kind: 'signed_in', planType: 'plus', email: null, subject: 'chatgpt:account' }
-      } } })
+      const service = managed(server)
       const lifetime = new AbortController()
-      const stop = new AbortController()
       const pending: Array<Promise<unknown>> = []
-      const start = (threadId: string, signal = lifetime.signal) => {
-        const turn = chat(service, { threadId, signal })
+      const start = (threadId: string) => {
+        const turn = chat(service, { threadId, signal: lifetime.signal })
         void turn.catch(() => undefined)
         pending.push(turn)
         return turn
       }
+      const unloaded = () => server.requests('thread/unsubscribe').map((message) => (message.params as { threadId: string }).threadId)
       try {
-        const stopped = start('stopped', stop.signal)
-        await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(1))
-        const victim = (server.requests('turn/start')[0]!.params as { threadId: string }).threadId
-        for (let index = 1; index < CODEX_MAX_LOADED_THREADS; index++) start('active-' + index)
+        for (let index = 0; index < CODEX_MAX_LOADED_THREADS; index++) start('busy-' + index)
         await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS))
-
-        const readsBefore = reads
-        const queued = start('ninth')
-        await vi.waitFor(() => expect(reads).toBeGreaterThan(readsBefore))
-        expect(server.requests('thread/start')).toHaveLength(CODEX_MAX_LOADED_THREADS)
-
-        stop.abort(new Error('Stopped'))
-        await expect(stopped).rejects.toThrow('Stopped')
-        expect(server.requests('turn/interrupt').map((message) => message.params)).toContainEqual({ threadId: victim, turnId: 'turn-1' })
-        expect(server.requests('thread/unsubscribe')).toHaveLength(0)
+        start('ninth')
+        await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS + 1))
+        expect(unloaded()).toEqual([])
 
         const notify = (method: string, params: unknown) => server.processes[0]!.stdout.write(JSON.stringify({ method, params }) + '\n')
-        notify('turn/completed', { threadId: victim, turn: { id: 'turn-1', status: 'interrupted', error: null } })
-        await vi.waitFor(() => expect(server.requests('thread/unsubscribe').map((message) => message.params)).toEqual([{ threadId: victim }]))
+        for (const message of server.requests('turn/start'))
+          notify('turn/completed', { threadId: (message.params as { threadId: string }).threadId, turn: { id: 'turn-1', status: 'completed', error: null } })
+        await Promise.all(pending)
         holdTurn = false
-        notify('thread/closed', { threadId: victim })
-
-        expect((await queued).codexThreadId).not.toBe(victim)
-        expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS + 1)
+        await start('tenth')
+        expect(unloaded()).toEqual(['thr-1', 'thr-2'])
         expect(server.launches).toHaveLength(1)
       } finally {
-        stop.abort()
         lifetime.abort()
         await service.stop()
         await Promise.allSettled(pending)
       }
     })
 
-    it('recycles when unsubscribe acknowledges without confirming unload', async () => {
-      const server = turnServer({ provider: () => MANAGED })
+    it('keeps the process when Codex acknowledges an unsubscribe without closing the thread yet', async () => {
+      const server = turnServer({ provider: () => MANAGED, unsubscribe: () => ({ result: { status: 'unsubscribed' } }) })
       const service = managed(server)
+      const unloaded = () => server.requests('thread/unsubscribe').map((message) => (message.params as { threadId: string }).threadId)
       // Reuse t0 just before the ninth turn, so thr-2 is the least recently used.
       for (let index = 0; index < CODEX_MAX_LOADED_THREADS; index++) await chat(service, { threadId: 't' + index })
       service.commitConversation('t0', 'h')
       await chat(service, { threadId: 't0', history: 'h' })
       await chat(service, { threadId: 'overflow' })
-      expect(server.requests('thread/unsubscribe').map((request) => request.params)).toContainEqual({ threadId: 'thr-2' })
-      expect(server.processes[0].signalCode).toBe('SIGTERM')
+      expect(unloaded()).toEqual(['thr-2'])
+      expect(server.processes[0].signalCode).toBeNull()
+      // The thread still closing no longer counts: the next one unloads the next least recently used.
       await chat(service, { threadId: 'later' })
-      expect(server.launches).toHaveLength(2)
+      expect(unloaded()).toEqual(['thr-2', 'thr-3'])
+      expect(server.launches).toHaveLength(1)
     })
 
     it('one process serves turns on different threads for the whole idle window, and closes once it has passed', async () => {
@@ -2072,6 +2176,28 @@ describe('a usage limit on a Codex turn', () => {
     const server = failingServer({ error: limitError(undefined, "You've hit your usage limit. Try again at 2:01 PM."), rateLimits: { result: { rateLimits: exhausted(inHours(1)) } } })
     const error = await chat(create(server)).catch((caught: unknown) => caught)
     expect(error).toMatchObject({ code: 'provider_usage_limit', details: { estimated: false } })
+  })
+
+  it('a plan limit Codex reports as a dropped stream is a usage limit', async () => {
+    const reset = inHours(2)
+    const server = failingServer({ error: limitError({ responseStreamDisconnected: { httpStatusCode: null } }, "stream disconnected before completion: You've hit your usage limit."), rateLimits: { result: { rateLimits: exhausted(reset) } } })
+    const error = await chat(create(server)).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'provider_usage_limit', details: { provider: 'codex', limitKind: 'five_hour', estimated: false, resetsAt: new Date(reset * 1000).toISOString() } })
+  })
+
+  // OpenAI's app limit (the share of the plan ChatGPT gives Mousse) as Codex 0.162 sent it, and with the code passed on.
+  const SHARING = 'stream disconnected before completion: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.'
+  it.each([
+    ['as a dropped stream', limitError({ responseStreamDisconnected: { httpStatusCode: null } }, SHARING)],
+    ['with no kind of its own', limitError('other', SHARING)],
+    ['classified as a usage limit', limitError('usageLimitExceeded', SHARING)],
+    ['as a 429 with the code in its details', { ...limitError({ responseTooManyFailedAttempts: { httpStatusCode: 429 } }, 'exceeded retry limit, last status: 429 Too Many Requests'), additionalDetails: JSON.stringify({ error: { code: 'subscription_sharing_usage_limit_exceeded' } }) }]
+  ])("an app limit %s is not a plan limit: no plan reset is read, and Mousse's own line replaces OpenAI's", async (_name, error) => {
+    const server = failingServer({ error, rateLimits: { result: { rateLimits: exhausted(inHours(2)) } } })
+    const failure = await chat(create(server)).catch((caught: unknown) => caught)
+    expect(failure).toMatchObject({ code: 'provider_app_limit', details: { provider: 'codex' }, errorInfo: { retryable: false } })
+    expect((failure as Error).message).toBe('Codex limit for Mousse reached. Your plan may still have usage.')
+    expect(server.methods()).not.toContain('account/rateLimits/read')
   })
 
   it('a structured kind that is not a limit is believed over the message', async () => {

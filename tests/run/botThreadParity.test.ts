@@ -106,7 +106,7 @@ describe('a bot uses what a thread\'s agent can', () => {
         return { error: true, text: error instanceof Error ? error.message : String(error) }
       }
     }
-    const listed = () => registry.listForThread('work', 'default', workRun.runId).map((tool) => tool.name)
+    const listed = () => registry.listForThread('work', workRun.runId).map((tool) => tool.name)
     return { compiled, call, listed, asked, host: fake.host, queueCommands: fake.queueCommands, onAppResult, files, base: base!, registry }
   }
 
@@ -134,11 +134,11 @@ describe('a bot uses what a thread\'s agent can', () => {
   describe('the thread controls ("use your threads")', () => {
     it('steers a running turn of one of its owner\'s threads, as the bot, and never its own chat, a private thread or a subagent', async () => {
       const { call, host, onAppResult } = await world()
-      const steered = await call('thread_steer', { threadId: 'mine', runId: 'run-9', text: 'Use the staging database.' })
+      const steered = await call('thread_send', { threadId: 'mine', runId: 'run-9', content: 'Use the staging database.', intent: 'note' })
       expect(steered.error).toBe(false)
       expect(host.steerRun).toHaveBeenCalledWith('mine', 'run-9', 'Use the staging database.', expect.objectContaining({ actor: expect.objectContaining({ kind: 'agent', threadId: 'work' }) }))
-      expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_steer', expect.objectContaining({ threadId: 'mine' }))
-      for (const target of ['home', 'private', 'subagent']) expect(await call('thread_steer', { threadId: target, runId: 'r', text: 'x' }), target).toMatchObject({ error: true, text: expect.stringMatching(/not available to you/) })
+      expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_send', expect.objectContaining({ threadId: 'mine' }))
+      for (const target of ['home', 'private', 'subagent']) expect(await call('thread_send', { threadId: target, runId: 'r', content: 'x', intent: 'note' }), target).toMatchObject({ error: true, text: expect.stringMatching(/not available to you/) })
     })
 
     it('reads and changes a thread\'s queue only when it names one of its owner\'s threads', async () => {
@@ -165,13 +165,13 @@ describe('a bot uses what a thread\'s agent can', () => {
       const { call, asked } = await world()
       // Past the bot's gates, the engine decides: `mine` has no finished run to fork after, and is no fork to hand back.
       expect(await call('thread_fork', { sourceThreadId: 'mine' })).toMatchObject({ error: true, text: expect.not.stringMatching(/not available to you|lineage/) })
-      expect(await call('thread_merge_back', { forkThreadId: 'mine' })).toMatchObject({ error: true, text: expect.stringMatching(/not a fork/) })
+      expect(await call('thread_return', { forkThreadId: 'mine' })).toMatchObject({ error: true, text: expect.stringMatching(/not a fork/) })
       expect(asked).toEqual([])
       // Its own chat is never the source, and a thread out of its reach is refused before anything runs.
       expect(await call('thread_fork', {})).toMatchObject({ error: true, text: expect.stringMatching(/sourceThreadId/) })
       for (const target of ['private', 'subagent']) {
         expect(await call('thread_fork', { sourceThreadId: target }), target).toMatchObject({ error: true, text: expect.stringMatching(/not available to you/) })
-        expect(await call('thread_merge_back', { forkThreadId: target }), target).toMatchObject({ error: true, text: expect.stringMatching(/not available to you/) })
+        expect(await call('thread_return', { forkThreadId: target }), target).toMatchObject({ error: true, text: expect.stringMatching(/not available to you/) })
       }
     })
 
@@ -205,10 +205,19 @@ describe('a bot uses what a thread\'s agent can', () => {
       expect(remoteThreads.computerFor).toHaveBeenCalledWith('work', 'Mac mini')
     })
 
-    it('starts a thread on another computer in the repository of a project it names', async () => {
+    it('starts a thread on another computer in the repository of a project it names, or in no project there', async () => {
       const createRemoteThread = vi.fn(async () => ({ status: 'launched' as const, threadId: 'n2:t9', computer: 'Mac mini', title: 'Build', replayed: false, firstMessage: 'sent' as const }))
       const { call } = await world({ host: { createRemoteThread: createRemoteThread as never } })
-      expect(await call('thread_create', { computer: 'Mac mini', title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: true, text: expect.stringMatching(/fromProjectId/) })
+      const last = () => (createRemoteThread.mock.calls.at(-1) as unknown as [Record<string, unknown>])[0]
+      // No project here named: the thread starts in no project there.
+      expect(await call('thread_create', { computer: 'Mac mini', title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: false })
+      expect(last()).not.toHaveProperty('fromProjectId')
+      expect(await call('thread_create', { computer: 'Mac mini', projectId: null, title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: false })
+      expect(last()).toMatchObject({ noProject: true })
+      // No project and a project at once is refused before any call.
+      const calls = createRemoteThread.mock.calls.length
+      expect(await call('thread_create', { computer: 'Mac mini', projectId: null, fromProjectId: 'p1', title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: true, text: expect.stringMatching(/no project/) })
+      expect(createRemoteThread.mock.calls.length).toBe(calls)
       expect(await call('thread_create', { computer: 'Mac mini', fromProjectId: 'p1', title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: false })
       expect(createRemoteThread).toHaveBeenCalledWith(expect.objectContaining({ computer: 'Mac mini', fromProjectId: 'p1' }), expect.objectContaining({ clientRequestId: expect.stringMatching(/^thread_create:work:/) }))
       // Its request names no hidden: the thread shows there, and a key it stored before hidden existed keeps its
@@ -216,6 +225,11 @@ describe('a bot uses what a thread\'s agent can', () => {
       const [request] = createRemoteThread.mock.calls.at(-1)! as unknown as [Record<string, unknown>]
       expect(request).not.toHaveProperty('hidden')
       expect(remoteThreadFingerprint(request as never)).not.toMatch(/hidden/)
+      // A project of that computer alone is enough: no project here is named.
+      expect(await call('thread_create', { computer: 'Mac mini', projectId: 'n2:p7', title: 'Build', firstMessage: 'Build it.', clientRequestId: 'direct' })).toMatchObject({ error: false })
+      const [direct] = createRemoteThread.mock.calls.at(-1)! as unknown as [Record<string, unknown>]
+      expect(direct).toMatchObject({ computer: 'Mac mini', projectId: 'n2:p7' })
+      expect(direct).not.toHaveProperty('fromProjectId')
     })
   })
 
@@ -292,17 +306,17 @@ describe('a bot uses what a thread\'s agent can', () => {
 
     it('keeps a task list with no permission', async () => {
       const { call } = await world({ grant: [] })
-      expect(await call('create_task', { description: 'Read the logs' })).toMatchObject({ error: false })
-      expect((await call('list_tasks')).text).toContain('Read the logs')
+      expect(await call('task_create', { description: 'Read the logs' })).toMatchObject({ error: false })
+      expect((await call('task_list')).text).toContain('Read the logs')
     })
   })
 
   describe('a subagent of its work', () => {
     it('acts on its owner\'s threads as its work would, and is refused what a thread\'s subagent is', async () => {
       const { call, host } = await world({ role: 'subagent', tools: ['shell'], botTools: { escalate: false, consult: false, subagent: true, threads: 'all', profiler: true, tasks: true } })
-      expect(await call('thread_steer', { threadId: 'mine', runId: 'run-9', text: 'Stop after the build.' })).toMatchObject({ error: false })
+      expect(await call('thread_send', { threadId: 'mine', runId: 'run-9', content: 'Stop after the build.', intent: 'note' })).toMatchObject({ error: false })
       expect(host.steerRun).toHaveBeenCalled()
-      expect(await call('create_task', { description: 'Part one' })).toMatchObject({ error: false })
+      expect(await call('task_create', { description: 'Part one' })).toMatchObject({ error: false })
       for (const tool of ['schedule_list', 'secret_request', 'create_quick_action']) expect(await call(tool, {}), tool).toMatchObject({ error: true })
     })
   })

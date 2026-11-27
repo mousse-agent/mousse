@@ -29,7 +29,7 @@ export interface BotTurnRights {
   remind: boolean
   /** `question_answer`: passes on to work an answer the owner gave in the chat. */
   relayAnswer: boolean
-  /** `ask_owner` and `question_withdraw`. In a run, a question it waits on parks the run until it is answered. */
+  /** `question_ask` and `question_withdraw`. In a run, a question it waits on parks the run until it is answered. */
   asksOwner: boolean
   /** `work_wait`: the run parks on a time or an event, holding no slot. */
   workWait: boolean
@@ -107,7 +107,7 @@ export function runProvenance(kind: string | undefined): BotActivationProvenance
 
 /** The tools whose cell a chat turn's start decides at the call (`BotAuthority.turnRefusals`), and the cell. */
 const TURN_TOOLS: ReadonlyArray<readonly [string, keyof BotTurnRights]> = [
-  ['watch_start', 'watchStart'], ['remind', 'remind'], ['question_answer', 'relayAnswer'], ['ask_owner', 'asksOwner'], ['question_withdraw', 'asksOwner'],
+  ['watch_start', 'watchStart'], ['remind', 'remind'], ['question_answer', 'relayAnswer'], ['question_ask', 'asksOwner'], ['question_withdraw', 'asksOwner'],
   ['bot_send', 'botSend'], ['work_start', 'workStart'], ['work_wait', 'workWait'], ['subagent_start', 'subagents']
 ]
 

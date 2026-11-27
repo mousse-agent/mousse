@@ -40,6 +40,7 @@ describe('a subagent on another entry is never held less tightly than its work',
   ]
   const cheap = { pick: { ...PIONLY }, name: { name: 'Cheap Model', entry: 'Cheap Router' } }
   const second = { pick: { ...SECOND }, name: { name: 'Second Model', entry: 'Second Claude' } }
+  const own = { pick: { ...PI }, name: { name: 'Some Model', entry: 'OpenRouter' } }
   let holds: Record<string, BotRuntimeHold>
 
   beforeEach(async () => {
@@ -66,10 +67,50 @@ describe('a subagent on another entry is never held less tightly than its work',
   const subagentNs = (activationId: string) => subagentRuns(f, activationId)
   const attemptOf = (runId: string) => f.runs.getRun(runId)!.activeAttemptId!
 
-  it('on an entry that holds commands less tightly it runs without them: no command tool, refused at the call, it is told, the work is told, work_models and the work line say so', async () => {
+  it('a subagent\'s own subagent holds no more than it: one that runs without commands starts one that runs without them too, even on the work\'s own entry', async () => {
+    const job = await work('w1', { shell: true })
+    await job.prepared.authority.subagents!.start({ title: 'Reviews', brief: 'Find reviews.', model: cheap })
+    const reviews = await startSubagent(f, subagentNs(job.id)[0])
+    expect(reviews.prepared.authority.check(command)).toMatchObject({ ok: false })
+    // On the work's own entry, which holds commands as tightly as the work: still none, as its parent has none.
+    expect(await reviews.prepared.authority.subagents!.start({ title: 'Deep', brief: 'List the folder.', model: own })).toHaveProperty('started')
+    const deep = await startSubagent(f, subagentNs(job.id)[1])
+    expect(deep.prepared.selection).toEqual(PI)
+    expect(deep.prepared.policy.tools!.allow).not.toContain('bash')
+    expect(deep.prepared.authority.check(command)).toMatchObject({ ok: false, refused: { askId: '' } })
+    expect(deep.prepared.beforeBind!()).toEqual({ policy: deep.prepared.policy })
+    // The control: the work's own subagent on that entry runs them.
+    await job.prepared.authority.subagents!.start({ title: 'Look', brief: 'List the folder.' })
+    const look = await startSubagent(f, subagentNs(job.id)[2])
+    expect(look.prepared.policy.tools!.allow).toContain('bash')
+    expect(look.prepared.authority.check(command)).toEqual({ ok: true })
+  })
+
+  it('a subagent\'s own subagent is held against its parent\'s entry, not the work\'s: never less tightly than its parent', async () => {
+    // The work runs on an entry that holds commands loosely; Second Claude holds them in its sandbox.
+    holds[PI.instanceId] = { runtime: 'pi' }
+    const job = await work('w1', { shell: true })
+    await job.prepared.authority.subagents!.start({ title: 'Reviews', brief: 'Find reviews.', model: second })
+    const reviews = await startSubagent(f, subagentNs(job.id)[0])
+    expect(reviews.prepared.policy.tools!.allow).toContain('second_bash')
+    // With no model named, its own runs on its entry, not the work's, with its commands.
+    await reviews.prepared.authority.subagents!.start({ title: 'Deep', brief: 'List the folder.' })
+    const deep = await startSubagent(f, subagentNs(job.id)[1])
+    expect(deep.prepared.selection).toMatchObject(SECOND)
+    expect(deep.prepared.policy.tools!.allow).toContain('second_bash')
+    // Named on the work's own entry, which holds commands less tightly than Reviews' does: it runs without them.
+    expect(reviews.prepared.authority.subagents!.holdOn!([PI.instanceId, SECOND.instanceId])).toEqual({ [PI.instanceId]: { lacks: ['run commands'] } })
+    expect(await reviews.prepared.authority.subagents!.start({ title: 'Loose', brief: 'List the folder.', model: own })).toMatchObject({ lacks: ['run commands'] })
+    const loose = await startSubagent(f, subagentNs(job.id)[2])
+    expect(loose.prepared.selection).toMatchObject(PI)
+    expect(loose.prepared.policy.tools!.allow).not.toContain('bash')
+    expect(loose.prepared.authority.check(command)).toMatchObject({ ok: false })
+  })
+
+  it('on an entry that holds commands less tightly it runs without them: no command tool, refused at the call, it is told, the work is told, model_list and the work line say so', async () => {
     const job = await work('w1', { shell: true })
     const subagents = job.prepared.authority.subagents!
-    // work_models marks the entry before anything starts; the work's own runtime is left unmarked.
+    // model_list marks the entry before anything starts; the work's own runtime is left unmarked.
     expect(subagents.holdOn!(choices.map((option) => option.instanceId))).toEqual({ [PIONLY.instanceId]: { lacks: ['run commands'] } })
     const started = await subagents.start({ title: 'Reviews', brief: 'Find reviews.', model: cheap })
     expect(started).toMatchObject({ started: { subagent: 'Reviews', model: 'Cheap Model on Cheap Router' }, lacks: ['run commands'], note: expect.stringMatching(/It can't run commands there: Cheap Router would hold that less tightly than your own entry/) })
@@ -84,13 +125,13 @@ describe('a subagent on another entry is never held less tightly than its work',
     const priced = await startSubagent(f, subagentNs(job.id)[1])
     expect(priced.prepared.authority.check(command)).toEqual({ ok: true })
     expect(priced.prepared.policy.tools!.allow).toContain('second_bash')
-    // work_models, as the work's model reads it through the app tools.
+    // model_list, as the work's model reads it through the app tools.
     const fx = delegationFixture()
     try {
       const parentRun = await fx.runningRun(job.payload.threadId)
       const { registry, turns, request } = appToolRegistry(fx.engine, fakeAppToolHost().host, { bots: () => ({ host: f.bots.tools, models: { pickable: async () => choices } }) })
       turns.register(appTurn({ threadId: job.payload.threadId, runId: parentRun.runId, bot: job.prepared.authority }))
-      const listed = await registry.call('work_models', {}, request({ threadId: job.payload.threadId, runId: parentRun.runId }))
+      const listed = await registry.call('model_list', {}, request({ threadId: job.payload.threadId, runId: parentRun.runId }))
       expect(listed.isError, listed.text).toBeFalsy()
       const entries = JSON.parse(listed.text).entries as Array<{ instanceId: string; subagentLacks?: string[] }>
       expect(entries.find((entry) => entry.instanceId === PIONLY.instanceId)?.subagentLacks).toEqual(['run commands'])

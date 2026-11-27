@@ -14,13 +14,13 @@ export class TaskControlTools {
   getToolDefinitions(): Tool[] {
     return [
       {
-        name: 'list_tasks',
+        name: 'task_list',
         description:
           'List all tasks in the current thread queue (pending, in progress, completed, etc.).',
         parameters: Type.Object({})
       },
       {
-        name: 'create_task',
+        name: 'task_create',
         description:
           'Create a task in the thread queue. agentId is optional — unassigned tasks are valid and editable.',
         parameters: Type.Object({
@@ -38,11 +38,11 @@ export class TaskControlTools {
         })
       },
       {
-        name: 'update_task',
+        name: 'task_update',
         description:
           'Update an existing task by id. Works for tasks with or without an assigned agent. Provide only fields to change.',
         parameters: Type.Object({
-          id: Type.String({ description: 'Task id from list_tasks or create_task.' }),
+          id: Type.String({ description: 'Task id from task_list or task_create.' }),
           description: Type.Optional(Type.String({ description: 'New task description.' })),
           status: Type.Optional(
             Type.String({
@@ -73,10 +73,10 @@ export class TaskControlTools {
   ): Promise<{ text: string; isError: boolean }> {
     try {
       switch (name) {
-        case 'list_tasks': {
+        case 'task_list': {
           return { text: JSON.stringify(this.tasks.list(), null, 2), isError: false }
         }
-        case 'create_task': {
+        case 'task_create': {
           const description = String(args.description ?? '')
           const agentId =
             typeof args.agentId === 'string' && args.agentId.trim()
@@ -89,7 +89,7 @@ export class TaskControlTools {
           const task = this.tasks.createTask({ description, agentId, status })
           return { text: JSON.stringify(task, null, 2), isError: false }
         }
-        case 'update_task': {
+        case 'task_update': {
           const id = String(args.id ?? '').trim()
           if (!id) {
             return { text: 'Task id is required.', isError: true }

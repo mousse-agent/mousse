@@ -635,6 +635,11 @@ html[data-theme='high-contrast'] .automations-page {
 
 /* Every select and field in the form has one width, so the rows read as a column. */
 .automation-form .automation-field-select { width: 260px; max-width: 100%; }
+/* Who is the app's model picker (as in a bot's Runs on), as wide as the selects. */
+.automation-who-picker { display: flex; width: 260px; max-width: 100%; }
+.automation-who-picker .settings-model-picker { display: flex; width: 100%; }
+.automation-who-picker .settings-model-btn { flex: 1; max-width: none; }
+.automation-who-picker .settings-model-btn-label { flex: 1; text-align: left; }
 .automation-form .scheduled-input.automation-field-select { font-size: 13px; background: color-mix(in srgb, var(--text-primary) 3%, transparent); }
 .automation-form .scheduled-prompt { display: block; }
 

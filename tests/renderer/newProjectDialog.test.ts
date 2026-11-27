@@ -186,7 +186,8 @@ it('on another computer, offers its project folders and adds a typed path there'
   const mac = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((option) => !dialog()!.contains(option) && option.textContent?.includes('Mac mini'))!
   await act(async () => mac.click())
   expect(input().placeholder).toContain('Mac mini')
-  expect(rowTitles()).toEqual(['Clone a repository…', '/Users/me/dev/'])
+  expect(rowTitles()).toEqual(['Add a folder on Mac mini…', 'Clone a repository…', '/Users/me/dev/'])
+  await press('ArrowDown')
   await press('ArrowDown')
   await press('Tab')
   expect(input().value).toBe('/Users/me/dev/')
@@ -282,6 +283,41 @@ it('connects GitHub on the other computer from here, showing the one-time code i
   expect(platform).toHaveBeenCalledWith('sourceControl.connect', { node: 'nod_mac', provider: 'github' })
   expect(platform).not.toHaveBeenCalledWith('sourceControl.clone', expect.anything())
   expect(dialog()!.querySelector('[aria-label="One-time code"]')!.textContent).toBe('AB12-CD34')
+})
+
+it('adds a folder of another computer with no projects yet, picked by browsing its folders, and starts a thread there', async () => {
+  mac.folders = {
+    '': { path: null, parent: null, folders: [{ name: 'Home', path: '/Users/me' }] },
+    '/Users/me': { path: '/Users/me', parent: '/Users', folders: [{ name: 'dev', path: '/Users/me/dev' }] },
+    '/Users/me/dev': { path: '/Users/me/dev', parent: '/Users/me', folders: [{ name: 'site', path: '/Users/me/dev/site' }] },
+    '/Users/me/dev/site': { path: '/Users/me/dev/site', parent: '/Users/me/dev', folders: [] }
+  }
+  remote.openRemoteProject.mockResolvedValueOnce({ ok: true, project: project('p9', '/Users/me/dev/site') })
+  await pickMac()
+  expect(rowTitles()).toEqual(['Add a folder on Mac mini…', 'Clone a repository…'])
+  await press('Enter')
+  // That computer's folders, from its places: the system's folder picker here is never opened.
+  expect(platform).toHaveBeenCalledWith('folders.browse', { node: 'nod_mac' })
+  expect(api.open).not.toHaveBeenCalled()
+  await clickRow('Home')
+  await clickRow('dev')
+  await clickRow('site')
+  expect(rowTitles()[0]).toBe('Add this folder')
+  await clickRow('Add this folder')
+  expect(remote.openRemoteProject).toHaveBeenCalledWith('nod_mac', '/Users/me/dev/site')
+  expect(actions.listProjectAndStartThread).toHaveBeenCalledWith(expect.objectContaining({ id: qualifyId('nod_mac', 'p9'), node: 'nod_mac' }))
+})
+
+it('ends browsing when another computer is picked, so a folder listed by one is never added on another', async () => {
+  mac.folders = { '': { path: '/Users/me', parent: null, folders: [] } }
+  await pickMac()
+  await press('Enter')
+  expect(rowTitles()[0]).toBe('Add this folder')
+  await act(async () => dialog()!.querySelector<HTMLButtonElement>('[aria-label="Computer"]')!.click())
+  const here = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((entry) => !dialog()!.contains(entry) && entry.textContent === 'This computer')!
+  await act(async () => here.click())
+  expect(rowTitles()).not.toContain('Add this folder')
+  expect(remote.openRemoteProject).not.toHaveBeenCalled()
 })
 
 it('asks where a clone goes on the other computer by browsing its folders, never by typing a path', async () => {

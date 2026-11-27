@@ -5,9 +5,11 @@ import type { MmsProfileServices } from '../../MmsProfileServices'
 import { rollUpActivities, visibleThreads, isLocalOnlyThread } from '../../../shared/threadLineage'
 import { mmsJson } from './jsonOutput'
 import { remoteBotSummary } from './RemoteBots'
+import { withHiddenBots } from './botReach'
 import type { BotsSharingPort } from '../../protocol/botsSharingPort'
 import type { BotReachPort } from '../../protocol/botReachPort'
 import { copyLimits } from '../copyLimits'
+import { TurnMarks, type ListsMarks, type TurnMarksServices } from './turnMarks'
 
 /**
  * The reserved display "thread" that carries a computer's sidebar lists. Real thread ids never
@@ -108,13 +110,32 @@ export interface ListsSnapshot {
       /** `archivedAt` again, for a reader that runs an older Mousse. */
       settledAt?: string
     } &
-      /** Only in a private lists stream: the subagent rows' place in the tree, and what the thread runs with. */
+      /** Out of the sidebar, and the bot that started it ("a bot" for a reader that may not see that bot). */
+      Partial<Pick<Thread, 'hidden' | 'startedByBot'>> &
+      /**
+       * Only in a private lists stream: the subagent rows' place in the tree, what the thread runs with, and who started
+       * it, so another computer lists, nests and links it as this one does.
+       */
       Partial<
-        Pick<Thread, 'lineage' | 'permissionMode' | 'modelOverride' | 'startedFrom' | 'sentFrom' | 'hidden' | 'titleSource'>
+        Pick<
+          Thread,
+          | 'lineage'
+          | 'permissionMode'
+          | 'modelOverride'
+          | 'startedFrom'
+          | 'sentFrom'
+          | 'titleSource'
+          | 'createdByThreadId'
+          | 'native'
+          | 'automationManager'
+          | 'runsOn'
+        >
       >
   >
   /** Threads that are not idle, by id. */
   status: Record<string, ListsStatus>
+  /** Only in a private lists stream: how this computer announces each thread's status (`ListsMarks`), by id. */
+  marks?: Record<string, ListsMarks>
   chats: ListsChat[]
   /** Oldest first; empty when the profile's bots are unavailable or this computer does not share them. */
   bots: ListsBot[]
@@ -141,6 +162,8 @@ export type ListsServices = Pick<
   botsSharing?: BotsSharingPort
   /** Which devices reach which bot: the lists of one device carry only the bots it reaches. */
   botReach?: BotReachPort
+  /** Whether a thread waits on a secret, which only the owner types: such a wait is never the bot's (`ListsMarks`). */
+  secretRequests?: TurnMarksServices['secretRequests']
 }
 
 interface Emitter {
@@ -257,6 +280,7 @@ export class MmsListsSource {
   ) {}
 
   private chats: ListsChat[] | undefined
+  private readonly turnMarks = new TurnMarks()
   private chatsStale = true
   private bots: ListsBot[] | undefined
   private botsStale = true
@@ -313,16 +337,17 @@ export class MmsListsSource {
     const own = this.options.private === true
     // A phone lists threads the way the CLI does: subagents sit under their parent, not beside it. Another
     // computer lists them all, with their lineage, and builds the tree itself like the desktop sidebar.
-    // A thread a bot keeps out of the sidebar (`Thread.hidden`) is left out of every device's list too, with the subagents
-    // below it; its bot's chat lists it. One an agent keeps out of the sidebar reaches the person's other computers,
-    // marked hidden: the side panel of the thread that started it there lists it, and All and search find it. A phone
-    // has neither, so its list leaves it out like a bot's.
-    const quiet = (thread: Thread) => Boolean(thread.hidden) && (!own || Boolean(thread.startedByBot))
-    const hidden = new Set(inventory.filter(quiet).map((thread) => thread.id))
-    const listed = (thread: Thread) => !quiet(thread) && !(thread.lineage && hidden.has(thread.lineage.rootThreadId))
-    const threads = (own ? inventory : visibleThreads(inventory)).filter(listed)
-    const snapshot = this.build(s, inventory, threads, own, activity, turns, chats, bots)
-    return own ? this.trimmed(snapshot, inventory) : snapshot
+    // A thread an agent or a bot keeps out of the sidebar (`Thread.hidden`) reaches the person's other computers too,
+    // marked hidden, with the subagents below it: All and search find it there as here, and so do the side panel of the
+    // thread that started it and the bot's chat. A phone's list leaves it out, with the subagents below it: a phone may
+    // not read the mark, and would list it with the rest.
+    const hidden = new Set(own ? [] : inventory.filter((thread) => thread.hidden).map((thread) => thread.id))
+    const listed = (thread: Thread) => !hidden.has(thread.id) && !(thread.lineage && hidden.has(thread.lineage.rootThreadId))
+    const threads = own ? inventory : visibleThreads(inventory).filter(listed)
+    const built = this.build(s, inventory, threads, own, activity, turns, chats, bots)
+    if (!own) return built
+    const marks = this.turnMarks.of(s, threads, activity, turns)
+    return this.trimmed(Object.keys(marks).length ? { ...built, marks } : built, inventory)
   }
 
   /**
@@ -388,7 +413,8 @@ export class MmsListsSource {
           order: project.order,
           pinnedAt: project.pinnedAt
         })),
-        threads: threads.map((thread) => ({
+        // A bot the reader may not see is "a bot" on its threads, with no launcher (`withHiddenBots`).
+        threads: withHiddenBots(threads.map((thread) => ({
           id: thread.id,
           name: thread.name,
           projectId: thread.projectId,
@@ -404,6 +430,12 @@ export class MmsListsSource {
           // When it archives itself, for the menu's Archive after (a phone keeps "stop a running turn" when it changes the time).
           ...(thread.expiresAt ? { expiresAt: thread.expiresAt } : {}),
           ...(thread.expiresAt && thread.expiryStopsRun ? { expiryStopsRun: true } : {}),
+          // Out of the sidebar there as here (`Thread.hidden`): its My threads leaves it out, All lists it. A reader that
+          // runs an older Mousse reads no such key and lists it with the rest.
+          ...(thread.hidden ? { hidden: true } : {}),
+          // The Bot threads filter, the bot's face and its Started-by bar there read the bot (`Thread.startedByBot`).
+          // A bot of another computer (`node`) goes as "a bot" (`withHiddenBots`).
+          ...(thread.startedByBot ? { startedByBot: { botId: thread.startedByBot.botId, name: thread.startedByBot.name, ...(thread.startedByBot.node ? { node: thread.startedByBot.node } : {}) } } : {}),
           ...(own
             ? {
                 lineage: thread.lineage,
@@ -413,15 +445,22 @@ export class MmsListsSource {
                 settingsRevision: thread.settingsRevision ?? 0,
                 startedFrom: thread.startedFrom,
                 sentFrom: thread.sentFrom,
-                // Out of the sidebar there as here (`Thread.hidden`); an older computer reads no such key and lists it.
-                ...(thread.hidden ? { hidden: true } : {}),
+                // The thread whose agent (or bot) started it: its side panel's Started threads and the Started-by bar
+                // there name it, qualified with this computer as the lists are read.
+                ...(thread.createdByThreadId ? { createdByThreadId: thread.createdByThreadId } : {}),
+                // A native helper's mirror opens watch-only there as here.
+                ...(thread.native ? { native: thread.native } : {}),
+                // The Automation manager's thread is listed nowhere there either.
+                ...(thread.automationManager ? { automationManager: true } : {}),
+                // A remote subagent's stand-in still says which computer runs it, and opens its thread there.
+                ...(thread.runsOn ? { runsOn: thread.runsOn } : {}),
                 // A chat made for its first message: a window binds that message (`Thread.firstSendPending`).
                 ...(thread.firstSendPending ? { firstSendPending: true } : {}),
                 // A title still being named shows dimmed there as here; the other sources look the same, so only this one is sent.
                 ...(thread.titleSource === 'provisional' ? { titleSource: 'provisional' as const } : {})
               }
             : {})
-        })),
+        })), s.botReach?.hiddenFor(this.options.reader)),
         status,
         chats,
         bots
@@ -496,6 +535,11 @@ export class MmsListsSource {
     ])
       on(s.orchestrator as unknown as Emitter, event)
     on(s.threadRuntimes as unknown as Emitter, 'activity')
+    // Read as each status changes: whether a turn is scheduled is known only while it runs.
+    const runtimes = s.threadRuntimes as unknown as Emitter
+    const noteTurn = (payload: unknown): void => this.turnMarks.note(s, payload)
+    runtimes.on('activity', noteTurn)
+    disposers.push(() => runtimes.off('activity', noteTurn))
     on(s.questions as unknown as Emitter, 'pending')
     on(s.questions as unknown as Emitter, 'cleared')
     const chatsChanged = (): void => {

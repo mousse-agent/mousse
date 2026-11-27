@@ -98,7 +98,7 @@ interface ThreadMeta {
   /** The thread whose agent launched this one with `thread_create`; not a subagent relation. */
   createdByThreadId?: string
   /** See `Thread.startedByBot`. */
-  startedByBot?: { botId: string; name: string }
+  startedByBot?: { botId: string; name: string; node?: string }
   /** See `Thread.hidden`. */
   hidden?: true
   startedFrom?: ThreadStartedFrom
@@ -2086,6 +2086,21 @@ export class ThreadDataStore extends EventEmitter {
       else delete next.hidden
       return next
     })
+    if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+    this.patchListCache(updated)
+    this.emit('list-changed', { id })
+    return updated
+  }
+
+  /**
+   * Records the bot of another computer that started the thread there (`Thread.startedByBot` with `node`), named by its
+   * first message. `updatedAt` is kept, as for `setThreadHidden`. A thread that already names a bot keeps it.
+   */
+  setRemoteStartedByBot(id: string, bot: { botId: string; name: string; node: string }): Thread {
+    const thread = this.getThread(id)
+    if (!thread) throw new Error(`Thread not found: ${id}`)
+    if (thread.startedByBot) return thread
+    const updated = this.writeThreadMeta(thread, (base) => ({ ...base, startedByBot: { botId: bot.botId, name: bot.name, node: bot.node } }))
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
     this.patchListCache(updated)
     this.emit('list-changed', { id })

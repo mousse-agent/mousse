@@ -10,7 +10,6 @@ import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import type { BrowserExecutionBinding } from '../../../orchestrator/browser'
 import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
-import type { ModeCeiling } from '../../types'
 import type { DelegationToolHost } from './delegation'
 import type { ToolAccessPolicy } from './authority'
 import { legacyRefusal, REFUSAL_FAULT_CODES } from './refusal'
@@ -20,7 +19,7 @@ import { legacyRefusal, REFUSAL_FAULT_CODES } from './refusal'
  * - `reads`: reads state; the handler limits what the caller may see.
  * - `actsAsCaller`: acts on the caller's own thread and run (delegation, questions, plans, tasks).
  * - `writesThreads`: writes a thread named by `threadId`; only the caller's thread is allowed.
- * - `startsThreads`: creates threads; refused under a `plan` ceiling.
+ * - `startsThreads`: creates threads; refused for a read-only child.
  * - `editsWorkspace`: changes the caller's workspace or hands work over to it (integration, merge-back);
  *   only the caller's own thread, and it asks the thread's user first unless the caller's permission
  *   mode allows edits.
@@ -29,7 +28,7 @@ import { legacyRefusal, REFUSAL_FAULT_CODES } from './refusal'
  *   `ctx.scope`.
  * - `managesOthers`: changes threads other than the caller's own.
  * - `changesSettings`: changes the profile's settings (the theme). Like a change in Settings it needs a turn that may
- *   edit: refused for a read-only child and under a Plan ceiling, and it asks the thread's user first unless the
+ *   edit: refused for a read-only child, and it asks the thread's user first unless the
  *   caller's permission mode allows edits.
  */
 export type ToolAccess = 'reads' | 'actsAsCaller' | 'writesThreads' | 'startsThreads' | 'editsWorkspace' | 'readsOthers' | 'managesOthers' | 'changesSettings'
@@ -64,26 +63,43 @@ export type ToolClass = 'read' | 'mutation' | 'delegation'
 
 /**
  * A capability a tool declares it needs beyond its `access` (docs/plans/tool-api.md §1.3). `threads.delegate` (start a
- * child no wider than yourself) is every delegation tool's and every thread holds it, readers and Plan included;
- * `threads.start` (an independent thread or a fork) is not held under a Plan ceiling or by a read-only child.
+ * child no wider than yourself) is every delegation tool's and every thread holds it, readers included;
+ * `threads.start` (an independent thread or a fork) is not held by a read-only child.
  */
 export type ToolCapability = 'threads.start' | 'themes' | 'quick_actions'
 
 export const TOOL_CLASSES: ReadonlySet<string> = new Set<ToolClass>(['read', 'mutation', 'delegation'])
 
-/** Who a call acts as: the thread's active run, under the ceiling its turn was given. */
+/** What a tool of variants reads to pick the variant of a call: who calls, in which turn, and the call's id. */
+export interface VariantSite {
+  threadId: string
+  turn: AppToolTurn
+  /** The call's id as the registry keys its receipts (`mcp:<clientRequestId>` over MCP). */
+  toolCallId?: string
+}
+
+/**
+ * The variant a call is: its tool and the arguments it runs with. `conceals` is a thread the variant read from what
+ * the call named rather than from the call: a refusal that would name it gets `refusal` instead.
+ */
+export interface ToolVariant {
+  tool: MousseTool
+  args: Record<string, unknown>
+  conceals?: { threadId: string; refusal: ToolOutcome }
+}
+
+/** Who a call acts as: the thread's active run. */
 export interface McpCaller {
   threadId: string
   runId: string
   provider: string
-  modeCeiling: ModeCeiling
   /** The level the run's credential recorded; it no longer limits anything (every agent reads and manages every thread). */
   accessLevel: AgentAccessLevel
 }
 
 /** A mode's permissions as tool selection reads them. */
 export interface ModeFacts {
-  /** Edits or shell are denied (Plan and other read-only modes). */
+  /** Edits or shell are denied (a read-only mode). */
   readOnly: boolean
   agent: boolean
   build: boolean
@@ -104,7 +120,6 @@ export interface AppToolTurn {
   mode: ChatMode
   /** What the mode allows, from its descriptor (`ModeRegistry`). */
   modeFacts: ModeFacts
-  modeCeiling: ModeCeiling
   /**
    * The permission mode the turn runs in; an MCP turn's is
    * read from its run's binding (`ToolRegistryOptions.permissionModeFor`). Absent, nothing runs unasked that a
@@ -221,14 +236,13 @@ export function checkedInHandler(where: string): ToolAuthorize {
 export type Availability = true | string
 
 /**
- * The thread-stable listing a native MCP client caches: a tool is listed when the thread's ceiling,
+ * The thread-stable listing a native MCP client caches: a tool is listed when the thread's
  * read-only status and the build allow it, whatever the current turn's mode.
  */
 export interface ToolListing {
   /** The thread the list is for, when it is one thread's. */
   threadId?: string
   readOnly: boolean
-  modeCeiling: ModeCeiling
   /** The thread is a Mousse subagent: it does not list what never passes down (the owner's own preferences). */
   subagent?: boolean
   /** The thread's role when it is a personal bot's thread (PR 6 §5): only bot threads list the bot tools. */
@@ -263,6 +277,8 @@ export interface MousseTool {
    * (a bot has no project: the git tools take the thread or project it reads).
    */
   botInputSchema?: JsonSchema
+  /** What a personal bot's thread lists instead of `class`, where the bot's tool of a shared name is another kind. */
+  botClass?: ToolClass
   /**
    * A tool whose personal bot's call its grant answers: once the registry has held the call to the bot's grant, it asks
    * nobody, whatever `access` would ask of a thread (the owner allowing the permission is the bot's Full access for it).
@@ -301,13 +317,13 @@ export interface MousseTool {
   messageIntent?(args: Record<string, unknown>): MessageIntent | undefined
   /**
    * Capabilities the tool needs beyond what its `access` says (docs/plans/tool-api.md §1.3): `threads.start` for a tool
-   * that starts an independent thread (a Plan ceiling and a read-only child lack it), `themes` and `quick_actions` for
+   * that starts an independent thread (a read-only child lacks it), `themes` and `quick_actions` for
    * the owner's own preferences, which never pass down to a subagent.
    */
   capabilities?: readonly ToolCapability[]
   /**
    * The browser right a call needs (docs/plans/tool-api.md §2.6 "Rights"): `browser.read` to observe, `browser.act` to
-   * open, act or change tabs, read from the arguments. A Plan ceiling and a read-only child do not hold `browser.act`.
+   * open, act or change tabs, read from the arguments. A read-only child, and a mode that denies edits, do not hold `browser.act`.
    */
   browserRight?(args: Record<string, unknown>): 'browser.read' | 'browser.act'
   /**
@@ -328,7 +344,7 @@ export interface MousseTool {
    */
   alwaysLoad?: true
   /**
-   * The call waits for the user: an approval (a quick action) or a question (`ask_user`). A run
+   * The call waits for the user: an approval (a quick action) or a question (`question_ask`). A run
    * whose approvals are `never` refuses it before the handler runs.
    */
   asksUser?: 'approval' | 'question'
@@ -356,13 +372,19 @@ export interface MousseTool {
    * handler checks it. Registration refuses a tool that takes such an argument without it.
    */
   authorize?: ToolAuthorize
+  /**
+   * A tool whose variant is decided by what its arguments name, not by an argument the caller picks (`request_answer`:
+   * the kind of the request its id names). Each variant is a whole tool with its own authority: the tool is listed and
+   * held when one of them is, and a call is checked and run as the variant `variantOf` picks, under this tool's name.
+   */
+  variants?: readonly MousseTool[]
+  variantOf?(args: Record<string, unknown>, site: VariantSite): ToolVariant | { refused: ToolOutcome }
   handler(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> | ToolOutcome
 }
 
 export type McpToolErrorCode =
   | 'mousse_scope_denied'
   | 'mousse_caller_not_live'
-  | 'mousse_ceiling_exceeded'
   | 'mousse_read_only'
   | 'mousse_conflict'
   | 'mousse_unknown_tool'
@@ -398,7 +420,7 @@ export type ToolLedger = {
   failed(id: string): void
 }
 
-/** `ask_user` over MCP blocks at most this long (or until the caller's run ends). */
+/** `question_ask` over MCP blocks at most this long (or until the caller's run ends). */
 export const ASK_USER_TIMEOUT_MS = 60 * 60 * 1000
 
 export const CLIENT_REQUEST_ID_SCHEMA: JsonSchema = {

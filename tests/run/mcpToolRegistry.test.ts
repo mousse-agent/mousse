@@ -19,31 +19,22 @@ import { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessage } from '../../src
 /** The tools a credential lists before the app tools joined (still listed, still these classes). */
 const PHASE5_TOOLS: Record<string, string> = {
   delegate_task: 'actsAsCaller',
-  continue_subagent: 'actsAsCaller',
-  answer_subagent: 'actsAsCaller',
-  task_status: 'actsAsCaller',
-  task_cancel: 'actsAsCaller',
-  list_subagents: 'actsAsCaller',
-  ask_user: 'actsAsCaller',
-  create_task: 'actsAsCaller',
-  update_task: 'actsAsCaller',
-  list_tasks: 'actsAsCaller',
+  request_answer: 'actsAsCaller',
+  question_ask: 'actsAsCaller',
+  task_create: 'actsAsCaller',
+  task_update: 'actsAsCaller',
+  task_list: 'actsAsCaller',
   thread_read: 'readsOthers',
   thread_wait: 'readsOthers',
   thread_send: 'managesOthers',
   thread_create: 'managesOthers',
-  thread_interrupt: 'managesOthers',
-  thread_steer: 'managesOthers',
-  approval_respond: 'managesOthers',
+  thread_stop: 'managesOthers',
   queue_list: 'readsOthers',
   queue_enqueue: 'managesOthers',
-  queue_edit: 'managesOthers',
-  queue_remove: 'managesOthers',
-  queue_reorder: 'managesOthers',
-  queue_promote_to_steer: 'managesOthers',
+  queue_update: 'managesOthers',
   // Phase 6 (SPEC §16.2).
   thread_fork: 'startsThreads',
-  thread_merge_back: 'editsWorkspace'
+  thread_return: 'editsWorkspace'
 }
 
 describe('Mousse tool registry (SPEC §15.1)', () => {
@@ -53,14 +44,14 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     fx = undefined
   })
 
-  const setup = async (modeCeiling: 'plan' | 'default' = 'default', hostOverrides: Parameters<typeof fakeAppToolHost>[0] = {}) => {
+  const setup = async (hostOverrides: Parameters<typeof fakeAppToolHost>[0] = {}) => {
     fx = delegationFixture()
     const run = await fx.runningRun('parent')
     const fake = fakeAppToolHost(hostOverrides)
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
-    const registered = turns.register(appTurn({ threadId: 'parent', runId: run.runId, modeCeiling }))
+    const registered = turns.register(appTurn({ threadId: 'parent', runId: run.runId }))
     const ctx = (overrides: Partial<Parameters<typeof request>[0]> = {}): McpCallRequest =>
-      request({ threadId: 'parent', runId: run.runId, modeCeiling, ...overrides })
+      request({ threadId: 'parent', runId: run.runId, ...overrides })
     return { fx, run, registry, turns, registered, ctx, request, ...fake }
   }
 
@@ -76,14 +67,14 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
 
   it('lists every Phase 5 tool with its access class and a plain JSON schema', async () => {
     const { registry } = await setup()
-    const listed = registry.listFor({ readOnly: false, modeCeiling: 'default' })
+    const listed = registry.listFor({ readOnly: false })
     const byName = Object.fromEntries(listed.map((tool) => [tool.name, tool.access]))
     for (const [name, access] of Object.entries(PHASE5_TOOLS)) expect(byName[name], name).toBe(access)
     for (const tool of listed) {
       expect(tool.inputSchema.type).toBe('object')
       expect(Object.getOwnPropertySymbols(tool.inputSchema)).toEqual([])
     }
-    expect((registry.get('delegate_task')!.inputSchema.properties as Record<string, unknown>).modeCeiling).toBeTruthy()
+    expect((registry.get('delegate_task')!.inputSchema.properties as Record<string, unknown>).modeCeiling).toBeUndefined()
     // The older delegation names stay dispatchable in process but are never listed.
     for (const hidden of ['create_subagent', 'create_subagents', 'recall_subagent', 'integrate_delegation', 'integrate_subagent', 'list_delegations'])
       expect(listed.some((tool) => tool.name === hidden), hidden).toBe(false)
@@ -97,7 +88,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     expect(enqueued).toEqual([])
     const ok = await registry.call('queue_enqueue', { content: 'hi' }, ctx())
     expect(ok.isError).toBeUndefined()
-    expect(enqueued).toEqual([{ threadId: 'parent', input: { content: 'hi', mode: 'agent' } }])
+    expect(enqueued).toEqual([{ threadId: 'parent', input: { content: 'hi' } }])
   })
 
   it('thread_read reaches the caller and its lineage, and refuses a thread the host does not know', async () => {
@@ -157,7 +148,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
       expect(host.delegation).toHaveBeenLastCalledWith(expect.objectContaining({ runId: run.runId }))
       expect(delegation.listSubagents).toHaveBeenCalledTimes(1)
       fx.engine.markTerminal(run.runId, 'completed')
-      const ended = await registry.call('list_tasks', {}, ctx()).catch((err) => err)
+      const ended = await registry.call('task_list', {}, ctx()).catch((err) => err)
       expect(ended.code).toBe('mousse_caller_not_live')
     })
 
@@ -181,7 +172,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
       fake.host.awaitLiveRun = () => gate
       const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
       const previous = turns.register(appTurn({ threadId: 'parent', runId: first.runId }))
-      const call = registry.call('ask_user', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], [TURN_TOKEN_KEY]: previous.turn.turnToken },
+      const call = registry.call('question_ask', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], [TURN_TOKEN_KEY]: previous.turn.turnToken },
         request({ threadId: 'parent', runId: first.runId, binding: 'per_call', provider: 'claude' }))
       const continuation = await fx.runningRun('parent')
       // The continuation keeps the token of the turn it continues.
@@ -193,7 +184,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
 
     it('per_call: a Claude call must carry the active turn token, which is stripped before the handler', async () => {
       const { registry, ctx, registered, tasks } = await setup()
-      const claude = (args: Record<string, unknown>) => registry.call('create_task', args, ctx({ binding: 'per_call', provider: 'claude' }))
+      const claude = (args: Record<string, unknown>) => registry.call('task_create', args, ctx({ binding: 'per_call', provider: 'claude' }))
       await expect(claude({ description: 'P' })).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
       await expect(claude({ description: 'P', [TURN_TOKEN_KEY]: 'an-earlier-turn' })).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
       expect(tasks.list()).toHaveLength(0)
@@ -205,7 +196,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     it('per_call: a runtime that tags calls by attempt must carry the active attempt token', async () => {
       const { registry, ctx, turns, run, tasks } = await setup()
       turns.register(appTurn({ threadId: 'parent', runId: run.runId, attemptToken: 'attempt-2' }))
-      const pi = (token: string) => registry.call('create_task', { description: 'P', [ATTEMPT_TOKEN_KEY]: token }, ctx({ binding: 'per_call', provider: 'pi:openai' }))
+      const pi = (token: string) => registry.call('task_create', { description: 'P', [ATTEMPT_TOKEN_KEY]: token }, ctx({ binding: 'per_call', provider: 'pi:openai' }))
       await expect(pi('attempt-1')).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
       expect(tasks.list()).toHaveLength(0)
       await pi('attempt-2')
@@ -222,7 +213,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
         resolveTarget: () => ({ backend: 'managed-chromium' as const }),
         requestAccess: async () => 'allowed' as const
       }
-      const s = await setup('default', { browserRuntime: () => port as never })
+      const s = await setup({ browserRuntime: () => port as never })
       const browser = { mode: 'structured', execution: { source: 'gui', threadId: 'parent' }, policy: { allowedTools: ['browser_open'] } } as never
       s.turns.register(appTurn({ threadId: 'parent', runId: s.run.runId, browser }))
       return { ...s, dispatched, binding }
@@ -265,51 +256,44 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     })
   })
 
-  it('children inherit the caller ceiling and cannot exceed it; the retired integrate_delegation only reports, even under plan', async () => {
-    const { registry, ctx, delegation } = await setup('plan')
-    await registry.call('delegate_task', { prompt: 'Look', title: 'Looker', workspace: 'shared', role: 'research' }, ctx({ toolCallId: 'mcp:a' }))
-    expect(delegation.delegateTask).toHaveBeenCalledWith(expect.objectContaining({ modeCeiling: 'plan' }), { toolCallId: 'mcp:a' })
-    const broader = await refusalIn(registry.call('delegate_task', { prompt: 'Edit', title: 'Editor', workspace: 'isolated', modeCeiling: 'default' }, ctx()))
-    expect(broader?.code).toBe('mousse_ceiling_exceeded')
-    // The retired merge tool is not offered over MCP any more.
+  it('the retired integrate_delegation is not offered over MCP', async () => {
+    const { registry, ctx, delegation } = await setup()
     await expect(registry.call('integrate_delegation', { delegationId: 'd1' }, ctx())).rejects.toMatchObject({ code: 'mousse_unknown_tool' })
     expect(delegation.reportResult).not.toHaveBeenCalled()
-    const agentTurn = await refusalIn(registry.call('queue_enqueue', { content: 'go', mode: 'agent' }, ctx()))
-    expect(agentTurn?.code).toBe('mousse_ceiling_exceeded')
   })
 
   it('a read-only child calls only reads and readOnlySafe tools', async () => {
-    const { registry, ctx, enqueued } = await setup('default', { readOnlyThread: () => true })
+    const { registry, ctx, enqueued } = await setup({ readOnlyThread: () => true })
     const refused = await refusalIn(registry.call('queue_enqueue', { content: 'x' }, ctx()))
     expect(refused?.code).toBe('mousse_read_only')
     expect(enqueued).toEqual([])
     expect(await refusalIn(registry.call('create_quick_action', { label: 'x', kind: 'bash', payload: 'ls' }, ctx()))).toMatchObject({ code: 'mousse_read_only' })
     expect((await registry.call('queue_list', {}, ctx())).isError).toBeUndefined()
-    const listed = registry.listForThread('parent', 'default').map((tool) => tool.name)
-    expect(listed).toContain('ask_user')
+    const listed = registry.listForThread('parent').map((tool) => tool.name)
+    expect(listed).toContain('question_ask')
     expect(listed).not.toContain('queue_enqueue')
     expect(listed).not.toContain('integrate_delegation')
   })
 
   it('a tool Settings turned off is refused at call time with the reason, and writes no ledger row', async () => {
     const ledger = { start: vi.fn(() => 'inv'), commit: vi.fn(), failed: vi.fn() }
-    const { registry, ctx, turns, run, host } = await setup('default', { toolLedger: () => ledger })
-    turns.register(appTurn({ threadId: 'parent', runId: run.runId, settingsEnabled: (name) => name !== 'ask_user' }))
-    const outcome = await registry.call('ask_user', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
-    expect(outcome).toEqual(refused('unavailable', 'Tool "ask_user" is disabled in Settings → Skills & MCP.'))
+    const { registry, ctx, turns, run, host } = await setup({ toolLedger: () => ledger })
+    turns.register(appTurn({ threadId: 'parent', runId: run.runId, settingsEnabled: (name) => name !== 'question_ask' }))
+    const outcome = await registry.call('question_ask', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
+    expect(outcome).toEqual(refused('unavailable', 'Tool "question_ask" is disabled in Settings → Skills & MCP.'))
     expect(host.askUser).not.toHaveBeenCalled()
     expect(ledger.start).not.toHaveBeenCalled()
   })
 
-  it('runs ask_user and the task tools through the shared handlers for the caller thread, and no plan tool exists', async () => {
+  it('runs question_ask and the task tools through the shared handlers for the caller thread, and no plan tool exists', async () => {
     const { registry, ctx, host, tasks } = await setup()
-    const asked = await registry.call('ask_user', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
+    const asked = await registry.call('question_ask', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
     expect(JSON.parse(asked.text)).toEqual({ q1: 'a' })
     expect(host.askUser).toHaveBeenCalledWith('parent', expect.any(Array), expect.objectContaining({ timeoutMs: 60 * 60 * 1000 }))
     for (const removed of ['present_plan', 'show_document']) expect(registry.get(removed), removed).toBeUndefined()
-    const created = JSON.parse((await registry.call('create_task', { description: 'Write tests' }, ctx())).text)
+    const created = JSON.parse((await registry.call('task_create', { description: 'Write tests' }, ctx())).text)
     expect(tasks.list().map((task) => task.id)).toEqual([created.id])
-    const failed = await registry.call('update_task', { id: '' }, ctx())
+    const failed = await registry.call('task_update', { id: '' }, ctx())
     expect(failed.isError).toBe(true)
   })
 
@@ -362,8 +346,6 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
       rows.length = 0
       await expect(call(registry, request, 'missing')).rejects.toMatchObject({ code: 'mousse_unknown_tool' })
       expect(await refusalIn(call(registry, request, 'write', { threadId: 'other' }))).toMatchObject({ code: 'mousse_scope_denied' })
-      const plan = request('run:active')
-      expect(await refusalIn(registry.call('spawn', {}, { ...plan, credential: { ...plan.credential, modeCeiling: 'plan' } }))).toMatchObject({ code: 'mousse_ceiling_exceeded' })
       await expect(call(registry, request, 'write', {}, 'call-1', 'run:stale')).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
       active = null
       await expect(call(registry, request, 'write')).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
@@ -373,18 +355,14 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
 
   describe('thread_fork and thread_merge_back (SPEC §16.2)', () => {
     /** A finished child run on `child-1`, so `parent` has a lineage thread to fork. */
-    const withFinishedChild = async (modeCeiling: 'plan' | 'default' = 'default') => {
-      const s = await setup(modeCeiling)
+    const withFinishedChild = async () => {
+      const s = await setup()
       const child = await s.fx.delegate(s.run.runId, 'call-child')
       s.fx.finish(child.childRunId, 'child answer')
       return { ...s, child }
     }
 
-    it('thread_fork refuses a plan ceiling and a thread outside the caller lineage, creating nothing', async () => {
-      const plan = await withFinishedChild('plan')
-      expect(await refusalIn(plan.registry.call('thread_fork', { sourceThreadId: 'child-1' }, plan.ctx()))).toMatchObject({ code: 'mousse_ceiling_exceeded' })
-      expect([...plan.fx.threads]).toEqual(['child-1'])
-      fx?.dispose()
+    it('thread_fork refuses a thread outside the caller lineage, creating nothing', async () => {
       const open = await withFinishedChild()
       await open.fx.runningRun('stranger')
       expect(await refusalIn(open.registry.call('thread_fork', { sourceThreadId: 'stranger' }, open.ctx()))).toMatchObject({ code: 'mousse_scope_denied' })
@@ -419,7 +397,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
 
     it('thread_merge_back acts for the caller\'s own fork only, and derives its clientRequestId from the run and call', async () => {
       // Accept edits, so the call reaches the tool without asking (the asking is covered below).
-      const { fx, registry, ctx, run } = await setup('default', { permissionModeFor: () => 'accept_edits' })
+      const { fx, registry, ctx, run } = await setup({ permissionModeFor: () => 'accept_edits' })
       const mergeBack = vi.spyOn(fx.engine, 'mergeBack')
       expect(await refusalIn(registry.call('thread_merge_back', { forkThreadId: 'someone-else' }, ctx()))).toMatchObject({ code: 'mousse_scope_denied' })
       expect(await refusalIn(registry.call('thread_merge_back', { threadId: 'someone-else' }, ctx()))).toMatchObject({ code: 'mousse_scope_denied' })
@@ -490,7 +468,7 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
   it('lists the tools that read and manage other threads for every caller', async () => {
     const { registry } = await world()
     expect(registry.listForThread('parent').map((tool) => tool.name)).toEqual(
-      expect.arrayContaining(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'thread_send', 'thread_steer', 'thread_interrupt', 'thread_create', 'approval_respond'])
+      expect.arrayContaining(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'thread_send', 'thread_stop', 'thread_create', 'request_answer'])
     )
   })
 
@@ -886,7 +864,7 @@ function appToolRegistryWithoutEngine(forRun: (runId: string) => { start: (call:
     turns: { get: (runId: string) => turns.get(runId) ?? { ...appTurn({ threadId: 't', runId }), turnToken: 'tok' } } as never
   })
   const request = (runId: string, id = 'call-1'): McpCallRequest => ({
-    credential: { threadId: 't', runId, provider: 'p', modeCeiling: 'default', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
+    credential: { threadId: 't', runId, provider: 'p', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
     toolCallId: id,
     signal: new AbortController().signal
   })

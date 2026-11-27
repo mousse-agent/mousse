@@ -2,6 +2,7 @@ import type { AgentRuntimePolicy, AgentRuntimeToolApprovalCallback } from '../..
 import type { EffectiveAgentGrants } from '../../shared/agents/types'
 import type { McpToolDescriptor } from '../../shared/integrations'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
+import { canonicalToolCall, grantHoldsCall, isVariantAlias } from '../../shared/toolAliases'
 import { authorizeTrustedToolDispatch, canonicalizeBuiltinToolName, digestToolArguments, prepareTrustedToolDispatch } from './runtimePolicy'
 
 /**
@@ -34,12 +35,15 @@ export function definitionAuthorityDigest(authority: Pick<DefinitionAuthority, '
 export type DefinitionDecision = { allowed: true } | { allowed: false; message: string }
 
 /** Whether `toolName` is in the definition's effective grants (a user MCP tool by server and tool). */
-export function definitionToolGranted(toolName: string, grants: EffectiveAgentGrants, mcpTools: readonly McpToolDescriptor[] = []): boolean {
+export function definitionToolGranted(toolName: string, grants: EffectiveAgentGrants, mcpTools: readonly McpToolDescriptor[] = [], args?: Record<string, unknown>): boolean {
   const mcp = mcpTools.find((tool) => tool.providerName === toolName)
   if (mcp)
     return grants.mcpTools.some((grant) => (grant.serverId === mcp.serverId || grant.serverId === mcp.installationId) && grant.toolName === mcp.toolName)
   const canonical = canonicalizeBuiltinToolName(toolName)
-  return grants.builtinTools.some((grant) => grant.id === toolName || grant.id === canonical || canonicalizeBuiltinToolName(grant.id) === canonical)
+  // A grant under an old name that became one variant of its tool holds that variant only, judged by the call's arguments.
+  return grants.builtinTools.some((grant) => isVariantAlias(grant.id)
+    ? grantHoldsCall(grant.id, toolName, args)
+    : grant.id === toolName || grant.id === canonical || canonicalizeBuiltinToolName(grant.id) === canonical)
 }
 
 /**
@@ -47,7 +51,7 @@ export function definitionToolGranted(toolName: string, grants: EffectiveAgentGr
  * approval), or undefined when it may go on to approval. It asks nobody.
  */
 export function definitionRefusal(authority: DefinitionAuthority, call: { toolName: string; args: Record<string, unknown>; projectPath?: string }): string | undefined {
-  if (!definitionToolGranted(call.toolName, authority.grants, authority.mcpTools)) return `Tool "${call.toolName}" is not granted to this agent definition.`
+  if (!definitionToolGranted(call.toolName, authority.grants, authority.mcpTools, call.args)) return `Tool "${call.toolName}" is not granted to this agent definition.`
   const prepared = prepareTrustedToolDispatch({
     policy: authority.policy,
     grants: authority.grants,
@@ -94,7 +98,8 @@ const AUTHORIZED = new WeakMap<DefinitionAuthority, Map<string, string>>()
 
 function authorizedKey(authority: DefinitionAuthority, call: AuthorizedCall): string {
   const mcp = (authority.mcpTools ?? []).find((tool) => tool.providerName === call.toolName)
-  const tool = mcp ? `mcp:${mcp.installationId ?? mcp.serverId}:${mcp.toolName}` : `tool:${call.toolName}`
+  // An old tool name is its new one (`canonicalizeBuiltinToolName`): the gate may see either, the registry the new one.
+  const tool = mcp ? `mcp:${mcp.installationId ?? mcp.serverId}:${mcp.toolName}` : `tool:${canonicalizeBuiltinToolName(call.toolName)}`
   return JSON.stringify([call.turnToken, tool, call.callId])
 }
 
@@ -102,7 +107,12 @@ function authorizedKey(authority: DefinitionAuthority, call: AuthorizedCall): st
 export function recordAuthorizedCall(authority: DefinitionAuthority, call: AuthorizedCall): void {
   let calls = AUTHORIZED.get(authority)
   if (!calls) AUTHORIZED.set(authority, (calls = new Map()))
-  calls.set(authorizedKey(authority, call), digestToolArguments(withoutTransportFields(call.args)))
+  calls.set(authorizedKey(authority, call), authorizedDigest(call))
+}
+
+/** The digest of a call's arguments as its canonical tool takes them: the gate may see an old variant name without the `op` it adds. */
+function authorizedDigest(call: AuthorizedCall): string {
+  return digestToolArguments(withoutTransportFields(canonicalToolCall(call.toolName, call.args).args))
 }
 
 /**
@@ -115,7 +125,7 @@ export function takeAuthorizedCall(authority: DefinitionAuthority, call: Authori
   const digest = calls?.get(key)
   if (digest === undefined) return false
   calls!.delete(key)
-  return digest === digestToolArguments(withoutTransportFields(call.args))
+  return digest === authorizedDigest(call)
 }
 
 /**
@@ -128,7 +138,7 @@ export async function authorizeDefinitionCall(
   authority: DefinitionAuthority,
   call: { toolName: string; args: Record<string, unknown>; projectPath?: string; signal?: AbortSignal; uncontainedShell?: boolean }
 ): Promise<DefinitionDecision> {
-  if (!definitionToolGranted(call.toolName, authority.grants, authority.mcpTools))
+  if (!definitionToolGranted(call.toolName, authority.grants, authority.mcpTools, call.args))
     return { allowed: false, message: `Tool "${call.toolName}" is not granted to this agent definition.` }
   const isMcp = (authority.mcpTools ?? []).some((tool) => tool.providerName === call.toolName)
   const base = {

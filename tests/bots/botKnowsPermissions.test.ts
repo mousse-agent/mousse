@@ -149,7 +149,7 @@ describe('the stated permissions match the tools a run is given', () => {
       expect(said.browser).toBe(BOT_BROWSER_TOOLS.every((tool) => allow.has(tool)))
       expect(said.web).toBe(allow.has('web_fetch') || allow.has('web_search'))
       // Every skill, as the text says.
-      expect(allow.has('load_skill')).toBe(true)
+      expect(allow.has('skill_load')).toBe(true)
       expect(said.automation).toEqual(BOT_AUTOMATION_APP_TOOLS.filter((tool) => allow.has(tool)))
       // Every Mousse tool the run is offered is one a bot's thread lists.
       for (const tool of compiled.permissions.appTools) expect(botMayBeOffered(tool), tool).toBe(true)
@@ -164,10 +164,10 @@ describe('the stated permissions match the tools a run is given', () => {
       "- Use the browser (your own): yes, but it can't open on this run",
       "- Use your owner's threads: no",
       '- Use apps on this computer: no',
-      '- Skills: yes, every skill your owner has (list_skills)',
+      '- Skills: yes, every skill your owner has (skill_list)',
       '- Automation tools: none',
       "- Your owner's MCP servers: none set up",
-      'Use what is allowed without asking. Ask with escalate only for something marked no.'
+      'Use what is allowed without asking. Ask with permission_ask only for something marked no.'
     ])
     // What the owner switched off of what every bot has is said so.
     const off = botAllowedText({ shell: false, browser: false, threads: false, web: true, automation: [], off: { mcp: true, skills: true, automation: true } }, 'run')
@@ -211,13 +211,13 @@ describe('the stated permissions match the tools a run is given', () => {
 
 describe("a bot's thread lists only tools a bot can hold", () => {
   const tool = (name: string): MousseTool => ({ name, description: name, inputSchema: { type: 'object', properties: {} }, access: 'reads', class: 'read', handler: async () => ({ text: '' }) }) as unknown as MousseTool
-  const names = ['delegate_task', 'thread_read', 'queue_enqueue', 'browser_open', 'browser_request_human', 'web_fetch', 'work_start', 'escalate']
+  const names = ['delegate_task', 'thread_read', 'queue_enqueue', 'browser_open', 'browser_request_human', 'web_fetch', 'work_start', 'permission_ask']
 
   it('lists no delegation or queue tools on a bot thread, only the thread tools "use your threads" gives, and every tool on any other', () => {
     const registry = new ToolRegistry({ activeRunId: () => null, botRole: (threadId) => (threadId === 'bot-home' ? 'activation' : undefined) })
     for (const name of names) registry.register(tool(name))
     // The thread tools only for a turn that holds them (tests/run/botThreadTools.test.ts): with no turn here, none.
-    expect(registry.listForThread('bot-home').map((entry) => entry.name).sort()).toEqual(['browser_open', 'escalate', 'web_fetch', 'work_start'])
+    expect(registry.listForThread('bot-home').map((entry) => entry.name).sort()).toEqual(['browser_open', 'permission_ask', 'web_fetch', 'work_start'])
     expect(registry.listForThread('other').map((entry) => entry.name).sort()).toEqual([...names].sort())
     expect(registry.isBotThread('bot-home')).toBe(true)
     expect(registry.isBotThread('other')).toBe(false)
@@ -231,19 +231,19 @@ describe("a bot's thread lists only tools a bot can hold", () => {
       }),
       escalate: () => 'asked'
     })
-    const NOT_ALLOWED = 'Not allowed: you may not use the browser on this turn. If you need it, ask your owner with escalate (tool "browser").'
+    const NOT_ALLOWED = 'Not allowed: you may not use the browser on this turn. If you need it, ask your owner with permission_ask (tool "browser").'
     // The runtime's own gate (locked Claude Code, Pi) and the Mousse server both answer it.
-    expect(botAppToolRefusal(authority(['escalate']), 'browser_open', { url: 'https://example.com' })).toBe(NOT_ALLOWED)
-    expect(botAppToolRefusal(authority(['escalate', ...BOT_BROWSER_TOOLS]), 'browser_open', { url: 'https://example.com' })).toBeUndefined()
+    expect(botAppToolRefusal(authority(['permission_ask']), 'browser_open', { url: 'https://example.com' })).toBe(NOT_ALLOWED)
+    expect(botAppToolRefusal(authority(['permission_ask', ...BOT_BROWSER_TOOLS]), 'browser_open', { url: 'https://example.com' })).toBeUndefined()
     const fx = delegationFixture()
     try {
       const run = await fx.runningRun('bot-home')
       const { registry, turns, request } = appToolRegistry(fx.engine, fakeAppToolHost().host)
-      turns.register(appTurn({ threadId: 'bot-home', runId: run.runId, bot: authority(['escalate']) }))
+      turns.register(appTurn({ threadId: 'bot-home', runId: run.runId, bot: authority(['permission_ask']) }))
       // Not "Browser tools are not bound for this turn": the bot is told it is not allowed, and to escalate.
       expect(await registry.call('browser_open', { url: 'https://example.com' }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual(refused('not_granted', NOT_ALLOWED))
       // Any other tool outside the grant keeps its wall.
-      expect(await registry.call('ask_user', { questions: [] }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual(refused('not_granted', 'This bot is not allowed to use ask_user.'))
+      expect(await registry.call('delegate_task', { prompt: 'x', title: 'x', workspace: 'shared' }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual(refused('not_granted', 'This bot is not allowed to use delegate_task.'))
     } finally {
       fx.dispose()
     }
@@ -251,11 +251,11 @@ describe("a bot's thread lists only tools a bot can hold", () => {
 
   it('a bot can hold every grantable tool, every tool of each permission, the task list and the work tools', () => {
     for (const name of [...BOT_APP_TOOLS].filter((name) => !BOT_GROUP_PERMISSIONS.has(name))) expect(botMayBeOffered(name), name).toBe(true)
-    for (const name of [...BOT_BROWSER_TOOLS, ...BOT_THREAD_TOOLS, ...BOT_PROFILER_TOOLS, ...BOT_THEME_TOOLS, ...BOT_SCHEDULE_READ_TOOLS, ...BOT_SCHEDULE_ACT_TOOLS, ...BOT_SECRET_TOOLS, ...BOT_QUICK_ACTION_TOOLS, ...BOT_TASK_TOOLS, ...BOT_WORK_TOOLS, 'consult', 'list_skills', 'load_skill']) expect(botMayBeOffered(name), name).toBe(true)
+    for (const name of [...BOT_BROWSER_TOOLS, ...BOT_THREAD_TOOLS, ...BOT_PROFILER_TOOLS, ...BOT_THEME_TOOLS, ...BOT_SCHEDULE_READ_TOOLS, ...BOT_SCHEDULE_ACT_TOOLS, ...BOT_SECRET_TOOLS, ...BOT_QUICK_ACTION_TOOLS, ...BOT_TASK_TOOLS, ...BOT_WORK_TOOLS, 'consult', 'skill_list', 'skill_load']) expect(botMayBeOffered(name), name).toBe(true)
     // What a thread's agent steers, queues, forks and answers with is a bot's too, under "use your threads".
-    for (const name of ['thread_steer', 'approval_respond', 'queue_enqueue', 'thread_fork', 'thread_merge_back', 'git_status', 'list_computers']) expect(botGrantTool(name), name).toBe('threads')
+    for (const name of ['thread_stop', 'thread_steer', 'approval_respond', 'queue_enqueue', 'thread_fork', 'thread_return', 'thread_merge_back', 'git_status', 'computer_list']) expect(botGrantTool(name), name).toBe('threads')
     // A permission's name is no tool; delegation is the work's own subagents; the heap summary pauses the service; a bot has no goal.
-    for (const name of ['delegate_task', 'continue_subagent', 'browser_request_human', ...BOT_GROUP_PERMISSIONS, 'profiler_heap_summary', 'goal_status']) expect(botMayBeOffered(name), name).toBe(false)
+    for (const name of ['delegate_task', 'continue_subagent', 'browser_request_human', ...BOT_GROUP_PERMISSIONS, 'profiler_heap_summary', 'goal_update']) expect(botMayBeOffered(name), name).toBe(false)
   })
 })
 

@@ -411,7 +411,15 @@ function ProvidersPage({
       return added.instanceId
     },
     // A further entry of an agent signs in right after it is added, in the sign-in dialog.
-    signIn: (instanceId, name) => void guard(() => startAgentSignIn(instanceId, name)),
+    signIn: (instanceId, name, options) =>
+      void guard(async () => {
+        if (options?.unlessSignedIn) {
+          const checked = await api.instances.recheck(instanceId)
+          apply(checked)
+          if (checked.auth.state === 'signed_in' || checked.auth.state === 'not_required') return
+        }
+        await startAgentSignIn(instanceId, name)
+      }),
     // Add (idempotent: a retry after a failed sign-in finds the entry), then the pasted key or the
     // sign-in. A credential saved on this device already (by another profile) needs neither. Cloud
     // credentials are checked before the entry is added, so a failed check adds nothing.

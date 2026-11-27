@@ -21,7 +21,7 @@ import type { HarnessCaps, RunPolicy } from '../../src/shared/harness/types'
 
 const base: HarnessCaps = { ...CLAUDE_CODE_CAPS }
 const caps = (toolControl: HarnessCaps['toolControl']): HarnessCaps => ({ ...base, toolControl })
-const policy = (patch: Partial<RunPolicy> = {}): RunPolicy => ({ mode: 'default', approvals: 'ask', ...patch })
+const policy = (patch: Partial<RunPolicy> = {}): RunPolicy => ({ approvals: 'ask', ...patch })
 
 describe('tool control levels', () => {
   it('is declared by every driver', () => {
@@ -92,10 +92,6 @@ describe('checkPolicy', () => {
   it('runs an uncontrolled instance for a person, including bindings recorded before origins', () => {
     expect(checkPolicy(caps('uncontrolled'), policy({ origin: 'interactive' }))).toEqual({ ok: true })
     expect(checkPolicy(caps('uncontrolled'), policy())).toEqual({ ok: true })
-  })
-
-  it('still names a missing plan mode', () => {
-    expect(checkPolicy({ ...caps('exact'), planMode: false }, policy({ mode: 'plan' }))).toMatchObject({ ok: false, error: { missing: ['planMode'] } })
   })
 })
 

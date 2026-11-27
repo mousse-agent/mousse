@@ -127,7 +127,7 @@ export function xaiHandlers(hooks: XaiHooks): Pick<AcpClientHandlers, 'extReques
           awaiting?.(callId as string, false)
         }
       }),
-      // Mousse runs no Grok plan mode: a request to leave one never blocks the turn.
+      // Mousse never puts Grok in its own plan mode: a request to leave one never blocks the turn.
       ...both('exit_plan_mode', async () => ({ outcome: 'abandoned' }))
     },
     extNotifications: both('session/prompt_complete', (params: unknown) => {

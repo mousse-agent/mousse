@@ -76,7 +76,7 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     })
     const orch = d.orch as unknown as {
       createThreadAsAgent(input: Record<string, unknown>, options: Record<string, unknown>): Promise<AgentCreatedThread>
-      sendToThreadAsAgent(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options: Record<string, unknown>): Promise<{ runId: string }>
+      sendToThreadAsAgent(threadId: string, input: { content: string; mode?: 'agent' }, options: Record<string, unknown>): Promise<{ runId: string }>
       stopRunAsAgent(threadId: string, runId: string, options: Record<string, unknown>): Promise<unknown>
       setThreadArchivedAsAgent(threadId: string, archived: boolean, options: Record<string, unknown>): Promise<unknown>
       setThreadHiddenAsAgent(threadId: string, hidden: boolean, options: Record<string, unknown>): { hidden: boolean; changed: boolean }
@@ -311,7 +311,7 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     busy = target.id
     const owner = await w.d.orch.send('Work on this.', false, { threadId: target.id, clientRequestId: 'owner-busy', awaitMode: 'ack' })
     await waitFor(() => w.d.engine.getRun(owner.runId!)?.status === 'running', 'the owner\'s turn running')
-    const join = (key: string) => s.steerRunAsAgent(target.id, owner.runId!, 'Use staging.', { clientRequestId: `thread_send:${w.chat.id}:${key}`, actor: w.actor, tool: 'thread_send' })
+    const join = (key: string) => s.steerRunAsAgent(target.id, owner.runId!, 'Use staging.', { clientRequestId: `thread_send:${w.chat.id}:${key}`, actor: w.actor })
     expect(await join('j1')).toMatchObject({ status: 'accepted', replayed: false })
     await expect(join('j2')).rejects.toMatchObject({ code: 'duplicate_message' })
     expect(await join('j1')).toMatchObject({ status: 'accepted', replayed: true })

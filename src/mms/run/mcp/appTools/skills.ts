@@ -7,12 +7,12 @@ import { disabledInSettings, plainSchema, truncateForModel, type AppToolTurn, ty
 
 export const SKILL_TOOLS: Tool[] = [
   {
-    name: 'list_skills',
+    name: 'skill_list',
     description: 'List available Mousse Agent Skills with descriptions and scopes.',
     parameters: Type.Object({})
   },
   {
-    name: 'load_skill',
+    name: 'skill_load',
     description: 'Load the full SKILL.md instructions for one available Skill by name or id.',
     parameters: Type.Object({
       skill: Type.String({ description: 'Skill name or id to load.' })
@@ -37,14 +37,14 @@ export function toSkillSummary(skill: SkillDescriptor): Record<string, unknown> 
 }
 
 /**
- * The skill tools are offered when skills are enabled for the turn, outside Build (whose skill is its mode). Plan and
- * reader turns load skills too (docs/plans/tool-api.md §1.5): reading a skill changes nothing.
+ * The skill tools are offered when skills are enabled for the turn, outside Build (whose skill is its mode). Read-only
+ * and reader turns load skills too (docs/plans/tool-api.md §1.5): reading a skill changes nothing.
  */
 function offeredInMode(host: AppToolHost, turn: AppToolTurn): boolean {
   return Boolean(host.skills?.()) && turn.enabledSkills.length > 0 && turn.mode !== 'build'
 }
 
-/** `list_skills` and `load_skill` over the turn's enabled skills. */
+/** `skill_list` and `skill_load` over the turn's enabled skills. */
 export function skillTools(host: AppToolHost): MousseTool[] {
   return SKILL_TOOLS.map((tool): MousseTool => ({
     name: tool.name,
@@ -56,7 +56,7 @@ export function skillTools(host: AppToolHost): MousseTool[] {
     listed: () => Boolean(host.skills?.()),
     available: (turn) => (turn.settingsEnabled(tool.name) ? true : disabledInSettings(tool.name)),
     offered: (turn) => offeredInMode(host, turn) && turn.settingsEnabled(tool.name),
-    describe: (args) => (tool.name === 'load_skill' ? `Load skill ${String(args.skill ?? '')}` : 'List skills'),
+    describe: (args) => (tool.name === 'skill_load' ? `Load skill ${String(args.skill ?? '')}` : 'List skills'),
     handler: async (args, ctx) => {
       const available = ctx.turn.enabledSkills
       // A running turn's list is a snapshot. Check the bot's live permission before listing or reading a skill.
@@ -65,7 +65,7 @@ export function skillTools(host: AppToolHost): MousseTool[] {
         const id = bot && !bot.skills.has(skill.id) && skill.installationId && bot.skills.has(skill.installationId) ? skill.installationId : skill.id
         return bot?.check({ kind: 'skill', skill: id })
       }
-      if (tool.name === 'list_skills') return { text: JSON.stringify(available.filter((skill) => check(skill)?.ok !== false).map(toSkillSummary), null, 2) }
+      if (tool.name === 'skill_list') return { text: JSON.stringify(available.filter((skill) => check(skill)?.ok !== false).map(toSkillSummary), null, 2) }
       const requested = String(args.skill ?? '')
       const skill = available.find((candidate) =>
         candidate.id === requested ||

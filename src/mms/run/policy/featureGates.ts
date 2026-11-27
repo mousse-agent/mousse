@@ -62,7 +62,7 @@ export interface ChildPreflightContext {
 }
 
 /**
- * Issue #142: a provider that cannot hold a child to read-only (it rejects plan mode) is refused as the target of a
+ * A provider that cannot hold a child to read-only (its child policy is not enforced) is refused as the target of a
  * read-only child (`delegate_task` `readOnly`). `label` names the provider for the message.
  */
 export function subagentTargetRefusal(caps: ProviderCapabilities, label: string, readOnly: boolean): SubagentRefusal | null {

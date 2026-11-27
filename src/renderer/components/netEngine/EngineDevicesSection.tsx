@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Laptop, Monitor, MonitorSmartphone, Plus, RefreshCw, Smartphone } from '../../lib/icons'
+import { ArrowUp, Laptop, Monitor, MonitorSmartphone, Plus, RefreshCw, Smartphone } from '../../lib/icons'
 import type {
   NetEngineDevice,
   NetEngineRemoval,
@@ -47,6 +47,7 @@ import { EnginePlusGroup } from './EnginePlusGroup'
 import { LetDeviceInDialog, type LetDeviceInStart } from './LetDeviceInDialog'
 import { UseComputerDialog } from './UseComputerDialog'
 import { hasFeatures } from './ways'
+import { computerUpdateWay } from './computerUpdate'
 import { hostLabel, removalText, removalTitle } from './plusRows'
 import {
   askedLine,
@@ -129,6 +130,9 @@ type RowView = {
   quiet?: boolean
 }
 
+/** A computer behind: Update (or Check again) beside the row's menu, and where to update it when not from here. */
+type RowUpdate = { control?: ReactNode; hint?: ReactNode }
+
 /** A row's key: one per direction, so a pairing both ways has a row in each list. */
 const sideKey = (node: string, side: EngineSide): string => `${node}:${side}`
 
@@ -195,6 +199,21 @@ export function EngineDevicesSection() {
       void reloadLegacy().catch(() => undefined)
     })
   }, [nodes, legacy.devices, reloadLegacy, current])
+  // Check again on a computer behind: asking it now, or what it answered (the same, or nothing).
+  const [checks, setChecks] = useState<Record<string, 'checking' | 'same' | 'failed'>>({})
+  const checkAgain = async (node: string) => {
+    setChecks((now) => ({ ...now, [node]: 'checking' }))
+    let answer: 'same' | 'failed' = 'same'
+    try {
+      // `version` keeps what it answers, like `refresh`, but fails when it does not answer now.
+      await window.mousse.platformRequest.request('net.update.there', { node, step: 'version' })
+    } catch {
+      answer = 'failed'
+    }
+    await Promise.allSettled([refreshComputers(), reloadLegacy()])
+    // Once it takes requests, its row shows Update instead and this answer is not shown.
+    setChecks((now) => ({ ...now, [node]: answer }))
+  }
   const [everywhere, setEverywhere] = useState<NetEngineDevice>()
   // "Let <name> use this computer…": the Allow prompt for a computer this one uses.
   const [letting, setLetting] = useState<NetEngineDevice>()
@@ -486,7 +505,7 @@ export function EngineDevicesSection() {
     }
   }
 
-  const row = (view: RowView, idTip?: string) => {
+  const row = (view: RowView, idTip?: string, update?: RowUpdate) => {
     const open = selected === view.key
     return (
       <SettingsRow
@@ -527,11 +546,15 @@ export function EngineDevicesSection() {
               </>
             )}
             {view.extra}
+            {update?.hint}
           </span>
         }
         control={
-          view.items.length ? (
-            <RowMenu label={`Actions for ${view.name}`} items={view.items} disabled={busy} />
+          update?.control || view.items.length ? (
+            <span className="device-row-controls">
+              {update?.control}
+              {view.items.length > 0 && <RowMenu label={`Actions for ${view.name}`} items={view.items} disabled={busy} />}
+            </span>
           ) : undefined
         }
       />
@@ -539,44 +562,76 @@ export function EngineDevicesSection() {
   }
 
   /**
-   * Under a computer that is behind: how it gets updated. One this computer installed over SSH is updated from here
-   * over SSH; one this computer uses whose app takes update requests gets Update; any other is updated on itself,
-   * and the tooltip says why and what it runs.
+   * A computer that is behind gets its update on its own row: Update beside its menu when this computer can update
+   * it (over SSH, or through its app's update requests), otherwise one muted line saying where and why, with Check
+   * again when its app may have opened since it last said.
    */
-  const updateRow = (key: string, name: string, device: Device | undefined, record?: SshRecordView, canAsk = false) => {
-    const tag = device ? versionTag({ ...device, name }, current) : undefined
-    if (tag?.label !== 'Behind') return null
-    const fromHere = record?.owner === 'managed' ? record : undefined
-    const asks = !fromHere && canAsk && !!current && device?.state === 'open' && !!device.update?.requests
-    return (
-      <SettingsRow
-        key={`${key}-update`}
-        indent
-        title={<span title={tag.detail}>{fromHere || asks ? `Update ${name} from here` : `Update on ${name}`}</span>}
-        control={
-          fromHere ? (
-            <button
-              type="button"
-              className="settings-btn"
-              disabled={busy}
-              onClick={() => setRecordDialog({ kind: 'update', record: fromHere, name })}
-            >
-              Update…
-            </button>
-          ) : asks ? (
-            <button
-              type="button"
-              className="settings-btn"
-              disabled={busy}
-              title={`Installs ${current} on ${name} after a 10-second countdown there`}
-              onClick={() => setUpdating({ node: device!.node, name, version: current!, ...(device!.version ? { runs: device!.version } : {}) })}
-            >
-              Update
-            </button>
-          ) : undefined
-        }
-      />
-    )
+  const updateView = (
+    name: string,
+    device: Device | undefined,
+    record?: SshRecordView,
+    canAsk = false
+  ): RowUpdate | undefined => {
+    const way = computerUpdateWay(device, { name, current, record, canAsk })
+    if (!way || !device) return undefined
+    if (way.kind === 'ssh')
+      return {
+        control: (
+          <button
+            type="button"
+            className="settings-btn device-update-btn"
+            disabled={busy}
+            title={`Updates ${name} over SSH, as this computer installed it`}
+            onClick={() => setRecordDialog({ kind: 'update', record: way.record, name })}
+          >
+            <ArrowUp size={14} aria-hidden="true" />
+            Update…
+          </button>
+        )
+      }
+    if (way.kind === 'request')
+      return {
+        control: (
+          <button
+            type="button"
+            className="settings-btn device-update-btn"
+            disabled={busy || !!updating}
+            title={`Installs ${current} on ${name} after a 10-second countdown there`}
+            onClick={() => setUpdating({ node: device.node, name, version: current!, ...(device.version ? { runs: device.version } : {}) })}
+          >
+            <ArrowUp size={14} aria-hidden="true" />
+            Update
+          </button>
+        )
+      }
+    const check = checks[device.node]
+    return {
+      hint: (
+        <span className="device-update-hint" title={way.detail}>
+          {check === 'checking'
+            ? `Asking ${name}…`
+            : check === 'failed'
+              ? `${name} didn't answer. ${way.hint}`
+              : check === 'same'
+                ? `${way.hint} Same answer just now.`
+                : way.hint}
+        </span>
+      ),
+      control: !way.check ? undefined : check === 'checking' ? (
+        <DelayedLoader size="small" delayMs={0} label={`Asking ${name}`} />
+      ) : (
+        <button
+          type="button"
+          className="settings-icon-btn"
+          disabled={busy}
+          title={`Check again whether ${name} can be updated from here`}
+          aria-label={`Check again whether ${name} can be updated from here`}
+          onClick={() => void checkAgain(device.node)}
+        >
+          <RefreshCw size={14} />
+        </button>
+      )
+    }
   }
 
   const block = (node: string) => (blocked: boolean) => void action('bridge.policy', { node, blocked })
@@ -596,8 +651,7 @@ export function EngineDevicesSection() {
     if (!engineSides(device).includes('out')) return []
     const view = engineView(device, 'out')
     return [
-      row(view, `Id ${device.shortId}`),
-      updateRow(view.key, device.name, nodes.find((item) => item.node === device.node), undefined, true),
+      row(view, `Id ${device.shortId}`, updateView(device.name, nodes.find((item) => item.node === device.node), undefined, true)),
       device.olderApp && (
         <SettingsRow
           key={`${device.node}-older`}
@@ -685,8 +739,7 @@ export function EngineDevicesSection() {
     const node = nodes.find((item) => item.node === device.node)
     const asked = askedLine(device)
     return [
-      row(view, `Id ${device.shortId}`),
-      !engineSides(device).includes('out') && updateRow(view.key, device.name, node),
+      row(view, `Id ${device.shortId}`, engineSides(device).includes('out') ? undefined : updateView(device.name, node)),
       asked && (
         <SettingsRow
           key={`${device.node}-asked`}
@@ -739,7 +792,7 @@ export function EngineDevicesSection() {
     .filter((device) => oldSides(device).includes('out'))
     .flatMap((device) => {
       const view = legacyView(device, 'out')
-      return [row(view), updateRow(view.key, device.name, device, sshRecordFor(device, legacy.ssh), true)]
+      return [row(view, undefined, updateView(device.name, device, sshRecordFor(device, legacy.ssh), true))]
     })
   const oldInRows = oldDevices.flatMap((device) => [
     row(legacyView(device, 'in')),

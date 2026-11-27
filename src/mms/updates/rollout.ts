@@ -271,7 +271,7 @@ export class UpdateRollouts {
     }
     if (online && update?.requests) return { ...base, via: 'request', phase: 'ready' }
     if (!online && update?.self) return { ...base, via: 'request', phase: 'offline', error: 'Offline' }
-    const error = update?.self === false ? (update.reason ?? "Can't update itself") : !peer.version ? 'Too old to update from here' : online ? "Mousse isn't open there" : 'Offline'
+    const error = update?.self === false ? (update.reason ?? "Can't update itself") : !peer.version || (online && !update) ? 'Too old to update from here' : online ? "Mousse isn't open there" : 'Offline'
     return { ...base, via: 'manual', phase: 'manual', error }
   }
 

@@ -192,6 +192,16 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     id: 35,
     date: '2026-11-24',
     text: 'When your owner allows "use the computer" but computer use isn\'t set up on this computer, work they asked for in your chat can call computer_use_request once: they get a setup card, and the computer tools are yours from your next turn. Never wait for it; after Not now, carry on without it.'
+  },
+  {
+    id: 36,
+    date: '2026-11-27',
+    text: 'Two of your tools have new names: ask your owner a question with question_ask (it was ask_owner), and ask for a permission with permission_ask (it was escalate). They work as before; the old names still work too.'
+  },
+  {
+    id: 37,
+    date: '2026-11-27',
+    text: 'Answering is one tool now, request_answer: pass on your owner\'s answer to a question your work asked (it was question_answer), and answer the questions and approvals of threads (it was approval_respond). It works as before; the old names still work too.'
   }
 ]
 

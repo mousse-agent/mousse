@@ -66,7 +66,8 @@ describe('Add provider: connecting a model API', () => {
   const openAndPick = async (label: string) => {
     await click(button('Add provider'))
     await click(choice(label))
-    await click(button('Next'))
+    // A provider with a browser sign-in offers it beside Configure manually; the others go on with Next.
+    await click(button('Next') ?? button('Configure manually'))
   }
 
   beforeEach(async () => {
@@ -173,6 +174,23 @@ describe('Add provider: connecting a model API', () => {
     expect(text()).toContain('Sign-in was cancelled.')
     expect(button('Back')?.disabled).toBe(false)
     expect(button('Sign in')?.disabled).toBe(false)
+  })
+
+  // One agent per case: the snapshot store outlives each test's mount, so an agent added once is offered as "<Label> 2".
+  it.each([
+    ['signed out', 'cursor', 'Cursor', 'signed_out', true],
+    ['signed in already', 'grok', 'Grok', 'signed_in', false]
+  ] as const)('the sign-in path of a first agent checks it after adding, and starts its sign-in only when %s', async (_name, driver, label, state, starts) => {
+    const added = snapshot({ instanceId: driver, driver, displayName: label, builtIn: false, auth: { state: 'signed_out' } })
+    instances.add!.mockImplementationOnce(async () => added)
+    instances.recheck!.mockImplementationOnce(async () => ({ ...added, auth: state === 'signed_in' ? { state, account: { id: 'acct-2', label: 'Pro' } } : { state } }))
+    await click(button('Add provider'))
+    await click(choice(label))
+    await click(button(`Continue with ${label}`))
+    expect(instances.add).toHaveBeenCalledWith({ driver, config: { displayName: label, home: 'default' } })
+    expect(instances.recheck).toHaveBeenCalledWith(driver)
+    if (starts) expect(instances.signIn).toHaveBeenCalledWith(driver)
+    else expect(instances.signIn).not.toHaveBeenCalled()
   })
 
   it('cloud credentials that are not set up add nothing and show why', async () => {

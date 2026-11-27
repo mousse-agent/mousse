@@ -1,5 +1,5 @@
 /**
- * A bot's checklist on its summary: the tasks `create_task` keeps on its chat's thread, then on the thread of work it
+ * A bot's checklist on its summary: the tasks `task_create` keeps on its chat's thread, then on the thread of work it
  * runs now; nothing once that work ended or while it keeps none; and a change to a bot thread's tasks says the bot
  * changed, so the app reads its summary again.
  */

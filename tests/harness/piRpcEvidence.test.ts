@@ -20,7 +20,7 @@ function driver(platform: NodeJS.Platform, evidence: readonly ContainmentEvidenc
   return piDriver({ rpc })
 }
 
-const definitionPolicy = { mode: 'default' as const, origin: 'definition' as const, approvals: 'grants' as const, tools: { allow: ['read'] }, authority: { kind: 'definition' as const, digest: 'd' }, budget: { maxTurns: 3, maxToolCalls: 5 } }
+const definitionPolicy = { origin: 'definition' as const, approvals: 'grants' as const, tools: { allow: ['read'] }, authority: { kind: 'definition' as const, digest: 'd' }, budget: { maxTurns: 3, maxToolCalls: 5 } }
 
 describe('Pi RPC’s evidence gate', () => {
   it('reads the pinned Pi’s version', () => {

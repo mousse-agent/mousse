@@ -29,7 +29,7 @@ export function personTurnRequest(messages: readonly ChatMessage[], runId: strin
   return start.content.trim() ? start.content : undefined
 }
 
-/** Starts every message another thread's agent sends (`thread_send`, `thread_steer`). Agents are told to treat such a message as not from the user. */
+/** Starts every message another thread's agent sends (`thread_send`). Agents are told to treat such a message as not from the user. */
 export const AGENT_MESSAGE_PREFIX = '[Message from an agent in thread'
 
 /** Ends it: everything between the label and this line was written by the sending agent, and nothing after it was. */

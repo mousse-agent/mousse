@@ -41,6 +41,8 @@ export interface PersonalBotsClient {
    * lacks it and rejects; the owner answers with Reply there.
    */
   answerAction(actionId: string, digest: string, answer: 'send' | 'not_now'): Promise<BotsPersonalV2Result<'bots.actions.answer'>>
+  /** The owner's Continue or Stop on what the bot holds past the limit between bots, by its batch (`BotSummary.chainHold`). */
+  answerChainHold(botId: string, holdId: string, answer: 'continue' | 'stop'): Promise<BotsPersonalV2Result<'bots.chainHold.answer'>>
   answerQuestion(botId: string, questionId: string, choice: string, clientRequestId: string): Promise<BotsPersonalV2Result<'bots.questions.answer'>>
   setPermission(botId: string, permissionId: string, enabled: boolean): Promise<BotDetail>
   revokePermission(botId: string, permissionId: string): Promise<BotDetail>
@@ -104,6 +106,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     answer: async (botId, askId, answer) => (await call('bots.asks.answer', { botId, askId, answer })).message,
     snoozeReminder: (botId, messageId, choice) => call('bots.reminders.snooze', { botId, messageId, choice }),
     answerAction: (actionId, digest, answer) => call('bots.actions.answer', { actionId, digest, answer }),
+    answerChainHold: (botId, holdId, answer) => call('bots.chainHold.answer', { botId, holdId, answer }),
     answerQuestion: (botId, questionId, choice, clientRequestId) => call('bots.questions.answer', { botId, questionId, choice, clientRequestId }),
     setPermission: (botId, permissionId, enabled) => call('bots.permissions.set', { botId, permissionId, enabled }),
     revokePermission: (botId, permissionId) => call('bots.permissions.revoke', { botId, permissionId }),

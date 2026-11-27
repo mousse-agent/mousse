@@ -1,4 +1,4 @@
-import { ROUTED_DEADLINE_KEY, ROUTED_METHODS, type RoutedAgentMark } from '../../shared/bridge/routed'
+import { ROUTED_AGENT_BOT_KEY, ROUTED_DEADLINE_KEY, ROUTED_METHODS, type RoutedAgentBot, type RoutedAgentMark } from '../../shared/bridge/routed'
 import { isPermissionMode, narrowPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { DomainRpcError } from '../protocol/domainRegistry'
 
@@ -75,12 +75,13 @@ export interface RemoteThreadStart {
   /** What is sent once the thread is set up; none for a thread that only needs to exist. */
   message?: {
     content: string
-    mode: 'agent' | 'plan'
     clientRequestId: string
     /** A follow-up on a thread that may be paused by a usage limit refuses instead of waiting. */
     refuseWhilePaused?: boolean
     /** The minutes of running time the run may use there (`ROUTED_DEADLINE_KEY`); only to a computer that takes it. */
     deadlineMinutes?: number
+    /** The personal bot it is sent as (`ROUTED_AGENT_BOT_KEY`), sent only with the mark. */
+    bot?: RoutedAgentBot
   }
 }
 
@@ -196,10 +197,10 @@ export async function runRemoteThreadStart(start: RemoteThreadStart, io: RemoteT
   const sent = await io.call('orchestrator.send', {
     threadId: remoteThreadId,
     content: start.message.content,
-    mode: start.message.mode,
     clientRequestId: start.message.clientRequestId,
     ...(start.message.refuseWhilePaused ? { refuseWhilePaused: true } : {}),
     ...(start.message.deadlineMinutes ? { [ROUTED_DEADLINE_KEY]: start.message.deadlineMinutes } : {}),
+    ...(start.message.bot && Object.keys(start.mark).length > 0 ? { [ROUTED_AGENT_BOT_KEY]: start.message.bot } : {}),
     ...start.mark
   }, keys.send)
   return { remoteThreadId, mode, sent }

@@ -53,6 +53,8 @@ interface AcpState {
   signedOut?: boolean
   /** The installed files (of the install record `hash`) no longer match it. */
   filesChanged?: { hash: string; message: string }
+  /** The home the saved sessions were made in (`AcpRuntimeHooks.sessionsHome`). */
+  sessionsHome?: string
 }
 
 export interface AcpDriverOptions {
@@ -83,6 +85,8 @@ export interface AcpRuntimeHooks {
   program?(purpose: AcpPurpose): { resolved: CliLaunch; launch?: AcpLaunch; track?: () => () => void } | undefined
   /** The variables of a process, last (the instance's secrets win). */
   env?(env: NodeJS.ProcessEnv, purpose: AcpPurpose): NodeJS.ProcessEnv
+  /** Every process, whatever its executable came from, just before it starts; a throw stops the launch. */
+  launching?(purpose: AcpPurpose, executable: string): void
   /**
    * The preset's own file check, run wherever a registry agent's install is checked: before every
    * new process (turns, checks, sign-in and sign-out included) and on Recheck. A throw stops the launch.
@@ -90,6 +94,12 @@ export interface AcpRuntimeHooks {
   checkInstall?(options: { signal?: AbortSignal; reuse: boolean }): Promise<void>
   /** Whether sign-out may ask the agent to sign out (`logout`); false leaves the agent's own sign-in alone. */
   agentLogout?(): boolean
+  /**
+   * The home the agent keeps its sessions in, when its turns run on one of the preset's choosing (Grok's held home).
+   * Sessions saved under another home cannot be reopened there: they are forgotten, and each thread's next turn hands
+   * its history to a new session.
+   */
+  sessionsHome?: string
 }
 
 /**
@@ -181,10 +191,7 @@ export function acpDriver(options: AcpDriverOptions = {}): HarnessDriver {
     relay: { approvals: 'runtime' },
     decodeConfig: decodeAcpConfig,
     versionArgs: (config) => preset.versionArgs?.(config) ?? null,
-    caps: (_config, _version, facts?: RuntimeFacts): HarnessCaps => {
-      const caps = { ...preset.staticCaps }
-      return facts && preset.capsFromFacts ? preset.capsFromFacts(caps, facts) : caps
-    },
+    caps: (): HarnessCaps => ({ ...preset.staticCaps }),
     updateCommand: () => undefined,
     create: (context) => createAcpRuntime(context, preset, options, ptyRuns)
   }
@@ -208,6 +215,12 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
   const save = () => {
     mkdirSync(context.stateDir, { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(statePath, state, { mode: 0o600 })
+  }
+  if (hooks.sessionsHome !== undefined && state.sessionsHome !== hooks.sessionsHome) {
+    const had = Boolean(state.sessions && Object.keys(state.sessions).length) || state.sessionsHome !== undefined
+    state.sessions = {}
+    state.sessionsHome = hooks.sessionsHome
+    if (had) save()
   }
   const source = acpSourceOf(context.config)
   const registrySource = source?.kind === 'registry' ? source : undefined
@@ -297,6 +310,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
 
   const spawnAgent = (request: AcpLaunchRequest): AcpConnection => {
     const { resolved, launch, root, track } = launchOf(request.purpose)
+    hooks.launching?.(request.purpose, resolved.path)
     // Every registry launch follows a file check (`beforeLaunch`); none starts without one.
     if (root && (!verified || verified.hash !== installedNow()?.hash || Date.now() - verified.atMs > 60_000))
       throw new Error(`Mousse did not check the files of ${label} before starting it.`)
@@ -336,6 +350,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     quirks: preset.quirks,
     ...(options.promptSilenceMs !== undefined ? { promptSilenceMs: options.promptSilenceMs } : {}),
     ...(preset.classifyOption ? { classifyOption: preset.classifyOption } : {}),
+    ...(preset.allowsUnasked ? { allowsUnasked: preset.allowsUnasked } : {}),
     ...(preset.initializeMeta ? { initializeMeta: preset.initializeMeta } : {}),
     urlElicitation: true,
     formElicitation: true,
@@ -525,8 +540,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
   const adapter = new AcpAdapter(() => client, {
     driver: hooks.driver ?? 'acp',
     label,
-    capabilities: preset.staticCaps,
-    planMode: () => Boolean(state.facts?.modes?.some((mode) => /^(plan|architect)$/i.test(mode.id) || /^(plan|architect)$/i.test(mode.name)))
+    capabilities: preset.staticCaps
   })
   const standaloneWorkspace = (threadId: string): string => {
     const directory = join(context.stateDir, 'workspaces', createHash('sha256').update(threadId).digest('hex'))

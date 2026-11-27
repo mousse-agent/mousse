@@ -35,7 +35,7 @@ describe('chipForCall: live chips, worded as attempts', () => {
   })
 
   it('shows none for escalate (its card is the chip); use_model shows the change without naming the model (#673)', () => {
-    expect(chipForCall('escalate', { permission: { tool: 'read' }, reason: 'x' }, ctx)).toBeNull()
+    expect(chipForCall('permission_ask', { permission: { tool: 'read' }, reason: 'x' }, ctx)).toBeNull()
     expect(chipForCall('use_model', { model: 'claude-opus-5-5', scope: 'now' }, ctx)).toEqual({ icon: 'think', text: 'switching models', live: true })
     expect(chipForCall('something_else', {}, ctx)).toBeNull()
   })
@@ -170,7 +170,7 @@ describe('rollUpChips: settled chips', () => {
       { tool: 'set_depth', input: { depth: 'deep', scope: 'now' }, result: { ok: true } },
       { tool: 'set_profile', input: { name: 'Inbox helper' }, result: { ok: true } },
       { tool: 'set_profile', input: { name: 'Inbox buddy' }, result: { ok: true } },
-      { tool: 'escalate', input: {} },
+      { tool: 'permission_ask', input: {} },
       { tool: 'use_model', input: { model: 'claude-opus-5-5' }, result: { ok: true, scope: 'now' } },
       { tool: 'use_model', input: { model: 'claude-opus-5-5', scope: 'always', for: 'work' }, result: { ok: true, scope: 'always', for: 'work' } },
       { tool: 'use_model', input: { model: 'grok' }, result: { ok: false, reason: 'not here' } }

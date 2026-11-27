@@ -70,7 +70,7 @@ describe('profile activation with saved workspaces', () => {
 
 describe('view fallbacks when a surface or document closes', () => {
   beforeEach(() => {
-    useAppStore.setState({ agents: [], mainView: 'browser', openedSurfaceKinds: [], documentTabs: [], activeDocumentTabId: null, documentsTabVisible: false })
+    useAppStore.setState({ agents: [], mainView: 'browser', openedSurfaceKinds: [], activeThreadId: null, documentTabs: [], activeDocumentTabByThread: {} })
   })
 
   it('moves to the first remaining open surface, ignoring any running agents', () => {
@@ -99,7 +99,7 @@ describe('view fallbacks when a surface or document closes', () => {
     const id = useAppStore.getState().openDocument('Notes', '# notes')
     expect(useAppStore.getState().mainView).toBe('documents')
     useAppStore.getState().closeDocumentTab(id)
-    expect(useAppStore.getState()).toMatchObject({ mainView: expected, documentsTabVisible: false })
+    expect(useAppStore.getState()).toMatchObject({ mainView: expected, documentTabs: [] })
   })
 
   it('stays on documents while another document remains', () => {

@@ -103,7 +103,7 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
   const deps: BotAppToolDeps = { host, activity, models: { pickable: async () => options.choices ?? CHOICES } }
   const tools = new Map(botTools(() => deps).map((tool) => [tool.name, tool]))
   const ctx = (threadId = 'home', activationId = 'a1', appTools: readonly string[] = []): ToolCallContext => ({
-    caller: { threadId, runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+    caller: { threadId, runId: 'r1', provider: 'pi', accessLevel: 'lineage' },
     turn: { threadId, bot: { role: 'activation', activationId, appTools: new Set(appTools) } as unknown as BotAuthority } as ToolCallContext['turn'],
     toolCallId: 'call-1',
     signal: new AbortController().signal,
@@ -401,13 +401,13 @@ describe('set_profile', () => {
   })
 })
 
-describe('ask_owner (#1123)', () => {
+describe('question_ask (#1123)', () => {
   /** The bot's tools with a question host that keeps what it is asked. */
   function asking(lane: BotLane) {
     const bots = fakeBots(lane)
     const asked: unknown[] = []
     const deps = { host: { ...{} as BotToolHost, activationOf: (threadId: string) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane, memoryLane: lane } : undefined), questions: { ask: (_botId: string, _activationId: string, asks: ReadonlyArray<{ spec: unknown }>) => { asked.push(...asks.map((ask) => ask.spec)); return { asked: true, text: 'Shown under your reply.', questionIds: asks.map((_, n) => `q_${n}`) } } } } as BotToolHost }
-    const tool = botTools(() => deps).find((entry) => entry.name === 'ask_owner')!
+    const tool = botTools(() => deps).find((entry) => entry.name === 'question_ask')!
     return { asked, call: (args: Record<string, unknown>) => tool.handler(args, bots.ctx()) }
   }
 
@@ -441,7 +441,7 @@ describe('ask_owner (#1123)', () => {
 describe('registration', () => {
   it('lists the bot tools in the bots family, and WP6\'s memory tools beside them', () => {
     const { families } = createAppToolRegistry({ host: fakeAppToolHost().host, bots: () => undefined })
-    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'schedule_done', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'work_wait', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'question_withdraw', 'show_card', 'bot_list', 'bot_send', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'tool_catalogue', 'use_tool'])
+    expect(families.bots).toEqual(['permission_ask', 'consult', 'bot_schedule_add', 'schedule_done', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_list', 'work_stop', 'work_note', 'remind', 'work_wait', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'show_card', 'bot_list', 'bot_send', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'tool_catalogue', 'use_tool'])
     // With `botMemory`, WP6's memory tools and the open items' tools follow them in the same family.
     const withMemory = createAppToolRegistry({ host: fakeAppToolHost().host, botMemory: { activationOf: () => undefined } })
     expect(withMemory.families.bots.slice(0, families.bots.length)).toEqual(families.bots)
@@ -569,7 +569,7 @@ it('page-check schedules reject say and invalid URLs before saving, and keep the
 
 it('accepts the exact flattened let-alone request Codex sent in the live trial', async () => {
   const tools = botTools()
-  const tool = tools.find(t => t.name === 'escalate')!
+  const tool = tools.find(t => t.name === 'permission_ask')!
   let permission: unknown
   const ctx = fakeBots().ctx()
   ctx.turn.bot!.escalate = request => { permission = request.permission; return 'Asked' }
@@ -578,7 +578,7 @@ it('accepts the exact flattened let-alone request Codex sent in the live trial',
   expect(permission).toEqual({ ask: 'let_alone', scheduleId: 's-67020d90', serverId: 'trial-drive.9be4eb770a', tool: 'upload_file' })
 })
 it.each([true, false])('the escalate definition describes the wrapped ask only with asks first on: %s', on => {
-  const tool = botTools().find(t => t.name === 'escalate')!
+  const tool = botTools().find(t => t.name === 'permission_ask')!
   const ctx = fakeBots().ctx()
   if (on) ctx.turn.bot!.holdMcp = () => ({ text: 'Held' })
   const definition = tool.definition!(ctx.turn)

@@ -83,7 +83,7 @@ describe('Give each subagent its own worktree', () => {
     })
     const child = new ScriptedAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, async (input) => {
       state.childCwds.push(input.cwd)
-      if (input.cwd && input.mode !== 'plan') writeFileSync(join(input.cwd, 'child.txt'), 'the child\'s work\n')
+      if (input.cwd) writeFileSync(join(input.cwd, 'child.txt'), 'the child\'s work\n')
       return 'Done.'
     })
     const d = phase6Daemon(home, [parent, child])
@@ -132,7 +132,7 @@ describe('Give each subagent its own worktree', () => {
     const outcomes: Record<string, Record<string, unknown>> = {}
     const { d, thread, projectDir, state } = daemon(true, async (delegation) => {
       outcomes.reader = await delegate(delegation, { workspace: 'shared', role: 'research' }, 'reader')
-      outcomes.planner = await delegate(delegation, { workspace: 'isolated', role: 'plan', modeCeiling: 'plan' }, 'planner')
+      outcomes.planner = await delegate(delegation, { workspace: 'isolated', role: 'plan' }, 'planner')
       outcomes.worker = await delegate(delegation, { workspace: 'isolated', role: 'implement' }, 'worker')
     })
     await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })

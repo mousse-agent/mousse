@@ -14,10 +14,11 @@ export const providerErrors = createErrorProvider({
   provider_quota_exceeded: { category: 'denied', retryable: false, message: 'The provider quota is exhausted. Check your billing or usage limits.' },
   provider_rate_limited: { category: 'unavailable', retryable: true, message: 'The provider is rate limiting requests. Please try again shortly.' },
   provider_usage_limit: { category: 'unavailable', retryable: false, message: 'The provider usage limit was reached.' },
+  provider_app_limit: { category: 'unavailable', retryable: false, message: 'Codex limit for Mousse reached. Your plan may still have usage.' },
   provider_unavailable: { category: 'unavailable', retryable: true, message: 'The provider is temporarily unavailable. Please try again.' },
   provider_timeout: { category: 'timeout', retryable: true, message: 'The provider response timed out. Please try again.' },
   provider_cancelled: { category: 'cancelled', retryable: false, message: 'The provider request was cancelled.' },
-  provider_retry_exhausted: { category: 'unavailable', retryable: false, message: 'The provider is still unavailable after five retries. Please try again later.' },
+  provider_retry_exhausted: { category: 'unavailable', retryable: false, message: 'The provider is still unavailable after its retries. Please try again later.' },
   provider_unknown: { category: 'internal', retryable: false, message: 'The provider request failed. Please try again or check your provider connection.' },
   provider_api_error: { category: 'unavailable', retryable: false, message: 'The provider returned an error.' }
 })
@@ -41,6 +42,23 @@ const STATUS_FORMS = [
 /** What Codex adds after the provider's message: the URL it called and the request id. */
 const TRAILING_CONTEXT = /(?:,\s*(?:url|request id|cf-ray):\s*\S+)+\s*$/i
 
+/**
+ * OpenAI's error envelope with the status inside it, `{"error": {…}, "status": 400}`: how Codex reports a refusal of
+ * `/v1/responses` it names no status for (`codexErrorInfo: "other"`). The body is the envelope, whose `error.message`
+ * the transcript shows.
+ */
+function readStatusEnvelope(text: string): { status: number; body: string } | undefined {
+  if (!text.startsWith('{')) return undefined
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown; status?: unknown }
+    const status = parsed?.status
+    if (parsed?.error === undefined || typeof status !== 'number' || !Number.isInteger(status) || status < 400 || status > 599) return undefined
+    return { status, body: text }
+  } catch {
+    return undefined
+  }
+}
+
 /** The status a runtime's or SDK's error text starts with, and the provider's text after it. */
 export function readProviderStatus(text: string): { status: number; body: string } | undefined {
   const trimmed = text.trim()
@@ -48,6 +66,8 @@ export function readProviderStatus(text: string): { status: number; body: string
     const match = form.exec(trimmed)
     if (match) return { status: Number(match[1]), body: match[2]!.replace(TRAILING_CONTEXT, '').trim() }
   }
+  const envelope = readStatusEnvelope(trimmed)
+  if (envelope) return envelope
   return undefined
 }
 
@@ -210,6 +230,27 @@ export function usageLimitError(limit: UsageLimit, cause?: unknown, extra: Recor
   }, cause)
 }
 
+/** OpenAI's code for the share of a ChatGPT plan that one app signed in with ChatGPT may use, used up. */
+export const APP_LIMIT_CODE = 'subscription_sharing_usage_limit_exceeded'
+
+/**
+ * An app limit: the weekly share of a ChatGPT plan that ChatGPT gives Mousse (ChatGPT → Settings → Usage → App
+ * limits) is used up, while the plan itself may still have usage. Read from OpenAI's code when it is passed on, else
+ * from OpenAI's wording ("The ChatGPT user has reached their Subscription Sharing usage limit."), which Codex 0.162
+ * sends as a dropped stream with no code. OpenAI says to infer neither an empty plan nor a reset time from it.
+ */
+export function isAppLimitText(...texts: Array<string | null | undefined>): boolean {
+  return texts.some((text) => !!text && (text.includes(APP_LIMIT_CODE) || /subscription sharing usage limit/i.test(text)))
+}
+
+/**
+ * The error for an app limit: never a plan usage limit (no pause until a plan reset, the entry is not marked limited)
+ * and never retried. OpenAI's wording stays on the cause, for the log.
+ */
+export function appLimitError(provider: string | undefined, cause?: unknown): AppError {
+  return providerErrors.create('provider_app_limit', cause, provider ? { provider } : undefined)
+}
+
 /** The usage limit an error stands for, or undefined when it is anything else. */
 export function readUsageLimit(error: unknown): UsageLimit | undefined {
   if (!(error instanceof AppError) || error.code !== 'provider_usage_limit') return undefined
@@ -245,6 +286,7 @@ export function normalizeProviderError(error: unknown, provider?: string, respon
   // Permanent classifications have precedence even if messages contain transport words.
   if (status === 401 || /authentication_error|invalid_api_key/.test(code) || /invalid (?:api key|auth|credential)|authentication (?:failed|required|error)|unauthorized|incorrect api key/i.test(text)) return providerErrors.create('provider_auth_invalid', error, details)
   if (status === 403 || /permission_denied/.test(code) || /permission denied|forbidden|access denied|denied by policy|refused by policy/i.test(text)) return refused('provider_permission_denied')
+  if (isAppLimitText(text, code)) return appLimitError(provider, error)
   if (/hit your ChatGPT usage limit/i.test(text)) return usageLimitError({ provider, estimated: true }, error, details)
   if (/insufficient_quota|quota_exceeded|billing/.test(code) || /insufficient[_ ]quota|quota (?:exceeded|exhausted)|billing (?:limit|error)|credit balance|GoUsageLimitError|FreeUsageLimitError|monthly usage limit|available balance|out of budget/i.test(text)) return providerErrors.create('provider_quota_exceeded', error, details)
   if (/context(?:_|\s|-)*(?:window|length|limit)|maximum context|too many tokens|prompt is too long/i.test(text)) return providerErrors.create('provider_context_overflow', error, details)

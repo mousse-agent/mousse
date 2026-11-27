@@ -464,7 +464,7 @@ describe('answers and continuations', () => {
 describe('consults', () => {
   it('a consult runs on the context thread under the main dispatch\'s scopes and returns its answer', async () => {
     const { activation, prepared } = await running()
-    expect(prepared.policy.tools?.allow).toEqual(expect.arrayContaining(['consult', 'escalate']))
+    expect(prepared.policy.tools?.allow).toEqual(expect.arrayContaining(['consult', 'permission_ask']))
     const asked = prepared.authority.consult!({ context: 'docs', question: 'What changed?' })
     await tick()
     const consult = store.dispatches(activation.id).find((dispatch) => dispatch.kind === 'consult')!
@@ -477,7 +477,7 @@ describe('consults', () => {
     // Depth is 1: no consult from a context thread; it narrows to read.
     expect(context.authority.consult).toBeUndefined()
     // What every bot has by default reaches it too: the automation tools and every skill.
-    expect(context.policy.tools?.allow).toEqual(['escalate', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, 'list_skills', 'load_skill', 'mcp_servers', 'read', 'running_list'].sort())
+    expect(context.policy.tools?.allow).toEqual(['permission_ask', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, 'skill_list', 'skill_load', 'mcp_servers', 'read', 'running_list'].sort())
     expect(context.authority.counters).toBe(prepared.authority.counters)
     expect(context.authority.time.signal).toBe(prepared.authority.time.signal)
     start(payload.runId)

@@ -37,7 +37,7 @@ export interface AgentThreadIntent {
    */
   bot?: { botId: string; name: string }
   request: AgentThreadRequest
-  firstMessage: { content: string; mode: 'agent' | 'plan' } | null
+  firstMessage: { content: string } | null
 }
 
 /** The arguments of a call in one stable form: two calls with the same key must carry the same one. */
@@ -49,7 +49,8 @@ export function agentThreadFingerprint(request: AgentThreadRequest): string {
     request.instanceId ?? null,
     request.model ?? null,
     request.firstMessage ?? null,
-    request.firstMessage === undefined ? null : request.mode ?? 'agent',
+    // The first message's mode, always agent now: kept so a key stored before keeps its fingerprint.
+    request.firstMessage === undefined ? null : 'agent',
     // Only when set, so a creation stored before levels existed keeps its fingerprint.
     ...(request.effort ? [request.effort] : []),
     // The same for a bot's choice of `Thread.hidden`.

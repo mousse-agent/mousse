@@ -572,37 +572,6 @@ it('keeps one reply row when a tool-published applet follows a reply that alread
   expect(replies[0].presentationParts?.filter((part) => part.type === 'applet')).toHaveLength(1)
 })
 
-it('publishes plan-mode applets once on the plan, which is an ordinary reply', async () => {
-  const { main, thread } = await fixture()
-  const content = 'Plan explanation\n' + fence(source)
-  vi.spyOn(main.claudeSubscription, 'chat').mockImplementation(async (input) => {
-    expect(input.mode).toBe('plan')
-    input.onText(content)
-    return content
-  })
-  await main.orchestrator.send({ content: 'Illustrate a plan', mode: 'plan' }, false, {
-    threadId: thread.id
-  })
-  const messages = main.threads.loadThreadData(thread.id).messages
-  const published = messages.filter((message) =>
-    message.presentationParts?.some((part) => part.type === 'applet')
-  )
-  expect(published).toHaveLength(1)
-  // The plan is the turn's reply, not a card.
-  expect(published[0].kind).toBeUndefined()
-  expect(published[0].content).toContain('Plan explanation')
-  expect(main.applets.list(thread.id)).toHaveLength(1)
-  const ref = reference(main, thread.id)
-  expect(
-    await request(main, 'applets.get', {
-      profileId: main.profileId,
-      threadId: thread.id,
-      appletId: ref.appletId,
-      revisionId: ref.revisionId
-    })
-  ).toEqual(expect.objectContaining({ title: source.title }))
-})
-
 it('recovers a completed turn publication after its transcript reference is lost', async () => {
   const { main, thread } = await fixture()
   vi.spyOn(main.claudeSubscription, 'chat').mockImplementation(async input => {

@@ -1,5 +1,5 @@
 /**
- * A bot's questions to its owner (`ask_owner`, issue #1123): a short question with 2–5 answers to tap, or yes/no, and
+ * A bot's questions to its owner (`question_ask`, issue #1123): a short question with 2–5 answers to tap, or yes/no, and
  * "Other…" for an answer in the owner's own words. Kept in `bots.db` (`bot_questions`, v8), apart from permission asks:
  * a question grants nothing. Browser-safe.
  */
@@ -30,7 +30,7 @@ export interface BotQuestionSpec {
   wait?: false
 }
 
-/** Whether work keeps working while this question is open (`ask_owner` with `wait: false`). */
+/** Whether work keeps working while this question is open (`question_ask` with `wait: false`). */
 export function keepsWorking(spec: Pick<BotQuestionSpec, 'wait'>): boolean {
   return spec.wait === false
 }
@@ -107,11 +107,11 @@ export const MAX_QUESTION_CHOICES = 5
 export const MAX_CHOICE_LABEL_CHARS = 40
 export const MAX_CHOICE_DETAIL_CHARS = 120
 
-/** The most questions one `ask_owner` call may ask together (`questions`). */
+/** The most questions one `question_ask` call may ask together (`questions`). */
 export const MAX_QUESTIONS_PER_CALL = 4
 
 /**
- * What `ask_owner` is refused with when it repeats a question the owner has not answered or written about since:
+ * What `question_ask` is refused with when it repeats a question the owner has not answered or written about since:
  * there is no count of questions, but asking the same thing again is a loop (`questionIdentity`).
  */
 export const QUESTION_DUPLICATE_TEXT = "duplicate_ask: You already asked this and your owner hasn't written since. Don't ask it again; decide yourself and say what you assumed, or wait for them to write."
@@ -125,13 +125,13 @@ export function questionIdentity(spec: Pick<BotQuestionSpec, 'question' | 'choic
   return JSON.stringify([words(spec.question).replace(/[?？]+$/, '').trim(), spec.choices.map((choice) => words(choice.label)).sort()])
 }
 
-/** `ask_owner`'s answer once the question is kept: it shows under the reply. */
+/** `question_ask`'s answer once the question is kept: it shows under the reply. */
 export const QUESTION_ASKED_TEXT = "The owner sees it under your reply, with its buttons. Don't repeat it in your reply; end your turn."
 
-/** `ask_owner`'s answer in work: the question is in the chat now, and the work waits for the answer. */
+/** `question_ask`'s answer in work: the question is in the chat now, and the work waits for the answer. */
 export const QUESTION_WORK_ASKED_TEXT = 'Asked: your owner sees it in the chat, with its buttons. Stop here and end your turn now; you carry on in this thread with their answer.'
 
-/** `ask_owner`'s answer in work that asked without waiting: the work goes on, and the answer comes as a note. */
+/** `question_ask`'s answer in work that asked without waiting: the work goes on, and the answer comes as a note. */
 export function questionWorkKeepsWorkingText(questionId: string): string {
   return `Asked (${questionId}): your owner sees it in the chat, with its buttons. Keep working on what doesn't need the answer, and don't do the part that does yet. Their answer reaches you as a note naming this question while you work; if your turn ends first, you carry on in this thread with it.`
 }
@@ -139,10 +139,10 @@ export function questionWorkKeepsWorkingText(questionId: string): string {
 /** What every call of work's turn after it asked is refused with: the turn ends, and the answer continues the work. */
 export const QUESTION_END_TURN_TEXT = 'You asked your owner a question. End your turn now; you continue with their answer.'
 
-/** `ask_owner` after `escalate` in the same turn: a tap there would count as Not now for the permission. */
+/** `question_ask` after `permission_ask` in the same turn: a tap there would count as Not now for the permission. */
 export const QUESTION_AFTER_ASK_TEXT = 'Ask it once the owner has answered your permission ask. Finish your message now.'
 
-/** `ask_owner` where it is never offered (a scheduled run, a consult, a subagent): the question goes in the report. */
+/** `question_ask` where it is never offered (a scheduled run, a consult, a subagent): the question goes in the report. */
 export const QUESTION_NOT_OFFERED_TEXT = "You can't ask your owner from here: carry on, and ask in your report."
 
 /** `question_answer` after the owner forgot what they wrote in that chat turn: nothing of it is passed on. */
@@ -185,7 +185,7 @@ export function waitLabel(ms: number): string {
 }
 
 /**
- * `ask_owner`'s follow-up, or why not, in words the bot can act on: `ifNoAnswer` `nudge` (the default) or `default`,
+ * `question_ask`'s follow-up, or why not, in words the bot can act on: `ifNoAnswer` `nudge` (the default) or `default`,
  * `after` in minutes (15 to 1440; an hour for a nudge and half an hour for a default when left out), and `default`, one
  * of the question's choices, which a default needs. A `default` given alone means `ifNoAnswer: 'default'`.
  */
@@ -270,7 +270,7 @@ export function questionGoneText(title: string): string {
  */
 export function waitingQuestionLine(input: { questionId: string; question: string; choices: string; title: string; default?: string; defaultAt?: string }): string {
   const fallback = input.default && input.defaultAt ? ` If they haven't answered by ${input.defaultAt}, it goes with "${input.default}".` : ''
-  return `"${input.title}" waits for the owner's answer to your question "${quoteOf(input.question, 160)}"${input.choices ? ` (${input.choices})` : ''} [${input.questionId}].${fallback} If the owner answers it in the chat, pass it on with question_answer.`
+  return `"${input.title}" waits for the owner's answer to your question "${quoteOf(input.question, 160)}"${input.choices ? ` (${input.choices})` : ''} [${input.questionId}].${fallback} If the owner answers it in the chat, pass it on with request_answer.`
 }
 
 /** How a question's answers read as text (older apps, notifications, the journal): "Flat A · Flat B · Something else". */
@@ -282,13 +282,13 @@ export function plainChoices(spec: Pick<BotQuestionSpec, 'choices' | 'other'>): 
 const oneLine = (value: string) => value.replace(/\s+/g, ' ').trim()
 
 /**
- * `ask_owner`'s arguments as a question, or why not, in words the bot can act on. `choices` are 2–5 labels (strings, or
+ * `question_ask`'s arguments as a question, or why not, in words the bot can act on. `choices` are 2–5 labels (strings, or
  * `{ label, detail? }`), each label one line of at most 40 characters and each different; `yesNo` is Yes and No. A
  * question needs its answers: an open question with none is the bot's reply, not a question.
  */
 export function questionSpecOf(args: Record<string, unknown>): BotQuestionSpec | { problem: string } {
   const question = typeof args.question === 'string' ? args.question.trim() : ''
-  if (!question) return { problem: 'ask_owner needs the question, standing on its own.' }
+  if (!question) return { problem: 'question_ask needs the question, standing on its own.' }
   if (question.length > MAX_QUESTION_CHARS) return { problem: `Keep the question under ${MAX_QUESTION_CHARS} characters.` }
   if (args.yesNo !== undefined && args.yesNo !== true) return { problem: 'yesNo is true, or left out.' }
   if (args.other !== undefined && typeof args.other !== 'boolean') return { problem: 'other is true or false.' }
@@ -320,15 +320,15 @@ export function questionSpecOf(args: Record<string, unknown>): BotQuestionSpec |
   return { question, choices, other, ...carded }
 }
 
-/** One question of an `ask_owner` call, as Mousse keeps it: what it asks, and what happens if the owner doesn't answer. */
+/** One question of an `question_ask` call, as Mousse keeps it: what it asks, and what happens if the owner doesn't answer. */
 export interface BotQuestionAsk {
   spec: BotQuestionSpec
-  /** Absent: nothing follows it up (as an earlier build kept it). `ask_owner` always names one. */
+  /** Absent: nothing follows it up (as an earlier build kept it). `question_ask` always names one. */
   follow?: BotQuestionFollow
 }
 
 /**
- * `ask_owner`'s arguments as the questions it asks, or why not: one question (`question` and its answers), or up to
+ * `question_ask`'s arguments as the questions it asks, or why not: one question (`question` and its answers), or up to
  * `MAX_QUESTIONS_PER_CALL` together (`questions`, each with its own answers and follow-up). `wait` is the call's, for
  * every question in it. The same question twice in one call is refused.
  */

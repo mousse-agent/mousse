@@ -169,7 +169,7 @@ describe('Inbox (SPEC §14.1)', () => {
       const planned = planWakeNotice([row('delegation:1', { runStatus: 'completed', text: long })], titles)
       expect(planned.text).toContain('x'.repeat(NOTICE_TASK_CHARS))
       expect(planned.text).not.toContain('x'.repeat(NOTICE_TASK_CHARS + 1))
-      expect(planned.text).toContain(`The result is cut at ${NOTICE_TASK_CHARS} of ${NOTICE_TASK_CHARS + 500} characters; call task_status with delegation:1 for the rest.`)
+      expect(planned.text).toContain(`The result is cut at ${NOTICE_TASK_CHARS} of ${NOTICE_TASK_CHARS + 500} characters; call thread_wait with delegationId delegation:1 for the rest.`)
       expect(planned.items[0].fullyShown).toBe(false)
     })
 
@@ -179,7 +179,7 @@ describe('Inbox (SPEC §14.1)', () => {
       const planned = planWakeNotice(rows, titles)
       expect(planned.items.map((item) => item.fullyShown)).toEqual([true, true, true, true, false])
       expect(planned.text.length).toBeLessThan(NOTICE_WAKE_CHARS + 2_000)
-      expect(planned.text).toContain('call task_status with delegation:5 for the rest')
+      expect(planned.text).toContain('call thread_wait with delegationId delegation:5 for the rest')
     })
 
     it('reports a failed task with its error, and joins other rows after a blank line', () => {

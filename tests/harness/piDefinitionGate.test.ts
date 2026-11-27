@@ -147,10 +147,10 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
   // The registry leaves an ungranted app tool off the turn's list; a list that still carries one is refused at the call gate.
   it('an app tool the definition does not grant is refused before it runs and costs no tool call, as an ungranted built-in', async () => {
     const { engine, recorder, project } = await setup(cleanups, {
-      mousseTools: () => [{ name: 'create_task', description: 'Create a task', inputSchema: { type: 'object', properties: { description: { type: 'string' } } }, class: 'mutation' }]
+      mousseTools: () => [{ name: 'task_create', description: 'Create a task', inputSchema: { type: 'object', properties: { description: { type: 'string' } } }, class: 'mutation' }]
     })
     recorder.respond(script([
-      { tool: { name: 'create_task', args: { description: 'not granted' } } },
+      { tool: { name: 'task_create', args: { description: 'not granted' } } },
       { tool: { name: 'write', args: { path: 'granted.txt', content: 'ok' } } },
       { text: 'done' }
     ]))
@@ -164,31 +164,31 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
     expect(result.text).toBe('done')
     const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
-    expect(JSON.parse(String(results[0].response))).toMatchObject({ refused: { code: 'not_granted', message: 'Tool "create_task" is not granted to this agent definition.' } })
+    expect(JSON.parse(String(results[0].response))).toMatchObject({ refused: { code: 'not_granted', message: 'Tool "task_create" is not granted to this agent definition.' } })
     // The refused app tool cost nothing: the one allowed call was the granted write.
     expect(readFileSync(join(project, 'granted.txt'), 'utf8')).toBe('ok')
     expect(counters.toolCalls).toBe(1)
   }, 90_000)
 
   /**
-   * A definition run whose app tool `create_task` runs through the real Mousse tool registry behind
-   * a local MCP endpoint, with `maxToolCalls: 1`. The model calls `create_task`, then `write`.
+   * A definition run whose app tool `task_create` runs through the real Mousse tool registry behind
+   * a local MCP endpoint, with `maxToolCalls: 1`. The model calls `task_create`, then `write`.
    */
   async function appToolRun(approve: (request: AgentRuntimeToolApprovalRequest) => { status: 'approved' | 'denied'; digest?: string; reason?: string }, appArgs: Record<string, unknown> = { description: 'a task' }) {
     const { engine, recorder, project } = await setup(cleanups, {
-      mousseTools: () => [{ name: 'create_task', description: 'Create a task', inputSchema: { type: 'object', properties: { description: { type: 'string' } } }, class: 'mutation' }]
+      mousseTools: () => [{ name: 'task_create', description: 'Create a task', inputSchema: { type: 'object', properties: { description: { type: 'string' } } }, class: 'mutation' }]
     })
     const asked: AgentRuntimeToolApprovalRequest[] = []
     const definition: DefinitionAuthority = {
       policy: policy(project, { approval: { policy: 'always' } }),
-      grants: grants('create_task', 'write'),
+      grants: grants('task_create', 'write'),
       approve: async (request) => (asked.push(request), approve(request))
     }
     const turns = new AppToolTurns()
     turns.register(appTurn({ threadId: 't1', runId: 'r1', turnToken: 'tt', projectPath: project, definition }))
     const ran: unknown[] = []
     const registry = new ToolRegistry({ activeRunId: () => 'r1', turns })
-    registry.register({ name: 'create_task', description: 'Create a task', inputSchema: {}, access: 'actsAsCaller', class: 'mutation', handler: async (args) => (ran.push(args), { text: 'created' }) } as unknown as MousseTool)
+    registry.register({ name: 'task_create', description: 'Create a task', inputSchema: {}, access: 'actsAsCaller', class: 'mutation', handler: async (args) => (ran.push(args), { text: 'created' }) } as unknown as MousseTool)
     // A minimal MCP endpoint: the call id as the MCP server derives it from `clientRequestId`.
     const server = createServer(async (req, res) => {
       let body = ''
@@ -196,7 +196,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
       const call = JSON.parse(body) as { id: string; params: { name: string; arguments: Record<string, unknown> } }
       const { clientRequestId, ...args } = call.params.arguments
       const outcome = await registry.call(call.params.name, args, {
-        credential: { threadId: 't1', runId: 'r1', provider: 'pi', modeCeiling: 'default', binding: 'per_call', current: () => true },
+        credential: { threadId: 't1', runId: 'r1', provider: 'pi', binding: 'per_call', current: () => true },
         toolCallId: `mcp:${String(clientRequestId)}`,
         signal: new AbortController().signal
       })
@@ -206,7 +206,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
     cleanups.push(() => new Promise<void>((done) => server.close(() => done())))
     recorder.respond(script([
-      { tool: { name: 'create_task', args: appArgs } },
+      { tool: { name: 'task_create', args: appArgs } },
       { tool: { name: 'write', args: { path: 'allowed.txt', content: 'ok' } } },
       { text: 'done' }
     ]))
@@ -246,7 +246,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
       const call = JSON.parse(body) as { id: string; params: { name: string; arguments: Record<string, unknown> } }
       const { clientRequestId, ...args } = call.params.arguments
       const outcome = await registry.call(call.params.name, args, {
-        credential: { threadId: 't1', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true },
+        credential: { threadId: 't1', runId: 'r1', provider: 'pi', accessLevel: 'lineage', binding: 'per_call', current: () => true },
         toolCallId: `mcp:${String(clientRequestId)}`,
         signal: new AbortController().signal
       })
@@ -284,8 +284,8 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
 
   it('an app tool whose approval is denied costs no tool call, and is asked once', async () => {
     const { result, asked, ran, counters, project } = await appToolRun((request) =>
-      request.toolName === 'create_task' ? { status: 'denied', reason: 'No task please' } : { status: 'approved', digest: request.argumentDigest })
-    expect(asked.map((request) => request.toolName)).toEqual(['create_task', 'write'])
+      request.toolName === 'task_create' ? { status: 'denied', reason: 'No task please' } : { status: 'approved', digest: request.argumentDigest })
+    expect(asked.map((request) => request.toolName)).toEqual(['task_create', 'write'])
     expect(ran).toEqual([])
     // The one allowed call was the approved write.
     expect(readFileSync(join(project, 'allowed.txt'), 'utf8')).toBe('ok')
@@ -295,7 +295,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
 
   it('an app tool approved with a stale digest costs no tool call', async () => {
     const { result, ran, counters, project } = await appToolRun((request) =>
-      request.toolName === 'create_task' ? { status: 'approved', digest: 'stale' } : { status: 'approved', digest: request.argumentDigest })
+      request.toolName === 'task_create' ? { status: 'approved', digest: 'stale' } : { status: 'approved', digest: request.argumentDigest })
     expect(ran).toEqual([])
     expect(readFileSync(join(project, 'allowed.txt'), 'utf8')).toBe('ok')
     expect(counters.toolCalls).toBe(1)
@@ -306,7 +306,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     const { result, asked, ran, counters, project } = await appToolRun((request) => ({ status: 'approved', digest: request.argumentDigest }))
     // Each call was asked once, at the gate (the registry took that authorization at dispatch);
     // the write was approved and then refused by the limit, before it ran.
-    expect(asked.map((request) => request.toolName)).toEqual(['create_task', 'write'])
+    expect(asked.map((request) => request.toolName)).toEqual(['task_create', 'write'])
     expect(asked[0].arguments).toEqual({ description: 'a task' })
     expect(ran).toEqual([{ description: 'a task' }])
     expect(counters.toolCalls).toBe(1)
@@ -318,7 +318,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
   it('a model-supplied clientRequestId is not part of the approved call: asked once, run once', async () => {
     const { asked, ran, counters } = await appToolRun((request) => ({ status: 'approved', digest: request.argumentDigest }), { description: 'a task', clientRequestId: 'model-chosen-id' })
     // The approver saw the call as the tool runs it; the registry did not ask again after the charge.
-    expect(asked.map((request) => [request.toolName, request.arguments])).toEqual([['create_task', { description: 'a task' }], ['write', expect.anything()]])
+    expect(asked.map((request) => [request.toolName, request.arguments])).toEqual([['task_create', { description: 'a task' }], ['write', expect.anything()]])
     expect(ran).toEqual([{ description: 'a task' }])
     expect(counters.toolCalls).toBe(1)
   }, 90_000)

@@ -1,8 +1,8 @@
 import type { Thread } from '../../shared/types'
-import { hiddenFromOwner, isSideChatThread, isSubagentThread, nearestVisibleAncestor } from '../../shared/threadLineage'
+import { hiddenFromOwner, isSideChatThread, nearestVisibleAncestor } from '../../shared/threadLineage'
 import type { ThreadNotificationKind } from './threadNotification'
 
-type NotificationThread = Pick<Thread, 'id' | 'name' | 'lineage' | 'projectId' | 'hidden' | 'startedByBot'>
+type NotificationThread = Pick<Thread, 'id' | 'name' | 'lineage' | 'projectId' | 'hidden' | 'startedByBot' | 'node' | 'startedFrom'>
 
 /** What a notification is about once subagents are folded under their parents. */
 export interface ThreadNotificationTarget {
@@ -19,8 +19,9 @@ export interface ThreadNotificationTarget {
 /**
  * Who a notification is for. A subagent finishing or pausing is not news: the parent reports the
  * outcome when it hears back. A subagent's question is, so it is announced under its nearest
- * visible ancestor's name. A side chat is read in its parent's panel: only its question is news, announced under the
- * thread whose panel shows it. A thread nobody knows lineage for notifies as itself.
+ * visible ancestor's name. A subagent on another computer is one on both computers, the one that started it and the one
+ * that runs it, when its parent is listed (`listedParentId`). A side chat is read in its parent's panel: only its question
+ * is news, announced under the thread whose panel shows it. A thread nobody knows lineage for notifies as itself.
  */
 export function resolveThreadNotification(
   threadId: string,
@@ -34,9 +35,9 @@ export function resolveThreadNotification(
     if (kind !== 'question' || !listedId) return null
     return { threadId: listedId, parentName: threads.get(listedId)?.name?.trim() || undefined, viaThreadId: threadId, sideChat: true }
   }
-  if (!thread || !isSubagentThread(thread)) return { threadId }
+  if (!thread) return { threadId }
   const ancestorId = nearestVisibleAncestor(threadId, [...threads.values()])
-  // A subagent whose parent is gone is listed as a normal thread, so it notifies as one.
+  // A thread listed on its own notifies as itself, as does a subagent whose parent is gone.
   if (!ancestorId || ancestorId === threadId) return { threadId }
   if (kind !== 'question') return null
   return { threadId: ancestorId, parentName: threads.get(ancestorId)?.name?.trim() || undefined, viaThreadId: threadId }
@@ -46,6 +47,20 @@ export function resolveThreadNotification(
 export interface NamedThreadNotificationTarget extends ThreadNotificationTarget {
   threadName?: string
   projectName?: string
+}
+
+/** What a notification reads of a row: a remote subagent's `node` and `startedFrom` name the parent it is announced under. */
+function notificationRow(row: NotificationThread): NotificationThread {
+  return {
+    id: row.id,
+    name: row.name,
+    lineage: row.lineage,
+    projectId: row.projectId,
+    ...(row.hidden ? { hidden: true as const } : {}),
+    ...(row.startedByBot ? { startedByBot: row.startedByBot } : {}),
+    ...(row.node ? { node: row.node } : {}),
+    ...(row.startedFrom?.agent?.subagent ? { startedFrom: row.startedFrom } : {})
+  }
 }
 
 function rowsOf(data: unknown, key: 'threads' | 'projects'): unknown[] | null {
@@ -65,7 +80,7 @@ export class NotificationThreadIndex {
     const next = new Map<string, NotificationThread>()
     for (const row of rows as NotificationThread[]) {
       if (row && typeof row.id === 'string') {
-        next.set(row.id, { id: row.id, name: row.name, lineage: row.lineage, projectId: row.projectId, ...(row.hidden ? { hidden: true as const } : {}), ...(row.startedByBot ? { startedByBot: row.startedByBot } : {}) })
+        next.set(row.id, notificationRow(row))
       }
     }
     this.byProfile.set(profileId, next)
@@ -78,7 +93,7 @@ export class NotificationThreadIndex {
     if (!threads) return
     const thread = row?.thread
     if (thread && typeof thread.id === 'string') {
-      threads.set(thread.id, { id: thread.id, name: thread.name, lineage: thread.lineage, projectId: thread.projectId, ...(thread.hidden ? { hidden: true as const } : {}), ...(thread.startedByBot ? { startedByBot: thread.startedByBot } : {}) })
+      threads.set(thread.id, notificationRow(thread))
     } else if (typeof row?.removed === 'string') {
       threads.delete(row.removed)
     }
@@ -115,7 +130,7 @@ export class NotificationThreadIndex {
     const threads = this.byProfile.get(profileId)
     const thread = threads?.get(threadId)
     if (threads && thread && isSideChatThread(thread)) return nearestVisibleAncestor(thread.lineage!.parentThreadId, [...threads.values()])
-    if (!threads || !thread || !isSubagentThread(thread)) return threadId
+    if (!threads || !thread) return threadId
     return nearestVisibleAncestor(threadId, [...threads.values()])
   }
 

@@ -196,6 +196,9 @@ function isDescribed(rawInput: unknown): rawInput is Record<string, unknown> {
   return typeof rawInput === 'object' && rawInput !== null && !Array.isArray(rawInput) && Object.keys(rawInput).length > 0
 }
 
+/** A permission request Mousse allows without asking anyone (`AcpPreset.allowsUnasked`); `cwd` is the turn's folder. */
+export type AllowsUnasked = (request: RequestPermissionRequest, cwd: string) => boolean
+
 /** A path the agent may touch: inside the workspace, also after resolving links. */
 export function workspacePath(scope: AcpRequestScope, path: string): string {
   scope.throwIfAborted()

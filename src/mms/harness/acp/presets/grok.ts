@@ -1,6 +1,7 @@
 import type { HarnessCaps } from '../../../../shared/harness/types'
 import { ACP_BASE_CAPABILITIES } from '../capabilities'
-import type { ClassifyOption, PermissionApprovals } from '../permissions'
+import { confinedRead, confinedSearch } from '../confinedRead'
+import type { AllowsUnasked, ClassifyOption, PermissionApprovals } from '../permissions'
 import { compatibilityFields } from '../../compatibility'
 import type { AcpPreset } from '../preset'
 import type { AcpQuirks } from '../quirks'
@@ -50,21 +51,50 @@ export const classifyGrokOption: ClassifyOption = (option) => {
 }
 
 /**
- * Grok asks Mousse for every tool (`approval_only`, pinned by the command line). Plan mode is not
- * offered over ACP, and Mousse measures no context for it: Grok sends no usage over ACP.
+ * On its held launch (`grok/held.ts`), Grok asks Mousse for every tool, its reads and searches included. Mousse
+ * answers these without asking anyone, in every mode but a run that refuses approvals, as Claude Code and Codex read
+ * their folder unasked: a file read, a folder listing or a search confined to the turn's folder (`confinedRead.ts`;
+ * Grok names each in `rawInput.variant`, with its path; a search without a path searches the folder), and Grok's own
+ * plan list. Anything else, and any of these that is not confined, goes to the turn's permission mode.
+ */
+export const grokAllowsUnasked: AllowsUnasked = (request, cwd) => {
+  const raw = request.toolCall?.rawInput
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const input = raw as Record<string, unknown>
+  switch (input.variant) {
+    case 'TodoWrite':
+      return true
+    case 'ReadFile':
+      return typeof input.target_file === 'string' && confinedRead(cwd, input.target_file)
+    case 'ListDir':
+      return typeof input.target_directory === 'string' && confinedRead(cwd, input.target_directory)
+    case 'Grep':
+      return input.path === null || input.path === undefined ? confinedSearch(cwd, cwd) : typeof input.path === 'string' && confinedSearch(cwd, input.path)
+    default:
+      return false
+  }
+}
+
+/**
+ * Grok's caps on a version whose held launch is proven on this platform (`grokHeldRecord`): it asks Mousse before
+ * every tool (`approval_only`). On any other version the driver claims `uncontrolled` (`grokCaps`). Mousse measures no context for it: Grok sends no usage over ACP.
  */
 export const GROK_CAPS: HarnessCaps = Object.freeze({
   ...ACP_BASE_CAPABILITIES,
   // Spike S4 (Grok 1.0.77 over ACP): every call of a response was reported before any ran, so no start arrived after
   // a result (G = 0); 2 × 0 + 100.
   steerSettleMs: 100,
-  planMode: false,
   contextUsage: 'none',
   toolControl: 'approval_only',
   autoPermissionMode: false,
   budgets: 'unsupported',
   spendLimits: 'unsupported'
 })
+
+/** The caps of a Grok whose held launch is proven (`held`), or not. */
+export function grokCaps(held: boolean): HarnessCaps {
+  return held ? GROK_CAPS : Object.freeze({ ...GROK_CAPS, toolControl: 'uncontrolled' as const })
+}
 
 export const GROK_QUIRKS: AcpQuirks = Object.freeze({ xaiExtensions: true })
 
@@ -79,5 +109,6 @@ export const GROK_PRESET: AcpPreset = {
   initializeMeta: { clientType: 'extension' },
   staticCaps: GROK_CAPS,
   classifyOption: classifyGrokOption,
+  allowsUnasked: grokAllowsUnasked,
   quirks: GROK_QUIRKS
 }

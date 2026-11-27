@@ -17,7 +17,7 @@ export type HarnessDriverKind = ProviderDriverKind
 /**
  * Capabilities of one instance, computed by the gateway from the driver, the installed version and
  * the execution profile (never a static per-vendor table in callers). Every key has a reader
- * outside the drivers (`tests/run/capabilityReaders.test.ts`). All but `planMode` and
+ * outside the drivers (`tests/run/capabilityReaders.test.ts`). All but
  * `contextUsage` keep the meaning of `ProviderCapabilities` in `harness/adapter.ts`.
  */
 export interface HarnessCaps {
@@ -52,8 +52,6 @@ export interface HarnessCaps {
    * child). `isolated_only`: it cannot, so it is refused as the target of a `shared` child.
    */
   childPolicy: 'enforced' | 'isolated_only'
-  /** The composer offers Plan mode for this instance. */
-  planMode: boolean
   /**
    * Context gauge source: `reported` when the runtime reports its context and window, `none` when
    * it publishes neither (the gauge is hidden rather than fabricated).
@@ -97,7 +95,7 @@ export type RunCapabilities = Pick<
 >
 
 export const HARNESS_CAP_KEYS = [
-  'steer', 'steerBoundary', 'steerSettleMs', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'autoPermissionMode', 'budgets', 'spendLimits'
+  'steer', 'steerBoundary', 'steerSettleMs', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'contextUsage', 'toolControl', 'autoPermissionMode', 'budgets', 'spendLimits'
 ] as const satisfies ReadonlyArray<keyof HarnessCaps>
 
 /** What a caller picks to run an agent. */
@@ -117,7 +115,6 @@ export type TurnOrigin = 'interactive' | 'delegated' | 'workflow' | 'definition'
 
 /** Restrictions a run must honour. Turn admission fails closed when an instance cannot enforce them. */
 export interface RunPolicy {
-  mode: 'default' | 'plan'
   /** Absent on bindings recorded before origins existed: they read as `interactive`. */
   origin?: TurnOrigin
   /** Exact tool allowlist (and optional denylist); absent = the instance's normal tools. */
@@ -529,7 +526,7 @@ export interface InstanceConfigPatch {
 export const RESERVED_AGENT_IDS: ReadonlySet<string> = new Set(['codex'])
 
 export function reservedAgentMessage(agentId: string): string {
-  return `The registry agent "${agentId}" cannot be added: Mousse runs it as its own entry. Add the ChatGPT subscription provider instead.`
+  return `The registry agent "${agentId}" cannot be added: Mousse runs it as its own entry. Add the Codex provider instead.`
 }
 
 /**

@@ -96,7 +96,7 @@ export function agentModelRefusal(
   const offered = entries.map((candidate) => candidate.instanceId).join(', ')
   if (!entry && options.unlisted !== 'refuse') return undefined
   if (!entry)
-    return { code: 'unknown_instance', message: `${where.charAt(0).toUpperCase()}${where.slice(1)} offers no "${choice.instanceId}" (offered: ${offered || 'none'}). Nothing was started. Check the name with list_models, or tell the user it is not set up.` }
+    return { code: 'unknown_instance', message: `${where.charAt(0).toUpperCase()}${where.slice(1)} offers no "${choice.instanceId}" (offered: ${offered || 'none'}). Nothing was started. Check the name with model_list, or tell the user it is not set up.` }
   if (!entry.ready)
     return { code: 'instance_unavailable', message: `${entry.name} on ${where} cannot run now (${entry.status}). Nothing was started. Tell the user why, and ask before using another model.` }
   if (!choice.model || entry.models.length === 0) return undefined

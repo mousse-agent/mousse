@@ -23,7 +23,7 @@ import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallCont
 /**
  * The personal-bot app tools (PR 6 §5, Bot Phase 1 §5.5, §5.6, §5.10). They exist only on bot
  * turns and act on the bot itself, never on another thread:
- * - `escalate` asks the owner for a permission the bot lacks (the one way to ask, since an
+ * - `permission_ask` asks the owner for a permission the bot lacks (the one way to ask, since an
  *   ungranted tool does not exist for the model);
  * - `consult` asks one of the bot's context threads;
  * - `bot_schedule_add`, `bot_schedule_remove`, `bot_schedule_list` keep the bot's own schedules (in
@@ -100,7 +100,7 @@ const card = (description?: string) => Type.Union([
   }, { description: 'Pictures from your files folder: ones you made, saved or a tool handed you.' })
 ], description ? { description } : {})
 
-/** What one `ask_owner` question takes besides its words: its answers and what happens if the owner doesn't answer. */
+/** What one `question_ask` question takes besides its words: its answers and what happens if the owner doesn't answer. */
 const questionFields = {
   choices: Type.Optional(Type.Array(Type.Union([
     Type.String({ description: `A short label, at most ${MAX_CHOICE_LABEL_CHARS} characters.` }),
@@ -119,7 +119,7 @@ const questionFields = {
 
 export const BOT_TOOLS: Tool[] = [
   {
-    name: 'escalate',
+    name: 'permission_ask',
     description: 'Ask your owner for a permission you do not have, in one plain sentence. Ask as soon as you need it; never ask the owner whether to ask. In the chat, the owner answers after your message and you continue then. In a run, carry on without it and say in your report what you skipped.',
     parameters: Type.Object({
       permission: PERMISSION,
@@ -198,29 +198,29 @@ export const BOT_TOOLS: Tool[] = [
       brief: Type.String({ description: 'The whole task, standing on its own.' }),
       level: Type.Optional(Type.Union(BOT_WORK_LEVELS.map((level) => Type.Literal(level)), { description: 'How hard it is: light for a quick lookup or a small routine job, medium for most work, hard for research, a long or difficult problem, or when the owner asks you to think harder. Left out: your usual level.' })),
       model: Type.Optional(Type.Object({
-        instanceId: Type.String({ description: 'The entry\'s instanceId from work_models.' }),
-        model: Type.String({ description: 'The model\'s id from work_models.' }),
-        effort: Type.Optional(Type.String({ description: 'One of that model\'s reasoning levels from work_models, when the owner asked for one. Left out: the model\'s default.' }))
-      }, { description: 'Only when the owner, in their message, asked for this work to run on a particular model: that model, from work_models. It is for this work only; never pick one yourself. Left out: your usual model for the level.' })),
+        instanceId: Type.String({ description: 'The entry\'s instanceId from model_list.' }),
+        model: Type.String({ description: 'The model\'s id from model_list.' }),
+        effort: Type.Optional(Type.String({ description: 'One of that model\'s reasoning levels from model_list, when the owner asked for one. Left out: the model\'s default.' }))
+      }, { description: 'Only when the owner, in their message, asked for this work to run on a particular model: that model, from model_list. It is for this work only; never pick one yourself. Left out: your usual model for the level.' })),
       slot: Type.Optional(Type.String({ description: 'A custom slot of the owner\'s whose name or description matches this job; it runs on that slot\'s model.' }))
     })
   },
   {
-    name: 'work_models',
+    name: 'model_list',
     description: 'The models your owner has that work can run on, by provider entry, with each model\'s reasoning levels; the entries your work can\'t run on, and why; and the models your work usually runs on. In the chat: use it when the owner asks for a piece of work on a particular model ("do this one with Opus"), to find the one they mean, then pass it to work_start as model; if you can\'t tell which one they mean, ask them. In your work: pick a model for a subagent from it (subagent_start\'s model).',
     parameters: Type.Object({})
   },
   {
     name: 'subagent_start',
-    description: `Start a subagent: a helper that does one part of this job on its own and returns its result to you, never to the owner. Use it to split a job into parts that can go on at once, or to give one part a model better suited to it. title is a short name you address it by ("Price check"); brief is the whole task, standing on its own (it sees neither your memory nor this conversation), at most 32,768 characters: a longer one is refused whole, never cut. It can do only what you can, and it can't ask the owner for anything. It runs on your model unless you give model: an instanceId and a model, and maybe effort, from work_models; one that isn't offered there is refused and nothing starts. Keep it on your model unless the part needs another. On another entry it may run without something you have (lacks says what) or not start at all, when that entry would hold it less tightly than yours. It returns at once, and you are told when it finishes. Before you report, wait for the ones you need (subagent_wait) and stop the rest: one still running when you report is stopped. You stay responsible for the result: check what they return. There is no count of how many you start and no limit on their time; start as many as the job needs.`,
+    description: `Start a subagent: a helper that does one part of this job on its own and returns its result to you, never to the owner. Use it to split a job into parts that can go on at once, or to give one part a model better suited to it. title is a short name you address it by ("Price check"); brief is the whole task, standing on its own (it sees neither your memory nor this conversation), at most 32,768 characters: a longer one is refused whole, never cut. It can do only what you can, and it can't ask the owner for anything. It runs on your model unless you give model: an instanceId and a model, and maybe effort, from model_list; one that isn't offered there is refused and nothing starts. Keep it on your model unless the part needs another. On another entry it may run without something you have (lacks says what) or not start at all, when that entry would hold it less tightly than yours. It returns at once, and you are told when it finishes. Before you report, wait for the ones you need (subagent_wait) and stop the rest: one still running when you report is stopped. You stay responsible for the result: check what they return. There is no count of how many you start and no limit on their time; start as many as the job needs.`,
     parameters: Type.Object({
       title: Type.String({ description: 'A short name for it, unique in this work.' }),
       brief: Type.String({ maxLength: 32_768, description: 'The whole task, standing on its own, and what its result should contain. At most 32,768 characters; a longer one is refused, not cut.' }),
       model: Type.Optional(Type.Object({
-        instanceId: Type.String({ description: 'The entry\'s instanceId from work_models.' }),
-        model: Type.String({ description: 'The model\'s id from work_models.' }),
-        effort: Type.Optional(Type.String({ description: 'One of that model\'s reasoning levels from work_models. Left out: its default.' }))
-      }, { description: 'The model it runs on, from work_models. Left out: your own.' }))
+        instanceId: Type.String({ description: 'The entry\'s instanceId from model_list.' }),
+        model: Type.String({ description: 'The model\'s id from model_list.' }),
+        effort: Type.Optional(Type.String({ description: 'One of that model\'s reasoning levels from model_list. Left out: its default.' }))
+      }, { description: 'The model it runs on, from model_list. Left out: your own.' }))
     })
   },
   {
@@ -337,7 +337,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: BOT_QUESTION_TOOL,
-    description: `Ask your owner a question they answer with a tap: ${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} short choices (or yesNo), and "Other…" so they can write their own answer. To ask several things at once, give questions: up to ${MAX_QUESTIONS_PER_CALL}, each with its own choices; each shows as its own bubble. Ask only when the answer changes what you do; settle a minor choice yourself and say what you picked. Never use it for a permission: that is escalate, and a "Yes" here allows nothing. Ask as yourself, in the first person. It returns the question's id (questionIds for several): question_withdraw takes one back when you no longer need it. Asking the same question again before your owner answers or writes is refused. In the chat it shows under your reply: don't repeat the question in your reply, and end your turn; their answer comes as their next message. In work it reaches them at once. By default your work waits for the answers: end your turn, and you carry on in this thread once every question is answered. Wait when nothing useful can happen without them. When you can carry on with other parts of the job meanwhile, set wait to false: keep working, and each answer reaches you as a note naming its question (or carries your work on in this thread if your turn ended first); don't do the part that needs it until then. If they don't answer, Mousse reminds them (ifNoAnswer 'nudge', the default: at most twice). Only for a minor choice that is easy to undo, you may instead name a default, one of your choices: if they haven't answered within after minutes, you go with it and say so. Never default on anything that spends money, can't be undone, or speaks for your owner.`,
+    description: `Ask your owner a question they answer with a tap: ${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} short choices (or yesNo), and "Other…" so they can write their own answer. To ask several things at once, give questions: up to ${MAX_QUESTIONS_PER_CALL}, each with its own choices; each shows as its own bubble. Ask only when the answer changes what you do; settle a minor choice yourself and say what you picked. Never use it for a permission: that is permission_ask, and a "Yes" here allows nothing. Ask as yourself, in the first person. It returns the question's id (questionIds for several): question_withdraw takes one back when you no longer need it. Asking the same question again before your owner answers or writes is refused. In the chat it shows under your reply: don't repeat the question in your reply, and end your turn; their answer comes as their next message. In work it reaches them at once. By default your work waits for the answers: end your turn, and you carry on in this thread once every question is answered. Wait when nothing useful can happen without them. When you can carry on with other parts of the job meanwhile, set wait to false: keep working, and each answer reaches you as a note naming its question (or carries your work on in this thread if your turn ended first); don't do the part that needs it until then. If they don't answer, Mousse reminds them (ifNoAnswer 'nudge', the default: at most twice). Only for a minor choice that is easy to undo, you may instead name a default, one of your choices: if they haven't answered within after minutes, you go with it and say so. Never default on anything that spends money, can't be undone, or speaks for your owner.`,
     parameters: Type.Object({
       question: Type.Optional(Type.String({ description: `The question, at most ${MAX_QUESTION_CHARS} characters. It must read on its own: the owner may see it in a notification. Leave it out when you give questions.` })),
       ...questionFields,
@@ -356,9 +356,9 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: BOT_QUESTION_WITHDRAW_TOOL,
-    description: 'Take back a question you asked with ask_owner, by its id, when you no longer need the answer (you found it out, or the plan changed). Its bubble says it was withdrawn. Only a question asked in this chat turn or this piece of work, while it is still open. If your owner answered first, nothing is withdrawn and you get their answer.',
+    description: 'Take back a question you asked with question_ask, by its id, when you no longer need the answer (you found it out, or the plan changed). Its bubble says it was withdrawn. Only a question asked in this chat turn or this piece of work, while it is still open. If your owner answered first, nothing is withdrawn and you get their answer.',
     parameters: Type.Object({
-      questionId: Type.String({ description: 'The id ask_owner returned.' })
+      questionId: Type.String({ description: 'The id question_ask returned.' })
     })
   },
   {
@@ -412,7 +412,7 @@ export interface BotAppToolDeps {
    */
   models?: {
     pickable(): Promise<BotModelOption[]>
-    /** `work_models` and `work_start` with a model: the same choices, and the entries a bot's work can't run on. */
+    /** `model_list` and `work_start` with a model: the same choices, and the entries a bot's work can't run on. */
     workChoices?(): Promise<BotWorkChoices>
   }
   /** `make_image` (#1088): pictures on the Images row's model. Absent: no bot here makes pictures. */
@@ -437,7 +437,7 @@ function otherNames(option: BotModelOption): string[] {
 }
 
 /**
- * `work_models`' answer: each entry the bot's work can run on, its models and their reasoning levels, in the order Runs
+ * `model_list`' answer: each entry the bot's work can run on, its models and their reasoning levels, in the order Runs
  * on lists them; the owner's other entries with why work can't run there; and the bot's Work rows by name.
  */
 export function workModelListing(choices: BotWorkChoices, rows: BotModelSlots): Record<string, unknown> {
@@ -466,14 +466,14 @@ export function workModelListing(choices: BotWorkChoices, rows: BotModelSlots): 
   }
 }
 
-/** `work_models`' note in a run's main turn: the list is for its subagents. */
+/** `model_list`' note in a run's main turn: the list is for its subagents. */
 const SUBAGENT_MODELS_NOTE = 'For a subagent you start: keep it on your own model unless a part needs another; then pass an entry\'s instanceId, a model and (if you want one) one of its efforts to subagent_start as model. Another entry is another provider: it is sent your instructions and the brief. Mind that a stronger model costs your owner more. subagentLacks says what a subagent there would run without, because that entry holds it less tightly than yours; subagentCantRun, why one can\'t run there. If an entry is under cantRunWork, a subagent can\'t run there either.'
 
 /** Why work can't start on a model, after which nothing starts: a sentence the bot passes on to the owner. */
 const NOTHING_STARTED = 'Nothing was started. Tell the owner plainly, and ask what they want.'
 
 /**
- * The model `work_start` was given (an entry and a model from `work_models`, and maybe a reasoning level), among the
+ * The model `work_start` was given (an entry and a model from `model_list`, and maybe a reasoning level), among the
  * choices now, or why not: an entry that can't run a bot says why, and a model or reasoning level the entry doesn't
  * offer is refused. Nothing else is ever chosen in its place.
  */
@@ -482,15 +482,15 @@ export function workModelChoice(choices: BotWorkChoices, asked: unknown): { opti
   const instanceId = typeof value?.instanceId === 'string' ? value.instanceId.trim() : ''
   const model = typeof value?.model === 'string' ? value.model.trim() : ''
   if (!instanceId || !model || (value?.effort !== undefined && typeof value.effort !== 'string'))
-    return { refused: 'model is an instanceId and a model from work_models, and maybe one of its reasoning levels.' }
+    return { refused: 'model is an instanceId and a model from model_list, and maybe one of its reasoning levels.' }
   const effort = typeof value?.effort === 'string' && value.effort.trim() ? value.effort.trim() : undefined
   const option = choices.options.find((candidate) => candidate.instanceId === instanceId && candidate.model === model)
   if (!option) {
     const out = choices.unavailable.find((entry) => entry.instanceId === instanceId)
     if (out) return { refused: `Work can't run on ${out.entry}: ${pickReasonText(out.reason)}. ${NOTHING_STARTED}` }
     const there = choices.options.find((candidate) => candidate.instanceId === instanceId)
-    if (there) return { refused: `${plainLabel(there.entry, 40)} doesn't offer that model for your work now (see work_models). ${NOTHING_STARTED}` }
-    return { refused: `None of the owner's entries your work can run on is "${plainLabel(instanceId, 60)}" (see work_models). ${NOTHING_STARTED}` }
+    if (there) return { refused: `${plainLabel(there.entry, 40)} doesn't offer that model for your work now (see model_list). ${NOTHING_STARTED}` }
+    return { refused: `None of the owner's entries your work can run on is "${plainLabel(instanceId, 60)}" (see model_list). ${NOTHING_STARTED}` }
   }
   if (effort && !option.efforts.includes(effort))
     return { refused: option.efforts.length
@@ -549,6 +549,9 @@ const CHAT_ONLY = 'Only your chat hands out, stops and adds to work, and sets wa
 const ANSWER_CHAT_ONLY = 'Only your chat passes on your owner\'s answers to your work.'
 /** `show_card` where it is never offered (a consult, a subagent): what it would show goes in words. */
 const CARDS_OFF = "You can't show cards from here: say it in words."
+/** What a bot is told of a step held for its owner (issue #1443): it waits for their Continue or Stop. */
+export const BOT_HELD_NOTE = 'Your owner sees it with Continue and Stop: Continue sends it, Stop drops it and you are told. Do not send it again. End your turn, and tell your owner in a few words where things stand.'
+
 /** `bot_list` and `bot_send` where they are never offered (a run started by hand, a consult, a subagent). */
 const BOT_MESSAGES_OFF = "You can't message your owner's other bots from here. Say in your report what you would have told them."
 const OWNER_ONLY = 'Only the owner can change this, in your chat. Suggest it in your report instead.'
@@ -691,7 +694,7 @@ const SUBAGENTS_WORK_ONLY = 'Only your work starts subagents: not the chat, a co
 
 export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] {
   const byName = new Map(BOT_TOOLS.map((tool) => [tool.name, tool]))
-  const escalate = byName.get('escalate')!
+  const escalate = byName.get('permission_ask')!
   const consult = byName.get('consult')!
   return [
     {
@@ -949,7 +952,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         }
       }
     }),
-    ownTool(byName.get('work_models')!, deps, {
+    ownTool(byName.get('model_list')!, deps, {
       class: 'read',
       describe: () => 'List models for work',
       handler: async (_args, ctx) => {
@@ -1070,7 +1073,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         } else if (args.thread !== undefined) {
           if (typeof args.thread !== 'string' || !args.thread.trim()) return error("thread is a thread's id, from thread_list.")
           // The owner's threads are theirs to share: a bot waits on one only while it may read them.
-          if (!ctx.turn.bot?.appTools?.has('thread_wait')) return error('Waiting for a thread needs "use your threads": ask for it with escalate (the tool threads).')
+          if (!ctx.turn.bot?.appTools?.has('thread_wait')) return error('Waiting for a thread needs "use your threads": ask for it with permission_ask (the tool threads).')
           input = { brief, event: { kind: 'thread', threadId: args.thread.trim() }, ...hours }
         } else {
           const pr = pullRequestOf(args.pr)
@@ -1112,7 +1115,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         } else if (args.thread !== undefined) {
           if (typeof args.thread !== 'string' || !args.thread.trim()) return error("thread is a thread's id, from thread_list.")
           // The owner's threads are theirs to share: a bot waits on one only while it may read them.
-          if (!ctx.turn.bot?.appTools?.has('thread_wait')) return error('Waiting for a thread needs "use your threads": ask for it with escalate (the tool threads).')
+          if (!ctx.turn.bot?.appTools?.has('thread_wait')) return error('Waiting for a thread needs "use your threads": ask for it with permission_ask (the tool threads).')
           input = { brief, event: { kind: 'thread', threadId: args.thread.trim() }, ...hours }
         } else {
           const pr = pullRequestOf(args.pr)
@@ -1121,6 +1124,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         }
         try {
           const added = await wakes.add(call.botId, call.activationId, input)
+          if ('held' in added) return json({ status: 'held', holdId: added.held.holdId, note: `You set this same wake-up again and again since your owner last wrote, so it waits for them. ${BOT_HELD_NOTE}` })
           const when = reminderLabel(new Date(added.dueAt))
           const result = { wakeId: added.wakeId, ...(added.label ? { waitsFor: added.label, givesUpAt: when } : { when }) }
           call.deps.activity?.onAppResult(call.activity, 'wake', result)
@@ -1299,14 +1303,14 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
           const call = botCall(deps, ctx)
           if (isOutcome(call)) return call
           if (!call.deps.host.questions?.withdraw) return error(QUESTION_NOT_OFFERED_TEXT)
-          if (typeof args.questionId !== 'string' || !args.questionId.trim()) return error('question_withdraw needs the id ask_owner returned.')
+          if (typeof args.questionId !== 'string' || !args.questionId.trim()) return error('question_withdraw needs the id question_ask returned.')
           const result = call.deps.host.questions.withdraw(call.botId, call.activationId, args.questionId.trim())
           if ('refused' in result) return error(result.refused)
           if (result.withdrawn) return json({ withdrawn: true, note: 'Withdrawn: its bubble says so. Carry on without its answer.' })
           return json({ ...result, note: result.status === 'answered' ? 'Your owner answered it first: go with their answer.' : 'It is no longer open, so nothing was withdrawn.' })
         }
       }),
-      // Held with `ask_owner` (`compileBotThread`), wherever a turn may ask.
+      // Held with `question_ask` (`compileBotThread`), wherever a turn may ask.
       listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_QUESTION_WITHDRAW_TOOL)),
       available: (turn) => (turn.bot?.appTools.has(BOT_QUESTION_WITHDRAW_TOOL) && deps?.() ? true : QUESTION_NOT_OFFERED_TEXT),
       offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_QUESTION_WITHDRAW_TOOL) && deps?.())
@@ -1358,6 +1362,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
           if (typeof args.bot !== 'string' || !args.bot.trim() || typeof args.message !== 'string' || !args.message.trim()) return error("bot_send needs the bot's name and a message.")
           try {
             const sent = await call.deps.host.bots.send(call.botId, call.activationId, { to: args.bot, message: args.message })
+            if (sent.held) return json({ status: 'held', to: sent.to, holdId: sent.held.holdId, note: `Your bots have messaged each other a lot since your owner last wrote, so this message to ${sent.to} waits for them. ${BOT_HELD_NOTE}` })
             call.deps.activity?.onAppResult(call.activity, BOT_SEND_TOOL, { to: sent.to })
             return json({
               sent: true,
@@ -1382,12 +1387,12 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
           if (isOutcome(call)) return call
           if (call.lane !== 'chat' || !call.deps.host.questions) return error(ANSWER_CHAT_ONLY)
           if (typeof args.questionId !== 'string' || !args.questionId || typeof args.answer !== 'string' || !args.answer.trim()) return error('question_answer needs the question\'s id and the owner\'s answer.')
-          const relayed = call.deps.host.questions.relay(call.botId, call.activationId, args.questionId, args.answer)
+          const relayed = call.deps.host.questions.relay(call.botId, call.activationId, args.questionId, args.answer, ctx.toolCallId)
           if (!relayed.ok) return error(relayed.text)
-          return json({ ok: true, note: `"${relayed.title}" carries on with their answer. Tell the owner in a few words, as yourself, that you're on it again ("Got it, carrying on with the flats").` })
+          return json({ ok: true, ...(relayed.replayed ? { replayed: true } : {}), note: `"${relayed.title}" carries on with their answer. Tell the owner in a few words, as yourself, that you're on it again ("Got it, carrying on with the flats").` })
         }
       }),
-      // Only a chat turn holds it, with `ask_owner`.
+      // Only a chat turn holds it, with `question_ask`.
       listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_QUESTION_ANSWER_TOOL)),
       available: (turn) => (turn.bot?.appTools.has(BOT_QUESTION_ANSWER_TOOL) && deps?.() ? true : ANSWER_CHAT_ONLY),
       offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_QUESTION_ANSWER_TOOL) && deps?.())
@@ -1435,12 +1440,12 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const subagents = ctx.turn.bot?.subagents
         if (!subagents) return error(SUBAGENTS_WORK_ONLY)
         if (typeof args.title !== 'string' || typeof args.brief !== 'string') return error('subagent_start needs a title and a brief.')
-        // A model of work_models' choices, matched as work_start matches one; nothing else is ever chosen in its place.
+        // A model of model_list' choices, matched as work_start matches one; nothing else is ever chosen in its place.
         let model: Parameters<typeof subagents.start>[0]['model']
         if (args.model !== undefined && args.model !== null) {
           const resolved = deps?.()
           const chosen = workModelChoice(resolved ? await workChoicesOf(resolved).catch(() => ({ options: [], unavailable: [] })) : { options: [], unavailable: [] }, args.model)
-          if ('refused' in chosen) return error(chosen.refused.replace('Tell the owner plainly, and ask what they want.', 'Pick another from work_models, or leave model out to use your own.').replace(/Work can't run on/, 'A subagent can\'t run on'))
+          if ('refused' in chosen) return error(chosen.refused.replace('Tell the owner plainly, and ask what they want.', 'Pick another from model_list, or leave model out to use your own.').replace(/Work can't run on/, 'A subagent can\'t run on'))
           const { option, effort } = chosen
           model = {
             pick: { instanceId: option.instanceId, model: option.model, ...(effort ? { effort } : {}), ...(option.credential ? { credential: option.credential } : {}), ...(option.account ? { account: option.account } : {}) },

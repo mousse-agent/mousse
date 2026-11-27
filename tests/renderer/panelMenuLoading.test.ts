@@ -58,6 +58,48 @@ describe('terminal tab labels', () => {
   })
 })
 
+describe('Documents tabs by thread', () => {
+  const docs = [
+    { id: 'a-diff', title: 'a.ts', markdown: '', turnFile: { threadId: 'A', profileId: null, path: '/repo/a.ts' } },
+    { id: 'b-applet', title: 'Chart', markdown: '', applet: { threadId: 'B', profileId: null, reference: { title: 'Chart' } } },
+    { id: 'notes', title: 'Notes', markdown: '# notes' }
+  ]
+  const labels = () => [...host.querySelectorAll('.main-view-tab-label')].map((node) => text(node))
+  const front = () => text(host.querySelector('[aria-current="page"] .main-view-tab-label'))
+  const show = (threadId: string) => act(() => useAppStore.setState({ activeThreadId: threadId }))
+
+  it("shows only the active thread's documents and keeps each thread's front tab", async () => {
+    useAppStore.setState({
+      activeThreadId: 'A', openedSurfaceKinds: [], projectTerminalTabs: [], browserTabs: [],
+      mainView: 'documents', mainAreaOpen: true, documentTabs: docs as never, activeDocumentTabByThread: {}
+    })
+    act(() => root.render(createElement(MainViewTabs)))
+    expect(labels()).toEqual(['a.ts', 'Notes'])
+    expect(front()).toBe('a.ts')
+
+    show('B')
+    expect(labels()).toEqual(['Chart', 'Notes'])
+    const notes = [...host.querySelectorAll<HTMLButtonElement>('.main-view-tab-select')].find((button) => text(button) === 'Notes')!
+    await act(async () => notes.click())
+    expect(front()).toBe('Notes')
+
+    show('A')
+    expect(front()).toBe('a.ts')
+    show('B')
+    expect(front()).toBe('Notes')
+  })
+
+  it("closing a thread's last document leaves Documents even while another thread keeps its own", () => {
+    useAppStore.setState({
+      activeThreadId: 'A', openedSurfaceKinds: ['git'], mainView: 'documents',
+      documentTabs: docs.slice(0, 2) as never, activeDocumentTabByThread: { A: 'a-diff', B: 'b-applet' }
+    })
+    useAppStore.getState().closeDocumentTab('a-diff')
+    expect(useAppStore.getState()).toMatchObject({ mainView: 'git', activeDocumentTabByThread: { B: 'b-applet' } })
+    expect(useAppStore.getState().documentTabs.map((tab) => tab.id)).toEqual(['b-applet'])
+  })
+})
+
 describe('resizer keys', () => {
   it('moves 16px with Left and Right and stops at the bounds', () => {
     expect(resizerKeyTarget('ArrowLeft', 260, 180, 480)).toBe(244)
@@ -82,7 +124,7 @@ describe('the "+" panel menu', () => {
     browserTabs: [{ id: 'b1', ownerThreadId: null, url: 'about:blank', title: 'New tab', zoomFactor: 1, deviceToolbarOpen: false, devicePreset: 'responsive' }],
     mainView: 'browser',
     mainAreaOpen: true,
-    documentsTabVisible: false
+    documentTabs: []
   })
   const addButton = () => host.querySelector<HTMLButtonElement>('.main-view-tab-add')!
   const menu = () => document.querySelector<HTMLElement>('.surface-menu-popover')

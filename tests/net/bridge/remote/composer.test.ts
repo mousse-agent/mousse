@@ -124,7 +124,7 @@ describe('remote composer methods', () => {
     ok('orchestrator.send', {
       threadId: 't',
       content: 'hi',
-      mode: 'plan',
+      mode: 'build',
       attachments: ['upload-0001']
     })
     ok('queue.enqueue', {
@@ -193,13 +193,13 @@ describe('remote composer methods', () => {
     await call(api, 'orchestrator.send', {
       threadId: 't',
       content: 'look',
-      mode: 'plan',
+      mode: 'build',
       attachments: ['upload-0001']
     })
     expect(runs).toEqual([
       {
         content: 'look',
-        extras: { mode: 'plan', images: [{ name: 'shot.png', mimeType: 'image/png', data }] }
+        extras: { mode: 'build', images: [{ name: 'shot.png', mimeType: 'image/png', data }] }
       }
     ])
     expect(
@@ -586,7 +586,7 @@ describe('remote composer methods on a real profile', () => {
       unknown
     >
     expect(Array.isArray(options.providers)).toBe(true)
-    expect(options.modes).toEqual(['plan', 'agent', 'build'])
+    expect(options.modes).toEqual(['agent', 'build'])
     expect(Array.isArray(options.skills)).toBe(true)
     const commands = options.commands as Array<{ name: string }>
     expect(commands.map((command) => command.name)).toEqual(
@@ -861,7 +861,7 @@ describe('remote composer methods on a real profile', () => {
     const thread = mms.threads.createThread('Queue')
     const item = mms.orchestrator.enqueueForThread(thread.id, {
       content: 'next',
-      mode: 'plan',
+      mode: 'build',
       images: [{ name: 'a.png', mimeType: 'image/png', data: 'AAAA' }]
     })
     const listed = (await call(api, 'queue.list', { threadId: thread.id })) as { items: unknown[] }
@@ -869,7 +869,7 @@ describe('remote composer methods on a real profile', () => {
       expect.objectContaining({
         id: item.id,
         content: 'next',
-        mode: 'plan',
+        mode: 'build',
         images: [{ name: 'a.png', mimeType: 'image/png' }]
       })
     ])

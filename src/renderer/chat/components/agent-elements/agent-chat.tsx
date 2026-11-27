@@ -157,6 +157,7 @@ export const AgentChat = memo(function AgentChat({
                         type: "error",
                         title: errorTitle(error as { code?: unknown }),
                         message: error.message,
+                        code: (error as { code?: unknown }).code,
                       },
                     ],
                   } as unknown as (typeof messages)[number],

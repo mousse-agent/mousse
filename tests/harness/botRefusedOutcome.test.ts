@@ -92,9 +92,9 @@ describe('the shared checks pass a refusal back as the tool error', () => {
   })
 
   it('the skill tools pass an ask on rather than reading it as "not granted"', () => {
-    const base = runAuthority({ tools: [], asks: (call) => call.kind === 'app' && call.tool === 'load_skill' })
+    const base = runAuthority({ tools: [], asks: (call) => call.kind === 'app' && call.tool === 'skill_load' })
     const withSkill: BotAuthority = { ...base.authority, skills: new Set(['s1']) }
-    expect(botAppToolRefusal(withSkill, 'load_skill', { skill: 's1' })).toBe(ASKED)
+    expect(botAppToolRefusal(withSkill, 'skill_load', { skill: 's1' })).toBe(ASKED)
   })
 })
 
@@ -132,12 +132,12 @@ describe('the Mousse app-tool registry', () => {
     const run = await fx.runningRun('thread-a')
     const fake = fakeAppToolHost()
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
-    const { authority } = runAuthority({ tools: [], appTools: ['create_task'], asks: (call) => call.kind === 'app' && call.tool === 'ask_user' })
+    const { authority } = runAuthority({ tools: [], appTools: ['task_create'], asks: (call) => call.kind === 'app' && call.tool === 'thread_wait' })
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, bot: authority }))
     const ctx = () => request({ threadId: 'thread-a', runId: run.runId })
-    expect(await registry.call('ask_user', { questions: [] }, ctx())).toEqual(refused('not_granted', ASKED))
-    expect(fake.host.askUser).not.toHaveBeenCalled()
-    expect((await registry.call('create_task', { description: 'fine' }, ctx())).isError).toBe(false)
+    expect(await registry.call('task_status', { taskId: 'd1' }, ctx())).toEqual(refused('not_granted', ASKED))
+    expect(fake.host.delegation).not.toHaveBeenCalled()
+    expect((await registry.call('task_create', { description: 'fine' }, ctx())).isError).toBe(false)
     expect(fx.engine.getRun(run.runId)?.status).toBe('running')
   })
 })

@@ -64,6 +64,8 @@ export function classifyProviderFailure(error: unknown): AgentFallbackRetryCateg
   if (isAbortError(error)) return undefined
   // A plan usage limit is a rate limit whatever its message says (it names the window and the reset).
   if (error instanceof AppError && error.code === 'provider_usage_limit') return 'rate_limit'
+  // So is a ChatGPT app limit: the same model is not tried again, another provider may be.
+  if (error instanceof AppError && error.code === 'provider_app_limit') return 'rate_limit'
   const text = errorText(error).toLowerCase()
   if (/content[_\s-]?filter|safety|refused/.test(text)) return 'content_filter'
   if (/rate.?limit|too many requests|429/.test(text)) return 'rate_limit'

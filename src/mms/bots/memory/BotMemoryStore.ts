@@ -1412,7 +1412,7 @@ function scrubMessageChips(tx: BotStoreTx, botId: string, scrub: (chips: unknown
  * A forgotten question's bubble (`message_id`) or answer (`answer_message`), as copied elsewhere (issue #1123): the line
  * that carried the answer to its work (`answer_json.sent`, which names it exactly) goes from that work's dispatch prompts
  * and the journal rows captured from its thread, the rest of each left as it was; the chat's `question_answer` call that
- * passed the answer on goes, and with the bubble, the work's `ask_owner` call that asked it. Each is found by the
+ * passed the answer on goes, and with the bubble, the work's `question_ask` call that asked it (`ask_owner` before its rename). Each is found by the
  * question's id and its activation, never by how long its words are. A default's line (the bot went with its own choice)
  * quotes the question, so it goes with the bubble: work's from its thread, a chat question's from the chat turn it
  * queued (`sent.activationId`), its request included. An owner's late answer to a default wrote no such line, but the chat
@@ -1443,9 +1443,13 @@ function redactQuestionCopies(tx: BotStoreTx, has: (table: string) => boolean, b
   const redactCalls = (tool: string, where: string, ...params: string[]) =>
     tx.statement(`UPDATE bot_journal SET text = ?, keys = '', json = NULL, redacted_at = COALESCE(redacted_at, ?) WHERE bot_id = ? AND kind = 'tool_call' AND redacted_at IS NULL
       AND (json_extract(json, '$.tool') = ? OR substr(json_extract(json, '$.tool'), -length(?)) = ?) AND ${where}`).run(text, new Date().toISOString(), botId, tool, `__${tool}`, `__${tool}`, ...params)
-  if (question.answer_message === messageId) redactCalls('question_answer', "json_extract(json, '$.input.questionId') = ?", question.id)
+  // The relay of the answer: `request_answer` names the question `requestId`, its old name `question_answer` `questionId`.
+  if (question.answer_message === messageId) {
+    redactCalls('request_answer', "json_extract(json, '$.input.requestId') = ?", question.id)
+    redactCalls('question_answer', "json_extract(json, '$.input.questionId') = ?", question.id)
+  }
   const asked = parseJson(question.spec_json)?.question
-  if (question.message_id === messageId && typeof asked === 'string') redactCalls('ask_owner', "activation_id = ? AND json_extract(json, '$.input.question') = ?", question.activation_id, asked)
+  if (question.message_id === messageId && typeof asked === 'string') for (const tool of ['question_ask', 'ask_owner']) redactCalls(tool, "activation_id = ? AND json_extract(json, '$.input.question') = ?", question.activation_id, asked)
 }
 
 function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, text: string): void {

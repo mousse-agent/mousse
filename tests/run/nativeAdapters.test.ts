@@ -228,14 +228,14 @@ describe('ClaudeSubscriptionAdapter', () => {
     const sink = recordingSink()
     const turnHost = host({ prepareNativeContext: () => ({ messages: [], nativeHistory: 'compacted history' }) })
     const result = await new ClaudeSubscriptionAdapter(() => client).startTurn(
-      input({ mode: 'plan', cwd: null }),
+      input({ cwd: null }),
       sink,
       control('steer text'),
       turnHost
     )
     const chat = client.chat.mock.calls[0][0]
+    expect(chat).not.toHaveProperty('mode')
     expect(chat).toMatchObject({
-      mode: 'plan',
       threadId: 'thread-1',
       cwd: '/standalone/thread-1',
       model: 'sonnet',
@@ -410,6 +410,22 @@ describe('ClaudeSubscriptionAdapter', () => {
       expect(client.commitFailed).toHaveBeenCalledExactlyOnceWith('thread-1', 'history')
     })
 
+    it('says the session is kept only when the live process holds the failed turn, and a continuation carries the history as it is', async () => {
+      const seen: Array<string | undefined> = []
+      for (const holds of [true, false]) {
+        const client = { ...claudeClient(async (chatInput) => { seen.push(chatInput.history); throw new Error('boom') }), commitInterrupted: vi.fn(), commitFailed: vi.fn(() => holds) }
+        const kept = vi.fn()
+        await expect(
+          new ClaudeSubscriptionAdapter(() => client).startTurn(input({ nativeHistory: 'H1' }), { ...recordingSink(), sessionKept: kept }, control(), host({ nativeHistoryNow: () => 'H1 + request', prepareNativeContext: () => ({ messages: [], nativeHistory: 'compacted' }) }))
+        ).rejects.toThrow('boom')
+        expect(kept).toHaveBeenCalledTimes(holds ? 1 : 0)
+      }
+      const client = { ...claudeClient(async (chatInput) => { seen.push(chatInput.history); return 'done' }), commitFailed: vi.fn(() => false) }
+      await new ClaudeSubscriptionAdapter(() => client).startTurn(input({ nativeHistory: 'H1 + request', continuesFailedRequest: true }), recordingSink(), control(), host({ prepareNativeContext: () => ({ messages: [], nativeHistory: 'compacted' }) }))
+      // An ordinary turn may compact first; a continuation goes on at the boundary the live process holds.
+      expect(seen).toEqual(['compacted', 'compacted', 'H1 + request'])
+    })
+
     it('cannot fingerprint without the host\'s history or the service\'s support, and still rethrows the stop', async () => {
       const { stop, client } = stopped()
       await expect(
@@ -479,7 +495,7 @@ describe('AntigravityAdapter', () => {
     return { chat: vi.fn(chat), commitConversation: vi.fn(), configured: () => true } satisfies AntigravityClient
   }
 
-  it('declares sparse events, publishes no context and refuses plan mode or a missing workspace', async () => {
+  it('declares sparse events, publishes no context and refuses a missing workspace', async () => {
     const service = client(async () => 'never')
     const adapter = antigravityAdapter(() => service)
     expect(adapter.driver).toBe('antigravity')
@@ -487,9 +503,6 @@ describe('AntigravityAdapter', () => {
     expect(adapter.describe('m')).toEqual({ contextUsage: 'none' })
     expect(adapter.configured()).toBe(true)
     const turn = { instanceId: 'antigravity', llmProvider: 'antigravity', model: 'm' }
-    await expect(adapter.startTurn(input({ ...turn, mode: 'plan' }), recordingSink(), control(), host())).rejects.toThrow(
-      'Use Antigravity’s /plan command in a chat turn'
-    )
     await expect(adapter.startTurn(input({ ...turn, cwd: null }), recordingSink(), control(), host())).rejects.toThrow(
       'antigravity requires a project workspace'
     )

@@ -241,9 +241,9 @@ describe('budgets, deadlines and the owner writing', () => {
     const { workId } = await f.bots.tools.work.start(botId, asking.activation.id, { title: 'Flat hunt', brief: 'Find two flats.', key: 'w1' })
     await finish(f, asking.payload, 'completed', { text: 'On it.' })
     const work = await start(f, workId)
-    const askOwner = botTools(() => ({ host: f.bots.tools })).find((entry) => entry.name === 'ask_owner') as MousseTool
+    const askOwner = botTools(() => ({ host: f.bots.tools })).find((entry) => entry.name === 'question_ask') as MousseTool
     await askOwner.handler({ question: 'Which flat?', choices: ['Flat A', 'Flat B'] }, {
-      caller: { threadId: work.payload.threadId, runId: 'r', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+      caller: { threadId: work.payload.threadId, runId: 'r', provider: 'pi', accessLevel: 'lineage' },
       turn: { threadId: work.payload.threadId, bot: work.prepared.authority }, toolCallId: 'ask-1', signal: new AbortController().signal, transport: 'mcp'
     } as unknown as ToolCallContext)
     await finish(f, work.payload, 'completed', { text: 'I asked which flat.' })

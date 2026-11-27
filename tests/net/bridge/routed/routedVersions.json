@@ -360,8 +360,8 @@
     "security": "926c4af141d1208d"
   },
   "orchestrator.send": {
-    "version": 8,
-    "digest": "f0c64070d7cee134",
+    "version": 9,
+    "digest": "d5b152ba340d4c17",
     "security": "1447c39a3cdfbf97"
   },
   "orchestrator.sendAccepted": {
@@ -898,6 +898,11 @@
     "version": 1,
     "digest": "2a27f073e7829290",
     "security": "04f7c680ffd36337"
+  },
+  "threads.chainHold": {
+    "version": 1,
+    "digest": "17cfab93e54b5e6e",
+    "security": "926c4af141d1208d"
   },
   "threads.clearApprovalRules": {
     "version": 1,

@@ -49,7 +49,6 @@ export interface BotModelResolverDeps {
  * list as bot model choices. Each activation's own compiled policy is checked again when it resolves.
  */
 export const REPRESENTATIVE_BOT_POLICY: RunPolicy = Object.freeze({
-  mode: 'default',
   origin: 'bot',
   approvals: 'grants',
   approve: 'host',
@@ -163,7 +162,7 @@ export class BotModelChooser implements BotModelResolver {
   }
 
   /**
-   * What one piece of work may be asked to run on (`work_models`): the same choices as `pickable`, read once, and each
+   * What one piece of work may be asked to run on (`model_list`): the same choices as `pickable`, read once, and each
    * other entry of the owner's with why a bot's work can't run there. An entry with no model that can hold a bot is one
    * that can't hold one at all, unless it is off, signed out or not ready.
    */

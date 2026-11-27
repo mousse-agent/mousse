@@ -34,7 +34,7 @@ function requestKey(tool: string, args: Record<string, unknown>, ctx: ToolCallCo
   return `${threadOf(ctx)}:${tool}:${id}`
 }
 
-/** Runs a command: refused in a mode that runs none (Plan), as the agent's own shell is. */
+/** Runs a command: refused in a mode that runs none (a read-only mode), as the agent's own shell is. */
 function runsCommands(tool: string) {
   return (turn: AppToolTurn): true | string => (turn.modeFacts.readOnly ? `${tool} runs in the background, which this mode does not allow.` : true)
 }
@@ -55,7 +55,7 @@ function shown(view: MonitorView & { replayed?: true }): Record<string, unknown>
 /**
  * `monitor_start`, `background_run`, `background_stop` and `keep_working`: a thread's agent leaves something running
  * while it keeps working, and is told what it reports and when it ends (`ThreadMonitors`). Starting a script needs what
- * running a shell command needs: never in a read-only subagent or a Plan turn, and it asks first unless the permission
+ * running a shell command needs: never in a read-only subagent or a read-only mode, and it asks first unless the permission
  * mode is Full access (a WebSocket only reads, so any mode that allows edits starts one). Personal bots keep their own
  * `watch_start` and are not offered these.
  */

@@ -341,6 +341,23 @@ function isRecordValue(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Default names a Mousse version gave new entries and later replaced. An entry still saved under
+ * one shows the current default ("ChatGPT subscription 2" reads "Codex 2"); a name the person
+ * typed is kept as it is.
+ */
+const RETIRED_DEFAULT_NAMES: Partial<Record<ProviderDriverKind, { old: string; now: string }>> = {
+  codex: { old: 'ChatGPT subscription', now: 'Codex' }
+}
+
+/** `name` with a retired default replaced by the current one (`RETIRED_DEFAULT_NAMES`). */
+export function currentDefaultName(driver: string, name: string): string {
+  const retired = RETIRED_DEFAULT_NAMES[driver as ProviderDriverKind]
+  if (!retired) return name
+  const match = new RegExp(`^${retired.old}( \\d+)?$`).exec(name.trim())
+  return match ? `${retired.now}${match[1] ?? ''}` : name
+}
+
+/**
  * The name of a further entry of a provider: `<base> 2`, `<base> 3`, ..., the first number no entry is called yet
  * (names compared without case or surrounding spaces).
  */

@@ -1,6 +1,8 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ChevronDown, ChevronLeft, ChevronRight, X } from '../../lib/icons'
-import { modelLabel } from '../../../shared/modelChoice'
+import { findListedModel, modelLabel } from '../../../shared/modelChoice'
+import type { ModelPick } from '../../../shared/modelSelection'
+import { listingServes } from '../../../shared/providerInstances'
 import { resolveModelChoice } from '../../lib/modelChoice'
 import { describePermissionMode, narrowPermissionMode, PERMISSION_MODES, isStricter, type PermissionMode } from '../../../shared/permissionMode'
 import { TELL_ME_LABELS, type AutomationItem, type AutomationRun } from '../../../shared/automations'
@@ -15,7 +17,6 @@ import {
   heldPermissionMode,
   isUnchanged,
   loweredPermission,
-  modeChoices,
   patchOf,
   scheduleOf,
   showsWorkspace,
@@ -32,7 +33,8 @@ import { ownedWhenText, skippedDates, whenText, zoneName } from './automationTim
 import { missedText, runText } from './automationList'
 import { projectsOn, type ComputerChoice } from './computerChoice'
 import { isWorkflowPrompt } from '../../../shared/jobPermissionEdit'
-import { parseWhoKey, whoKey, whoName as nameOfWho, whoOptions, type AutomationLibrary, type Who } from './whoDo'
+import { SettingsModelPicker } from '../settings/SettingsModelPicker'
+import { severalEntries } from '../bots/BotRunsOn'
 import { BotFaceStill } from '../bots/face/BotFace'
 import { DeliveryLog, RequestFields, RequestSetup, type RequestApi } from './RequestTrigger'
 import { eventNouns, THREAD_EVENT_CHOICES, THREAD_EVENT_MIN_GAP_MS, threadEventChoice, threadEventText } from '../../../shared/threadEvents'
@@ -84,10 +86,13 @@ export function eventLogText(entry: ScheduledEventLogEntry, when: (iso: string) 
   }
 }
 
-/** The When row: "Every weekday at 9:00", "Every 30 minutes", "When you run it". */
-export function whenSentence(draft: JobDraft): string {
+/**
+ * The When row: "Every weekday at 9:00", "Every 30 minutes", "On request", "From the CLI · nightly", "When you run it".
+ * With no clock, what else starts it says it: a request URL (or a draft that is to take requests), else its CLI name.
+ */
+export function whenSentence(draft: JobDraft, starts: Pick<ScheduledJob, 'cliName' | 'draft'> & { trigger?: ScheduledJob['trigger'] } = {}): string {
   const schedule = scheduleOf(draft)
-  if (schedule.kind === 'manual') return 'When you run it'
+  if (schedule.kind === 'manual') return manualWhen(starts)
   if (schedule.kind === 'interval') {
     const minutes = schedule.minutes ?? 0
     if (minutes === 60) return 'Every hour'
@@ -106,6 +111,13 @@ export function whenSentence(draft: JobDraft): string {
     ? 'day'
     : days.join(',') === '1,2,3,4,5' ? 'weekday' : days.join(',') === '0,6' ? 'weekend day' : days.map((entry) => WEEKDAY_NAMES[entry]!.slice(0, days.length === 1 ? undefined : 3)).join(', ')
   return `Every ${day} at ${time}`
+}
+
+/** When, for an automation with no clock: on request, from the CLI, or when the person runs it. */
+export function manualWhen(job: Pick<ScheduledJob, 'cliName' | 'draft'> & { trigger?: ScheduledJob['trigger'] }): string {
+  if (job.trigger?.webhook || job.draft?.request) return 'On request'
+  if (job.cliName) return `From the CLI · ${job.cliName}`
+  return 'When you run it'
 }
 
 /** The glyph of a run in the Runs list. */
@@ -145,7 +157,6 @@ export function AutomationDetail({
   item,
   initial,
   catalog,
-  library,
   defaultName,
   profileId,
   viewerZone,
@@ -169,8 +180,6 @@ export function AutomationDetail({
   item?: AutomationItem
   initial: JobDraft
   catalog: ScheduledCatalog
-  /** The bots that may fill Who. */
-  library: AutomationLibrary
   /** The default agent's name. */
   defaultName: string
   profileId: string
@@ -200,7 +209,8 @@ export function AutomationDetail({
 }) {
   const [draft, setDraft] = useState<JobDraft>(initial)
   const [builderOpen, setBuilderOpen] = useState(false)
-  const [moreOpen, setMoreOpen] = useState(false)
+  // A draft that waits for its request URL opens on it: that is what keeps Turn on off.
+  const [moreOpen, setMoreOpen] = useState(Boolean(job.draft?.request && !job.trigger?.webhook && job.schedule.kind === 'manual'))
   const [whyOpen, setWhyOpen] = useState(false)
   const [allRuns, setAllRuns] = useState(false)
   const [cronForm, setCronForm] = useState<CronForm>(() => cronFormOf(initial.expr))
@@ -225,7 +235,7 @@ export function AutomationDetail({
   )
   const shown = attempted ? errors : {}
   const patch = (changes: Partial<JobDraft>) => { setDraft((current) => ({ ...current, ...changes })); setFailure(null) }
-  const unchanged = isUnchanged(patchOf(initial, draft, catalog))
+  const unchanged = isUnchanged(patchOf(initial, draft))
   const lowered = loweredPermission(draft, initial, catalog, job)
   const builderKind: BuilderKind = draft.scheduleKind === 'cron' ? cronForm : draft.scheduleKind
   const parts = cronParts(draft.expr)
@@ -294,21 +304,18 @@ export function AutomationDetail({
     ...(!threadLocked && draft.threadId && !projectThreads.some((thread) => thread.id === draft.threadId) ? [{ value: draft.threadId, label: 'Unknown thread' }] : []),
     ...projectThreads.map((thread) => ({ value: thread.id, label: thread.name }))
   ]
-  // Who: the default agent, a model or a saved agent. A model the lists no longer offer stays chosen until changed.
-  const who: Who = draft.agentId ? { kind: 'agent', id: draft.agentId } : draft.modelKey ? { kind: 'model', key: draft.modelKey } : { kind: 'default' }
-  const naming = { defaultName, models: catalog.models, library }
-  const staleModel = draft.staleSelection && draft.modelKey !== '' && !catalog.models.some((group) => group.choices.some((choice) => choice.key === draft.modelKey))
-    ? `${modelLabel(resolveModelChoice({ ...draft.staleSelection, provider: draft.staleSelection.llmProvider }))} (not available now)`
-    : undefined
+  // Who: the default agent, a model at a reasoning level, or a saved agent, in the app's model picker. A model the lists
+  // no longer offer stays chosen until changed.
+  const selection = draft.agentId ? null : draft.selection
+  const listing = selection ? catalog.providers.find((provider) => listingServes(provider, selection)) : undefined
+  const listedModel = selection && listing ? findListedModel(listing.models, selection.model) : undefined
+  const selectionName = selection ? modelLabel(resolveModelChoice({ ...selection, provider: selection.llmProvider }, catalog.providers)) : ''
   // A saved agent an automation was made with before saved agents were removed keeps its name until it is changed.
   const savedAgentName = draft.agentId ? (draft.agentId === initial.agentId && item?.who.kind === 'saved_agent' ? item.who.name : 'Saved agent') : undefined
-  const whoLabel = staleModel ?? savedAgentName ?? nameOfWho(who, naming)
-  const whoChoices = whoOptions({ ...naming, withBots: false, current: { key: whoKey(who), label: whoLabel } })
-  const chooseWho = (key: string) => {
-    const next = parseWhoKey(key)
-    if (next.kind === 'agent') patch({ agentId: next.id, modelKey: '' })
-    else if (next.kind === 'model') patch({ agentId: '', modelKey: next.key })
-    else patch({ agentId: '', modelKey: '' })
+  const whoLabel = savedAgentName ?? (selection ? `${selectionName}${listedModel ? '' : ' (not available now)'}` : defaultName)
+  const chooseModel = (llmProvider: string, pick: ModelPick, instanceId?: string) => {
+    const name = catalog.providers.find((provider) => listingServes(provider, { instanceId, llmProvider }))?.models.find((model) => model.id === pick.model)?.label
+    patch({ agentId: '', selection: { ...(instanceId ? { instanceId } : {}), llmProvider, model: pick.model, ...(pick.effort ? { effort: pick.effort } : {}), ...(name ? { name } : {}) } })
   }
 
   // May: the effective mode a run gets, from what is chosen here, held to what the person holds.
@@ -323,7 +330,7 @@ export function AutomationDetail({
 
   // Next and why.
   const savedSchedule = scheduleOf(draft)
-  const scheduleChanged = Boolean(patchOf(initial, draft, catalog).schedule)
+  const scheduleChanged = Boolean(patchOf(initial, draft).schedule)
   const next = !scheduleChanged && !paused && job.nextRunAt ? job.nextRunAt : null
   const skipped = whyOpen ? skippedDates(savedSchedule, now) : []
   const code = scheduleCode(savedSchedule)
@@ -444,7 +451,7 @@ export function AutomationDetail({
               onClick={() => setBuilderOpen((open) => !open)}
               data-testid="automation-when"
             >
-              <span className="ui-select-value" id={id('when-value')}>{whenSentence(draft)}</span>
+              <span className="ui-select-value" id={id('when-value')}>{whenSentence(draft, job)}</span>
               <ChevronDown size={14} strokeWidth={2} className="ui-select-chevron" aria-hidden="true" />
             </button>
           )}
@@ -461,15 +468,22 @@ export function AutomationDetail({
           ) : remoteNode ? (
             <span className="automation-form-value" data-testid="automation-who" title={`Who does it is picked on ${owner.name}`}>{item?.who.name ?? whoLabel}</span>
           ) : (
-            <Select
-              ariaLabelledBy={id('who-label')}
-              className="automation-field-select"
-              value={whoKey(who)}
-              options={whoChoices}
-              title="Who does it"
-              renderValue={() => <span data-testid="automation-who">{whoLabel}</span>}
-              onChange={chooseWho}
-            />
+            <span className="automation-who-picker" data-testid="automation-who">
+              <SettingsModelPicker
+                ariaLabel="Who"
+                providers={catalog.providers}
+                providerId={listedModel && listing ? listing.id : ''}
+                instanceId={listedModel ? selection?.instanceId : undefined}
+                modelId={listedModel?.id ?? ''}
+                effort={listedModel ? selection?.effort : undefined}
+                placeholder={whoLabel}
+                title={listedModel ? undefined : whoLabel}
+                entry={listedModel && listing && severalEntries(catalog.providers) ? listing.label : undefined}
+                onSelect={chooseModel}
+                // The default agent is the picker's no-model choice, at the right of its footer.
+                clear={{ label: defaultName, title: 'Your default agent does it', active: !draft.agentId && !draft.selection, onClear: () => patch({ agentId: '', selection: null }) }}
+              />
+            </span>
           )}
         </FormRow>
 
@@ -492,7 +506,7 @@ export function AutomationDetail({
 
         <FormRow label="Task" htmlFor={id('prompt')} wide extra={
           <>
-            {job.trigger?.webhook ? <RequestFields prompt={draft.prompt} promptRef={promptRef} onChange={(prompt) => patch({ prompt })} /> : null}
+            {(job.trigger?.webhook || job.draft?.request) ? <RequestFields prompt={draft.prompt} promptRef={promptRef} onChange={(prompt) => patch({ prompt })} /> : null}
             {fieldError('prompt')}
           </>
         }>
@@ -554,7 +568,7 @@ export function AutomationDetail({
               ? job.resumeAt ? `Paused until ${ownedWhenText(job.resumeAt, now, owner, viewerZone)}` : item?.pausedBy === 'bot' ? `${item.pausedReason ?? 'Paused'} · the bot is paused` : 'Paused'
               : wakesOn
                 ? events?.heldUntil ? `Held until ${ownedWhenText(events.heldUntil, now, owner, viewerZone)}` : events && !events.watching ? 'Not watching. Resume to watch again.' : `When ${threadEventText(wakesOn.number, wakesOn.events)}`
-              : scheduleChanged ? 'Shown after Save' : next ? ownedWhenText(next, now, owner, viewerZone) : savedSchedule.kind === 'manual' ? 'When you run it' : 'None'}
+              : scheduleChanged ? 'Shown after Save' : next ? ownedWhenText(next, now, owner, viewerZone) : savedSchedule.kind === 'manual' ? manualWhen(job) : 'None'}
           </span>
           <button type="button" className="scheduled-link-btn automation-form-link" aria-expanded={whyOpen} onClick={() => setWhyOpen((open) => !open)} data-testid="automation-why">Why?</button>
         </FormRow>
@@ -588,7 +602,7 @@ export function AutomationDetail({
       <button type="button" className="scheduled-disclosure automation-form-more" aria-expanded={moreOpen} aria-controls={id('more')} onClick={() => setMoreOpen((open) => !open)} data-testid="automation-more">
         <ChevronRight size={13} aria-hidden="true" className="scheduled-disclosure-chevron" />
         More
-        <span className="automation-more-hint">{bot ? 'name · request URL · added by' : 'name · thread · mode · keys · request URL'}</span>
+        <span className="automation-more-hint">{bot ? 'name · request URL · added by' : 'name · thread · keys · request URL'}</span>
       </button>
 
       {moreOpen ? (
@@ -613,7 +627,7 @@ export function AutomationDetail({
                   </div>
                 ) : null}
                 {fieldError('worktreePath')}
-                {draft.workspaceKind === 'project' && draft.mode !== 'plan' ? <p className="scheduled-note warn" data-testid="workspace-warning">{PROJECT_WORKSPACE_WARNING}</p> : null}
+                {draft.workspaceKind === 'project' ? <p className="scheduled-note warn" data-testid="workspace-warning">{PROJECT_WORKSPACE_WARNING}</p> : null}
               </>
             }>
               <Select<WorkspaceKind>
@@ -625,10 +639,6 @@ export function AutomationDetail({
               />
             </FormRow>
           ) : draft.threadId ? <FormRow label="Runs in"><span className="automation-form-value">The thread's own workspace</span></FormRow> : null}
-
-          <FormRow label="Mode" htmlFor={id('mode')}>
-            <Select<JobDraft['mode']> id={id('mode')} className="automation-field-select" value={draft.mode} options={modeChoices(draft)} onChange={(mode) => patch({ mode })} />
-          </FormRow>
 
           {remoteNode ? null : (
             <FormRow label="Keys" testId="keys-row" wide>

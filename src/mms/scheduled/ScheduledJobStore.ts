@@ -143,7 +143,7 @@ export interface ScheduledRunProbe {
 
 /** Fields of a run record the runner knows once the occurrence has a thread and a run. */
 export type ScheduledRunDetails = Partial<
-  Pick<ScheduledJobRunRecord, 'threadId' | 'runId' | 'queueItemId' | 'selection' | 'mode' | 'permissionMode' | 'workspace' | 'missingPlaceholders' | 'agent' | 'missingKey'>
+  Pick<ScheduledJobRunRecord, 'threadId' | 'runId' | 'queueItemId' | 'selection' | 'permissionMode' | 'workspace' | 'missingPlaceholders' | 'agent' | 'missingKey'>
 >
 
 export function scheduledReceiptId(jobId: string, occurrenceKey: string): string {
@@ -632,7 +632,6 @@ export class ScheduledJobStore {
       selection: input.selection,
       ...(input.agent && !isWorkflowPrompt(input.prompt) ? { agent: { definitionId: input.agent.definitionId } } : {}),
       ...(input.bot ? { bot: { botId: input.bot.botId, scheduleId: input.bot.scheduleId, createdBy: input.bot.createdBy, ...(input.bot.ownerAsked !== undefined ? { ownerAsked: input.bot.ownerAsked } : {}), ...(input.bot.say !== undefined ? { say: input.bot.say } : {}), ...(input.bot.model ? { model: input.bot.model } : {}), ...(input.bot.model && input.bot.pick ? { pick: input.bot.pick } : {}) } } : {}),
-      mode: input.mode,
       workspace: input.workspace,
       permissionMode,
       permissionCeiling,

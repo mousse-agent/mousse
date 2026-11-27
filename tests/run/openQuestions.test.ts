@@ -1,7 +1,7 @@
 /**
- * Questions an agent asks without waiting (`ask_user` with `wait: false`, issue #1372), end to end: a real
+ * Questions an agent asks without waiting (`question_ask` with `wait: false`, issue #1372), end to end: a real
  * `OrchestratorService`, Run Engine and effect worker, with a provider stand-in shaped like Claude Code (it steers by
- * restarting its reply, and takes steers while its turn runs). The question is asked through the `ask_user` tool's
+ * restarting its reply, and takes steers while its turn runs). The question is asked through the `question_ask` tool's
  * own host call, answered the way every client answers (`settle`, or the protocol handler a linked phone and another
  * computer reach), and delivered by the reconciler, as in the app.
  *
@@ -100,7 +100,7 @@ class SteeringAdapter implements ProviderAdapter {
   }
 }
 
-describe('a question asked without waiting (ask_user wait: false)', () => {
+describe('a question asked without waiting (question_ask wait: false)', () => {
   let home: string | undefined
   let previousHome: string | undefined
   const daemons: Phase6Daemon[] = []
@@ -133,7 +133,7 @@ describe('a question asked without waiting (ask_user wait: false)', () => {
     d.orch.setThreadModelOverride(thread.id, MODEL)
     let sends = 0
     const send = (text: string) => d.orch.send(text, false, { threadId: thread.id, clientRequestId: `send-${++sends}`, awaitMode: 'ack' })
-    /** `ask_user` with `wait: false`, through the host call the tool makes. */
+    /** `question_ask` with `wait: false`, through the host call the tool makes. */
     const ask = (questions = BADGE, runId: string | null = d.engine.getActiveRun(thread.id)?.runId ?? null) => d.orch.mcpToolHost().askWithoutWaiting!(thread.id, questions, runId)
     const messages = (daemon = d): ChatMessage[] => daemon.orch.getOrCreateSession(thread.id).messages
     /** The messages that deliver answers, as the transcript keeps them. */

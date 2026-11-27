@@ -22,7 +22,7 @@ import { sessionMcpServers } from './mcp'
 import { mousseServerToolOf } from '../../run/mcp/attachment'
 import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
-import { AGENT_DEFAULT_MODEL, agentModels, agentModes, mergeModelOptions, modelOptions, planModeId, thoughtConfigOption, type ModelControl, type ThoughtConfig } from './models'
+import { AGENT_DEFAULT_MODEL, agentModels, agentModes, mergeModelOptions, modelOptions, thoughtConfigOption, type ModelControl, type ThoughtConfig } from './models'
 import {
   answerPermission,
   classifyGenericOption,
@@ -30,6 +30,7 @@ import {
   readWorkspaceFile,
   writeWorkspaceFile,
   type AcpRequestScope,
+  type AllowsUnasked,
   type ClassifyOption,
   type PermissionPrompter
 } from './permissions'
@@ -589,8 +590,6 @@ export interface AcpChatInput {
   instanceId?: string
   cwd: string
   model: string
-  /** `plan`: the session runs in the agent's plan mode (only where the agent offers one). */
-  mode?: 'default' | 'plan'
   /**
    * The thread's permission mode for this turn: whether `session/request_permission` and client
    * file writes are answered without asking. Absent asks about everything.
@@ -674,6 +673,11 @@ export interface AcpSessionsOptions {
   quirks: AcpQuirks
   /** How permission options are labelled and which are shown (default: the generic classes). */
   classifyOption?: ClassifyOption
+  /**
+   * Requests Mousse answers with the agent's allow-once option without asking anyone, in any mode and origin: an agent
+   * that asks before every tool (Grok's held launch) still reads its folder as Claude Code and Codex do, unasked.
+   */
+  allowsUnasked?: AllowsUnasked
   /** Who answers permission requests (default: the thread's questions). */
   prompter?: PermissionPrompter
   /** `_meta` sent with `initialize`. */
@@ -1196,6 +1200,12 @@ export class AcpSessions {
           if (answer.outcome.outcome === 'cancelled') active.cancelRequested = true
           return answer
         }
+        // A read confined to the turn's folder goes ahead unasked, as Claude Code's and Codex's do; a run that refuses
+        // approvals refuses it too.
+        if (scope.cwd && scope.approvals !== 'never' && !scope.aborted() && this.options.allowsUnasked?.(request, scope.cwd)) {
+          const allow = request.options.map(classify).find((option) => option?.kind === 'allow_once')
+          if (allow) return { outcome: { outcome: 'selected', optionId: allow.optionId } }
+        }
         // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
         const callId = request.toolCall?.toolCallId
         const awaiting = callId ? active?.turnToolAwaiting : undefined
@@ -1417,6 +1427,19 @@ export class AcpSessions {
       signal?.removeEventListener('abort', abort)
       this.close(active)
     }
+  }
+
+  /**
+   * A saved session that an older build left in the agent's own plan mode (named `plan` or `architect`) goes back to
+   * the agent's default mode, so its turns run as they would in a new session.
+   */
+  private async leaveAgentPlanMode(active: AcpProcess): Promise<void> {
+    const current = active.currentModeId
+    if (!current || !active.defaultModeId || current === active.defaultModeId) return
+    const mode = (active.modes ?? []).find((entry) => entry.id === current)
+    if (!/^(plan|architect)$/i.test(current) && !(mode && /^(plan|architect)$/i.test(mode.name))) return
+    await active.connection.agent.request(methods.agent.session.setMode, { sessionId: active.sessionId!, modeId: active.defaultModeId })
+    active.currentModeId = active.defaultModeId
   }
 
   /**
@@ -1668,22 +1691,6 @@ export class AcpSessions {
     }
   }
 
-  /** Puts the session in the agent's plan mode for a plan turn, and back for a normal one. */
-  private async selectMode(active: AcpProcess, mode: AcpChatInput['mode']): Promise<void> {
-    const plan = planModeId(active.modes ?? [])
-    if (mode === 'plan') {
-      if (!plan) throw new Error(`${this.options.label} has no plan mode`)
-      if (active.currentModeId === plan) return
-      await active.connection.agent.request(methods.agent.session.setMode, { sessionId: active.sessionId!, modeId: plan })
-      active.currentModeId = plan
-      return
-    }
-    if (plan && active.currentModeId === plan && active.defaultModeId && active.defaultModeId !== plan) {
-      await active.connection.agent.request(methods.agent.session.setMode, { sessionId: active.sessionId!, modeId: active.defaultModeId })
-      active.currentModeId = active.defaultModeId
-    }
-  }
-
   /**
    * `mcp` attaches the Mousse MCP server to the ACP session (SPEC §15.2) and `orchestrationInstructions`
    * goes into the session's first prompt. The token is stable per thread, so a live session is reused
@@ -1845,7 +1852,7 @@ export class AcpSessions {
       clearTimeout(silenceTimer)
       silenceTimer = undefined
       if (!prompting || !(silenceMs > 0) || (current.openRequests ?? 0) > 0) return
-      // Mousse's own tools (`ask_user`, approvals) ask the user through the thread's
+      // Mousse's own tools (`question_ask`, approvals) ask the user through the thread's
       // questions, not through the ACP connection, and may wait up to an hour: the agent is not
       // silent while one is open. The clock starts over (a full window) once the last one is answered.
       if (questions.listPendingForThread(input.threadId).length > 0) {
@@ -2127,7 +2134,7 @@ export class AcpSessions {
       input.onSession?.(active.sessionId)
       if (!claimedContinuation) {
         await this.selectModel(active, input.model)
-        if (!quirks.modelConfigId) await this.selectMode(active, input.mode)
+        if (!quirks.modelConfigId) await this.leaveAgentPlanMode(active)
       }
       input.signal?.throwIfAborted()
       const imageBlocks = (input.images ?? []).map((image) => {

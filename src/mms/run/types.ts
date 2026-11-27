@@ -1,6 +1,7 @@
 import type { ExecutionBinding } from '../../shared/harness/types'
 import type { AgentAccessLevel } from '../../shared/settings'
 import type { PermissionMode } from '../../shared/permissionMode'
+import type { BotLook } from '../../shared/bots/personal/look'
 export type RunStatus =
   | 'queued'
   | 'starting'
@@ -69,7 +70,7 @@ export interface RunOutcome {
   usageLimitKind?: string
   /**
    * `bot_wall`: a personal bot's dispatch ended at a wall (PR 6 §5); the run engine never retries it.
-   * `agent`: another thread's agent stopped the run (`thread_interrupt`); it settles as a user's Stop does (`stoppedByPerson`).
+   * `agent`: another thread's agent stopped the run (`thread_stop`); it settles as a user's Stop does (`stoppedByPerson`).
    */
   interruptedBy?: 'user' | 'agent' | 'daemon_restart' | 'provider' | 'bot_wall'
   uncertainReason?: string
@@ -82,6 +83,12 @@ export interface RunOutcome {
    */
   sentByAgent?: true
   agentHops?: number
+  /**
+   * The chain of agent messages this run belongs to (`AgentChains`): the chain of the agent message that started it, or
+   * of the run it carries on (a wake, a settle notice, a provider's continuation, a resume, a subagent's task). Absent on
+   * a run a person or a schedule started: it starts a chain of its own (`chainIdOf`).
+   */
+  agentChain?: string
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
   continuationOf?: string
   /** Set while the run is `paused`, and kept after the pause ended. */
@@ -386,8 +393,6 @@ export interface DelegationRecord {
   result: DelegationResult | null
   createdAt: string
   completedAt: string | null
-  /** The most the child may do (SPEC §15.1); null when the delegation set none. */
-  modeCeiling: ModeCeiling | null
   /**
    * The agent access level the delegation passes to its child (SPEC §15.1): the caller's effective
    * level when it started the task. Null on rows from before version 11, which read as `lineage`.
@@ -417,12 +422,6 @@ export interface BotDelegation {
 export type DelegationWorkspace = 'isolated' | 'shared'
 
 /**
- * What a run's Mousse MCP credential may do (SPEC §15.1): `plan` is read-only planning (no
- * writes, no integration, children stay `plan`); `default` is the thread's ordinary authority.
- */
-export type ModeCeiling = 'plan' | 'default'
-
-/**
  * The agent behind a change to another thread (SPEC §15.1): the thread and run that called the tool
  * and the tool call itself. Recorded in the `agent.action` event on the thread that was changed.
  */
@@ -433,6 +432,8 @@ export interface AgentActor {
   toolCallId: string
   /** How many agent messages in a row led to this one (the sender's own count plus one); set by the thread owner. */
   hops?: number
+  /** The chain of agent messages it belongs to (`AgentChains`); set by the thread owner for a sender on this computer. */
+  chain?: string
   /**
    * Set when the agent is on another of the user's computers (a routed call marked as an agent's): `threadId` and `runId`
    * are then its ids on that computer, and nothing about the sender is looked up here. `node` is the calling computer
@@ -440,7 +441,14 @@ export interface AgentActor {
    * cleaned title, and `mode` the most the sender may do here: the narrowest of the mode it carried and the limit this
    * computer set for that device. `hops` is already the owner's own count (the larger of the carried count and its own).
    */
-  remote?: { node: string; computer: string; title: string; mode: PermissionMode }
+  remote?: {
+    node: string
+    computer: string
+    title: string
+    mode: PermissionMode
+    /** The calling computer's personal bot that sent it (`ROUTED_AGENT_BOT_KEY`), cleaned: shown on its message, never trusted. */
+    bot?: { id: string; name: string; look: BotLook }
+  }
 }
 
 /** `pr_update` is no longer written (see `isRetiredInboxRow`). */
@@ -523,8 +531,8 @@ export interface AgentNotePayload {
   senderThreadId: string
   senderRunId: string
   senderTitle: string | null
-  /** What the sender may do, for the label: a read-only subagent, a Plan ceiling, or an agent that may change files. */
-  senderAccess: 'read_only' | 'plan' | 'agent'
+  /** What the sender may do, for the label: a read-only subagent, or an agent that may change files. */
+  senderAccess: 'read_only' | 'agent'
   /**
    * Who the sender is to the receiver; `bot` is the owner's personal bot that started the receiving thread. `person`: a
    * person's correction to an ancestor, relayed down its tree (`treeCorrection.ts`); the sender is that ancestor, and
