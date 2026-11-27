@@ -15,7 +15,7 @@ One pass, then merge. A review catches a wrong intended case before it ships; it
 | 3 | The author reads the full diff after the tests pass, as if someone else wrote it. |
 | 4 and 5 | One reviewer that did not write the code: a subagent with fresh context, or a teammate. |
 
-One reviewer, not a panel. Several reviewers only when the human asks for them.
+One reviewer, not a panel. Two reviewers only as a [council](../council/SKILL.md), which the human agrees to first.
 
 ## Asking for a review
 

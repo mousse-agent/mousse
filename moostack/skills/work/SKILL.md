@@ -27,7 +27,7 @@ Run each tier's checks once. Interactive UI logic still runs its tests; screensh
 2. Decide: local-only (testing or combining existing PRs, conflict resolution for a trial, experiments) or shared (a durable change meant to ship). Local-only work creates no issue, PR, push or GitHub update unless asked; follow [local-only](local-only.md). The policy's "Decide what needs tracking" has the full rules.
 3. Once per task, and again when resuming later: `node scripts/team-status.mjs --fetch`. Do not switch, stash or commit unrelated work; use a worktree (`git worktree list` first, reuse the task's).
 4. After a context reset or when resuming, run `node scripts/task-notes.mjs show`. It lists tier, related-work verdict, claim, tested results with the commands run, and PR. Reuse a tested result only when `show` calls it current, meaning the working-tree fingerprint (the exact file contents, not just the commit) matches; "NOT VERIFIED" means the files changed since, so rerun `verify.mjs`. Do not rerun checks it records as current.
-5. Work that will not fit one PR is planned with [slice](../slice/SKILL.md) before any of it starts. Handing part of a task to a subagent: [subagents](subagents.md).
+5. Work that will not fit one PR is planned with [slice](../slice/SKILL.md) before any of it starts, and a new subsystem with [design](../design/SKILL.md) before that. Handing part of a task to a subagent: [subagents](subagents.md).
 
 ## Shared work: check, claim, branch
 

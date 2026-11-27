@@ -12,8 +12,10 @@
 - For authorized implementation or resuming implementation, read and follow `moostack/skills/work/SKILL.md` before editing. Discussion, planning, reviews, and diagnosis alone do not authorize implementation or GitHub writes.
 - Reviews, audits, and diagnosis read the latest remote default branch. Run `git fetch` first; if the checkout is behind, read a detached worktree at the remote default branch instead, or state how many commits behind the reviewed code is. A finding about code the default branch has already changed or removed is not a finding.
 - Before presenting a final plan or starting a substantial implementation, read and follow `moostack/skills/check-related-work/SKILL.md`. It only reads issues, PRs and branches.
+- Before planning a new subsystem, a replacement for one, or a change to how parts of the system talk to each other, read and follow `moostack/skills/design/SKILL.md`. It ends in a design document and a decision, then hands to `slice`.
 - Before starting work that will not fit one PR, read and follow `moostack/skills/slice/SKILL.md`. It plans slices that each merge on their own.
 - When reviewing a PR, diff or plan, asking for a review, or answering review findings, read and follow `moostack/skills/review/SKILL.md`. One pass; a re-check reads only the fix.
+- A council (two independent reviewers) runs only after the human agrees to it, for heavy core changes: `moostack/skills/council/SKILL.md`. Never start one on your own judgment.
 - When asked for a retro, or why work took so long, read and follow `moostack/skills/retro/SKILL.md`.
 - Before writing or changing tests for a feature or fix, and when reviewing a PR's tests, read and follow `moostack/skills/test-the-claim/SKILL.md`. It decides what to test, at which level, and what not to write.
 - When asked to build, publish or install a nightly, read and follow `moostack/skills/nightly-build-release/SKILL.md`. It keeps fixing failures until a nightly is published.
