@@ -4692,8 +4692,10 @@ it('E1 restart tells the run an uncertain automatic outcome, finishes, and admit
   f.clock.now += 60_000
   const id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
   const turn = await start(f, id)
-  vi.mocked(t.manager.callTool).mockImplementationOnce(() => new Promise(() => {}))
-  void callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'interrupted', signal: new AbortController().signal })
+  // The send that was in flight when Mousse stopped: settled once the restart has judged it, before the fixture closes.
+  let late!: (value: unknown) => void
+  vi.mocked(t.manager.callTool).mockImplementationOnce(() => new Promise(resolve => { late = resolve }))
+  const inFlight = callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'interrupted', signal: new AbortController().signal })
   await flush()
   const action = f.bots.actions.forWork(id)!
   expect(action.status).toBe('running')
@@ -4707,6 +4709,10 @@ it('E1 restart tells the run an uncertain automatic outcome, finishes, and admit
   expect(f.store.activation(id)?.status).toBe('done')
   expect(f.store.message(action.message_id)).toBeUndefined()
   expect((await aloneNext(t)).action.status).toBe('done')
+  // Its result arriving after the restart changes nothing: the run was already told it is uncertain.
+  late({ content: [{ type: 'text', text: 'delivered late' }] })
+  await inFlight
+  expect(f.bots.actions.get(action.id)?.status).toBe('uncertain')
 })
 it('E1 an uncertain automatic call gets a card under a new call id in the same run', async () => {
   const t = await aloneAsk()
@@ -4933,12 +4939,16 @@ it.each(['restart', 'same-run', 'sent-card'] as const)('E1 r2 uncertain target r
     f.clock.now += 60_000
     id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
     turn = await start(f, id)
-    vi.mocked(t.manager.callTool).mockImplementationOnce(afterSend(() => new Promise(() => {})))
-    void callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'r2-interrupted', signal: new AbortController().signal })
+    // The send in flight when Mousse stopped: settled once the restart has judged it, before the fixture closes.
+    let late!: (value: unknown) => void
+    vi.mocked(t.manager.callTool).mockImplementationOnce(afterSend(() => new Promise(resolve => { late = resolve })))
+    const inFlight = callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'r2-interrupted', signal: new AbortController().signal })
     await flush()
     f.runs.markTerminal(turn.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     f.bots.close(); f.bots = new BotEngine(f.host)
     await f.bots.reconcileOnStartup(); await flush()
+    late({ content: [{ type: 'text', text: 'delivered late' }] })
+    await inFlight
     turn = await start(f, id, 2)
   } else {
     vi.mocked(t.manager.callTool).mockImplementationOnce(afterSend(() => { throw new Error('Connection closed after dispatch') }))
