@@ -9,6 +9,7 @@ import { withHiddenBots } from './botReach'
 import type { BotsSharingPort } from '../../protocol/botsSharingPort'
 import type { BotReachPort } from '../../protocol/botReachPort'
 import { copyLimits } from '../copyLimits'
+import { TurnMarks, type ListsMarks, type TurnMarksServices } from './turnMarks'
 
 /**
  * The reserved display "thread" that carries a computer's sidebar lists. Real thread ids never
@@ -133,6 +134,8 @@ export interface ListsSnapshot {
   >
   /** Threads that are not idle, by id. */
   status: Record<string, ListsStatus>
+  /** Only in a private lists stream: how this computer announces each thread's status (`ListsMarks`), by id. */
+  marks?: Record<string, ListsMarks>
   chats: ListsChat[]
   /** Oldest first; empty when the profile's bots are unavailable or this computer does not share them. */
   bots: ListsBot[]
@@ -159,6 +162,8 @@ export type ListsServices = Pick<
   botsSharing?: BotsSharingPort
   /** Which devices reach which bot: the lists of one device carry only the bots it reaches. */
   botReach?: BotReachPort
+  /** Whether a thread waits on a secret, which only the owner types: such a wait is never the bot's (`ListsMarks`). */
+  secretRequests?: TurnMarksServices['secretRequests']
 }
 
 interface Emitter {
@@ -275,6 +280,7 @@ export class MmsListsSource {
   ) {}
 
   private chats: ListsChat[] | undefined
+  private readonly turnMarks = new TurnMarks()
   private chatsStale = true
   private bots: ListsBot[] | undefined
   private botsStale = true
@@ -338,8 +344,10 @@ export class MmsListsSource {
     const hidden = new Set(own ? [] : inventory.filter((thread) => thread.hidden).map((thread) => thread.id))
     const listed = (thread: Thread) => !hidden.has(thread.id) && !(thread.lineage && hidden.has(thread.lineage.rootThreadId))
     const threads = own ? inventory : visibleThreads(inventory).filter(listed)
-    const snapshot = this.build(s, inventory, threads, own, activity, turns, chats, bots)
-    return own ? this.trimmed(snapshot, inventory) : snapshot
+    const built = this.build(s, inventory, threads, own, activity, turns, chats, bots)
+    if (!own) return built
+    const marks = this.turnMarks.of(s, threads, activity, turns)
+    return this.trimmed(Object.keys(marks).length ? { ...built, marks } : built, inventory)
   }
 
   /**
@@ -526,6 +534,11 @@ export class MmsListsSource {
     ])
       on(s.orchestrator as unknown as Emitter, event)
     on(s.threadRuntimes as unknown as Emitter, 'activity')
+    // Read as each status changes: whether a turn is scheduled is known only while it runs.
+    const runtimes = s.threadRuntimes as unknown as Emitter
+    const noteTurn = (payload: unknown): void => this.turnMarks.note(s, payload)
+    runtimes.on('activity', noteTurn)
+    disposers.push(() => runtimes.off('activity', noteTurn))
     on(s.questions as unknown as Emitter, 'pending')
     on(s.questions as unknown as Emitter, 'cleared')
     const chatsChanged = (): void => {

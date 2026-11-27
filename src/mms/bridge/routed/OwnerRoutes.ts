@@ -5,6 +5,7 @@ import { isAbsolute, win32 } from 'node:path'
 import { NetError, isBlobId, isId, type NodeId, type RpcArtifactRef } from '../../../shared/net'
 import type { NodeCapability } from '../../../shared/net'
 import {
+  ROUTED_AGENT_BOT_KEY,
   ROUTED_AGENT_KEY,
   ROUTED_FORBIDDEN_KEYS,
   ROUTED_JOB_METHODS,
@@ -66,7 +67,7 @@ import type { RoutedStaging } from './staging'
 import { RoutedTerminals, type TerminalClaim } from './terminals'
 import { withHiddenBots } from '../remote/botReach'
 import { withLegacySettledAtIn } from '../../../shared/archivedAt'
-import { parseRoutedAgentMark, RemoteAgentCalls, type RemoteAgentCall } from './remoteAgent'
+import { parseRoutedAgentBot, parseRoutedAgentMark, RemoteAgentCalls, type RemoteAgentCall } from './remoteAgent'
 
 /** Ids are text of this length at most, as in the protocol handlers. */
 const ID_MAX = 256
@@ -223,6 +224,11 @@ export function validateRoutedParams(
   // The agent mark's shape is checked with the call's, before the ledger: a malformed mark is a bad request, never a
   // call whose outcome is unknown.
   if (value[ROUTED_AGENT_KEY] !== undefined) parseRoutedAgentMark(value[ROUTED_AGENT_KEY])
+  // The bot behind an agent's message comes only with the mark: a person's call never names one.
+  if (value[ROUTED_AGENT_BOT_KEY] !== undefined) {
+    if (value[ROUTED_AGENT_KEY] === undefined) throw new NetError('bad_request', `${ROUTED_AGENT_BOT_KEY} comes only with ${ROUTED_AGENT_KEY}.`)
+    parseRoutedAgentBot(value[ROUTED_AGENT_BOT_KEY])
+  }
   const threadKey = row.threadIds?.[0] ?? 'threadId'
   switch (row.target) {
     case 'thread':
