@@ -359,17 +359,17 @@ const AGENT_REACH_WORDS: Record<AgentReach, string> = { none: 'none', launched: 
 
 /**
  * What this computer lets `device` do here, from what it knows: connected here, the block, the grant, this computer's
- * own switches ("Let my other devices work here", Share bots) and the device's switches. A phone keeps the phone API.
+ * own switch ("Let my other devices work here") and the device's switches. A phone keeps the phone API.
  * A string says why it may do nothing; undefined for a daemon that sends no policy.
  */
-export function accessHere(device: Device, switches: { workOnThreads: boolean; shareBots: boolean }): DeviceAccess | 'not_connected' | 'blocked' | undefined {
+export function accessHere(device: Device, switches: { workOnThreads: boolean }): DeviceAccess | 'not_connected' | 'blocked' | undefined {
   const policy = device.policy
   if (!policy) return undefined
   if (!connectedHere(device)) return 'not_connected'
   if (policy.blocked) return 'blocked'
   // Each item also needs the signed grant its calls check: reads need read, sends chat, terminals write.
   const has = (cap: NodeCapability) => device.caps.includes(cap)
-  const bots = has('read') && policy.bots !== false && switches.shareBots
+  const bots = has('read') && policy.bots !== false
   if (!isComputer(device)) {
     const threads = device.caps.includes('read')
     return { threads, work: threads && device.caps.includes('write') && policy.work !== false, terminal: false, editor: false, bots }

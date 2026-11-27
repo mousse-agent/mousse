@@ -187,7 +187,7 @@ describe('a bot the device may not reach answers as a bot that is not there', ()
 })
 
 describe('Bots on this computer, per device', () => {
-  it('off: every method is refused as if this computer shared no bots, for every bot alike, and its lists carry none', async () => {
+  it('off: every method is refused (bots_off), for every bot alike, and its lists carry none', async () => {
     const botId = (await createBot(f, { name: 'Penny', reply: 'Hello.' })).botId
     onBoth(botId)
     const { reach, switchOff } = reachOver(store)
@@ -195,11 +195,11 @@ describe('Bots on this computer, per device', () => {
     const methods = remoteBotMethods({ bots: () => f.bots.service, reach })
     for (const name of NAMED) {
       const real = await outcome(methods, name, paramsFor(botId)[name], as(PHONE))
-      expect(real, name).toMatchObject({ code: 'forbidden', details: { reason: 'setting_off' } })
+      expect(real, name).toMatchObject({ code: 'forbidden', details: { reason: 'bots_off' } })
       expect(await outcome(methods, name, paramsFor('bot-ffffffffffff')[name], as(PHONE)), name).toEqual(real)
     }
     expect(await outcome(methods, 'bots.create', { look: { colour: 'teal', accessory: 'cap' }, description: 'Tidy', clientRequestId: 'c1' }, as(PHONE)))
-      .toMatchObject({ code: 'forbidden', details: { reason: 'setting_off' } })
+      .toMatchObject({ code: 'forbidden', details: { reason: 'bots_off' } })
     // The laptop's switch is still on.
     expect(await outcome(methods, 'bots.get', { botId }, as(LAPTOP))).toEqual({ ok: true })
     const lists = (reader?: string) => new MmsListsSource(listsServices(f, reach), undefined, reader ? { reader } : {}).snapshot().bots.map((bot) => bot.id)
@@ -640,6 +640,6 @@ it.each(['send', 'not_now'] as const)('held-action %s rechecks real bot Reach an
   await expect(method.handle(params, context)).rejects.toMatchObject({ code: 'stream_unknown' })
   store.set(botId, { mode: 'chosen', nodes: [PHONE] })
   switchOff(PHONE)
-  expect(await outcome(methods, 'bots.actions.answer', params, context)).toMatchObject({ code: 'forbidden', details: { reason: 'setting_off' } })
+  expect(await outcome(methods, 'bots.actions.answer', params, context)).toMatchObject({ code: 'forbidden', details: { reason: 'bots_off' } })
   expect(backend).toHaveBeenCalledTimes(1)
 })

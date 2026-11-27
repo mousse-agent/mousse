@@ -158,7 +158,6 @@ import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry
 import type { ThreadRouterPort } from './protocol/threadRouterPort'
 import type { RoutedTerminalsPort } from './protocol/routedTerminalsPort'
 import type { EditorAsksPort } from './protocol/editorAsksPort'
-import type { BotsSharingPort } from './protocol/botsSharingPort'
 import type { BotReachPort } from './protocol/botReachPort'
 import { BotDeviceAccessStore } from './bots/definitions/BotDeviceAccessStore'
 import type { RemoteListsPort } from './protocol/remoteListsPort'
@@ -355,8 +354,6 @@ export class MmsProfileServices {
   routedTerminals?: RoutedTerminalsPort
   /** The asks other computers made for editor connections, set while Bridge is on. */
   editorAsks?: EditorAsksPort
-  /** "Share bots with other devices" on this computer, set while Bridge is on. */
-  botsSharing?: BotsSharingPort
   /** Which of the owner's devices reach which bot here (each device's switch, each bot's Devices), set while Bridge is on. */
   botReach?: BotReachPort
   /**

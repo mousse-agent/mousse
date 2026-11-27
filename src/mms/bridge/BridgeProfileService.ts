@@ -30,7 +30,6 @@ import type { BotReachPort } from '../protocol/botReachPort'
 import type { BotDeviceChoice } from '../../shared/bots/personal/deviceAccess'
 import { remoteListMethods } from './remote/RemoteLists'
 import { botDeviceLimitFrom, remoteBotMethods } from './remote/RemoteBots'
-import type { BotsSharingPort } from '../protocol/botsSharingPort'
 import { cleanDeviceName } from '../../shared/bridge/editorAsk'
 import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
@@ -103,20 +102,6 @@ export class BridgeProfileService {
     const { services, runtime: rt, net } = options
     this.peers = options.peers ?? new PeerDirectory({ net, engine: () => undefined })
     raiseStreamListenerLimits(services)
-    // "Share bots with other devices": the lists and the bot methods ask on every push and call.
-    const botsSharing: BotsSharingPort = {
-      refusal: () => {
-        if (net.sharesBots?.() !== false) return undefined
-        const self = rt.identity.self()?.node
-        const name = cleanDeviceName(self ? deviceNameOf(rt.identity, self, 'This computer') : 'This computer')
-        return `${name} doesn't share its bots with other devices.`
-      },
-      onChange: (listener) => net.onShareBotsChanged?.(listener) ?? (() => undefined)
-    }
-    services.botsSharing = botsSharing
-    this.disposers.add(() => {
-      if (services.botsSharing === botsSharing) services.botsSharing = undefined
-    })
     // Which of the owner's devices reach which bot here: each device's switch (Settings, Devices) and each bot's Devices
     // (About), both kept on this computer. Every path that shows a bot to another device asks it.
     const access = services.botDeviceAccess
@@ -523,7 +508,6 @@ export class BridgeProfileService {
     // The owner's personal bots, from a phone or another computer: their chats, asks and pause, and a new bot.
     for (const method of remoteBotMethods({
       bots: () => services.personalBots?.service ?? undefined,
-      refusal: () => botsSharing.refusal(),
       // The device's own limit here: what a bot does with threads in a turn its message started is held to it.
       deviceLimit: botDeviceLimitFrom(rt.policy),
       // Which bots the calling device reaches; a bot it made stays within its reach, unless a choice was saved for it.

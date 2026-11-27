@@ -15,7 +15,7 @@ import {
   ROUTED_STREAM_ACCESS,
   STREAM_ACCESS
 } from '../../../../src/shared/net/accessClasses'
-import { accessPresetOf } from '../../../../src/shared/net/accessPresets'
+import { ACCESS_PRESETS, accessPreset, accessPresetOf } from '../../../../src/shared/net/accessPresets'
 import type { MousseMainService } from '../../../../src/mms/MousseMainService'
 import type { BridgeNodePolicy } from '../../../../src/shared/net/local'
 import { cleanupAll, cleanups, linked } from './routerFixture'
@@ -44,6 +44,34 @@ describe('the access table', () => {
     for (const kind of ROUTED_STREAM_KINDS) expect(ACCESS_CLASSES, kind).toContain(ROUTED_STREAM_ACCESS[kind])
     expect(ROUTED_STREAM_ACCESS.terminal).toBe('terminal')
   })
+})
+
+describe('speech (dictation and read-aloud)', () => {
+  it('is admitted for every access preset, with the Bots switch on or off, and refused only to a blocked device', async () => {
+    const speech = Object.keys(METHOD_ACCESS).filter((name) => name.startsWith('speech.'))
+    expect(speech).toContain('speech.transcribe')
+    const peer = t.owner.net.session(t.callerNode).peer
+    const admitted = (method: string): boolean => {
+      try {
+        t.owner.net.runtime().rpc.authorizedMethod(method, peer)
+        return true
+      } catch {
+        return false
+      }
+    }
+    try {
+      for (const preset of ACCESS_PRESETS)
+        for (const bots of [true, false]) {
+          await t.owner.net.request('bridge.policy', { node: t.callerNode, ...preset.fields, bots })
+          for (const method of speech) expect(admitted(method), `${preset.id}, bots ${bots}: ${method}`).toBe(true)
+        }
+      // The one device-level rule speech had, and keeps: a blocked device gets nothing.
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, blocked: true })
+      for (const method of speech) expect(admitted(method), method).toBe(false)
+    } finally {
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, ...accessPreset('work').fields, bots: true, blocked: false })
+    }
+  }, 60_000)
 })
 
 const forbidden = (reason: string) => ({ code: 'forbidden', details: { reason } })

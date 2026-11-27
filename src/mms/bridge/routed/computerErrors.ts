@@ -36,6 +36,7 @@ const FORBIDDEN_WORDS: Record<ComputerForbiddenReason, (name: string) => string>
   not_connected: (name) => `${name} hasn't connected this computer.`,
   work_off: (name) => `${name} lets this computer view threads and chat with bots only.`,
   full_control_needed: (name) => `Only a computer with Full control on ${name} can update it.`,
+  bots_off: (name) => `${name} doesn't let this device reach its bots.`,
   unknown: (name) => `${name} refused this request.`
 }
 

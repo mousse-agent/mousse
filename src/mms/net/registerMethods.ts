@@ -107,7 +107,6 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'bridge.access.there': ['node'],
   'net.update.there': ['node', 'step', 'version', 'rollout', 'job', 'runningTurns'],
   'bridge.workOnThreads': ['enabled'],
-  'bridge.shareBots': ['enabled'],
   'bridge.editorServer': ['system']
 }
 const SSH_ID = /^[A-Za-z0-9_-]{1,64}$/u
@@ -292,7 +291,7 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
   if (method === 'bridge.setCaps' && params.caps === undefined)
     throw new DomainRpcError('invalid_params', 'A capability list is required')
   if (
-    (method === 'bridge.workOnThreads' || method === 'bridge.shareBots') &&
+    method === 'bridge.workOnThreads' &&
     params.enabled !== undefined &&
     typeof params.enabled !== 'boolean'
   )
