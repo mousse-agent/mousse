@@ -313,6 +313,12 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   useEffect(() => { if (!editing.current) setAddress(url) }, [url])
   // Taken over here: the page has the keyboard at once, so typing, copy and paste work without a click first.
   useEffect(() => { if (drives) keys.current?.focus({ preventScroll: true }) }, [drives])
+  // The page's field goes with the hold (taken in another window, given back) or the view: a field removed while it had
+  // the keyboard may never hear its blur, so the app gets its zoom keys back here too.
+  useEffect(() => {
+    if (!drives) return
+    return () => pageKeyboard(false)
+  }, [drives])
   // Watched while on screen, faster while the person holds the browser. The page is laid out at the
   // view's own size, so its picture fills it; the picture is that size at the screen's pixel ratio.
   // Watched once it is measured; where it cannot be, the page keeps its size and the picture is 960 px wide.

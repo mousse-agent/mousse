@@ -960,6 +960,26 @@ describe('the split view used as the thread browser is', () => {
   })
 })
 
+describe('the app\'s zoom keys', () => {
+  it('come back to the app when the hold is taken in another window while the page has the keyboard', async () => {
+    const pageKeyboard = vi.fn(async () => undefined)
+    installPreload(fake, { zoom: { pageKeyboard } })
+    fake.chats.noobesh = [message(1, { text: 'Here it is.', activationId: 'act1' })]
+    browser = { ...browser, control: 'owner', holder: 'this-view', hold: HOLD }
+    await open()
+    await click(button('Expand Noobesh\'s browser'))
+    await act(async () => useBotBrowserStore.getState().load('noobesh', false))
+    await act(async () => { host.querySelector<HTMLTextAreaElement>('.watched-browser-keys')!.focus() })
+    expect(pageKeyboard).toHaveBeenLastCalledWith(true)
+    // Taken in another window: the page's field goes, focused, with no blur of its own.
+    browser = { ...browser, holder: 'another-view' }
+    delete browser.hold
+    await push({ control: 'owner', holder: 'another-view' })
+    expect(host.querySelector('.watched-browser-keys')).toBeNull()
+    expect(pageKeyboard).toHaveBeenLastCalledWith(false)
+  })
+})
+
 describe('the side panel\'s width', () => {
   it('widens past half the window, as far as the chat keeps 240 px beside it', async () => {
     fake.chats.noobesh = [message(1, { text: 'Here it is.', activationId: 'act1' })]
