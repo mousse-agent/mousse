@@ -3105,6 +3105,18 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const result = await ctx.mms.orchestrator.steerNow({ threadId, runId, holdGeneration, itemIds, clientRequestId })
       return { ...runCommandResponse(result, runId), clientRequestId }
     }
+    case 'orchestrator.correctSubagents': {
+      // "Also tell subagents" (docs/plans/tool-api.md §2.5): only a person corrects a thread's tree, from a window or the CLI.
+      if (!isPerson(ctx.connection) && ctx.connection?.clientType !== 'cli') throw new DomainRpcError('forbidden', "Only a person tells a thread's subagents what they told it")
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'text', 'clientRequestId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const text = asString(p.text, 'text')
+      if (!text.trim()) throw new DomainRpcError('invalid_params', 'text must not be empty')
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const revision = await ctx.mms.orchestrator.correctSubagents(threadId, text, asOptionalClientRequestId(p.clientRequestId) ?? randomUUID())
+      return { revisionId: revision.revisionId, deliveries: revision.deliveries }
+    }
     case 'orchestrator.retrySetup': {
       // Retry on a thread whose worktree could not be set up (`Thread.setupFailure`): its kept message, sent once.
       const p = isObject(params) ? params : {}

@@ -525,9 +525,17 @@ export interface AgentNotePayload {
   senderTitle: string | null
   /** What the sender may do, for the label: a read-only subagent, a Plan ceiling, or an agent that may change files. */
   senderAccess: 'read_only' | 'plan' | 'agent'
-  /** Who the sender is to the receiver; `bot` is the owner's personal bot that started the receiving thread. */
-  from: 'parent' | 'ancestor' | 'subagent' | 'sibling' | 'bot'
+  /**
+   * Who the sender is to the receiver; `bot` is the owner's personal bot that started the receiving thread. `person`: a
+   * person's correction to an ancestor, relayed down its tree (`treeCorrection.ts`); the sender is that ancestor, and
+   * the note carries none of the person's authority. `relay`: Mousse's record, to that ancestor, of where it went.
+   */
+  from: 'parent' | 'ancestor' | 'subagent' | 'sibling' | 'bot' | 'person' | 'relay'
   text: string
+  /** The tree instruction revision a `person` or `relay` note belongs to. */
+  revisionId?: string
+  /** A `person` note: whether the ancestor is the receiver's parent. */
+  direct?: boolean
   /** `needed` starts a notice turn on an idle thread; `none` waits for the thread's next turn. */
   attention: 'needed' | 'none'
 }

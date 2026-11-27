@@ -2090,6 +2090,10 @@ export function registerGuiIpc(
     return { ok: res.ok === true, ...(res.reason ? { reason: res.reason } : {}) }
   })
 
+  registerHandler('orchestrator:correctSubagents', async (_e, threadId: string, text: string, clientRequestId: string) =>
+    guiMms.request('orchestrator.correctSubagents', { threadId: String(threadId ?? ''), text: String(text ?? ''), clientRequestId: String(clientRequestId ?? '') })
+  )
+
   registerHandler('orchestrator:isTurnActive', async (_e, threadId?: string) => {
     const id = threadId ?? currentPresentation().getActiveThreadId()
     if (!id) return false

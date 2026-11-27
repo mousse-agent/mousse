@@ -771,6 +771,12 @@ html[data-theme='light'] .app .chat--empty .chat-input-area .composer {
   background-color: color-mix(in srgb, var(--text-primary) 14%, transparent);
 }
 
+/* "Also tell subagents" when on: the same soft fill as Steer. */
+.app .chat-input-area .composer-tell-subagents-btn.is-on {
+  background-color: color-mix(in srgb, var(--text-primary) 9%, transparent);
+  color: var(--text-primary);
+}
+
 .app .chat-input-area :is(.composer-action-btn, .composer-stop-btn, .composer-send-mode-btn, .composer-dictate-btn):focus-visible {
   outline: none;
   background-image: var(--ui-focus-layer);

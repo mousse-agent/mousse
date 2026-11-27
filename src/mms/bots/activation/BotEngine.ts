@@ -119,6 +119,8 @@ import type { RunEngine } from '../../run/RunEngine'
 import { TERMINAL_RUN_STATUSES, type BotDelegation, type BotTurnPayload, type DelegationRecord, type RunRecord } from '../../run/types'
 import type { BotSubagentOutcome } from '../../run/delegation/botPort'
 import { readRunResultText } from '../../run/delegation/hold'
+import { correctionText } from '../../run/delegation/notice'
+import { recordRevision } from '../../run/delegation/treeCorrection'
 import { priceFor } from '../../usageHistory/pricing'
 import { createBotAuthority, type BotFileReadState } from '../authority/botAuthority'
 import { type BotChatImages, BotChatService, chatInput, messageInput } from '../chat/BotChatService'
@@ -7199,6 +7201,29 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
+   * The owner's correction of running work, relayed to its subagents still working (docs/plans/tool-api.md §2.5) by the
+   * port's own path, as the work's message to each (`noteSubagent`), and recorded as a tree instruction revision.
+   */
+  noteSubagents(botId: string, workId: string, note: string): Array<{ subagent: string; sent: boolean; why?: string }> {
+    const row = this.store.activation(workId)
+    if (!row || row.botId !== botId || row.lane !== 'run' || !note.trim()) return []
+    const running = this.subagentRecords(workId).filter((record) => this.subagentRunning(record))
+    if (!running.length) return []
+    const title = this.listWork(botId).now.find((work) => work.workId === workId)?.title.trim() || null
+    const text = correctionText(title, note, true)
+    const sent = running.map((record) => {
+      const outcome = this.noteSubagent(record, text)
+      return 'refused' in outcome ? { subagent: record.spec.title, sent: false, why: outcome.refused } : { subagent: record.spec.title, sent: true }
+    })
+    const runs = this.host.runs()
+    if (runs) recordRevision(runs.store, {
+      threadId: running[0].turns[0].delegation.parentThreadId, title, text: note,
+      deliveries: running.map((record, index) => ({ threadId: record.threadId, title: record.spec.title, state: sent[index].sent ? 'pending' : 'not_sent', how: sent[index].sent ? 'next_step' : 'refused' }))
+    })
+    return sent
+  }
+
+  /**
    * A subagent turn's steer: the messages its work sent it while it works (`noteSubagent`), taken in at its next step and
    * delivered once; one its runtime hands back waits again.
    */
@@ -9516,7 +9541,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       stop: (botId, workId) => this.stopWork(botId, workId),
       note: (botId, workId, note, from) => this.noteWork(botId, workId, note, from),
       reach: (botId, workId) => this.noteReach(botId, workId),
-      fromOwner: (botId, from) => this.noteFromOwner(botId, from)
+      fromOwner: (botId, from) => this.noteFromOwner(botId, from),
+      noteSubagents: (botId, workId, note) => this.noteSubagents(botId, workId, note)
     },
     questions: {
       ask: (botId, activationId, asks) => this.askOwner(botId, activationId, asks),

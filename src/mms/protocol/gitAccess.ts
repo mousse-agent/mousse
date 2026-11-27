@@ -71,6 +71,7 @@ export const GIT_ACCESS = {
   'orchestrator.abort': 'owned',
   'orchestrator.steer': 'owned',
   'orchestrator.steerNow': 'owned',
+  'orchestrator.correctSubagents': 'owned',
   'orchestrator.retry': 'owned',
   'orchestrator.retrySetup': 'owned',
   'orchestrator.isTurnActive': 'none',

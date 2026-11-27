@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
-import { File as FileIcon, IconPhoto, MessageSquare, Mic, RefreshCw, Reply, X } from '../lib/icons'
+import { File as FileIcon, GitFork, IconPhoto, MessageSquare, Mic, RefreshCw, Reply, X } from '../lib/icons'
 import type {
   BrowserElementAttachment,
   FileSearchResponse,
@@ -179,7 +179,12 @@ export interface ChatComposerProps {
    * prompt in skill mode without flipping the global chat mode. `steer` is set
    * when the text was sent as a steer during a run: it goes into the running turn.
    */
-  onSend: (skillMode?: SkillChatMode, options?: { steer?: boolean }) => void
+  onSend: (skillMode?: SkillChatMode, options?: { steer?: boolean; alsoSubagents?: boolean }) => void
+  /**
+   * The thread has subagents still working: "Also tell subagents" shows, on by default for a steer and off for any other
+   * message, and `alsoSubagents` goes with the send when it is on (docs/plans/tool-api.md §2.5).
+   */
+  tellSubagents?: boolean
   /**
    * The steer chord in an empty composer while a reply runs: sends the next queued message into the reply now.
    * Returns whether one was sent.
@@ -297,6 +302,7 @@ export function ChatComposer({
   placeholder,
   onSend,
   onSteerQueued,
+  tellSubagents = false,
   sendLabel,
   onStop,
   lastPrompt,
@@ -338,6 +344,9 @@ export function ChatComposer({
   const sendModeShown = Boolean(sendModeThreadId) && loading && !sendLabel
   const sendMode: SendMode = sendModeShown ? threadSendMode : 'queue'
   const switchSendMode = () => setThreadSendMode(sendMode === 'steer' ? 'queue' : 'steer')
+  // "Also tell subagents": the person's own choice for this message, else on for a steer and off for any other.
+  const [tellChoice, setTellChoice] = useState<boolean | null>(null)
+  const tellOn = tellChoice ?? sendMode === 'steer'
   useCommand('composer.switchSendMode', switchSendMode, () => sendModeShown && !disabled && isShown(composerInputRef.current))
   // The prompt Up brought back, until it is sent or edited: Escape clears it again.
   const recalledRef = useRef<string | null>(null)
@@ -1157,7 +1166,9 @@ export function ChatComposer({
       ? { type: 'skill', skillId: skillToken.skillId }
       : undefined
     recalledRef.current = null
-    if (options?.steer) onSend(skillMode, options)
+    const also = tellSubagents && (tellChoice ?? options?.steer === true)
+    setTellChoice(null)
+    if (options?.steer || also) onSend(skillMode, { ...options, ...(also ? { alsoSubagents: true } : {}) })
     else onSend(skillMode)
   }
 
@@ -1770,7 +1781,23 @@ export function ChatComposer({
         recordingLevels={dictation.levels}
         allowAttachWhileLoading
         permission={permission}
-        extraActions={extraActions}
+        extraActions={tellSubagents ? (
+          <>
+            {extraActions}
+            <button
+              type="button"
+              className={`composer-icon-btn composer-tell-subagents-btn${tellOn ? ' is-on' : ''}`}
+              title={tellOn ? 'Also tell subagents: on' : 'Also tell subagents: off'}
+              aria-label="Also tell subagents"
+              aria-pressed={tellOn}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => setTellChoice(!tellOn)}
+              disabled={disabled}
+            >
+              <GitFork size={16} strokeWidth={2} />
+            </button>
+          </>
+        ) : extraActions}
         connecting={connecting}
         connectingNote={connecting && (input.length > 0 || hasAttachments) ? CONNECTING_TEXT : null}
         {...(sendModeShown ? { sendMode: { mode: sendMode, onSwitch: switchSendMode } } : {})}

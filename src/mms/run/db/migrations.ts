@@ -831,5 +831,25 @@ CREATE INDEX delegations_by_root_activation ON delegations(root_activation_id) W
 -- A run's delegation by its child run: read when any delegated run ends (whether a bot's subagent did).
 CREATE INDEX delegations_child_run ON delegations(child_run_id);
 `
+  },
+  {
+    // Tree instruction revisions (docs/plans/tool-api.md §2.5): a person's correction to a thread, or to a bot's work,
+    // that was relayed to its live subagents at every depth. `run_id` is the thread's run the correction reached (NULL
+    // when none ran). `deliveries` is the record for each subagent (JSON): its thread, title and where the correction
+    // stands (delivered, pending or not sent, and why); `title` is the thread's when it was corrected. A subagent a run older than the revision starts later inherits
+    // it and is added. Kept so a pending approval can be fenced against the revision it predates.
+    version: 30,
+    sql: `
+CREATE TABLE tree_revisions(
+  revision_id TEXT PRIMARY KEY,
+  thread_id   TEXT NOT NULL,
+  title       TEXT,
+  run_id      TEXT,
+  text        TEXT NOT NULL,
+  deliveries  TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+) STRICT;
+CREATE INDEX tree_revisions_thread ON tree_revisions(thread_id, created_at);
+`
   }
 ]

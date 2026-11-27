@@ -94,7 +94,8 @@ export function monitorNoticeLine(item: Pick<SubagentNoticeItem, 'title' | 'moni
   return { name, detail: lines ? `${lines} · ${words}` : words, tone }
 }
 
-const NOTE_FROM_WORDS = { parent: 'Parent', ancestor: 'Agent above', subagent: 'Subagent', sibling: 'Sibling subagent', bot: 'Bot' } as const
+// `person`: the person's correction to an ancestor, relayed down its tree; `relay`: where that correction went.
+const NOTE_FROM_WORDS = { parent: 'Parent', ancestor: 'Agent above', subagent: 'Subagent', sibling: 'Sibling subagent', bot: 'Bot', person: 'From you, via', relay: 'Also told subagents' } as const
 
 /** A note's row: who sent it ("Subagent “Reviewer”"). */
 export function noteNoticeName(item: Pick<SubagentNoticeItem, 'title' | 'note'>): string {

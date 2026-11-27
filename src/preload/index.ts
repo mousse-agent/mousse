@@ -372,6 +372,9 @@ const api = {
      */
     steerNow: (request: { threadId: string; runId: string; holdGeneration: number; itemIds: string[]; clientRequestId: string }): Promise<{ ok: boolean; reason?: string }> =>
       ipcRenderer.invoke('orchestrator:steerNow', request),
+    /** "Also tell subagents": what the person just told the thread reaches its subagents still working, with where it went for each. */
+    correctSubagents: (threadId: string, text: string, clientRequestId: string): Promise<{ deliveries: Array<{ threadId: string; title: string | null; state: 'delivered' | 'pending' | 'not_sent' }> }> =>
+      ipcRenderer.invoke('orchestrator:correctSubagents', threadId, text, clientRequestId),
     /** `threadId` names the thread that asked; a thread on another computer needs it. */
     answerQuestions: (requestId: string, answers: UserQuestionAnswers, threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:answerQuestions', requestId, answers, threadId),
