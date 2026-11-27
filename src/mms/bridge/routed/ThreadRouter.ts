@@ -3,6 +3,7 @@ import {
   ROUTED_JOB_METHODS,
   ROUTED_METHODS,
   ROUTED_AGENT_KEY,
+  ROUTED_AGENT_BOT_KEY,
   ROUTED_SEND_WINDOW_KEY,
   type RoutedRow
 } from '../../../shared/bridge/routed'
@@ -337,8 +338,8 @@ export class ThreadRouter implements ThreadRouterPort {
       if (key === ROUTED_SEND_WINDOW_KEY && method === 'orchestrator.send') continue
       // Only this computer's daemon marks a call as an agent's (remote subagents); a window is a person, so a window that
       // names the key is refused, not passed through (the key is in the row, so the check below would let it go).
-      if (key === ROUTED_AGENT_KEY)
-        throw new DomainRpcError('invalid_params', `${method} does not take ${ROUTED_AGENT_KEY} from a window: only this computer's agents' calls are marked.`)
+      if (key === ROUTED_AGENT_KEY || key === ROUTED_AGENT_BOT_KEY)
+        throw new DomainRpcError('invalid_params', `${method} does not take ${key} from a window: only this computer's agents' calls are marked.`)
       // The owner answers a send once the turn is admitted, however long the turn runs.
       if (key === 'await' && method === 'orchestrator.send') continue
       // Numbers belong to the router: a window never picks one.

@@ -33,7 +33,7 @@ import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { basename, join } from 'node:path'
 import { askNoticeText, askText } from '../../../shared/bots/personal/askText'
-import { lookFields } from '../../../shared/bots/personal/look'
+import { lookFields, type BotLook } from '../../../shared/bots/personal/look'
 import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHold, type BotSubagentHold } from '../../../shared/bots/personal/subagentHold'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import { launchedActive, type BotChatMessage, type BotChip, type BotError, type BotLaunchedThread, type BotPermissionItem } from '../../../shared/bots/personal/chat'
@@ -9197,8 +9197,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { bot: name, replayed: false }
   }
 
-  /** The bot `threadId` belongs to, with its name now (`BotThreads.botOf`). Never throws. */
-  botOf(threadId: string): { botId: string; name: string } | undefined {
+  /** The bot `threadId` belongs to, with its name and look now (`BotThreads.botOf`). Never throws. */
+  botOf(threadId: string): { botId: string; name: string; look?: BotLook } | undefined {
     let botId: string | undefined
     try {
       botId = this.store.threadBot(threadId)
@@ -9206,7 +9206,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       botId = this.known.get(threadId)?.botId
     }
     if (!botId) return undefined
-    return { botId, name: this.ownerOf(threadId) ?? botId }
+    let look: BotLook | undefined
+    try {
+      const entry = this.host.definitions.get(botId)
+      look = (entry?.published ?? entry?.draft)?.look
+    } catch {
+      look = undefined
+    }
+    return { botId, name: this.ownerOf(threadId) ?? botId, ...(look ? { look: lookFields(look) } : {}) }
   }
 
   /** The chat thread of the bot `threadId` belongs to (`BotThreads.homeOf`). Never throws. */

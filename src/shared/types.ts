@@ -3,6 +3,7 @@ import type { AppletReference } from './applets'
 import type { ModelOverride } from './providerInstances'
 import type { ThreadPullRequestLink } from './pullRequests'
 import type { PermissionMode } from './permissionMode'
+import type { BotLook } from './bots/personal/look'
 import type { ProviderRetryState } from './providerRetry'
 export type { PermissionMode } from './permissionMode'
 export type { GitPullRequestInfo, GitPullRequestLookup, PullRequestCheckState } from './pullRequests'
@@ -1381,6 +1382,11 @@ export interface AgentOrigin {
 export interface AgentOriginBot {
   id: string
   name: string
+  /**
+   * Its face, for a bot of another computer: a window there has no record of it (`ROUTED_AGENT_BOT_KEY`). Absent on a
+   * bot of this computer, whose window reads its face from the bots it lists.
+   */
+  look?: BotLook
 }
 
 /** The length of the header before an agent's words (`head`) and of the closing line after them (`tail`). */

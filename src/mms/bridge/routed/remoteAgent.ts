@@ -3,12 +3,14 @@ import { NetError, type NodeId } from '../../../shared/net'
 import { isPermissionMode, isStricter, narrowPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import {
   ROUTED_AGENT_BODY_MAX,
+  ROUTED_AGENT_BOT_KEY,
   ROUTED_AGENT_KEY,
   ROUTED_AGENT_METHODS,
   ROUTED_AGENT_TITLE_MAX,
   ROUTED_DEADLINE_KEY,
   type RoutedAgentMark
 } from '../../../shared/bridge/routed'
+import { normalizeBotLook, type KnownBotLook } from '../../../shared/bots/personal/look'
 import type { Thread } from '../../../shared/types'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { AGENT_MESSAGE_MAX_HOPS } from '../../orchestrator/OrchestratorService'
@@ -64,12 +66,36 @@ export function parseRoutedAgentMark(value: unknown): RoutedAgentMark & { mode: 
   return { thread: id('thread'), run: id('run'), title: value.title, hops: value.hops as number, mode: isPermissionMode(value.mode) ? value.mode : 'ask' }
 }
 
+const LOOK_KEYS = ['colour', 'accessory', 'kind', 'eyes', 'eyeColour'] as const
+
+/**
+ * The personal bot behind an agent's message (`ROUTED_AGENT_BOT_KEY`), as the owner shows it: an id of short text, a
+ * name cleaned and cut like a sender's title, and a look of known values only (`normalizeBotLook`). Display only: it
+ * changes how the message is labelled, never what the call may do.
+ */
+export function parseRoutedAgentBot(value: unknown): { id: string; name: string; look: KnownBotLook } {
+  const bad = (): NetError => new NetError('bad_request', `${ROUTED_AGENT_BOT_KEY} is not valid.`)
+  if (!isRecord(value)) throw bad()
+  for (const key of Object.keys(value)) if (!['id', 'name', 'look'].includes(key)) throw bad()
+  if (typeof value.id !== 'string' || !value.id || value.id.length > MARK_ID_MAX || value.id.includes('\0')) throw bad()
+  if (typeof value.name !== 'string' || value.name.length > 4 * ROUTED_AGENT_TITLE_MAX) throw bad()
+  const name = cleanRemoteSenderTitle(value.name, ROUTED_AGENT_TITLE_MAX)
+  if (!name) throw bad()
+  const look = value.look
+  if (look !== undefined) {
+    if (!isRecord(look)) throw bad()
+    for (const [key, field] of Object.entries(look))
+      if (!(LOOK_KEYS as readonly string[]).includes(key) || typeof field !== 'string' || field.length > 32) throw bad()
+  }
+  return { id: value.id, name, look: normalizeBotLook(look as Record<string, string> | undefined) }
+}
+
 /** The keys a marked call may carry besides the target and the mark; anything else a person's call takes is refused. */
 const MARKED_KEYS: Readonly<Record<string, readonly string[]>> = {
   'threads.create': ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId', 'hidden', 'subagent'],
   'threads.setModel': ['threadId', 'model', 'ifRevision'],
   'threads.setPermissionMode': ['threadId', 'mode', 'ifRevision'],
-  'orchestrator.send': ['threadId', 'content', 'mode', 'clientRequestId', 'requestId', 'refuseWhilePaused', 'forceQueue', ROUTED_DEADLINE_KEY],
+  'orchestrator.send': ['threadId', 'content', 'mode', 'clientRequestId', 'requestId', 'refuseWhilePaused', 'forceQueue', ROUTED_DEADLINE_KEY, ROUTED_AGENT_BOT_KEY],
   'queue.enqueue': ['threadId', 'content', 'mode', 'requestId'],
   'orchestrator.steer': ['threadId', 'text', 'runId', 'clientRequestId'],
   'orchestrator.abort': ['threadId', 'runId', 'clientRequestId'],
@@ -139,7 +165,9 @@ export class RemoteAgentCalls {
         if (deadline !== undefined && (method !== 'orchestrator.send' || !Number.isSafeInteger(deadline) || (deadline as number) < 1))
           throw new DomainRpcError('invalid_params', `${ROUTED_DEADLINE_KEY} must be a whole number of minutes, at least 1.`)
         const key = this.requestKey(call, params, method === 'queue.enqueue' ? 'requestId' : 'clientRequestId')
-        const actor = this.actor(call, mode, this.hops(threadId, call, launchedBySender))
+        // A personal bot's message shows its name and face here; anything else it carries is not taken from it.
+        const bot = params[ROUTED_AGENT_BOT_KEY] !== undefined ? parseRoutedAgentBot(params[ROUTED_AGENT_BOT_KEY]) : undefined
+        const actor = this.actor(call, mode, this.hops(threadId, call, launchedBySender), bot)
         if (!this.replay(key)) this.assertLimits(call, threadId, true)
         const sent = await services.orchestrator.sendForRemoteAgent(threadId, { content, mode: params.mode === 'plan' ? 'plan' : 'agent' }, {
           clientRequestId: key,
@@ -247,7 +275,7 @@ export class RemoteAgentCalls {
     return hops
   }
 
-  private actor(call: RemoteAgentCall, mode: PermissionMode, hops: number): AgentActor {
+  private actor(call: RemoteAgentCall, mode: PermissionMode, hops: number, bot?: { id: string; name: string; look: KnownBotLook }): AgentActor {
     return {
       kind: 'agent',
       threadId: call.mark.thread,
@@ -258,7 +286,8 @@ export class RemoteAgentCalls {
         node: call.node,
         computer: cleanRemoteSenderTitle(this.deps.deviceName(call.node)) || 'another computer',
         title: cleanRemoteSenderTitle(call.mark.title),
-        mode
+        mode,
+        ...(bot ? { bot } : {})
       }
     }
   }

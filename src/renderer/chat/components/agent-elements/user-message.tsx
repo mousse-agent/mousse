@@ -146,14 +146,16 @@ function AgentSenderHeader({ origin }: { origin: AgentOrigin }) {
 
 /**
  * The header inside a bot's bubble: its face, drawn still, its name, and "open", which opens its chat. A bot this window
- * does not list (deleted, or on another computer) shows the name it had when it sent, with nothing to open.
+ * does not list (deleted, or on another computer) shows the name it had when it sent, with nothing to open; a bot of
+ * another computer also shows the face that came with its message.
  */
 function BotSenderHeader({ origin, bot }: { origin: AgentOrigin; bot: BotSummary | undefined }) {
   const name = bot?.name ?? origin.bot?.name ?? "Bot";
+  const look = bot?.look ?? (origin.bot?.look ? normalizeBotLook(origin.bot.look) : undefined);
   return (
     <div className="chat-agent-sender chat-bot-sender" data-find-ignore>
-      {bot ? (
-        <BotFace look={bot.look} state="idle" size={18} view="head" still className="chat-bot-sender-face" />
+      {look ? (
+        <BotFace look={look} state="idle" size={18} view="head" still className="chat-bot-sender-face" />
       ) : (
         <Bot size={13} strokeWidth={2} aria-hidden="true" />
       )}
