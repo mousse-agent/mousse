@@ -126,6 +126,11 @@
   cursor: pointer;
 }
 
+/* Last in its row, its text lines up with the controls above rather than its padding. */
+.engine-pair-foot > .engine-quiet-btn:last-child {
+  margin-right: calc(-1 * var(--space-8));
+}
+
 .engine-quiet-btn:hover {
   background: var(--ui-hover);
   color: var(--text-primary);
@@ -147,6 +152,11 @@
 
 .engine-back {
   margin-left: calc(-1 * var(--space-8));
+}
+
+/* Back sits by the title, as in the speech models dialog. */
+.engine-pair-modal .modal-header {
+  gap: var(--space-8);
 }
 
 /* Buttons in the Devices dialogs share the row control size, as they do in Settings rows. */

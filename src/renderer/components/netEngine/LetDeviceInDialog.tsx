@@ -231,6 +231,7 @@ function WayRow({
         value={way}
         options={options}
         placeholder="Any ready way"
+        align="end"
         ariaLabelledBy={labelId}
         onChange={onPick}
       />
