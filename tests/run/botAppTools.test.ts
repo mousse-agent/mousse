@@ -308,6 +308,12 @@ describe('work_start levels (#673)', () => {
     expect(await bots.call('work_start', { title: 'Odd', brief: 'Something.', level: 'max' })).toMatchObject({ isError: true, text: 'level is light, medium or hard.' })
     expect(bots.works.map((work) => work.level)).toEqual(['light', undefined])
   })
+
+  it('gives a piece of work its id as runId, and as workId for a bot that still calls work_note and work_stop by it', async () => {
+    const bots = fakeBots('chat', { work: { list: () => SSD_SEARCH } })
+    expect((await bots.call('work_start', { title: 'Research', brief: 'Compare three vacuums.' })).value).toMatchObject({ runId: 'w1', workId: 'w1' })
+    expect((await bots.call('work_list', {})).value).toMatchObject({ now: [{ runId: 'w1', workId: 'w1', title: 'SSD search' }] })
+  })
 })
 
 /** The SSD search, running, as `work_list` lists it. */

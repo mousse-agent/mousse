@@ -1503,7 +1503,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const subagents = ctx.turn.bot?.subagents
         if (!subagents) return error(SUBAGENTS_WORK_ONLY)
         if (typeof args.subagent !== 'string') return error('Stopping a subagent needs its title (subagent).')
-        const stopped = subagents.stop({ subagent: args.subagent })
+        const stopped = subagents.stop({ subagent: args.subagent, ...(ctx.toolCallId ? { toolCallId: ctx.toolCallId } : {}) })
         if ('refused' in stopped) return error(stopped.refused)
         return json(stopped.stopped)
       }
@@ -1511,9 +1511,12 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
   ]
 }
 
-/** A piece of work as the bot reads it: its id is the `runId` that `thread_send` and `thread_stop` take (S7d4a). */
-function withRunId<T extends { workId: string }>({ workId, ...rest }: T): Omit<T, 'workId'> & { runId: string } {
-  return { runId: workId, ...rest }
+/**
+ * A piece of work as the bot reads it: its id is the `runId` that `thread_send` and `thread_stop` take (S7d4a), and
+ * `workId` as well while bots still call `work_note` and `work_stop` by it: the same id.
+ */
+function withRunId<T extends { workId: string }>({ workId, ...rest }: T): Omit<T, 'workId'> & { runId: string; workId: string } {
+  return { runId: workId, workId, ...rest }
 }
 
 /** How a bot lists its work (`work_list`, the bot's variant of `thread_list`). */

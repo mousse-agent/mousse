@@ -1275,6 +1275,11 @@ export interface BotSubagentSpec {
   at?: number
   /** What it runs without, in the owner's words, because its entry holds that less tightly than the work's (`subagentHold`). */
   lacks?: string[]
+  /**
+   * The work's Stop calls that reached this turn, by tool call, with the state they answered: a retry of one (under
+   * either name, `subagent_stop` or `thread_stop`) answers the same and never stops a later turn.
+   */
+  stops?: Array<{ call: string; state: string }>
 }
 
 /** A work subagent's turn (`bot_subagent_runs`): its lifecycle and result are the run database's delegation. */
@@ -1789,6 +1794,14 @@ export class BotStore {
   /** A work's subagent turns, oldest first. */
   subagentRuns(activationId: string): BotSubagentRunRow[] {
     return this.all('SELECT * FROM bot_subagent_runs WHERE activation_id = ? ORDER BY reserved_at, rowid', activationId).map(subagentRunOf)
+  }
+
+  /** A Stop call that reached this turn (`BotSubagentSpec.stops`): written once per call. */
+  noteSubagentStop(activationId: string, childRunId: string, call: string, state: string): void {
+    const row = this.subagentRun(activationId, childRunId)
+    if (!row || row.spec.stops?.some((stop) => stop.call === call)) return
+    const spec: BotSubagentSpec = { ...row.spec, stops: [...(row.spec.stops ?? []), { call, state }] }
+    this.run('UPDATE bot_subagent_runs SET spec_json = ? WHERE activation_id = ? AND child_run_id = ?', JSON.stringify(spec), activationId, childRunId)
   }
 
   /** Its turn began (wall-clock milliseconds): only the first start counts. */

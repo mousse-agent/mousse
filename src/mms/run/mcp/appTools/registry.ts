@@ -320,15 +320,23 @@ function asBotTool(tool: MousseTool): MousseTool {
 }
 
 /**
- * One schema for a thread tool and its bot variants: every property (the first schema that declares one wins), each
- * argument a variant fixes as one more of its values, and what all of them need. Without the tool's own schema, an
- * argument every variant fixes is needed too, so a call is always one of them.
+ * One schema for a thread tool and its bot variants: every property (the first schema that declares one wins; one that
+ * two of them type differently, as `thread_create`'s `model`, is either), each argument a variant fixes as one more of
+ * its values, and what all of them need. Without the tool's own schema, an argument every variant fixes is needed too,
+ * so a call is always one of them.
  */
 function botVariantsSchema(own: JsonSchema | undefined, parts: Array<{ variant: MousseTool; fixes: Record<string, unknown> }>): JsonSchema {
-  type ObjectSchema = { properties?: Record<string, JsonSchema & { enum?: unknown[] }>; required?: string[] }
+  type PropertySchema = JsonSchema & { enum?: unknown[]; type?: unknown; anyOf?: PropertySchema[] }
+  type ObjectSchema = { properties?: Record<string, PropertySchema>; required?: string[] }
   const schemas = [...(own ? [own] : []), ...parts.map(({ variant }) => variant.inputSchema)] as ObjectSchema[]
-  const properties: Record<string, JsonSchema & { enum?: unknown[] }> = {}
-  for (const schema of schemas) for (const [key, value] of Object.entries(schema.properties ?? {})) properties[key] ??= value
+  const properties: Record<string, PropertySchema> = {}
+  const typeOf = (schema: PropertySchema) => JSON.stringify(schema.type ?? null)
+  for (const schema of schemas)
+    for (const [key, value] of Object.entries(schema.properties ?? {})) {
+      const kept = properties[key]
+      if (!kept) properties[key] = value
+      else if (!(kept.anyOf ?? [kept]).some((one) => typeOf(one) === typeOf(value))) properties[key] = { anyOf: [...(kept.anyOf ?? [kept]), value] }
+    }
   for (const { fixes } of parts)
     for (const [key, value] of Object.entries(fixes)) {
       const declared = properties[key]
@@ -500,12 +508,8 @@ export class ToolRegistry {
   catalogued(threadId: string, turn: AppToolTurn, names: readonly string[]): MousseTool[] {
     const bot = this.botListing(threadId)
     if (!bot.botRole || !turn.bot) return []
-    const listed = new Map(this.listFor({
-      threadId,
-      readOnly: this.options.readOnlyThread?.(threadId) === true,
-      ...bot,
-      botTurnTools: turn.bot.appTools
-    }).map((tool) => [tool.name, asBotTool(tool)]))
+    const listing: ToolListing = { threadId, readOnly: this.options.readOnlyThread?.(threadId) === true, ...bot, botTurnTools: turn.bot.appTools }
+    const listed = new Map(this.listFor(listing).map((tool) => [tool.name, this.asBotListed(tool, listing, turn)]))
     return names.flatMap((name) => listed.get(name) ?? [])
   }
 
@@ -675,8 +679,10 @@ export class ToolRegistry {
     const addressed = addressedArgs({ addresses: this.options.addresses, tool: name, args: given, callerThreadId: caller.threadId, toolCallId: request.toolCallId, record: !READ_ONLY_TOOL_NAMES.has(name), visible, bots: botReachOf(turn) })
     if ('refused' in addressed) return addressed.refused
     const { args, resolved } = addressed
+    // A call that named a thread by address is the thread tool, before and after it fans out (`variantOf`).
+    const named = given.thread !== undefined
     if (!resolved?.many) {
-      const called = this.variantOf(name, tool, args, turn, site.calledAs)
+      const called = this.variantOf(name, tool, args, turn, site.calledAs, named)
       if (!('name' in called)) return called
       const outcome = await this.callAdmitted(name, called, args, caller, site)
       // A thread an address named that the caller can't read by id: a refusal says no more than that.
@@ -692,7 +698,7 @@ export class ToolRegistry {
       const each = { ...site, request: { ...request, toolCallId: keyOf(target.threadId) } }
       let outcome: ToolOutcome
       try {
-        const called = this.variantOf(name, tool, targetArgs, turn, site.calledAs)
+        const called = this.variantOf(name, tool, targetArgs, turn, site.calledAs, named)
         outcome = 'name' in called ? await this.callAdmitted(name, called, targetArgs, caller, each) : called
       } catch (error) {
         const refusedNow = refusalOutcome(error)
@@ -729,10 +735,15 @@ export class ToolRegistry {
    * The declaration that runs a call of `name`: the old tool's own when the call is the variant it became (`toolVariant`),
    * so it is checked and run as that tool always was, whichever name it came under; else `tool`. A definition's turn
    * runs none: a definition delegates nothing. A bot's turn runs its own tool through the bot port or not at all: never
-   * the thread tool in its place (the one of `subagent_start` and `work_start` the turn is offered).
+   * the thread tool in its place (the one of `subagent_start` and `work_start` the turn is offered). A call that named a
+   * thread by address (`addressed`) is the thread tool: on a bot's turn, never one of its own. The registry's preflight
+   * (`resolveCall`) and its dispatch both choose here, so a gate judges the tool that runs.
    */
-  private variantOf(name: string, tool: MousseTool, args: Record<string, unknown>, turn: AppToolTurn, calledAs?: string): MousseTool | ToolOutcome {
-    const olds = toolVariants(name, args, turn.bot ? 'bot' : turn.definition ? undefined : 'thread')
+  private variantOf(name: string, tool: MousseTool, args: Record<string, unknown>, turn: AppToolTurn, calledAs?: string, addressed = false): MousseTool | ToolOutcome {
+    const olds = addressed && turn.bot ? [] : toolVariants(name, args, turn.bot ? 'bot' : turn.definition ? undefined : 'thread')
+    // A bot's old name runs its own tools or none: a thread it can't take is refused, never sent to the thread tool.
+    if (turn.bot && calledAs && isBotVariant(calledAs) && !olds.length)
+      return refused('invalid_arguments', `${calledAs} is your own work's tool and takes no thread. To reach a thread, call ${name}.`)
     const declared = olds.flatMap((old) => this.variants.get(old) ?? [])
     if (turn.bot && olds.length && !declared.length) return refused('unavailable', `${olds[0]} is not available here: your bot's tools are not.`)
     // A call under an old name is that tool and no other (`work_start` never runs as `subagent_start`).
@@ -785,7 +796,7 @@ export class ToolRegistry {
     const { args } = addressed
     const tool = this.tools.get(name)
     // A bot's own tool that this call is (`variantOf`): the gate judges it by that name, as the bot's grant does.
-    const running = tool && turn ? this.variantOf(name, tool, args, turn, calledAs) : undefined
+    const running = tool && turn ? this.variantOf(name, tool, args, turn, calledAs, named.thread !== undefined) : undefined
     if (running && !('name' in running)) return { refused: running }
     if (running && running !== tool) return { name, variant: running.name, args }
     if (!tool?.variantOf || !turn) return { name, variant: name, args }

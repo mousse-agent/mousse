@@ -39,7 +39,8 @@ export function threadCreateTool(kinds: { subagent: MousseTool; thread?: MousseT
     description: `Start a subagent or a thread; kind is required. kind "subagent": ${kinds.subagent.description}${kinds.thread ? ` kind "thread": ${kinds.thread.description}` : ''}`,
     inputSchema: { type: 'object', properties: { kind: KIND_SCHEMA, ...mergedProperties(properties.subagent, properties.thread) }, required: ['kind'] },
     // A bot's thread lists the thread kind only, as a bot uses it (`asBotTool`).
-    ...(kinds.thread ? { botDescription: kinds.thread.botDescription ?? kinds.thread.description, botInputSchema: kinds.thread.botInputSchema ?? kinds.thread.inputSchema, botClass: kinds.thread.class } : {}),
+    // Its kind is named, so a bot whose own work is kind "subagent" (S7d4a) is offered both.
+    ...(kinds.thread ? { botDescription: kinds.thread.botDescription ?? kinds.thread.description, botInputSchema: withThreadKind(kinds.thread.botInputSchema ?? kinds.thread.inputSchema), botClass: kinds.thread.class } : {}),
     describe: () => 'Start a subagent or a thread',
     variants: Object.values(variants) as MousseTool[],
     variantOf: (args, site) => kindOf(args, site, variants, properties),
@@ -47,6 +48,12 @@ export function threadCreateTool(kinds: { subagent: MousseTool; thread?: MousseT
       throw new Error('thread_create runs as the kind its call names (variantOf).')
     }
   }
+}
+
+/** A bot's thread kind's schema, naming its kind: "thread", the default. */
+function withThreadKind(schema: JsonSchema): JsonSchema {
+  const { properties = {}, ...rest } = schema as { properties?: Record<string, JsonSchema> }
+  return { ...rest, properties: { kind: { type: 'string', enum: ['thread'], description: 'thread: the default.' }, ...properties } } as JsonSchema
 }
 
 /**

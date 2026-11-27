@@ -7944,11 +7944,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** `subagent_stop`: the subagent's turn ends now (a queued one never starts). */
-  private stopSubagent(activationId: string, request: { subagent: string }, under: string | null): { stopped: BotSubagentView } | { refused: string } {
+  private stopSubagent(activationId: string, request: { subagent: string; toolCallId?: string }, under: string | null): { stopped: BotSubagentView } | { refused: string } {
+    // A retry of a Stop answers as the first did: the subagent may have taken more work since, and that turn is not stopped.
+    const call = request.toolCallId
+    if (call)
+      for (const record of this.subagentRecords(activationId, under))
+        for (const turn of record.turns) {
+          const earlier = turn.spec.stops?.find((stop) => stop.call === call)
+          if (earlier) return { stopped: { subagent: record.spec.title, model: turn.spec.model, state: earlier.state as BotSubagentView['state'] } }
+        }
     const record = this.subagentNamed(activationId, request.subagent, under)
     if (!record) return { refused: this.unknownSubagent(activationId, request.subagent, under) }
-    if (!this.subagentRunning(record)) return { stopped: this.subagentView(record, false) }
-    const { delegation } = record.turns.at(-1)!
+    const last = record.turns.at(-1)!
+    const noted = (view: BotSubagentView) => {
+      if (call) this.store.noteSubagentStop(activationId, last.delegation.childRunId, call, view.state)
+      return { stopped: view }
+    }
+    if (!this.subagentRunning(record)) return noted(this.subagentView(record, false))
+    const { delegation } = last
     this.subagentStops.add(delegation.childRunId)
     const runs = this.host.runs()
     if (runs?.getRun(delegation.childRunId)?.status === 'queued') {
@@ -7960,7 +7973,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     if (!runs || !TERMINAL_RUN_STATUSES.has(runs.getRun(delegation.childRunId)?.status ?? 'queued'))
       void Promise.resolve(this.host.stopThread?.(record.threadId)).catch(() => {})
-    return { stopped: { subagent: record.spec.title, model: record.spec.model, state: 'stopped' } }
+    return noted({ subagent: record.spec.title, model: record.spec.model, state: 'stopped' })
   }
 
   private unknownSubagent(activationId: string, name: string, under: string | null): string {

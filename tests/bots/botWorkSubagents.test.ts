@@ -350,12 +350,48 @@ describe('a bot\'s work and its subagents', () => {
       expect(registry.resolveCall('thread_wait', { subagent: 'Prices' }, { threadId: 'bot-work', runId: parentRun.runId })).toMatchObject({ variant: 'subagent_wait' })
       // A thread by id is the owner's thread, not one of its subagents: subagent_wait, which the work holds, never answers it,
       // and the work holds no "use your threads".
-      for (const name of ['thread_wait', 'subagent_wait']) {
-        expect(registry.resolveCall(name, { threadId: 'mine' }, { threadId: 'bot-work', runId: parentRun.runId }), name).toMatchObject({ name: 'thread_wait', variant: 'thread_wait' })
-        const refused = await registry.call(name, { threadId: 'mine' }, at(`wait-${name}`))
-        expect(refused.isError, name).toBe(true)
-        expect(refusalOf(refused)?.code, name).toBe('not_granted')
+      expect(registry.resolveCall('thread_wait', { threadId: 'mine' }, { threadId: 'bot-work', runId: parentRun.runId })).toMatchObject({ name: 'thread_wait', variant: 'thread_wait' })
+      expect(refusalOf(await registry.call('thread_wait', { threadId: 'mine' }, at('wait-1')))?.code).toBe('not_granted')
+      // A thread address is the thread tool, before it fans out to each thread as after: never the work's own wait or Stop.
+      for (const name of ['thread_wait', 'thread_stop']) {
+        expect(registry.resolveCall(name, { thread: 'children' }, { threadId: 'bot-work', runId: parentRun.runId }), name).toMatchObject({ name, variant: name })
+        expect(registry.resolveCall(name, { thread: 'self' }, { threadId: 'bot-work', runId: parentRun.runId }), name).toMatchObject({ name, variant: name })
       }
+      // Under its old name it is the work's own tool, which takes no thread: refused, never sent to thread_wait.
+      expect(registry.resolveCall('subagent_wait', { threadId: 'mine' }, { threadId: 'bot-work', runId: parentRun.runId })).toMatchObject({ refused: { isError: true } })
+      expect(refusalOf(await registry.call('subagent_wait', { threadId: 'mine' }, at('wait-2')))).toMatchObject({ code: 'invalid_arguments', message: expect.stringMatching(/^subagent_wait is your own work's tool and takes no thread/) })
+    } finally {
+      fx.dispose()
+    }
+  })
+
+  it('a Stop retried under its other name answers as the first did, and never stops the turn the subagent took on since', async () => {
+    const job = await work('w1')
+    const fx = delegationFixture()
+    try {
+      const parentRun = await fx.runningRun('bot-work')
+      const { registry, turns, request } = appToolRegistry(fx.engine, fakeAppToolHost().host, { bots: () => ({ host: f.bots.tools, models: { pickable: async () => choices } }) })
+      turns.register(appTurn({ threadId: 'bot-work', runId: parentRun.runId, bot: job.prepared.authority }))
+      const at = (toolCallId: string) => request({ threadId: 'bot-work', runId: parentRun.runId, toolCallId })
+      await registry.call('subagent_start', { title: 'Prices', brief: 'Find the prices.' }, at('start-1'))
+      const first = await startSubagent(f, subagentNs(job.id)[0]!)
+      const stopped = await registry.call('subagent_stop', { subagent: 'Prices' }, at('stop-1'))
+      expect(JSON.parse(stopped.text)).toMatchObject({ subagent: 'Prices', state: 'stopped' })
+      f.runs.markTerminal(first.payload.runId, 'interrupted', { interruptedBy: 'user' })
+      f.runs.deliverBotResults()
+      await flush()
+      // More work for it: a new turn, queued.
+      job.prepared.authority.subagents!.result({ subagent: 'Prices' })
+      expect(await job.prepared.authority.subagents!.send({ subagent: 'Prices', message: 'Only ones under 300.' })).toMatchObject({ sent: { subagent: 'Prices' } })
+      const next = subagentNs(job.id)[1]!
+      expect(f.runs.getRun(next)?.status).toBe('queued')
+      // The first Stop, retried as thread_stop with the same request: the same answer, and the new turn goes on.
+      const retried = await registry.call('thread_stop', { subagent: 'Prices' }, at('stop-1'))
+      expect(retried.text).toBe(stopped.text)
+      expect(f.runs.getRun(next)?.status).toBe('queued')
+      // A new Stop stops it.
+      await registry.call('thread_stop', { subagent: 'Prices' }, at('stop-2'))
+      expect(f.runs.getRun(next)?.status).toBe('cancelled')
     } finally {
       fx.dispose()
     }

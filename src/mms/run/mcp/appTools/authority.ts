@@ -3,6 +3,7 @@ import { permissionModeAllows, type PermissionMode } from '../../../../shared/pe
 import { botAppToolRefusal, botBrowserNotAllowed, botBrowserWithheld, botTurnOffers } from '../../../../shared/bots/personal/walls'
 import { botMayBeOffered, isBotThreadTool, isBotTurnHeldTool } from '../../../../shared/bots/personal/manifest'
 import { botCoreTool } from '../../../../shared/bots/personal/catalogue'
+import { canonicalToolName, isBotVariant } from '../../../../shared/toolAliases'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import { startedByPerson } from '../../approvalRights'
 import { familyMessageScope } from './family'
@@ -185,8 +186,9 @@ export function listsTool(tool: MousseTool, listing: ToolListing): boolean {
   // A bot's thread lists only what a bot can hold: the model is never shown delegation, queues or tools it can't use.
   if (listing.botRole && !botMayBeOffered(tool.name)) return false
   // A catalogue turn on Codex or Pi (docs/plans/bot-context.md §15) lists the core set only: the rest is looked up with
-  // `tool_catalogue` and called through `use_tool`, so the list never changes with what the bot looks up.
-  if (listing.botCatalogue === 'use_tool' && !botCoreTool(tool.name)) return false
+  // `tool_catalogue` and called through `use_tool`, so the list never changes with what the bot looks up. A bot's own
+  // tool under a thread tool's name (`work_start` is `thread_create`) is core when that name is.
+  if (listing.botCatalogue === 'use_tool' && !botCoreTool(isBotVariant(tool.name) ? canonicalToolName(tool.name) : tool.name)) return false
   return tool.listed?.(listing) ?? true
 }
 

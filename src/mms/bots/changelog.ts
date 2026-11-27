@@ -206,7 +206,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 38,
     date: '2026-11-27',
-    text: 'Your work and your work\'s subagents use the thread tools now. Start work or a subagent with thread_create and kind "subagent" (it was work_start and subagent_start). Add to work with thread_send, intent "note" and its runId (it was work_note), and message a subagent with thread_send and its title as subagent (it was subagent_send). Wait for a subagent, or read its result with timeoutSeconds 0, with thread_wait (it was subagent_wait and subagent_result). Stop work by its runId, or a subagent by its title, with thread_stop (it was work_stop and subagent_stop). List your work with thread_list and scope "bot_work" (it was work_list). A piece of work\'s id is its runId. They work as before; the old names still work too.'
+    text: 'Your work and your work\'s subagents use the thread tools now. Start work or a subagent with thread_create and kind "subagent" (it was work_start and subagent_start). Add to work with thread_send, intent "note" and its runId (it was work_note), and message a subagent with thread_send and its title as subagent (it was subagent_send). Wait for a subagent, or read its result with timeoutSeconds 0, with thread_wait (it was subagent_wait and subagent_result). Stop work by its runId, or a subagent by its title, with thread_stop (it was work_stop and subagent_stop). List your work with thread_list and scope "bot_work" (it was work_list). A piece of work\'s id is its runId; results still give it as workId too, the same id. They work as before; the old names still work too.'
   }
 ]
 

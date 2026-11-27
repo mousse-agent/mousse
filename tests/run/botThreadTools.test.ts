@@ -7,6 +7,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import Ajv from 'ajv'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { botManifestDigest, compileBotThread } from '../../src/mms/bots/grants/compile'
@@ -481,6 +482,10 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     const listed = registry.listForThread('home', runId).find((tool) => tool.name === 'thread_create')!
     expect(listed.description).toMatch(/With kind "subagent": /)
     expect(Object.keys((listed.inputSchema as { properties: object }).properties)).toEqual(expect.arrayContaining(['kind', 'title', 'brief', 'projectId']))
+    // Each kind's own calls fit it: a thread (kind named or not) and work on a model from model_list.
+    const fits = new Ajv({ strict: false }).compile(listed.inputSchema)
+    for (const args of [{ kind: 'thread', projectId: 'p1', title: 'Quick check', firstMessage: 'Check.', model: 'opus' }, { projectId: 'p1', title: 'Quick check' }, { kind: 'subagent', title: 'Reader', brief: 'Read the logs', model: { instanceId: 'claude', model: 'opus' } }])
+      expect(fits(args), JSON.stringify(fits.errors)).toBe(true)
     // This chat turn's grant holds no work_start: the bot's own tool refuses it, and nothing falls back to a subagent.
     const refused = await text('thread_create', { kind: 'subagent', title: 'Reader', brief: 'Read the logs' })
     expect(refused.error).toBe(true)
@@ -497,6 +502,12 @@ describe('a bot\'s thread tools ("use your threads")', () => {
       const refused = await text(name, args)
       expect(refused, name).toEqual({ error: true, text: 'Only a bot can use this.' })
     }
+    // Naming an ordinary thread, by id or address, with its run: the bot's own tool takes no thread, and the thread's
+    // Stop never runs in its place.
+    for (const args of [{ threadId: 'mine', runId: 'run-mine' }, { thread: 'mine', runId: 'run-mine' }]) {
+      const refused = await text('work_stop', args)
+      expect(refused, JSON.stringify(args)).toEqual({ error: true, text: "work_stop is your own work's tool and takes no thread. To reach a thread, call thread_stop." })
+    }
     expect(host.stopRun).not.toHaveBeenCalled()
     // An agent's thread: the bot's old name is no tool of its own.
     const mine = await fx!.runningRun('mine')
@@ -505,6 +516,14 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     const agent = await agents.call('work_stop', { runId: 'w1' }, request({ threadId: 'mine', runId: mine.runId }))
     expect(refusalOf(agent)).toMatchObject({ code: 'unknown_tool', message: "work_stop is a personal bot's tool; you have no tool by that name." })
     expect(agents.resolveCall('work_stop', { runId: 'w1' }, { threadId: 'mine', runId: mine.runId })).toMatchObject({ refused: { isError: true } })
+  })
+
+  it('a catalogue turn (Codex, Pi) without "use your threads" lists its work\'s core tools by their thread names, and its catalogue shows the work\'s Stop as the bot uses it', async () => {
+    const { registry, runId, turns } = await world({ granted: false, threads: 'all', catalogue: 'use_tool' })
+    expect(registry.listForThread('home', runId).map((tool) => tool.name).filter(isBotThreadTool).sort()).toEqual(['thread_create', 'thread_list', 'thread_send'])
+    const [stop] = registry.catalogued('home', turns.get(runId)!, ['thread_stop'])
+    expect(stop.description).toMatch(/^With runId alone \(a piece of your work\): /)
+    expect((stop.inputSchema as { properties: Record<string, unknown>; required?: string[] }).properties).toHaveProperty('runId')
   })
 
   it('a chat turn no person started reads threads but never starts, messages or stops one', async () => {
