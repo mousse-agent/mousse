@@ -61,7 +61,7 @@ import {
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
 import { canonicalGrantName } from '../../../shared/toolAliases'
-import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_AUTOMATIONS_SWITCH, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_DROPPED_PERMISSIONS, BOT_IMAGE_TOOL, BOT_RETIRED_APP_TOOLS, BOT_MCP_SERVER_SWITCH, BOT_MCP_SWITCH, BOT_SKILLS_SWITCH, BOT_THREADS_PERMISSION, BOT_CHAT_NATIVE_OFF, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, isBotDefaultSwitch, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_AUTOMATIONS_SWITCH, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_DROPPED_PERMISSIONS, BOT_IMAGE_TOOL, BOT_RETIRED_APP_TOOLS, BOT_MCP_SERVER_SWITCH, BOT_MCP_SWITCH, BOT_SKILLS_SWITCH, BOT_THREADS_PERMISSION, BOT_CHAT_NATIVE_OFF, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, isBotAutomationTool, isBotDefaultSwitch, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -3907,7 +3907,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     return {
       ...manifest,
-      appTools: off.automations ? manifest.appTools.filter((tool) => !BOT_AUTOMATION_APP_TOOLS.includes(tool)) : [...new Set([...manifest.appTools, ...BOT_AUTOMATION_APP_TOOLS])],
+      appTools: off.automations ? manifest.appTools.filter((tool) => !isBotAutomationTool(tool)) : [...new Set([...manifest.appTools, ...BOT_AUTOMATION_APP_TOOLS])],
       mcp: [...pairs.values()],
       skills: off.skills ? [] : manifest.skills
     }
@@ -5747,7 +5747,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const defaults = this.defaultsOff(botId)
     if ('mcp' in request) return defaults.mcp || defaults.servers.has(installationOf(request.mcp.serverId))
     if ('skill' in request && defaults.skills) return true
-    if ('tool' in request && defaults.automations && BOT_AUTOMATION_APP_TOOLS.includes(request.tool)) return true
+    if ('tool' in request && defaults.automations && isBotAutomationTool(request.tool)) return true
     return this.store.disabledPermissions(botId).some((off) => {
       const held = switchedOffPermission(off)
       if (!held) return false

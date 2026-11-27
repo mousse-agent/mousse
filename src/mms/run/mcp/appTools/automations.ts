@@ -34,8 +34,14 @@ export interface AutomationToolHost {
   }
 }
 
-/** The tools' names: a bot may be granted them (`BOT_APP_TOOLS`); its first use asks the owner. */
-export const AUTOMATION_TOOL_NAMES = ['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause'] as const
+/**
+ * A bot turns an automation on itself (`BOT_AUTOMATION_ENABLE_TOOL`): only with "create and turn on automations" in its
+ * grant, which its first call (or `escalate`) asks the owner for.
+ */
+export const AUTOMATION_ENABLE_TOOL = 'automation_enable'
+
+/** The tools' names: every bot has them unless its owner switched them off; `automation_enable` is asked for. */
+export const AUTOMATION_TOOL_NAMES = ['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause', AUTOMATION_ENABLE_TOOL] as const
 
 /** An automation run's own tool: how much the run needs the person, in one line. */
 export const RUN_REPORT_TOOL = 'run_report'
@@ -79,6 +85,11 @@ export function automationTools(host: AppToolHost): MousseTool[] {
     const tools = host.automations?.()
     if (!tools) return undefined
     return reach(threadId) ?? (tools.ordinaryThread?.(threadId) ? tools : undefined)
+  }
+  /** Turning an automation on reaches only a bot's thread (its grant decides whether it holds the tool). */
+  const reachBot = (threadId: string): AutomationToolHost | undefined => {
+    const tools = host.automations?.()
+    return tools?.botOf(threadId) ? tools : undefined
   }
   const author = (tools: AutomationToolHost, ctx: ToolCallContext): DraftAuthor => {
     const botId = tools.botOf(ctx.caller.threadId)
@@ -140,6 +151,18 @@ export function automationTools(host: AppToolHost): MousseTool[] {
       available: (turn: { threadId: string }) => (reachDraft(turn.threadId) ? true as const : 'Only a conversation, the Automation manager or a bot can write a draft.'),
       listed: (listing: { threadId?: string }) => Boolean(listing.threadId && reachDraft(listing.threadId)),
       handler: (args, ctx) => run(ctx, (tools) => tools.drafts.save(args, author(tools, ctx)), reachDraft)
+    },
+    {
+      ...common,
+      name: AUTOMATION_ENABLE_TOOL,
+      description:
+        'Turn an automation on yourself, as if the person pressed Turn on: it runs on its trigger in their permission mode until they pause or delete it. Only for a bot its owner allowed to "create and turn on automations" (without it, write a draft and ask with escalate {tool:"automation_enable"}). Pass draftId alone to turn on a draft you wrote, or the fields of automation_draft_save (with draftId to change one you wrote) to write one and turn it on at once. Turn one on only when your owner asked for it to run. Returns { id, enabled, problems[], automation }: with problems it stays a draft; fix them or ask, then call again.',
+      inputSchema: { type: 'object', properties: { draftId: { type: 'string' }, ...FIELDS } },
+      class: 'mutation',
+      // A bot's alone: the manager and a chat's agent write drafts the person turns on.
+      available: (turn: { threadId: string }) => (reachBot(turn.threadId) ? true as const : 'Only a bot its owner allowed to turn automations on can use this.'),
+      listed: (listing: { threadId?: string }) => Boolean(listing.threadId && reachBot(listing.threadId)),
+      handler: (args, ctx) => run(ctx, (tools) => tools.drafts.enable(args, tools.botOf(ctx.caller.threadId)!), reachBot)
     },
     {
       ...common,

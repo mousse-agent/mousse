@@ -26,6 +26,16 @@ export const THREADS_TEXT: AskText = {
   tip: 'It can read your threads, their queues and their Git status and diffs, here and on your other computers that let agents work there. When you ask it in its chat, or in work you gave it, it can start new threads, message, steer or stop them, change what waits in their queues, fork one and hand a fork\'s work back, and archive or unarchive them. A thread it starts runs commands and changes files without asking; a message it sends runs in that thread\'s own mode. It answers the questions and approvals of the threads it starts. In other threads it answers an approval only while you let agents answer approvals on other threads, and never a question.'
 }
 
+/**
+ * "Create and turn on automations" (`automation_enable`): what the card and About say. The line names what matters most,
+ * that what it turns on runs without the owner's Turn on, in their permission mode.
+ */
+export const AUTOMATION_ENABLE_TEXT: AskText = {
+  title: 'create and turn on automations',
+  note: 'They run without you pressing Turn on, within the permissions you hold.',
+  tip: "It can turn on the automation drafts it wrote, or write one and turn it on at once, as if you pressed Turn on: each runs on its schedule in your permission mode, until you pause or delete it in Automations. Another bot's message never makes it do so. Without this it writes drafts you turn on yourself."
+}
+
 /** Tools by name, as a card says them after "wants to". */
 const TOOL_TEXT: Record<string, AskText> = {
   read: { title: 'read files', note: 'In its files folder.' },
@@ -43,6 +53,7 @@ const TOOL_TEXT: Record<string, AskText> = {
     tip: "It can read app windows, click, type and run steps in apps on this computer through Cua Driver, as a thread's agent can, in its work (never in the chat itself). Threads it starts get it too. Settings → Computer use can still turn it off for everyone."
   },
   threads: THREADS_TEXT,
+  automation_enable: AUTOMATION_ENABLE_TEXT,
   // The bot's own tools: a bot made before one of them existed has none of it in its grant, so its first use asks.
   bot_schedule_add: { title: 'run on a schedule', note: '' },
   bot_schedule_remove: { title: 'remove its schedules', note: '' },

@@ -637,6 +637,37 @@ export class AutomationDrafts {
     return updated
   }
 
+  /**
+   * `automation_enable`: a bot its owner allowed to "create and turn on automations" turns an automation on itself, as
+   * if the owner pressed Turn on. With only `draftId`, the draft it wrote is turned on; with fields (and `draftId` to
+   * change one it wrote), the draft is saved first, then turned on. A draft with problems stays a draft and is returned
+   * with them, for the bot to fix or ask about. Whether the bot holds the permission is its grant's to say, before this
+   * is called.
+   */
+  enable(args: Record<string, unknown>, botId: string): { id: string; enabled: boolean; problems: string[]; automation: AutomationContract } {
+    const { draftId: _draftId, ...fields } = args
+    let draftId: string
+    if (Object.keys(fields).length) {
+      draftId = this.save(args, { botId }).draftId
+    } else {
+      if (args.draftId === undefined) fail('Pass draftId to turn on a draft you wrote, or name, trigger and prompt to write one and turn it on.')
+      draftId = text(args.draftId, 'draftId', 256)
+      // A bot turns on only the drafts it wrote, as it changes only those.
+      if (this.draftJob(draftId).draft!.botId !== botId) fail(`No draft ${draftId}.`)
+    }
+    const draft = this.draftJob(draftId)
+    const { problems } = this.build({}, draft)
+    if (problems.length) {
+      if (JSON.stringify(problems) !== JSON.stringify(draft.draft!.problems)) {
+        this.deps.update(draft.id, { draft: { ...draft.draft!, problems } })
+        this.deps.changed?.()
+      }
+      return { id: draft.id, enabled: false, problems, automation: this.contract(this.deps.get(draft.id) ?? draft) }
+    }
+    const on = this.turnOn(draftId)
+    return { id: on.id, enabled: true, problems: [], automation: this.contract(on) }
+  }
+
   /** A draft changed by hand (Edit details): what keeps Turn on off is worked out again. */
   recheck(draftId: string): void {
     const job = this.deps.get(draftId)

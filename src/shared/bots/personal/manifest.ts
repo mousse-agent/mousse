@@ -177,6 +177,21 @@ export const BOT_COMPUTER_REQUEST_TOOL = COMPUTER_USE_REQUEST_TOOL
 export const BOT_AUTOMATION_APP_TOOLS: readonly string[] = ['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause']
 
 /**
+ * "Create and turn on automations": the one automation tool a bot is not given by default (`automation_enable`). Without
+ * it a bot only writes drafts its owner turns on; with it, it turns on a draft it wrote, or saves and turns on a new one
+ * in one call, as if its owner pressed Turn on (their permission mode, no end). It is asked for like any tool
+ * (`escalate` with the tool `automation_enable`, or its first call), listed in About → Can use once allowed, and goes
+ * with the automation tools when the owner switches those off (`BOT_AUTOMATIONS_SWITCH`). Only a turn that may act on
+ * the owner's threads calls it (`turnRefusals`).
+ */
+export const BOT_AUTOMATION_ENABLE_TOOL = 'automation_enable'
+
+/** Whether `tool` goes with the automation tools' switch: the default ones and `automation_enable`. */
+export function isBotAutomationTool(tool: string): boolean {
+  return tool === BOT_AUTOMATION_ENABLE_TOOL || BOT_AUTOMATION_APP_TOOLS.includes(tool)
+}
+
+/**
  * "Use your threads": one permission, asked for once, for the owner's ordinary threads in this profile. The grant names
  * it alone; `compileBotThread` turns it into the thread tools a turn may use (`BOT_THREAD_READ_TOOLS` in every lane but a
  * consult, `BOT_THREAD_ACT_TOOLS` in a run and a chat turn the owner's message or tapped answer started). A thread the bot starts runs in
@@ -297,7 +312,7 @@ export const BOT_GROUP_PERMISSIONS: ReadonlySet<string> = new Set([BOT_BROWSER_P
  * one permission each. Delegation is not one: a bot's work has subagents of its own (`BOT_SUBAGENT_TOOLS`), held to the
  * grant. Consults (6c-2) are the way a bot uses its own threads. The skill tools come with skills.
  */
-export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, ...BOT_GROUP_PERMISSIONS])
+export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, BOT_AUTOMATION_ENABLE_TOOL, ...BOT_GROUP_PERMISSIONS])
 
 /**
  * Group permissions every bot now has without asking: the profiler, Mousse's look, scheduled jobs, secrets and quick
