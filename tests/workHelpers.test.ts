@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -9,7 +9,7 @@ import {
 } from '../scripts/related-work.mjs'
 import { closeComment, closingIssues, decideClose, referenceRepo } from '../scripts/close-completed-issues.mjs'
 import { formatNotes } from '../scripts/task-notes.mjs'
-import { mergeTested, summarizeTsc, summarizeVitestJson } from '../scripts/verify.mjs'
+import { mergeTested, readKnownFailures, summarizeTsc, summarizeVitestJson, vitestPassed } from '../scripts/verify.mjs'
 import {
   checkPrBody, formatSpan, getPath, mergeNotes, normalizePath, parseArgv, parseClosingRefs, parseDuration,
   parsePartialRefs, pathSetsOverlap, pathsOverlap, setPath, trimText, workingTreeFingerprint
@@ -221,6 +221,85 @@ describe('output digesting', () => {
     const out = summarizeVitestJson({ success: false, numFailedTests: 0, testResults: [{ name: '/r/tests/c.test.ts', status: 'failed', message: 'boom', assertionResults: [] }] })
     expect(out.ok).toBe(false)
     expect(out.failures[0]).toContain('boom')
+  })
+
+  describe('failures known to fail on the default branch', () => {
+    type Case = [name: string, status: 'passed' | 'failed']
+    const file = (name: string, status: 'passed' | 'failed', cases: Case[]) => ({
+      name: `/r/${name}`, status, message: status === 'failed' && !cases.some(([, s]) => s === 'failed') ? 'cleanup timed out' : '',
+      assertionResults: cases.map(([fullName, s]) => ({ fullName, status: s, failureMessages: s === 'failed' ? ['expected 1'] : [] }))
+    })
+    const report = (files: ReturnType<typeof file>[], numFailedTests?: number) => ({
+      success: files.every((f) => f.status === 'passed'), numTotalTests: 4,
+      numFailedTests: numFailedTests ?? files.flatMap((f) => f.assertionResults).filter((t) => t.status === 'failed').length,
+      testResults: files
+    })
+    const oneTest = { file: 'tests/a.test.ts', test: 'hold is released', issue: 1946, how: 'races the timer' }
+    const wholeFile = { file: 'tests/a.test.ts', issue: 1950, how: 'cleanup times out' }
+
+    it.each([
+      ['a listed test failing alone passes the run', [oneTest], [file('tests/a.test.ts', 'failed', [['suite hold is released', 'failed'], ['suite other', 'passed']])], true],
+      ['an unlisted test in the same file still fails the run', [oneTest], [file('tests/a.test.ts', 'failed', [['suite hold is released', 'failed'], ['suite other', 'failed']])], false],
+      ['a file listed as a whole covers the file failing to run', [wholeFile], [file('tests/a.test.ts', 'failed', [['suite other', 'passed']])], true],
+      ['a file listed as a whole does not cover a failing test in it', [wholeFile], [file('tests/a.test.ts', 'failed', [['suite other', 'failed']])], false],
+      ['a listed test does not cover the file failing to run', [oneTest], [file('tests/a.test.ts', 'failed', [['suite hold is released', 'passed']])], false],
+      ['an entry for another file covers nothing', [{ ...oneTest, file: 'tests/b.test.ts' }], [file('tests/a.test.ts', 'failed', [['suite hold is released', 'failed']])], false],
+    ])('%s', (_name, known, files, ok) => {
+      expect(summarizeVitestJson(report(files), { known }).ok).toBe(ok)
+    })
+
+    it('reports a known failure with its issue, apart from the failures that count', () => {
+      const out = summarizeVitestJson(report([file('tests/a.test.ts', 'failed', [['suite hold is released', 'failed'], ['suite other', 'failed']])]), { known: [oneTest] })
+      expect(out.summary).toBe('1 file(s), 4 test(s), 2 failed (1 known)')
+      expect(out.known).toHaveLength(1)
+      expect(out.known[0]).toContain('#1946')
+      expect(out.known[0]).toContain('races the timer')
+      expect(out.failures).toHaveLength(1)
+      expect(out.failures[0]).toContain('suite other')
+    })
+
+    it('says so when a listed test passes, so the entry gets removed', () => {
+      const out = summarizeVitestJson(report([file('tests/a.test.ts', 'passed', [['suite hold is released', 'passed']])]), { known: [oneTest, { ...wholeFile, file: 'tests/z.test.ts' }] })
+      expect(out).toMatchObject({ ok: true, knownOnly: false, known: [] })
+      expect(out.stale).toHaveLength(1)
+      expect(out.stale[0]).toContain('tests/a.test.ts > hold is released')
+    })
+
+    it('keeps a failed run failed when the report names no failure, or more failures than it lists', () => {
+      const failing = file('tests/a.test.ts', 'failed', [['suite hold is released', 'failed']])
+      expect(summarizeVitestJson({ success: false, numTotalTests: 1, numFailedTests: 0, testResults: [file('tests/a.test.ts', 'passed', [])] }, { known: [oneTest] }).ok).toBe(false)
+      expect(summarizeVitestJson(report([failing], 5), { known: [oneTest] }).ok).toBe(false)
+    })
+
+    it('passes a run that exited non-zero only when every failure was known', () => {
+      expect(vitestPassed({ ok: true, knownOnly: true }, 1)).toBe(true)
+      expect(vitestPassed({ ok: true, knownOnly: false }, 1)).toBe(false)
+      expect(vitestPassed({ ok: true, knownOnly: false }, 0)).toBe(true)
+      expect(vitestPassed({ ok: false, knownOnly: false }, 0)).toBe(false)
+    })
+
+    it('reads the list for this platform, and treats a list it cannot read as empty', () => {
+      const root = mkdtempSync(join(tmpdir(), 'known-failures-'))
+      const write = (text: string) => writeFileSync(join(root, 'tests', 'known-failures.json'), text)
+      try {
+        expect(readKnownFailures(root)).toEqual({ entries: [], error: null })
+        mkdirSync(join(root, 'tests'))
+        write(JSON.stringify([
+          { file: 'tests\\a.test.ts', issue: 1, how: 'x' },
+          { file: 'tests/b.test.ts', test: 'only here', issue: 2, how: 'y', platform: 'win32' },
+          { file: 'tests/c.test.ts', issue: 3, how: 'z', platform: 'darwin' }
+        ]))
+        expect(readKnownFailures(root, { platform: 'win32' }).entries.map((e) => e.file)).toEqual(['tests/a.test.ts', 'tests/b.test.ts'])
+        for (const broken of ['{ not json', '{"file":"tests/a.test.ts"}', JSON.stringify([{ file: 'tests/a.test.ts', how: 'no issue' }]), JSON.stringify([{ file: 'tests/a.test.ts', issue: 1, how: 'x', test: '' }])]) {
+          write(broken)
+          const out = readKnownFailures(root)
+          expect(out.entries).toEqual([])
+          expect(out.error).toContain('no failure is treated as known')
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
   })
 
   it('summarises tsc output and trims long lists', () => {
