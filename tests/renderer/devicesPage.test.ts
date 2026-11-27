@@ -93,28 +93,30 @@ const flush = async () => { for (let i = 0; i < 6; i++) await act(async () => { 
 const mount = async () => { await act(async () => root.render(createElement(EngineDevicesSection))); await flush() }
 const buttons = (name: string) => [...document.querySelectorAll<HTMLButtonElement>('button')].filter((item) => item.textContent?.trim() === name || item.getAttribute('aria-label') === name)
 const click = async (target: HTMLElement | undefined) => { expect(target).toBeTruthy(); await act(async () => target!.click()); await flush() }
-const rowText = (node: string, side = 'in') =>
-  (host.querySelector(`[data-device-node="${node}"][data-device-side="${side}"]`)?.textContent ?? '').replace(/\s+/g, ' ')
+/** A device's row in the list, and the chosen device's detail, as read. */
+const rowText = (node: string) => (host.querySelector(`[data-device-node="${node}"]`)?.textContent ?? '').replace(/\s+/g, ' ')
+const detailText = () => (host.querySelector('[data-device-detail]')?.textContent ?? '').replace(/\s+/g, ' ')
+const choose = (name: string) => click(host.querySelector<HTMLElement>(`[data-device-node] button[aria-label="${name}"]`) ?? undefined)
 const called = (method: string) => request.mock.calls.filter(([name]) => name === method)
 
 describe('Settings → Devices', () => {
-  it('lists an engine pairing and an old pairing in the same lists, with one switch, one add button per list and none of the old controls', async () => {
+  it('lists an engine pairing and an old pairing in one list, with one switch, both add buttons and none of the old controls', async () => {
     await mount()
-    expect(rowText('n_studio')).toContain('Works on threads · bots · Connected · same network')
-    expect(rowText('n_studio', 'out')).toContain('Connected · same network')
-    expect(rowText('nod_nas')).toContain('Connected · via relay')
-    expect(rowText('nod_nas', 'out')).toContain('Connected · via relay')
+    expect(rowText('n_studio')).toContain('Both ways')
+    expect(rowText('nod_nas')).toContain('Both ways')
+    // The first device shows at once.
+    expect(detailText()).toContain('Connected · same network · Both ways')
+    expect(detailText()).toContain('Access here')
     expect(buttons('Use another computer')).toHaveLength(1)
     expect(buttons('Let a device in')).toHaveLength(1)
     expect([...host.querySelectorAll('[role="switch"][aria-label="Networking"]')]).toHaveLength(1)
     for (const gone of ['Start over', 'Connection checks', 'Connection add-ons', 'Advertised routes', 'Device name', 'cloudflared'])
       expect(host.textContent).not.toContain(gone)
 
-    // The old pairing's Can use row (the second list) opens the same Access panel, and Remove goes to the old
-    // networking.
-    await click(buttons('Actions for Old NAS')[1])
-    await click(buttons('Access')[0])
-    expect(host.textContent).toContain('All projects, except private threads')
+    // The old pairing opens the same Access panel, and Remove goes to the old networking.
+    await choose('Old NAS')
+    expect(detailText()).toContain('Connected · via relay')
+    expect(detailText()).toContain('All projects, except private threads')
     await click(buttons('Actions for Old NAS')[0])
     await click(buttons('Remove…')[0])
     await click(buttons('Remove').at(-1))
