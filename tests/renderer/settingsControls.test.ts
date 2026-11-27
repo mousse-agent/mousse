@@ -160,9 +160,12 @@ describe('Settings > Appearance and General', () => {
     const about = host.querySelector('[data-settings-anchor="general-updates"]')!
     expect(about.textContent).toContain('Mousse 1.2.3')
     expect(about.textContent).toContain('Updates are not available in this build.')
-    expect(about.querySelector('button')).toBeNull()
+    // Only the version's copy button: no update button that cannot work.
+    expect([...about.querySelectorAll('button')].map((button) => button.getAttribute('aria-label'))).toEqual(['Copy version'])
     act(() => useUpdateStore.setState({ phase: 'up-to-date' }))
-    expect(about.querySelector('button')?.textContent).toContain('Check for updates')
+    expect(about.querySelector('.settings-item-control button')?.textContent).toContain('Check for updates')
+    // Up to date is a quiet status, not a coloured one.
+    expect(about.querySelector('[role="status"]')!.className).toBe('')
   })
 })
 
