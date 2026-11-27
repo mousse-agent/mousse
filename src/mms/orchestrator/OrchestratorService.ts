@@ -16767,10 +16767,11 @@ export class OrchestratorService extends EventEmitter {
           noteRetry(retries + 1, TURN_RETRY.attempts, cause)
           this.setTurnStep(session.threadId, { kind: 'retrying', attempt: retries + 1, maxAttempts: TURN_RETRY.attempts, delayMs: delay })
           if (plan.how === 'continue') {
-            // What the failed request left open ends here; the continuation's own output starts new rows below it.
+            // The text and thought the failed request left open end here; the continuation's own output starts new rows
+            // below them. Calls stay as they are: one the kept session still runs (a background agent) reports on, and
+            // the turn's end closes any left.
             this.transcript.closeThinking()
             this.transcript.abandonAssistant(this.transcript.openAssistantContent() ?? '', true)
-            this.transcript.closeOpenTools('no_result')
             // The session holds the turn and its history as it is now: the continuation carries that history, a note in
             // place of the request, and nothing it handed over or attached the first time.
             const { images: _images, historyHandedOver: _handedOver, handoffUnplanned: _unplanned, ...base } = turnInput
