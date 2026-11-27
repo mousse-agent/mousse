@@ -371,6 +371,18 @@ export interface ForkThreadRequest {
   seedFrom?: 'checkpoint' | 'current_head'
   /** A side chat (`ThreadLineage.relationship: 'side'`): the fork lives in the source's side panel, not in any list. */
   sideChat?: boolean
+  /** The thread whose agent or bot made the fork (`ForkStarter`); absent for a person's fork. */
+  startedBy?: ForkStarter
+}
+
+/**
+ * Who made a fork, as a `thread_create` thread records it: the calling thread becomes its launcher
+ * (`Thread.createdByThreadId`), and a bot's thread names the bot (`Thread.startedByBot`). `hidden` keeps it out of the
+ * person's sidebar; without it the fork shows there, as a person's does.
+ */
+export interface ForkStarter {
+  threadId: string
+  hidden?: boolean
 }
 
 /**
@@ -421,7 +433,7 @@ export function narrowestAccess(tasks: ReadonlyArray<Pick<DelegationRecord, 'acc
 /** A thread the engine asks its host to create: a delegated child or a fork. */
 export type ThreadCreation =
   | { kind: 'delegation'; request: DelegationRequest }
-  | { kind: 'fork'; threadId: string; sourceThreadId: string; sourceRunId: string; title?: string; sideChat?: boolean }
+  | { kind: 'fork'; threadId: string; sourceThreadId: string; sourceRunId: string; title?: string; sideChat?: boolean; startedBy?: ForkStarter }
 
 /** Source runs a fork may start after (SPEC §16.2): never `running` or `uncertain`. */
 export const FORKABLE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
@@ -1924,7 +1936,8 @@ un_time_limits). */
           sourceThreadId: input.sourceThreadId,
           sourceRunId: source.runId,
           title: input.title,
-          ...(input.sideChat ? { sideChat: true } : {})
+          ...(input.sideChat ? { sideChat: true } : {}),
+          ...(input.startedBy ? { startedBy: input.startedBy } : {})
         }).threadId
         created = true
         const pinned = seedFrom === 'checkpoint' && !input.sideChat && await host.pinForkCheckpoint?.(threadId, input.sourceThreadId, source.runId)
