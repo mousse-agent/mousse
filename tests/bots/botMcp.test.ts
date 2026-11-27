@@ -259,7 +259,7 @@ describe('mcp_servers', () => {
       ],
       note: expect.stringContaining('with no asking')
     })
-    expect((await f.bots.tools.mcpServers!(botId, 'chat')).note).toMatch(/hand jobs that need them to work_start/)
+    expect((await f.bots.tools.mcpServers!(botId, 'chat')).note).toMatch(/hand jobs that need them to work/)
   })
 
   it('shows a server that has not answered as still starting, and an ask for it makes no card', async () => {

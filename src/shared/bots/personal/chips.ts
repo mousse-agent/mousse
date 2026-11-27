@@ -1,5 +1,5 @@
 import type { BotChip, BotChipIcon } from './chat'
-import { canonicalToolName } from '../../toolAliases'
+import { canonicalToolName, isBotVariant } from '../../toolAliases'
 
 /**
  * Activity chips (Bot Phase 1 §5.8, bot-ui C3). Mousse makes them from the calls the authority
@@ -162,8 +162,9 @@ function classifyFile(tool: string, input: unknown, ctx: BotChipContext): Classi
 const DEPTH_WORDS: Record<string, string> = { deep: 'taking more time', quick: 'going quicker', normal: 'back to the usual pace' }
 
 function classify(name: string, input: unknown, ctx: BotChipContext): Classified | null {
-  // A call an older activation recorded under a tool's old name reads as the tool it was renamed to.
-  const tool = canonicalToolName(name)
+  // A call an older activation recorded under a tool's old name reads as the tool it was renamed to; a bot's own tool
+  // that became a variant of a thread tool (`work_start`) keeps its own words.
+  const tool = chipToolName(name)
   const args = record(input)
   if (READ_TOOLS.has(tool) || WRITE_TOOLS.has(tool)) return classifyFile(tool, input, ctx)
   if (LOOK_BACK_TOOLS.has(tool)) {
@@ -319,6 +320,11 @@ function classify(name: string, input: unknown, ctx: BotChipContext): Classified
  * The live chip for a call the authority just allowed, or null when the call shows none
  * (`permission_ask`: its card is the chip).
  */
+/** The tool a chip names: an old name's new one, except a bot's own tool, which the gate names as that (`isBotVariant`). */
+function chipToolName(name: string): string {
+  return isBotVariant(name) ? name : canonicalToolName(name)
+}
+
 export function chipForCall(tool: string, input: unknown, ctx: BotChipContext = {}): BotChip | null {
   const classified = classify(tool, input, ctx)
   if (!classified) return null
@@ -531,7 +537,7 @@ const QUIET_KINDS: ReadonlySet<ChipKind> = new Set(['schedules', 'work_look', 'b
  * shows it at once, before the turn ends and its message carries every chip. Null for any other call.
  */
 export function actedChip(tool: string, input: unknown, result: unknown): BotChip | null {
-  const name = canonicalToolName(tool)
+  const name = chipToolName(tool)
   const kind = name === 'thread_create' ? 'thread_start' : name === 'thread_send' ? 'thread_send' : name === 'thread_stop' ? 'thread_stop'
     : name === 'thread_archive' ? 'thread_archive' : name === 'thread_update' ? 'thread_hide' : undefined
   return kind ? outcomeChip(kind, { tool, input, result }) : null

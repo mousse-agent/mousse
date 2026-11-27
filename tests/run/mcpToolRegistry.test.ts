@@ -701,6 +701,51 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     expect(result.payload).toMatchObject({ runId: child.childRunId, text: `${'w'.repeat(THREAD_RESULT_MAX_CHARS)}…`, truncated: true, totalChars: long.length, hint: expect.stringContaining('view "messages"') })
   })
 
+  it('thread_list pages with a cursor bound to the thread and the query, and each page lists only what that thread may read', async () => {
+    const { call, threads, denied } = await world()
+    for (let at = 1; at <= 5; at += 1) threads.set(`t${at}`, thread(`t${at}`, { updatedAt: `2026-10-0${6 - at}T00:00:00.000Z` }))
+    const list = async (args: Record<string, unknown>) => JSON.parse((await call('parent', 'thread_list', args)).text) as { threads: Array<{ id: string }>; nextCursor: string | null; complete: boolean }
+    const whole = await list({})
+    expect(whole).toMatchObject({ nextCursor: null, complete: true })
+    const pages: string[][] = []
+    let page = await list({ limit: 3 })
+    for (;;) {
+      pages.push(page.threads.map((row) => row.id))
+      if (page.complete) break
+      expect(page.nextCursor).toEqual(expect.any(String))
+      page = await list({ limit: 3, cursor: page.nextCursor })
+    }
+    expect(page.nextCursor).toBeNull()
+    expect(pages.map((ids) => ids.length)).toEqual([3, 3, 3])
+    expect(pages.flat()).toEqual(whole.threads.map((row) => row.id))
+    // Another thread, or the same thread with other filters, can't continue it; a made-up cursor is refused too.
+    const first = await list({ limit: 3 })
+    expect(await denied(call('stranger', 'thread_list', { limit: 3, cursor: first.nextCursor }))).toMatchObject({ code: 'cursor_mismatch' })
+    expect(await denied(call('parent', 'thread_list', { limit: 3, projectId: 'p1', cursor: first.nextCursor }))).toMatchObject({ code: 'cursor_mismatch' })
+    expect(await denied(call('parent', 'thread_list', { cursor: 'not-a-cursor' }))).toMatchObject({ code: 'invalid_cursor' })
+    // The next page is built for the thread that presents the cursor: a thread made private since is not on it.
+    const next = pages[1]![0]!
+    threads.set(next, { ...threads.get(next)!, localOnly: true })
+    expect((await list({ limit: 3, cursor: first.nextCursor })).threads.map((row) => row.id)).toEqual([...pages[1]!.slice(1), pages[2]![0]])
+    threads.set(next, { ...threads.get(next)!, localOnly: undefined })
+    // The last row of a page updated before the next page is read: the next page goes on from where it was, and
+    // repeats none of the page before.
+    const last = pages[0]!.at(-1)!
+    threads.set(last, { ...threads.get(last)!, updatedAt: '2026-12-01T00:00:00.000Z' })
+    expect((await list({ limit: 3, cursor: first.nextCursor })).threads.map((row) => row.id)).toEqual(pages[1])
+  })
+
+  it('thread_read messages: a message cut short carries readMore, the call that reads that message on', async () => {
+    const { read, messages } = await world()
+    messages.set('stranger', [message(0, 'x'.repeat(THREAD_MESSAGE_MAX_CHARS + 10), 'assistant'), message(1, 'short')])
+    const page = await read('parent', { threadId: 'stranger', view: 'messages' })
+    expect(page.messages[0]).toMatchObject({ truncated: true, totalChars: THREAD_MESSAGE_MAX_CHARS + 10 })
+    expect(page.messages[0].readMore).toEqual({ tool: 'thread_read', args: { threadId: 'stranger', view: 'messages', afterIndex: 0, textOffset: THREAD_MESSAGE_MAX_CHARS, limit: 1 } })
+    expect(page.messages[1]).not.toHaveProperty('readMore')
+    const more = await read('parent', page.messages[0].readMore.args)
+    expect(more.messages).toEqual([expect.objectContaining({ index: 0, text: 'x'.repeat(10) })])
+  })
+
   it('thread_list: every project, started and unarchived by default, filters and limits, with the pending questions', async () => {
     const { call, fx, threads, activity, strangerRun } = await world()
     threads.set('draft', thread('draft', { startedAt: undefined }))
@@ -716,7 +761,8 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     const ids = (value: { threads: Array<Record<string, unknown>> }) => value.threads.map((row) => row.id)
 
     const base = await list()
-    expect(ids(base)).toEqual(['parent', 'stranger', 'elsewhere', 'loose', 'quiet'])
+    // Newest first; threads updated at the same moment by id.
+    expect(ids(base)).toEqual(['elsewhere', 'loose', 'parent', 'stranger', 'quiet'])
     expect(base.projects).toEqual([{ id: 'p1', name: 'One' }, { id: 'p2', name: 'Two' }])
     expect(base.threads.find((row) => row.id === 'stranger')).toMatchObject({
       projectId: 'p1', projectName: 'One', queuedCount: 2, pendingQuestionCount: 1, status: 'awaiting_input', activeRunId: strangerRun.runId,

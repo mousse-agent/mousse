@@ -229,8 +229,8 @@ export interface BotSummary {
    */
   tasks?: BotTaskItem[]
   /**
-   * Which devices reach it (About's Devices), on its own computer's window only: anything but `all` shows a lock in the
-   * Bots list. Absent from older services and from what other devices get.
+   * Which devices reach it (About's Devices), on its own computer's window only: this computer alone, or other devices
+   * too, when the bot's menu offers Make private. Absent from older services and from what other devices get.
    */
   reach?: BotDeviceAccessMode
   /**

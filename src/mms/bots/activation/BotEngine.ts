@@ -104,6 +104,7 @@ import { addedPermissions, BOT_FULL_TRUST_PERMISSION, intersectManifest, manifes
 import { allPinned, copyPick, customSlotsOf, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withCustomSlot, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import type { BotDeviceAccessStore } from '../definitions/BotDeviceAccessStore'
+import type { BotDeviceChoice } from '../../../shared/bots/personal/deviceAccess'
 import { defaultChatInput, defaultWorkLine, lateWorkNote, DEFAULT_NUDGE_AFTER_MINUTES, MAX_NUDGES_PER_QUESTION, MAX_QUESTIONS_PER_CALL, QUESTION_DUPLICATE_TEXT, questionIdentity, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, keepsWorking, openQuestionAnswerNote, questionWorkKeepsWorkingText, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionAsk, type BotQuestionFollow, type BotQuestionSpec, type BotQuestionStatus } from '../../../shared/bots/personal/questions'
 import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
 import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../chat/replyCards'
@@ -370,9 +371,11 @@ export interface BotEngineHost {
   otherComputers?(): Array<{ node: string; name: string; online: boolean }>
   /**
    * Which devices reach each bot (`BotDeviceAccessStore`): a new bot's choice is saved here before the bot is published,
-   * and the Bots list shows it. Absent: no bot is given a choice when it is made, and none is listed with one.
+   * and the bot's menu reads it (Make private). Absent: no bot is given a choice when it is made, and none is listed with one.
    */
-  deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget'>
+  deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget' | 'needsSnapshot'>
+  /** The owner's other devices, for New bot's Devices step (`BotReachPort.devices`); undefined while Bridge is off. */
+  devices?(): Promise<BotDeviceChoice[] | undefined>
   /** The secrets a thread's agents may use (the bot's home thread: the bot's), by name and label, never a value. */
   secretsHeld?(threadId: string): Array<{ name: string; label?: string }>
   /**
@@ -424,9 +427,9 @@ export const BOT_ASK_NOT_YET_TEXT = "Don't ask for permissions yet: the owner ha
  * What a chat turn's call of the runtime's own web is answered with when the grant holds the web: its web is Mousse's
  * `web_search` and `web_fetch`, which keep to the chat's deadlines (`frontDeskManifest`).
  */
-export const BOT_CHAT_WEB_TEXT = "The owner already allowed the web. Here use Mousse's web_search and web_fetch for it; a job of several steps goes to work_start."
+export const BOT_CHAT_WEB_TEXT = "The owner already allowed the web. Here use Mousse's web_search and web_fetch for it; a job of several steps goes to your work (thread_create, kind \"subagent\")."
 /** What a chat turn's ask for something its work already holds is answered with (commands, the computer, the browser). */
-export const BOT_WORK_HAS_TEXT = 'Your work already has this; the chat does not use it. Hand the job to work_start and tell the owner you are on it.'
+export const BOT_WORK_HAS_TEXT = 'Your work already has this; the chat does not use it. Hand the job to your work (thread_create, kind "subagent") and tell the owner you are on it.'
 /**
  * What a run's call or `escalate` is answered with when the owner allowed the permission after its turn started: the
  * turn keeps the permissions it started with, and the work continues with the new one once the turn ends.
@@ -1082,7 +1085,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...(host.images ? { images: host.images } : {}),
       ...(host.computerName ? { computerName: host.computerName } : {}),
       ...(host.otherComputers ? { otherComputers: host.otherComputers } : {}),
-      ...(host.deviceAccess ? { deviceAccess: host.deviceAccess } : {})
+      ...(host.deviceAccess ? { deviceAccess: host.deviceAccess } : {}),
+      ...(host.devices ? { devices: host.devices } : {})
     })
     try {
       for (const thread of host.store.allThreads()) this.known.set(thread.threadId, { botId: thread.botId, role: thread.role })
@@ -4074,7 +4078,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const note = !servers.length
       ? read ? 'Your owner has no MCP servers set up in Mousse for you to use.' : 'Your owner\'s MCP servers are still being read. Call mcp_servers again in a moment.'
       : lane === 'chat'
-        ? 'Servers marked yes are your work\'s, with no asking: hand jobs that need them to work_start. One still starting has its tools once it has listed them. Asking won\'t help for one your owner switched off.'
+        ? 'Servers marked yes are your work\'s, with no asking: hand jobs that need them to work. One still starting has its tools once it has listed them. Asking won\'t help for one your owner switched off.'
         : 'Use the tools of servers marked yes, with no asking. One still starting has its tools in your next turn once it has listed them. Asking won\'t help for one your owner switched off: carry on without it, and say so in your report.'
     return { servers, note }
   }
@@ -6823,7 +6827,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (isSpecialAsk(answer.permission)) return `The owner allowed: ${title}. Mousse saves it now.`
       // A chat turn is not offered what takes long: the work it hands off has it now.
       if (row.lane === 'chat' && 'tool' in answer.permission && (BOT_WORK_ONLY_TOOLS.includes(botGrantTool(answer.permission.tool)) || botGrantTool(answer.permission.tool) === BOT_BROWSER_PERMISSION))
-        return `The owner allowed: ${title}. Your work has it now: hand the job to work_start.`
+        return `The owner allowed: ${title}. Your work has it now: hand the job to your work (thread_create, kind "subagent").`
       return `The owner allowed: ${title}.`
     }
     // Ordered store events supply the same update slot as ordinary notes and answers. The reason
@@ -7224,7 +7228,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private subagentCapped(activationId: string, under: string | null, title?: string): string | undefined {
     const records = this.subagentRecords(activationId, under)
     if (title !== undefined && (records.some((record) => record.spec.title.toLowerCase() === title.toLowerCase()) || this.startingSubagents.get(startingKey(activationId, under))?.has(title.toLowerCase())))
-      return `You already have a subagent called "${title}". Give this one another title, or send that one more work with subagent_send.`
+      return `You already have a subagent called "${title}". Give this one another title, or send that one more work (thread_send with its title as subagent).`
     const live = this.live.get(activationId)
     if (live && live.deadline - this.now() < 2 * ACTIVE_TIME_CHUNK_MS)
       return 'Your turn is about to end, so no subagent can start now. Start it after your work goes on.'
@@ -7244,9 +7248,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const row = turn
     const under = childrenOf(main)
     const title = cutText(request.title, MAX_SUBAGENT_TITLE_CHARS)
-    if (!title) return { refused: 'subagent_start needs a short title, like "Price check".' }
+    if (!title) return { refused: 'A subagent needs a short title, like "Price check".' }
     const brief = request.brief.trim()
-    if (!brief) return { refused: 'subagent_start needs a brief that stands on its own: the subagent sees nothing else.' }
+    if (!brief) return { refused: 'A subagent needs a brief that stands on its own: the subagent sees nothing else.' }
     // Never cut: a brief over the limit is refused whole, so the subagent never works from part of it.
     if (brief.length > MAX_SUBAGENT_BRIEF_CHARS) return { refused: subagentTooLongText('brief', brief.length) }
     // A repeat of the same tool call (a runtime's retry) starts nothing new.
@@ -7319,7 +7323,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const record = this.subagentNamed(row.id, request.subagent, under)
     if (!record) return { refused: this.unknownSubagent(row.id, request.subagent, under) }
     const message = request.message.trim()
-    if (!message) return { refused: 'subagent_send needs the message.' }
+    if (!message) return { refused: 'A message to a subagent needs its content.' }
     if (message.length > MAX_SUBAGENT_BRIEF_CHARS) return { refused: subagentTooLongText('message', message.length) }
     // One still working takes it in at its next step, as a correction to what it does.
     if (this.subagentRunning(record)) return this.noteSubagent(record, message)
@@ -7336,7 +7340,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (this.subagentRunning(fresh)) return this.noteSubagent(fresh, message)
     // `subagent_result` reads a subagent's last turn: more work before the work read what the last one returned would
     // leave that result where nothing reads it, and its notice pointing at the next one's.
-    if (this.subagentResultUnread(row.id, fresh)) return { refused: `Read what "${fresh.spec.title}" returned first (subagent_result): more work replaces that result.` }
+    if (this.subagentResultUnread(row.id, fresh)) return { refused: `Read what "${fresh.spec.title}" returned first (thread_wait with timeoutSeconds 0): more work replaces that result.` }
     const recheck = this.subagentCapped(row.id, under)
     if (recheck) return { refused: recheck }
     const lacks = held.hold.withheld.map((power) => BOT_HELD_POWER_TEXT[power])
@@ -7360,7 +7364,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private noteSubagent(record: SubagentRecord, message: string): { sent: BotSubagentView; note: string } | { refused: string } {
     const notes = this.subagentNotes.get(record.turns.at(-1)!.delegation.childRunId)
-    if (!notes?.attached) return { refused: `"${record.spec.title}" is still working and can't take a message until it finishes. Wait for it (subagent_wait), or stop it and send it what changed.` }
+    if (!notes?.attached) return { refused: `"${record.spec.title}" is still working and can't take a message until it finishes. Wait for it (thread_wait), or stop it and send it what changed.` }
     notes.waiting.push(message)
     return { sent: { subagent: record.spec.title, model: record.spec.model, state: 'running' }, note: SUBAGENT_NOTE_SENT }
   }
@@ -8056,11 +8060,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** `subagent_stop`: the subagent's turn ends now (a queued one never starts). */
-  private stopSubagent(activationId: string, request: { subagent: string }, under: string | null): { stopped: BotSubagentView } | { refused: string } {
+  private stopSubagent(activationId: string, request: { subagent: string; toolCallId?: string }, under: string | null): { stopped: BotSubagentView } | { refused: string } {
+    // A retry of a Stop answers as the first did: the subagent may have taken more work since, and that turn is not stopped.
+    const call = request.toolCallId
+    if (call)
+      for (const record of this.subagentRecords(activationId, under))
+        for (const turn of record.turns) {
+          const earlier = turn.spec.stops?.find((stop) => stop.call === call)
+          if (earlier) return { stopped: { subagent: record.spec.title, model: turn.spec.model, state: earlier.state as BotSubagentView['state'] } }
+        }
     const record = this.subagentNamed(activationId, request.subagent, under)
     if (!record) return { refused: this.unknownSubagent(activationId, request.subagent, under) }
-    if (!this.subagentRunning(record)) return { stopped: this.subagentView(record, false) }
-    const { delegation } = record.turns.at(-1)!
+    const last = record.turns.at(-1)!
+    const noted = (view: BotSubagentView) => {
+      if (call) this.store.noteSubagentStop(activationId, last.delegation.childRunId, call, view.state)
+      return { stopped: view }
+    }
+    if (!this.subagentRunning(record)) return noted(this.subagentView(record, false))
+    const { delegation } = last
     this.subagentStops.add(delegation.childRunId)
     const runs = this.host.runs()
     if (runs?.getRun(delegation.childRunId)?.status === 'queued') {
@@ -8072,7 +8089,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     if (!runs || !TERMINAL_RUN_STATUSES.has(runs.getRun(delegation.childRunId)?.status ?? 'queued'))
       void Promise.resolve(this.host.stopThread?.(record.threadId)).catch(() => {})
-    return { stopped: { subagent: record.spec.title, model: record.spec.model, state: 'stopped' } }
+    return noted({ subagent: record.spec.title, model: record.spec.model, state: 'stopped' })
   }
 
   private unknownSubagent(activationId: string, name: string, under: string | null): string {
@@ -8126,8 +8143,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const stopped = untold.filter((entry) => entry.stopped)
     const ended = untold.filter((entry) => !entry.stopped)
     this.store.markSubagentsTold(row.id, untold.map((entry) => entry.childRunId))
-    return (stopped.length ? ` Your subagents ${titles(stopped)} were stopped when your last turn ended; subagent_result shows each one, and you may start them again.` : '')
-      + (ended.length ? ` Your subagents ${titles(ended)} ended since you last looked; read what each returned with subagent_result.` : '')
+    return (stopped.length ? ` Your subagents ${titles(stopped)} were stopped when your last turn ended; thread_wait with timeoutSeconds 0 shows each one, and you may start them again.` : '')
+      + (ended.length ? ` Your subagents ${titles(ended)} ended since you last looked; read what each returned with thread_wait (timeoutSeconds 0).` : '')
   }
 
   /**
@@ -9580,7 +9597,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return Promise.race([call, timedOut])
   }
 
-  /** Which devices reach the bot changed (About's Devices, Make private): the Bots list reads it again for its lock. */
+  /** Which devices reach the bot changed (About's Devices, Make private): the bot's menu reads it again. */
   reachChanged(botId: string): void {
     this.changed({ botId })
   }
@@ -12297,7 +12314,7 @@ function subagentNoteText(messages: readonly string[]): string {
 /** The notice a work's running turn takes in at its next step when one of its subagents ended (`steerNext`). */
 function subagentNoticeText(entry: Pick<BotSubagentRunRow, 'spec' | 'outcome'>): string {
   const how = entry.outcome === 'done' ? 'finished' : entry.outcome === 'failed' ? 'ended without a result' : 'was stopped'
-  return mousseNotice({ kind: 'bot_subagent' }, [`Your subagent "${entry.spec.title}" ${how}. Read what it returned with subagent_result.`])
+  return mousseNotice({ kind: 'bot_subagent' }, [`Your subagent "${entry.spec.title}" ${how}. Read what it returned with thread_wait (timeoutSeconds 0).`])
 }
 
 /** The room a subagent holds on its work's spend before it runs (`holdSubagentSpend`): about one small first request. */
@@ -12316,7 +12333,7 @@ const SUBAGENT_NO_PORT_TEXT = 'Bots are not running here, so no subagent can sta
 const SUBAGENT_RESULT_LINE = 'End with your result for the work that started you: what you found or did, in plain words. Your last message is your result.'
 const SUBAGENT_NOTHING_STARTED = 'Nothing was started.'
 const SUBAGENT_TURN_ENDED_TEXT = 'Your turn has ended, so nothing was started.'
-const SUBAGENT_STARTED_NOTE = 'It runs now, beside you. You are told when it finishes; read its result with subagent_result, or wait for it with subagent_wait. Before you report, wait for the ones you need and stop the rest: one still running when you report is stopped.'
+const SUBAGENT_STARTED_NOTE = 'It runs now, beside you. You are told when it finishes; read its result with thread_wait and timeoutSeconds 0, or wait for it with thread_wait. Before you report, wait for the ones you need and stop the rest: one still running when you report is stopped.'
 /** The Mousse app tools that are the web: a turn without either has no web. */
 const BOT_WEB_TOOLS: ReadonlySet<string> = new Set(['web_search', 'web_fetch'])
 

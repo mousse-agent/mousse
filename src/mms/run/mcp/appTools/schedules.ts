@@ -17,8 +17,12 @@ const PROMPT_LIST_CHARS = 2000
 const RECENT_RUNS = 3
 /** Subagent links followed up from a job's creating thread to the caller; a deeper chain is not the caller's. */
 const SUBAGENT_DEPTH = 64
-/** Removals remembered for repeats and retries (`schedule_delete`); the oldest is forgotten first. */
-const REMEMBERED_REMOVALS = 512
+/**
+ * The run-store receipt kind that keeps what `schedule_delete` removed (docs/plans/tool-api.md §1.2 "Retry"), under three
+ * keys: the delete's own request key, the job (`job:<id>`), and the request key that created it (`created:<key>`). A retry
+ * after a restart replays, and a stale retry of the create that made a job removed since does not make it again.
+ */
+export const SCHEDULE_DELETE_RECEIPT = 'schedule_delete'
 
 /** The schedule's schema with the profile's shortest interval as it is now. */
 function scheduleSchema(minMinutes: number) {
@@ -186,10 +190,15 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
     return false
   }
   /** Jobs this tool set removed, by job id and by request key, so a repeat or a retry is answered rather than refused. */
-  const removals = new Map<string, { removedBy: string; job: { id: string; name: string } }>()
-  const remember = (key: string, entry: { removedBy: string; job: { id: string; name: string } }): void => {
-    removals.set(key, entry)
-    while (removals.size > REMEMBERED_REMOVALS) removals.delete(removals.keys().next().value as string)
+  type Removal = { removedBy: string; job: { id: string; name: string } }
+  const removal = (key: string): Removal | undefined => {
+    const receipt = engine.store.getReceipt(`${SCHEDULE_DELETE_RECEIPT}:${key}`)
+    return receipt?.commandKind === SCHEDULE_DELETE_RECEIPT ? (receipt.result as Removal) : undefined
+  }
+  const remember = (key: string, entry: Removal): void => {
+    const clientRequestId = `${SCHEDULE_DELETE_RECEIPT}:${key}`
+    if (engine.store.getReceipt(clientRequestId)) return
+    engine.store.putReceipt({ clientRequestId, threadId: entry.removedBy, commandKind: SCHEDULE_DELETE_RECEIPT, status: 'accepted', result: entry, createdAt: new Date().toISOString() })
   }
   const findVisible = (id: string, ctx: ToolCallContext): ScheduledJob => {
     const job = schedules.get(id)
@@ -348,6 +357,9 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         // A retry of a call that already made its job returns that job and changes nothing, however many jobs exist.
         const earlier = schedules.list().find((job) => job.createdBy?.requestId === requestKey)
         if (earlier) return json({ job: summary(earlier, ctx), replayed: true })
+        // The job this key made was removed since: a stale retry says so and does not make it again.
+        const gone = removal(`created:${requestKey}`)
+        if (gone) return json({ job: gone.job, replayed: true, removed: true, note: 'This call already made this job, and it was removed since; nothing was made. Use a new clientRequestId to make a new one.' })
         const { projectId: _botProject, ...rest } = args
         const input = asCreateScheduledJobInput(without(rest, 'clientRequestId'))
         const refusal = scheduleRefusal(input.schedule, limitsNow().minIntervalMinutes) ?? promptRefusal(input.prompt)
@@ -538,12 +550,12 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       handler: (args, ctx) => {
         const id = requiredId(args, 'jobId')
         const requestKey = `schedule_delete:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
-        const replay = removals.get(requestKey)
+        const replay = removal(requestKey)
         if (replay) return json({ removed: true, alreadyRemoved: true, replayed: true, job: replay.job })
         const job = schedules.get(id)
         if (!job || !(visible(job, ctx) || madeBySubagent(job, ctx))) {
           // A job this thread removed before is gone, not refused; anything else is refused the same way whether it exists or not.
-          const earlier = removals.get(`job:${id}`)
+          const earlier = removal(`job:${id}`)
           if (!job && earlier?.removedBy === ctx.caller.threadId) return json({ removed: true, alreadyRemoved: true, job: earlier.job })
           throw new McpToolError(
             'mousse_scope_denied',
@@ -555,6 +567,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         if (!schedules.remove(job.id)) return json({ removed: true, alreadyRemoved: true, job: entry.job })
         remember(`job:${job.id}`, entry)
         remember(requestKey, entry)
+        if (job.createdBy?.requestId) remember(`created:${job.createdBy.requestId}`, entry)
         const summaryText = `removed scheduled job "${job.name}" (${job.id})`
         record(ctx, 'scheduled_job_deleted', job, summaryText)
         // A subagent's job: its own thread shows the removal too, by whom.

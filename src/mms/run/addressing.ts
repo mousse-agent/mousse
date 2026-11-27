@@ -95,30 +95,46 @@ export function isNamedAddress(value: string, sources: Pick<AddressSources, 'exi
   return parseQualifiedId(value) === undefined && !sources.exists(value.trim())
 }
 
+/** A member of a thread's family, with the thread it sits under (none for the parent). */
+export interface FamilyMember {
+  threadId: string
+  title: string
+  relation: AddressRelation
+  parentThreadId?: string
+}
+
 /**
  * The family of `threadId` (§1.2 "Family"), itself excluded: its parent, its siblings, its descendants at any depth, and
  * the native helpers of all of these and of itself. Parent and siblings first, then the tree below, breadth first.
+ * `complete` is false when the tree goes deeper than is followed, so some descendants are left out.
  */
-export function familyMembers(sources: AddressSources, threadId: string): Array<{ threadId: string; title: string; relation: AddressRelation }> {
-  const out: Array<{ threadId: string; title: string; relation: AddressRelation }> = []
+export function familyOf(sources: AddressSources, threadId: string): { members: FamilyMember[]; complete: boolean } {
+  const out: FamilyMember[] = []
   const seen = new Set([threadId])
-  const add = (id: string, title: string, relation: AddressRelation) => {
+  const add = (id: string, title: string, relation: AddressRelation, parentThreadId?: string) => {
     if (seen.has(id)) return
     seen.add(id)
-    out.push({ threadId: id, title, relation })
+    out.push({ threadId: id, title, relation, ...(parentThreadId ? { parentThreadId } : {}) })
   }
   const parent = sources.parentOf(threadId)
   if (parent) {
     add(parent, sources.titleOf(parent) ?? '', 'parent')
-    for (const sibling of sources.childrenOf(parent)) add(sibling.threadId, sibling.title, 'sibling')
+    for (const sibling of sources.childrenOf(parent)) add(sibling.threadId, sibling.title, 'sibling', parent)
   }
-  for (const member of descendants(sources, threadId)) add(member.threadId, member.title, member.relation)
-  for (const member of [{ threadId }, ...out.filter((member) => member.relation !== 'native')]) for (const helper of sources.helpersOf?.(member.threadId) ?? []) add(helper.threadId, helper.title, 'native')
-  return out
+  let complete = true
+  for (const member of descendants(sources, threadId, () => (complete = false))) add(member.threadId, member.title, member.relation, member.parentThreadId)
+  for (const member of [{ threadId }, ...out.filter((member) => member.relation !== 'native')])
+    for (const helper of sources.helpersOf?.(member.threadId) ?? []) add(helper.threadId, helper.title, 'native', member.threadId)
+  return { members: out, complete }
+}
+
+/** `familyOf`'s members. */
+export function familyMembers(sources: AddressSources, threadId: string): FamilyMember[] {
+  return familyOf(sources, threadId).members
 }
 
 /** The subagents below `threadId`, breadth first: its children, then theirs. */
-function descendants(sources: AddressSources, threadId: string): Array<{ threadId: string; title: string; relation: 'child' | 'descendant'; parentThreadId: string }> {
+function descendants(sources: AddressSources, threadId: string, cut?: () => void): Array<{ threadId: string; title: string; relation: 'child' | 'descendant'; parentThreadId: string }> {
   const out: Array<{ threadId: string; title: string; relation: 'child' | 'descendant'; parentThreadId: string }> = []
   let level = [threadId]
   const seen = new Set(level)
@@ -133,6 +149,7 @@ function descendants(sources: AddressSources, threadId: string): Array<{ threadI
       }
     level = next
   }
+  if (cut && level.some((id) => sources.childrenOf(id).length > 0)) cut()
   return out
 }
 

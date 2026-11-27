@@ -12,7 +12,7 @@ import {
   sanitizeCuaInput,
   sanitizeCuaOutput,
 } from "../../../../../shared/cuaActivity";
-import { canonicalToolName } from "../../../../../shared/toolAliases";
+import { canonicalToolName, isBotVariant } from "../../../../../shared/toolAliases";
 
 const MOUSSE_TOOL_PREFIX = "tool-mcp__mousse__";
 const CUSTOM_TOOL_PREFIX = "tool-mcp__custom__";
@@ -198,8 +198,9 @@ export type MousseToolLabels = { running: string; done: string; failed: string }
 
 export function mousseToolLabels(tool: string): MousseToolLabels {
   const family = FAMILIES.find(([prefix]) => tool.startsWith(prefix));
-  // A call an older transcript names by a tool's old name reads as the tool it was renamed to.
-  const own = TOOLS[canonicalToolName(tool)] ?? (family ? ([family[1], family[2]] as const) : undefined);
+  // A call an older transcript names by a tool's old name reads as the tool it was renamed to; a bot's own tool that
+  // became a variant of a thread tool (`work_start`) keeps its words.
+  const own = TOOLS[isBotVariant(tool) ? tool : canonicalToolName(tool)] ?? (family ? ([family[1], family[2]] as const) : undefined);
   if (!own) {
     const name = tool.replace(/_/g, " ").trim();
     return { running: `Running ${name} in Mousse`, done: `Ran ${name} in Mousse`, failed: `Couldn't run ${name} in Mousse` };

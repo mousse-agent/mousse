@@ -209,33 +209,54 @@ describe('New bot', () => {
     expect(creates()).toHaveLength(0)
   })
 
-  it('Devices on Runs on: Everywhere unless This computer only is picked, after the model, which keeps the focus', async () => {
-    vi.mocked(fake.client.modelChoices).mockImplementation(async () => ({ models: [{ model: 'sonnet', label: 'Claude · sonnet' }], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }], reachOnCreate: true }))
-    const devices = () => dialog()!.querySelector<HTMLElement>('[aria-label="Devices that reach the new bot"]')
+  /** Runs on's choices from a home that takes `access`, with these other devices of the owner's. */
+  const choicesWith = (devices?: Array<{ node: string; name: string; kind: 'phone' | 'computer' }>) =>
+    vi.mocked(fake.client.modelChoices).mockImplementation(async () => ({ models: [{ model: 'sonnet', label: 'Claude · sonnet' }], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }], reachOnCreate: true, ...(devices ? { devices } : {}) }))
+  const deviceSwitch = (label: string) => dialog()!.querySelector<HTMLButtonElement>(`[role="switch"][aria-label^="${label} reaches"]`)
+
+  it('with another device (a phone counts), a Devices step after Runs on: each device off at first, this computer always on', async () => {
+    choicesWith([{ node: 'nod_pocket', name: 'Pocket', kind: 'phone' }, { node: 'nod_tablet', name: 'Tablet', kind: 'computer' }])
     await open([])
     await toRunsOn('Remind me to water the plants.')
-    expect(document.activeElement).toBe(modelPicker())
-    expect(devices()?.textContent).toContain('Everywhere')
+    expect(stepLabels()).toEqual(['Look', 'What it does', 'Runs on', 'Devices'])
+    expect(createButton()).toBeUndefined()
+    await click(nextButton())
+    expect(stepNow()).toBe('devices')
+    expect(deviceSwitch('This computer')?.getAttribute('aria-checked')).toBe('true')
+    expect(deviceSwitch('This computer')?.disabled).toBe(true)
+    expect(deviceSwitch('Pocket')?.getAttribute('aria-checked')).toBe('false')
+    expect(deviceSwitch('Tablet')?.getAttribute('aria-checked')).toBe('false')
+    await click(deviceSwitch('Pocket')!)
+    expect(deviceSwitch('Pocket')?.getAttribute('aria-checked')).toBe('true')
     await click(createButton())
     await act(async () => {})
-    expect(creates()[0]![1]).toMatchObject({ access: { mode: 'all' } })
-    // The next bot starts on Everywhere again.
+    expect(creates()[0]![1]).toMatchObject({ access: { mode: 'chosen', nodes: ['nod_pocket'] } })
+    // The next bot starts with every other device off again: this computer alone.
     await act(async () => useBotsStore.setState({ newBotOpen: true }))
     await toRunsOn('Keep my diary.')
-    expect(devices()?.textContent).toContain('Everywhere')
-    await click(devices()!)
-    expect([...document.querySelectorAll('[role="option"]')].map((option) => option.textContent)).toEqual(['EverywhereYour connected devices and phones', 'This computer only'])
-    await pickOption('This computer only')
+    await click(nextButton())
+    expect(deviceSwitch('Pocket')?.getAttribute('aria-checked')).toBe('false')
     await click(createButton())
     await act(async () => {})
     expect(creates()[1]![1]).toMatchObject({ access: { mode: 'this_computer' } })
   })
 
-  it('has no Devices row with a home that can\'t take the choice at creation, and sends none', async () => {
+  it('with this computer the only device, no Devices step: Create bot is on Runs on and the bot is this computer\'s alone', async () => {
+    choicesWith()
+    await open([])
+    await toRunsOn('Remind me to water the plants.')
+    expect(stepLabels()).toEqual(['Look', 'What it does', 'Runs on'])
+    expect(dialog()!.querySelector('[data-testid="bot-new-devices"]')).toBeNull()
+    await click(createButton())
+    await act(async () => {})
+    expect(creates()[0]![1]).toMatchObject({ access: { mode: 'this_computer' } })
+  })
+
+  it('has no Devices step with a home that can\'t take the choice at creation, and sends none', async () => {
     // The default service here answers model choices without `reachOnCreate`: one from before this choice.
     await open([])
     await toRunsOn('Remind me to water the plants.')
-    expect(dialog()!.querySelector('[aria-label="Devices that reach the new bot"]')).toBeNull()
+    expect(dialog()!.querySelector('[data-testid="bot-new-devices"]')).toBeNull()
     expect(dialog()!.textContent).not.toMatch(/device|everywhere/i)
     await click(createButton())
     await act(async () => {})

@@ -89,11 +89,9 @@ const whatYouCanReach: SectionBuilder = (facts) => {
   const devices = facts.devices
   const reach = !devices
     ? 'unknown now'
-    : devices.access === 'all'
-      ? 'every one of your owner\'s devices'
-      : devices.access === 'this_computer' || !devices.reach.length
-        ? 'this computer only'
-        : `this computer and ${devices.reach.join(', ')}`
+    : devices.access === 'this_computer' || !devices.reach.length
+      ? 'this computer only'
+      : `this computer and ${devices.reach.join(', ')}`
   const mcp = facts.allowed?.off?.mcp ? 'switched off by your owner' : facts.allowed?.mcp?.length ? facts.allowed.mcp.join(', ') : 'none'
   const secrets = facts.secrets.length ? facts.secrets.map((secret) => (secret.label ? `${secret.name} (${secret.label})` : secret.name)).join(', ') : 'none'
   return {

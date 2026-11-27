@@ -179,14 +179,14 @@ describe('budgets, deadlines and the owner writing', () => {
     expect((await writing).text).toContain('Issue #12 filed.')
   })
 
-  it('at its deadline a call that only reads says work_required; one that may write is uncertain, with work_start the fix', async () => {
+  it('at its deadline a call that only reads says work_required; one that may write is uncertain, with thread_create the fix', async () => {
     const talk = await chat('Read my note and file an issue.', 'm1')
     const call = registryFor(talk)
     hangs = new Set([READ, WRITE])
-    expect(refusalOf(await use(call, READ))?.refused).toMatchObject({ code: 'work_required', fix: 'work_start' })
+    expect(refusalOf(await use(call, READ))?.refused).toMatchObject({ code: 'work_required', fix: 'thread_create' })
     expect(waiting.get(READ)!.signal.aborted).toBe(true)
     const write = refusalOf(await use(call, WRITE))?.refused
-    expect(write).toMatchObject({ code: 'uncertain', fix: 'work_start', retry: 'never' })
+    expect(write).toMatchObject({ code: 'uncertain', fix: 'thread_create', retry: 'never' })
     // The deadline stopped the call; what the server says after it is dropped.
     expect(waiting.get(WRITE)!.signal.aborted).toBe(true)
   })
@@ -290,7 +290,7 @@ describe('budgets, deadlines and the owner writing', () => {
     expect(refusalOf(await use(call, READ))?.refused).toMatchObject({ code: 'work_required', message: expect.stringContaining("this turn's") })
     const before = sent.length
     const spent = refusalOf(await call('web_fetch', { url: 'https://example.com' }))?.refused
-    expect(spent).toMatchObject({ code: 'work_required', fix: 'work_start', message: expect.stringContaining("didn't run") })
+    expect(spent).toMatchObject({ code: 'work_required', fix: 'thread_create', message: expect.stringContaining("didn't run") })
     expect(sent).toHaveLength(before)
   })
 })

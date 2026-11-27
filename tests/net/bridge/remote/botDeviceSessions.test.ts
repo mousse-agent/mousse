@@ -1,13 +1,16 @@
 /**
  * Which devices reach a bot, over real sessions: an owner computer with its real profile services and Bridge, and two
- * phones that joined it. What crosses the wire is checked here: a bot left out of a phone's list is not there for that
- * phone, a phone whose switch is off reaches no bot, and each phone's lists stream is its own.
+ * phones that joined it. What crosses the wire is checked here: an earlier build's "every device" reaches no phone
+ * until the one-time snapshot, which gives it the devices linked then (none on a computer with no networking set up, so
+ * a phone linked later reaches no bot); a bot left out of a phone's list is not there for that phone, a phone whose
+ * switch is off reaches no bot, and each phone's lists stream is its own.
  */
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { afterEach, expect, it, vi } from 'vitest'
+import { PeerDirectory } from '../../../../src/mms/bridge/peers'
 import { MmsProfileServices } from '../../../../src/mms/MmsProfileServices'
 import { MousseConfigStore } from '../../../../src/mms/config/MousseConfigStore'
 import { ProviderAuthService } from '../../../../src/mms/providers/ProviderAuthService'
@@ -29,8 +32,8 @@ function directory(prefix: string): string {
   return path
 }
 
-async function owner() {
-  const home = directory('bot-devices-owner-')
+/** The owner's profile services over `home`, as the app opens them. */
+function profileAt(home: string, profileId: string) {
   const auth = new ProviderAuthService(join(home, 'provider-auth.json'))
   cleanup.push(() => auth.stop())
   const services = new MmsProfileServices(
@@ -38,12 +41,31 @@ async function owner() {
     { homeDir: home, repoRoot: home, headless: true, requireOwnership: false },
     null,
     home,
-    { providerAuth: auth, domains: new DomainHandlerRegistry(), installationHome: home, profileId: randomUUID(), allowLegacyProjectData: false }
+    { providerAuth: auth, domains: new DomainHandlerRegistry(), installationHome: home, profileId, allowLegacyProjectData: false }
   )
   cleanup.push(() => services.stop())
+  return services
+}
+
+/** A real bot in the profile's `bots.db`, made by an earlier build: its first turn is not what is tested. */
+async function oldBot(home: string, profileId: string, name: string): Promise<string> {
+  const services = profileAt(home, profileId)
+  vi.spyOn(services.personalBots!, 'enqueueChat').mockResolvedValue(undefined as never)
+  const made = await services.personalBots!.service.create({ look: { colour: 'teal', accessory: 'cap' }, name, description: 'Keep the servers up', clientRequestId: `old-${name}` })
+  await services.stop()
+  // What the earlier build stored for it: every device.
+  mkdirSync(join(home, 'bots'), { recursive: true })
+  writeFileSync(join(home, 'bots', 'device-access.json'), JSON.stringify({ version: 1, bots: { [made.bot.id]: { mode: 'all' } } }))
+  return made.bot.id
+}
+
+async function owner(at?: { home: string; profileId: string }) {
+  const home = at?.home ?? directory('bot-devices-owner-')
+  const services = profileAt(home, at?.profileId ?? randomUUID())
+  let bridge: BridgeProfileService | undefined
   const net = new NetService({
     profileDir: home,
-    composeRuntime: (runtime) => new BridgeProfileService({ services, runtime, net }).composition()
+    composeRuntime: (runtime) => (bridge = new BridgeProfileService({ services, runtime, net })).composition()
   })
   cleanup.push(() => net.shutdown())
   await net.request('net.init', { name: 'desk', listen: true, port: 0 })
@@ -79,14 +101,14 @@ async function owner() {
     }
     return { node: joined.node, rpc, answer, watch }
   }
-  return { services, net, phone }
+  return { services, net, phone, bridge: () => bridge! }
 }
 
 it('a phone left out of a bot\'s list finds no such bot, a phone switched off finds none, and each phone reads only its own lists', async () => {
-  const o = await owner()
   // The profile's bots as the bridge reads them, with one bot. A real bot would start its first turn on the computer's
   // own providers; what is tested here is what crosses the wire, not the bot.
   const bot = { id: 'bot-0123456789ab', name: 'Server keeper' }
+  const o = await owner()
   const reached: string[] = []
   const service = {
     list: () => ({ bots: [bot] }),
@@ -105,14 +127,19 @@ it('a phone left out of a bot\'s list finds no such bot, a phone switched off fi
   const mine = await o.phone('pocket')
   const sisters = await o.phone('tablet')
 
-  // Every device reaches every bot until the owner says otherwise, as before.
+  // A bot without a choice reaches this computer alone: neither phone finds it.
+  const missing = await sisters.answer('bots.get', { botId: 'bot-ffffffffffff' })
+  expect(missing).toMatchObject({ code: 'stream_unknown' })
+  expect(await mine.answer('bots.get', { botId: bot.id })).toEqual(missing)
+  expect(await sisters.answer('bots.get', { botId: bot.id })).toEqual(missing)
+
+  // About → Devices: both phones turned on.
+  o.services.botDeviceAccess.set(bot.id, { mode: 'chosen', nodes: [mine.node, sisters.node] })
   expect(await mine.answer('bots.get', { botId: bot.id })).toMatchObject({ ok: { summary: { id: bot.id, name: 'Server keeper' } } })
   expect(await sisters.answer('bots.get', { botId: bot.id })).toMatchObject({ ok: { summary: { id: bot.id } } })
 
   // About → Devices: only the owner's phone.
   o.services.botDeviceAccess.set(bot.id, { mode: 'chosen', nodes: [mine.node] })
-  const missing = await sisters.answer('bots.get', { botId: 'bot-ffffffffffff' })
-  expect(missing).toMatchObject({ code: 'stream_unknown' })
   const before = reached.length
   for (const [method, params] of [
     ['bots.get', { botId: bot.id }],
@@ -145,4 +172,50 @@ it('a phone left out of a bot\'s list finds no such bot, a phone switched off fi
   const listed = (node: NodeId) => (o.services.botReach!.hiddenFor(node)?.(bot.id) ? [] : [bot.id])
   expect(listed(mine.node)).toEqual([bot.id])
   expect(listed(sisters.node)).toEqual([])
+}, 120_000)
+
+const storedAt = (home: string) => JSON.parse(readFileSync(join(home, 'bots', 'device-access.json'), 'utf8')) as { version: number; bots: Record<string, unknown> }
+
+it('on a computer with networking set up, an old bot reaches no phone until the account\'s devices can be read, then the devices linked then', async () => {
+  const home = directory('bot-devices-owner-')
+  const profileId = randomUUID()
+  const botId = await oldBot(home, profileId, 'Server keeper')
+  // Networking was set up before the update.
+  const earlier = new NetService({ profileDir: home })
+  await earlier.request('net.init', { name: 'desk', listen: true, port: 0 })
+  await earlier.shutdown()
+  // The engine is still starting: the account's devices can't be read yet.
+  const unread = vi.spyOn(PeerDirectory.prototype, 'accountDevices').mockReturnValue(undefined)
+  const o = await owner({ home, profileId })
+  const mine = await o.phone('pocket')
+  const missing = await mine.answer('bots.get', { botId: 'bot-ffffffffffff' })
+  expect(missing).toMatchObject({ code: 'stream_unknown' })
+  expect(storedAt(home).version).toBe(1)
+  expect(await mine.answer('bots.get', { botId })).toEqual(missing)
+
+  // The devices can be read: the next time Bridge reads them (here a second phone joining), every old bot gets them.
+  unread.mockRestore()
+  const sisters = await o.phone('tablet')
+  await vi.waitFor(() => expect(storedAt(home).version).toBe(2))
+  expect((storedAt(home).bots[botId] as { nodes: string[] }).nodes.sort()).toEqual([mine.node, sisters.node].sort())
+  expect(await mine.answer('bots.get', { botId })).toMatchObject({ ok: { summary: { id: botId } } })
+  expect(await sisters.answer('bots.get', { botId })).toMatchObject({ ok: { summary: { id: botId } } })
+}, 120_000)
+
+it('on a computer with no networking set up, an old bot becomes this computer\'s alone when the bots open, and a phone linked later never reaches it', async () => {
+  const home = directory('bot-devices-owner-')
+  const profileId = randomUUID()
+  const botId = await oldBot(home, profileId, 'Server keeper')
+  // Networking is set up after the update, on an account that already has a device: the first list Bridge reads holds it.
+  const already = newId('node')
+  const joined = vi.spyOn(PeerDirectory.prototype, 'accountDevices').mockReturnValue([already as NodeId])
+  const o = await owner({ home, profileId })
+  expect(storedAt(home)).toEqual({ version: 2, bots: { [botId]: { mode: 'this_computer' } } })
+  expect(o.services.botReach!.canReach(botId, already)).toBe(false)
+  joined.mockRestore()
+  const mine = await o.phone('pocket')
+  expect(storedAt(home)).toEqual({ version: 2, bots: { [botId]: { mode: 'this_computer' } } })
+  const missing = await mine.answer('bots.get', { botId: 'bot-ffffffffffff' })
+  expect(missing).toMatchObject({ code: 'stream_unknown' })
+  expect(await mine.answer('bots.get', { botId })).toEqual(missing)
 }, 120_000)

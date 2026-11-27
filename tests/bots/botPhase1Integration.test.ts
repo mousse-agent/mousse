@@ -354,14 +354,14 @@ describe('the owner\'s fresh starts: /clear, /forget history, /reset', () => {
     await w.engine.service.chatSend({ botId, text: 'Find a risotto recipe.', clientRequestId: 'fresh-2' })
     let first = ''
     await dispatch(chatActivation(botId).id, async ({ call }) => {
-      first = JSON.parse((await call('work_start', { title: 'Risotto', brief: 'Find a risotto recipe.' })).text).workId
+      first = JSON.parse((await call('work_start', { title: 'Risotto', brief: 'Find a risotto recipe.' })).text).runId
     }, 'On it.')
     await dispatch(first, async ({ call }) => { await call('memory_save', { text: 'The recipe site needs a login.' }) }, 'Mushroom risotto, 40 minutes.')
     w.clock.now += 60_000
     await w.engine.service.chatSend({ botId, text: 'And a soup?', clientRequestId: 'fresh-3' })
     let work = ''
     await dispatch(chatActivation(botId).id, async ({ call }) => {
-      work = JSON.parse((await call('work_start', { title: 'Soup', brief: 'Find a soup recipe.' })).text).workId
+      work = JSON.parse((await call('work_start', { title: 'Soup', brief: 'Find a soup recipe.' })).text).runId
     }, 'Looking.')
     w.engine.tools.reminders.add(botId, chatActivation(botId)?.id ?? work, { dueAt: new Date(w.clock.now + HOUR).toISOString(), text: 'Soak the beans.' })
     await w.engine.service.chatSend({ botId, text: 'Thanks!', clientRequestId: 'fresh-4' })

@@ -1,10 +1,11 @@
 /**
  * Which of the owner's devices reach a personal bot (`docs/bots.md`, Two layers). The claim: to a device that is left
  * out, the bot does not exist; a device whose switch is off reaches no bot; only this computer's own window changes
- * either; and an update narrows or widens nothing.
+ * either; a new bot reaches only its own computer (and its maker); a device linked later reaches no bot; and the
+ * update's one-time snapshot narrows or widens nothing.
  */
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -103,8 +104,12 @@ let store: BotDeviceAccessStore
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'bot-device-access-'))
   store = new BotDeviceAccessStore(dir)
+  // A profile past the one-time snapshot, as every start after this update is.
+  store.snapshot([], [])
   f = botFixture({ deviceAccess: store })
 })
+/** The owner turns both devices on for these bots (About → Devices). */
+const onBoth = (...botIds: string[]) => { for (const botId of botIds) store.set(botId, { mode: 'chosen', nodes: [PHONE, LAPTOP] }) }
 afterEach(() => {
   f.close()
   rmSync(dir, { recursive: true, force: true })
@@ -115,6 +120,7 @@ describe('a bot the device may not reach answers as a bot that is not there', ()
     const shown = (await createBot(f, { name: 'Penny', reply: 'Hello.' })).botId
     const hidden = (await createBot(f, { name: 'Server keeper', reply: 'Ready.' })).botId
     const missing = 'bot-ffffffffffff'
+    onBoth(shown)
     store.set(hidden, { mode: 'chosen', nodes: [LAPTOP] })
     const { reach } = reachOver(store)
     const methods = remoteBotMethods({ bots: () => f.bots.service, reach, deviceLimit: () => 'full' })
@@ -138,6 +144,7 @@ describe('a bot the device may not reach answers as a bot that is not there', ()
 
   it('a saved result of an earlier call is not handed back to a device that has lost the bot since', async () => {
     const botId = (await createBot(f, { name: 'Server keeper', reply: 'Ready.' })).botId
+    onBoth(botId)
     const { reach, switchOff } = reachOver(store)
     const methods = remoteBotMethods({ bots: () => f.bots.service, reach, deviceLimit: () => 'full' })
     const pause = methods.find((entry) => entry.method === 'bots.personal.pause')!
@@ -155,11 +162,12 @@ describe('a bot the device may not reach answers as a bot that is not there', ()
     // Taken off the bot: the saved result answers as a bot that is not there, like the call itself would.
     store.set(botId, { mode: 'chosen', nodes: [LAPTOP] })
     expect(saved('exec-1', PHONE)).toBe('stream_unknown')
-    // A result whose bot is not known here (the service restarted since) goes only to a device no bot is held from.
+    // A result whose bot is not known here (the service restarted since) goes only to a device no bot is held from: with
+    // each list explicit, a bot without one (this computer alone) is held from every device.
     expect(saved('exec-from-before-a-restart', PHONE)).toBe('outcome_uncertain')
-    expect(saved('exec-from-before-a-restart', LAPTOP)).toBe('ok')
+    expect(saved('exec-from-before-a-restart', LAPTOP)).toBe('outcome_uncertain')
     // Its switch off: refused as every bot call is.
-    store.set(botId, { mode: 'all' })
+    onBoth(botId)
     switchOff(PHONE)
     expect(saved('exec-1', PHONE)).toBe('forbidden')
   })
@@ -181,6 +189,7 @@ describe('a bot the device may not reach answers as a bot that is not there', ()
 describe('Bots on this computer, per device', () => {
   it('off: every method is refused as if this computer shared no bots, for every bot alike, and its lists carry none', async () => {
     const botId = (await createBot(f, { name: 'Penny', reply: 'Hello.' })).botId
+    onBoth(botId)
     const { reach, switchOff } = reachOver(store)
     switchOff(PHONE)
     const methods = remoteBotMethods({ bots: () => f.bots.service, reach })
@@ -206,8 +215,8 @@ describe('lists', () => {
     const everyone = (await createBot(f, { name: 'Penny', reply: 'Hello.' })).botId
     const laptopOnly = (await createBot(f, { name: 'Server keeper', reply: 'Ready.' })).botId
     const here = (await createBot(f, { name: 'Diary', reply: 'Hi.' })).botId
+    onBoth(everyone)
     store.set(laptopOnly, { mode: 'chosen', nodes: [LAPTOP] })
-    store.set(here, { mode: 'this_computer' })
     const { reach } = reachOver(store)
     // Bots made in the same instant list in either order.
     const ids = (reader?: string) => new MmsListsSource(listsServices(f, reach), undefined, reader ? { reader } : {}).snapshot().bots.map((bot) => bot.id).sort()
@@ -220,6 +229,7 @@ describe('lists', () => {
 
   it('push again at once when a bot leaves a device', async () => {
     const botId = (await createBot(f, { name: 'Penny', reply: 'Hello.' })).botId
+    onBoth(botId)
     const { reach } = reachOver(store)
     const timeouts: Array<() => void> = []
     const lists = new MmsListsSource(listsServices(f, reach), { setTimeout: (run: () => void) => timeouts.push(run), clearTimeout: () => undefined, setInterval: () => 0, clearInterval: () => undefined }, { reader: PHONE })
@@ -237,6 +247,7 @@ describe('lists', () => {
 describe('what is already under way', () => {
   it('a queued message from a device that lost the bot is not delivered; running work carries on', async () => {
     const botId = (await createBot(f, { name: 'Penny', reply: 'Hello.' })).botId
+    onBoth(botId)
     const { reach } = reachOver(store)
     const methods = remoteBotMethods({ bots: () => f.bots.service, reach, deviceLimit: () => 'accept_edits' })
     // The owner's own message is running; the phone's waits behind it.
@@ -296,8 +307,10 @@ describe('who changes it', () => {
       entry.handle({ connection }, entry.validate({ botId, access }), { profileId: 'p', epoch: 1 })
     const routed = { id: 'c1', capabilities: new Set(), clientType: 'bridge', bridgeCaller: { node: PHONE, user: 'usr_x', maxPermissionMode: 'full' } }
     for (const connection of [routed, { id: 'c2', capabilities: new Set(), clientType: 'unknown' }, { id: 'c3', capabilities: new Set(), clientType: 'test' }, undefined])
-      await expect(set(connection, { mode: 'all' })).rejects.toMatchObject({ code: 'forbidden' })
-    expect(store.get(botId).access).toEqual({ mode: 'all' })
+      await expect(set(connection, { mode: 'chosen', nodes: [PHONE] })).rejects.toMatchObject({ code: 'forbidden' })
+    expect(store.get(botId).access).toEqual({ mode: 'this_computer' })
+    // "All my devices" is gone: the list is explicit.
+    expect(() => entry.validate({ botId, access: { mode: 'all' } })).toThrow(expect.objectContaining({ code: 'invalid_params' }))
     await expect(set({ id: 'c4', capabilities: new Set(), clientType: 'gui' }, { mode: 'chosen', nodes: [PHONE] })).resolves.toMatchObject({ access: { mode: 'chosen', nodes: [PHONE] } })
     await expect(set({ id: 'c5', capabilities: new Set(), clientType: 'cli' }, { mode: 'this_computer' })).resolves.toMatchObject({ access: { mode: 'this_computer' } })
     // A device that is not on the account can't be picked.
@@ -343,75 +356,77 @@ describe('a choice made when the bot is made', () => {
   const ids = (reach: BotReachPort, reader: string) => new MmsListsSource(listsServices(f, reach), undefined, { reader }).snapshot().bots.map((bot) => bot.id)
   const stored = () => (JSON.parse(readFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), 'utf8')) as { bots: Record<string, BotDeviceAccess> }).bots
 
-  it('New bot for this computer only: a device watching its lists never sees it, where walling it off after it is made does', async () => {
+  it('a new bot reaches only its own computer: a device watching its lists never sees it, whatever New bot or an older app sent', async () => {
     const { reach } = reachOver(store)
     const phone = watchLists(reach, PHONE)
     const everyone = watchLists(reach)
-    const diary = (await createBot(f, { name: 'Diary', reply: 'Hi.', access: { mode: 'this_computer' } })).botId
-    expect(phone.has(diary)).toBe(false)
-    expect(everyone.has(diary)).toBe(false)
-    expect(stored()).toEqual({ [diary]: { mode: 'this_computer' } })
-    // This computer's window lists it, with what the lock reads.
-    expect(f.bots.service.list().bots.find((bot) => bot.id === diary)?.reach).toBe('this_computer')
-    // The way it was before: made for every device, then walled off in About. The phone had it in between.
-    const notes = (await createBot(f, { name: 'Notes', reply: 'Hi.' })).botId
-    store.set(notes, { mode: 'this_computer' })
-    expect(phone.has(notes)).toBe(true)
+    const asked: Array<[string, Parameters<typeof createBot>[1]]> = [
+      ['nothing', { name: 'Diary', reply: 'Hi.' }],
+      ['this computer', { name: 'Notes', reply: 'Hi.', access: { mode: 'this_computer' } }],
+      // An app from before the lists sends its Everywhere.
+      ['an older app\'s Everywhere', { name: 'Shopping', reply: 'Hi.', access: { mode: 'all' } as never }]
+    ]
+    for (const [name, input] of asked) {
+      const botId = (await createBot(f, input)).botId
+      expect(phone.has(botId), name).toBe(false)
+      expect(everyone.has(botId), name).toBe(false)
+      expect(reach.canReach(botId, LAPTOP), name).toBe(false)
+      // This computer's window lists it, and its menu has nothing to make private.
+      expect(f.bots.service.list().bots.find((bot) => bot.id === botId)?.reach, name).toBe('this_computer')
+    }
   })
 
-  it('Everywhere on New bot is the bot as it always started: every device, and nothing written', async () => {
+  it('New bot with devices turned on: those devices and no other, from the first moment', async () => {
     const { reach } = reachOver(store)
-    const botId = (await createBot(f, { name: 'Penny', access: { mode: 'all' } })).botId
-    expect(existsSync(join(dir, BOT_DEVICE_ACCESS_FILE))).toBe(false)
+    const laptop = watchLists(reach, LAPTOP)
+    const botId = (await createBot(f, { name: 'Diary', reply: 'Hi.', access: { mode: 'chosen', nodes: [PHONE] } })).botId
+    expect(stored()).toEqual({ [botId]: { mode: 'chosen', nodes: [PHONE] } })
     expect(ids(reach, PHONE)).toEqual([botId])
-    expect(f.bots.service.list().bots[0]?.reach).toBe('all')
-    // What is stored can't be read: Everywhere, picked, is saved for this bot, and the others stay on this computer.
-    writeFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), '{ nope')
-    const picked = (await createBot(f, { name: 'Notes', access: { mode: 'all' } })).botId
-    expect(store.get(picked).access).toEqual({ mode: 'all' })
-    expect(store.get(botId).access).toEqual({ mode: 'this_computer' })
+    expect(laptop.has(botId)).toBe(false)
+    expect(f.bots.service.list().bots[0]?.reach).toBe('chosen')
   })
 
   it('a retry of the same request finds the bot it made and changes nothing, whatever it asks for now', async () => {
-    const first = await createBot(f, { name: 'Diary', access: { mode: 'this_computer' }, clientRequestId: 'desk-1' })
-    const again = await createBot(f, { name: 'Diary', access: { mode: 'all' }, clientRequestId: 'desk-1' })
+    const first = await createBot(f, { name: 'Diary', access: { mode: 'chosen', nodes: [PHONE] }, clientRequestId: 'desk-1' })
+    const again = await createBot(f, { name: 'Diary', access: { mode: 'this_computer' }, clientRequestId: 'desk-1' })
     expect(again.botId).toBe(first.botId)
     expect(f.bots.service.list().bots.map((bot) => bot.id)).toEqual([first.botId])
-    expect(stored()).toEqual({ [first.botId]: { mode: 'this_computer' } })
+    expect(stored()).toEqual({ [first.botId]: { mode: 'chosen', nodes: [PHONE] } })
   })
 
   it('a create that fails before the bot is published leaves no choice behind; one that fails after keeps it, and its retry finishes the bot', async () => {
     const { reach } = reachOver(store)
     const phone = watchLists(reach, PHONE)
+    const laptopOnly = { mode: 'chosen', nodes: [LAPTOP] } as const
     vi.spyOn(f.bots, 'createBot').mockImplementationOnce(() => { throw new Error('disk full') })
-    await expect(createBot(f, { name: 'Diary', access: { mode: 'this_computer' }, clientRequestId: 'desk-1' })).rejects.toThrow('disk full')
+    await expect(createBot(f, { name: 'Diary', access: { mode: 'chosen', nodes: [LAPTOP] }, clientRequestId: 'desk-1' })).rejects.toThrow('disk full')
     expect(f.bots.service.list().bots).toEqual([])
     expect(stored()).toEqual({})
     // Published, and then its home thread could not be made: the bot is there, so its choice stays with it.
     const ensureHome = vi.spyOn(f.bots as unknown as { ensureHome(botId: string, name: string): void }, 'ensureHome').mockImplementationOnce(() => { throw new Error('thread store busy') })
-    await expect(createBot(f, { name: 'Diary', access: { mode: 'this_computer' }, clientRequestId: 'desk-2' })).rejects.toThrow('thread store busy')
+    await expect(createBot(f, { name: 'Diary', access: { mode: 'chosen', nodes: [LAPTOP] }, clientRequestId: 'desk-2' })).rejects.toThrow('thread store busy')
     const [made] = f.bots.service.list().bots
-    expect(made?.reach).toBe('this_computer')
+    expect(made?.reach).toBe('chosen')
     ensureHome.mockRestore()
-    expect((await createBot(f, { name: 'Diary', access: { mode: 'this_computer' }, clientRequestId: 'desk-2' })).botId).toBe(made!.id)
-    expect(stored()).toEqual({ [made!.id]: { mode: 'this_computer' } })
+    expect((await createBot(f, { name: 'Diary', access: { mode: 'chosen', nodes: [LAPTOP] }, clientRequestId: 'desk-2' })).botId).toBe(made!.id)
+    expect(stored()).toEqual({ [made!.id]: laptopOnly })
     expect(phone.size).toBe(0)
   })
 
-  it('a device asking for the home and itself: no other device sees the bot, ever; asking for every device, every device does', async () => {
+  it('a bot made from another device reaches this computer and its maker, and no other device ever sees it, whatever reach it asked for', async () => {
     const { reach } = reachOver(store)
     const laptop = watchLists(reach, LAPTOP)
     const methods = remoteBotMethods({ bots: () => f.bots.service, reach, madeBy: keepMakerInReach(store, reach) })
     const create = methods.find((entry) => entry.method === 'bots.create')!
-    const made = (await create.handle(create.validate!({ look: LOOK, name: 'Notes', description: 'Tidy my notes', clientRequestId: 'phone-c1', reach: 'home_and_maker' }), as(PHONE))) as { bot: { id: string } }
-    expect(store.get(made.bot.id).access).toEqual({ mode: 'chosen', nodes: [PHONE] })
-    expect(laptop.has(made.bot.id)).toBe(false)
-    expect(ids(reach, PHONE)).toEqual([made.bot.id])
-    // Which devices reach it stays on this computer: the device's answer does not say.
-    expect(made.bot).not.toHaveProperty('reach')
-    const open = (await create.handle(create.validate!({ look: LOOK, name: 'Shopping', description: 'Keep my list', clientRequestId: 'phone-c2', reach: 'all' }), as(PHONE))) as { bot: { id: string } }
-    expect(store.get(open.bot.id).access).toEqual({ mode: 'all' })
-    expect(ids(reach, LAPTOP)).toEqual([open.bot.id])
+    // `all` comes from a phone made before the lists were explicit: it is taken as the home and the maker, not refused.
+    for (const [index, asked] of [{ reach: 'home_and_maker' }, { reach: 'all' }, {}].entries()) {
+      const made = (await create.handle(create.validate!({ look: LOOK, name: 'Notes', description: 'Tidy my notes', clientRequestId: `phone-c${index}`, ...asked }), as(PHONE))) as { bot: { id: string } }
+      expect(store.get(made.bot.id).access, JSON.stringify(asked)).toEqual({ mode: 'chosen', nodes: [PHONE] })
+      expect(laptop.has(made.bot.id), JSON.stringify(asked)).toBe(false)
+      expect(ids(reach, PHONE), JSON.stringify(asked)).toContain(made.bot.id)
+      // Which devices reach it stays on this computer: the device's answer does not say.
+      expect(made.bot).not.toHaveProperty('reach')
+    }
   })
 
   it('the device that made a bot never widens a choice saved for it, such as the owner walling it off while the create finished', async () => {
@@ -436,48 +451,105 @@ describe('a choice made when the bot is made', () => {
 })
 
 describe('what is stored', () => {
-  it('an update changes nothing: no file means every bot on every device, and a new bot starts there too', async () => {
-    const botId = (await createBot(f, { name: 'Penny', reply: 'Hello.' })).botId
-    expect(existsSync(join(dir, BOT_DEVICE_ACCESS_FILE))).toBe(false)
-    expect(store.get(botId)).toEqual({ access: { mode: 'all' }, unreadable: false })
-    const { reach } = reachOver(store)
-    expect(reach.canReach(botId, PHONE) && reach.canReach(botId, LAPTOP) && reach.everyone(botId)).toBe(true)
-    expect(reach.hiddenFor(PHONE)).toBeUndefined()
-    expect(reach.hiddenFor()).toBeUndefined()
-    // Reading writes nothing.
-    expect(existsSync(join(dir, BOT_DEVICE_ACCESS_FILE))).toBe(false)
-    // A choice that was saved is read back as it was, by a new store (a restart).
-    store.set(botId, { mode: 'chosen', nodes: [PHONE] })
-    expect(new BotDeviceAccessStore(dir).get(botId)).toEqual({ access: { mode: 'chosen', nodes: [PHONE] }, unreadable: false })
-    expect(new BotDeviceAccessStore(dir).get('bot-aaaaaaaaaaaa').access).toEqual({ mode: 'all' })
+  /**
+   * The one-time snapshot on update. Rows: what an earlier build stored for a bot (All my devices, nothing, this computer,
+   * chosen devices, a value it can't read, or a file with `missing: this_computer` after a bad file), and which devices
+   * are linked when the snapshot runs (two, or none).
+   */
+  const A = 'bot-aaaaaaaaaaaa', B = 'bot-bbbbbbbbbbbb', C = 'bot-cccccccccccc', D = 'bot-dddddddddddd', E = 'bot-eeeeeeeeeeee'
+  const earlier = (file: unknown) => {
+    rmSync(join(dir, BOT_DEVICE_ACCESS_FILE), { force: true })
+    if (file !== undefined) writeFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), JSON.stringify(file))
+    return new BotDeviceAccessStore(dir)
+  }
+  it.each([
+    ['All my devices, with two linked', { version: 1, bots: { [A]: { mode: 'all' } } }, [PHONE, LAPTOP], { mode: 'this_computer' }, { mode: 'chosen', nodes: [PHONE, LAPTOP] }],
+    ['no choice stored, with two linked', { version: 1, bots: {} }, [PHONE, LAPTOP], { mode: 'this_computer' }, { mode: 'chosen', nodes: [PHONE, LAPTOP] }],
+    ['no file at all, with two linked', undefined, [PHONE, LAPTOP], { mode: 'this_computer' }, { mode: 'chosen', nodes: [PHONE, LAPTOP] }],
+    ['All my devices, with none linked', { version: 1, bots: { [A]: { mode: 'all' } } }, [], { mode: 'this_computer' }, { mode: 'this_computer' }],
+    ['this computer', { version: 1, bots: { [A]: { mode: 'this_computer' } } }, [PHONE, LAPTOP], { mode: 'this_computer' }, { mode: 'this_computer' }],
+    ['chosen devices', { version: 1, bots: { [A]: { mode: 'chosen', nodes: [LAPTOP] } } }, [PHONE, LAPTOP], { mode: 'chosen', nodes: [LAPTOP] }, { mode: 'chosen', nodes: [LAPTOP] }],
+    ['a value it can\'t read', { version: 1, bots: { [A]: { mode: 'everyone' } } }, [PHONE, LAPTOP], { mode: 'this_computer' }, { mode: 'this_computer' }],
+    ['no choice, after a file that could not be read', { version: 1, bots: {}, missing: 'this_computer' }, [PHONE, LAPTOP], { mode: 'this_computer' }, { mode: 'this_computer' }]
+  ] as const)('on update, %s: no other device reaches it until the snapshot, which gives it the devices linked then', (_name, file, devices, before, after) => {
+    const fresh = earlier(file)
+    // Until the snapshot, an earlier build's every device reads as this computer alone: no device reaches it in between.
+    expect(fresh.get(A).access).toEqual(before)
+    expect(fresh.needsSnapshot()).toBe(true)
+    expect(fresh.snapshot([A], devices)).toBe(true)
+    expect(fresh.get(A).access).toEqual(after)
+    expect(JSON.parse(readFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), 'utf8'))).toMatchObject({ version: 2 })
+  })
+
+  it('the snapshot runs once: a restart, or a device linked since, changes nothing; a bot without a choice after it reaches this computer alone', () => {
+    const fresh = earlier({ version: 1, bots: { [A]: { mode: 'all' } } })
+    expect(fresh.snapshot([A, B], [PHONE])).toBe(true)
+    const restarted = new BotDeviceAccessStore(dir)
+    expect(restarted.needsSnapshot()).toBe(false)
+    // LAPTOP is linked later: the snapshot does not run again, and it reaches no existing bot.
+    expect(restarted.snapshot([A, B, C], [PHONE, LAPTOP])).toBe(false)
+    expect(restarted.get(A).access).toEqual({ mode: 'chosen', nodes: [PHONE] })
+    expect(restarted.get(B).access).toEqual({ mode: 'chosen', nodes: [PHONE] })
+    expect(restarted.get(C).access).toEqual({ mode: 'this_computer' })
+    const { reach } = reachOver(restarted)
+    for (const botId of [A, B, C]) expect(reach.canReach(botId, LAPTOP), botId).toBe(false)
+  })
+
+  it('a bot made before the snapshot, as this computer alone, is not widened by it', async () => {
+    rmSync(join(dir, BOT_DEVICE_ACCESS_FILE), { force: true })
+    const fresh = new BotDeviceAccessStore(dir)
+    const fixture = botFixture({ deviceAccess: fresh })
+    try {
+      const botId = (await createBot(fixture, { name: 'Diary', reply: 'Hi.' })).botId
+      expect(fresh.get(botId).access).toEqual({ mode: 'this_computer' })
+      fresh.snapshot([botId, D], [PHONE, LAPTOP])
+      expect(fresh.get(botId).access).toEqual({ mode: 'this_computer' })
+      // An earlier bot, with no choice stored, keeps every device linked now.
+      expect(fresh.get(D).access).toEqual({ mode: 'chosen', nodes: [PHONE, LAPTOP] })
+    } finally {
+      fixture.close()
+    }
+  })
+
+  it('a file that can\'t be read at the snapshot is put aside, and every bot stays at this computer alone', () => {
+    rmSync(join(dir, BOT_DEVICE_ACCESS_FILE), { force: true })
+    writeFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), '{ nope')
+    const broken = new BotDeviceAccessStore(dir, () => 7)
+    expect(broken.needsSnapshot()).toBe(true)
+    expect(broken.snapshot([E], [PHONE, LAPTOP])).toBe(true)
+    expect(readdirSync(dir)).toContain(`${BOT_DEVICE_ACCESS_FILE}.corrupt-7`)
+    expect(broken.get(E)).toEqual({ access: { mode: 'this_computer' }, unreadable: false })
+    expect(broken.needsSnapshot()).toBe(false)
   })
 
   it('what can\'t be read means only this computer, and the next change keeps the rest there', () => {
     const cases: Array<[string, string]> = [
       ['not JSON', '{ nope'],
-      ['another version', JSON.stringify({ version: 2, bots: {} })],
+      ['another version', JSON.stringify({ version: 3, bots: {} })],
       ['bots not an object', JSON.stringify({ version: 1, bots: [] })],
-      ['an unknown default', JSON.stringify({ version: 1, bots: {}, missing: 'all' })]
+      ['an unknown default', JSON.stringify({ version: 1, bots: {}, missing: 'all' })],
+      ['a default at version 2', JSON.stringify({ version: 2, bots: {}, missing: 'this_computer' })]
     ]
     for (const [name, text] of cases) {
       writeFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), text)
       const fresh = new BotDeviceAccessStore(dir)
       expect(fresh.get('bot-aaaaaaaaaaaa'), name).toEqual({ access: { mode: 'this_computer' }, unreadable: true })
     }
-    // One entry that can't be read holds back that bot only.
-    writeFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), JSON.stringify({ version: 1, bots: { 'bot-aaaaaaaaaaaa': { mode: 'chosen', nodes: ['../x'] }, 'bot-bbbbbbbbbbbb': { mode: 'all' } } }))
+    // One entry that can't be read holds back that bot only; at version 2 "every device" is one of those.
+    writeFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), JSON.stringify({ version: 2, bots: { 'bot-aaaaaaaaaaaa': { mode: 'chosen', nodes: ['../x'] }, 'bot-bbbbbbbbbbbb': { mode: 'all' }, 'bot-dddddddddddd': { mode: 'chosen', nodes: [PHONE] } } }))
     const partly = new BotDeviceAccessStore(dir)
     expect(partly.get('bot-aaaaaaaaaaaa')).toEqual({ access: { mode: 'this_computer' }, unreadable: true })
-    expect(partly.get('bot-bbbbbbbbbbbb')).toEqual({ access: { mode: 'all' }, unreadable: false })
-    expect(partly.get('bot-cccccccccccc').access).toEqual({ mode: 'all' })
+    expect(partly.get('bot-bbbbbbbbbbbb')).toEqual({ access: { mode: 'this_computer' }, unreadable: true })
+    expect(partly.get('bot-dddddddddddd')).toEqual({ access: { mode: 'chosen', nodes: [PHONE] }, unreadable: false })
+    expect(partly.get('bot-cccccccccccc')).toEqual({ access: { mode: 'this_computer' }, unreadable: false })
     // A file that can't be read is put aside at the next change, and the other bots stay on this computer.
     writeFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), '{ nope')
     const broken = new BotDeviceAccessStore(dir, () => 42)
-    broken.set('bot-aaaaaaaaaaaa', { mode: 'all' })
+    broken.set('bot-aaaaaaaaaaaa', { mode: 'chosen', nodes: [PHONE] })
     expect(readdirSync(dir)).toContain(`${BOT_DEVICE_ACCESS_FILE}.corrupt-42`)
-    expect(broken.get('bot-aaaaaaaaaaaa')).toEqual({ access: { mode: 'all' }, unreadable: false })
+    expect(broken.get('bot-aaaaaaaaaaaa')).toEqual({ access: { mode: 'chosen', nodes: [PHONE] }, unreadable: false })
     expect(broken.get('bot-bbbbbbbbbbbb').access).toEqual({ mode: 'this_computer' })
-    expect(JSON.parse(readFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), 'utf8'))).toMatchObject({ version: 1, missing: 'this_computer' })
+    expect(JSON.parse(readFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), 'utf8'))).toEqual({ version: 2, bots: { 'bot-aaaaaaaaaaaa': { mode: 'chosen', nodes: [PHONE] } } })
   })
 
   it('a device removed from the account leaves every bot\'s list', () => {

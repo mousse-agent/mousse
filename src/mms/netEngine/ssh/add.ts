@@ -83,10 +83,34 @@ export function sshErrorText(reason: string, host = 'the other computer', user =
   }
 }
 
-/** A helper's or B's refusal, as a NetError carrying its §3.5 reason. */
+/** The §3.5 reasons the helper's `ssh.*` replies name, each with its own line in `sshErrorText`. */
+const SSH_REASONS = new Set([
+  'auth_denied',
+  'host_key_changed',
+  'host_key_unknown',
+  'probe_again',
+  'remote_not_installed',
+  'remote_not_running',
+  'remote_no_endpoint',
+  'remote_failed',
+  'removed',
+  'ssh_proxy_unsupported',
+  'windows_remote_unsupported',
+  'unreachable',
+  'timeout'
+])
+
+/**
+ * A helper's or B's refusal, as a NetError carrying its §3.5 reason. A helper reply names its reason as its code and
+ * the remote's own output as its text (`'exec' is not recognized…` from a Windows remote): the code decides the line
+ * shown, never the raw output, and an unknown code never reads as an internal error.
+ */
 export function sshError(error: unknown, host?: string, user?: string): NetError {
+  const code = helperCode(error)
+  if (code && SSH_REASONS.has(code))
+    return new NetError('bad_request', sshErrorText(code, host, user), { details: { reason: code } })
   if (error instanceof NetError && typeof reasonOf(error) === 'string') return error
-  const reason = helperCode(error) ?? 'remote_failed'
+  const reason = code ?? 'remote_failed'
   return new NetError('bad_request', sshErrorText(reason, host, user), { details: { reason } })
 }
 

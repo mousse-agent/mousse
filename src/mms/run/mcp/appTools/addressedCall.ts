@@ -1,4 +1,5 @@
-import { ADDRESSED_TOOLS, addressReceiptKey, type AddressResolution, type AddressTarget, type BotReach, type ResolvedAddress, type ResolveOptions } from '../../addressing'
+import { ADDRESSED_TOOLS, addressReceiptKey, type AddressResolution, type AddressTarget, type BotReach, type FamilyMember, type ResolvedAddress, type ResolveOptions } from '../../addressing'
+import { fitPage, makeCursor, pageEnd, readCursor } from './paging'
 import { refused } from './refusal'
 import type { JsonSchema, ToolOutcome } from './types'
 
@@ -13,6 +14,10 @@ export interface ThreadAddresses {
   resolve(callerThreadId: string, address: string, options: ResolveOptions): AddressResolution
   recorded(key: string): ResolvedAddress | undefined
   record(key: string, callerThreadId: string, resolved: ResolvedAddress): ResolvedAddress
+  /** The caller's family, itself first (`familyOf`). */
+  family?(callerThreadId: string): { members: FamilyMember[]; complete: boolean }
+  /** The thread of the caller's subagent named by title, childThreadId or delegationId, as `task_status` reads it. */
+  subagentOf?(callerThreadId: string, ref: string): string | undefined
 }
 
 type ThreadTarget = Extract<AddressTarget, { kind: 'thread' }>
@@ -56,15 +61,21 @@ export interface AddressedCall {
   bots: BotReach
 }
 
-/** The thread a call names the older way (`threadId`, `subagent`, `delegationId`), as its receipt records it. */
-function olderForm(args: Record<string, unknown>): ResolvedAddress | undefined {
+/**
+ * The thread a call names the older way (`threadId`, `subagent`, `delegationId`), as its receipt records it. A subagent
+ * named by title or delegationId records its thread, so the same request under another name (`thread_send` to its id,
+ * `continue_subagent` by its title) reaches it under one key.
+ */
+function olderForm(args: Record<string, unknown>, subagentOf: (ref: string) => string | undefined): ResolvedAddress | undefined {
   const value = (key: string) => (typeof args[key] === 'string' && (args[key] as string).trim() ? (args[key] as string).trim() : undefined)
   const threadId = value('threadId')
   if (threadId) return { form: 'threadId', address: threadId, targets: [{ kind: 'thread', threadId }], many: false }
   for (const form of ['subagent', 'delegationId'] as const) {
     const named = value(form)
-    // Resolved by its tool: no targets here, so only the same words reuse its key.
-    if (named) return { form, address: named, targets: [], many: false }
+    if (!named) continue
+    // Resolved by its tool; one that names none of the caller's subagents has no targets, so only the same words reuse its key.
+    const threadId = subagentOf(named)
+    return { form, address: named, targets: threadId ? [{ kind: 'thread', threadId }] : [], many: false }
   }
   return undefined
 }
@@ -96,8 +107,9 @@ export function addressedArgs(call: AddressedCall): AddressedArgs {
   const key = addresses && toolCallId ? addressReceiptKey(callerThreadId, tool, toolCallId) : undefined
   const earlier = key ? addresses!.recorded(key) : undefined
   if (args.thread === undefined) {
-    const named = olderForm(args)
-    if (!named || !key) return { args }
+    if (!key) return { args }
+    const named = olderForm(args, (ref) => addresses!.subagentOf?.(callerThreadId, ref))
+    if (!named) return { args }
     if (earlier) return sameTargets(earlier, named) ? { args } : { refused: keyConflict(earlier) }
     if (record) addresses!.record(key, callerThreadId, named)
     return { args }
@@ -179,4 +191,54 @@ export function fanOutRows(resolved: ResolvedAddress, rows: ReadonlyMap<string, 
       note: stopped ? 'Stopped with the subagent above it, which stops what it delegated.' : 'The Stop of the subagent above it did not go ahead.'
     }
   })
+}
+
+/** The most rows of a family page (`thread_list scope: family`), and how many when the call names no limit. */
+const FAMILY_PAGE_MAX = 500
+const FAMILY_PAGE_DEFAULT = 100
+const FAMILY_PAGE_MAX_BYTES = 64 * 1024
+
+/**
+ * `thread_list scope: family` (docs/plans/tool-api.md §1.2 "Family"): the caller, then its parent, siblings, subagents at
+ * any depth and the native helpers of all of these, one row each with its relation and the thread it sits under. A row
+ * of one of the caller's own subagents carries what `list_subagents` says of it (`subagents`, that call's result). Only
+ * the threads the caller may read by id are listed. The cursor continues after the last row it returned, wherever that
+ * row is now; `complete` is false while there are more pages, and when the tree goes deeper than is followed.
+ */
+export function familyPage(
+  family: { members: FamilyMember[]; complete: boolean },
+  subagents: ToolOutcome,
+  visible: (threadId: string) => boolean,
+  callerThreadId: string,
+  args: Record<string, unknown>
+): ToolOutcome {
+  if (args.limit !== undefined && (typeof args.limit !== 'number' || !Number.isInteger(args.limit) || args.limit < 1 || args.limit > FAMILY_PAGE_MAX))
+    return refused('invalid_arguments', `limit must be a whole number from 1 to ${FAMILY_PAGE_MAX}.`)
+  const cursor = readCursor(callerThreadId, 'thread_list', args)
+  if ('refused' in cursor) return cursor.refused
+  const detail = new Map<string, Record<string, unknown>>()
+  try {
+    const rows: unknown = subagents.isError ? undefined : JSON.parse(subagents.text)
+    if (Array.isArray(rows)) for (const row of rows) if (row && typeof row === 'object' && typeof row.childThreadId === 'string') detail.set(row.childThreadId, row as Record<string, unknown>)
+  } catch {
+    // Rows without their subagent details.
+  }
+  const rows = family.members
+    .filter((member) => member.relation === 'self' || visible(member.threadId))
+    .map((member) => ({ ...detail.get(member.threadId), thread: member.threadId, title: member.title, relation: member.relation, ...(member.parentThreadId ? { parentThread: member.parentThreadId } : {}) }))
+  const at = cursor.position
+  const after = typeof at?.t === 'string' ? rows.findIndex((row) => row.thread === at.t) : -1
+  const from = after >= 0 ? after + 1 : typeof at?.o === 'number' && Number.isInteger(at.o) && at.o >= 0 ? at.o : 0
+  const limit = typeof args.limit === 'number' ? args.limit : FAMILY_PAGE_DEFAULT
+  const { taken } = fitPage(rows.slice(from, from + limit), {}, FAMILY_PAGE_MAX_BYTES)
+  const next = from + taken.length
+  const end = pageEnd(next < rows.length, () => makeCursor(callerThreadId, 'thread_list', args, { o: next, t: taken.at(-1)?.thread }))
+  return {
+    text: JSON.stringify({
+      items: taken,
+      nextCursor: end.nextCursor,
+      complete: end.complete && family.complete,
+      ...(family.complete ? {} : { note: 'Your subagents delegate deeper than this list follows: read a subagent\'s own family for the rest.' })
+    })
+  }
 }

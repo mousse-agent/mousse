@@ -189,14 +189,27 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
 export type EngineSide = 'out' | 'in'
 
 /**
- * The lists a pairing shows in: one direction in its own list, both in both. A pairing still being made shows only
- * under Computers I use, where it was started.
+ * The directions a pairing works in: one way, or both. A pairing still being made counts as this computer using it,
+ * where it was started.
  */
 export function engineSides(device: NetEngineDevice): EngineSide[] {
   if (device.direction) return [device.direction]
   if (device.state === 'finishing' || device.unfinished) return ['out']
   return ['out', 'in']
 }
+
+/** Which way a pairing works, as the devices list says it: `both`, `out` (this computer uses it), `in` (it uses this one). */
+export type EngineDirection = 'both' | EngineSide
+
+export const directionOf = (sides: readonly EngineSide[]): EngineDirection =>
+  sides.includes('out') && sides.includes('in') ? 'both' : sides.includes('in') ? 'in' : 'out'
+
+/** The direction's words in the list, and its tooltip. */
+export const DIRECTION_WORDS: Readonly<Record<EngineDirection, { label: string; detail: string }>> = Object.freeze({
+  both: { label: 'Both ways', detail: 'You use it, and it uses this computer' },
+  out: { label: 'I use it', detail: 'This computer uses it; it can’t use this one' },
+  in: { label: 'Uses this computer', detail: 'It uses this computer; this one doesn’t use it' }
+})
 
 /**
  * One direction's row: the pairing's own problem where it belongs to this direction, else that direction's state.
@@ -282,8 +295,8 @@ export function engineWay(device: NetEngineDevice): string {
 }
 
 /**
- * The menu item for the missing direction of a pairing made one way, on the row of the list that holds it: "Use
- * <name> from here…" under Can use this computer (it asks), "Let <name> use this computer…" under Computers I use
+ * The menu item for the missing direction of a pairing made one way, for the direction it holds: "Use <name> from
+ * here…" for a computer that uses this one (it asks), "Let <name> use this computer…" for one this computer uses
  * (this owner decides). Disabled, with why, while it can't be done; absent where the pairing can't.
  */
 export function otherWayItem(
@@ -398,7 +411,11 @@ const shown = (text: string): { address: string; full?: string } =>
 export function deviceRoutes(device: NetEngineDevice): DeviceRoute[] {
   const routes: DeviceRoute[] = []
   // This computer looks for it on the same network whenever it dials it, one way or both, added over SSH or not.
-  if (device.direction !== 'in')
+  // A same-network address it has already is that route: one row, not a second "Found automatically".
+  const lanListed = [...(device.addresses ?? []), ...(device.approvedAddresses ?? [])].some(
+    (address) => classOf(address) === 'lan'
+  )
+  if (device.direction !== 'in' && !lanListed)
     routes.push({ key: 'local', cls: 'lan', address: 'Found automatically', state: 'available' })
   for (const address of device.addresses ?? []) {
     routes.push({

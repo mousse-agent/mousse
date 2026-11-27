@@ -194,8 +194,8 @@ export function SendLinkPanel({
 
 /**
  * Enter link (§5.3): the link, read here before anything is dialled (a decode error says the link is damaged);
- * the consent with the destinations it will contact and "Also let it use this computer", unticked ("Also share"
- * under it once ticked); then the code, typed in six boxes while the join waits for it.
+ * the consent with the destinations it will contact and "Also let it use this computer", unticked (how it
+ * reaches this computer, and other ways to, under it once ticked); then the code, typed in six boxes while the join waits for it.
  */
 export function EnterLinkPanel({
   status,
@@ -280,7 +280,9 @@ export function EnterLinkPanel({
           Also let {name} use this computer
         </label>
         <JoinRoutes
-          preview={back ? preview : { ...preview, shareable: [] }}
+          preview={preview}
+          name={name}
+          back={back}
           share={share}
           onShare={(route, on) =>
             setShare((list) => (on ? [...list, route] : list.filter((item) => item !== route)))
@@ -437,17 +439,27 @@ export function CodeEntry({ join }: { join: NetEngineLinkJoin }) {
 
 /**
  * The Connect dialog's routes (1b §1.3): every destination the ticket names, with its class (Connect approves
- * them), and this computer's tailnet, internet and tunnel routes as unticked boxes under "Also share".
+ * them). With "Also let" ticked (`back`), the line that says how the other computer reaches this one: the same way,
+ * its routes of the link's kinds going with the pairback; this computer's routes of other kinds are unticked boxes
+ * under "Other ways to reach this computer".
  */
 export function JoinRoutes({
   preview,
+  name,
+  back,
   share,
   onShare
 }: {
   preview: NetEngineJoinPreview
+  /** The other computer's name, for the line on how it reaches this one. */
+  name: string
+  /** "Also let" is ticked: it may use this computer, so it needs a way to reach it. */
+  back: boolean
   share: string[]
   onShare: (route: string, on: boolean) => void
 }) {
+  const sameWay = back ? (preview.sameWay ?? []) : []
+  const others = back ? preview.shareable : []
   return (
     <>
       {!!preview.destinations?.length && (
@@ -462,12 +474,24 @@ export function JoinRoutes({
             .join(', ')}
         </p>
       )}
-      {!!preview.shareable?.length && (
+      {back && (
+        <p
+          className="settings-muted engine-same-way"
+          title="On the same network it finds this computer by itself."
+        >
+          {sameWay.length
+            ? `${name} reaches this computer the same way: ${sameWay
+                .map((item) => `${ROUTE_WORDS[item.cls]} ${item.label}`)
+                .join(', ')}`
+            : `${name} reaches this computer on the same network.`}
+        </p>
+      )}
+      {!!others.length && (
         <fieldset className="engine-share">
-          <legend title="It can reach this computer at the ticked addresses too.">
-            Also share
+          <legend title={`${name} can reach this computer at the ticked addresses too.`}>
+            Other ways to reach this computer
           </legend>
-          {preview.shareable.map((item) => (
+          {others.map((item) => (
             <label key={item.route} className="engine-share-item">
               <input
                 type="checkbox"

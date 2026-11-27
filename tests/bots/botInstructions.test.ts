@@ -38,9 +38,9 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
     expect(BOT_BASE_INSTRUCTIONS).not.toMatch(/shell commands/i)
   })
 
-  it('tells the chat to always say what it is doing in one line before a slow step, work_start and thread tools included', () => {
+  it('tells the chat to always say what it is doing in one line before a slow step, starting work and thread tools included', () => {
     const text = botInstructions({ name: 'Inbox helper', description: 'Mail.', lane: 'chat' })
-    expect(text).toContain('Before every step that takes a while (a search, a page, a long read, work_start, a thread tool), always write one short line first')
+    expect(text).toContain('Before every step that takes a while (a search, a page, a long read, starting work, a thread tool), always write one short line first')
     expect(text).toContain('Never start such a step without it.')
     expect(text).toContain("before that call, write only your one-line status on what you're starting")
     // It used to be optional, and the chat was told to write nothing before work_start: the dots then sat alone.
