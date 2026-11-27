@@ -35,4 +35,4 @@ The plan is a checklist in the tracking issue: slice, depends on, files, verific
 
 ## 5. Check the plan once
 
-Run [check-related-work](../check-related-work/SKILL.md) on the plan's paths. A tier 5 plan gets one read by someone who did not write it ("Reviewing a plan" in [review](../review/SKILL.md)). Other plans need none. No rounds, no scores.
+Run [check-related-work](../check-related-work/SKILL.md) on the plan's paths. A tier 5 plan gets one read by someone who did not write it ("Reviewing a plan" in [review](../review/SKILL.md)). Work that has no settled architecture yet goes through [design](../design/SKILL.md) before it is sliced. Other plans need none. No rounds, no scores.

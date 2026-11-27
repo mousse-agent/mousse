@@ -7,8 +7,10 @@ The agent skills Mousse is built with. Each one is a folder in `skills/` with a 
 | Skill | When | What it does |
 |---|---|---|
 | `work` | Any authorized implementation | Takes a change from branch to merged PR: related-work check, claim, focused tests, PR text, merge and sync. |
+| `design` | A large goal with no plan yet | Gets to an architecture that lasts: the problem and its rules, shapes that really differ, spikes for the unknowns, one decision, a thin slice. |
 | `slice` | Work that needs more than one PR | Plans it as slices that each merge on their own within a day: the rules first, then the slices, their order and their files. |
 | `review` | Reviewing a PR, diff or plan, or answering findings | One pass: who reviews at each tier, findings that need proof, a re-check of the fix only, and when to stop. |
+| `council` | Heavy core changes, only after the human agrees | Two independent reviewers from different model families for a design or PR. Same proof rules as `review`, no scores. |
 | `retro` | After work that ran long | Finds where the time went from the record and changes a skill, script or check. |
 | `check-related-work` | Before a final plan or a substantial change | Finds open and closed PRs, issues and branches that already do part of the work or will collide with it. Read-only. |
 | `test-the-claim` | Writing, changing or reviewing tests | Decides what to test for a change, at which level, and what not to write. |
@@ -23,7 +25,9 @@ The agent skills Mousse is built with. Each one is a folder in `skills/` with a 
 Some skills call others:
 
 - `work` uses `slice`, `check-related-work`, `test-the-claim`, `check-on-real-data` and `review`, and hands off to `nightly-build-release` and `end-session`.
+- `design` uses `check-related-work`, then `review` or `council` for the one read of the design, and hands off to `slice`.
 - `slice` uses `check-related-work`, and `review` for a tier 5 plan.
+- `council` is `review` with two reviewers.
 - `retro` points back at whichever skill the lost time traces to.
 - `nightly-build-release` follows `work` for each fix it merges.
 
@@ -33,7 +37,7 @@ They share [the team workflow](../docs/team-workflow.md); each reads only the se
 
 The skills are built for speed: a change should merge the day it starts.
 
-1. **Plan.** One PR's worth of work goes straight to `work`. Anything larger goes through `slice` first.
+1. **Plan.** One PR's worth of work goes straight to `work`. Anything larger goes through `slice` first. A new subsystem, or a replacement for one, starts a step earlier with `design`.
 2. **Build.** `work` sizes the change into a tier, which sets how much to check. Each check runs once.
 3. **Review.** One pass by the reviewer the tier names. A finding needs proof. Only a wrong intended case, lost data or a skipped permission check blocks the merge; the rest become notes.
 4. **Merge.** On the local test results, without waiting for hosted CI, and without merging the default branch in unless there is a conflict.
