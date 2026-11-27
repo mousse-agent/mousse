@@ -517,6 +517,9 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   // Version 4: `agent` (`ROUTED_AGENT_KEY`); a marked call never sets a mode above the one the thread was held to.
   'threads.setPermissionMode': chat('thread', ['threadId', 'mode', 'ifRevision', ROUTED_AGENT_KEY], { required: ['mode'], version: 4, since: { ifRevision: 3, [ROUTED_AGENT_KEY]: 4 } }),
   'threads.clearApprovalRules': chat('thread', ['threadId', 'ruleId']),
+  // Continue or Stop on a held chain of agent messages (issue #1443), on the computer whose thread it started in.
+  // `window` is set by the calling computer's router, never by a window: a person at a window answers (`'person'`).
+  'threads.chainHold': chat('thread', ['threadId', 'chainId', 'holdId', 'answer', ROUTED_SEND_WINDOW_KEY], { required: ['chainId', 'holdId', 'answer'] }),
   'runs.resumeNow': chat('thread', ['threadId', 'runId'], {
     required: ['runId'],
     owned: { runId: 'run' }
@@ -1131,10 +1134,6 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
   {
     methods: ['threads.goal'],
     reason: 'A goal is set and changed from the desktop composer of the computer that runs the thread (issue #1207).'
-  },
-  {
-    methods: ['threads.chainHold'],
-    reason: 'A held chain of agent messages is answered on the computer that runs it, where its holds are kept (issue #1443).'
   },
   {
     methods: ['threads.setHidden'],

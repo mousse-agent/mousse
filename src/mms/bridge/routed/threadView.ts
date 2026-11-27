@@ -54,7 +54,9 @@ export class RemoteThreadView {
         ? (snapshot.pendingQuestions as Json[])
         : [],
       activeTurn: isRecord(snapshot.activeTurn) ? snapshot.activeTurn : { active: false, running: false },
-      connectionFailed: false
+      connectionFailed: false,
+      // An owner from before it sends none; the next `turn.state` brings it.
+      ...(isRecord(snapshot.turnState) ? { turnState: snapshot.turnState } : {})
     }
   }
 

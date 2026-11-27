@@ -1,4 +1,5 @@
 [
+  { "file": "tests/net/bridge/routed/routerReview.test.ts", "test": "keeps a claimed item out of the queue it is also in", "issue": 2036, "how": "intermittent: the queue still reads [] when the 1 s wait for ['i1'] gives up" },
   { "file": "tests/run/threadSettleNoticeDaemon.test.ts", "test": "waits behind the sender's running turn, and notices that meet there run as one turn", "issue": 2021, "how": "intermittent under load (several daemon files in one run): timed out waiting for both notices queued" },
   { "file": "tests/run/profileDatabase.test.ts", "test": "with owner-only permissions and migrates idempotently", "issue": 1964, "how": "Windows keeps no POSIX file modes: expected 438 to be 448", "platform": "win32" },
   { "file": "tests/run/profileDatabase.test.ts", "test": "refuses a symlinked run directory", "issue": 1964, "how": "creating the symlink fails with EPERM without Developer Mode", "platform": "win32" },

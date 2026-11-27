@@ -132,7 +132,7 @@ describe('the Mousse app-tool registry', () => {
     const run = await fx.runningRun('thread-a')
     const fake = fakeAppToolHost()
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
-    const { authority } = runAuthority({ tools: [], appTools: ['task_create'], asks: (call) => call.kind === 'app' && call.tool === 'task_status' })
+    const { authority } = runAuthority({ tools: [], appTools: ['task_create'], asks: (call) => call.kind === 'app' && call.tool === 'thread_wait' })
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, bot: authority }))
     const ctx = () => request({ threadId: 'thread-a', runId: run.runId })
     expect(await registry.call('task_status', { taskId: 'd1' }, ctx())).toEqual(refused('not_granted', ASKED))
