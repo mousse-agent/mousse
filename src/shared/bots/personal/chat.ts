@@ -133,7 +133,7 @@ export interface BotChatMessage {
   /** A bot's message: the owner's reaction on it, an emoji (`bots.chat.react`). */
   reaction?: string
   /**
-   * A bot's question to tap an answer to (`ask_owner`, `bots.questions.answer`); on the owner's message that answered
+   * A bot's question to tap an answer to (`question_ask`, `bots.questions.answer`); on the owner's message that answered
    * one, its id alone. Absent from older services.
    */
   question?: BotChatQuestion

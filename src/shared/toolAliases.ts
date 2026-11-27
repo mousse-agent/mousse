@@ -18,6 +18,12 @@ export const MOUSSE_TOOL_ALIASES: Readonly<Record<string, string>> = Object.free
   list_models: 'model_list',
   work_models: 'model_list',
   list_computers: 'computer_list',
+  // The request family, asking side. A thread's `ask_user` and a bot's `ask_owner` are one tool, as are a thread's
+  // `withdraw_question` and a bot's `question_withdraw`: the bot's version on a bot turn.
+  ask_user: 'question_ask',
+  ask_owner: 'question_ask',
+  withdraw_question: 'question_withdraw',
+  escalate: 'permission_ask',
   // The queue family. Each old tool is one `op` of `queue_update` (`MOUSSE_TOOL_ALIAS_ARGUMENTS`).
   queue_edit: 'queue_update',
   queue_remove: 'queue_update',

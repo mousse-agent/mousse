@@ -491,7 +491,7 @@ it.each([
   ['reload', { reload: true }, 'Your settings changed.'],
   ['internet back', { network: true }, 'The internet connection dropped while you were working; it is back now.'],
   ['usage reset', { usageReset: true }, 'A usage limit stopped you while you were working; it has reset now.'],
-  ['question re-asked', { askAgain: ['Which release?'] }, 'Ask it again with ask_owner if you still need to know.'],
+  ['question re-asked', { askAgain: ['Which release?'] }, 'Ask it again with question_ask if you still need to know.'],
   ['never ran replay', { restart: true }, 'The original task never reached the provider.'],
   ['updated report', { afterReport: true }, 'Your last message is your updated report: lead with what changed, in plain words.'],
   ['permission switched off', { switchCut: true }, 'Your turn stopped; carry on without it and do not ask for it.']

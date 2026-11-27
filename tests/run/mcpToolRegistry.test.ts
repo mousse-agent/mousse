@@ -24,7 +24,7 @@ const PHASE5_TOOLS: Record<string, string> = {
   task_status: 'actsAsCaller',
   task_cancel: 'actsAsCaller',
   list_subagents: 'actsAsCaller',
-  ask_user: 'actsAsCaller',
+  question_ask: 'actsAsCaller',
   task_create: 'actsAsCaller',
   task_update: 'actsAsCaller',
   task_list: 'actsAsCaller',
@@ -178,7 +178,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
       fake.host.awaitLiveRun = () => gate
       const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
       const previous = turns.register(appTurn({ threadId: 'parent', runId: first.runId }))
-      const call = registry.call('ask_user', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], [TURN_TOKEN_KEY]: previous.turn.turnToken },
+      const call = registry.call('question_ask', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], [TURN_TOKEN_KEY]: previous.turn.turnToken },
         request({ threadId: 'parent', runId: first.runId, binding: 'per_call', provider: 'claude' }))
       const continuation = await fx.runningRun('parent')
       // The continuation keeps the token of the turn it continues.
@@ -283,7 +283,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     expect(await refusalIn(registry.call('create_quick_action', { label: 'x', kind: 'bash', payload: 'ls' }, ctx()))).toMatchObject({ code: 'mousse_read_only' })
     expect((await registry.call('queue_list', {}, ctx())).isError).toBeUndefined()
     const listed = registry.listForThread('parent', 'default').map((tool) => tool.name)
-    expect(listed).toContain('ask_user')
+    expect(listed).toContain('question_ask')
     expect(listed).not.toContain('queue_enqueue')
     expect(listed).not.toContain('integrate_delegation')
   })
@@ -291,16 +291,16 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
   it('a tool Settings turned off is refused at call time with the reason, and writes no ledger row', async () => {
     const ledger = { start: vi.fn(() => 'inv'), commit: vi.fn(), failed: vi.fn() }
     const { registry, ctx, turns, run, host } = await setup('default', { toolLedger: () => ledger })
-    turns.register(appTurn({ threadId: 'parent', runId: run.runId, settingsEnabled: (name) => name !== 'ask_user' }))
-    const outcome = await registry.call('ask_user', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
-    expect(outcome).toEqual(refused('unavailable', 'Tool "ask_user" is disabled in Settings → Skills & MCP.'))
+    turns.register(appTurn({ threadId: 'parent', runId: run.runId, settingsEnabled: (name) => name !== 'question_ask' }))
+    const outcome = await registry.call('question_ask', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
+    expect(outcome).toEqual(refused('unavailable', 'Tool "question_ask" is disabled in Settings → Skills & MCP.'))
     expect(host.askUser).not.toHaveBeenCalled()
     expect(ledger.start).not.toHaveBeenCalled()
   })
 
-  it('runs ask_user and the task tools through the shared handlers for the caller thread, and no plan tool exists', async () => {
+  it('runs question_ask and the task tools through the shared handlers for the caller thread, and no plan tool exists', async () => {
     const { registry, ctx, host, tasks } = await setup()
-    const asked = await registry.call('ask_user', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
+    const asked = await registry.call('question_ask', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
     expect(JSON.parse(asked.text)).toEqual({ q1: 'a' })
     expect(host.askUser).toHaveBeenCalledWith('parent', expect.any(Array), expect.objectContaining({ timeoutMs: 60 * 60 * 1000 }))
     for (const removed of ['present_plan', 'show_document']) expect(registry.get(removed), removed).toBeUndefined()

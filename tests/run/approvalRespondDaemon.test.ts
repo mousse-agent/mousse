@@ -278,7 +278,7 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       w.d.orch.setBotThreads({ roleOf: (threadId) => (threadId === botThread.id ? 'context' : undefined) })
       await w.attach()
       const bot = w.ask(botThread.id)
-      // `ask_user`: a question with no approval behind it, which only the user answers.
+      // `question_ask`: a question with no approval behind it, which only the user answers.
       const plain = w.d.questions.requestAnswers([{ id: 'permission', prompt: 'Which one?', options: [{ id: 'a', label: 'A' }] }], w.other.id)
       plain.catch(() => undefined)
       ids.bot = bot.requestId

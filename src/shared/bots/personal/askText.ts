@@ -50,7 +50,7 @@ const TOOL_TEXT: Record<string, AskText> = {
   set_profile: { title: 'change its name or description', note: '' },
   set_depth: { title: 'change how long it thinks', note: '' },
   use_model: { title: 'switch its model', note: '' },
-  escalate: { title: 'ask you for permissions', note: '' },
+  permission_ask: { title: 'ask you for permissions', note: '' },
   run_report: { title: 'report on its automation runs', note: '' },
   memory_search: { title: 'search its memory', note: '' },
   memory_read: { title: 'read its memory', note: '' },

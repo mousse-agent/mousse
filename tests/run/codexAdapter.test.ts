@@ -1854,7 +1854,7 @@ describe('CodexAdapter', () => {
     ]
 
     /** Cue actions: `steer` (a person's message arrives), `drained` (wait until the adapter drained it), `ask`. */
-    /** Mousse's own questions asked in the thread (`ask` cue), as its MCP server's `ask_user` asks them. */
+    /** Mousse's own questions asked in the thread (`ask` cue), as its MCP server's `question_ask` asks them. */
     const asked: Array<Promise<unknown>> = []
     const cues = (hold: HoldControl) => async (frame: unknown) => {
       const action = frame as { action: string; text?: string }
@@ -1954,7 +1954,7 @@ describe('CodexAdapter', () => {
     })
 
     describe('a question for the person: the steer cuts and answers it', () => {
-      const mousseAsk = (status: string, extra: Record<string, unknown> = {}) => ({ type: 'mcpToolCall', id: 'mcp-ask', server: 'mousse', tool: 'ask_user', arguments: { questions: [] }, status, result: null, error: null, durationMs: null, ...extra })
+      const mousseAsk = (status: string, extra: Record<string, unknown> = {}) => ({ type: 'mcpToolCall', id: 'mcp-ask', server: 'mousse', tool: 'question_ask', arguments: { questions: [] }, status, result: null, error: null, durationMs: null, ...extra })
 
       it('a steer during Codex\'s own question (requestUserInput) cuts and answers it as the person', async () => {
         const { events } = await run([
@@ -1975,7 +1975,7 @@ describe('CodexAdapter', () => {
         expect(questions.listPendingForThread('thread-1')).toEqual([])
       })
 
-      it('a steer during Mousse\'s ask_user goes in at once, with no wait for the window', async () => {
+      it('a steer during Mousse\'s question_ask goes in at once, with no wait for the window', async () => {
         asked.length = 0
         const { hold, events } = await run([
           ...head(),

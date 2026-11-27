@@ -52,7 +52,7 @@ describe('send preempts pending questions instead of queueing', () => {
     expect(userQuestionService.listPendingForThread('thread-qa')).toHaveLength(0)
   })
 
-  it('dismisses a generic ask_user with no reject-like option', async () => {
+  it('dismisses a generic question_ask with no reject-like option', async () => {
     const waiter = userQuestionService.requestAnswers(
       [
         {

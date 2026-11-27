@@ -559,7 +559,7 @@ un_time_limits). */
   readonly approvals: ThreadApprovals
   /** The chains of agent messages and the messages held at their budget (issues #1442, #1443). */
   readonly chains: AgentChains
-  /** Questions agents asked without waiting (`ask_user` with `wait: false`). */
+  /** Questions agents asked without waiting (`question_ask` with `wait: false`). */
   readonly openQuestions: OpenQuestions
   /** Context handoffs (SPEC §16.1). */
   readonly handoffs: HandoffService

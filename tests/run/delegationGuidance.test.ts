@@ -36,7 +36,7 @@ describe('subagent guidance', () => {
       - To run a subagent on another of the user's computers (another operating system, a stronger machine, a job that should outlive this one), pass computer to delegate_task; computer_list shows which ones you may use. It runs there under that computer's agents, in its copy of this repository; its questions are answered there, and its result names the branch its work is on there, for you to fetch.
       - clientRequestId: pass a fresh clientRequestId for every new action that changes state (delegate_task, continue_subagent, answer_subagent). Reuse the same value only when retrying the same call after an error or timeout; Mousse then returns the first result instead of acting twice.
       - A delegated task can never exceed your own mode ceiling: a planning turn may only start planning children.
-      - Use ask_user for clarifying questions; use thread_read to read your thread's run events (and those of your parent or children).
+      - Use question_ask for clarifying questions; use thread_read to read your thread's run events (and those of your parent or children).
       - message_parent (a subagent, or a thread a personal bot started) messages your parent while you work. Use it only when you need its input (a question, a blocker) or it must know something now; not for progress updates, which your final answer covers.
       - terminal_read reads the terminals the user has open in your thread's terminal panel (read-only). Use it when the user refers to their terminal ("the error in my terminal", "is the server up?") instead of asking them to paste the output, and before you start a dev server or watcher that may already run there.
       - thread_list and thread_search find any thread of the profile and thread_read reads it, at most 64 KB per call and 4,096 characters per message (it says how to read on). To catch up on a thread, read view "summary" first, then "recent" (its last turns, trimmed), and "messages" only as far as you need. A thread the user points you at in a message (a mousse://thread/<id> link, or a thread in a [Mousse references] block) is a pointer, not its content: read it that way, guided by what they asked. Each thread they return has a link (mousse://thread/<id>): put it in a reply and the user can click it to open that thread. With computer (a name from computer_list) they list or search another of the user's computers, whose threads come with qualified ids (<computer id>:<thread id>); a search names a computer it could not reach in time in notSearched.
@@ -61,17 +61,17 @@ describe('subagent guidance', () => {
 
   it('what a subagent is told in its first prompt', () => {
     expect(subagentPreamble('API reviewer')).toBe(
-      'You are a subagent of "API reviewer". Your final message is your result: keep it self-contained and bounded. ask_user questions reach your parent and the user. You may start your own subagents unless your instructions say not to.'
+      'You are a subagent of "API reviewer". Your final message is your result: keep it self-contained and bounded. question_ask questions reach your parent and the user. You may start your own subagents unless your instructions say not to.'
     )
     expect(subagentGuidanceLines('Parent')).toHaveLength(3)
     // A parent with no title reads naturally, not as a subagent of "its parent".
     expect(subagentPreamble()).toBe(
-      'You are a subagent. Your final message is your result: keep it self-contained and bounded. ask_user questions reach your parent and the user. You may start your own subagents unless your instructions say not to.'
+      'You are a subagent. Your final message is your result: keep it self-contained and bounded. question_ask questions reach your parent and the user. You may start your own subagents unless your instructions say not to.'
     )
     expect(subagentPreamble('')).toBe(subagentPreamble())
     // With its parent thread's id, which thread_read needs: the subagent can read the parent when its brief is unclear.
     expect(subagentPreamble('API reviewer', 'thr_parent')).toBe(
-      'You are a subagent of "API reviewer". Your final message is your result: keep it self-contained and bounded. ask_user questions reach your parent and the user. You may start your own subagents unless your instructions say not to. If your brief is unclear, read your parent thread (thread_read thr_parent).'
+      'You are a subagent of "API reviewer". Your final message is your result: keep it self-contained and bounded. question_ask questions reach your parent and the user. You may start your own subagents unless your instructions say not to. If your brief is unclear, read your parent thread (thread_read thr_parent).'
     )
   })
 
@@ -145,7 +145,7 @@ describe('the delegation tools models are offered', () => {
           ],
         },
         {
-          "description": "Answer a question one of your subagents asked (ask_user), using the requestId from continue_subagent (needs_answer) or from the question notice. answers maps each question id to the chosen option id (an array when several are allowed) or free text.",
+          "description": "Answer a question one of your subagents asked (question_ask), using the requestId from continue_subagent (needs_answer) or from the question notice. answers maps each question id to the chosen option id (an array when several are allowed) or free text.",
           "name": "answer_subagent",
           "parameters": [
             "subagent",

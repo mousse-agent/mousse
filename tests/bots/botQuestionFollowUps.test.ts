@@ -77,7 +77,7 @@ async function chat(text: string, id: string, replyTo?: string) {
 /** A chat turn that asks `args` and ends; its question's bubble. */
 async function chatAsks(args: Record<string, unknown>, id = 'c-ask') {
   const turn = await chat('Find me a flat to view this week.', id)
-  expect(JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, args)).text)).toMatchObject({ asked: true })
+  expect(JSON.parse((await tool('question_ask', turn.prepared, turn.payload.threadId, args)).text)).toMatchObject({ asked: true })
   await finish(f, turn.payload, 'completed', { text: 'I found two.' })
   const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === turn.activation.id)!
   return { bubble, questionId: bubble.question!.questionId }
@@ -89,7 +89,7 @@ async function workAsks(args: Record<string, unknown>, title = 'Flat hunt', key 
   const { workId } = await f.bots.tools.work.start(botId, turn.activation.id, { title, brief: `${title}: find two and book a viewing.`, key })
   await finish(f, turn.payload, 'completed', { text: 'On it.' })
   const work = await start(f, workId)
-  expect(JSON.parse((await tool('ask_owner', work.prepared, work.payload.threadId, args)).text)).toMatchObject({ asked: true })
+  expect(JSON.parse((await tool('question_ask', work.prepared, work.payload.threadId, args)).text)).toMatchObject({ asked: true })
   await finish(f, work.payload, 'completed', { text: 'I asked which flat.' })
   const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === workId)!
   return { workId, work, asked: turn.message, bubble, questionId: bubble.question!.questionId }
@@ -118,7 +118,7 @@ async function restart(advance = 0) {
 describe('a nudge', () => {
   it("of a question asked with others still comes after the owner taps one of them, and so does its sibling's default", async () => {
     const turn = await chat('Plan the viewings.', 'c-batch')
-    const asked = JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, { questions: [
+    const asked = JSON.parse((await tool('question_ask', turn.prepared, turn.payload.threadId, { questions: [
       { question: 'Which day?', yesNo: true },
       { question: 'Which flat?', choices: ['Flat A', 'Flat B'], ifNoAnswer: 'default', default: 'Flat A', after: 30 },
       { question: 'Book the movers?', yesNo: true }

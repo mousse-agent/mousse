@@ -2,7 +2,7 @@
  * Daemon-owned pending user questions (not Electron-local).
  * Requests are keyed by requestId and scoped to threadId for snapshot/resubscribe.
  *
- * Two kinds live here, side by side. A plain question (`ask_user`, a plan question, a quick action)
+ * Two kinds live here, side by side. A plain question (`question_ask`, a plan question, a quick action)
  * is process memory only: it dies with the daemon. A provider's, the Pi agent's or a Mousse tool's
  * approval request (an `ApprovalTag`) is saved in the Run Engine database once the profile binds
  * `ThreadApprovals`: it survives a reconnect and a daemon restart, and any client can answer it
@@ -13,7 +13,7 @@
  * `signal`, or the runtime's own dismissal when it stops). Only a deadline the caller passes
  * (`timeoutMs`) ends it unanswered.
  *
- * A third kind is a question an agent asked without waiting (`ask_user` with `wait: false`, `open`): saved in the Run
+ * A third kind is a question an agent asked without waiting (`question_ask` with `wait: false`, `open`): saved in the Run
  * Engine database once the profile binds `OpenQuestions`. Nothing waits on it: its answer reaches the agent through the
  * thread's inbox. It is shown and answered like any question, but it never makes the thread wait for the user, so the
  * `listPendingForThread` family leaves it out and a new message does not close it.
@@ -307,11 +307,11 @@ export class UserQuestionService extends EventEmitter {
   /**
    * A request waits until it is answered or dismissed: there is no default deadline, for a person's turn or an
    * unattended one (a workflow, a bot, a scheduled job, a definition run). `options.timeoutMs` is the caller's own
-   * deadline (the Mousse MCP `ask_user` waits up to an hour, since its client gives up). An aborted `options.signal`
+   * deadline (the Mousse MCP `question_ask` waits up to an hour, since its client gives up). An aborted `options.signal`
    * dismisses the request (its caller's run ended).
    * `options.approval` marks a provider's approval request (see `ApprovalTag`).
    * `options.onAttachments` is told the images a plain question's answer carries, by question id, before the answers
-   * resolve: for a caller that can hand images to its agent (`ask_user`). Their paths are in the answers either way.
+   * resolve: for a caller that can hand images to its agent (`question_ask`). Their paths are in the answers either way.
    */
   requestAnswers(
     questions: PendingUserQuestions['questions'],
@@ -836,7 +836,7 @@ export class UserQuestionService extends EventEmitter {
 
   /**
    * Auto-reject every pending question for a thread with its default answer.
-   * Used when a new chat message preempts a turn blocked on ask_user / plan
+   * Used when a new chat message preempts a turn blocked on question_ask / plan
    * ask / quick-action approval: the fresh message must not strand behind an
    * unanswered prompt. Falls back to dismiss when a question has no
    * reject-like option (dismissal also unblocks the tool loop as rejection).

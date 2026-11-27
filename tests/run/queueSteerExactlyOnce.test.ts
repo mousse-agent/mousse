@@ -2475,7 +2475,7 @@ describe('the hold: a person\'s steer goes in at once and waits only for a compa
   describe.each([
     ['Codex (best effort, a long window)', { settleMs: 5_000 }],
     ['Cursor or an ACP agent (no measured window: strict)', { settleMs: null }]
-  ] as const)("Mousse's ask_user on %s: the turn waits for a person, so a steer goes in at once", (_name, options) => {
+  ] as const)("Mousse's question_ask on %s: the turn waits for a person, so a steer goes in at once", (_name, options) => {
     const ask = (w: Awaited<ReturnType<typeof world>>) => {
       const answer = w.d.questions.requestAnswers([{ id: 'q', prompt: 'Which one?', options: [{ id: 'a', label: 'A' }] }], w.thread.id)
       answer.catch(() => undefined)

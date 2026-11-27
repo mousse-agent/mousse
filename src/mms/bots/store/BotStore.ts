@@ -544,7 +544,7 @@ export const BOT_OFFLINE_REASON = 'waiting_for_internet'
  * run lane) with one of these end reasons, like the internet wait, so an older build still reads `bots.db`:
  * `budget_exhausted` waits for the owner's answer to its limit ask, `room_allowed` was allowed more and goes on when
  * the run lane is free, `usage_limit` goes on when the bot's usage pause ends, `question` waits for the owner's answer
- * to the question it asked (`ask_owner`), and `question_answered` was answered and goes on when the run lane is free.
+ * to the question it asked (`question_ask`), and `question_answered` was answered and goes on when the run lane is free.
  */
 export { BOT_WORK_WAIT_REASONS, workWaits } from '../activation/workWaiting'
 
