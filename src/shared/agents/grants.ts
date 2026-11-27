@@ -1,4 +1,4 @@
-import { canonicalToolName } from '../toolAliases'
+import { canonicalGrantName } from '../toolAliases'
 import type { AgentIntegrationLookup } from './types'
 import type {
   AgentBuiltinToolsSettings,
@@ -130,8 +130,9 @@ export function resolveBuiltinToolGrants(
   const profileTools = lookup.listProfileBuiltinToolIds()
   const grants: EffectiveAgentGrantEntry[] = []
   const denied: DeniedAgentGrant[] = []
-  // A definition saved before a tool was renamed names its old name; it grants the new one.
-  const allowlist = [...new Set(settings.allowlist.map(canonicalToolName))]
+  // A definition saved before a tool was renamed names its old name; it grants the new one. An old name that became one
+  // variant of its tool stays as it is: it grants only that variant (`grantHoldsCall`).
+  const allowlist = [...new Set(settings.allowlist.map(canonicalGrantName))]
   const allow = new Set(allowlist)
 
   const candidates = settings.mode === 'inherit' ? profileTools : allowlist

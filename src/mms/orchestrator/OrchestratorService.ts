@@ -900,15 +900,15 @@ const BOT_ANSWERED_QUESTIONS_KEPT = 500
 /** The tools with which the owner's bot acts on their threads ("use your threads"), as `botSenderOf` holds them. */
 type BotThreadActTool =
   | 'thread_create' | 'thread_send' | 'thread_interrupt' | 'thread_archive' | 'thread_hide' | 'thread_steer'
-  | 'queue_enqueue' | 'queue_edit' | 'queue_remove' | 'queue_reorder' | 'queue_promote_to_steer' | 'approval_respond'
+  | 'queue_enqueue' | 'queue_update' | 'approval_respond'
 
-/** The queue tool a queue command came from. */
+/** The queue tool a queue command came from: every change but an enqueue is one `op` of `queue_update`. */
 const QUEUE_TOOL_OF: Record<AgentQueueCommand['op'], BotThreadActTool> = {
   enqueue: 'queue_enqueue',
-  edit: 'queue_edit',
-  remove: 'queue_remove',
-  reorder: 'queue_reorder',
-  promote: 'queue_promote_to_steer'
+  edit: 'queue_update',
+  remove: 'queue_update',
+  reorder: 'queue_update',
+  promote: 'queue_update'
 }
 
 /**
@@ -12200,8 +12200,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * One agent command on a thread's queue (`queue_enqueue`, `queue_edit`, `queue_remove`, `queue_reorder`,
-   * `queue_promote_to_steer`; SPEC §15.1). Journaled and replayable by `options.clientRequestId`; every command
+   * One agent command on a thread's queue (`queue_enqueue`, or `queue_update` with op edit, remove, move or send_now;
+   * SPEC §15.1). Journaled and replayable by `options.clientRequestId`; every command
    * but an enqueue on the caller's own thread carries the revision the caller read and fails with a conflict when
    * the queue is not that any more. An agent can never widen what an item may do or pass its words off as a
    * person's: what it writes is labelled and stored as the agent's, under the stricter of the item's own limit and
@@ -12302,7 +12302,7 @@ export class OrchestratorService extends EventEmitter {
             // A thread a person keeps in Plan takes another agent's words as a plan turn, whatever mode the message had.
             if (cross && this.lastChatModeOf(threadId) === 'plan') patch.mode = 'plan'
           }
-          if (patch.content === undefined && patch.mode === undefined) throw new QueueValidationError('queue_edit needs content or mode.')
+          if (patch.content === undefined && patch.mode === undefined) throw new QueueValidationError('An edit of a queued message needs content or mode.')
           return {
             intent: { ...base, op: 'edit', itemId: item.id, patch, expectedRevision: command.expectedRevision, cancelRunIds },
             ...(cross || !authored ? { audit: { action: 'edited_queued_message', details: { itemId: item.id, ...(command.content !== undefined ? { length: command.content.length } : {}), changedMode: command.mode !== undefined, wasOrigin: item.origin?.kind ?? (item.source ?? 'person') } } } : {})

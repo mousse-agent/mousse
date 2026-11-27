@@ -48,7 +48,7 @@ Stored shape. `agentMessageText` returns, with the text, the length of the heade
 - `body?: {head, tail}`: those two lengths. The agent's own words are `content.slice(head, content.length - tail)`. Start and end positions would not survive: when another computer reads a thread, the router re-encodes references inside the text, which shifts positions, but it never touches the header or the closing line.
 - `title?`: the sender's title when it sent, for a sender that is later deleted.
 
-Every path that builds an envelope sets them: `thread_send`, `thread_steer`, a steer handed back and queued again, `queue_enqueue` and `queue_edit` on another thread, and a launch's first message. The stored content keeps the envelope, so everything that feeds a model (the provider, `thread_read`, the phone, the CLI) is unchanged.
+Every path that builds an envelope sets them: `thread_send`, `thread_steer`, a steer handed back and queued again, `queue_enqueue` and `queue_update op: edit` on another thread, and a launch's first message. The stored content keeps the envelope, so everything that feeds a model (the provider, `thread_read`, the phone, the CLI) is unchanged.
 
 Display:
 

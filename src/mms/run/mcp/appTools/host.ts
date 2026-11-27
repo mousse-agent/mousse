@@ -525,8 +525,8 @@ export interface AppToolHost extends DelegationToolsHost {
    */
   queueSnapshot?(threadId: string): QueueSnapshot
   /**
-   * One agent command on a thread's queue (`queue_enqueue`, `queue_edit`, `queue_remove`, `queue_reorder`,
-   * `queue_promote_to_steer`). `options.clientRequestId` is the full request key: a retry returns the first
+   * One agent command on a thread's queue (`queue_enqueue`, or `queue_update` with op edit, remove, move or
+   * send_now). `options.clientRequestId` is the full request key: a retry returns the first
    * result. Throws a `QueueConflictError` when the queue is not as the caller expects.
    */
   queueCommand?(threadId: string, command: AgentQueueCommand, options: { clientRequestId: string; actor: AgentActor }): AgentQueueResult
