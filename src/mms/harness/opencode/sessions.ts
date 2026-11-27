@@ -8,10 +8,10 @@ import type { AcpChatInput, AcpTurnUsage } from '../acp/session'
 import type { ClassifiedOption, PermissionPrompter } from '../acp/permissions'
 import { bearerHeader } from '../../run/mcp/attachment'
 import { isNotFound, OpencodeApiError, type OpencodeClient } from './client'
-import { actionKind, mousseServerName, oneShotRules, permissionKind, sessionRules } from './rules'
+import { actionKind, mousseServerName, permissionKind, sessionRules } from './rules'
 
 /**
- * Turns and one-shots on an OpenCode server (`server.ts`), one OpenCode session per thread.
+ * Turns on an OpenCode server (`server.ts`), one OpenCode session per thread.
  *
  * A thread's session is created with the rules of the turn's permission mode (`rules.ts`), resumed while the history
  * Mousse holds for the thread is what the session last answered (the same fingerprint the ACP runtime kept, so a
@@ -35,7 +35,8 @@ export interface OpencodeSessionStore {
   saved(threadId: string): SavedOpencodeSession | undefined
   setSaved(threadId: string, saved: SavedOpencodeSession | undefined): void
   models(): LlmModelOption[]
-  setModels(models: LlmModelOption[]): void
+  /** The models listed, and which of them are OpenCode's own free ones (`isOpencodeFreeModel`). */
+  setModels(models: LlmModelOption[], free: string[]): void
 }
 
 /** The entry's server, as turns use it (`OpencodeServer`, with the managed copy's file check in front). */
@@ -50,8 +51,6 @@ export interface OpencodeSessionsOptions {
   defaultInstanceId: string
   server: OpencodeServerHandle
   store: OpencodeSessionStore
-  /** A folder of its own for one one-shot (removed by the caller afterwards). */
-  scratch(): { path: string; remove(): void }
   /** How long a stop waits for OpenCode to confirm it ended the run (default 10 s). */
   interruptWaitMs?: number
 }
@@ -111,6 +110,15 @@ export function modelsFromListing(data: unknown): LlmModelOption[] {
     })
   }
   return models
+}
+
+/** The ids (`provider/model`) of OpenCode's own free models in a model listing. */
+export function freeModelsOf(data: unknown): string[] {
+  return (Array.isArray(data) ? data.filter(isRecord) : []).flatMap((raw) => {
+    const providerID = str(raw.providerID)
+    const id = str(raw.id)
+    return providerID && id && isOpencodeFreeModel(raw as unknown as ListedModel, { providerID, id }) ? [`${providerID}/${id}`] : []
+  })
 }
 
 /** Whether a listed OpenCode model is one of OpenCode's own free ones (its Zen provider, at no cost). */
@@ -253,12 +261,14 @@ export class OpencodeSessions {
    */
   async refreshModels(client: OpencodeClient, directory?: string): Promise<LlmModelOption[]> {
     const deadline = Date.now() + MODEL_LIST_WAIT_MS
-    let models = modelsFromListing(await client.data('GET', '/api/model', { ...(directory ? { directory } : {}) }))
+    let raw = await client.data('GET', '/api/model', { ...(directory ? { directory } : {}) })
+    let models = modelsFromListing(raw)
     while (!models.length && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 100))
-      models = modelsFromListing(await client.data('GET', '/api/model', { ...(directory ? { directory } : {}) }))
+      raw = await client.data('GET', '/api/model', { ...(directory ? { directory } : {}) })
+      models = modelsFromListing(raw)
     }
-    this.options.store.setModels(models)
+    this.options.store.setModels(models, freeModelsOf(raw))
     return models
   }
 
@@ -711,99 +721,6 @@ export class OpencodeSessions {
   /** Whether a turn runs now. */
   busy(): boolean {
     return this.running.size > 0
-  }
-
-  /**
-   * One request with no tools: a session in a scratch folder whose rules deny every tool, so the model is offered none
-   * (`oneShotRules`), one prompt, its text, and the session deleted afterwards. OpenCode retries a failed model request
-   * itself (`session/runner/retry.ts`) with no setting for it, so the first retry it schedules ends the request: a
-   * one-shot makes one model request. A tool call that still shows up is refused.
-   */
-  async oneShot(spec: { model: string; system: string; prompt: string; signal: AbortSignal; onActivity(): void }): Promise<string> {
-    const { label } = this.options
-    spec.signal.throwIfAborted()
-    const scratch = this.options.scratch()
-    const release = this.options.server.hold()
-    let sessionId: string | undefined
-    let client: OpencodeClient | undefined
-    /** The interrupt this request sent, awaited before its session is deleted. */
-    let interrupting: Promise<unknown> | undefined
-    try {
-      client = await this.options.server.client(spec.signal)
-      const listed = this.options.store.models().length ? this.options.store.models() : await this.refreshModels(client).catch(() => [])
-      const ref = parseModel(spec.model, listed)
-      if (!ref) throw harnessAppError({ code: 'model_unavailable', message: `${label} does not list ${spec.model}.` })
-      const raw = await client.data('GET', '/api/model').catch(() => [])
-      const listedModel = (Array.isArray(raw) ? raw.filter(isRecord) : []).find((model) => model.providerID === ref.providerID && model.id === ref.id) as ListedModel | undefined
-      const withRead = isOpencodeFreeModel(listedModel, ref)
-      const created = await client.data('POST', '/api/session', {
-        body: { location: { directory: scratch.path }, model: modelBody(ref), permissions: oneShotRules(withRead), title: 'Mousse one-shot' },
-        signal: spec.signal
-      })
-      sessionId = isRecord(created) ? str(created.id) : undefined
-      if (!sessionId) throw new Error(`${label} did not open a session.`)
-      spec.onActivity()
-      const id = sessionId
-      const live = client
-      let text = ''
-      const blocks = new Map<string, string>()
-      let finish: ((ending: Ending | { kind: 'refused'; error: Error }) => void) | undefined
-      const done = new Promise<Ending | { kind: 'refused'; error: Error }>((resolve) => { finish = resolve })
-      const interrupt = () => {
-        interrupting ??= live.request('POST', `/api/session/${encodeURIComponent(id)}/interrupt`).catch(() => undefined)
-      }
-      const refuse = (error: Error) => {
-        finish?.({ kind: 'refused', error })
-        interrupt()
-      }
-      this.listeners.set(id, (event) => {
-        const type = str(event.type) ?? ''
-        const data = isRecord(event.data) ? event.data : {}
-        spec.onActivity()
-        if (type === 'session.text.delta' || type === 'session.text.ended') {
-          const key = `${str(data.assistantMessageID) ?? ''}:${typeof data.ordinal === 'number' ? data.ordinal : 0}`
-          blocks.set(key, type === 'session.text.ended' && typeof data.text === 'string' ? data.text : (blocks.get(key) ?? '') + (str(data.delta) ?? ''))
-          text = [...blocks.values()].join('\n\n')
-        } else if (type === 'session.tool.input.started' || type === 'session.tool.called') {
-          const name = str(data.name) ?? 'a tool'
-          if (!(withRead && name === 'read')) refuse(harnessAppError({ code: 'policy_unenforceable', message: `${label} tried to use a tool (${name}) in a request that runs none, so Mousse stopped it.` }))
-        } else if (type === 'permission.asked') {
-          // Nothing may run here; an ask OpenCode cannot be told the answer to would wait for good, so the request ends.
-          void live.request('POST', `/api/session/${encodeURIComponent(id)}/permission/${encodeURIComponent(str(data.id) ?? '')}/reply`, { body: { decision: 'reject' } })
-            .catch(() => refuse(harnessAppError({ code: 'policy_unenforceable', message: `${label} asked to use a tool (${str(data.action) ?? 'a tool'}) in a request that runs none, and could not be refused.` })))
-        } else if (type === 'session.retry.scheduled') {
-          refuse(opencodeTurnError(label, data.error))
-        } else if (type === 'session.execution.succeeded') finish?.({ kind: 'succeeded' })
-        else if (type === 'session.execution.failed') finish?.({ kind: 'failed', error: data.error })
-        else if (type === 'session.execution.interrupted') finish?.({ kind: 'interrupted' })
-        else if (type === 'server.ended') finish?.({ kind: 'failed', error: { type: 'provider.transport', message: `${label}'s server ended.` } })
-      })
-      const onAbort = () => {
-        finish?.({ kind: 'interrupted' })
-        interrupt()
-      }
-      spec.signal.addEventListener('abort', onAbort, { once: true })
-      try {
-        const prompt = [spec.system, spec.prompt].filter((part) => part.trim()).join('\n\n')
-        await client.request('POST', `/api/session/${encodeURIComponent(id)}/prompt`, { body: { text: prompt }, signal: spec.signal })
-        const end = await done
-        spec.signal.throwIfAborted()
-        if (end.kind === 'refused') throw end.error
-        if (end.kind === 'failed') throw opencodeTurnError(label, end.error)
-        if (end.kind === 'interrupted') throw harnessAppError({ code: 'cancelled', message: `${label} stopped the request.` })
-        return text.trim()
-      } finally {
-        spec.signal.removeEventListener('abort', onAbort)
-      }
-    } finally {
-      if (sessionId) {
-        this.listeners.delete(sessionId)
-        await interrupting
-        await client?.request('DELETE', `/api/session/${encodeURIComponent(sessionId)}`).catch(() => undefined)
-      }
-      release()
-      scratch.remove()
-    }
   }
 
   /** Mousse's MCP server of a thread is no longer needed (its conversation was dropped). */

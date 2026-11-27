@@ -51,6 +51,26 @@ export const CODEX_DIRECT_FACTS: RouteFacts = Object.freeze({ tools: 'none_offer
  */
 export const CODEX_APP_SERVER_FACTS: RouteFacts = Object.freeze({ tools: 'detected_on_report', attempts: 'unenforced', isolation: 'env_only', launch: 'sealed_child', audience: 'any' })
 
+/**
+ * OpenCode (`opencode:sealed`): a server of its own in the request's place, its config folders in the place and the
+ * folders above it skipped (`OPENCODE_DISABLE_PROJECT_CONFIG`), a session that denies every tool, and one `generate` on
+ * it, which runs no session runner and so never retries (counted at a stub on 429 and 503; effects shown in
+ * `tests/opencodeOneShotEffects.test.ts`). Held.
+ */
+export const OPENCODE_SEALED_FACTS: RouteFacts = Object.freeze({ tools: 'none_offered', attempts: 'one', isolation: 'verified', launch: 'sealed_child', audience: 'any' })
+
+/**
+ * OpenCode's own paid models (`opencode/*`): its Console provider loads the organisation's config from the Console with
+ * the key (its providers, remote MCP servers and policies), so only the environment is held. Best-effort.
+ */
+export const OPENCODE_CONSOLE_FACTS: RouteFacts = Object.freeze({ ...OPENCODE_SEALED_FACTS, isolation: 'env_only' })
+
+/**
+ * OpenCode's own free models refuse a request with no tool, so they are offered `read`. `generate` runs no tool, so a
+ * call is never run; the model is still offered one. Best-effort.
+ */
+export const OPENCODE_FREE_FACTS: RouteFacts = Object.freeze({ ...OPENCODE_SEALED_FACTS, tools: 'refused_before_run' })
+
 /** A provider still on its own one-shot code (`DriverRuntime.oneShot`), admitted with no facts claimed. */
 export function legacyOneShotRoute(driver: string): () => OneShotRouteDecision {
   const decision: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: `legacy:${driver}` as const }) })
