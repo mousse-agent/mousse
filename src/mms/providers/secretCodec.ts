@@ -118,25 +118,63 @@ export function savedElsewhere(codec: SecretCodec): boolean {
  */
 export const MAC_KEYCHAIN_NAME = 'Mousse'
 
+let ownMacKeychainItem = false
+/**
+ * Records that this process ran under `MAC_KEYCHAIN_NAME` when Electron read the app name, so its
+ * keychain item is the signed build's own. Only then may an unreadable payload be set aside.
+ */
+export function markOwnMacKeychainItem(): void {
+  ownMacKeychainItem = true
+}
+
+/**
+ * Creates the signed build's keychain item in this process, if it is missing, before another process
+ * (the background service) starts. Two processes that both find it missing would both try to add it,
+ * and the one that loses gets no key until it restarts.
+ */
+export function prepareOwnMacKeychainItem(): void {
+  if (ownMacKeychainItem) createSecretCodec().canEncrypt()
+}
+
 /**
  * Whether `codesign --display --verbose=2` output shows a signature the keychain recognises across
  * updates: a Developer ID or App Store signature names its team, ad hoc and unsigned builds do not.
  * Output that shows neither (codesign missing or failing) keeps the keychain.
  */
 export function stableMacSignature(details: string): boolean {
-  if (/^TeamIdentifier=(?!not set$).+$/m.test(details)) return true
+  if (teamMacSignature(details)) return true
   return !(/^Signature=adhoc$/m.test(details) || /code object is not signed at all/.test(details))
 }
 
-let signedApp: boolean | undefined
-/** This macOS app has a signature the keychain recognises across updates (cached; runs codesign once). */
-export function signedMacApp(): boolean {
-  if (signedApp !== undefined) return signedApp
+/** Whether `codesign --display --verbose=2` output names the team that signed the app. */
+export function teamMacSignature(details: string): boolean {
+  return /^TeamIdentifier=(?!not set$).+$/m.test(details)
+}
+
+let signature: { details: string } | null | undefined
+/** This app's `codesign` details, or null when codesign could not run (cached; runs codesign once). */
+function macSignature(): { details: string } | null {
+  if (signature !== undefined) return signature
   const executable = process.execPath,
     bundle = executable.lastIndexOf('.app/'),
     target = bundle === -1 ? executable : executable.slice(0, bundle + 4)
   const result = spawnSync('/usr/bin/codesign', ['--display', '--verbose=2', target], { encoding: 'utf8', timeout: 5000 })
-  return (signedApp = result.error ? true : stableMacSignature(`${result.stdout ?? ''}${result.stderr ?? ''}`))
+  return (signature = result.error ? null : { details: `${result.stdout ?? ''}${result.stderr ?? ''}` })
+}
+
+/** This macOS app has a signature the keychain recognises across updates; a failed codesign keeps the keychain. */
+export function signedMacApp(): boolean {
+  const found = macSignature()
+  return !found || stableMacSignature(found.details)
+}
+
+/**
+ * codesign positively names the team that signed this macOS app. A failed codesign is not enough here:
+ * an unsigned build that made the signed build's own keychain item would trust only itself.
+ */
+export function teamSignedMacApp(): boolean {
+  const found = macSignature()
+  return !!found && teamMacSignature(found.details)
 }
 
 export function createSecretCodec(): SecretCodec {
@@ -148,7 +186,7 @@ export function createSecretCodec(): SecretCodec {
     const electron = requireFromHere('electron') as { safeStorage?: SafeStorageLike }
     if (!electron?.safeStorage) return new PassthroughCodec(true)
     if (process.platform === 'darwin' && !signedMacApp()) return new OwnerFileCodec()
-    return new SafeStorageCodec(electron.safeStorage, process.platform === 'darwin')
+    return new SafeStorageCodec(electron.safeStorage, process.platform === 'darwin' && ownMacKeychainItem)
   } catch {
     return new PassthroughCodec(true)
   }

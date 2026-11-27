@@ -6,7 +6,7 @@ import { InstanceVault } from '../src/mms/harness/vault'
 import { FileKeyStore, setAsideKeychainNetwork } from '../src/mms/net/identity'
 import { FileCredentialStore } from '../src/mms/providers/FileCredentialStore'
 import { UsageProxyKeyStore } from '../src/mms/providers/usageProxyKeys'
-import { stableMacSignature, type SecretCodec } from '../src/mms/providers/secretCodec'
+import { stableMacSignature, teamMacSignature, type SecretCodec } from '../src/mms/providers/secretCodec'
 
 /** Reverses bytes: stands in for the keychain an earlier build saved through. */
 const keychain: SecretCodec = {
@@ -45,6 +45,10 @@ describe('secrets on a macOS build without a stable signature', () => {
     expect(stableMacSignature(adHoc)).toBe(false)
     expect(stableMacSignature('/Applications/Mousse.app: code object is not signed at all')).toBe(false)
     expect(stableMacSignature('')).toBe(true)
+    // Only a named team gives a build a keychain item of its own; a failed codesign does not.
+    expect(teamMacSignature(developerId)).toBe(true)
+    expect(teamMacSignature(adHoc)).toBe(false)
+    expect(teamMacSignature('')).toBe(false)
   })
 
   it('sets provider credentials saved through the keychain aside and saves new ones as an owner-only file', async () => {

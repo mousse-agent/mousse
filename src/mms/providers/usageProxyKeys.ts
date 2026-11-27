@@ -29,7 +29,7 @@ export class UsageProxyKeyStore {
       opened = openSecretFile(raw, this.codec)
     } catch (error) {
       if (!(error instanceof SecretFileError) || error.kind !== 'unavailable' || !savedElsewhere(this.codec)) throw error
-      // Saved through a keychain item this build never asks: set aside, and the proxy hands out a new key.
+      // Saved through a keychain item this build never asks: set aside, and the key is entered again.
       setAsideSecretFile(this.path)
       return { keys: {}, encrypted: false }
     }

@@ -2,7 +2,7 @@ import { homedir } from 'os'
 import { join, resolve } from 'path'
 import { parseArgs } from './parseArgs'
 import { addToSwitchList, type SwitchCommandLine } from '../shared/chromiumSwitches'
-import { MAC_KEYCHAIN_NAME, signedMacApp } from '../mms/providers/secretCodec'
+import { MAC_KEYCHAIN_NAME, markOwnMacKeychainItem, teamSignedMacApp } from '../mms/providers/secretCodec'
 
 /** Resolve before app.ready: safeStorage and Chromium share this vault context. */
 export function resolveElectronUserData(
@@ -21,6 +21,7 @@ export function resolveElectronUserData(
 
 interface NamedApp {
   name: string
+  readonly isPackaged: boolean
   once(event: 'will-finish-launching', listener: () => void): unknown
 }
 
@@ -30,14 +31,21 @@ interface NamedApp {
  * "mousse" was made by earlier unsigned builds: it trusts only them, so every process of a signed build
  * that opened it asked for the login password. The app runs under `MAC_KEYCHAIN_NAME` until Electron has
  * read the name, then gets its own name back. Data saved through the old item is set aside by each store
- * (`savedElsewhere`). Call before `app` is ready, in every process that uses the keychain.
+ * (`savedElsewhere`), and only once the name is known to have taken: Electron reads it before
+ * `will-finish-launching`, so a switch made after that event never marks the item as the build's own.
+ * Call before `app` is ready, while the entry module first runs, in every process that uses the keychain.
  */
-export function useOwnMacKeychainItem(app: NamedApp, signed: () => boolean = () => process.platform === 'darwin' && signedMacApp()): void {
+export function useOwnMacKeychainItem(
+  app: NamedApp,
+  signed: () => boolean = () => process.platform === 'darwin' && app.isPackaged && teamSignedMacApp(),
+  mark: () => void = markOwnMacKeychainItem
+): void {
   if (!signed()) return
   const name = app.name
   app.name = MAC_KEYCHAIN_NAME
   app.once('will-finish-launching', () => {
     app.name = name
+    mark()
   })
 }
 
