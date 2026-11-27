@@ -305,6 +305,11 @@ export class BotChatService {
     return this.detailOf(botId)
   }
 
+  /** One bot's summary, as `list` has it. */
+  summary(botId: string): BotSummary {
+    return this.summaryOf(botId)
+  }
+
   /**
    * The local vault resolves its recipient here, never from a window's thread id. Every bot may be given secrets: one
    * with an approved grant may keep a pasted key.

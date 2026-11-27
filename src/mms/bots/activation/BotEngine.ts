@@ -1316,6 +1316,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.dropChainHolds(botId)
       return running
     })
+    // It is gone from every list and every other device now, before its runs are stopped (up to 15 s): a device reading
+    // its chat hears at once that the bot is no longer there.
+    this.changed({ botId })
     // Its messages still waiting in its owner's threads ("use your threads") go with it, each thread saying so, as after
     // Remove. Named now: the deleted bot's definition is no longer read.
     this.withdrawThreadMessages(botId, (entry.published ?? entry.draft).name)
@@ -1334,6 +1337,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       console.warn('a deleted bot\'s browser could not be closed', { botId, error: error instanceof Error ? error.message : String(error) })
     }
     await this.archiveThreads(botId)
+    // Its runs and threads as they ended.
     this.changed({ botId })
     const deletedAt = this.store.registry(botId)?.deletedAt ?? this.store.now()
     return { purgeAt: new Date(Date.parse(deletedAt) + BOT_DELETE_PURGE_MS).toISOString() }
@@ -8460,6 +8464,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const chip = this.liveChips.get(working.id)?.chip
     const status = this.liveStatuses.get(working.id)
     return { activationId: working.id, ...(chip ? { chip } : {}), ...(status ? { status } : {}) }
+  }
+
+  /**
+   * What another device needs to tell of a bot and to take it back (`BotStreamSources`): how far its chat is read, its
+   * newest message and how loudly it asked to be told, and the messages past the read mark that still want the owner.
+   */
+  feedTelling(botId: string): { readSeq: number; latest?: { id: string; seq: number; author: 'owner' | 'bot'; tell?: 'now' | 'soon' | 'later' }; attention: string[] } {
+    const readSeq = this.store.registry(botId)?.readSeq ?? 0
+    const last = this.store.lastMessage(botId)
+    const latest = last ? { id: last.id, seq: last.seq, author: last.author, ...(last.tell ? { tell: last.tell } : {}) } : undefined
+    return { readSeq, ...(latest ? { latest } : {}), attention: this.tellings.attention(botId, readSeq) }
   }
 
   private settleConsult(row: BotActivationRow, dispatch: BotDispatchRow, run: RunRecord, outcome: { text?: string }, fromExecutor: boolean): void {

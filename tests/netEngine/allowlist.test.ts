@@ -9,6 +9,7 @@ import {
   ROUTED_TRANSPORT_METHODS,
   routedNetMethod
 } from '../../src/shared/bridge/routed'
+import { REMOTE_BOT_METHOD_NAMES } from '../../src/shared/bots/personal/methodTable'
 import { NET_LOCAL_METHODS } from '../../src/shared/net/local'
 import { ENGINE_OWNER_METHODS } from '../../src/shared/netEngine/allowlist'
 import { NET_ENGINE_LOCAL_METHODS } from '../../src/shared/netEngine/local'
@@ -25,7 +26,7 @@ describe('the engine allow-lists', () => {
       expect(ENGINE_OWNER_METHODS.has(method), method).toBe(false)
   })
 
-  it('lets a paired computer call the routed rows, three transport calls, staging, net.info, its access, dispatch and updates, and nothing else', () => {
+  it('lets a paired computer call the routed rows, three transport calls, staging, net.info, its access, dispatch, updates and its bots, and nothing else', () => {
     const expected = new Set([
       // The editor rows included (Phase 1b §9.1).
       ...Object.keys(ROUTED_METHODS).map(routedNetMethod),
@@ -38,7 +39,11 @@ describe('the engine allow-lists', () => {
       'bridge.access.mine',
       'bridge.dispatch',
       // Held to Full control by the per-device policy (`checkNodePolicy`).
-      ...UPDATE_NET_METHODS
+      ...UPDATE_NET_METHODS,
+      // The owner's personal bots: every remote row and both bot streams, held to the device's bot level (`remoteBotMethods`).
+      ...REMOTE_BOT_METHOD_NAMES,
+      'bridge.bots.open',
+      'bridge.bot.open'
     ])
     expect([...ENGINE_OWNER_METHODS].sort()).toEqual([...expected].sort())
     // The transport calls it takes are routed ones; the local tunnel methods and Spaces are not on it.

@@ -13,6 +13,7 @@ import { NetError } from '../../shared/net/errors'
 import { newId, type BlobId, type NodeCapability, type NodeId, type StoredRecord, type StreamId } from '../../shared/net'
 import type { BridgeNodePolicy } from '../../shared/net/local'
 import { ENGINE_OWNER_METHODS } from '../../shared/netEngine/allowlist'
+import { isBotStreamKind } from '../../shared/bridge/routed'
 import {
   isNetEngineWay,
   type EngineFeature,
@@ -2406,8 +2407,9 @@ export class NetEngineService implements EngineDirectoryPort {
   }
 
   /**
-   * §4.4: an engine caller reads only a routed private stream bound to it (open, its reader, its bound reader,
-   * and allowed by current policy for the stream's kind) or a request artifact of its own.
+   * §4.4: an engine caller reads only a private stream bound to it (open, its reader, its bound reader, and allowed by
+   * current policy for the stream's kind: thread sharing for the routed kinds, the bot level and the bot's Devices for
+   * the bot streams) or a request artifact of its own.
    */
   private assertReadable(stream: StreamId, caller: EngineCaller): void {
     const started = this.require()
@@ -2428,6 +2430,9 @@ export class NetEngineService implements EngineDirectoryPort {
     const policy = started.rt.policy.get(caller.node)
     if (policy.blocked)
       throw new NetError('forbidden', undefined, { details: { reason: 'blocked' } })
+    // A bot stream (the bots feed, a bot's chat) stands apart from thread sharing: the device's bot level and the bot's
+    // Devices keep it, read on every batch through `access.open` above.
+    if (isBotStreamKind(access.kind)) return
     if (this.options.net.nodePolicyConfig().workOnThreads === false)
       throw new NetError('forbidden', undefined, { details: { reason: 'setting_off' } })
     if (access.kind === 'terminal' && !policy.terminal)

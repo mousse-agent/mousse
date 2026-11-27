@@ -1,4 +1,4 @@
-import type { RoutedStreamKind } from '../bridge/routed'
+import type { PrivateStreamKind } from '../bridge/routed'
 import type { StreamKind } from './streams'
 import { botMethodAccess } from '../bots/personal/methodTable'
 
@@ -109,6 +109,9 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
 
   // ---------------------------------------------------------------- personal bots: `BOT_METHODS`' remote rows
   ...botMethodAccess(),
+  // The bots feed and one bot's chat stream, opened by each device for itself (`remoteBotMethods`' one gate).
+  'bridge.bots.open': 'bots_use',
+  'bridge.bot.open': 'bots_use',
 
   // ---------------------------------------------------------------- routed: the transport
   ...routed({
@@ -356,13 +359,16 @@ export const STREAM_ACCESS: Readonly<Record<StreamKind, AccessClass>> = Object.f
   'space.private': 'view'
 })
 
-/** Every kind of private stream one computer opens on another (`routed.stream.open`). */
-export const ROUTED_STREAM_ACCESS: Readonly<Record<RoutedStreamKind, AccessClass>> = Object.freeze({
+/** Every kind of private stream one device opens on another (`routed.stream.open`, and the bot streams). */
+export const ROUTED_STREAM_ACCESS: Readonly<Record<PrivateStreamKind, AccessClass>> = Object.freeze({
   thread: 'view',
   lists: 'view',
   // A Git action's progress, for the computer that started it.
   channel: 'view',
-  terminal: 'terminal'
+  terminal: 'terminal',
+  // The bots feed and a bot's chat: held to the bot level and each bot's Devices, never to thread sharing.
+  bots: 'bots_use',
+  bot: 'bots_use'
 })
 
 /** A method with no class counts as work: a device that may only view threads never reaches it. */

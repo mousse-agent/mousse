@@ -82,7 +82,7 @@ import type {
 } from '../../shared/net/local'
 import { isBotLevel } from '../../shared/net/local'
 import type { PermissionMode } from '../../shared/permissionMode'
-import { routedVersions } from '../../shared/bridge/routed'
+import { isBotStreamKind, routedVersions, type PrivateStreamKind } from '../../shared/bridge/routed'
 import { bridgeRemoteMethodNames } from '../bridge/remote/capabilities'
 import { remoteBotVersions } from '../bridge/remote/RemoteBots'
 import type { AgentReach, NodePolicy } from './store/nodePolicy'
@@ -350,19 +350,14 @@ export interface NetRuntime {
  * The network layer asks which stream is one, and ends them when their reader may no longer have them.
  */
 export interface PrivateStreamsControl {
-  access(
-    stream: StreamId
-  ):
-    { reader: NodeId; kind: 'thread' | 'lists' | 'channel' | 'terminal'; open: boolean } | undefined
+  access(stream: StreamId): { reader: NodeId; kind: PrivateStreamKind; open: boolean } | undefined
   /** Stops serving private streams (of one reader, of one kind, or all); returns the ones that were open. */
-  close(filter?: {
-    reader?: NodeId
-    kind?: 'thread' | 'lists' | 'channel' | 'terminal'
-  }): StreamId[]
+  close(filter?: { reader?: NodeId; kind?: PrivateStreamKind }): StreamId[]
   /**
    * Lets go of everything held for computers that may no longer work on threads here: their private
    * streams, the results waiting to be fetched in pages and the values they staged. `granted` says
-   * which computers may; with none, every computer is let go of (the owner switch is off).
+   * which computers may; with none, every computer is let go of (the owner switch is off). Bot streams
+   * stand apart from thread sharing and are kept: their bot level and each bot's Devices decide them.
    */
   release(granted?: (node: NodeId) => boolean): StreamId[]
 }
@@ -2549,10 +2544,12 @@ export class NetService {
         (rt.policy.isBlocked(peer.node) || streamWorkOff(stream, peer)))
     // A private stream is read by its computer only, while the owner's switch for other computers is on
     // (read on every record, so turning it off is also a kill switch) and, for a terminal, the device's
-    // terminal switch is on. The authority checks the reader and "Works on threads".
+    // terminal switch is on. The authority checks the reader and "Works on threads". A bot stream stands
+    // apart from that switch: its bot level and the bot's Devices decide it (`access.open`).
     const privateReadable = (stream: StreamId, peer: { node: NodeId }): boolean => {
       const access = this.domain?.privateStreams?.access(stream)
       if (!access) return true
+      if (isBotStreamKind(access.kind)) return access.open
       if (this.config.workOnThreads === false) return false
       return access.kind !== 'terminal' || rt.policy.get(peer.node).terminal
     }
