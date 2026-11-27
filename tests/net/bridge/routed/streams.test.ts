@@ -7,6 +7,7 @@ import {
   MmsListsSource,
   type ListsServices
 } from '../../../../src/mms/bridge/remote/MmsListsSource'
+import { MmsRemoteBackend } from '../../../../src/mms/bridge/remote/MmsBackend'
 import { MmsThreadSource } from '../../../../src/mms/bridge/remote/MmsThreadSource'
 import {
   PRIVATE_STREAM_QUOTA,
@@ -807,4 +808,95 @@ describe('a long thread on a private stream', () => {
     expect(newest.length).toBeGreaterThan(20)
     expect(snapshot.earlier).toEqual({ before: newest[0].id, count: 80 - newest.length })
   }, 180_000)
+})
+
+/**
+ * Another computer opening one of this computer's threads that is not open yet. The transcript is read off the event
+ * loop first; what the open depends on is checked again once it is read, as rows:
+ * - nothing changed: the stream opens, from the page read, and the thread is not loaded;
+ * - the computer's streams were closed meanwhile (a block, its access gone): it does not open;
+ * - the thread is no longer one this computer shares: it does not open;
+ * - the stream is open already: it is returned as it is, nothing is read or built.
+ */
+describe('a thread stream opened cold', () => {
+  async function owner() {
+    const o = await routedOwner({ streams: true })
+    o.f.mms.threads.setSqliteStoreEnabled(true)
+    const t = o.f.mms.threads.createThread('Long', undefined, undefined, { started: true })
+    const all = Array.from({ length: 8 }, (_, index) => message(index, `${index}:`.padEnd(512 * 1024, 'x')))
+    o.f.mms.threads.mutateThreadData(t.id, () => ({ messages: all as never }))
+    expect(o.f.mms.threads.usesThreadDb(t.id)).toBe(true)
+    return { ...o, t }
+  }
+  /** Holds the transcript read until `release`; `reading` settles once it has started. */
+  function heldRead() {
+    const original = MmsRemoteBackend.prototype.warm
+    let release!: () => void, started!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve)),
+      reading = new Promise<void>((resolve) => (started = resolve))
+    const warm = vi
+      .spyOn(MmsRemoteBackend.prototype, 'warm')
+      .mockImplementation(async function (this: MmsRemoteBackend, ...args) {
+        started()
+        await gate
+        return original.apply(this, args)
+      })
+    return { warm, reading, release }
+  }
+
+  it('reads the newest messages without loading the thread, and builds the snapshot once', async () => {
+    const { ok, f, t, adapter } = await owner()
+    const builds = vi.spyOn(MmsRemoteBackend.prototype, 'snapshot'),
+      wholeReads = vi.spyOn(f.mms.orchestrator, 'getMessages'),
+      loads = vi.spyOn(f.mms.threads, 'warmThread')
+    const opened = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
+    expect(builds).toHaveBeenCalledTimes(1)
+    expect(wholeReads).not.toHaveBeenCalled()
+    expect(loads).not.toHaveBeenCalled()
+    expect(f.mms.orchestrator.hasSession(t.id)).toBe(false)
+    const stream = (opened.descriptor as { id: never }).id
+    expect(adapter!.privateAccess(stream)).toMatchObject({ reader: f.callerNode, open: true })
+    const { snapshot } = readStream(f, stream, t.id)
+    expect((snapshot.messages as Array<{ id: string }>).map((row) => row.id)).toEqual(
+      Array.from({ length: 8 }, (_, index) => `m-${index}`)
+    )
+  }, 120_000)
+
+  it('does not open when the streams of that computer are closed while its transcript is read', async () => {
+    const { raw, f, t, adapter } = await owner()
+    const held = heldRead()
+    const opening = raw('stream.open', { kind: 'thread', threadId: t.id })
+    await held.reading
+    // As a block does: everything open, or opening, for that computer closes.
+    expect(adapter!.privateReaders()).toEqual([f.callerNode])
+    adapter!.closePrivate({ reader: f.callerNode })
+    held.release()
+    await expect(opening).rejects.toMatchObject({ code: 'cancelled' })
+    expect(adapter!.privateHead(f.callerNode, t.id)).toBeUndefined()
+  }, 120_000)
+
+  it('does not open when the thread is no longer shared once its transcript is read', async () => {
+    const { call, f, t, adapter } = await owner()
+    const held = heldRead()
+    const opening = call('stream.open', { kind: 'thread', threadId: t.id })
+    await held.reading
+    const getThread = f.mms.threads.getThread.bind(f.mms.threads)
+    vi.spyOn(f.mms.threads, 'getThread').mockImplementation((id: string) =>
+      id === t.id ? undefined : getThread(id)
+    )
+    held.release()
+    expect(await opening).toMatchObject({ ok: false, error: { code: 'thread_not_found' } })
+    expect(adapter!.privateHead(f.callerNode, t.id)).toBeUndefined()
+  }, 120_000)
+
+  it('returns a stream that is open already without reading or building again', async () => {
+    const { ok, t } = await owner()
+    const first = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
+    const warm = vi.spyOn(MmsRemoteBackend.prototype, 'warm'),
+      builds = vi.spyOn(MmsRemoteBackend.prototype, 'snapshot')
+    const again = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
+    expect((again.descriptor as { id: string }).id).toBe((first.descriptor as { id: string }).id)
+    expect(warm).not.toHaveBeenCalled()
+    expect(builds).not.toHaveBeenCalled()
+  }, 120_000)
 })

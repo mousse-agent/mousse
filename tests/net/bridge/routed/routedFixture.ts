@@ -191,6 +191,7 @@ export async function routedOwner(options: RoutedOwnerOptions = {}) {
       // As the Bridge service: a private stream's key goes to its own sources, any other id is a thread's.
       source: {
         snapshot: (key) => (isPrivateKey(key) ? sources.snapshot(key) : shared.snapshot(key)),
+        warm: (key) => (isPrivateKey(key) ? sources.warm(key) : shared.warm(key)),
         onThread: (key, listener, onError) =>
           isPrivateKey(key)
             ? sources.onThread(key, listener, onError)

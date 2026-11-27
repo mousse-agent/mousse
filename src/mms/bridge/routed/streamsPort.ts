@@ -7,12 +7,12 @@ import type { RoutedStreamsPort } from './OwnerRoutes'
  * to the computer that asked, so the request names only what it is about (a thread, a terminal).
  */
 export function routedStreamsPort(
-  threads: Pick<ThreadStreamAdapter, 'openPrivate' | 'privateHead' | 'closePrivate'> & {
+  threads: Pick<ThreadStreamAdapter, 'openPrivateWarm' | 'privateHead' | 'closePrivate'> & {
     store: Pick<ThreadStreamAdapter['store'], 'head'>
   }
 ): RoutedStreamsPort {
   return {
-    open: (caller, request) => {
+    open: async (caller, request, stillAllowed) => {
       const spec: PrivateSpec = {
         reader: caller,
         kind: request.kind,
@@ -23,7 +23,8 @@ export function routedStreamsPort(
               ? `${request.threadId}:${request.ptyId}`
               : ''
       }
-      const descriptor = threads.openPrivate(spec)
+      // A thread not open yet reads its transcript off the event loop first; the caller's checks run again after.
+      const descriptor = await threads.openPrivateWarm(spec, stillAllowed)
       return {
         descriptor,
         head: threads.store.head(descriptor.id),

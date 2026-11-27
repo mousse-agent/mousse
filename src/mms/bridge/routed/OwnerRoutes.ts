@@ -73,11 +73,15 @@ const ID_MAX = 256
 
 /** The private streams a computer can open on this one. Implemented by the Bridge profile service. */
 export interface RoutedStreamsPort {
-  /** Opens (or reopens) the stream `caller` reads and nobody else may. */
+  /**
+   * Opens (or reopens) the stream `caller` reads and nobody else may. A thread stream may first read its transcript off
+   * the event loop; `stillAllowed` then runs again before the stream opens, and throws when the caller no longer may.
+   */
   open(
     caller: NodeId,
-    request: { kind: RoutedStreamKind; threadId?: string; ptyId?: string }
-  ): RoutedStreamOpened
+    request: { kind: RoutedStreamKind; threadId?: string; ptyId?: string },
+    stillAllowed?: () => void
+  ): RoutedStreamOpened | Promise<RoutedStreamOpened>
   /** Stops serving the stream `caller` opened, which it no longer reads. Its records stay; it can open it again. */
   close(caller: NodeId, request: { kind: RoutedStreamKind; threadId?: string; ptyId?: string }): void
   /** Where the stream `caller` holds open for `threadId` is now, if it holds one. */
@@ -489,10 +493,14 @@ export class OwnerRoutes {
       }
       need('threadId', request.kind === 'thread' || request.kind === 'terminal')
       need('ptyId', request.kind === 'terminal')
-      if (request.threadId && !this.sharedThread(request.threadId))
-        throw new DomainRpcError('thread_not_found', 'Thread not found', {
-          threadId: request.threadId
-        })
+      // Checked again once a thread's transcript has been read: the thread may have gone meanwhile.
+      const shared = (): void => {
+        if (request.threadId && !this.sharedThread(request.threadId))
+          throw new DomainRpcError('thread_not_found', 'Thread not found', {
+            threadId: request.threadId
+          })
+      }
+      shared()
       if (request.kind === 'terminal') {
         // The device's terminal switch decides whether it may see terminal output, here and on every record.
         if (!policy.get(node).terminal)
@@ -503,7 +511,7 @@ export class OwnerRoutes {
         )
           throw notFoundFor('pty', request.ptyId!, request.threadId!)
       }
-      const opened = streams!.open(node, request)
+      const opened = await streams!.open(node, request, shared)
       audit.countRead(node, 0)
       return { ok: true, result: opened }
     } catch (error) {
