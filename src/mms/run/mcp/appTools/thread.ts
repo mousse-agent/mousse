@@ -1478,7 +1478,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
   }
   /**
    * A bot's chat reaching its own running work, its child in the thread tree (`delegation/botWork.ts`): a message is the
-   * owner's note to the work and a Stop stops it, both through the bot port (`RunEngine.noteBotWork`, `stopBotWork`),
+   * owner's note to the work (a note, intent "note", is the bot's own, never the owner's words) and a Stop stops it, both through the bot port (`RunEngine.noteBotWork`, `stopBotWork`),
    * never the work thread's inbox or runs. Any other caller or target is left to the tool's own rules.
    */
   const ownBotWork = (threadId: string, ctx: ToolCallContext): boolean =>
@@ -1487,7 +1487,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     if (typeof args.content !== 'string' || !args.content.trim()) throw new Error('thread_send requires content')
     // Credited to the turn that sent it, as `work_note` is, and noted once per request.
     const activationId = ctx.turn.bot!.activationId
-    const outcome = engine.noteBotWork(threadId, args.content, { from: activationId, requestKey: `${botRequestPrefix('thread_send', ctx.caller.threadId, activationId)}${toolRequestId(args, ctx)}` })
+    const outcome = engine.noteBotWork(threadId, args.content, { from: activationId, requestKey: `${botRequestPrefix('thread_send', ctx.caller.threadId, activationId)}${toolRequestId(args, ctx)}`, ...(args.intent === 'note' ? { own: true } : {}) })
     if (outcome !== 'noted') throw new McpToolError('mousse_conflict', `The work did not take the message (${outcome}).`, { conflict: `bot_work_${outcome}` })
     return json({ threadId, work: 'noted' })
   }

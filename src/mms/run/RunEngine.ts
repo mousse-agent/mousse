@@ -1205,7 +1205,7 @@ un_time_limits). */
    * A message to a bot work's row (`thread_send`) goes to the bots through the port as the owner's note (`work_note`),
    * never into the work thread's inbox. Null when the thread is no running work's.
    */
-  noteBotWork(threadId: string, text: string, options: { from?: string; requestKey?: string } = {}): string | null {
+  noteBotWork(threadId: string, text: string, options: { from?: string; requestKey?: string; own?: boolean } = {}): string | null {
     const work = this.runningBotWork(threadId)
     if (!work) return null
     const port = this.botExecution

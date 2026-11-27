@@ -779,9 +779,17 @@ describe('a bot\'s chat reaching its work\'s row in the thread tree (thread_stop
       const sent = await call('thread_send', { threadId: 'work', content: 'Only cordless ones.', ...(intent ? { intent } : {}) })
       expect(sent.isError, intent).toBeFalsy()
     }
-    // Credited to the bot turn that sent it, once per request.
+    // The old thread_steer is a note.
+    const steered = await call('thread_steer', { threadId: 'work', runId: workRun.runId, text: 'And quiet.' })
+    expect(steered.isError, steered.text).toBeFalsy()
+    // Credited to the bot turn that sent it, once per request. A note is the bot's own, never the owner's words, even on a
+    // turn the owner started: only a message (work) may carry what the owner asked.
     const sentFrom = { from: authority.activationId, requestKey: expect.stringMatching(/^thread_send:home:/) }
-    expect(port.noteBotWork.mock.calls).toEqual([['act-9', 'Only cordless ones.', sentFrom], ['act-9', 'Only cordless ones.', sentFrom]])
+    expect(port.noteBotWork.mock.calls).toEqual([
+      ['act-9', 'Only cordless ones.', sentFrom],
+      ['act-9', 'Only cordless ones.', { ...sentFrom, own: true }],
+      ['act-9', 'And quiet.', { ...sentFrom, own: true }]
+    ])
     expect(fake.host.sendToThread).not.toHaveBeenCalled()
     expect(fake.host.noteOnThread).not.toHaveBeenCalled()
     expect(engine.store.db.statement("SELECT COUNT(*) AS n FROM inbox WHERE thread_id = 'work'").get()!.n).toBe(0)

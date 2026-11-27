@@ -8601,11 +8601,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * `BotExecutionPort.noteBotWork`: a message to the work's row reaches the work as `work_note` does, credited to the
-   * turn that sent it (`from`: only a turn its owner started speaks for the owner), once per request (`requestKey`).
+   * turn that sent it (`from`: only a turn its owner started speaks for the owner, and never a note the bot sends as its
+   * own, `own`), once per request (`requestKey`).
    */
-  noteBotWork(activationId: string, text: string, options: { from?: string; requestKey?: string } = {}): ReturnType<BotEngine['noteWork']> {
+  noteBotWork(activationId: string, text: string, options: { from?: string; requestKey?: string; own?: boolean } = {}): ReturnType<BotEngine['noteWork']> {
     const row = this.store.activation(activationId)
-    return row ? this.noteWork(row.botId, activationId, text, options.from, options.requestKey) : 'not_found'
+    return row ? this.noteWork(row.botId, activationId, text, options.from, options.requestKey, options.own) : 'not_found'
   }
 
   private async reconcileAll(): Promise<void> {
@@ -10250,7 +10251,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * turn ends, before it reports (`advance`); `noteReach` says which. Ended work can't take it, nor work that waits for
    * the owner's answer to its question: the answer is the way on (`question_answer`).
    */
-  noteWork(botId: string, workId: string, note: string, from?: string, requestKey?: string): 'noted' | 'held' | 'ended' | 'not_found' | 'question' | 'approval' | 'waiting' {
+  noteWork(botId: string, workId: string, note: string, from?: string, requestKey?: string, own = false): 'noted' | 'held' | 'ended' | 'not_found' | 'question' | 'approval' | 'waiting' {
     const text = note.trim()
     const row = this.store.activation(workId)
     if (!row || row.botId !== botId || row.lane !== 'run' || !text) return 'not_found'
@@ -10263,10 +10264,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!['queued', 'running', 'waiting_grant'].includes(current.status) && !workWaits(current)) return 'held' as const
       // A retry of the same request (`requestKey`) was noted already: it adds nothing.
       if (requestKey && !this.store.run("INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, '1')", botId, `work-note-request:${workId}:${requestKey}`)) return 'noted' as const
-      // The note keeps the owner's message it came from (the chat turn's), so a forget of that message reaches it.
-      if (from && this.store.activation(from) && ownerChatTurn(this.store.activation(from)!)) this.resetWorkWaitChain(workId)
-      this.store.addWorkNote(workId, botId, text, from ? this.noteSourceOf(from) : undefined)
-      if ((botAsksFirst(this.host.settings?.get()) || this.actions.forWork(workId)) && (!from || (this.store.activation(from) && ownerChatTurn(this.store.activation(from)!))))
+      // The note keeps the owner's message it came from (the chat turn's), so a forget of that message reaches it. The
+      // bot's own note (`own`) names its turn instead, as one from a turn the owner did not start does.
+      const owners = from !== undefined && !own && Boolean(this.store.activation(from)) && ownerChatTurn(this.store.activation(from)!)
+      if (owners) this.resetWorkWaitChain(workId)
+      this.store.addWorkNote(workId, botId, text, from ? (own ? `${BOT_NOTE_SOURCE_PREFIX}${from}` : this.noteSourceOf(from)) : undefined)
+      if ((botAsksFirst(this.host.settings?.get()) || this.actions.forWork(workId)) && (!from || owners))
         this.store.run(`INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, '1') ON CONFLICT(bot_id, key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)`, botId, `cursor:action-note:${workId}`)
       return 'noted' as const
     })
