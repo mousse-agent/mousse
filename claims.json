@@ -208,19 +208,6 @@
       "expiresAt": "2026-11-27T17:53:06.509Z"
     },
     {
-      "task": "t3/thread-addressing-paging",
-      "session": "LAPTOP-HIEROJK7-7b3d1e",
-      "machine": "LAPTOP-HIEROJK7",
-      "branch": "t3/thread-addressing-paging",
-      "paths": [
-        "src/mms/run/addressing.ts",
-        "src/mms/run/mcp/appTools/registry.ts",
-        "src/mms/run/mcp/appTools/index.ts"
-      ],
-      "claimedAt": "2026-11-27T17:00:24.937Z",
-      "expiresAt": "2026-11-27T19:00:24.937Z"
-    },
-    {
       "task": "tree-corrections",
       "session": "LAPTOP-HIEROJK7-dfae29",
       "machine": "LAPTOP-HIEROJK7",
