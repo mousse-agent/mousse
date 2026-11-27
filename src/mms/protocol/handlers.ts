@@ -2021,6 +2021,12 @@ function jobRefused(message: string): AppError {
   return knownAppError({ code: 'scheduled_job_refused', message }, { category: 'invalid', retryable: false })
 }
 
+/** A draft whose request URL came or went: what keeps Turn on off is worked out again, and the draft read back. */
+function recheckedDraft(ctx: HandlerContext, id: string): ScheduledJob | undefined {
+  ctx.mms.automationDrafts?.recheck(id)
+  return ctx.mms.scheduled.getJob(id) ?? undefined
+}
+
 /** Runs a webhook request; the service's refusals ("already has a webhook", "agent-created jobs ...") reach the caller as readable errors. */
 async function withWebhookRefusals<T>(run: () => Promise<T>): Promise<T> {
   try {
@@ -4019,7 +4025,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
       const port = p.port === undefined ? undefined : asBoundedInt(p.port, 'port', { min: 1024, max: 65535 })
-      return withWebhookRefusals(async () => ({ ...(await ctx.mms.enableScheduledWebhook(id, { port })), jobs: ctx.mms.scheduled.listJobs() }))
+      return withWebhookRefusals(async () => {
+        const grant = await ctx.mms.enableScheduledWebhook(id, { port })
+        // A draft that waited for its request URL can be turned on now.
+        const job = grant.job.draft ? recheckedDraft(ctx, id) ?? grant.job : grant.job
+        return { ...grant, job, jobs: ctx.mms.scheduled.listJobs() }
+      })
     }
     case 'scheduled.webhook.rotate': {
       const p = isObject(params) ? params : {}
@@ -4029,7 +4040,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'scheduled.webhook.disable': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
-      return withWebhookRefusals(async () => ({ job: ctx.mms.scheduled.disableWebhook(id), jobs: ctx.mms.scheduled.listJobs() }))
+      return withWebhookRefusals(async () => {
+        const off = ctx.mms.scheduled.disableWebhook(id)
+        const job = off.draft ? recheckedDraft(ctx, id) ?? off : off
+        return { job, jobs: ctx.mms.scheduled.listJobs() }
+      })
     }
     case 'scheduled.webhook.deliveries': {
       const p = isObject(params) ? params : {}

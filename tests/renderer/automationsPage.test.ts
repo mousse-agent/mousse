@@ -311,6 +311,8 @@ describe('Edit details, from the inbox', () => {
       throw new Error(method)
     })
     await openForm('job:j1')
+    // A request starts it: When says so, not "When you run it".
+    expect($('[data-testid="automation-when"]')?.textContent).toBe('On request')
     expect($$('[data-testid="request-field"]').map((entry) => entry.textContent)).toEqual(['ref'])
     const prompt = $<HTMLTextAreaElement>('textarea.scheduled-prompt')!
     prompt.setSelectionRange(prompt.value.length, prompt.value.length)
@@ -373,6 +375,23 @@ describe('Edit details, from the inbox', () => {
     await click($('[data-testid="automation-more"]'))
     expect($<HTMLButtonElement>('[data-testid="request-enable"]')!.disabled).toBe(true)
     expect($('[data-testid="request-refusal"]')?.textContent).toMatch(/^Keep it first/)
+  })
+
+  it('says what starts an automation with no clock: a request draft opens on its URL setup, a CLI one names its command', async () => {
+    const draftState = { draft: true as const, draftId: 'd1', problems: ['Set up its request URL in Edit details › Request URL.'], request: true as const }
+    const draft = job({ id: 'd1', name: 'Triage', prompt: 'Triage {{body.issue}}', schedule: { kind: 'manual' }, nextRunAt: null, enabled: false, draft: draftState })
+    const cli = job({ id: 'c1', name: 'Ship', schedule: { kind: 'manual' }, nextRunAt: null, cliName: 'ship' })
+    const mousse = await mount([item({ key: 'job:d1', name: 'Triage', trigger: 'request' }), item({ key: 'job:c1', name: 'Ship', trigger: 'on_demand', cliName: 'ship' })], [draft, cli])
+    mousse.scheduled.webhook.enable.mockResolvedValue({ job: draft, secret: 'whsec_shown_once', url: 'http://127.0.0.1:18790/hooks/d1', listening: true })
+    await openForm('job:d1')
+    expect($('[data-testid="automation-when"]')?.textContent).toBe('On request')
+    expect($$('[data-testid="request-field"]').map((entry) => entry.textContent)).toEqual(['issue'])
+    // More is open on what keeps Turn on off.
+    await click($('[data-testid="request-enable"]'))
+    expect(mousse.scheduled.webhook.enable).toHaveBeenCalledWith('d1')
+    expect($('[data-testid="request-secret"]')?.textContent).toBe('whsec_shown_once')
+    await openForm('job:c1')
+    expect($('[data-testid="automation-when"]')?.textContent).toBe('From the CLI · ship')
   })
 
   it('shows the secret once after Set up, and the curl line signed with it', async () => {

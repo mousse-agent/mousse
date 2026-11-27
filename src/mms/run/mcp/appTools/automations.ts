@@ -43,9 +43,9 @@ export const RUN_REPORT_TOOL = 'run_report'
 const TRIGGER_SCHEMA = {
   type: 'object',
   description:
-    'What starts it. {kind:"time", schedule:{kind:"cron", expr:"0 5 * * 4"}} (five-field cron on this computer\'s clock), {kind:"time", schedule:{kind:"interval", minutes:60}}, {kind:"time", schedule:{kind:"once", runAt:"<ISO time>"}}; {kind:"cli", name?} (started by `mousse-cli automation run <name>`); {kind:"http"} (a signed request; the person sets up its URL after Turn on); {kind:"thread_event", threadId, events:["checks_failed"|"checks_passed"|"review"|"comment"]} (a thread\'s pull request).',
+    'What starts it. {kind:"time", schedule:{kind:"cron", expr:"0 5 * * 4"}} (five-field cron on this computer\'s clock), {kind:"time", schedule:{kind:"interval", minutes:60}}, {kind:"time", schedule:{kind:"once", runAt:"<ISO time>"}}; {kind:"cli", name?} (started by `mousse-cli automation run <name>`); {kind:"http"} (a webhook: a signed request to a URL on this computer starts it, and {{body.<field>}} in the prompt is filled from that field of the JSON body of the request; `webhook` is the same kind; the person sets up its URL and secret in Edit details, which turning it on waits for); {kind:"thread_event", threadId, events:["checks_failed"|"checks_passed"|"review"|"comment"]} (a thread\'s pull request).',
   properties: {
-    kind: { type: 'string', enum: ['time', 'cli', 'http', 'thread_event'] },
+    kind: { type: 'string', enum: ['time', 'cli', 'http', 'webhook', 'thread_event'] },
     schedule: { type: 'object', properties: { kind: { type: 'string', enum: ['cron', 'interval', 'once'] }, expr: { type: 'string' }, minutes: { type: 'integer', minimum: 1 }, runAt: { type: 'string' } }, required: ['kind'] },
     name: { type: 'string' },
     threadId: { type: 'string' },
