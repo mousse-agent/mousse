@@ -75,7 +75,7 @@ beforeEach(() => {
       }
     }
   }
-  useAppStore.setState({ activeThreadId: 't1', mainView: 'browser', openedSurfaceKinds: [], mainAreaOpen: false, documentTabs: [], activeDocumentTabId: null })
+  useAppStore.setState({ activeThreadId: 't1', mainView: 'browser', openedSurfaceKinds: [], mainAreaOpen: false, documentTabs: [], activeDocumentTabByThread: {} })
   useChangesStore.setState({ byThread: {} })
 })
 
