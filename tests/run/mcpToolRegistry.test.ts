@@ -32,15 +32,14 @@ const PHASE5_TOOLS: Record<string, string> = {
   thread_wait: 'readsOthers',
   thread_send: 'managesOthers',
   thread_create: 'managesOthers',
-  thread_interrupt: 'managesOthers',
-  thread_steer: 'managesOthers',
+  thread_stop: 'managesOthers',
   approval_respond: 'managesOthers',
   queue_list: 'readsOthers',
   queue_enqueue: 'managesOthers',
   queue_update: 'managesOthers',
   // Phase 6 (SPEC §16.2).
   thread_fork: 'startsThreads',
-  thread_merge_back: 'editsWorkspace'
+  thread_return: 'editsWorkspace'
 }
 
 describe('Mousse tool registry (SPEC §15.1)', () => {
@@ -487,7 +486,7 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
   it('lists the tools that read and manage other threads for every caller', async () => {
     const { registry } = await world()
     expect(registry.listForThread('parent').map((tool) => tool.name)).toEqual(
-      expect.arrayContaining(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'thread_send', 'thread_steer', 'thread_interrupt', 'thread_create', 'approval_respond'])
+      expect.arrayContaining(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'thread_send', 'thread_stop', 'thread_create', 'approval_respond'])
     )
   })
 

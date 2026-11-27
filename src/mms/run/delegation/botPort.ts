@@ -41,9 +41,10 @@ export interface BotExecutionPort {
   /**
    * A message to a bot work's row: the bots pass it to the work as its owner's note (`work_note`), never through the
    * work thread's inbox. `from`: the bot turn that sent it, so a turn its owner did not start never speaks for them;
-   * `requestKey`: a retry of the same request adds nothing. Returns what `work_note` returns (`noted`: the work takes it).
+   * `requestKey`: a retry of the same request adds nothing; `own`: the bot's own note (`thread_send` intent note), never
+   * the owner's words, whoever started the turn. Returns what `work_note` returns (`noted`: the work takes it).
    */
-  noteBotWork?(activationId: string, text: string, options?: { from?: string; requestKey?: string }): string
+  noteBotWork?(activationId: string, text: string, options?: { from?: string; requestKey?: string; own?: boolean }): string
 }
 
 /**

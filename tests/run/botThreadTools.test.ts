@@ -283,9 +283,9 @@ describe('a bot\'s thread tools ("use your threads")', () => {
 
   it('a Stop of a running turn leaves a line naming the bot, and every start and message is a chip with what it sent', async () => {
     const { text, host, onAppResult } = await world({ threads: 'all' })
-    expect((await text('thread_interrupt', { threadId: 'mine', runId: 'run-x' })).error).toBe(false)
+    expect((await text('thread_stop', { threadId: 'mine', runId: 'run-x' })).error).toBe(false)
     expect(host.showAgentAction).toHaveBeenCalledWith({ threadId: 'mine' }, expect.objectContaining({ threadId: 'home' }), 'stopped the turn that was running', { notice: true })
-    expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_interrupt', { threadId: 'mine', title: 'Fix the login page' })
+    expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_stop', { threadId: 'mine', title: 'Fix the login page' })
     expect((await text('thread_send', { threadId: 'mine', content: '\n  Please also check the signup page.\nThen the footer.' })).error).toBe(false)
     expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_send', { threadId: 'mine', title: 'Fix the login page', sent: 'Please also check the signup page.' })
     expect((await text('thread_create', { projectId: 'p1', title: 'Fix login', firstMessage: 'Look at the login page.\nThen the form.' })).error).toBe(false)
@@ -360,7 +360,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(result.error).toBe(false)
     const body = JSON.parse(result.text)
     if (outcome === 'steer') {
-      expect(host.steerRun).toHaveBeenCalledWith('mine', run!.runId, 'Use staging instead.', expect.objectContaining({ tool: 'thread_send' }))
+      expect(host.steerRun).toHaveBeenCalledWith('mine', run!.runId, 'Use staging instead.', expect.objectContaining({ clientRequestId: expect.stringMatching(/^thread_send:/) }))
       expect(host.sendToThread).not.toHaveBeenCalled()
       expect(body).toMatchObject({ delivery: 'presented', runId: run!.runId })
       return
@@ -428,8 +428,8 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     const described = (threadId: string, name: string) => registry.listForThread(threadId, 'default', runId).find((tool) => tool.name === name)?.description ?? ''
     for (const name of ['thread_create', 'thread_send']) {
       expect(described('home', name)).toMatch(/no count per turn, per run or per day/)
-      expect(described('home', name)).not.toMatch(/agent messages in a row without a person/)
-      expect(described('mine', name)).toMatch(/agent messages in a row without a person/)
+      expect(described('home', name)).not.toMatch(/agent messages that follow(ed)? one person's message/)
+      expect(described('mine', name)).toMatch(/agent messages that follow(ed)? one person's message/)
     }
     expect(described('home', 'thread_create')).toMatch(/no limit on how many work at once/)
   })
@@ -483,7 +483,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(host.setThreadHidden).not.toHaveBeenCalled()
   })
 
-  it('a thread it starts is created as it asks, hidden or not, and says so to the bot and in its chip; thread_hide hides or shows one later; an ordinary agent asks the host the same way', async () => {
+  it('a thread it starts is created as it asks, hidden or not, and says so to the bot and in its chip; thread_update hidden hides or shows one later; an ordinary agent asks the host the same way', async () => {
     const { text, host, onAppResult, runId, threads } = await world({ threads: 'all' })
     // The service makes a bot's thread hidden unless asked not to; the tool reads it back as it is.
     vi.mocked(host.createThread!).mockImplementationOnce(async (request) => {
@@ -505,13 +505,13 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect((await text('thread_create', { projectId: 'p1', title: 'X', firstMessage: 'Y', hidden: 'yes' })).text).toMatch(/hidden must be true or false/)
 
     // Later: hidden, then shown again, each with a line in the thread and a chip; already so, neither.
-    expect(JSON.parse((await text('thread_hide', { threadId: 'mine' })).text)).toMatchObject({ threadId: 'mine', hidden: true, changed: true })
+    expect(JSON.parse((await text('thread_update', { threadId: 'mine', hidden: true })).text)).toMatchObject({ threadId: 'mine', hidden: true, changed: true })
     expect(host.setThreadHidden).toHaveBeenLastCalledWith('mine', true, { actor: expect.objectContaining({ threadId: 'home', runId }) })
     expect(host.showAgentAction).toHaveBeenCalledWith({ threadId: 'mine' }, expect.objectContaining({ threadId: 'home' }), 'hid this thread from the sidebar')
-    expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_hide', { threadId: 'mine', title: 'Fix the login page', hidden: true })
-    expect(JSON.parse((await text('thread_hide', { threadId: 'mine', hidden: false })).text)).toMatchObject({ hidden: false, changed: true })
+    expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_update', { threadId: 'mine', title: 'Fix the login page', hidden: true })
+    expect(JSON.parse((await text('thread_update', { threadId: 'mine', hidden: false })).text)).toMatchObject({ hidden: false, changed: true })
     expect(host.setThreadHidden).toHaveBeenLastCalledWith('mine', false, expect.anything())
-    expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_hide', { threadId: 'mine', title: 'Fix the login page', hidden: false })
+    expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_update', { threadId: 'mine', title: 'Fix the login page', hidden: false })
     // thread_update hidden does the same.
     expect(JSON.parse((await text('thread_update', { threadId: 'mine', hidden: true })).text)).toMatchObject({ threadId: 'mine', hidden: true, changed: true })
     expect(host.setThreadHidden).toHaveBeenLastCalledWith('mine', true, { actor: expect.objectContaining({ threadId: 'home', runId }) })
@@ -519,7 +519,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     vi.mocked(host.showAgentAction!).mockClear()
     onAppResult.mockClear()
     vi.mocked(host.setThreadHidden!).mockReturnValueOnce({ hidden: false, changed: false })
-    expect(JSON.parse((await text('thread_hide', { threadId: 'mine', hidden: false })).text)).toMatchObject({ changed: false })
+    expect(JSON.parse((await text('thread_update', { threadId: 'mine', hidden: false })).text)).toMatchObject({ changed: false })
     expect(host.showAgentAction).not.toHaveBeenCalled()
     expect(onAppResult).not.toHaveBeenCalled()
 
@@ -595,7 +595,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(JSON.parse((await text('thread_archive', { threadId: 'mine' })).text)).toMatchObject({ changed: false })
     // Still working: refused, with what to do.
     vi.mocked(host.setThreadArchived!).mockResolvedValueOnce({ status: 'rejected', reason: 'thread_running' })
-    expect(await text('thread_archive', { threadId: 'mine' })).toEqual({ error: true, text: expect.stringContaining('is still working, so it was not archived. If your owner wants it archived anyway, stop it first with thread_interrupt') })
+    expect(await text('thread_archive', { threadId: 'mine' })).toEqual({ error: true, text: expect.stringContaining('is still working, so it was not archived. If your owner wants it archived anyway, stop it first with thread_stop') })
     expect(host.showAgentAction).not.toHaveBeenCalled()
     expect(onAppResult).not.toHaveBeenCalled()
     // An ordinary thread's agent archives another thread only in a turn the person started: here none did.
@@ -619,7 +619,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(fresh.host.showAgentAction).toHaveBeenCalledWith({ threadId: 'archived' }, expect.objectContaining({ threadId: 'mine' }), 'unarchived this thread')
     // Still working: refused, with what to do.
     vi.mocked(fresh.host.setThreadArchived!).mockResolvedValueOnce({ status: 'rejected', reason: 'thread_running' })
-    expect(refusalOf(await asAgent({ threadId: 'archived' }))?.refused).toMatchObject({ code: 'conflict', message: expect.stringContaining('stop it first with thread_interrupt') })
+    expect(refusalOf(await asAgent({ threadId: 'archived' }))?.refused).toMatchObject({ code: 'conflict', message: expect.stringContaining('stop it first with thread_stop') })
   })
 
   it('what it reads is framed as data from the thread, short by default, and the transcript and run events with an agent\'s caps', async () => {
@@ -702,7 +702,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(entry).toContain(botCatalogueGroup('threads')!.guidance)
     expect(entry).toMatch(/ToolSearch \("select:[^"]*mcp__mousse__thread_search/)
     // A read-only turn is told which of the group's tools it does not hold.
-    expect(entry).toMatch(/Not yours on this turn: .*thread_steer/)
+    expect(entry).toMatch(/Not yours on this turn: .*thread_stop/)
   })
 
   it('on Codex and Pi, tool_catalogue gives each held tool with its arguments; with no group or an unknown one, the list of groups', async () => {
@@ -779,9 +779,17 @@ describe('a bot\'s chat reaching its work\'s row in the thread tree (thread_stop
       const sent = await call('thread_send', { threadId: 'work', content: 'Only cordless ones.', ...(intent ? { intent } : {}) })
       expect(sent.isError, intent).toBeFalsy()
     }
-    // Credited to the bot turn that sent it, once per request.
+    // The old thread_steer is a note.
+    const steered = await call('thread_steer', { threadId: 'work', runId: workRun.runId, text: 'And quiet.' })
+    expect(steered.isError, steered.text).toBeFalsy()
+    // Credited to the bot turn that sent it, once per request. A note is the bot's own, never the owner's words, even on a
+    // turn the owner started: only a message (work) may carry what the owner asked.
     const sentFrom = { from: authority.activationId, requestKey: expect.stringMatching(/^thread_send:home:/) }
-    expect(port.noteBotWork.mock.calls).toEqual([['act-9', 'Only cordless ones.', sentFrom], ['act-9', 'Only cordless ones.', sentFrom]])
+    expect(port.noteBotWork.mock.calls).toEqual([
+      ['act-9', 'Only cordless ones.', sentFrom],
+      ['act-9', 'Only cordless ones.', { ...sentFrom, own: true }],
+      ['act-9', 'And quiet.', { ...sentFrom, own: true }]
+    ])
     expect(fake.host.sendToThread).not.toHaveBeenCalled()
     expect(fake.host.noteOnThread).not.toHaveBeenCalled()
     expect(engine.store.db.statement("SELECT COUNT(*) AS n FROM inbox WHERE thread_id = 'work'").get()!.n).toBe(0)

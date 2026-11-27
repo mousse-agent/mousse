@@ -2,7 +2,7 @@ import type { AgentRuntimePolicy, AgentRuntimeToolApprovalCallback } from '../..
 import type { EffectiveAgentGrants } from '../../shared/agents/types'
 import type { McpToolDescriptor } from '../../shared/integrations'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
-import { MOUSSE_TOOL_ALIAS_ARGUMENTS, canonicalToolCall, grantHoldsCall } from '../../shared/toolAliases'
+import { canonicalToolCall, grantHoldsCall, isVariantAlias } from '../../shared/toolAliases'
 import { authorizeTrustedToolDispatch, canonicalizeBuiltinToolName, digestToolArguments, prepareTrustedToolDispatch } from './runtimePolicy'
 
 /**
@@ -41,7 +41,7 @@ export function definitionToolGranted(toolName: string, grants: EffectiveAgentGr
     return grants.mcpTools.some((grant) => (grant.serverId === mcp.serverId || grant.serverId === mcp.installationId) && grant.toolName === mcp.toolName)
   const canonical = canonicalizeBuiltinToolName(toolName)
   // A grant under an old name that became one variant of its tool holds that variant only, judged by the call's arguments.
-  return grants.builtinTools.some((grant) => Object.prototype.hasOwnProperty.call(MOUSSE_TOOL_ALIAS_ARGUMENTS, grant.id)
+  return grants.builtinTools.some((grant) => isVariantAlias(grant.id)
     ? grantHoldsCall(grant.id, toolName, args)
     : grant.id === toolName || grant.id === canonical || canonicalizeBuiltinToolName(grant.id) === canonical)
 }
