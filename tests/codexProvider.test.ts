@@ -2101,6 +2101,16 @@ describe('a usage limit on a Codex turn', () => {
     expect(error).toMatchObject({ code: 'provider_usage_limit', details: { estimated: false } })
   })
 
+  it('a ChatGPT plan limit Codex reports as a disconnected stream (kind `other`) is a usage limit', async () => {
+    // Recorded from Codex 0.162.1 (managed, 2026-11-27).
+    const server = failingServer({ error: limitError('other', 'stream disconnected before completion: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.'), rateLimits: { result: { rateLimits: exhausted(inHours(1)) } } })
+    const error = await chat(create(server)).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'provider_usage_limit', details: { estimated: false } })
+    // Any other `other` failure is not read as one.
+    const other = failingServer({ error: limitError('other', 'stream disconnected before completion: error sending request') })
+    expect(await chat(create(other)).catch((caught: unknown) => caught)).not.toMatchObject({ code: 'provider_usage_limit' })
+  })
+
   it('a structured kind that is not a limit is believed over the message', async () => {
     const server = failingServer({ error: limitError('contextWindowExceeded', 'The context window is full; the usage limit of the model was exceeded') })
     const error = await chat(create(server)).catch((caught: unknown) => caught)

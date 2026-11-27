@@ -72,7 +72,7 @@ import {
   type TurnError,
   type UserInput
 } from './protocol'
-import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot, trimResetCredits } from './rateLimits'
+import { isChatGptUsageLimitText, isUsageLimitInfo, isUsageLimitText, resetFromSnapshot, trimResetCredits } from './rateLimits'
 import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
@@ -3997,8 +3997,13 @@ export class CodexProviderService {
    */
   private async limitOrFailure(failure: CodexTurnFailure, run: TurnRun, conn: CodexConnection, signal: AbortSignal): Promise<Error> {
     const info = failure.codexErrorInfo
-    // A server that classifies its errors is believed; the message is read only when it sends no kind.
-    if (!(codexErrorKind(info) === undefined ? isUsageLimitText(failure.message) : isUsageLimitInfo(info))) return failure
+    const kind = codexErrorKind(info)
+    // A server that classifies its errors is believed; the message is read only when it sends no kind, or when it sends
+    // `other` with ChatGPT's own words for a plan limit (a stream that disconnected on it).
+    const limited = kind === undefined
+      ? isUsageLimitText(failure.message)
+      : isUsageLimitInfo(info) || (kind === 'other' && isChatGptUsageLimitText(failure.message))
+    if (!limited) return failure
     let fresh: RateLimitSnapshot | undefined
     try {
       fresh = (await conn.request('account/rateLimits/read', undefined, { timeoutMs: 5_000, signal })).rateLimits

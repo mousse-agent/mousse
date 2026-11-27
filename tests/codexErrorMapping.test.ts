@@ -3,6 +3,10 @@ import { harnessAppError } from '../src/shared/harness/types'
 import { CodexTurnFailure } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import type { TurnError } from '../src/mms/harness/vendors/codex/protocol'
 import { codexHarnessError, codexProviderError } from '../src/mms/harness/drivers/codex/adapter'
+import { usageLimitOf } from '../src/mms/run/pausePolicy'
+
+/** Recorded from Codex 0.162.1 (managed, 2026-11-27): a ChatGPT plan limit on a stream, with no kind of its own. */
+const SHARING_LIMIT = 'stream disconnected before completion: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.'
 
 const failure = (error: Partial<TurnError>) => new CodexTurnFailure(error.message ?? 'failed', { message: 'failed', ...error })
 /** How Codex 0.162.1 reports an HTTP failure (recorded by `codexManagedWire.test.ts`). */
@@ -55,6 +59,15 @@ describe('codexHarnessError (managed Codex)', () => {
     expect(codexHarnessError(busy)).toMatchObject({ message: '503 · Upstream busy', errorInfo: { category: 'unavailable', retryable: true } })
     // A JSON message without a status is still Codex's own error.
     expect(codexHarnessError(failure({ message: JSON.stringify({ error: { message: 'stream ended' } }), codexErrorInfo: 'other' }))).toMatchObject({ code: 'protocol' })
+  })
+
+  it('reads a ChatGPT plan limit Codex reports as a disconnected stream as a usage limit, never a protocol error', () => {
+    const mapped = codexHarnessError(failure({ message: SHARING_LIMIT, codexErrorInfo: 'other' }), 'codex-2')
+    expect(mapped).toMatchObject({ code: 'rate_limited' })
+    // The run pauses on it (an estimated reset: Codex named none).
+    expect(usageLimitOf(mapped)).toMatchObject({ provider: 'codex', estimated: true })
+    // Any other disconnected stream stays Codex's own error.
+    expect(codexHarnessError(failure({ message: 'stream disconnected before completion: error sending request', codexErrorInfo: 'other' }))).toMatchObject({ code: 'protocol' })
   })
 
   it('leaves a context overflow and other errors unchanged', () => {

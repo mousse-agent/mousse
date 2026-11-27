@@ -116,6 +116,16 @@ export function isUsageLimitInfo(info: CodexErrorInfo | null | undefined): boole
   return kind === 'responseTooManyFailedAttempts' && codexHttpStatus(info) === 429
 }
 
+/**
+ * A ChatGPT plan limit Codex reports with no kind of its own (`codexErrorInfo: "other"`): Codex 0.162.1 ended a turn with
+ * "stream disconnected before completion: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the
+ * user to try again after their usage limit resets or use an API key instead." Only that wording counts: any other
+ * failure of that kind stays what it is.
+ */
+export function isChatGptUsageLimitText(message: string | undefined): boolean {
+  return /\breached (?:their|your) (?:[a-z][a-z ]{0,40} )?usage limit\b/i.test(message ?? '')
+}
+
 /** Older servers send no structured kind; their message is all there is. */
 export function isUsageLimitText(message: string | undefined): boolean {
   return /usage limit|rate limit/i.test(message ?? '')
