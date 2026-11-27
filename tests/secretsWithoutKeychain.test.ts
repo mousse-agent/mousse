@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { InstanceVault } from '../src/mms/harness/vault'
 import { FileKeyStore, setAsideKeychainNetwork } from '../src/mms/net/identity'
 import { FileCredentialStore } from '../src/mms/providers/FileCredentialStore'
+import { UsageProxyKeyStore } from '../src/mms/providers/usageProxyKeys'
 import { stableMacSignature, type SecretCodec } from '../src/mms/providers/secretCodec'
 
 /** Reverses bytes: stands in for the keychain an earlier build saved through. */
@@ -87,5 +88,88 @@ describe('secrets on a macOS build without a stable signature', () => {
     await keys.initialize({ asAuthority: true })
     expect(JSON.parse(readFileSync(join(profile, 'net', 'keys.json'), 'utf-8')).mode).toBe('plain')
     expect(keys.protectedAtRest()).toBe(true)
+  })
+})
+
+/**
+ * A signed macOS build's keychain item, which only it opens: it reads what it saved itself. `answers`
+ * is false while the keychain is locked or missing.
+ */
+function ownItem(answers = true, own = true): SecretCodec {
+  const tag = Buffer.from('own-item:')
+  return {
+    encryptionRequired: true,
+    ownKeychainItem: own,
+    canEncrypt: () => answers,
+    encrypt: (plain) => (answers ? Buffer.concat([tag, Buffer.from(plain)]) : null),
+    decrypt: (stored) => {
+      if (!answers || !stored.subarray(0, tag.length).equals(tag)) throw new Error('Error while decrypting the ciphertext')
+      return stored.subarray(tag.length).toString()
+    }
+  }
+}
+
+describe('secrets on a signed macOS build, which uses a keychain item of its own', () => {
+  const asideOf = (dir: string, name: string) => readdirSync(dir).filter((entry) => entry.startsWith(`${name}.keychain-`))
+
+  it('sets provider credentials saved through the old item aside and saves new ones through its own', async () => {
+    const dir = directory(),
+      path = join(dir, 'auth.json')
+    await new FileCredentialStore(path, keychain).modify('openai', async () => ({ type: 'api_key', key: 'sk-old' }))
+    const saved = readFileSync(path, 'utf-8')
+
+    const store = new FileCredentialStore(path, ownItem())
+    expect(store.listProviderIds()).toEqual([])
+    expect(asideOf(dir, 'auth.json').map((name) => readFileSync(join(dir, name), 'utf-8'))).toEqual([saved])
+
+    await store.modify('anthropic', async () => ({ type: 'api_key', key: 'sk-new' }))
+    expect(new FileCredentialStore(path, ownItem()).listProviderIds()).toEqual(['anthropic'])
+    expect(readFileSync(path, 'utf-8')).not.toContain('sk-new')
+  })
+
+  it('keeps data it cannot read while the keychain is locked, and on other systems', async () => {
+    const dir = directory(),
+      path = join(dir, 'auth.json')
+    await new FileCredentialStore(path, keychain).modify('openai', async () => ({ type: 'api_key', key: 'sk-old' }))
+    const saved = readFileSync(path, 'utf-8')
+
+    expect(() => new FileCredentialStore(path, ownItem(false))).toThrow()
+    expect(() => new FileCredentialStore(path, ownItem(true, false))).toThrow()
+    expect(readFileSync(path, 'utf-8')).toBe(saved)
+    expect(asideOf(dir, 'auth.json')).toEqual([])
+  })
+
+  it('sets instance secrets and proxy keys saved through the old item aside', () => {
+    const dir = directory()
+    new InstanceVault(join(dir, 'secrets.json'), keychain).set('token', 'old-value')
+    new UsageProxyKeyStore(join(dir, 'proxy-keys.json'), keychain).set('http://127.0.0.1:8317', 'old-key')
+
+    const vault = new InstanceVault(join(dir, 'secrets.json'), ownItem())
+    expect(vault.get('token')).toBeUndefined()
+    vault.set('token', 'new-value')
+    expect(new InstanceVault(join(dir, 'secrets.json'), ownItem()).get('token')).toBe('new-value')
+
+    const proxyKeys = new UsageProxyKeyStore(join(dir, 'proxy-keys.json'), ownItem())
+    expect(proxyKeys.get('http://127.0.0.1:8317')).toBeUndefined()
+    proxyKeys.set('http://127.0.0.1:8317', 'new-key')
+    expect(new UsageProxyKeyStore(join(dir, 'proxy-keys.json'), ownItem()).get('http://127.0.0.1:8317')).toBe('new-key')
+
+    expect(asideOf(dir, 'secrets.json')).toHaveLength(1)
+    expect(asideOf(dir, 'proxy-keys.json')).toHaveLength(1)
+  })
+
+  it('moves network data saved through the old item aside, and keeps its own', async () => {
+    const old = directory(),
+      own = directory()
+    await new FileKeyStore(old, { codec: keychain }).initialize({ asAuthority: true })
+    await new FileKeyStore(own, { codec: ownItem() }).initialize({ asAuthority: true })
+
+    expect(setAsideKeychainNetwork(old, ownItem(false))).toBe(false)
+    expect(setAsideKeychainNetwork(own, ownItem())).toBe(false)
+    expect(new FileKeyStore(own, { codec: ownItem() }).state()).toBe('unlocked')
+
+    expect(setAsideKeychainNetwork(old, ownItem())).toBe(true)
+    expect(readdirSync(old).filter((name) => name.startsWith('net'))).toEqual([expect.stringMatching(/^net\.keychain-\d+$/)])
+    expect(new FileKeyStore(old, { codec: ownItem() }).state()).toBe('missing')
   })
 })

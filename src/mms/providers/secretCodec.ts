@@ -11,9 +11,14 @@ import { createRequire } from 'node:module'
  * encryption; vault failures must never silently downgrade a store.
  *
  * The exception is a macOS build without a stable signature (ad hoc, as local
- * and CI builds are today). The keychain trusts each such build separately, so
+ * and CI builds are). The keychain trusts each such build separately, so
  * every update would ask for the login password again. Those builds never use
  * the keychain and keep secrets in owner-only files instead (`plainAtRest`).
+ *
+ * A signed macOS build uses a keychain item of its own (`MAC_KEYCHAIN_NAME`), which
+ * it creates itself and so opens without asking. It never asks for the item earlier
+ * unsigned builds made, which trusts only those builds and asks for the login password
+ * from every process that opens it.
  *
  * No static electron import: resolved lazily via process detection so src/mms
  * stays loadable in plain node and tests.
@@ -34,6 +39,11 @@ export interface SecretCodec {
    * sets such a file aside (`setAsideSecretFile`) and starts empty.
    */
   readonly plainAtRest?: boolean
+  /**
+   * The keychain item behind this codec is one only this build opens. A payload it cannot decrypt while
+   * the keychain answers was saved through another item and can never be read here (see `savedElsewhere`).
+   */
+  readonly ownKeychainItem?: boolean
   /** True when payloads written now will be encrypted. */
   canEncrypt(): boolean
   encrypt(plain: string): Buffer | null
@@ -55,7 +65,10 @@ class PassthroughCodec implements SecretCodec {
 
 class SafeStorageCodec implements SecretCodec {
   readonly encryptionRequired = true
-  constructor(private readonly safeStorage: SafeStorageLike) {}
+  constructor(
+    private readonly safeStorage: SafeStorageLike,
+    readonly ownKeychainItem = false
+  ) {}
 
   canEncrypt(): boolean {
     try {
@@ -89,6 +102,23 @@ class OwnerFileCodec extends PassthroughCodec {
 }
 
 /**
+ * Whether a payload `codec` just failed to decrypt was saved through a keychain item this build never
+ * opens, so it can never be read here. Each store then sets it aside and starts empty; nothing is
+ * deleted. Otherwise the failure may pass (a locked keychain) and the data is kept as it is.
+ */
+export function savedElsewhere(codec: SecretCodec): boolean {
+  if (codec.plainAtRest) return true
+  return !!codec.ownKeychainItem && codec.canEncrypt()
+}
+
+/**
+ * The app name a signed macOS build runs under until Electron has read it. Electron names its keychain
+ * item after the app ("mousse Safe Storage"), and the item earlier unsigned builds made under that name
+ * trusts only them. Keychain names are case-sensitive, so "Mousse Safe Storage" is a separate item.
+ */
+export const MAC_KEYCHAIN_NAME = 'Mousse'
+
+/**
  * Whether `codesign --display --verbose=2` output shows a signature the keychain recognises across
  * updates: a Developer ID or App Store signature names its team, ad hoc and unsigned builds do not.
  * Output that shows neither (codesign missing or failing) keeps the keychain.
@@ -99,7 +129,8 @@ export function stableMacSignature(details: string): boolean {
 }
 
 let signedApp: boolean | undefined
-function signedMacApp(): boolean {
+/** This macOS app has a signature the keychain recognises across updates (cached; runs codesign once). */
+export function signedMacApp(): boolean {
   if (signedApp !== undefined) return signedApp
   const executable = process.execPath,
     bundle = executable.lastIndexOf('.app/'),
@@ -117,7 +148,7 @@ export function createSecretCodec(): SecretCodec {
     const electron = requireFromHere('electron') as { safeStorage?: SafeStorageLike }
     if (!electron?.safeStorage) return new PassthroughCodec(true)
     if (process.platform === 'darwin' && !signedMacApp()) return new OwnerFileCodec()
-    return new SafeStorageCodec(electron.safeStorage)
+    return new SafeStorageCodec(electron.safeStorage, process.platform === 'darwin')
   } catch {
     return new PassthroughCodec(true)
   }

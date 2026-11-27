@@ -2,6 +2,7 @@ import { homedir } from 'os'
 import { join, resolve } from 'path'
 import { parseArgs } from './parseArgs'
 import { addToSwitchList, type SwitchCommandLine } from '../shared/chromiumSwitches'
+import { MAC_KEYCHAIN_NAME, signedMacApp } from '../mms/providers/secretCodec'
 
 /** Resolve before app.ready: safeStorage and Chromium share this vault context. */
 export function resolveElectronUserData(
@@ -18,10 +19,33 @@ export function resolveElectronUserData(
   return join(resolve(home), 'electron-user-data')
 }
 
+interface NamedApp {
+  name: string
+  once(event: 'will-finish-launching', listener: () => void): unknown
+}
+
+/**
+ * A signed macOS build keeps secrets in a keychain item of its own, which it creates itself and so
+ * opens without asking. Electron names the item after the app when it starts, and the item named after
+ * "mousse" was made by earlier unsigned builds: it trusts only them, so every process of a signed build
+ * that opened it asked for the login password. The app runs under `MAC_KEYCHAIN_NAME` until Electron has
+ * read the name, then gets its own name back. Data saved through the old item is set aside by each store
+ * (`savedElsewhere`). Call before `app` is ready, in every process that uses the keychain.
+ */
+export function useOwnMacKeychainItem(app: NamedApp, signed: () => boolean = () => process.platform === 'darwin' && signedMacApp()): void {
+  if (!signed()) return
+  const name = app.name
+  app.name = MAC_KEYCHAIN_NAME
+  app.once('will-finish-launching', () => {
+    app.name = name
+  })
+}
+
 export function configureElectronContext(
-  app: { getPath(name: 'appData' | 'userData'): string; setPath(name: 'userData', value: string): void },
+  app: NamedApp & { getPath(name: 'appData' | 'userData'): string; setPath(name: 'userData', value: string): void },
   argv: string[] = []
 ): void {
+  useOwnMacKeychainItem(app)
   const userData = resolveElectronUserData(app.getPath('appData'), process.env, argv)
   app.setPath('userData', userData)
   // GUI bootstrap and service start normalize MOUSSE_HOME later. Preserve the

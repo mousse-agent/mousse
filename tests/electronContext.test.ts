@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { join, resolve } from 'path'
-import { resolveElectronUserData, finishElectronCli, configureWindowlessElectron } from '../src/cli/electronContext'
+import { resolveElectronUserData, finishElectronCli, configureWindowlessElectron, useOwnMacKeychainItem } from '../src/cli/electronContext'
 
 describe('Electron vault context', () => {
   const appData = resolve('fixture/app-data')
@@ -78,5 +78,30 @@ describe('a windowless Electron run (the CLI and the daemon)', () => {
     configureWindowlessElectron(app)
     configureWindowlessElectron(app)
     expect(app.switches.get('enable-features')).toBe('SomeFeature,NetworkServiceInProcess2')
+  })
+})
+
+describe('the keychain item of a signed macOS build', () => {
+  function fakeApp() {
+    const listeners = new Map<string, () => void>()
+    return {
+      name: 'mousse',
+      once: (event: string, listener: () => void) => listeners.set(event, listener),
+      launch: () => listeners.get('will-finish-launching')?.()
+    }
+  }
+
+  it('starts under a name of its own, which Electron gives its keychain item, then gets its name back', () => {
+    const app = fakeApp()
+    useOwnMacKeychainItem(app, () => true)
+    expect(app.name).toBe('Mousse')
+    app.launch()
+    expect(app.name).toBe('mousse')
+  })
+
+  it('leaves unsigned builds and other systems under their name', () => {
+    const app = fakeApp()
+    useOwnMacKeychainItem(app, () => false)
+    expect(app.name).toBe('mousse')
   })
 })

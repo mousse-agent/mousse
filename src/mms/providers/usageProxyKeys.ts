@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { atomicWriteFileSync } from '../data/AtomicFs'
-import { createSecretCodec, type SecretCodec } from './secretCodec'
-import { openSecretFile, sealSecretFile, SecretFileError } from './secretFile'
+import { createSecretCodec, savedElsewhere, type SecretCodec } from './secretCodec'
+import { openSecretFile, sealSecretFile, SecretFileError, setAsideSecretFile } from './secretFile'
 
 /**
  * The management keys of local CLI-to-API proxies the user entered in Mousse, one per proxy origin
@@ -24,7 +24,15 @@ export class UsageProxyKeyStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { keys: {}, encrypted: false }
       throw new SecretFileError('the proxy keys cannot be read', 'unavailable')
     }
-    const opened = openSecretFile(raw, this.codec)
+    let opened: ReturnType<typeof openSecretFile>
+    try {
+      opened = openSecretFile(raw, this.codec)
+    } catch (error) {
+      if (!(error instanceof SecretFileError) || error.kind !== 'unavailable' || !savedElsewhere(this.codec)) throw error
+      // Saved through a keychain item this build never asks: set aside, and the proxy hands out a new key.
+      setAsideSecretFile(this.path)
+      return { keys: {}, encrypted: false }
+    }
     const keys: Record<string, string> = {}
     if (opened.value && typeof opened.value === 'object' && !Array.isArray(opened.value))
       for (const [origin, key] of Object.entries(opened.value as Record<string, unknown>)) if (typeof key === 'string' && key) keys[origin] = key
