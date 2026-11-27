@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 /**
- * Update everywhere, as the person uses it: the update button's list offers "Update everywhere · N computers" beside
- * "This computer only"; the confirmation names each computer with its version and state and the turns that will stop;
- * Install confirms with the turns it showed; the results stay in the list with a retry on a failed row until dismissed.
+ * Update everywhere, as the person uses it: the update button's list shows this computer and each other one with its
+ * version change and how it updates or why it can't, and one "Update everywhere…"; the confirmation says what happens
+ * on each computer, the skipped ones with their reason, and the turns that will stop; "Update N computers" confirms
+ * with the turns it showed; the results stay in the list with a retry on a failed row until dismissed.
  * The window talks to its service only through the bridge, stubbed here.
  */
 import { act, createElement } from 'react'
@@ -110,28 +111,36 @@ const click = async (name: string) => {
 const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]:not(.downloads-popover)')
 
 describe('Update everywhere', () => {
-  it('offers both choices, confirms with the turns it showed, and keeps the results until dismissed', async () => {
+  it('lists every computer, confirms what happens on each with the turns it showed, and keeps the results until dismissed', async () => {
     await act(async () => root.render(createElement(DownloadsIndicator, { variant: 'nav' })))
     await click('Restart to update · 1 computer behind')
-    // The list asked which computers it would reach; the one by hand is not counted.
+    // The list asked which computers it would reach.
     expect(calls).toContainEqual(['updates.rollout.get', { version: '0.9.4' }])
-    expect(button('Update everywhere · 2 computers')).toBeDefined()
-    // This computer's own step moved to the footer: one control, not two.
-    expect(button('This computer only')).toBeDefined()
-    expect(button('Restart to update')).toBeUndefined()
+    const listed = [...document.querySelectorAll('.downloads-popover .downloads-row-text')].map((row) => row.textContent)
+    expect(listed).toEqual([
+      'This computerReady to install',
+      'Laptopv0.9.3 → v0.9.4 · Updates from here',
+      "Deskv0.9.1 → v0.9.4 · Mousse isn't open there"
+    ])
+    // One action for every computer; this computer keeps its own restart on its row.
+    expect(button('Update everywhere…')).toBeDefined()
+    expect(button('Restart to update')).toBeDefined()
 
-    await click('Update everywhere · 2 computers')
+    await click('Update everywhere…')
     // Opening the confirmation starts the downloads; nothing installs yet.
     expect(calls.map(([method]) => method)).toContain('updates.rollout.start')
     expect(calls.map(([method]) => method)).not.toContain('updates.rollout.confirm')
     const confirm = dialog()!
     expect(confirm.textContent).toContain('Update 2 computers to v0.9.4?')
     const rows = [...confirm.querySelectorAll('li')].map((row) => row.textContent)
-    expect(rows).toEqual(['This computerv0.9.2Ready', 'Laptopv0.9.3Downloading 40%', 'Deskv0.9.1Update by hand'])
-    expect(confirm.querySelectorAll('li')[2].getAttribute('title')).toBe("Mousse isn't open there")
-    expect(confirm.textContent).toContain('3 running agent turns will be stopped')
+    expect(rows).toEqual([
+      'This computerv0.9.2 → v0.9.4Restarts last',
+      'Laptopv0.9.3 → v0.9.410-second countdown there',
+      "Deskv0.9.1Skipped · Mousse isn't open there"
+    ])
+    expect(confirm.textContent).toContain('3 running agent turns on these computers are stopped')
 
-    await click('Install')
+    await click('Update 2 computers')
     expect(calls.find(([method]) => method === 'updates.rollout.confirm')?.[1]).toEqual({ turns: { self: 1, laptop: 2 } })
     expect(dialog()).toBeNull()
 
@@ -161,7 +170,7 @@ describe('Update everywhere', () => {
   it('cancelling the confirmation drops the downloads it started', async () => {
     await act(async () => root.render(createElement(DownloadsIndicator, { variant: 'nav' })))
     await click('Restart to update · 1 computer behind')
-    await click('Update everywhere · 2 computers')
+    await click('Update everywhere…')
     await click('Cancel')
     expect(calls.map(([method]) => method)).toContain('updates.rollout.cancel')
     expect(calls.map(([method]) => method)).not.toContain('updates.rollout.confirm')

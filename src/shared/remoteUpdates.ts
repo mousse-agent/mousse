@@ -90,7 +90,9 @@ export const REMOTE_UPDATE_APP_METHODS = {
   /** The countdown ended: may it install now? */
   begin: 'updates.remote.begin',
   /** Cancel from the countdown on this computer. */
-  cancel: 'updates.remote.cancel'
+  cancel: 'updates.remote.cancel',
+  /** The turns running now in every profile of the service: what a restart of this computer stops. */
+  turns: 'updates.remote.turns'
 } as const
 
 /** The service tells its app to read the request again (an installation event; replaying it is harmless). */

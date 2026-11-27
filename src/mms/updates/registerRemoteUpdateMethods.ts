@@ -73,6 +73,15 @@ export function registerRemoteUpdateMethods(
     handle: (ctx, input) => hub.begin(appConnection(ctx).id, input.job)
   })
   registry.register({
+    method: REMOTE_UPDATE_APP_METHODS.turns,
+    scope: 'installation',
+    validate: empty,
+    handle: (ctx) => {
+      appConnection(ctx)
+      return { runningTurns: hub.runningTurns() }
+    }
+  })
+  registry.register({
     method: REMOTE_UPDATE_APP_METHODS.cancel,
     scope: 'installation',
     validate: (params) => {
