@@ -45,7 +45,7 @@ import type { ChatReference } from '../../../shared/chatReferences'
 import { botThreadReferenceRefusal } from '../../lib/threadReference'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
 import { botGroupTime, placeMessages } from './messageGroups'
-import { botDoingLine, chatRows, withNotes, type BotChatRow, type OwnerMarks } from './botChatShape'
+import { botDoingLine, chatRows, resumedWork, resumedWorkLine, withNotes, type BotChatRow, type OwnerMarks } from './botChatShape'
 import { BOT_CHAT_WINDOW_STEP, rowIndex, rowKey, windowStart } from './botChatWindow'
 import { botCommandSuggestions } from './botCommands'
 import { slotModels, submitBotChat } from './runBotCommand'
@@ -952,6 +952,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const browserRun = browser?.activationId ?? browser?.activations.at(-1)
   const previewOn = browserRun ? messages.filter((message) => message.author === 'bot' && message.activationId === browserRun).at(-1)?.id : undefined
   const preview = browser && browserRun ? <BotBrowserPreview bot={bot} view={browser} /> : null
+  // Work the owner's answer set going again: it starts no chat turn, so the chat says the work carries on until it posts.
+  const resumed = useMemo(() => resumedWork(messages, bot.work), [messages, bot.work])
 
   // This window shows the bot's chat: its replies only sound while it is on screen.
   useEffect(() => {
@@ -1187,6 +1189,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
                 asked={message.replyTo ? byId.get(message.replyTo.id) : undefined} onRetry={message.id === retryOn ? retry : undefined} {...(replyKeys.keys.has(message.id) ? { follow: followEnd } : {})} />}
           </Fragment>
         }).concat(liveShown ? [<Fragment key={replyKeys.live}>{null}<BotMessage bot={bot} message={liveMessage} onAction={act} quote={false} starts={typingStarts} time={false} onReply={reply} onApplet={openApplet} live={live} follow={followEnd} /></Fragment>] : [])}
+        {resumed && <p className="bot-system-line" role="status" data-work-id={resumed.id}><span>{resumedWorkLine(bot.name, resumed)}</span></p>}
         {/* A run still working before its reply: the preview follows it here. */}
         {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}
         {bot.state === 'paused' && <p className="bot-paused-line" role="status">{(pauseLine ?? (bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused')).replace(/\.$/, '')}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
