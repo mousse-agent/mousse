@@ -228,7 +228,7 @@ export interface StopRequest {
   /** Also cancels the runs a person queued on `threadId` (today's `clearQueue`). */
   clearQueue?: boolean
   /**
-   * Another thread's agent asked for the Stop (`thread_interrupt`): everything it ends is recorded as the
+   * Another thread's agent asked for the Stop (`thread_stop`): everything it ends is recorded as the
    * agent's (`interruptedBy: 'agent'`) and one `agent.action` event is written in the same transaction.
    */
   actor?: AgentActor
@@ -1205,7 +1205,7 @@ un_time_limits). */
    * A message to a bot work's row (`thread_send`) goes to the bots through the port as the owner's note (`work_note`),
    * never into the work thread's inbox. Null when the thread is no running work's.
    */
-  noteBotWork(threadId: string, text: string, options: { from?: string; requestKey?: string } = {}): string | null {
+  noteBotWork(threadId: string, text: string, options: { from?: string; requestKey?: string; own?: boolean } = {}): string | null {
     const work = this.runningBotWork(threadId)
     if (!work) return null
     const port = this.botExecution
@@ -2289,7 +2289,7 @@ un_time_limits). */
       // only for the pause it was queued for (it may have ended meanwhile).
       if (paused && (isFencedSource(command.source) || isPauseHeldSource(command.source)) && !resuming) return refuse('thread_paused')
       // A message an agent sent never ends a pause the user's usage limit put there: it can stop the
-      // paused run first (`thread_interrupt`), and send once that is done.
+      // paused run first (`thread_stop`), and send once that is done.
       if (paused && (command.actor || command.refuseWhilePaused) && !resuming) return refuse('thread_paused')
       if (resuming && (!paused || command.continuationOfRunId !== paused.runId)) return refuse('pause_ended')
       const refusal = this.continuationRefusal(command)

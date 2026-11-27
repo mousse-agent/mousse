@@ -7,6 +7,7 @@ import type { Options, SandboxSettings, Settings, SpawnedProcess, SpawnOptions }
 import type { ToolCall } from '@earendil-works/pi-ai'
 import type { BotAuthority, BotMcpTool } from '../../../shared/bots/personal/authority'
 import { botAppToolRefusal, checkBuiltinCall, checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
+import { canonicalToolCall } from '../../../shared/toolAliases'
 import { runtimeExpandedPath } from '../../bots/authority/botAuthority'
 import { mousseTempEntries } from '../../data/closedPlaces'
 import { neutralToolIdempotent, neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../../shared/harness/tools'
@@ -645,7 +646,9 @@ export class ClaudeLockedGate {
       case 'unknown':
         return { ok: false, reason: wallMessage({ kind: 'tool', tool: toolName }) }
       case 'app': {
-        const refusal = botAppToolRefusal(authority, classified.tool, withoutTransportFields(args))
+        // An old name is its new tool with that variant's arguments (`canonicalToolCall`), as Mousse's server reads it.
+        const call = canonicalToolCall(classified.tool, withoutTransportFields(args))
+        const refusal = botAppToolRefusal(authority, call.name, call.args)
         return refusal ? { ok: false, reason: refusal } : { ok: true, classified }
       }
       // Held to the grant here and again by the relay, which runs it on the owner's connection and writes its row.

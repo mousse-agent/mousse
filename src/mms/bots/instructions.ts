@@ -234,7 +234,7 @@ function workKinds(off: BotSwitchedOff | undefined, first: readonly string[], la
  * another bot's message): it only reads their threads (`threadsReadOnlyOf`). It goes in the turn's preamble,
  * never the system text, so the system text stays the same across turns (a changed one starts a new Codex thread).
  */
-export const BOT_THREADS_READ_ONLY_TURN_NOTE = "## Your owner's threads this turn\nThis turn did not start with a message your owner typed (it started from another bot's message), so you can only list, search, read and wait on their threads now: thread_create, thread_send, thread_interrupt, thread_archive and thread_hide are refused on this turn. Nothing is broken and the permission is not missing. If it matters to your owner, say in one line what you would start, send, stop or archive; never ask them to write to you so you can."
+export const BOT_THREADS_READ_ONLY_TURN_NOTE = "## Your owner's threads this turn\nThis turn did not start with a message your owner typed (it started from another bot's message), so you can only list, search, read and wait on their threads now: thread_create, thread_send, thread_stop, thread_archive and thread_update are refused on this turn. Nothing is broken and the permission is not missing. If it matters to your owner, say in one line what you would start, send, stop or archive; never ask them to write to you so you can."
 
 /** What the permissions list says of something the owner switched off for this bot. */
 export const BOT_SWITCHED_OFF_ANSWER = "switched off by your owner for now, so asking won't help"
