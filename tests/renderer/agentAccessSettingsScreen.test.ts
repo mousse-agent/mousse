@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentAccessSettings } from '../../src/renderer/components/settings/AgentAccessSettings'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
+import { NO_COMPUTERS, useComputersStore } from '../../src/renderer/lib/computers'
 import { getDefaultSettings, normalizeAgentAccessSettings, type AgentAccessSettings as AccessSetting, type MousseSettings } from '../../src/shared/settings'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -27,6 +28,7 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => root.unmount())
+  useComputersStore.setState(NO_COMPUTERS)
   host.remove()
   rmSync(home, { recursive: true, force: true })
 })
@@ -119,13 +121,35 @@ describe('Settings > Agents > Access', () => {
       expect(text()).toContain('Pair them in Settings → Devices')
     })
 
+    /** The user's devices as the daemon lists them: this computer and the named others. */
+    const devices = (...others: string[]) => useComputersStore.setState({
+      loaded: true,
+      routed: true,
+      byNode: Object.fromEntries(others.map((node) => [node, { node, name: node, online: true }])),
+      devices: [{ node: 'node-self', self: true } as never, ...others.map((node) => ({ node, self: false }) as never)]
+    })
+
     it('hides the computer list while off and keeps it, so switching back on restores the same computers', () => {
-      show({ remoteSubagents: false, computers: ['node-gone'] })
-      expect(rows().some((entry) => entry.getAttribute('aria-label') === 'Removed computer')).toBe(false)
+      devices('node-a')
+      show({ remoteSubagents: false, computers: ['node-a'] })
+      expect(rows()).toEqual([])
       click(remoteSwitch()!)
-      expect(row('Removed computer').getAttribute('aria-checked')).toBe('true')
+      expect(row('node-a').getAttribute('aria-checked')).toBe('true')
       click(remoteSwitch()!)
-      expect(savedByDaemon()).toMatchObject({ remoteSubagents: false, computers: ['node-gone'] })
+      expect(savedByDaemon()).toMatchObject({ remoteSubagents: false, computers: ['node-a'] })
+    })
+
+    it('drops a computer removed from the devices on its own, with no row for it', () => {
+      devices('node-a')
+      show({ remoteSubagents: true, computers: ['node-a', 'node-gone'] })
+      expect(rows().map((entry) => entry.getAttribute('aria-label'))).toEqual(['node-a'])
+      expect(savedByDaemon().computers).toEqual(['node-a'])
+    })
+
+    it('keeps allowed computers while the device list is not known yet, and shows none as removed', () => {
+      show({ remoteSubagents: true, computers: ['node-a'] })
+      expect(rows()).toEqual([])
+      expect(savedByDaemon().computers).toEqual(['node-a'])
     })
   })
 

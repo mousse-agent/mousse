@@ -130,7 +130,7 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   {
     id: 'threads',
     line: "more for your owner's threads: search, wait, steer, hide, fork, queues, terminals, Git, approvals, their other computers (needs \"use your threads\")",
-    tools: ['thread_search', 'thread_wait', 'thread_interrupt', 'thread_steer', 'thread_hide', 'thread_update', 'thread_fork', 'thread_merge_back', 'terminal_read', 'queue_list', 'queue_enqueue', 'queue_edit', 'queue_remove', 'queue_reorder', 'queue_promote_to_steer', 'git_status', 'git_diff', 'computer_list', 'approval_respond'],
+    tools: ['thread_search', 'thread_wait', 'thread_interrupt', 'thread_steer', 'thread_hide', 'thread_update', 'thread_fork', 'thread_merge_back', 'terminal_read', 'queue_list', 'queue_enqueue', 'queue_update', 'git_status', 'git_diff', 'computer_list', 'approval_respond'],
     guidance: THREADS_GUIDANCE
   },
   {

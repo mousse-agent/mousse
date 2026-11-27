@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { Thread, ThreadNativeHelper } from '../../../../shared/types'
+import type { HeldMessage } from '../../AgentChains'
 import type { SteerStrategy } from '../../CommandPolicy'
 import type { RunEngine } from '../../RunEngine'
 import type { AgentNotePayload, InboxRecord, MonitorEventPayload, ThreadEvent, ThreadWakePayload } from '../../types'
@@ -12,6 +13,15 @@ import type { FamilyRelation } from './types'
  * because the thread is a native helper's that its runtime owns.
  */
 export type SendDelivery = 'started' | 'presented' | 'waiting_for_boundary' | 'queued' | 'after_answer' | 'waiting_on_command' | 'runtime_owned'
+
+/**
+ * A `thread_send` held at its chain's budget (issue #1443): kept, not sent, and the person decides (`held_for_person`);
+ * the sender ends its turn.
+ */
+export function heldResult(threadId: string, intent: 'work' | 'note', error: Error & { held: HeldMessage }): Record<string, unknown> {
+  const { holdId, chainId, rootThreadId, replayed } = error.held
+  return { threadId, intent, status: 'held', delivery: 'held_for_person', holdId, chainId, rootThreadId, replayed, note: error.message }
+}
 
 /** How long a note's sender waits to see the note reach a running turn, or start a notice turn, before it is told where the note waits. */
 export const NOTE_PRESENT_WAIT_MS = 1_500

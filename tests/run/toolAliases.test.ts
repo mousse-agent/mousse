@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { claudeChildToolDenial } from '../../src/mms/harness/vendors/claude/childPolicy'
 import { StaticAgentIntegrationLookup } from '../../src/mms/agentDefinitions/lookups'
 import { resolveBuiltinToolGrants } from '../../src/shared/agents/grants'
+import type { EffectiveAgentGrants } from '../../src/shared/agents/types'
+import { definitionToolGranted, recordAuthorizedCall, takeAuthorizedCall, type DefinitionAuthority } from '../../src/mms/agentDefinitions/definitionGate'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import { readRefusal } from '../../src/mms/run/mcp/appTools'
@@ -94,6 +96,44 @@ describe("an agent definition's saved grant of an old tool name", () => {
   it('keeps the new tool when the definition narrows the tools it inherits', () => {
     const { grants } = resolveBuiltinToolGrants({ mode: 'inherit', allowlist: ['list_skills'] }, lookup)
     expect(grants.map((grant) => grant.id)).toEqual(['skill_list'])
+  })
+})
+
+describe("an agent definition's grant of an old queue tool", () => {
+  const holding = (...ids: string[]): EffectiveAgentGrants => ({ skills: [], mcpTools: [], builtinTools: ids.map((id) => ({ id, source: 'explicit' as const })), denied: [] })
+
+  it('holds the one op of queue_update that tool was, and a grant of queue_update holds every op', () => {
+    const rows: Array<[grant: string, called: string, args: Record<string, unknown>, held: boolean]> = [
+      ['queue_edit', 'queue_update', { op: 'edit' }, true],
+      ['queue_edit', 'queue_update', { op: 'send_now' }, false],
+      ['queue_edit', 'queue_update', {}, false],
+      ['queue_reorder', 'queue_update', { op: 'move' }, true],
+      ['queue_reorder', 'queue_update', { op: 'remove' }, false],
+      ['queue_promote_to_steer', 'queue_update', { op: 'send_now' }, true],
+      // Called under the old name, the call is that op whatever op it names.
+      ['queue_edit', 'queue_edit', { op: 'send_now' }, true],
+      ['queue_edit', 'queue_promote_to_steer', {}, false],
+      ['queue_update', 'queue_update', { op: 'send_now' }, true],
+      ['queue_update', 'queue_remove', {}, true]
+    ]
+    for (const [grant, called, args, held] of rows) expect(definitionToolGranted(called, holding(grant), [], args), `${grant} → ${called} ${JSON.stringify(args)}`).toBe(held)
+  })
+
+  it('stays that op when the definition is resolved: it never becomes all of queue_update', () => {
+    const lookup = new StaticAgentIntegrationLookup({ builtinToolIds: ['queue_update'] })
+    for (const mode of ['explicit', 'inherit'] as const) {
+      const { grants } = resolveBuiltinToolGrants({ mode, allowlist: ['queue_edit'] }, lookup)
+      expect(definitionToolGranted('queue_update', { skills: [], mcpTools: [], builtinTools: grants, denied: [] }, [], { op: 'send_now' }), mode).toBe(false)
+    }
+  })
+
+  it("a runtime gate's approval of a call under the old name is taken by the registry's call under the new one, and only for that op", () => {
+    const authority = { grants: holding('queue_edit') } as DefinitionAuthority
+    const call = { turnToken: 't', callId: 'c1', args: { itemId: 'i1', content: 'x', expectedRevision: 'r1' } }
+    recordAuthorizedCall(authority, { ...call, toolName: 'queue_edit' })
+    expect(takeAuthorizedCall(authority, { ...call, toolName: 'queue_update', args: { ...call.args, op: 'send_now' } })).toBe(false)
+    recordAuthorizedCall(authority, { ...call, toolName: 'queue_edit' })
+    expect(takeAuthorizedCall(authority, { ...call, toolName: 'queue_update', args: { ...call.args, op: 'edit' } })).toBe(true)
   })
 })
 

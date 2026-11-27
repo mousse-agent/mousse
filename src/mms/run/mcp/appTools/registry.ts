@@ -9,7 +9,7 @@ import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, definitionToolGranted, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
 import { botMayBeOffered } from '../../../../shared/bots/personal/manifest'
 import { BOT_USE_TOOL } from '../../../../shared/bots/personal/catalogue'
-import { canonicalToolName, isToolAlias } from '../../../../shared/toolAliases'
+import { canonicalToolCall, canonicalToolName, isToolAlias } from '../../../../shared/toolAliases'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
@@ -315,13 +315,14 @@ function asBotTool(tool: MousseTool): MousseTool {
  * Mousse's MCP server takes it out of a direct call; or why the call is malformed.
  */
 function useToolCall(args: Record<string, unknown>): { name: string; args: Record<string, unknown>; clientRequestId?: string } | { refused: string } {
-  // An old name is the tool it was renamed to (`canonicalToolName`), here as for a direct call.
-  const name = typeof args.tool === 'string' ? canonicalToolName(args.tool.trim().replace(/^mcp__mousse__/, '')) : ''
-  if (!name) return { refused: 'use_tool needs tool: the name of a tool from tool_catalogue.' }
+  const calledAs = typeof args.tool === 'string' ? args.tool.trim().replace(/^mcp__mousse__/, '') : ''
+  if (!calledAs) return { refused: 'use_tool needs tool: the name of a tool from tool_catalogue.' }
   const given = args.arguments ?? {}
   if (typeof given !== 'object' || given === null || Array.isArray(given)) return { refused: 'use_tool needs arguments as an object: the arguments of the tool it names.' }
   const { clientRequestId, ...rest } = given as Record<string, unknown>
-  return { name, args: rest, ...(typeof clientRequestId === 'string' && clientRequestId.trim() ? { clientRequestId: clientRequestId.trim() } : {}) }
+  // An old name is the tool it was renamed to, with the arguments it adds (`canonicalToolCall`), here as for a direct call.
+  const call = canonicalToolCall(calledAs, rest)
+  return { ...call, ...(typeof clientRequestId === 'string' && clientRequestId.trim() ? { clientRequestId: clientRequestId.trim() } : {}) }
 }
 
 /**
@@ -548,13 +549,14 @@ export class ToolRegistry {
    */
   async call(calledAs: string, rawArgs: Record<string, unknown>, request: McpCallRequest): Promise<ToolOutcome> {
     // An old name is its new one from here on, before any check and before the ledger row or a receipt names the call:
-    // the same checks, the same request key, and a retry under either name is the same request.
-    const name = canonicalToolName(calledAs)
+    // the same checks, the same request key, and a retry under either name is the same request. An old name that became
+    // one variant of its tool adds that variant's arguments (`canonicalToolCall`), so every check judges the variant.
+    const { name, args: callArgs } = canonicalToolCall(calledAs, rawArgs)
     const registered = this.tools.get(name)
     const tool = registered && toolNeeds(registered).callable ? registered : undefined
     // Any other name can only be one of the turn's proxied user MCP tools, looked up once the turn is known.
     if (!tool && (registered || !this.options.userMcp)) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
-    const { threadId, active, turn, args, caller, boundToken } = await this.admit(rawArgs, request)
+    const { threadId, active, turn, args, caller, boundToken } = await this.admit(callArgs, request)
     const { credential } = request
     const narrowed = caller.modeCeiling === 'plan' && credential.modeCeiling !== 'plan' && turn.modeCeiling !== 'plan'
     const site: CallSite = { threadId, active, turn, credential, boundToken, request, narrowed }

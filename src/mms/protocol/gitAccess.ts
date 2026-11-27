@@ -88,6 +88,8 @@ export const GIT_ACCESS = {
   'runs.cancelPause': 'none',
   // Setting or continuing a goal queues a turn.
   'threads.goal': 'owned',
+  // Continue sends held agent messages, which queue turns.
+  'threads.chainHold': 'owned',
   'thread.fork': 'owned',
   'thread.mergeBack': 'owned',
   'orchestrator.answerQuestions': 'owned',

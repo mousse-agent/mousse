@@ -174,12 +174,12 @@ export function claudeFamilyAlias(model: string): string | undefined {
 /** Vault entries of an API-key entry. */
 const SECRET = { apiKey: 'anthropic_api_key' } as const
 
-function readAuth(service: ClaudeSubscriptionProviderService, status: Awaited<ReturnType<ClaudeSubscriptionProviderService['status']>>, signInCommand: string, inApp: boolean): AuthReading {
+function readAuth(service: ClaudeSubscriptionProviderService, status: Awaited<ReturnType<ClaudeSubscriptionProviderService['status']>>, signInCommand: string, inApp: boolean, userHome = false): AuthReading {
   const methodLabel = 'Claude Code sign-in'
   // Signed in from Mousse: the Sign in button, with the command to copy kept beside it as the fallback.
   const signedOut = (message: string | undefined): AuthReading =>
     inApp
-      ? { state: 'signed_out', methodLabel, message: 'Not signed in. Choose Sign in to sign this account in.', signInCommand, canSignIn: true }
+      ? { state: 'signed_out', methodLabel, message: userHome ? 'Not signed in. Choose Sign in to sign in.' : 'Not signed in. Choose Sign in to sign this account in.', signInCommand, canSignIn: true }
       : { state: 'signed_out', methodLabel, message, signInCommand }
   switch (status.state) {
     case 'connected': {
@@ -201,8 +201,8 @@ function readAuth(service: ClaudeSubscriptionProviderService, status: Awaited<Re
 /**
  * Claude Code through the official Agent SDK. The built-in `claude` instance runs exactly as the
  * user set Claude Code up (their home, settings and sign-in); an added instance gets its own
- * `CLAUDE_CONFIG_DIR`, signed in with Claude's own `claude auth login` in that home. Mousse never
- * handles Claude tokens.
+ * `CLAUDE_CONFIG_DIR`. Either signs in from Mousse with Claude's own `claude auth login` in its home
+ * (where no terminal runs here: the command to copy). Mousse never handles Claude tokens.
  */
 export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): HarnessDriver {
   /**
@@ -413,15 +413,22 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
       /** The sign-in terminal that is running, so removing the instance can end it. */
       let activeRun: PtyRun | undefined
       /**
-       * `claude auth login` in the instance's home. The link goes to the page (with a paste field
-       * for the code Claude may ask for), and the sign-in counts only once `claude auth status` in
-       * that home says signed in. The terminal's output is never logged or stored.
+       * An entry on the user's own home (the built-in one, or an added one without a home of its own)
+       * signs in from Mousse too: the same `claude auth login`, in that home. API-key and locked
+       * entries keep their own sign-in.
+       */
+      const inAppOnDefaultHome = !privateHome && !onKey && !claudeLocked(context.config)
+      /**
+       * `claude auth login` in the instance's home (the user's own one when it has none: no
+       * `CLAUDE_CONFIG_DIR` is set). The link goes to the page (with a paste field for the code Claude
+       * may ask for), and the sign-in counts only once `claude auth status` in that home says signed
+       * in. The terminal's output is never logged or stored.
        */
       const signInInTerminal = async (session: LoginSession, cwd: string): Promise<ProviderLoginResult> => {
         const pasted: string[] = []
         const fail = (message: string): ProviderLoginResult => ({ success: false, sessionId: session.sessionId, error: redactSignIn(message, pasted) })
         // Only a folder Mousse owns: a link to another account's folder would sign that account in.
-        const problem = ownedHomeProblem(privateHome!, context.profileHome)
+        const problem = privateHome ? ownedHomeProblem(privateHome, context.profileHome) : undefined
         if (problem) return fail(problem)
         const launch = service.authLaunch()
         // No terminal here (or no executable yet): the command to copy, as for the user's own Claude.
@@ -456,10 +463,13 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
               waiting = code
               type()
             }, () => undefined)
+          // A folder Mousse owns is the one Claude Code starts in (the home, or the entry's state folder
+          // on the user's own home): no project settings of Mousse's own folder or a project are read.
+          const startIn = privateHome ?? context.stateDir
+          if (!privateHome) mkdirSync(startIn, { recursive: true, mode: 0o700 })
           run = runInPty(launch.command, [...launch.args, 'auth', 'login'], {
             env: launch.env,
-            // The home is the folder Claude Code starts in: no project settings of Mousse's own folder are read.
-            cwd: privateHome!,
+            cwd: startIn,
             cols: SIGN_IN_COLUMNS,
             ...(options.pty?.spawn ? { spawn: options.pty.spawn } : {}),
             onOutput: (transcript) => {
@@ -596,7 +606,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         // older Mousse; an added one only its sign-out (its launch settings were always in config).
         vendorMirror: service.vendorMirror(shared ? ALL_MIRROR_FIELDS : SIGN_OUT_MIRROR_FIELDS),
         ...(shared ? { validateLaunch: (patch: CliProviderConfigPatch) => service.validateLaunch(patch) } : {}),
-        auth: async ({ force }) => readAuth(service, await service.status({ force }), signInCommand, Boolean(privateHome) && ptyRuns()),
+        auth: async ({ force }) => readAuth(service, await service.status({ force }), signInCommand, (Boolean(privateHome) || inAppOnDefaultHome) && ptyRuns(), !privateHome),
         // Read from the home and the variables Claude Code reads; `claude auth status` is the turn's own check.
         identity: async () => service.accountSubject(),
         // Claude Code refuses `bypassPermissions` when the user's settings say so.
@@ -609,7 +619,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
           await service.status()
           await service.refreshModels(cwd)
         },
-        signIn: privateHome ? signInInTerminal : (session, cwd) => service.login(session, cwd),
+        signIn: privateHome || inAppOnDefaultHome ? signInInTerminal : (session, cwd) => service.login(session, cwd),
         signOut: privateHome ? signOutOfHome : () => service.logout(),
         forgetConversation: (threadId) => service.forgetConversation(threadId),
         compactConversation: (request) => service.compactConversation(request.threadId, request.history, request.instanceId, request.focus, request.signal, { cacheCold: request.cacheCold === true }),

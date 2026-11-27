@@ -12,7 +12,7 @@ import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { CodexAppServerExitedError } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
-import { CodexTurnFailure, createCodexProviderService, type CodexProviderService, type CodexServiceDependencies } from '../../src/mms/harness/vendors/codex/CodexProviderService'
+import { CodexTurnFailure, createCodexProviderService, type CodexChatInput, type CodexProviderService, type CodexServiceDependencies } from '../../src/mms/harness/vendors/codex/CodexProviderService'
 import { STOP_GRACE_MS } from '../../src/mms/harness/stopProcesses'
 import { decideUsageLimit } from '../../src/mms/run/pausePolicy'
 import { CodexAdapter } from '../../src/mms/harness/drivers/codex/adapter'
@@ -1314,6 +1314,46 @@ describe('CodexAdapter', () => {
       expect(decide(refused)).toBeUndefined()
       const limited = await turn(failing(usageLimitError({ provider: 'codex', resetsAt, estimated: false }, new CodexTurnFailure('Too many requests', { message: 'Too many requests', codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 429 } } }))), false)
       expect(decide(limited)).toMatchObject({ action: 'pause' })
+    })
+
+    it('a failure after the Codex thread opened says the session is kept; a turn that continues it resumes that thread first', async () => {
+      const envelope = JSON.stringify({ error: { message: 'Bad Request', type: null, code: null, param: null }, status: 400 }, null, 2)
+      const order: string[] = []
+      const client = {
+        configured: () => true,
+        failedThreadKept: () => true,
+        commitInterrupted: (_threadId: string, history: string) => void order.push(`commit:${history}`),
+        chat: async (chatInput: CodexChatInput) => {
+          order.push(`chat:${chatInput.history}`)
+          throw new CodexTurnFailure(envelope, { message: envelope, codexErrorInfo: 'other' })
+        }
+      } as unknown as CodexProviderService
+      const sink = recordingSink()
+      const kept = vi.fn()
+      const context = { ...host().context, prepareNativeContext: () => ({ messages: [], nativeHistory: 'compacted' }), nativeHistoryNow: () => 'H1 + request' }
+      const failed = await new CodexAdapter(() => client, { managed: true }).startTurn(input({ nativeHistory: 'H1' }), { ...sink, sessionKept: kept }, control(), { ...host(), context }).catch((caught: unknown) => caught)
+      expect(failed).toMatchObject({ code: 'provider_api_error', message: '400 · Bad Request' })
+      expect(kept).toHaveBeenCalledTimes(1)
+      // A failed turn is not fingerprinted by itself: the thread's next ordinary turn starts fresh, as before.
+      expect(order).toEqual(['chat:compacted'])
+
+      order.length = 0
+      await new CodexAdapter(() => client, { managed: true }).startTurn(input({ nativeHistory: 'H1 + request', continuesFailedRequest: true, prompt: 'continue' }), recordingSink(), control(), { ...host(), context }).catch(() => undefined)
+      // The continuation resumes at the history it carries, never a compacted one.
+      expect(order).toEqual(['commit:H1 + request', 'chat:H1 + request'])
+    })
+
+    it('a stopped turn does not say its session is kept for a continuation', async () => {
+      const controller = new AbortController()
+      const client = {
+        configured: () => true,
+        failedThreadKept: () => true,
+        commitInterrupted: () => {},
+        chat: async () => { controller.abort(); throw new Error('stopped') }
+      } as unknown as CodexProviderService
+      const kept = vi.fn()
+      await new CodexAdapter(() => client, { managed: true }).startTurn(input({ signal: controller.signal }), { ...recordingSink(), sessionKept: kept }, control(), host()).catch(() => undefined)
+      expect(kept).not.toHaveBeenCalled()
     })
 
     it('a managed Codex failure that is not a usage limit does not pause', async () => {

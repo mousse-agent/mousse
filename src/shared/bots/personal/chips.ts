@@ -266,10 +266,7 @@ function classify(name: string, input: unknown, ctx: BotChipContext): Classified
     case 'approval_respond': return { kind: 'approval', icon: 'think', live: 'answering an approval' }
     // A thread's queue: every change rolls up into one chip.
     case 'queue_enqueue':
-    case 'queue_edit':
-    case 'queue_remove':
-    case 'queue_reorder':
-    case 'queue_promote_to_steer': return { kind: 'queue', icon: 'think', live: "changing a thread's queue" }
+    case 'queue_update': return { kind: 'queue', icon: 'think', live: "changing a thread's queue" }
     // The owner's scheduled jobs ("schedule work in your threads"): the list is a look, every change one chip.
     case 'schedule_list': return { kind: 'schedules', icon: 'schedule', live: 'checking your scheduled jobs' }
     case 'schedule_create':

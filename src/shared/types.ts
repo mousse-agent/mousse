@@ -1257,6 +1257,8 @@ export interface QueuedMessage {
   settleNotice?: import('./settleNotice').SettleNoticeItem[]
   /** With `settleNotice`: the count of agent messages in a row of the runs the notices are about; the turn carries it. */
   settleHops?: number
+  /** With `settleNotice`: the chain of the messages the notices are about (issue #1442); the turn stays in it. */
+  settleChain?: string
   /**
    * A settle notice that must not start a turn by itself (its thread is a subagent, the person stopped it, it is kept in
    * Plan, or the notice says Mousse stopped watching): it waits until a person sends it (Send now), a notice that may
@@ -1362,6 +1364,8 @@ export interface AgentOrigin {
    * plus one). A message that would pass the limit is refused, so a chain of agents cannot run unwatched.
    */
   hops?: number
+  /** The chain of agent messages it belongs to, so a queued message keeps it until it runs. */
+  chain?: string
   /**
    * Where the sending agent's own words sit in the stored text: after the header Mousse wrote and before its closing
    * line (`agentMessageWords`). Lengths, not positions: text another computer reads is re-encoded inside the words,

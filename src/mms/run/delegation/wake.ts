@@ -4,7 +4,8 @@ import { RunStoreError } from '../db/RunStoreError'
 import { Delegations } from '../Delegations'
 import { toEffect, type EffectOutbox } from '../EffectOutbox'
 import { Inbox } from '../Inbox'
-import { inheritedAgentHops } from '../agentHops'
+import { inheritedAgentChain, inheritedAgentHops } from '../agentHops'
+import { chainIdOf } from '../AgentChains'
 import type { RunStore } from '../RunStore'
 import { writeTerminalRun } from '../terminal'
 import {
@@ -217,6 +218,16 @@ function deliveryFailure(store: RunStore, effect: EffectRecord, row: InboxRecord
   return { at: run.completedAt ?? effect.updatedAt, error: run.outcome?.error ?? `the delivering run ${run.status}` }
 }
 
+/** The chain of the first row a run on this computer sent: an agent's note (its sender's run) or a subagent's result. */
+function wakeChain(store: RunStore, rows: ReadonlyArray<{ payload: unknown }>): string | undefined {
+  for (const row of rows) {
+    const payload = row.payload as { senderRunId?: unknown; childRunId?: unknown } | null
+    const runId = typeof payload?.senderRunId === 'string' ? payload.senderRunId : typeof payload?.childRunId === 'string' ? payload.childRunId : undefined
+    if (runId && store.getRun(runId)) return chainIdOf(store, runId)
+  }
+  return undefined
+}
+
 /**
  * Reconciler rule 4 (SPEC §12.4, §14.3). First, rows whose delivery failed or was cut off return
  * to pending (`restoreUndeliveredRows`). Then, for every thread with `pending` inbox rows:
@@ -269,11 +280,14 @@ export function wakeThreads(
           if (rows.every(isQuietNoteRow)) return
           // The wake carries on the work that delegated: a chain of agent messages is not reset by it (SPEC §15.1).
           const carriedHops = inheritedAgentHops(store, threadId, 'wake')
+          // Nor does it start a chain of its own: it takes the chain of what woke it (a note's sender, a subagent whose
+          // result it delivers), else of the run it carries on (issue #1442).
+          const chain = wakeChain(store, rows) ?? inheritedAgentChain(store, threadId, 'wake')
           const run = store.createRun({
             threadId,
             source: 'wake',
             clientRequestId: `wake:${rows[0].inboxId}`,
-            ...(carriedHops !== undefined ? { outcome: { agentHops: carriedHops } } : {})
+            ...(carriedHops !== undefined || chain ? { outcome: { ...(carriedHops !== undefined ? { agentHops: carriedHops } : {}), ...(chain ? { agentChain: chain } : {}) } } : {})
           })
           const payload: WakeTurnPayload = {
             kind: 'wake',

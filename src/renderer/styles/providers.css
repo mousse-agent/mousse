@@ -1185,7 +1185,6 @@ html[data-theme='high-contrast'] .prov-update-chip {
   border: 0;
   border-radius: var(--ui-card-radius);
   background: var(--settings-surface, var(--ui-hover));
-  box-shadow: var(--settings-surface-edge, none);
   color: var(--text-secondary);
   font: inherit;
   text-align: left;

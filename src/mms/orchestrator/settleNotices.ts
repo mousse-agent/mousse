@@ -2,6 +2,7 @@ import { SETTLE_NOTICE_RESULT_CHARS, SETTLE_WATCH_TTL_MS, type SettleNoticeItem 
 import { notice, quoted, type NoticePart } from '../../shared/mousseContext'
 import { threadLink } from '../../shared/threadLink'
 import { qualifyId } from '../../shared/threadRef'
+import { chainIdOf } from '../run/AgentChains'
 import type { RunEngine } from '../run/RunEngine'
 import { followMessage, type WatchTarget } from '../run/settle/follow'
 import { ThreadWatches, type ThreadWatchRecord } from '../run/settle/ThreadWatches'
@@ -18,6 +19,8 @@ export interface PlannedSettleNotice {
   text: string
   /** The count of agent messages in a row of the run the notice is about; the turn it starts carries it. */
   hops: number
+  /** The chain of the message sent with notify (its sender's run); the turn it starts stays in it (issue #1442). */
+  chain?: string
 }
 
 export interface SettleNoticeHost {
@@ -217,7 +220,7 @@ export class SettleNotices {
         this.remoteDetails.delete(`${watch.watchId}:${which}`)
         return
       }
-      const notice = this.plan(watch, event)
+      const notice = { ...this.plan(watch, event), ...(this.host.engine.store.getRun(watch.watcherRunId) ? { chain: chainIdOf(this.host.engine.store, watch.watcherRunId) } : {}) }
       this.host.deliver(watch.watcherThreadId, notice, this.held(watch, event))
       this.watches.markSent(watch.watchId, which)
       this.remoteDetails.delete(`${watch.watchId}:${which}`)

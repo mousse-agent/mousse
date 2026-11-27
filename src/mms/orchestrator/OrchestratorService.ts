@@ -97,7 +97,7 @@ import { childBusy, deleteRunResults, readRunResultText } from '../run/delegatio
 import { SettleNotices, type PlannedSettleNotice } from './settleNotices'
 import { decideUsageLimit, usageLimitOf, type UsageLimitDecision } from '../run/pausePolicy'
 import { boundedResetIso, estimatedReset } from './providerErrors'
-import { TURN_RETRY, turnRetryCause, turnRetryDelay, waitOrAbort, withRetries } from './turnRetry'
+import { TURN_RETRY, continuationPrompt, turnRetryCause, turnRetryPlan, waitOrAbort, withRetries } from './turnRetry'
 import { providerRetryText, type ProviderRetries, type ProviderRetryState } from '../../shared/providerRetry'
 import { CONTINUE_TEXT, MANUAL_CONTINUE_TEXT, pausedLine } from '../run/pauseText'
 import { currentStopGeneration, runStopGeneration } from '../run/stopGeneration'
@@ -124,6 +124,8 @@ import { botMessage } from '../run/mcp/appTools/agentMessage'
 type BotSender = { botId: string; name: string; look?: BotLook; activationId: string; limit?: PermissionMode }
 import { createHash, randomUUID } from 'node:crypto'
 import { QueueCommands, type QueueIntent } from '../run/QueueCommands'
+import { AgentMessageHeld, CHAIN_BUDGET, chainIdOf, type ChainHoldKind, type ChainHoldRecord } from '../run/AgentChains'
+import { postNote } from '../run/mcp/appTools/threadNotes'
 import type { PlannedQueueCommand, QueueEffects } from '../queue/queueJournal'
 import { modeFactsFor, PLAN_TURN_NOTE, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble, type SkillsContext } from '../run/mcp/appTools/assemble'
 import type { AutomationToolHost } from '../run/mcp/appTools/automations'
@@ -200,6 +202,7 @@ import {
   type ThreadEvent,
   type TransferRecord,
   type WakeTurnPayload,
+  type AgentNotePayload,
   isRetiredInboxRow
 } from '../run/types'
 import {
@@ -739,6 +742,8 @@ export interface OrchestratorSendOptions {
    * passed; a throw refuses the send before its run exists. A replay never runs it. `thread_send`'s repeat check.
    */
   onAdmit?: () => void
+  /** A held message the person's Continue sends: its hold settles with the run (`chainHold` of the engine's send). */
+  chainHold?: string
 }
 
 /** Options of `runRemoteTurn`. */
@@ -840,11 +845,18 @@ const CONTINUATION_REFUSALS: ReadonlySet<string> = new Set([
  */
 const ADMITTED_TURN_FAILURES = new WeakMap<object, { workflowRun?: WorkflowChatRun }>()
 
-/** Agent messages in a row, without a person in between, that a message may be the end of; the next one is refused. */
 /** Why a thread its agent asked to archive stayed open when the turn ended (`archiveOwnThreadNow`). */
 export const ARCHIVE_AFTER_TURN_KEPT = 'Not archived: this thread still has work queued or running.'
 
-export const AGENT_MESSAGE_MAX_HOPS = 3
+/**
+ * Agent messages in a row, without a person in between, that a message from an agent on another computer may be the end
+ * of; the next one is refused. Senders on this computer are counted by their chain's budget instead (`CHAIN_BUDGET`).
+ */
+export const AGENT_MESSAGE_MAX_HOPS = CHAIN_BUDGET
+
+/** What Continue needs to send a held `thread_send` of work (`AgentChains`, payload of kind `work`). */
+/** A held `thread_send` or first message as Continue sends it; `watchKey` is the notify watch its sender asked for. */
+type HeldWork = { threadId: string; input: { content: string; mode: 'agent' | 'plan' }; clientRequestId: string; actor: AgentActor; watchKey?: string }
 
 /**
  * Who sent an agent's message, as the caps and the repeat check count senders: its thread here, or for an agent on
@@ -900,15 +912,15 @@ const BOT_ANSWERED_QUESTIONS_KEPT = 500
 /** The tools with which the owner's bot acts on their threads ("use your threads"), as `botSenderOf` holds them. */
 type BotThreadActTool =
   | 'thread_create' | 'thread_send' | 'thread_interrupt' | 'thread_archive' | 'thread_hide' | 'thread_steer'
-  | 'queue_enqueue' | 'queue_edit' | 'queue_remove' | 'queue_reorder' | 'queue_promote_to_steer' | 'approval_respond'
+  | 'queue_enqueue' | 'queue_update' | 'approval_respond'
 
-/** The queue tool a queue command came from. */
+/** The queue tool a queue command came from: every change but an enqueue is one `op` of `queue_update`. */
 const QUEUE_TOOL_OF: Record<AgentQueueCommand['op'], BotThreadActTool> = {
   enqueue: 'queue_enqueue',
-  edit: 'queue_edit',
-  remove: 'queue_remove',
-  reorder: 'queue_reorder',
-  promote: 'queue_promote_to_steer'
+  edit: 'queue_update',
+  remove: 'queue_update',
+  reorder: 'queue_update',
+  promote: 'queue_update'
 }
 
 /**
@@ -921,6 +933,7 @@ function agentOriginOf(agent: AgentSender | AgentOrigin): AgentOrigin {
   const bot = agent.bot ?? ('remote' in agent ? agent.remote?.bot : undefined)
   const extra = {
     ...(agent.hops !== undefined ? { hops: agent.hops } : {}),
+    ...(agent.chain ? { chain: agent.chain } : {}),
     ...(agent.body ? { body: { head: agent.body.head, tail: agent.body.tail } } : {}),
     ...(bot ? { bot: { id: bot.id, name: bot.name, ...(bot.look ? { look: lookFields(bot.look) } : {}) } } : {})
   }
@@ -2002,6 +2015,8 @@ export class OrchestratorService extends EventEmitter {
   private readonly agentCreations = new Map<string, { fingerprint: string; task: Promise<AgentCreatedThread> }>()
   /** Agents' messages of the last `AGENT_REPEAT_WINDOW_MS`, by `agentRepeatKey`, oldest first: the repeat check of `thread_send`. */
   private readonly recentAgentMessages = new Map<string, { at: number }>()
+  /** Chains whose person's answer is being carried out: a second answer meanwhile is refused (issue #1443). */
+  private readonly answeringChains = new Set<string>()
   /** `thread_create` calls with `computer` in progress, by request key, likewise. */
   private readonly remoteCreations = new Map<string, { fingerprint: string; task: Promise<AgentRemoteThreadResult> }>()
 
@@ -3768,7 +3783,7 @@ export class OrchestratorService extends EventEmitter {
     const mode = getLastUserChatMode(session.messages) ?? 'agent'
     let item: QueuedMessage | undefined
     const merge = (items: QueuedMessage[]): QueuedMessage[] => {
-      const result = mergeSettleNotice(items, { threadId, item: notice.item, text: notice.text, hops: notice.hops, mode, held })
+      const result = mergeSettleNotice(items, { threadId, item: notice.item, text: notice.text, hops: notice.hops, ...(notice.chain ? { chain: notice.chain } : {}), mode, held })
       item = result.item
       return result.items
     }
@@ -5198,6 +5213,16 @@ export class OrchestratorService extends EventEmitter {
       recordAgentAction: (target, actor, action, details) => this.recordAgentAction(target, actor, action, details),
       showAgentAction: (target, actor, summary, options) => this.showAgentAction(target.threadId, actor, summary, options),
       sendToThread: (threadId, input, options) => this.sendToThreadAsAgent(threadId, input, options),
+      // A note that asks for attention is one message of its sender's chain; a bot's notes are counted by its own engine.
+      admitAgentNote: (threadId, requestKey, payload, actor) => {
+        let botRole: string | undefined
+        try {
+          botRole = this.botThreads?.roleOf(actor.threadId)
+        } catch {
+          botRole = 'unknown'
+        }
+        if (!actor.remote && !botRole) this.admitChainStep(this.withAgentHops(actor), threadId, 'note', requestKey, payload)
+      },
       watchSettle: (input) => {
         if (!this.settleNotices) throw new Error('Mousse cannot watch threads without the run engine.')
         return { watchId: this.settleNotices.watch(input).watchId }
@@ -5482,7 +5507,7 @@ export class OrchestratorService extends EventEmitter {
   private async sendToThreadAsAgent(
     threadId: string,
     input: { content: string; mode: 'agent' | 'plan' },
-    options: { clientRequestId: string; actor: AgentActor; bot?: { botId: string; name: string }; forceQueue?: boolean; refuseWhilePaused?: boolean; hidePreamble?: boolean }
+    options: { clientRequestId: string; actor: AgentActor; bot?: { botId: string; name: string }; forceQueue?: boolean; refuseWhilePaused?: boolean; hidePreamble?: boolean; chainHold?: string; notify?: { messageKey: string } }
   ): Promise<AgentSendResult> {
     const engine = this.requireRunEngine()
     // A bot's thread sends only as the owner's bot, with "use your threads" held by the turn that sends (or, for a thread
@@ -5499,6 +5524,14 @@ export class OrchestratorService extends EventEmitter {
     if (turnBot) this.assertBotRequestKey('thread_send', options.clientRequestId, options.actor, turnBot)
     // A thread a person keeps in Plan takes the message as a plan turn, whatever mode the sender asked for.
     const mode: 'agent' | 'plan' = this.lastChatModeOf(threadId) === 'plan' ? 'plan' : input.mode
+    // One message of the sender's chain, decided before the send; a retry of a send that went is not counted again. Past
+    // the budget it is held for the person (`AgentMessageHeld`), with the notify watch it asked for; Continue sends it
+    // (`chainHold`), counted in the new budget with its run.
+    const step = bot || !sender.chain || options.chainHold || this.earlierAgentSend(threadId, options.clientRequestId)
+      ? undefined
+      : this.admitChainStep(sender, threadId, 'work', options.clientRequestId, {
+        threadId, input, clientRequestId: options.clientRequestId, actor: options.actor, ...(options.notify ? { watchKey: options.notify.messageKey } : {})
+      } satisfies HeldWork)
     // The same text from the same thread again within the window is refused as a repeat, decided at admission (under the
     // thread's lock, so two at once cannot both pass) and only for a new request: a retry with the same key replays.
     const repeatKey = agentRepeatKey(threadId, agentSenderKey(options.actor), input.content)
@@ -5522,9 +5555,14 @@ export class OrchestratorService extends EventEmitter {
         ...(sender.remote ? { sentFrom: { node: sender.remote.node } } : {}),
         ...(options.forceQueue ? { forceQueue: true } : {}),
         ...(options.refuseWhilePaused ? { refuseWhilePaused: true } : {}),
+        ...(options.chainHold ? { chainHold: options.chainHold } : {}),
         onAdmit: () => this.claimAgentMessage(repeatKey, claim)
       }
-    ))
+    )).catch((error: unknown) => {
+      // Not sent: the message it counted is given back.
+      if (step) engine.chains.release(step)
+      throw error
+    })
     if (!response.runId || response.sequence === undefined) throw new Error('The message was not recorded as a run.')
     const replayed = response.replayed === true
     return {
@@ -5577,17 +5615,108 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * The sender with the count of agent messages in a row that led to this one: its own run's count (0 for a run a
-   * person started) plus one. Past `AGENT_MESSAGE_MAX_HOPS` the message is refused, so a chain of agents
-   * answering each other stops by itself and needs a person to go on.
+   * The sender with the count of agent messages in a row that led to this one (its own run's count, 0 for a run a person
+   * started, plus one) and, for a sender on this computer, its chain (`chainIdOf`), whose budget decides whether the
+   * message goes (`admitChainStep`). A sender on another computer has no chain here: past `AGENT_MESSAGE_MAX_HOPS` in a
+   * row its message is refused.
    */
   private withAgentHops(actor: AgentActor): AgentActor {
     // A sender on another computer has no run here: its count was set by this computer when the call came in
     // (`bridge/routed/remoteAgent.ts`), the larger of what it carried and this computer's own count.
-    const hops = actor.remote ? actor.hops ?? 1 : (this.requireRunEngine().getRun(actor.runId)?.outcome?.agentHops ?? 0) + 1
-    if (hops > AGENT_MESSAGE_MAX_HOPS)
-      throw new DomainRpcError('agent_hops_exceeded', `This message would be agent message number ${hops} in a row without a person in between; the limit is ${AGENT_MESSAGE_MAX_HOPS}. Wait for a person to reply before going on.`)
-    return { ...actor, hops }
+    if (actor.remote) {
+      const hops = actor.hops ?? 1
+      if (hops > AGENT_MESSAGE_MAX_HOPS)
+        throw new DomainRpcError('agent_hops_exceeded', `This message would be agent message number ${hops} in a row without a person in between; the limit is ${AGENT_MESSAGE_MAX_HOPS}. Wait for a person to reply before going on.`)
+      return { ...actor, hops }
+    }
+    const store = this.requireRunEngine().store
+    return { ...actor, hops: (store.getRun(actor.runId)?.outcome?.agentHops ?? 0) + 1, chain: chainIdOf(store, actor.runId) }
+  }
+
+  /**
+   * One more message of `sender`'s chain to `targetThreadId` (`AgentChains.admit`): the chain it was counted in, or
+   * undefined for a sender with no chain here. Past the budget a holdable message is kept and `AgentMessageHeld` thrown;
+   * one that cannot wait (`holdable` false) is refused (`ChainBudgetReached`, `agent_hops_exceeded`).
+   */
+  private admitChainStep(sender: AgentActor, targetThreadId: string, kind: ChainHoldKind, requestKey: string, payload: unknown, holdable = true): string | undefined {
+    if (!sender.chain || sender.remote) return undefined
+    const chains = this.requireRunEngine().chains
+    const admission = chains.admit({ chainId: sender.chain, senderThreadId: sender.threadId, senderRunId: sender.runId, targetThreadId, kind, requestKey, payload, holdable })
+    if (admission.status === 'go') return admission.chainId
+    const rootThreadId = chains.get(admission.chainId)?.rootThreadId ?? sender.threadId
+    throw new AgentMessageHeld({ holdId: admission.hold.holdId, chainId: admission.chainId, rootThreadId, targetThreadId, replayed: admission.replayed })
+  }
+
+  /**
+   * The person's answer to a chain held at its budget (issue #1443), on the thread the chain started in. Continue renews
+   * the budget and sends what the chain holds, oldest first, as its senders wrote it (with the notify watch they asked
+   * for); Stop drops it. A sender whose message did not go is told with a quiet note that starts no turn. A hold stays
+   * held until its own message is sent, in the transaction that records it: after a restart, Continue finds what was
+   * not sent yet and nothing twice, and the chain's new messages wait behind it until Continue has sent it all.
+   */
+  async answerChainHold(threadId: string, chainId: string, answer: 'continue' | 'stop'): Promise<{ chainId: string; sent: number; stopped: number; failed: number }> {
+    const engine = this.requireRunEngine()
+    const { chains } = engine
+    const chain = chains.get(chainId)
+    if (!chain || chain.rootThreadId !== threadId) throw new CommandRejection('conflict', `Chain ${chainId} did not start in this thread.`)
+    if (this.answeringChains.has(chainId)) throw new CommandRejection('conflict', 'This chain was already answered; what it held is being sent.')
+    if (!chains.heldFor(chainId).length) throw new CommandRejection('conflict', 'Nothing of this chain is held any more.')
+    const counts = { chainId, sent: 0, stopped: 0, failed: 0 }
+    this.answeringChains.add(chainId)
+    try {
+      if (answer === 'stop') {
+        for (const hold of chains.heldFor(chainId)) {
+          if (!chains.settleHold(hold.holdId, 'stopped')) continue
+          counts.stopped += 1
+          this.tellHoldSender(hold, 'The person chose Stop, so it was not sent. Do not send it again unless the person asks.')
+        }
+        return counts
+      }
+      chains.renew(chainId)
+      // Until nothing is held: a message the chain sends meanwhile is held behind these, and goes after them.
+      for (let hold = chains.heldFor(chainId)[0]; hold; hold = chains.heldFor(chainId)[0]) {
+        const current = hold
+        try {
+          if (current.kind === 'work') {
+            const work = current.payload as HeldWork
+            const sent = await this.sendToThreadAsAgent(work.threadId, work.input, { clientRequestId: work.clientRequestId, actor: work.actor, chainHold: current.holdId })
+            if (work.watchKey) this.settleNotices?.watch({ messageKey: work.watchKey, watcherThreadId: work.actor.threadId, watcherRunId: work.actor.runId, targetThreadId: work.threadId, runId: sent.runId })
+          } else {
+            engine.store.db.transaction(() => {
+              if (!chains.settleHold(current.holdId, 'continued')) return
+              chains.count(chainId)
+              postNote(engine, current.requestKey, current.payload as AgentNotePayload, current.targetThreadId)
+            })
+          }
+          // A replay of a send that already went settled nothing: it is not held any more either way.
+          chains.settleHold(current.holdId, 'continued')
+          counts.sent += 1
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error)
+          if (!chains.settleHold(current.holdId, 'failed', 'held', { reason })) continue
+          counts.failed += 1
+          this.tellHoldSender(current, `The person chose Continue, but it could not be sent: ${reason}`)
+        }
+      }
+      return counts
+    } finally {
+      this.answeringChains.delete(chainId)
+    }
+  }
+
+  /** Tells a held message's sender what became of it, with a quiet note from Mousse it reads with its next turn. */
+  private tellHoldSender(hold: ChainHoldRecord, outcome: string): void {
+    const text = hold.kind === 'work' ? (hold.payload as HeldWork).input.content : (hold.payload as AgentNotePayload).text
+    const title = this.titleOf(hold.targetThreadId)
+    const payload: AgentNotePayload = {
+      kind: 'agent_note', senderThreadId: hold.senderThreadId, senderRunId: hold.senderRunId ?? '', senderTitle: null, senderAccess: 'agent', from: 'relay', attention: 'none',
+      text: `Your message to ${title ? `"${title}" (thread ${hold.targetThreadId})` : `thread ${hold.targetThreadId}`} was held when its chain of agent messages reached ${CHAIN_BUDGET}. ${outcome} It began: "${text.length > 300 ? `${text.slice(0, 300)}…` : text}"`
+    }
+    try {
+      postNote(this.requireRunEngine(), `chain-hold:${hold.holdId}`, payload, hold.senderThreadId)
+    } catch (error) {
+      console.warn('the sender of a held message could not be told what became of it', { holdId: hold.holdId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /** The most an agent's message may do: its own run's mode here, or for a sender on another computer the mode it was held to. */
@@ -5643,7 +5772,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private createThreadAsAgent(
     input: AgentThreadRequest,
-    options: { clientRequestId: string; actor: AgentActor }
+    options: { clientRequestId: string; actor: AgentActor; notify?: { messageKey: string } }
   ): Promise<AgentCreatedThread> {
     const key = options.clientRequestId
     const fingerprint = agentThreadFingerprint(input)
@@ -5666,7 +5795,7 @@ export class OrchestratorService extends EventEmitter {
   private async createThreadAsAgentOnce(
     input: AgentThreadRequest,
     fingerprint: string,
-    options: { clientRequestId: string; actor: AgentActor }
+    options: { clientRequestId: string; actor: AgentActor; notify?: { messageKey: string } }
   ): Promise<AgentCreatedThread> {
     const engine = this.requireRunEngine()
     if (!this.threadStore || !this.projectManager) throw new Error('Creating threads needs the thread store and the project manager.')
@@ -5711,7 +5840,7 @@ export class OrchestratorService extends EventEmitter {
     const replayed = engine.store.hasAgentAction(intent.threadId, AGENT_THREAD_CREATED_ACTION)
     if (!replayed) this.makeAgentThread(intent)
     let firstMessage: AgentCreatedThread['firstMessage']
-    if (intent.firstMessage) firstMessage = await this.sendFirstMessage(intent, `${key}:first`)
+    if (intent.firstMessage) firstMessage = await this.sendFirstMessage(intent, `${key}:first`, options.notify)
     return this.agentCreated(intent, firstMessage, replayed)
   }
 
@@ -5742,8 +5871,9 @@ export class OrchestratorService extends EventEmitter {
     // A thread the owner's bot starts runs in Full access instead: the owner allowed that with "use your threads".
     const callerMode = this.runPermissionMode(options.actor.runId)
     const profileMode = normalizePermissionMode(this.settingsStore.get().permissions.defaultMode)
-    // The first message counts as the next agent message in a row: a creation cannot start a chain the limit would stop.
-    // A bot's is the first after its owner's message (`botSenderHops`).
+    // From an agent on another computer, the first message counts as the next agent message in a row: a creation cannot
+    // start what the limit would stop. Here it is one message of the creator's chain: past the budget the thread is still
+    // made and its first message is held (`sendFirstMessage`). A bot's is the first after its owner's (`botSenderHops`).
     if (input.firstMessage !== undefined && !options.bot) this.withAgentHops(options.actor)
     return {
       threadId: uuidv4(),
@@ -5870,13 +6000,13 @@ export class OrchestratorService extends EventEmitter {
    * counted as an agent message in a row. Keyed on the creation's key, so a retry returns the first result. A message
    * that cannot be sent leaves the thread made; the result says why and a retry sends it.
    */
-  private async sendFirstMessage(intent: AgentThreadIntent, key: string): Promise<NonNullable<AgentCreatedThread['firstMessage']>> {
+  private async sendFirstMessage(intent: AgentThreadIntent, key: string, notify?: { messageKey: string }): Promise<NonNullable<AgentCreatedThread['firstMessage']>> {
     try {
       const sent = this.earlierAgentSend(intent.threadId, key)
-        ?? await this.sendToThreadAsAgent(intent.threadId, intent.firstMessage!, { clientRequestId: key, actor: intent.actor, ...(intent.bot ? { bot: intent.bot } : {}) })
+        ?? await this.sendToThreadAsAgent(intent.threadId, intent.firstMessage!, { clientRequestId: key, actor: intent.actor, ...(intent.bot ? { bot: intent.bot } : {}), ...(notify ? { notify } : {}) })
       return { sent: true, ...sent }
     } catch (error) {
-      return { sent: false, reason: error instanceof Error ? error.message : String(error) }
+      return { sent: false, reason: error instanceof Error ? error.message : String(error), ...(error instanceof AgentMessageHeld ? { held: error.held } : {}) }
     }
   }
 
@@ -6721,8 +6851,11 @@ export class OrchestratorService extends EventEmitter {
     // words as a message it may not send.
     if (bot && this.awaitsAnswer(threadId)) return { status: 'rejected', reason: 'questions_pending' }
     let sender: AgentActor
+    let step: string | undefined
     try {
       sender = bot ? botSenderHops(options.actor) : this.withAgentHops(options.actor)
+      // A steer joins a live turn, so it cannot wait for the person: at the chain's budget it is refused. A retry is not counted again.
+      if (!bot && !engine.store.getReceipt(options.clientRequestId)) step = this.admitChainStep(sender, threadId, 'work', options.clientRequestId, null, false)
     } catch (error) {
       return { status: 'rejected', reason: (error as { code?: string }).code ?? 'agent_hops_exceeded' }
     }
@@ -6738,6 +6871,7 @@ export class OrchestratorService extends EventEmitter {
     const result = repeat ? await this.sendGuardedAgainstRepeat(repeat.key, repeat.claim, steer) : await steer()
     // A steer the engine admitted and then refused (the run ended meanwhile) sent nothing: a fresh try is no repeat.
     if (repeat && result.status !== 'accepted' && this.recentAgentMessages.get(repeat.key) === repeat.claim) this.recentAgentMessages.delete(repeat.key)
+    if (step && result.status === 'rejected') engine.chains.release(step)
     if (result.status === 'rejected' && result.reason === 'ceiling_exceeded') return { status: 'ceiling_exceeded', callerMode, targetMode: this.runPermissionMode(runId) }
     return this.agentRunCommandResult(engine, threadId, runId, result)
   }
@@ -10451,9 +10585,9 @@ export class OrchestratorService extends EventEmitter {
         source: item.source ?? 'queue',
         // A message an agent queued is still its run: it counts toward the chain of agent messages and is held
         // behind a pause, wherever it was written (the send, or an edit that made it the agent's).
-        ...(item.origin?.kind === 'agent' ? { agentOrigin: { hops: item.origin.hops ?? 1 } } : {}),
+        ...(item.origin?.kind === 'agent' ? { agentOrigin: { hops: item.origin.hops ?? 1, ...(item.origin.chain ? { chain: item.origin.chain } : {}) } } : {}),
         // A settle notice's turn carries the count of the work it reports on and adds none (SPEC §15.1).
-        ...(item.settleNotice?.length ? { noticeHops: item.settleHops ?? 0 } : {})
+        ...(item.settleNotice?.length ? { noticeHops: item.settleHops ?? 0, ...(item.settleChain ? { noticeChain: item.settleChain } : {}) } : {})
       })
       return result.status === 'accepted' ? result.runId : undefined
     } catch (error) {
@@ -12200,8 +12334,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * One agent command on a thread's queue (`queue_enqueue`, `queue_edit`, `queue_remove`, `queue_reorder`,
-   * `queue_promote_to_steer`; SPEC §15.1). Journaled and replayable by `options.clientRequestId`; every command
+   * One agent command on a thread's queue (`queue_enqueue`, or `queue_update` with op edit, remove, move or send_now;
+   * SPEC §15.1). Journaled and replayable by `options.clientRequestId`; every command
    * but an enqueue on the caller's own thread carries the revision the caller read and fails with a conflict when
    * the queue is not that any more. An agent can never widen what an item may do or pass its words off as a
    * person's: what it writes is labelled and stored as the agent's, under the stricter of the item's own limit and
@@ -12224,8 +12358,15 @@ export class OrchestratorService extends EventEmitter {
     // labelled as the bot's, held to the thread's own mode, or no wider than the device its owner wrote from.
     const bot = actor.remote ? undefined : this.botSenderOf(actor, QUEUE_TOOL_OF[command.op])
     const callerMode = bot ? bot.limit ?? 'full' : this.runPermissionMode(actor.runId)
-    const letterOf = (content: string, labelled: boolean): { content: string; sender: AgentSender } =>
-      bot ? this.botLetter(botSenderHops(actor), bot, content) : this.agentLetter(this.withAgentHops(actor), content, labelled)
+    const letterOf = (content: string, labelled: boolean): { content: string; sender: AgentSender } => {
+      if (bot) return this.botLetter(botSenderHops(actor), bot, content)
+      const sender = this.withAgentHops(actor)
+      // On another thread, a message queued is one of the sender's chain and an edit changes one; neither can wait for the
+      // person, so at the chain's budget both are refused (thread_send keeps a message instead).
+      if (cross && sender.chain && command.op === 'enqueue') this.admitChainStep(sender, threadId, 'work', options.clientRequestId, null, false)
+      else if (cross && sender.chain) this.requireRunEngine().chains.assertOpen(sender.chain)
+      return this.agentLetter(sender, content, labelled)
+    }
     if (command.op === 'enqueue') this.assertQueueOpen(threadId)
     // Who wrote the item: this agent (its origin names its thread: an own note or a message it sent) or someone else. A
     // label such as the item's source never decides it: only the origin the daemon stamped on the message does.
@@ -12302,7 +12443,7 @@ export class OrchestratorService extends EventEmitter {
             // A thread a person keeps in Plan takes another agent's words as a plan turn, whatever mode the message had.
             if (cross && this.lastChatModeOf(threadId) === 'plan') patch.mode = 'plan'
           }
-          if (patch.content === undefined && patch.mode === undefined) throw new QueueValidationError('queue_edit needs content or mode.')
+          if (patch.content === undefined && patch.mode === undefined) throw new QueueValidationError('An edit of a queued message needs content or mode.')
           return {
             intent: { ...base, op: 'edit', itemId: item.id, patch, expectedRevision: command.expectedRevision, cancelRunIds },
             ...(cross || !authored ? { audit: { action: 'edited_queued_message', details: { itemId: item.id, ...(command.content !== undefined ? { length: command.content.length } : {}), changedMode: command.mode !== undefined, wasOrigin: item.origin?.kind ?? (item.source ?? 'person') } } } : {})
@@ -13999,7 +14140,7 @@ export class OrchestratorService extends EventEmitter {
             agentRunId = this.runEngine?.store.createRun({
               threadId: session.threadId,
               source: 'steer-followup',
-              outcome: { sentByAgent: true, agentHops: steer.origin.hops ?? 1 }
+              outcome: { sentByAgent: true, agentHops: steer.origin.hops ?? 1, ...(steer.origin.chain ? { agentChain: steer.origin.chain } : {}) }
             }).runId
           } catch {
             // Without a run the text is still queued; the thread is just not held for it.
@@ -14590,7 +14731,8 @@ export class OrchestratorService extends EventEmitter {
           : {}),
         ...(opts?.bindDelivery ? { bindDelivery: opts.bindDelivery } : {}),
         ...(queueBehindPause ? { queueBehindPause: true } : {}),
-        ...(opts?.refuseWhilePaused ? { refuseWhilePaused: true } : {})
+        ...(opts?.refuseWhilePaused ? { refuseWhilePaused: true } : {}),
+        ...(opts?.chainHold ? { chainHold: opts.chainHold } : {})
       }, { admit })
       if (result.status === 'rejected' && CONTINUATION_REFUSALS.has(result.reason))
         throw new DomainRpcError(result.reason, `Cannot continue run ${opts?.continuationOfRunId}: ${result.reason}.`)
@@ -16037,8 +16179,15 @@ export class OrchestratorService extends EventEmitter {
     let retryRow: ChatMessage | undefined
     /** The retries of the turn's current request, until the provider answers it: a failure after them says how many. */
     let pendingRetries: ProviderRetries | undefined
-    /** The runtime retried one of the turn's requests itself: Mousse never runs the turn again on top (`turnRetryDelay`). */
+    /**
+     * The runtime retried the turn's current request itself: Mousse never runs the turn again on top of a failure after
+     * those retries (`turnRetryPlan`). The provider answering again ends it.
+     */
     let runtimeRetried = false
+    /** The runtime kept its session as the current attempt's failure left it (`TurnSink.sessionKept`). */
+    let sessionKept = false
+    /** When the provider last answered this turn (`progress`): a run of failures after it has its own deadline. */
+    let answeredAt = 0
     /** The runtime or Mousse compacted the history inside the turn: the turn is never sent again as it was. */
     let providerCompacted = false
     /**
@@ -16501,6 +16650,8 @@ export class OrchestratorService extends EventEmitter {
         },
         progress: () => {
           providerProgress = true
+          answeredAt = Date.now()
+          runtimeRetried = false
           attachBotSteer()
           this.setTurnStep(session.threadId, undefined)
           endRetries('recovered')
@@ -16594,7 +16745,8 @@ export class OrchestratorService extends EventEmitter {
           try { opts?.bot?.metrics?.(metrics) }
           catch (error) { logDebug('OrchestratorService', 'bot turn metrics could not be recorded', error, { threadId: session.threadId }) }
         },
-        lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
+        lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines),
+        sessionKept: () => { sessionKept = true }
       }, { dropLate: true })
       // Every word from the runtime is progress.
       const turnSink = Object.fromEntries(Object.entries(sinkCalls).map(([key, call]) => [key, typeof call === 'function'
@@ -16762,19 +16914,25 @@ export class OrchestratorService extends EventEmitter {
       attachBotSteer()
       turnBoundaryStarted(session.threadId, 'harness')
       turnTimingMark(session.threadId, 'harness')
-      const firstRequestAt = Date.now()
-      // A request that failed for a passing reason before the provider answered, ran a tool or took a steer is sent
-      // again after a capped, spread-out wait (`turnRetryDelay`): nothing of it happened, so nothing is repeated. The
-      // run stays running meanwhile; a Stop ends the wait.
+      // A request that failed on the provider is tried again after a capped, spread-out wait (`turnRetryPlan`), up to
+      // `TURN_RETRY.attempts` times per turn. Before anything of the turn happened it is sent again as it was. Once the
+      // provider answered, a tool ran or a steer went in, it is never sent again: a runtime that kept its session as
+      // the failure left it gets a short continuation turn on that session instead (`continuesFailedRequest`), so the
+      // model picks up where the request stopped and no tool runs twice; any other runtime's failure is final. The run
+      // stays running meanwhile; a Stop ends the wait.
+      let attemptInput = turnInput
+      /** Since the first failure after the provider last answered. */
+      let failingSince: number | undefined
       for (let retries = 0; ; retries += 1) {
         const releaseCopies = this.secretCopiesForTurn(session.threadId, binding.driver)
         let delay: number | undefined
+        sessionKept = false
         try {
           result = await this.harness.startTurn({
             binding,
             ...(previous ? { previous } : {}),
             ...(attemptOrdinal ? { attemptOrdinal } : {}),
-            input: turnInput,
+            input: attemptInput,
             sink: turnSink,
             control: turnControl,
             host: adapterHost,
@@ -16787,19 +16945,43 @@ export class OrchestratorService extends EventEmitter {
           }).result
           break
         } catch (error) {
-          delay = turn.abort.signal.aborted ? undefined : turnRetryDelay(error, {
+          const now = Date.now()
+          if (failingSince === undefined || answeredAt > failingSince) failingSince = now
+          const plan = turn.abort.signal.aborted ? undefined : turnRetryPlan(error, {
             retries,
-            elapsedMs: Date.now() - firstRequestAt,
-            answered: providerProgress || providerCompacted || nativeCheckpointed,
-            toolStarted: conversationToolsUsed,
-            steered: drains > 0 || acceptedDrains.size > 0 || takenDrains.size > 0,
+            failingMs: now - failingSince,
+            progressed: providerProgress || providerCompacted || nativeCheckpointed || conversationToolsUsed ||
+              drains > 0 || acceptedDrains.size > 0 || takenDrains.size > 0 || attemptInput !== turnInput,
+            sessionKept,
             runtimeRetried,
             bot: Boolean(opts?.bot)
           })
-          if (delay === undefined) throw error
-          logDebug('OrchestratorService', 'provider request failed before it was answered; trying again', error, { threadId: session.threadId, retry: retries + 1, delayMs: delay })
-          noteRetry(retries + 1, TURN_RETRY.attempts, turnRetryCause(error))
+          if (!plan) throw error
+          delay = plan.delayMs
+          const cause = turnRetryCause(error)
+          logDebug('OrchestratorService', plan.how === 'continue'
+            ? "provider request failed mid-turn; continuing the runtime's session"
+            : 'provider request failed before it was answered; trying again', error, { threadId: session.threadId, retry: retries + 1, delayMs: delay })
+          noteRetry(retries + 1, TURN_RETRY.attempts, cause)
           this.setTurnStep(session.threadId, { kind: 'retrying', attempt: retries + 1, maxAttempts: TURN_RETRY.attempts, delayMs: delay })
+          if (plan.how === 'continue') {
+            // The text and thought the failed request left open end here; the continuation's own output starts new rows
+            // below them. Calls stay as they are: one the kept session still runs (a background agent) reports on, and
+            // the turn's end closes any left.
+            this.transcript.closeThinking()
+            this.transcript.abandonAssistant(this.transcript.openAssistantContent() ?? '', true)
+            // The session holds the turn and its history as it is now: the continuation carries that history, a note in
+            // place of the request, and nothing it handed over or attached the first time.
+            const { images: _images, historyHandedOver: _handedOver, handoffUnplanned: _unplanned, ...base } = turnInput
+            attemptInput = {
+              ...base,
+              prompt: continuationPrompt(cause),
+              messages: getActiveMessages(this.nativeContext),
+              contextSummary: getCompactionSummary(this.nativeContext),
+              nativeHistory: nativeAgentHistory(this.nativeContext),
+              continuesFailedRequest: true
+            }
+          }
         } finally {
           // Copies held off for this turn come back once it has settled (a Claude Code turn holds none).
           releaseCopies()
