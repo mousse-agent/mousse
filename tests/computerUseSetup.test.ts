@@ -171,6 +171,8 @@ describe('the outcome line', () => {
     ['computer_use_request', undefined, true],
     ['mcp__mousse__computer_use_request', undefined, true],
     ['mcp_mousse_computer_use_request', undefined, true],
+    ['mousse_0123456789ab_computer_use_request', undefined, true],
+    ['mousse_0123456789ab_relay_computer_use_request', undefined, false],
     ['computer_use_request (mousse MCP Server)', undefined, true],
     ['use_tool', { tool: 'computer_use_request' }, true],
     ['mcp__mousse__use_tool', { tool: 'mcp__mousse__computer_use_request' }, true],

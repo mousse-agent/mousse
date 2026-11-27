@@ -8,6 +8,8 @@
  * (`BOT_COMPUTER_PERMISSION`), and a thread a bot started gets it only while that bot holds it.
  */
 
+import { mousseServerToolOf } from './harness/mcpNames'
+
 /** The two Mousse tools that reach the driver: list its tools, and run one. */
 export const COMPUTER_TOOLS_TOOL = 'computer_tools'
 export const COMPUTER_USE_TOOL = 'computer_use'
@@ -106,13 +108,15 @@ export function parseComputerUseOutcome(output: string | undefined): { outcome: 
 }
 
 /**
- * The Mousse tool a call's name names, in any runtime's spelling (`mcp__mousse__x`, Antigravity's `mcp_mousse_x`,
- * `mousse.x`, an ACP title `x (mousse MCP Server)`, or a bare name), else undefined.
+ * The Mousse tool a call's name names, in any runtime's spelling (`mousseServerToolOf`: `mcp__mousse__x`, Antigravity's
+ * `mcp_mousse_x`, OpenCode's `mousse_<12 hex>_x`, `mousse.x`, an ACP title `x (mousse MCP Server)`) or a bare name;
+ * undefined for a relayed tool or any other name.
  */
 function mousseToolName(name: string | undefined): string | undefined {
   if (typeof name !== 'string') return undefined
-  const match = /^(?:mcp__mousse__|mcp_mousse_|mousse(?:__|[./:] ?))?([a-z][a-z0-9_]*)(?: \(mousse MCP Server\))?$/.exec(name.trim())
-  return match?.[1]
+  const served = mousseServerToolOf(name)
+  if (served) return served.server === 'mousse' ? served.tool : undefined
+  return /^[a-z][a-z0-9_]*$/.exec(name.trim())?.[0]
 }
 
 /** Whether a call named `toolName` with `input` is `computer_use_request`, directly or through a bot's `use_tool`. */

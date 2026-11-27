@@ -12,6 +12,7 @@ import {
 import { commandLabel, knownToolName, normalizeToolName, type AgentActivityItem } from '../../../shared/agentActivity'
 import { nativeSubagentInput } from './nativeSubagents'
 import { subagentToolOfRecord } from '../../../shared/subagentTools'
+import { mousseServerToolOf } from '../../../shared/harness/mcpNames'
 import { splitExitCode } from '../components/agent-elements/utils/bash-output'
 import { getToolStatus } from '../components/agent-elements/utils/format-tool'
 
@@ -211,10 +212,15 @@ function mcpCustomType(rawName: string | undefined): string {
   return `tool-mcp__custom__${mcpToolSlug(rawName)}`
 }
 
-/** A runtime's full MCP tool name (`mcp__<server>__<tool>` for Claude/Codex, `mcp_mousse_<tool>` for Antigravity), split. */
+/**
+ * A runtime's full MCP tool name (`mcp__<server>__<tool>` for Claude/Codex, `mcp_mousse_<tool>` for Antigravity,
+ * `mousse_<12 hex>_<tool>` for OpenCode), split.
+ */
 function splitMcpName(rawName: string | undefined): { server: string; tool: string } | undefined {
   const match = rawName?.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/) ?? rawName?.match(/^mcp_(mousse-relay|mousse)_(.+)$/)
-  return match ? { server: match[1]!, tool: match[2]! } : undefined
+  if (match) return { server: match[1]!, tool: match[2]! }
+  const opencode = rawName && /^mousse_[0-9a-f]{12}_/.test(rawName) ? mousseServerToolOf(rawName) : undefined
+  return opencode ? { server: opencode.server === 'relay' ? 'mousse-relay' : 'mousse', tool: opencode.tool } : undefined
 }
 
 /**
@@ -273,6 +279,11 @@ function nestingRoot(
   }
   return undefined
 }
+
+/** Where the file cards read a call's file (`extractFilePathArg`). */
+const FILE_ARG_KEYS = ['file_path', 'path', 'filePath', 'file']
+/** Other names runtimes give a call's file. */
+const OTHER_FILE_ARG_KEYS = ['absolute_path', 'AbsolutePath', 'TargetFile', 'target_file', 'notebook_path']
 
 /** The tool part of a timeline tool row. */
 function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown> {
@@ -338,6 +349,12 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
   // Prefer real args JSON. Only synthesize minimal display input when args were
   // already overwritten by complete-phase result text.
   let input: Record<string, unknown> = structuredInput ? { ...structuredInput } : {}
+  // A file card named from a title (an ACP agent's) whose arguments spell the file their own way.
+  if (structuredInput && !subagentTool && (toolName === 'Read' || toolName === 'Edit' || toolName === 'Write') && !FILE_ARG_KEYS.some((key) => typeof input[key] === 'string' && input[key])) {
+    const file = OTHER_FILE_ARG_KEYS.map((key) => input[key]).find((value): value is string => typeof value === 'string' && value.length > 0)
+      ?? toolCall.summary.match(/[^\s]+\.[a-z]{1,4}/i)?.[0]
+    if (file) input = { ...input, file_path: file }
+  }
   if (!structuredInput && !subagentTool) {
     if (toolName === 'Bash') {
       // Never synthesize a command from the summary: provider summaries
@@ -356,7 +373,14 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
     } else if (toolName === 'TodoWrite') {
       input = { todos: [], action: 'update' }
     } else {
-      input = { summary: toolCall.summary, details: toolCall.details }
+      // A runtime that sends no arguments puts the tool's own name in the summary: the row's type names it already. A
+      // summary that is the only place a title-named call's tool is (an ACP agent's) stays.
+      const summary = toolCall.summary.trim()
+      const named = !summary || summary === rawName
+      input = {
+        ...(named ? {} : { summary: toolCall.summary }),
+        ...(toolCall.details.length > 0 ? { details: toolCall.details } : {}),
+      }
     }
   }
 
