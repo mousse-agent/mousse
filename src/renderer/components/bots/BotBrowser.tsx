@@ -73,7 +73,8 @@ export function BotBrowserPreview({ bot, view: given }: { bot: BotSummary; view:
 export function BotBrowserPane({ bot, view, fullScreen }: { bot: BotSummary; view: BotBrowserView; fullScreen?: WatchedBrowserFullScreen }) {
   const busy = useBotBrowserStore((state) => state.busy)
   const open = (url: string | undefined) => void useBotBrowserStore.getState().open(bot.id, url)
-  return <WatchedBrowserPane kit={botBrowserKit} browserKey={bot.id} label={`${bot.name}'s browser`} user={bot.name} view={view} open={open}
+  // One view per browser: another bot's never inherits this one's pending input or menu.
+  return <WatchedBrowserPane key={bot.id} kit={botBrowserKit} browserKey={bot.id} label={`${bot.name}'s browser`} user={bot.name} view={view} open={open}
     {...(fullScreen ? { fullScreen } : {})}
     closed={(typed) => <>
       <p>{view.stopped ? 'The browser stopped.' : `${bot.name}'s browser is closed.`}</p>

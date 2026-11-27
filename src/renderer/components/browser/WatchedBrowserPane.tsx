@@ -413,6 +413,11 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
     if (refocus) keys.current?.focus({ preventScroll: true })
   }, [])
   const paste = async () => {
+    // Bound now: the clipboard answers later, and by then the view may show another browser or the hold may have ended.
+    const key = browserKey
+    const holdId = store().holds[key]?.id
+    const picture = view.frame?.id
+    if (!holdId) return
     let text = ''
     try {
       text = await navigator.clipboard.readText()
@@ -421,8 +426,9 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
       return
     }
     if (!text) return
+    if (store().holds[key]?.id !== holdId) return
     if (text.length > MAX_BROWSER_PASTE_CHARS) say(`Too long to paste (over ${MAX_BROWSER_PASTE_CHARS.toLocaleString()} characters)`)
-    else send({ kind: 'paste', text })
+    else store().send(key, { kind: 'paste', text }, picture)
   }
   const selectAll = () => {
     send({ kind: 'keys', type: 'down', key: 'a', code: 'KeyA', keyCode: 65, modifiers: primary })

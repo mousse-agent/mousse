@@ -929,6 +929,30 @@ describe('the split view used as the thread browser is', () => {
     expect(document.querySelector('[role="menu"]')).toBeNull()
   })
 
+  it('Paste from the menu sends nothing when its hold ends before the clipboard answers, even if a new one has begun', async () => {
+    browser = { ...browser, control: 'owner', holder: 'this-view', hold: HOLD }
+    await expanded()
+    await act(async () => useBotBrowserStore.getState().load('noobesh', false))
+    let answer: (text: string) => void = () => {}
+    clipboard.readText.mockImplementation(() => new Promise<string>((resolve) => { answer = resolve }))
+    await act(async () => { frameOf().dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 420, clientY: 140, button: 2 })) })
+    const paste = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((entry) => entry.querySelector('span')?.textContent === 'Paste')
+    await click(paste)
+    await click(button('Give back'))
+    // Taken over again, as a new hold.
+    const first = HOLD.id
+    HOLD.id = 'hold_2'
+    try {
+      await click(button('Take over'))
+      expect(useBotBrowserStore.getState().holds.noobesh?.id).toBe('hold_2')
+      await act(async () => { answer('from my clipboard') })
+      await settle()
+    } finally {
+      HOLD.id = first
+    }
+    expect(sentInputs().map((sent) => sent.input)).not.toContainEqual(expect.objectContaining({ kind: 'paste' }))
+  })
+
   it('Control with + and - zooms the page, not the app, and is never sent; the zoom is kept for the next view', async () => {
     const pageKeyboard = vi.fn(async () => undefined)
     installPreload(fake, { zoom: { pageKeyboard } })
