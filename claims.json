@@ -2,6 +2,20 @@
   "version": 1,
   "claims": [
     {
+      "task": "applets-in-page-webview",
+      "session": "Avarnics-Mac-mini.local-3ff47c",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "applets-in-page-webview",
+      "paths": [
+        "src/main/applets",
+        "src/renderer/components/applets",
+        "src/shared/appletDocument.ts",
+        "src/shared/appletRuntime.ts"
+      ],
+      "claimedAt": "2026-11-27T15:32:25.878Z",
+      "expiresAt": "2026-11-27T17:32:25.878Z"
+    },
+    {
       "task": "bot-skills-and-browser-handoff",
       "session": "Animatrix-17eea9",
       "machine": "Animatrix",
