@@ -292,11 +292,15 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions, r
    */
   const probed = (version: string | undefined, info: { fingerprint?: BinaryFingerprint; soon: boolean } = { soon: false }): void => {
     probedBinary = version ? { version, ...(info.fingerprint ? { fingerprint: info.fingerprint } : {}) } : undefined
-    if (stopped || !version || checking || checkTimer || recordOf(version) || heldProblem()) return
+    if (stopped || !version || checking || recordOf(version) || heldProblem()) return
     const last = inconclusive.get(version)
     if (last !== undefined && Date.now() - last < GROK_HELD_RETRY_MS) return
-    if (info.soon) startCheck(version)
-    else {
+    if (info.soon) {
+      // A person asked: a check waiting for its delay starts now.
+      if (checkTimer) clearTimeout(checkTimer)
+      checkTimer = undefined
+      startCheck(version)
+    } else if (!checkTimer) {
       checkTimer = setTimeout(() => {
         checkTimer = undefined
         if (!stopped && probedBinary?.version === version && !recordOf(version)) startCheck(version)
