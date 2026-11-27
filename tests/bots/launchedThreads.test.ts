@@ -4,10 +4,10 @@
  */
 import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
-import { launchedThreadsIn, launchedThreadsOf, runStanding, watchLaunchedThreads, type LaunchedThreadMeta, type RunStanding } from '../../src/mms/bots/launchedThreads'
+import { launchedThreadsIn, launchedThreadsOf, launchedHereAndThere, remoteLaunchedThreadsOf, runStanding, watchLaunchedThreads, withRemoteLaunched, type LaunchedThreadMeta, type RunStanding } from '../../src/mms/bots/launchedThreads'
 import { launchedActive, launchedGoing, type BotLaunchedThread } from '../../src/shared/bots/personal/chat'
 import type { EffectRecord, RunPause, RunRecord } from '../../src/mms/run/types'
-import type { QueuedMessage } from '../../src/shared/types'
+import type { QueuedMessage, Thread, ThreadActivitySnapshot } from '../../src/shared/types'
 
 const NOW = '2026-11-15T10:00:00.000Z'
 const run = (threadId: string, status: RunRecord['status']): RunRecord => ({ runId: `run:${threadId}`, threadId, status, requestedAt: NOW, startedAt: NOW, completedAt: NOW }) as RunRecord
@@ -246,5 +246,72 @@ describe('how a run of a thread the bot started stands', () => {
     }, new Set(['home']))
     expect(listed.map((thread) => [thread.threadId, thread.status])).toEqual([['launched', 'queued']])
     expect(reads).toEqual(['launched'])
+  })
+})
+
+// A bot's thread_create with `computer` runs the thread on another computer: the merged lists name the bot on its row
+// (`startedByBot`, from `startedFrom.agent`), and the bot's list shows it beside its threads here, by its status there.
+describe('a thread the bot started on another computer', () => {
+  const SINCE = '2026-11-14T10:00:00.000Z'
+  const OLD = '2026-11-14T09:00:00.000Z'
+  const bot = { botId: 'b1', name: 'Mousseroni' }
+  const row = (id: string, more: Partial<Thread> = {}): Thread => ({
+    id: `node-a:${id}`, name: id, createdAt: OLD, updatedAt: NOW, order: 0, node: 'node-a', projectId: 'node-a:p1',
+    startedFrom: { node: 'self', agent: { thread: 'home', title: 'Mousseroni', mode: 'auto' } }, startedByBot: bot, ...more
+  }) as Thread
+  const list = (rows: Thread[], activity: ThreadActivitySnapshot = {}) => remoteLaunchedThreadsOf({
+    creators: new Set(['home']),
+    rows,
+    activity,
+    computerName: (node) => (node === 'node-a' ? 'AEONIX' : undefined),
+    projectName: (id) => (id === 'node-a:p1' ? 'mousse' : undefined),
+    doneSince: SINCE
+  })
+  const statuses: Array<[string, ThreadActivitySnapshot[string] | undefined, Partial<Thread>, BotLaunchedThread['status']]> = [
+    ['working there', 'processing', {}, 'running'],
+    ['its turn ended, its subagents still work there', 'waiting', {}, 'subagents'],
+    ['it asks the owner there', 'awaiting_input', {}, 'needs_input'],
+    ['held by a usage limit there', 'paused', {}, 'paused'],
+    ['just finished there', 'completed', {}, 'done'],
+    ['nothing runs there', undefined, {}, 'done'],
+    ['that computer is offline', undefined, { offline: true }, 'idle'],
+    ['archived there, whatever it did', 'processing', { archivedAt: NOW }, 'done']
+  ]
+  it.each(statuses)('%s', (_name, state, more, status) => {
+    const [listed] = remoteLaunchedThreadsOf({ creators: new Set(['home']), rows: [row('t', more)], activity: state ? { 'node-a:t': state } : {} })
+    expect(listed?.status).toBe(status)
+  })
+
+  it('keeps the bot busy while it works, and names the project and the computer', () => {
+    const [listed] = list([row('t')], { 'node-a:t': 'processing' })
+    expect(listed).toMatchObject({ threadId: 'node-a:t', title: 't', project: 'mousse on AEONIX', status: 'running' })
+    expect(launchedActive(listed!)).toBe(true)
+  })
+
+  const which: Array<[string, Thread, boolean]> = [
+    ['started by the bot, working, however old', row('old-working', { updatedAt: OLD }), true],
+    ['started by the bot, ended lately', row('recent'), true],
+    ['started by the bot, ended before Recent', row('stale', { updatedAt: OLD }), false],
+    ['started by the bot, archived', row('archived', { archivedAt: NOW }), false],
+    ['started by another of its threads', row('other', { startedFrom: { node: 'self', agent: { thread: 'not-the-bot', title: 'x', mode: 'auto' } } }), false],
+    ['started there by an agent here that is no bot', row('agent', { startedByBot: undefined }), false],
+    ['a subagent there', row('sub', { lineage: { parentThreadId: 'node-a:t', rootThreadId: 'node-a:t', relationship: 'subagent' } }), false]
+  ]
+  it.each(which)('%s', (_name, thread, shown) => {
+    const activity: ThreadActivitySnapshot = thread.id === 'node-a:old-working' ? { [thread.id]: 'processing' } : {}
+    expect(list([thread], activity).map((listed) => listed.threadId)).toEqual(shown ? [thread.id] : [])
+  })
+
+  it('joins the threads here in one order, what works first', () => {
+    const here: BotLaunchedThread = { threadId: 'local-done', title: 'here', status: 'done', startedAt: OLD, updatedAt: NOW }
+    const there = list([row('t')], { 'node-a:t': 'processing' })
+    expect(withRemoteLaunched([here], there).map((listed) => listed.threadId)).toEqual(['node-a:t', 'local-done'])
+  })
+
+  it('leaves only the threads here when the other computers cannot be read', () => {
+    const here: BotLaunchedThread = { threadId: 'local', title: 'here', status: 'running', startedAt: OLD, updatedAt: NOW }
+    const broken = { threads: () => { throw new Error('lists off') }, projects: () => [], activity: () => ({}) }
+    expect(launchedHereAndThere([here], broken, new Set(['home']))).toEqual([here])
+    expect(launchedHereAndThere([here], undefined, new Set(['home']))).toEqual([here])
   })
 })
