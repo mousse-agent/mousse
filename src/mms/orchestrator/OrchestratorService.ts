@@ -102,6 +102,7 @@ import { providerRetryText, type ProviderRetries, type ProviderRetryState } from
 import { CONTINUE_TEXT, MANUAL_CONTINUE_TEXT, pausedLine } from '../run/pauseText'
 import { currentStopGeneration, runStopGeneration } from '../run/stopGeneration'
 import { buildSubagentView } from '../run/delegation/subagentView'
+import { correctionsStartingWith, reviseTree, type TreeRevision } from '../run/delegation/treeCorrection'
 import { resolveSubagent, subagentsTitled, type SubagentAddressSources } from '../run/delegation/subagentAddress'
 import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/delegation/policy'
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
@@ -6279,6 +6280,28 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * "Also tell subagents" (docs/plans/tool-api.md §2.5): the person's correction of a thread, which they steered or sent
+   * it, reaches its live subagents at every depth as a tree instruction revision, with a delivery record for each. The
+   * relayed note carries none of the person's authority. A retry with the same `clientRequestId` returns the first record.
+   */
+  async correctSubagents(threadId: string, text: string, clientRequestId: string): Promise<TreeRevision> {
+    const engine = this.requireRunEngine()
+    if (!text.trim()) throw new Error('A correction needs its text.')
+    const { revision } = await reviseTree(engine, {
+      threadId,
+      text,
+      clientRequestId,
+      titleOf: (id) => this.titleOf(id) ?? null,
+      strategyOf: (id) => {
+        const caps = this.capabilitiesForThread(id)
+        return caps ? steerStrategy(caps, engine.getActiveRun(id)) : null
+      },
+      waitsOnPerson: (id) => this.questions.listPendingForThread(id).length > 0 || engine.approvals.listPending(id).length > 0
+    })
+    return revision
+  }
+
+  /**
    * A person who writes in an archived thread wants it back: it is unarchived through the app's own Unarchive
    * (`archiveThread`) before their message or steer runs: from a window, their phone or the CLI. A thread whose expiry
    * passed stays archived; its send is refused. Agents and bots never come here (`thread_archived`).
@@ -7035,7 +7058,13 @@ export class OrchestratorService extends EventEmitter {
     if (entry) entry.started = true
     // The in-memory payload keeps image data the durable payload omits. Without it the sender is
     // gone (another orchestrator instance), so this executor does not inherit its admission.
-    const payload = entry?.payload ?? { ...stored, admissionHeld: false }
+    const held = entry?.payload ?? { ...stored, admissionHeld: false }
+    // A person's correction that reached this subagent before its turn started ends its first message (§2.5).
+    const corrections = this.runEngine ? correctionsStartingWith(this.runEngine.store, effect.effectId) : []
+    const corrected = (content: string): string => [content, ...corrections].join('\n\n')
+    const payload = corrections.length
+      ? { ...held, input: typeof held.input === 'string' ? corrected(held.input) : { ...held.input, content: corrected(held.input.content) } }
+      : held
     try {
       const session = this.getOrCreateSession(payload.threadId)
       if (payload.sharedWorkspace && !session.sharedWorkspace) session.sharedWorkspace = payload.sharedWorkspace

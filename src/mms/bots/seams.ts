@@ -120,6 +120,11 @@ export interface BotToolHost {
      * started (a job notice, a wake), whose note is the bot's own update and is never credited to the owner.
      */
     fromOwner?(botId: string, from: string): boolean
+    /**
+     * The owner's own note to running work reaches its subagents still working too (docs/plans/tool-api.md §2.5), as the
+     * work's message to each (`subagent_send`): where it went, or why not. It answers and approves nothing.
+     */
+    noteSubagents?(botId: string, workId: string, note: string): Array<{ subagent: string; sent: boolean; why?: string }>
   }
   /** `mcp_servers`: the owner's MCP servers the bot may ask for, and whether it holds their tools. Absent: none here. */
   mcpServers?(botId: string, lane: BotLane): Promise<BotMcpListing>

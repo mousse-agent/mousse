@@ -11,6 +11,7 @@ import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
 import { deliverBotResults, withoutBotParentRows, type BotExecutionPort } from './delegation/botPort'
 import { RemoteLaunchRecords } from './delegation/remoteLaunches'
 import { RemoteSubagentRecords } from './delegation/remoteSubagents'
+import { inheritRevisions } from './delegation/treeCorrection'
 import { RemoteExpiryRecords } from './delegation/remoteExpiry'
 import { RemoteArchiveRecords } from './delegation/remoteArchive'
 import { RunTimeLimitRecords } from './runTimeLimits'
@@ -1668,13 +1669,17 @@ un_time_limits). */
     })
     // A remote subagent's run here only stands in for the run on its computer: no turn starts for it.
     if (input.remote) this.remoteSubagents.create({ delegationId: delegation.delegationId, childThreadId, childRunId: child.runId, ...input.remote })
-    else
-      this.outbox.enqueue({
+    else {
+      const start = this.outbox.enqueue({
         threadId: childThreadId,
         runId: child.runId,
         kind: 'turn.start',
         payload: turnPayload({ childRunId: child.runId, delegationId: delegation.delegationId })
       })
+      // A subagent a run older than a person's correction starts now inherits it (§2.5). A bot's work is corrected through its port.
+      const parentRun = input.bot ? null : this.store.getRun(input.parentRunId)
+      if (parentRun) inheritRevisions(this.store, { parentThreadId: input.parentThreadId, parentRun, childThreadId, startEffectId: start.effectId })
+    }
     const accepted = { delegationId: delegation.delegationId, childThreadId, childRunId: child.runId }
     this.store.putReceipt({
       clientRequestId: input.clientRequestId,

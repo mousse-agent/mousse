@@ -1508,7 +1508,21 @@ export function OrchestratorChat() {
     if (!workspaceReady || !selectionRead) return
     if (useAppStore.getState().takeWarmSend(activeThreadId)) void handleSendRef.current?.()
   }, [workspaceReady, selectionRead, activeThreadId])
-  const handleSend = async (skillMode?: SkillChatMode, options?: { steer?: boolean; skipQuestions?: boolean }) => {
+  // "Also tell subagents" (docs/plans/tool-api.md §2.5): what the person told the thread reaches its subagents still
+  // working, and a toast says where it went.
+  const tellSubagents = (threadId: string | null, text: string) => {
+    if (!threadId || isQualifiedId(threadId) || !text.trim()) return
+    void window.mousse.orchestrator.correctSubagents(threadId, text, crypto.randomUUID()).then(({ deliveries }) => {
+      if (!deliveries.length) return
+      const waiting = deliveries.filter((entry) => entry.state !== 'delivered').length
+      showToast({
+        key: `correction:${threadId}`,
+        message: `Also told ${deliveries.length === 1 ? '1 subagent' : `${deliveries.length} subagents`}${waiting ? ` · ${waiting} not yet` : ''}`,
+        detail: deliveries.map((entry) => `${entry.title ?? 'Subagent'}: ${entry.state === 'delivered' ? 'delivered' : entry.state === 'pending' ? 'waiting' : 'not sent'}`).join('\n')
+      })
+    }).catch(() => showToast({ key: `correction:${threadId}`, tone: 'attention', message: "Couldn't tell the subagents" }))
+  }
+  const handleSend = async (skillMode?: SkillChatMode, options?: { steer?: boolean; skipQuestions?: boolean; alsoSubagents?: boolean }) => {
     if (!useAppStore.getState().workspaceReady) return
     // A file is sent as its path on this computer, which the agent of a thread on another computer can't read. A long
     // paste is text, so there it goes in the message itself.
@@ -1708,6 +1722,7 @@ export function OrchestratorChat() {
         }
         return
       }
+      if ((steered === true || steered === 'queued') && options.alsoSubagents) tellSubagents(steerThread, trimmed)
       if (steered === 'queued') {
         // Not steered: the running turn could not take it, so it waits at the end of the queue. Said, not hidden.
         setSendError(STEER_QUEUED)
@@ -1926,6 +1941,8 @@ export function OrchestratorChat() {
         retry: retrySteer
       })
     // Refused: nothing runs, so the goal set for it goes too. (An unconfirmed send may have arrived; it keeps the goal.)
+    // Only a message the thread took reaches its subagents (§2.5).
+    if (options?.alsoSubagents && !startingBlank && sent === true) tellSubagents(targetThreadId, text)
     if (goalThread && sent === false) void window.mousse.platformRequest.request('threads.goal', { threadId: goalThread, action: 'clear' }).catch(() => undefined)
     if (sent === false) {
       restoreUnsent()
@@ -2346,6 +2363,7 @@ export function OrchestratorChat() {
                 ? questionComposerSendLabel(questionAnswerSubmits)
                 : approvalWaiting ? DENY_AND_SEND_LABEL : undefined}
               onSend={(skillMode, options) => void handleSend(skillMode, options)}
+              tellSubagents={subagentsRunning && Boolean(activeThreadId) && !isQualifiedId(activeThreadId ?? '')}
               onSteerQueued={() => {
                 // A waiting approval or question is answered first; a steer then would deny it.
                 if (approvalWaiting || questionsTakeMessage) return false

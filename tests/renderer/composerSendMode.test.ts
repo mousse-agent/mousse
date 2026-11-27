@@ -59,6 +59,7 @@ interface Options {
   sendLabel?: string
   onSteerQueued?: () => boolean
   stoppable?: boolean
+  tellSubagents?: boolean
 }
 
 function render(options: Options = {}) {
@@ -78,6 +79,7 @@ function render(options: Options = {}) {
       ...(options.onSteerQueued ? { onSteerQueued: options.onSteerQueued } : {}),
       ...(options.stoppable !== undefined ? { stoppable: options.stoppable } : {}),
       ...(options.sendLabel ? { sendLabel: options.sendLabel } : {}),
+      ...(options.tellSubagents ? { tellSubagents: true } : {}),
       ...('thread' in options ? (options.thread ? { sendModeThreadId: options.thread } : {}) : { sendModeThreadId: 'thread-a' })
     }
     return createElement(ChatComposer, props)
@@ -305,5 +307,51 @@ describe('send mode storage', () => {
     expect(profileSendMode(PROFILE)).toBe('queue')
     setProfileSendMode(PROFILE, 'steer')
     expect(localStorage.getItem(`mousse-profile-${PROFILE}-sendMode.v1`)).toBe('steer')
+  })
+})
+
+describe('"Also tell subagents" (docs/plans/tool-api.md §2.5)', () => {
+  const tell = () => host.querySelector<HTMLButtonElement>('.composer-tell-subagents-btn')
+  const told = [undefined, { steer: true, alsoSubagents: true }]
+
+  it('shows only while the thread has subagents working', () => {
+    render()
+    expect(tell()).toBeNull()
+    rerender({ tellSubagents: true })
+    expect(tell()!.getAttribute('aria-label')).toBe('Also tell subagents')
+  })
+
+  it('is on for a steer and off for a queued or ordinary message, unless the person flips it for this message', () => {
+    setProfileSendMode(PROFILE, 'steer')
+    let { onSend } = render({ tellSubagents: true })
+    expect(tell()!.getAttribute('aria-pressed')).toBe('true')
+    press()
+    expect(onSend.mock.lastCall).toEqual(told)
+    // Queued with the chord: off.
+    press({ ctrlKey: true })
+    expect(onSend.mock.lastCall).toEqual(queue)
+    // Flipped off for this steer: it goes alone, and the next steer is on again.
+    act(() => tell()!.click())
+    expect(tell()!.getAttribute('aria-pressed')).toBe('false')
+    press()
+    expect(onSend.mock.lastCall).toEqual(steer)
+    expect(tell()!.getAttribute('aria-pressed')).toBe('true')
+    press()
+    expect(onSend.mock.lastCall).toEqual(told)
+
+    // Queue mode: off; flipped on, the queued message goes to the subagents too.
+    setProfileSendMode(PROFILE, 'queue')
+    ;({ onSend } = rerender({ tellSubagents: true }))
+    expect(tell()!.getAttribute('aria-pressed')).toBe('false')
+    press()
+    expect(onSend.mock.lastCall).toEqual(queue)
+    act(() => tell()!.click())
+    press()
+    expect(onSend.mock.lastCall).toEqual([undefined, { alsoSubagents: true }])
+    // An ordinary message to an idle thread: off.
+    ;({ onSend } = rerender({ tellSubagents: true, loading: false }))
+    expect(tell()!.getAttribute('aria-pressed')).toBe('false')
+    act(() => sendButton().click())
+    expect(onSend.mock.lastCall).toEqual(queue)
   })
 })

@@ -129,7 +129,7 @@ export interface SubagentNoticeItem {
    * With `event: 'note'`: another agent's note (`thread_send` intent `note`). `childThreadId` and `title` are its
    * sender's; `from` says where the sender stands to this thread. The transcript shows its words, not the notice text.
    */
-  note?: { from: 'parent' | 'ancestor' | 'subagent' | 'sibling' | 'bot'; text: string }
+  note?: { from: 'parent' | 'ancestor' | 'subagent' | 'sibling' | 'bot' | 'person' | 'relay'; text: string }
   /**
    * With `event: 'monitor'`: what this thread's monitor, background command or hold reported (`delegationId` is its id,
    * `title` its description, `childThreadId` the thread itself), and on its last notice how it ended.

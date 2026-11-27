@@ -1013,7 +1013,9 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (result !== 'noted') return json({ result, note: workNoteAnswer(result, args.note, title, provenance) })
         // When the work takes it in, truly: the bot tells the owner that, as its own, when the owner's message asked for it.
         const reaches = call.deps.host.work.reach?.(call.botId, args.workId) ?? 'step_end'
-        return json({ result, reaches, note: workNoteAnswer(reaches, args.note, title, provenance) })
+        // The owner's own correction also reaches the work's subagents still working, through the bot port (§2.5).
+        const subagents = provenance ? [] : call.deps.host.work.noteSubagents?.(call.botId, args.workId, args.note) ?? []
+        return json({ result, reaches, note: workNoteAnswer(reaches, args.note, title, provenance), ...(subagents.length ? { subagents } : {}) })
       }
     }),
     ownTool(byName.get('remind')!, deps, {

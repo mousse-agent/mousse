@@ -119,6 +119,7 @@ import type { RunEngine } from '../../run/RunEngine'
 import { TERMINAL_RUN_STATUSES, type BotDelegation, type BotTurnPayload, type DelegationRecord, type RunRecord } from '../../run/types'
 import type { BotSubagentOutcome } from '../../run/delegation/botPort'
 import { readRunResultText } from '../../run/delegation/hold'
+import { botSubagentStartsWith, recordRevision, type TreeDelivery } from '../../run/delegation/treeCorrection'
 import { priceFor } from '../../usageHistory/pricing'
 import { createBotAuthority, type BotFileReadState } from '../authority/botAuthority'
 import { type BotChatImages, BotChatService, chatInput, messageInput } from '../chat/BotChatService'
@@ -7199,6 +7200,30 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
+   * The owner's correction of running work, passed on to its subagents still working (docs/plans/tool-api.md §2.5) by
+   * the port's own path, as the work's own message to each (`noteSubagent`): the model wrote it, so it is never the
+   * owner's words. One whose turn has not started yet starts with it, as does one the work's run starts later
+   * (`botSubagentStartsWith`), from the revision recorded here.
+   */
+  noteSubagents(botId: string, workId: string, note: string): Array<{ subagent: string; sent: boolean; why?: string }> {
+    const row = this.store.activation(workId)
+    const runs = this.host.runs()
+    const main = this.liveMain(workId)
+    if (!row || row.botId !== botId || row.lane !== 'run' || !note.trim() || !runs || !main) return []
+    const title = this.listWork(botId).now.find((work) => work.workId === workId)?.title.trim() || null
+    const deliveries: TreeDelivery[] = []
+    const sent = this.subagentRecords(workId).filter((record) => this.subagentRunning(record)).map((record) => {
+      const waiting = !this.subagentNotes.has(record.turns.at(-1)!.delegation.childRunId)
+      const outcome = waiting ? { sent: true as const } : this.noteSubagent(record, note)
+      const how = waiting ? 'starts_with_it' : 'refused' in outcome ? 'refused' : 'next_step'
+      deliveries.push({ threadId: record.threadId, title: record.spec.title, state: how === 'refused' ? 'not_sent' : 'pending', how })
+      return 'refused' in outcome ? { subagent: record.spec.title, sent: false, why: outcome.refused } : { subagent: record.spec.title, sent: true }
+    })
+    recordRevision(runs.store, { threadId: main.dispatch.threadId, title, text: note, deliveries })
+    return sent
+  }
+
+  /**
    * A subagent turn's steer: the messages its work sent it while it works (`noteSubagent`), taken in at its next step and
    * delivered once; one its runtime hands back waits again.
    */
@@ -7651,7 +7676,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     const browser = compiled.permissions.browser ? this.browserTurn(row, payload.runId, main.controller.signal) : undefined
     const first = runs.delegations.listForChildThread(delegation.childThreadId)[0]?.delegationId === delegation.delegationId
-    const prompt = payload.prompt ?? ''
+    // The owner's corrections of the work since the run that started it, which it could not take in while it waited.
+    const parentRun = runs.getRun(delegation.parentRunId)
+    const corrections = parentRun ? botSubagentStartsWith(runs.store, { workThreadId: delegation.parentThreadId, parentRun, childThreadId: delegation.childThreadId }) : []
+    const prompt = [payload.prompt ?? '', ...(corrections.length ? [subagentNoteText(corrections)] : [])].join('\n\n')
     return {
       activationId: row.id,
       dispatchN: 0,
@@ -9516,7 +9544,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       stop: (botId, workId) => this.stopWork(botId, workId),
       note: (botId, workId, note, from) => this.noteWork(botId, workId, note, from),
       reach: (botId, workId) => this.noteReach(botId, workId),
-      fromOwner: (botId, from) => this.noteFromOwner(botId, from)
+      fromOwner: (botId, from) => this.noteFromOwner(botId, from),
+      noteSubagents: (botId, workId, note) => this.noteSubagents(botId, workId, note)
     },
     questions: {
       ask: (botId, activationId, asks) => this.askOwner(botId, activationId, asks),
