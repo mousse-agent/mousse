@@ -168,9 +168,9 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     // With no turn of its own running, none; and never what no bot can hold.
     expect(thread(registry.listForThread('home').map((tool) => tool.name))).toEqual([])
     expect(registry.listForThread('home', runId).map((tool) => tool.name).filter((name) => name === 'delegate_task' || name === 'continue_subagent')).toEqual([])
-    // An ordinary thread lists it as an agent's: its own thread when the turn ends, or another by id.
+    // An ordinary thread lists it as an agent's: its own thread when the turn ends, or another by id or address.
     const own = registry.listForThread('mine').find((tool) => tool.name === 'thread_archive')
-    expect(Object.keys((own?.inputSchema as { properties: object }).properties).sort()).toEqual(['archived', 'clientRequestId', 'threadId'])
+    expect(Object.keys((own?.inputSchema as { properties: object }).properties).sort()).toEqual(['archived', 'clientRequestId', 'thread', 'threadId'])
   })
 
   // Who the bot may reach, by each tool that names a thread: whether read, send, wait, stop and archive go ahead. Every thread the

@@ -5,6 +5,7 @@ import { isStricter, type PermissionMode } from '../../shared/permissionMode'
 import { narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { DaemonEpoch } from './DaemonEpoch'
 import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreError'
+import { reservedAddressTitle } from './addressing'
 import { inheritedAgentChain, inheritedAgentHops } from './agentHops'
 import { AgentChains, chainIdOf } from './AgentChains'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from './delegation/sources'
@@ -1571,6 +1572,9 @@ un_time_limits). */
       // Admission: a Stop of the parent's thread after this run started fences it off (nothing awaits before the commit below).
       if (isRunAdmissionStale(this.store, parent.runId))
         reject('parent_stopping', 'The thread was stopped after this run started; the run cannot start subagents.')
+      // A subagent's title is its address, so it may not be one of the words and prefixes addresses are made of.
+      const reserved = input.title ? reservedAddressTitle(input.title) : undefined
+      if (reserved) reject('reserved_title', `A subagent can't be titled "${input.title!.trim()}": ${reserved} is how threads are addressed. Choose another title.`)
       const taken = input.title ? host.titleConflicts?.(input.parentThreadId, input.title) ?? [] : []
       if (taken.length) throw new TitleTakenRejection(input.title!, taken)
       const { threadId: childThreadId } = host.createThread({ kind: 'delegation', request: input })

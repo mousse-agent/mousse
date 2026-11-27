@@ -106,6 +106,7 @@ import { currentStopGeneration, runStopGeneration } from '../run/stopGeneration'
 import { buildSubagentView } from '../run/delegation/subagentView'
 import { correctionsStartingWith, reviseTree, type TreeRevision } from '../run/delegation/treeCorrection'
 import { resolveSubagent, subagentsTitled, type SubagentAddressSources } from '../run/delegation/subagentAddress'
+import { reservedAddressTitle } from '../run/addressing'
 import { cancelRequestKey, delegationRequestKey, followUpRequestKey } from '../run/delegation/policy'
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
@@ -9321,6 +9322,7 @@ export class OrchestratorService extends EventEmitter {
     } catch (error) {
       // A retry already replayed its receipt; what is left is a title that belongs to another subagent.
       if (error instanceof TitleTakenRejection) return this.titleTakenValue(parentThreadId, error)
+      if (error instanceof CommandRejection && error.reason === 'reserved_title') return { started: false as const, code: 'reserved_title' as const, message: error.message }
       if (error instanceof CommandRejection && error.reason === 'parent_stopping')
         return { started: false as const, code: 'parent_stopping' as const, message: error.message }
       throw error
@@ -9450,6 +9452,7 @@ export class OrchestratorService extends EventEmitter {
       })
     } catch (error) {
       if (error instanceof TitleTakenRejection) return this.titleTakenValue(parentThreadId, error)
+      if (error instanceof CommandRejection && error.reason === 'reserved_title') return { started: false as const, code: 'reserved_title' as const, message: error.message }
       if (error instanceof CommandRejection && error.reason === 'parent_stopping')
         return { started: false as const, code: 'parent_stopping' as const, message: error.message }
       throw error
@@ -9657,6 +9660,8 @@ export class OrchestratorService extends EventEmitter {
         return
       }
       if (lineage?.relationship !== 'subagent') return
+      const reserved = reservedAddressTitle(name)
+      if (reserved) throw new DomainRpcError('reserved_title', `A subagent can't be titled "${name.trim()}": ${reserved} is how threads are addressed.`, { title: name, reserved })
       const taken = this.subagentTitleConflicts(lineage.parentThreadId, name).filter((threadId) => threadId !== thread.id)
       if (taken.length)
         throw new DomainRpcError('title_taken', `Another subagent of the same thread is already titled "${name}".`, { title: name, threadIds: taken })

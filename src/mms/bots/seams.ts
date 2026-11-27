@@ -162,7 +162,8 @@ export interface BotToolHost {
    * owner asked for. `send` throws, with why in words for the bot, when the message can't go. Absent: none here.
    */
   bots?: {
-    list(botId: string): Array<{ name: string; does: string; paused?: true }>
+    /** `botId`: what an address (`bot:<name>`) records, so a retry reaches the same bot after a rename; never shown to a bot. */
+    list(botId: string): Array<{ botId: string; name: string; does: string; paused?: true }>
     /** `held`: past its chain's limit, it waits for the owner's Continue or Stop (issue #1443). */
     send(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string; held?: { holdId: string } }>
   }

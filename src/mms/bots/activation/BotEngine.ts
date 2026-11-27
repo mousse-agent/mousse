@@ -9736,7 +9736,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       show: (botId, activationId, card) => this.showCard(botId, activationId, card)
     },
     bots: {
-      list: (botId) => this.otherBots(botId).map((bot) => ({ name: bot.name, does: bot.does, ...(bot.paused ? { paused: true as const } : {}) })),
+      list: (botId) => this.otherBots(botId).map((bot) => ({ botId: bot.botId, name: bot.name, does: bot.does, ...(bot.paused ? { paused: true as const } : {}) })),
       send: (botId, from, input) => this.sendBotMessage(botId, from, input)
     },
     jobs: {
