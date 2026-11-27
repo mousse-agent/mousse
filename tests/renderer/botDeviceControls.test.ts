@@ -177,7 +177,7 @@ describe('Settings → Devices → Bots on this computer', () => {
   const request = vi.fn(async (method: string, params?: { node?: string; bots?: boolean }) => {
     switch (method) {
       case 'netEngine.status': return { enabled: false, on: false, helper: { state: 'off' }, devices: [], approvals: [] }
-      case 'net.status': return { enabled: true, keystore: 'unlocked', protected: true, self: { node: 'nod_self', isAuthority: true }, transports: [], peers: [], routes: [], workOnThreads: true, shareBots: true }
+      case 'net.status': return { enabled: true, keystore: 'unlocked', protected: true, self: { node: 'nod_self', isAuthority: true }, transports: [], peers: [], routes: [], workOnThreads: true }
       case 'net.transport.list': return { manifests: [], records: {}, settings: {} }
       case 'net.ssh.list': return { records: [] }
       case 'bridge.nodes': return { nodes }

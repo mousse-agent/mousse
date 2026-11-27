@@ -19,7 +19,7 @@ import {
   type Device
 } from '../../lib/netDevices'
 import { mousseIdAvailable, useMousseIdStore } from '../../stores/mousseIdStore'
-import { SettingsRow, Switch } from '../settings/SettingsRow'
+import { SettingsRow } from '../settings/SettingsRow'
 
 /*
  * The old networking, drawn in the engine's layout. It keeps serving the devices paired under it, phones and
@@ -99,7 +99,7 @@ export const legacyHow = (device: Device): string | undefined =>
 /** What a device may do here, as the row's last words; undefined when it may do nothing worth naming. */
 export function accessShort(
   device: Device | undefined,
-  switches: { workOnThreads: boolean; shareBots: boolean }
+  switches: { workOnThreads: boolean }
 ): string | undefined {
   if (!device?.policy) return undefined
   if (device.policy.blocked) return 'Blocked here'
@@ -311,32 +311,6 @@ export function LegacyUnlockRow({
             Unlock
           </button>
         </form>
-      }
-    />
-  )
-}
-
-/** "Share bots with other devices", where the old networking is set up on this computer. */
-export function LegacyShareBotsRow({
-  on,
-  busy,
-  onChange
-}: {
-  on: boolean
-  busy: boolean
-  onChange: (next: boolean) => void
-}) {
-  return (
-    <SettingsRow
-      title="Share bots with other devices"
-      anchor="devices-bots"
-      description={
-        on
-          ? 'On · my phones and other devices can see and chat with this computer’s bots'
-          : 'Off · my other devices don’t see this computer’s bots'
-      }
-      control={
-        <Switch checked={on} label="Share bots with other devices" disabled={busy} onChange={onChange} />
       }
     />
   )

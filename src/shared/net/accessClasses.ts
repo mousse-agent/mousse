@@ -11,9 +11,11 @@ import { botMethodAccess } from '../bots/personal/methodTable'
  *
  * - `view`: reads threads, lists and what a transcript already shows, and the connection's own traffic. Passes for
  *   every device this computer serves.
- * - `bots_chat`: a bot's chat, its replies, asks and pictures, and dictation; held to the device's Bots switch and each
- *   bot's Devices choice, and runs within the bot's own permissions.
+ * - `bots_chat`: a bot's chat, its replies, asks and pictures; held to the device's Bots switch and each bot's Devices
+ *   choice, and runs within the bot's own permissions.
  * - `bots_manage`: makes a bot or changes one (its name, look, permissions, memory, schedules, pause).
+ * - `speech`: dictation and read-aloud for any message, on this computer's speech models. Passes for every device this
+ *   computer serves, View and chat included; it never follows bot access.
  * - `work`: starts, sends to, steers, stops or changes threads, their queue, settings, files and Git, projects,
  *   automations and agent chats; and reads that expose the computer's files (Files, Git, review).
  * - `terminal`: opens, reads or types into a terminal (the device's terminal switch governs it).
@@ -24,7 +26,7 @@ import { botMethodAccess } from '../bots/personal/methodTable'
  * "Work on threads from this device" off (`net_node_policy.work`) refuses `work` and `bots_manage` in every family,
  * with the reason `work_off`. Kept apart from the rows of `ROUTED_METHODS` and keyed by the Net method name.
  */
-export const ACCESS_CLASSES = ['view', 'bots_chat', 'bots_manage', 'work', 'terminal', 'editor', 'update'] as const
+export const ACCESS_CLASSES = ['view', 'bots_chat', 'bots_manage', 'speech', 'work', 'terminal', 'editor', 'update'] as const
 export type AccessClass = (typeof ACCESS_CLASSES)[number]
 
 const routed = (classes: Record<string, AccessClass>): Record<string, AccessClass> =>
@@ -88,12 +90,12 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
   'queue.reorder': 'work',
   'queue.promoteToSteer': 'work',
   // Dictation and read-aloud for any message, a bot's included: runs nothing on a thread.
-  'speech.options': 'bots_chat',
-  'speech.choose': 'bots_chat',
-  'speech.download': 'bots_chat',
-  'speech.upload': 'bots_chat',
-  'speech.transcribe': 'bots_chat',
-  'speech.speak': 'bots_chat',
+  'speech.options': 'speech',
+  'speech.choose': 'speech',
+  'speech.download': 'speech',
+  'speech.upload': 'speech',
+  'speech.transcribe': 'speech',
+  'speech.speak': 'speech',
 
   // ---------------------------------------------------------------- Bridge: streams, lists, agent chats, hub
   'bridge.thread.open': 'view',

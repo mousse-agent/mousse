@@ -107,7 +107,6 @@ export const BRIDGE_HELP = `Usage:
   mousse-cli bridge caps <node-id> --caps read,chat,write,settings
   mousse-cli bridge kind <node-id> computer|phone
   mousse-cli bridge threads [on|off]
-  mousse-cli bridge bots [on|off]
   mousse-cli bridge editor-server [system|mousse]
 
 link makes a connect link: one line of text to paste on the other computer. On the computer
@@ -129,9 +128,6 @@ computer's own SSH server (it needs one running, and a key it accepts). Without 
 shows the setting. A Windows computer always uses its own SSH server for now, and a device that had its editor switch on before the endpoint existed keeps using it until that switch is turned off.
 threads turns on (or off) whether your other computers may work on this computer's threads;
 without an argument it shows the setting. It is on by default and only changes this computer.
-bots turns on (or off) "Share bots with other devices": whether your phones and other computers
-list and use this computer's personal bots; without an argument it shows the setting. It is on by
-default and only changes this computer.
 Only the current authority can invite, revoke or rename nodes, change capabilities or set a
 device's kind. block, unblock and limits act on this computer only, on any computer: a blocked
 device is refused every Bridge call and stream here until unblocked. limits --bots off keeps
@@ -198,12 +194,10 @@ type NetMethod =
   | 'net.link.make'
   | 'net.link.paste'
   | 'bridge.workOnThreads'
-  | 'bridge.shareBots'
   | 'bridge.editorServer'
 /** CLI subcommands that are one daemon method with fixed arguments. */
 const BRIDGE_ALIASES: Record<string, NetMethod> = {
   threads: 'bridge.workOnThreads',
-  bots: 'bridge.shareBots',
   'editor-server': 'bridge.editorServer',
   block: 'bridge.policy',
   unblock: 'bridge.policy',
@@ -399,7 +393,6 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     'net.link.make': ['name', 'protect'],
     'net.link.paste': ['name', 'start-over', 'protect', 'link-file'],
     'bridge.workOnThreads': [],
-    'bridge.shareBots': [],
     'bridge.editorServer': []
   }
   const permitted = options[method]
@@ -447,7 +440,6 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
               : method === 'bridge.join' ||
                   method === 'net.link.paste' ||
                   method === 'bridge.workOnThreads' ||
-                  method === 'bridge.shareBots' ||
                   method === 'bridge.editorServer'
                 ? undefined
                 : 0
@@ -655,12 +647,6 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     const [setting, extra] = args.positional
     if (extra !== undefined || (setting !== undefined && setting !== 'on' && setting !== 'off'))
       invalid('bridge threads takes on or off, or nothing to show the setting.')
-    if (setting !== undefined) params.enabled = setting === 'on'
-  }
-  if (method === 'bridge.shareBots') {
-    const [setting, extra] = args.positional
-    if (extra !== undefined || (setting !== undefined && setting !== 'on' && setting !== 'off'))
-      invalid('bridge bots takes on or off, or nothing to show the setting.')
     if (setting !== undefined) params.enabled = setting === 'on'
   }
   if (method === 'bridge.editorServer') {

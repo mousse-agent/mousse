@@ -22,7 +22,7 @@ import { REMOTE_BOT_REACH, type BotDeviceAccess } from '../../../shared/bots/per
  * asks, its pause, what it remembers and the rest of About, and a new bot. Deny-default like `BRIDGE_REMOTE_METHODS`;
  * each one calls the same `BotChatService` method the desktop's `bots.*` handler calls, with the same params (less
  * `attachments`, which name files on this computer) and results. No result carries a model, an instance id or a path
- * on this computer. While "Share bots with other devices" is off, every one is refused. Which methods these are, their
+ * on this computer. Which methods these are, their
  * keys and their access classes are the `remote` rows of `BOT_METHODS` (`shared/bots/personal/methodTable.ts`).
  *
  * Which devices reach which bot (`docs/bots.md`, Which devices reach a bot) is checked in `remoteBotMethods`'s one
@@ -403,12 +403,6 @@ export function remoteBotMethods(options: {
   /** The profile's bots; undefined when its `bots.db` could not be opened. */
   bots(): RemoteBotsPort | undefined
   /**
-   * "Share bots with other devices": undefined while it is on, the refusal's words while it is off. Every call is
-   * refused then, with `forbidden` and the reason `setting_off` (the words stay on this computer: an error's own
-   * words never cross the wire).
-   */
-  refusal?(): string | undefined
-  /**
    * The most this computer lets the calling device run a turn in (Settings, Devices). A message from it holds what the
    * bot starts or messages in that chat turn to it, and its Allow of "use your threads" needs Full access. The service
    * passes `botDeviceLimitFrom` (a device with none on record: Accept edits). Absent (tests only): the strictest, Ask.
@@ -434,12 +428,10 @@ export function remoteBotMethods(options: {
     }
   }
   const shared = (node: string): void => {
-    const words = options.refusal?.()
-    if (words) throw new NetError('forbidden', words, { details: { reason: 'setting_off' } })
-    // The device's own switch for bots here: off, it is answered as if this computer shared none (only the code and the
-    // reason cross the wire, the same for every bot, so nothing tells one bot from another).
+    // The device's own switch for bots here: off, every call is refused alike (only the code and the reason cross the
+    // wire, the same for every bot, so nothing tells one bot from another).
     if (options.reach && !options.reach.deviceOn(node))
-      throw new NetError('forbidden', "This computer doesn't share its bots with this device.", { details: { reason: 'setting_off' } })
+      throw new NetError('forbidden', "This computer doesn't let this device reach its bots.", { details: { reason: 'bots_off' } })
   }
   const bots = (context: RpcContext): RemoteBotsPort => {
     shared(context.caller.node)

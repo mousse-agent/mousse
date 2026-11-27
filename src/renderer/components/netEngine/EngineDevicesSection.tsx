@@ -77,7 +77,6 @@ import {
   legacyOn,
   LegacyHeldRow,
   LegacyJoinRow,
-  LegacyShareBotsRow,
   LegacyUnfinishedSshRow,
   LegacyUnlockRow,
   useLegacyNet
@@ -271,7 +270,7 @@ export function EngineDevicesSection() {
   const authority = !!v1?.self?.isAuthority
   const locked = v1?.keystore === 'locked'
   const now = Date.now()
-  const switches = { workOnThreads: v1?.workOnThreads !== false, shareBots: v1?.shareBots !== false }
+  const switches = { workOnThreads: v1?.workOnThreads !== false }
 
   const toggleNetworking = async (next: boolean) => {
     if (next) {
@@ -599,7 +598,7 @@ export function EngineDevicesSection() {
     // computer never dials it; the engine's own state says whether it is connected.
     const level =
       inView && !inView.warn && node && !showsLevel(node)
-        ? accessShort({ ...node, connection: undefined }, { workOnThreads: true, shareBots: true })
+        ? accessShort({ ...node, connection: undefined }, { workOnThreads: true })
         : undefined
     return {
       node: device.node,
@@ -884,9 +883,8 @@ export function EngineDevicesSection() {
   // This computer: what it shares with my other devices.
   const engineWorkHere = status?.workOnThreads !== undefined
   const workHere = engineWorkHere ? status?.workOnThreads : v1Ready ? v1?.workOnThreads : undefined
-  const shareBots = v1Ready && v1?.shareBots !== undefined
   const unlock = !!v1?.self && locked
-  const thisComputer = workHere !== undefined || shareBots || unlock
+  const thisComputer = workHere !== undefined || unlock
 
   // Reach: the old networking's ways in and relays, only where they are on or set today.
   const oldWays = legacyAddonsOn(legacy) || legacy.records.tailscale?.action === 'serve'
@@ -1016,13 +1014,6 @@ export function EngineDevicesSection() {
                   enabled: next
                 })
               }
-            />
-          )}
-          {shareBots && (
-            <LegacyShareBotsRow
-              on={v1?.shareBots !== false}
-              busy={busy}
-              onChange={(next) => void action('bridge.shareBots', { enabled: next })}
             />
           )}
           {unlock && (

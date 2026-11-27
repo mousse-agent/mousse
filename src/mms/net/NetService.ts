@@ -218,12 +218,6 @@ interface NetConfiguration {
    */
   workOnThreads?: boolean
   /**
-   * "Share bots with other devices": the owner's personal bots of this computer are listed for, and used from, the
-   * user's phones and other computers unless this is turned off (on when absent). Read on every call and every lists
-   * push, so turning it off also ends what an open lists stream shows.
-   */
-  shareBots?: boolean
-  /**
    * "Use this computer's SSH server" for editor connections from other computers: the owner's choice for this
    * computer. Off when absent: Mousse's own SSH endpoint answers. It is written only while it is on, so a profile
    * that never used it stays readable by an earlier version.
@@ -259,6 +253,8 @@ const JOIN_CLOCK_LIMIT_MS = 30_000
  * members keep moving the role (list sync, renewals and routes travel as session messages, not calls).
  */
 const CONTROL_METHOD = /^authority\.transfer\./
+/** `net_local_markers`: "Share bots" was off and only the devices known without the user's list were switched off yet. */
+const BOTS_UNSHARED_PARTIAL = 'bots-unshared.partial'
 /** The refusal of a device of this user's list that is not connected here. */
 const notConnected = () =>
   new NetError('forbidden', undefined, { details: { reason: 'not_connected' } })
@@ -428,6 +424,8 @@ export class NetService {
   private webrtcBlockedFor = ''
   private stopped = false
   private disabled = false
+  /** "Share bots" was off and the user's list could not be read yet: `shareBots: false` stays stored (`keepBotsUnshared`). */
+  private botsUnsharedPending = false
   private disabling?: Promise<NetStatus>
   private lastError?: keyof typeof NET_ERRORS
   private renewal?: { cancel(): void }
@@ -463,7 +461,6 @@ export class NetService {
   /** The tunnels `mousse-cli net ssh-proxy` holds on this computer's local connections. */
   private localTunnelStore?: LocalEditorTunnels
   private readonly editorFirstOpen = new Set<(node: NodeId) => void>()
-  private readonly shareBotsListeners = new Set<() => void>()
   /** Loopback listeners that exist only while a remote machine joins; never persisted. */
   private readonly enrollmentListeners = new Set<DirectTransport>()
   /**
@@ -562,6 +559,8 @@ export class NetService {
     if (this.state) return this.state
     setAsideKeychainNetwork(this.options.profileDir)
     const db = new NetDatabase({ profileDir: this.options.profileDir, clock: this.clock })
+    let botsUnshared = false
+    this.botsUnsharedPending = false
     try {
       db.transaction(() =>
         db.database.exec(
@@ -591,8 +590,13 @@ export class NetService {
         delete cfg.preparedForJoin
         if (cfg.workOnThreads !== undefined && typeof cfg.workOnThreads !== 'boolean')
           throw new NetError('storage_corrupt')
-        if (cfg.shareBots !== undefined && typeof cfg.shareBots !== 'boolean')
+        // "Share bots with other devices" is gone: a computer that had it off keeps every device out of its bots
+        // through each device's own Bots switch (`keepBotsUnshared`, below), and the key is dropped.
+        const legacy = cfg as NetConfiguration & { shareBots?: unknown }
+        if (legacy.shareBots !== undefined && typeof legacy.shareBots !== 'boolean')
           throw new NetError('storage_corrupt')
+        botsUnshared = legacy.shareBots === false
+        delete legacy.shareBots
         if (cfg.editorSystemSsh !== undefined && typeof cfg.editorSystemSsh !== 'boolean')
           throw new NetError('storage_corrupt')
         if (
@@ -693,6 +697,7 @@ export class NetService {
         const listed = listedOwnNodes(identity)
         if (listed) connections.migrate(listed)
       }
+      if (botsUnshared) this.keepBotsUnshared(db, identity, policy)
       const rpc = new DurableRpcDispatcher({
           db,
           identity,
@@ -1001,11 +1006,47 @@ export class NetService {
     return this.runtime()
   }
   private saveConfig(): void {
-    const { db } = this.runtime()
+    this.writeConfig(this.runtime().db)
+  }
+  /**
+   * Once, for a computer that had "Share bots with other devices" off: every device it knows (its user's list, every
+   * device with a record here, every engine pairing) gets its Bots switch off, so none reaches a bot it could not reach
+   * before, and the configuration is saved without the old switch in the same transaction, so this never runs again.
+   * A list that cannot be read now is left for the next start, as the connections record does: the devices known
+   * otherwise are switched off at once, `shareBots: false` stays stored, and each later start switches off the listed
+   * devices that still have no row of their own (a device with one has the owner's choice since), until the list reads.
+   */
+  private keepBotsUnshared(db: NetDatabase, identity: NetIdentityService, policy: SqliteNodePolicy): void {
+    const listed = listedOwnNodes(identity)
+    const partial = !!db.database
+      .prepare('SELECT 1 FROM net_local_markers WHERE name=?')
+      .get(BOTS_UNSHARED_PARTIAL)
+    const nodes = new Set<string>(listed ?? [])
+    if (partial) for (const row of policy.list()) nodes.delete(row.node)
+    else {
+      for (const row of policy.list()) nodes.add(row.node)
+      for (const row of db.database.prepare('SELECT node FROM net_connections').all()) nodes.add(String(row.node))
+      if (db.database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='net_engine_peers'").get())
+        for (const row of db.database.prepare('SELECT local_id FROM net_engine_peers').all()) nodes.add(String(row.local_id))
+    }
+    db.transaction(() => {
+      for (const node of nodes) if (isId('node', node)) policy.set(node as NodeId, { bots: false })
+      this.botsUnsharedPending = listed === undefined
+      if (this.botsUnsharedPending)
+        db.database
+          .prepare('INSERT OR IGNORE INTO net_local_markers VALUES(?,?)')
+          .run(BOTS_UNSHARED_PARTIAL, Math.trunc(this.clock.now()))
+      else db.database.prepare('DELETE FROM net_local_markers WHERE name=?').run(BOTS_UNSHARED_PARTIAL)
+      this.writeConfig(db)
+    })
+  }
+  private writeConfig(db: NetDatabase): void {
     // An earlier version rejects any other key in `features` as corrupt storage and then fails to load Net
     // at all. The routing flag is on by default, so it is written only while it is off: a profile that
     // never turned it off can go back to an earlier build.
-    const { features, ...rest } = this.config
+    const { features, ...config } = this.config
+    // Kept while the update that replaced it waits for the user's list (`keepBotsUnshared`); an earlier build reads it.
+    const rest = this.botsUnsharedPending ? { ...config, shareBots: false } : config
     const stored: NetConfiguration = features
       ? {
           ...rest,
@@ -1398,19 +1439,6 @@ export class NetService {
           this.requireEnrolled()
           if (params.enabled !== undefined) this.setWorkOnThreads(params.enabled === true)
           return { enabled: this.config.workOnThreads !== false }
-        }
-        case 'bridge.shareBots': {
-          // "Share bots with other devices". Any computer sets it for itself; the bot methods and the lists read it
-          // on every call and push, so turning it off takes effect at once.
-          this.requireEnrolled()
-          if (params.enabled !== undefined) {
-            const was = this.config.shareBots !== false
-            this.config = { ...this.config, shareBots: params.enabled === true }
-            this.saveConfig()
-            if (was !== (params.enabled === true)) for (const listener of [...this.shareBotsListeners]) listener()
-            this.emit()
-          }
-          return { enabled: this.config.shareBots !== false }
         }
         case 'bridge.editorServer': {
           // "Use this computer's SSH server" for editor connections from other computers. Any computer sets it
@@ -3126,7 +3154,7 @@ export class NetService {
    * `bridge.access.mine`: what this computer lets `caller` do here now. Each answer is a real call's checks, run through
    * the dispatcher's own authorization (the grant, connected here, the block, "Let my other computers work here", the
    * per-device switches) without running anything, plus the checks a method makes in its handler: an editor
-   * connection's (`deviceRefusal`) and the bots' (Share bots and the device's Bots switch).
+   * connection's (`deviceRefusal`) and the bots' (the device's Bots switch).
    */
   private accessMine(caller: RpcCaller): BridgeAccessMine {
     const rt = this.requireEnrolled(),
@@ -3151,7 +3179,7 @@ export class NetService {
         threads &&
         passes('routed.editor.folder') &&
         (isEngineCaller(caller) || this.deviceRefusal(caller.node) === undefined),
-      bots: passes('bots.chat.list') && this.sharesBots() && policy.bots,
+      bots: passes('bots.chat.list') && policy.bots,
       maxPermissionMode: policy.maxPermissionMode,
       agentReach: policy.agentReach
     }
@@ -4393,7 +4421,6 @@ export class NetService {
         enabled: this.config.enabled,
         features: { ...this.config.features! },
         workOnThreads: this.config.workOnThreads !== false,
-        shareBots: this.config.shareBots !== false,
         editorServer: this.editorServerView(),
         ...(this.disabled ? { restartRequired: true } : {}),
         keystore: rt.keys.state(),
@@ -4433,15 +4460,6 @@ export class NetService {
     ) {
       throw new NetError('disabled')
     }
-  }
-  /** "Share bots with other devices" (on unless this computer turned it off). */
-  sharesBots(): boolean {
-    return this.config.shareBots !== false
-  }
-  /** Called when "Share bots with other devices" turns on or off. */
-  onShareBotsChanged(listener: () => void): () => void {
-    this.shareBotsListeners.add(listener)
-    return () => this.shareBotsListeners.delete(listener)
   }
   featureEnabled(feature: keyof NetFeatureFlags): boolean {
     return (

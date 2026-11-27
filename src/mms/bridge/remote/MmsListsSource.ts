@@ -6,7 +6,6 @@ import { rollUpActivities, visibleThreads, isLocalOnlyThread } from '../../../sh
 import { mmsJson } from './jsonOutput'
 import { remoteBotSummary } from './RemoteBots'
 import { withHiddenBots } from './botReach'
-import type { BotsSharingPort } from '../../protocol/botsSharingPort'
 import type { BotReachPort } from '../../protocol/botReachPort'
 import { copyLimits } from '../copyLimits'
 import { TurnMarks, type ListsMarks, type TurnMarksServices } from './turnMarks'
@@ -158,8 +157,6 @@ export type ListsServices = Pick<
     chats: { snapshot(): { chats: ChatSummary[] }; onChange(listener: () => void): () => void }
   }
   personalBots?: ListsBotsPort | null
-  /** "Share bots with other devices": while it refuses, the lists carry no bots. */
-  botsSharing?: BotsSharingPort
   /** Which devices reach which bot: the lists of one device carry only the bots it reaches. */
   botReach?: BotReachPort
   /** Whether a thread waits on a secret, which only the owner types: such a wait is never the bot's (`ListsMarks`). */
@@ -308,9 +305,8 @@ export class MmsListsSource {
     if (this.watchers === 0 || this.botsStale || !this.bots) {
       const engine = this.services.personalBots
       try {
-        // Off: "Share bots with other devices" is off on this computer.
         const hidden = this.services.botReach?.hiddenFor(this.options.reader)
-        this.bots = engine && !this.services.botsSharing?.refusal()
+        this.bots = engine
           ? engine.service.list().bots.filter((bot) => !hidden?.(bot.id)).map((bot) => botOf(bot, engine.liveActivity(bot.id)))
           : []
       } catch {
@@ -558,8 +554,6 @@ export class MmsListsSource {
         bots.on(event, botsChanged)
         disposers.push(() => bots.off(event, botsChanged))
       }
-    const sharing = s.botsSharing
-    if (sharing) disposers.push(sharing.onChange(botsChanged))
     // A bot's Devices choice, a device's switch for bots, or the devices on the account changed.
     const reach = s.botReach
     if (reach) disposers.push(reach.onChange(botsChanged))

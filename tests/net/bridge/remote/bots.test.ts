@@ -451,11 +451,11 @@ describe('bot methods on a real bot', () => {
   })
 })
 
-describe('"Share bots with other devices"', () => {
-  it('while it is off, every method refuses before it reads anything', async () => {
+describe('"Bots on this computer" off for the calling device', () => {
+  it('every method refuses before it reads anything', async () => {
     let reads = 0
     const port = new Proxy({}, { get: () => () => { reads++; return {} } }) as RemoteBotsPort
-    const methods = remoteBotMethods({ bots: () => port, refusal: () => "Desk doesn't share its bots with other devices." })
+    const methods = remoteBotMethods({ bots: () => port, reach: { deviceOn: () => false, canReach: () => true } })
     const params: Record<RemoteBotMethod, unknown> = {
       'bots.get': { botId: BOT },
       'bots.chat.list': { botId: BOT },
@@ -482,46 +482,11 @@ describe('"Share bots with other devices"', () => {
     }
     for (const name of Object.keys(REMOTE_BOT_METHODS) as RemoteBotMethod[]) {
       const error = await refused(() => call(methods, name, params[name]))
-      expect(error).toMatchObject({ code: 'forbidden', message: "Desk doesn't share its bots with other devices.", details: { reason: 'setting_off' } })
+      expect(error).toMatchObject({ code: 'forbidden', details: { reason: 'bots_off' } })
       // The handler refuses too, for a call admitted just before the switch went off.
       await expect(methods.find((entry) => entry.method === name)!.handle(params[name], context)).rejects.toMatchObject({ code: 'forbidden' })
     }
     expect(reads).toBe(0)
-  })
-
-  it('while it is off, the lists carry no bots, and turning it on or off pushes them again', async () => {
-    const f = botFixture()
-    try {
-      const { botId } = await createBot(f, { name: 'Penny', reply: 'Hello.' })
-      let off = false
-      const listeners = new Set<() => void>()
-      const services = listsServices(f.bots, {
-        refusal: () => (off ? "Desk doesn't share its bots with other devices." : undefined),
-        onChange: (listener: () => void) => {
-          listeners.add(listener)
-          return () => listeners.delete(listener)
-        }
-      })
-      const timeouts: Array<() => void> = []
-      const lists = new MmsListsSource(services, fakeTimers(timeouts))
-      expect(lists.snapshot().bots.map((bot) => bot.id)).toEqual([botId])
-      let pushes = 0
-      const stop = lists.watch(() => pushes++)
-      off = true
-      for (const listener of listeners) listener()
-      timeouts.splice(0).forEach((run) => run())
-      expect(pushes).toBe(1)
-      expect(lists.snapshot()).toMatchObject({ version: 1, bots: [] })
-      off = false
-      for (const listener of listeners) listener()
-      timeouts.splice(0).forEach((run) => run())
-      expect(pushes).toBe(2)
-      expect(lists.snapshot().bots).toHaveLength(1)
-      stop()
-      expect(listeners.size).toBe(0)
-    } finally {
-      f.close()
-    }
   })
 })
 
@@ -622,7 +587,7 @@ function fakeTimers(timeouts: Array<() => void>) {
   }
 }
 
-function listsServices(bots: unknown, botsSharing?: unknown): ListsServices {
+function listsServices(bots: unknown): ListsServices {
   return {
     threads: Object.assign(new EventEmitter(), { listAllThreads: () => [] }),
     projects: { listProjects: () => [] },
@@ -631,8 +596,7 @@ function listsServices(bots: unknown, botsSharing?: unknown): ListsServices {
     questions: new EventEmitter(),
     events: new EventEmitter(),
     platform: { chats: { snapshot: () => ({ chats: [] }), onChange: () => () => undefined } },
-    personalBots: bots,
-    ...(botsSharing ? { botsSharing } : {})
+    personalBots: bots
   } as unknown as ListsServices
 }
 

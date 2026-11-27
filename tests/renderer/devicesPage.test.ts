@@ -36,7 +36,7 @@ const request = vi.fn(async (method: string, _params?: unknown) => {
     case 'net.status':
       return {
         enabled: daemon.enabled, keystore: 'unlocked', protected: true, rosterState: 'ok', routes: [], transports: [],
-        self: { node: 'nod_self', user: 'usr_a', isAuthority: true, removed: daemon.removed }, peers: [], workOnThreads: true, shareBots: true, error: daemon.error
+        self: { node: 'nod_self', user: 'usr_a', isAuthority: true, removed: daemon.removed }, peers: [], workOnThreads: true, error: daemon.error
       }
     case 'net.plus.status': return daemon.plus
     case 'net.init':

@@ -125,9 +125,8 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Vocabulary', section: 'speech', anchor: 'speech-vocabulary', keywords: ['dictation', 'names', 'spelling'], needs: { anchor: 'speech-dictation', reason: 'Vocabulary appears once you choose a dictation model that uses it, such as Parakeet.' } },
 
   { title: 'Let my other devices work here', section: 'connections', anchor: 'devices-inbound', keywords: ['remote', 'sharing', 'computers', "let my other devices work on this device's threads"] },
-  { title: 'Share bots with other devices', section: 'connections', anchor: 'devices-bots', keywords: ['bots', 'phone', 'mobile', 'sharing', 'personal bots', 'mousse bot'], needs: { anchor: 'devices-list', reason: 'Appears while devices paired before this version are connected.' } },
   { title: 'Unlock to reach older devices', section: 'connections', anchor: 'devices-passphrase', keywords: ['unlock', 'passphrase', 'network keys'], needs: { anchor: 'devices-list', reason: 'Appears only while the passphrase is needed after a restart.' } },
-  { title: 'Your devices', section: 'connections', anchor: 'devices-list', keywords: ['networking', 'network', 'pair', 'add device', 'my devices', 'use another computer', 'let a device in', 'scan', 'link', 'ssh', 'qr', 'code', 'access', 'phone', 'computers', 'both ways'] },
+  { title: 'Your devices', section: 'connections', anchor: 'devices-list', keywords: ['networking', 'network', 'pair', 'add device', 'my devices', 'use another computer', 'let a device in', 'scan', 'link', 'ssh', 'qr', 'code', 'access', 'phone', 'computers', 'both ways', 'bots', 'bots on this computer', 'personal bots'] },
   { title: 'Mousse Plus', section: 'connections', anchor: 'devices-plus', keywords: ['plus', 'relay', 'sign in', 'hosts'] },
   { title: 'Reach this computer', section: 'connections', anchor: 'devices-engine-reach', keywords: ['same network', 'wi-fi', 'lan', 'tailscale', 'port forward', 'tunnel', 'relay', 'internet'] },
   { title: 'Let my editor reach my other devices', section: 'connections', anchor: 'devices-editors', keywords: ['editors', 'ssh', 'computers'] },

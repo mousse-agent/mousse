@@ -155,7 +155,7 @@ it('a phone left out of a bot\'s list finds no such bot, a phone switched off fi
 
   // Settings → Devices → Bots on this computer, off for the owner's own phone: it reaches no bot either.
   await o.net.request('bridge.policy', { node: mine.node, bots: false })
-  expect(await mine.answer('bots.get', { botId: bot.id })).toMatchObject({ code: 'forbidden', details: { reason: 'setting_off' } })
+  expect(await mine.answer('bots.get', { botId: bot.id })).toMatchObject({ code: 'forbidden', details: { reason: 'bots_off' } })
   await o.net.request('bridge.policy', { node: mine.node, bots: true })
   expect(await mine.answer('bots.get', { botId: bot.id })).toMatchObject({ ok: { summary: { id: bot.id } } })
 
