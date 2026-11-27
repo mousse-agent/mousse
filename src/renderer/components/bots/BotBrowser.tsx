@@ -36,7 +36,9 @@ function hostOf(url: string | undefined): string {
  * while on screen. While the split view is open it shows the same tab larger: the preview is then one
  * line, with no picture, and asks for none.
  */
-export function BotBrowserPreview({ bot, view }: { bot: BotSummary; view: BotBrowserView }) {
+export function BotBrowserPreview({ bot, view: given }: { bot: BotSummary; view: BotBrowserView }) {
+  // Its picture and cursor as they are now: the chat that passes `view` keeps it still between pictures.
+  const view = useBotBrowserStore((state) => state.views[bot.id]) ?? given
   const host = hostOf(view.tab?.url)
   const figure = useRef<HTMLElement>(null)
   const paneOpen = useBotBrowserStore((state) => state.pane === bot.id)

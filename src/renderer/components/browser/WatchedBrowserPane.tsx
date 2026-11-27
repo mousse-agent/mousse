@@ -216,7 +216,7 @@ function ControlToggle({ user, held, elsewhere, busy, take, giveBack }: { user: 
   </button>
 }
 
-export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { percent?: number } }>({ kit, browserKey, label, user, view, line, lineDetail, closed, open, fullScreen, className }: {
+export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { percent?: number } }>({ kit, browserKey, label, user, view: given, line, lineDetail, closed, open, fullScreen, className }: {
   kit: WatchedBrowserKit<V>
   /** The browser's key in its store (a bot's id, a thread's id). */
   browserKey: string
@@ -237,6 +237,8 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   fullScreen?: WatchedBrowserFullScreen
   className?: string
 }) {
+  // The picture and cursor as they are now: whoever passed `view` may keep it still between pictures.
+  const view = (kit.useStore((state) => state.views[browserKey]) as V | undefined) ?? given
   const busy = kit.useStore((state) => state.busy)
   const error = kit.useStore((state) => state.error)
   const errorDetail = kit.useStore((state) => state.errorDetail)

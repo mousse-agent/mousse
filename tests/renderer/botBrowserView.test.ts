@@ -793,3 +793,31 @@ describe('the bot browser\'s pictures', () => {
     }
   })
 })
+
+describe('the chat while pictures arrive', () => {
+  it('a new picture re-renders only the picture: the chat, which keeps the browser\'s state, stays still', async () => {
+    const { useBotBrowser } = await import('../../src/renderer/stores/botBrowserStore')
+    let renders = 0
+    const Chat = () => {
+      renders += 1
+      useBotBrowser('noobesh')
+      return null
+    }
+    await act(async () => root.render(createElement(Chat)))
+    await act(async () => {})
+    const element = { current: document.createElement('div') }
+    const Picture = () => { useBotBrowserWatch('noobesh', element, { width: 480, fps: 5 }); return null }
+    const pictures = createRoot(document.createElement('div'))
+    await act(async () => pictures.render(createElement(Picture)))
+    await act(async () => {})
+    const before = renders
+    await push({ frame: { ...FRAME, id: 2, at: Date.now() }, cursor: { x: 10, y: 10, action: 'move', at: Date.now(), viewport: { width: 1280, height: 720 } } })
+    await push({ frame: { ...FRAME, id: 3, at: Date.now() } })
+    expect(useBotBrowserStore.getState().views.noobesh!.frame!.id).toBe(3)
+    expect(renders).toBe(before)
+    // Something else changing (the tab) still reaches it.
+    await push({ tab: { url: 'https://bank.example.com/other', title: 'Other' } })
+    expect(renders).toBe(before + 1)
+    act(() => pictures.unmount())
+  })
+})

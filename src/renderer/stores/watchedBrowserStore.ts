@@ -158,6 +158,10 @@ const samePicture = (a: WatchedBrowserFrame, b: WatchedBrowserFrame) =>
 const sameView = (a: WatchedBrowserView, b: WatchedBrowserView) =>
   a.frame === b.frame && JSON.stringify({ ...a, frame: undefined }) === JSON.stringify({ ...b, frame: undefined })
 
+/** Two views alike but for their picture and the agent cursor, which change at the pictures' pace. */
+const sameBesidesPicture = (a: WatchedBrowserView, b: WatchedBrowserView) =>
+  JSON.stringify({ ...a, frame: undefined, cursor: undefined }) === JSON.stringify({ ...b, frame: undefined, cursor: undefined })
+
 let windowViewId: string | undefined
 
 /** This window's id as a view of browsers without a window, kept across its reloads: a hold it took is picked up again. */
@@ -733,7 +737,15 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
    * pictures come from what is seen of it (`useWatch`). `off` reads nothing.
    */
   function useBrowserState(key: string | undefined, off = false): V | undefined {
-    const view = useStore((state) => (key ? state.views[key] : undefined))
+    // A new picture or a moving cursor alone hands back the view it had: the surface that keeps the state (a whole chat)
+    // never re-renders at the pictures' pace. What shows the picture reads the store itself.
+    const kept = useRef<V | undefined>(undefined)
+    const view = useStore((state) => {
+      const next = key ? state.views[key] : undefined
+      if (next && kept.current && next !== kept.current && sameBesidesPicture(kept.current, next)) return kept.current
+      kept.current = next
+      return next
+    })
     const unavailable = useStore((state) => state.unavailable)
     useEffect(() => {
       if (unavailable || off || !key) return
