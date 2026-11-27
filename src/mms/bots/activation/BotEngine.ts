@@ -60,7 +60,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
-import { canonicalToolName } from '../../../shared/toolAliases'
+import { canonicalGrantName } from '../../../shared/toolAliases'
 import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_AUTOMATIONS_SWITCH, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_DROPPED_PERMISSIONS, BOT_IMAGE_TOOL, BOT_RETIRED_APP_TOOLS, BOT_MCP_SERVER_SWITCH, BOT_MCP_SWITCH, BOT_SKILLS_SWITCH, BOT_THREADS_PERMISSION, BOT_CHAT_NATIVE_OFF, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, isBotDefaultSwitch, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
@@ -3369,7 +3369,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // holds (it hands those jobs off), a run what it holds itself, and whether its browser could be offered.
     const told = this.instructionsOf(definition, definition.main, row.lane, {
       // MCP servers set up later reach the bot without asking, unless its owner switched MCP off for it.
-      canAskMcp: effective.appTools.some((tool) => canonicalToolName(tool) === 'permission_ask') && !this.defaultsOff(row.botId).mcp, scheduled: row.trigger.kind === 'schedule',
+      canAskMcp: effective.appTools.some((tool) => canonicalGrantName(tool) === 'permission_ask') && !this.defaultsOff(row.botId).mcp, scheduled: row.trigger.kind === 'schedule',
       // Guidance follows the actual local service-read authority; hand-started runs have none.
       secretFetchOffered: Boolean(authority.secretFetch),
       allowed: { ...botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)), ...(compiled.permissions.appTools.includes(BOT_IMAGE_TOOL) ? { images: true } : {}) },
@@ -12073,7 +12073,7 @@ function grantHolds(manifest: BotManifest, asked: BotAskRequest): boolean {
   if (!('tool' in asked) || typeof asked.tool !== 'string') return false
   const tool = botGrantTool(asked.tool)
   // The web tools are neutral tools that a grant keeps with the app tools (the starter grant does): either holds them.
-  return (isNeutralTool(tool) && (manifest.tools as readonly string[]).includes(tool)) || manifest.appTools.some((held) => canonicalToolName(held) === tool)
+  return (isNeutralTool(tool) && (manifest.tools as readonly string[]).includes(tool)) || manifest.appTools.some((held) => canonicalGrantName(held) === tool)
 }
 
 /**

@@ -358,6 +358,13 @@ export interface MousseTool {
    * handler checks it. Registration refuses a tool that takes such an argument without it.
    */
   authorize?: ToolAuthorize
+  /**
+   * A tool whose variant is decided by what its arguments name, not by an argument the caller picks (`request_answer`:
+   * the kind of the request its id names). Each variant is a whole tool with its own authority: the tool is listed and
+   * held when one of them is, and a call is checked and run as the variant `variantOf` picks, under this tool's name.
+   */
+  variants?: readonly MousseTool[]
+  variantOf?(args: Record<string, unknown>, site: { caller: McpCaller; turn: AppToolTurn }): { tool: MousseTool; args: Record<string, unknown> } | { refused: ToolOutcome }
   handler(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> | ToolOutcome
 }
 

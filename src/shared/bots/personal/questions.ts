@@ -270,7 +270,7 @@ export function questionGoneText(title: string): string {
  */
 export function waitingQuestionLine(input: { questionId: string; question: string; choices: string; title: string; default?: string; defaultAt?: string }): string {
   const fallback = input.default && input.defaultAt ? ` If they haven't answered by ${input.defaultAt}, it goes with "${input.default}".` : ''
-  return `"${input.title}" waits for the owner's answer to your question "${quoteOf(input.question, 160)}"${input.choices ? ` (${input.choices})` : ''} [${input.questionId}].${fallback} If the owner answers it in the chat, pass it on with question_answer.`
+  return `"${input.title}" waits for the owner's answer to your question "${quoteOf(input.question, 160)}"${input.choices ? ` (${input.choices})` : ''} [${input.questionId}].${fallback} If the owner answers it in the chat, pass it on with request_answer.`
 }
 
 /** How a question's answers read as text (older apps, notifications, the journal): "Flat A · Flat B · Something else". */

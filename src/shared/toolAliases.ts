@@ -24,6 +24,10 @@ export const MOUSSE_TOOL_ALIASES: Readonly<Record<string, string>> = Object.free
   ask_owner: 'question_ask',
   withdraw_question: 'question_withdraw',
   escalate: 'permission_ask',
+  // The request family, answering side. Each old tool answers one kind of request (`MOUSSE_TOOL_ALIAS_ARGUMENTS`).
+  answer_subagent: 'request_answer',
+  approval_respond: 'request_answer',
+  question_answer: 'request_answer',
   // The queue family. Each old tool is one `op` of `queue_update` (`MOUSSE_TOOL_ALIAS_ARGUMENTS`).
   queue_edit: 'queue_update',
   queue_remove: 'queue_update',
@@ -39,7 +43,11 @@ export const MOUSSE_TOOL_ALIAS_ARGUMENTS: Readonly<Record<string, Readonly<Recor
   queue_edit: { op: 'edit' },
   queue_remove: { op: 'remove' },
   queue_reorder: { op: 'move' },
-  queue_promote_to_steer: { op: 'send_now' }
+  queue_promote_to_steer: { op: 'send_now' },
+  // `request_answer` reads the kind from the request; a call that names another kind is refused (`requestAnswer.ts`).
+  answer_subagent: { kind: 'subagent' },
+  approval_respond: { kind: 'approval' },
+  question_answer: { kind: 'relay' }
 })
 
 /** The name a Mousse tool is registered, listed, granted and recorded under: `name` itself unless it is an old alias. */

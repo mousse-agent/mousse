@@ -3815,7 +3815,7 @@ export class OrchestratorService extends EventEmitter {
    * subagent's thread (the model's own `question_ask`, a plan question, a provider's approval such as
    * Codex's command approval; they all go through `UserQuestionService`) writes a `child_question`
    * row (a `reconcile_notice`) into the parent's inbox, and rule 4 wakes or steers the parent with
-   * it: it answers with `answer_subagent` or asks the user. The user still sees the question under
+   * it: it answers with `request_answer` or asks the user. The user still sees the question under
    * the top-level thread. When the question is answered, dismissed or times out, its row is
    * acknowledged on the `cleared` event; one left from a previous process is acknowledged at boot.
    * Returns the function that removes the listeners.
@@ -9671,7 +9671,7 @@ export class OrchestratorService extends EventEmitter {
         subagent: target.title,
         childThreadId,
         questions: pending.map(({ requestId: id, questions }) => ({ requestId: id, questions })),
-        message: `"${target.title}" is waiting for an answer, so it cannot take new work. Answer it with answer_subagent (or ask the user), then continue it.`
+        message: `"${target.title}" is waiting for an answer, so it cannot take new work. Answer it with request_answer (or ask the user), then continue it.`
       }
     if (engine.getRun(parentRunId)?.outcome?.stopRequested)
       return { started: false as const, code: 'parent_stopping' as const, message: 'The calling run is being stopped; it cannot continue subagents.' }
@@ -9975,7 +9975,7 @@ export class OrchestratorService extends EventEmitter {
         ? {
             needsInput: true,
             pendingQuestion: pending.map(({ requestId, questions }) => ({ requestId, questions })),
-            hint: `It waits for an answer. Answer it with answer_subagent (subagent "${this.titleOf(delegation.childThreadId) ?? delegation.childThreadId}", requestId ${pending[0].requestId}), or ask the user.`
+            hint: `It waits for an answer. Answer it with request_answer (requestId ${pending[0].requestId}), or ask the user.`
           }
         : {}),
       ...(row?.computer ? { computer: this.remoteTaskStatus(delegationId, row.computer) } : {}),

@@ -175,7 +175,7 @@ export function jobNoticeInput(job: BotJob, seen: { result?: string; asks?: read
   parts.push(quoted('the request', jobLine(job.request)))
   if (seen.result?.trim()) parts.push(quoted('its answer', capReport(seen.result, 'read the rest with thread_read view "messages"').text))
   else if (job.state !== 'needs_input' && job.state !== 'gone') parts.push('It ended without a final answer: thread_read shows what happened (view "events" for why a run failed).')
-  if (asks.length) parts.push("Answer what you can with approval_respond; only a real owner's call goes to them, as your own short question.")
+  if (asks.length) parts.push("Answer what you can with request_answer; only a real owner's call goes to them, as your own short question.")
   return notice({ kind: 'job_update', reply: 'if-needed', ref: job.threadId }, parts)
 }
 

@@ -1034,7 +1034,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
   /**
    * What a local `thread_wait` returns when the run waits on a question or an approval (#657): the requests (their ids
    * and prompts, for a caller that manages the thread; a count otherwise) and who answers them. The caller's own
-   * subagent is answered with `answer_subagent`; any other thread's requests are the user's.
+   * subagent is answered with `request_answer`; any other thread's requests are the user's.
    */
   const needsInputView = (threadId: string, run: Record<string, unknown>, requests: ReadonlyArray<{ requestId: string; questions: unknown }>, manage: boolean, callerThreadId: string): Record<string, unknown> => {
     const lineage = engine.delegations.getLineage(threadId)
@@ -1049,7 +1049,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       requests: requests.length,
       ...(manage || own ? { pendingRequests: requests.map(({ requestId, questions }) => ({ requestId, questions })) } : {}),
       hint: own
-        ? `Your subagent "${title ?? threadId}" waits for an answer. Answer it with answer_subagent (subagent "${title ?? threadId}", requestId ${first}), or ask the user; then wait again.`
+        ? `Your subagent "${title ?? threadId}" waits for an answer. Answer it with request_answer (requestId ${first}), or ask the user; then wait again.`
         : 'The run waits on a person: a question or an approval. Tell the user it waits for them; call thread_wait again once it is answered.'
     }
   }

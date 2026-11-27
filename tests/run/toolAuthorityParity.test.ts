@@ -168,10 +168,13 @@ async function snapshotOf(kind: TurnKind) {
       options: { userMcp, botMcp: { call: async () => ({ text: 'ran' }) as never } }
     })
     const ran = new Set<string>()
+    // A tool of variants (`request_answer`) runs as one of them: reaching any of theirs is reaching it.
     for (const tool of registry.list()) {
-      ;(tool as { handler: unknown }).handler = async () => {
-        ran.add(tool.name)
-        return { text: 'ran' }
+      for (const handled of [tool, ...(tool.variants ?? [])]) {
+        ;(handled as { handler: unknown }).handler = async () => {
+          ran.add(tool.name)
+          return { text: 'ran' }
+        }
       }
     }
     const turn = turns.register(appTurn({ threadId: THREAD, runId: run.runId, turnToken: 'turn-1', ...kind.turn }) as AppToolTurn).turn
@@ -187,13 +190,15 @@ async function snapshotOf(kind: TurnKind) {
     const tokens = binding === 'per_call' ? (turn.attemptToken ? { _mousse_attempt: turn.attemptToken } : { _mousse_turn: turn.turnToken }) : {}
     const words = (text: string) => text.split(run.runId).join('<run>')
     const dispatch: Record<string, string> = {}
-    /** Each tool called with no arguments, and each that takes `threadId` with another thread and a private one. */
-    const calls = registry.list().flatMap((tool) => [
-      { key: tool.name, name: tool.name, args: {} },
-      ...(JSON.stringify(tool.inputSchema).includes('"threadId"')
-        ? ['thread-b', 'thread-private'].map((threadId) => ({ key: `${tool.name} ${threadId}`, name: tool.name, args: { threadId } }))
-        : [])
-    ])
+    /** Each tool called with no arguments, and each that takes `threadId` (or `thread`) with another thread and a private one. */
+    const calls = registry.list().flatMap((tool) => {
+      const schema = JSON.stringify(tool.inputSchema)
+      const key = schema.includes('"threadId"') ? 'threadId' : schema.includes('"thread"') ? 'thread' : undefined
+      return [
+        { key: tool.name, name: tool.name, args: {} },
+        ...(key ? ['thread-b', 'thread-private'].map((threadId) => ({ key: `${tool.name} ${threadId}`, name: tool.name, args: { [key]: threadId } })) : [])
+      ]
+    })
     for (const { key, name, args } of calls) {
       asked.length = 0
       ran.delete(name)

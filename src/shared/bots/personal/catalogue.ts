@@ -60,7 +60,7 @@ const THREADS_GUIDANCE = [
   "These reach your owner's Mousse threads, here and on their other computers that let agents work there (computer_list): search them (thread_search), wait on one (thread_wait), read the terminals open in them (terminal_read), look at their queues and Git status and diffs, steer or stop one's turn, change what waits in its queue, fork one or hand a fork's work back, hide or show a thread you started, and archive one whose work is merged or dropped (and unarchive it again).",
   'thread_list names their projects and the models a thread can run on. Each thread comes with a link: put it in your reply when you name a thread, and your owner can click it to open it.',
   "A thread you start stays out of your owner's sidebar, your chat lists it, until your owner writes in it. Start it with hidden: false when they asked to follow, answer or continue that work in their sidebar. thread_hide (or thread_update with hidden) hides or shows a thread you started later.",
-  "In a thread you didn't start, answer an approval (approval_respond) only when your owner asks and lets agents answer approvals, never a question."
+  "In a thread you didn't start, answer an approval (request_answer) only when your owner asks and lets agents answer approvals, never a question."
 ].join('\n')
 
 const BROWSER_GUIDANCE = [
@@ -75,7 +75,7 @@ const BROWSER_GUIDANCE = [
 const WORK_GUIDANCE = [
   'work_stop stops a piece of work (stop it and start again with work_start if the task changed).',
   'The owner can ask for one piece of work on a particular model ("do this one with Opus"): find the one they mean with model_list and give it to work_start as model. It is for that work only; their usual models stay as set in Runs on. If it isn\'t there or can\'t run your work, tell them why in plain words and start nothing on another model. Never choose a model for work yourself.',
-  'Your work may wait for the owner\'s answer to a question it asked (your situation lists each one). When they answer it in the chat in their own words, pass their answer on with question_answer; never answer it for them.',
+  'Your work may wait for the owner\'s answer to a question it asked (your situation lists each one). When they answer it in the chat in their own words, pass their answer on with request_answer; never answer it for them.',
   'In a run, when a job splits into parts that can go on at once, or a part needs another model, you can hand parts to subagents (subagent_start). Keep them on your own model unless a part needs another one from model_list: another entry is another provider, and it is sent your instructions and that part\'s brief. They can do only what you can, never ask the owner, and their time counts against yours. Before you report, wait for the ones you need and stop the rest (subagent_stop), and check what they return: you stay responsible for the result.',
   'Keep a checklist of a long job with task_create, task_list and task_update; it is yours alone.',
   'consult asks one of your context threads, when you have them.'
@@ -130,7 +130,7 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   {
     id: 'threads',
     line: "more for your owner's threads: search, wait, steer, hide, fork, queues, terminals, Git, approvals, their other computers (needs \"use your threads\")",
-    tools: ['thread_search', 'thread_wait', 'thread_interrupt', 'thread_steer', 'thread_hide', 'thread_update', 'thread_fork', 'thread_merge_back', 'terminal_read', 'queue_list', 'queue_enqueue', 'queue_update', 'git_status', 'git_diff', 'computer_list', 'approval_respond'],
+    tools: ['thread_search', 'thread_wait', 'thread_interrupt', 'thread_steer', 'thread_hide', 'thread_update', 'thread_fork', 'thread_merge_back', 'terminal_read', 'queue_list', 'queue_enqueue', 'queue_update', 'git_status', 'git_diff', 'computer_list', 'request_answer'],
     guidance: THREADS_GUIDANCE
   },
   {
@@ -149,7 +149,7 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   {
     id: 'work',
     line: 'stop work, pick a model for one piece of work, pass on an answer to work, take back a question, subagents, a task checklist, consults',
-    tools: ['work_stop', 'model_list', 'question_answer', 'question_withdraw', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'task_create', 'task_list', 'task_update', 'consult'],
+    tools: ['work_stop', 'model_list', 'request_answer', 'question_withdraw', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'task_create', 'task_list', 'task_update', 'consult'],
     guidance: WORK_GUIDANCE
   },
   {

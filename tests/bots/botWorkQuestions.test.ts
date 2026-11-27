@@ -247,7 +247,7 @@ describe('the chat passes on an answer (question_answer)', () => {
     const { workId, work, bubble, questionId } = await workThatAsks()
     await endTurn(work)
     // The chat knows what its work waits on, with the id to pass an answer on with.
-    expect(f.bots.questionLines(botId)).toEqual([`"Flat hunt" waits for the owner's answer to your question "${FLATS.question}" (Flat A · Flat B · Something else) [${questionId}]. If the owner answers it in the chat, pass it on with question_answer.`])
+    expect(f.bots.questionLines(botId)).toEqual([`"Flat hunt" waits for the owner's answer to your question "${FLATS.question}" (Flat A · Flat B · Something else) [${questionId}]. If the owner answers it in the chat, pass it on with request_answer.`])
     // A chat question the owner taps: the turn it starts carries their answer, so it may pass one on too.
     const asking = await chat('Anything else?', 'c1')
     await tool('question_ask', asking.prepared, asking.payload.threadId, { question: 'Shall I also look at parking?', yesNo: true })
@@ -389,7 +389,7 @@ describe('Forget', () => {
     expect(journalText(report!).text).toBe('I booked a viewing of Flat B for Saturday.')
   })
 
-  it('of the owner’s words the chat passed on: the chat’s question_answer call and the work’s copy go; of the question’s bubble: its question_ask call and the line that quoted it', async () => {
+  it('of the owner’s words the chat passed on: the chat’s relay call and the work’s copy go; of the question’s bubble: its question_ask call and the line that quoted it', async () => {
     const memory = memoryStore()
     const { workId, work, questionId, bubble } = await workThatAsks()
     await endTurn(work)
@@ -402,13 +402,16 @@ describe('Forget', () => {
     const [askCall, oldAskCall] = captured(memory, { threadId: mainDispatches(workId)[0]!.threadId, lane: 'run', activationId: workId }, ['question_ask', 'ask_owner'].map((name) =>
       ({ id: `ask-${name}`, role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(), toolCall: { title: name, summary: '', details: [], status: 'complete', toolName: `mcp__mousse__${name}`, input: { question: FLATS.question, choices: FLATS.choices } } } as ChatMessage)
     ))
-    const [relayCall] = captured(memory, { threadId: own.payload.threadId, lane: 'chat', activationId: own.activation.id }, [
-      { id: 'relay', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(), toolCall: { title: 'question_answer', summary: '', details: [], status: 'complete', toolName: 'mcp__mousse__question_answer', input: { questionId, answer: 'The second one, Flat B' } } } as ChatMessage
-    ])
+    // The relay, under its name now and under its old name (`question_answer`, which named the question `questionId`).
+    const [relayCall, oldRelayCall] = captured(memory, { threadId: own.payload.threadId, lane: 'chat', activationId: own.activation.id }, [
+      ['request_answer', { requestId: questionId }], ['question_answer', { questionId }]
+    ].map(([name, id]) => ({ id: `relay-${name}`, role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(), toolCall: { title: name, summary: '', details: [], status: 'complete', toolName: `mcp__mousse__${name}`, input: { ...(id as object), answer: 'The second one, Flat B' } } } as ChatMessage)))
     const [copy] = captured(memory, { threadId: resumed.threadId, lane: 'run', activationId: workId }, [{ id: 'cont', role: 'user', content: resumed.prompt.text, timestamp: f.store.now() } as ChatMessage])
     memory.forget(botId, { refs: [journaled(memory, own.message, 'owner_msg', 'chat')], by: 'owner_ui' })
-    expect(journalText(relayCall!)).toMatchObject({ redacted_at: expect.any(String) })
-    expect(journalText(relayCall!).text).not.toContain('Flat B')
+    for (const call of [relayCall, oldRelayCall]) {
+      expect(journalText(call!)).toMatchObject({ redacted_at: expect.any(String) })
+      expect(journalText(call!).text).not.toContain('Flat B')
+    }
     expect(f.store.dispatch(workId, resumed.n)!.prompt.text).not.toContain('Flat B')
     expect(journalText(copy!).text).not.toContain('Flat B')
     // The question itself is not forgotten yet: its question_ask call stays.

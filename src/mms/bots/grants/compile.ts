@@ -10,7 +10,7 @@ import { BOT_ITEM_TOOLS } from '../../../shared/bots/personal/items'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
 import { stableStringify } from '../../run/json'
-import { canonicalToolName } from '../../../shared/toolAliases'
+import { canonicalGrantName } from '../../../shared/toolAliases'
 
 /**
  * A bot thread's grant, compiled for one dispatch (PR 6 §4). Pure: the caller supplies the native
@@ -216,7 +216,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
   const narrowed = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
   // A tool bots no longer have, still listed by a grant an older build approved, gives nothing. One it names by an old
   // name gives the tool it was renamed to; the stored grant and its digest stay as approved.
-  const held = { ...narrowed, appTools: narrowed.appTools.filter((tool) => !BOT_RETIRED_APP_TOOLS.has(tool)).map(canonicalToolName) }
+  const held = { ...narrowed, appTools: narrowed.appTools.filter((tool) => !BOT_RETIRED_APP_TOOLS.has(tool)).map(canonicalGrantName) }
   // A subagent is the work, never more: what the work holds, less what is the bot's alone, and none of the bot's tools
   // but what a thread's subagent may use (the owner's threads, the profiler, its task list).
   const subagent = input.botTools?.subagent === true
