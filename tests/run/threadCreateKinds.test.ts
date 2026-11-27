@@ -15,7 +15,7 @@ describe('thread_create kinds', () => {
   })
 
   /** An agent's turn in thread `parent` of project `home`, with a fake owner that records what it was asked to start. */
-  const setup = async (options: { modeCeiling?: 'plan' | 'default'; readOnly?: boolean } = {}) => {
+  const setup = async (options: { readOnly?: boolean } = {}) => {
     fx = delegationFixture()
     const run = await fx.runningRun('parent')
     const createThread = vi.fn(async (request: AgentThreadRequest) => ({
@@ -23,27 +23,22 @@ describe('thread_create kinds', () => {
     }))
     const fake = fakeAppToolHost({ createThread, threadMeta: (id) => ({ id, name: id, projectId: 'home' }) as never, ...(options.readOnly ? { readOnlyThread: () => true } : {}) })
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
-    const modeCeiling = options.modeCeiling ?? 'default'
-    turns.register(appTurn({ threadId: 'parent', runId: run.runId, modeCeiling }))
+    turns.register(appTurn({ threadId: 'parent', runId: run.runId }))
     const call = (name: string, args: Record<string, unknown>, toolCallId = `mcp:${Math.random()}`): Promise<ToolOutcome> =>
-      registry.call(name, args, request({ threadId: 'parent', runId: run.runId, modeCeiling, toolCallId }))
+      registry.call(name, args, request({ threadId: 'parent', runId: run.runId, toolCallId }))
     return { call, createThread, delegateTask: fake.delegation.delegateTask, engine: fx.engine }
   }
   const subagent = { prompt: 'Read the logs', title: 'Log reader', workspace: 'shared' }
   const lacks = (outcome: ToolOutcome) => (JSON.parse(outcome.text) as { refused: { lacks?: string } }).refused.lacks
 
-  it('kind subagent is held by a Plan turn and a read-only child; kind thread needs threads.start, which they lack', async () => {
-    for (const options of [{ modeCeiling: 'plan' as const }, { readOnly: true }]) {
-      const { call, createThread, delegateTask } = await setup(options)
-      expect((await call('thread_create', { kind: 'subagent', ...subagent })).isError, JSON.stringify(options)).toBeUndefined()
-      expect(delegateTask).toHaveBeenCalledTimes(1)
-      const thread = await call('thread_create', { kind: 'thread', projectId: 'other', title: 'Release notes' })
-      expect((await denied(Promise.resolve(thread)))?.code).toBe(options.readOnly ? 'mousse_read_only' : 'mousse_ceiling_exceeded')
-      expect(lacks(thread)).toBe('threads.start')
-      expect(createThread).not.toHaveBeenCalled()
-      fx!.dispose()
-      fx = undefined
-    }
+  it('kind subagent is held by a read-only child; kind thread needs threads.start, which it lacks', async () => {
+    const { call, createThread, delegateTask } = await setup({ readOnly: true })
+    expect((await call('thread_create', { kind: 'subagent', ...subagent })).isError).toBeUndefined()
+    expect(delegateTask).toHaveBeenCalledTimes(1)
+    const thread = await call('thread_create', { kind: 'thread', projectId: 'other', title: 'Release notes' })
+    expect((await denied(Promise.resolve(thread)))?.code).toBe('mousse_read_only')
+    expect(lacks(thread)).toBe('threads.start')
+    expect(createThread).not.toHaveBeenCalled()
   })
 
   it('an agent\'s kind thread starts a shown thread in a project; its hidden is refused, with nothing started', async () => {

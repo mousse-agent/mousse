@@ -331,7 +331,7 @@ describe('Claude subscription attachment', () => {
     questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' }))
     const relay = { url: 'http://127.0.0.1:4567/mcp/relay', revision: 'rev-1' }
     await claude.chat({ threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: { ...MCP, relay } })
-    await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: { ...MCP, relay }, mode: 'plan' })
+    await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: { ...MCP, relay }, child: { readOnly: true } })
     expect(options[0].mcpServers).toEqual({})
     expect(registered[0]).toEqual({
       mousse: { type: 'http', url: MCP.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 },
@@ -341,8 +341,8 @@ describe('Claude subscription attachment', () => {
     expect(ask).toHaveBeenCalledTimes(1)
     expect(ask.mock.calls[0][0][0].prompt).toMatch(/mcp__mousse-relay__github__create_issue/)
     expect(relayed[0]).toMatchObject({ behavior: 'deny' })
-    // A plan turn refuses it without asking.
-    expect(relayed[1]).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/planning only/) })
+    // A read-only child refuses it without asking.
+    expect(relayed[1]).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/read-only/) })
   })
 
   it('the service gives the user\'s MCP servers with their secrets through the startup pipe and registers Mousse\'s own over Claude Code\'s input, and adds the skills plugin and tool limits', async () => {
@@ -404,7 +404,7 @@ describe('Claude subscription attachment', () => {
     const { home, questions, service: claude } = service(({ options: o }) => { options.push(o); return finished(o) })
     questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' }))
     await claude.chat({ threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: MCP, mcpTurnToken: 'turn-7' })
-    await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: MCP, mcpTurnToken: 'turn-8', mode: 'plan' })
+    await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: MCP, mcpTurnToken: 'turn-8', child: { readOnly: true } })
     await claude.chat({ threadId: 't3', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn() })
     const hook = (index: number, tool_name: string) => options[index].hooks!.PreToolUse![0].hooks[0](
       { hook_event_name: 'PreToolUse', tool_name, tool_input: { limit: 5 }, tool_use_id: 'u' } as never, 'u', { signal: new AbortController().signal }
@@ -414,7 +414,7 @@ describe('Claude subscription attachment', () => {
       hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput: { limit: 5, _mousse_turn: 'turn-7' } }
     })
     expect(await hook(0, 'Read')).toEqual({})
-    // A plan turn routes every call through canUseTool (`ask`), stamped all the same.
+    // A read-only child routes every call through canUseTool (`ask`), stamped all the same.
     expect(await hook(1, 'mcp__mousse__thread_read')).toEqual({
       hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask', updatedInput: { limit: 5, _mousse_turn: 'turn-8' } }
     })

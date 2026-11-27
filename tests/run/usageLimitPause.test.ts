@@ -1038,7 +1038,7 @@ describe('a usage limit pauses the run', () => {
       const thread = d.store.createThread('Planning')
       d.orch.setThreadModelOverride(thread.id, PI)
       d.orch.setThreadPermissionMode(thread.id, 'ask')
-      const first = await d.orch.send({ content: 'Plan it', mode: 'plan' }, false, { threadId: thread.id, clientRequestId: 'plan-1' })
+      const first = await d.orch.send({ content: 'Build it', mode: 'build' }, false, { threadId: thread.id, clientRequestId: 'build-1' })
       const pausedRun = d.engine.getRun(first.runId!)!
       expect(pausedRun.status).toBe('paused')
       const mode = d.orch.runPermissionMode(pausedRun.runId)
@@ -1050,7 +1050,7 @@ describe('a usage limit pauses the run', () => {
 
       const continued = runsOf(d, thread.id)[1]
       const [start] = effectsOf(d, continued.runId, 'turn.start')
-      expect(start.payload).toMatchObject({ input: { mode: 'plan' }, permissionMode: mode })
+      expect(start.payload).toMatchObject({ input: { mode: 'build' }, permissionMode: mode })
       expect(d.orch.runPermissionMode(continued.runId)).toBe(mode)
     })
 
@@ -1059,11 +1059,11 @@ describe('a usage limit pauses the run', () => {
       const d = boot(newHome(), [pi])
       const thread = d.store.createThread('Timer')
       d.orch.setThreadModelOverride(thread.id, PI)
-      const first = await d.orch.send({ content: 'Plan it', mode: 'plan' }, false, { threadId: thread.id, clientRequestId: 'plan-1' })
+      const first = await d.orch.send({ content: 'Build it', mode: 'build' }, false, { threadId: thread.id, clientRequestId: 'build-1' })
       await waitFor(() => runsOf(d, thread.id).length === 2 && settled(d, thread.id), 'the continuation to finish')
       const continued = runsOf(d, thread.id)[1]
       expect(continued).toMatchObject({ source: 'resume', outcome: { continuationOf: first.runId } })
-      expect(effectsOf(d, continued.runId, 'turn.start')[0].payload).toMatchObject({ input: { mode: 'plan' } })
+      expect(effectsOf(d, continued.runId, 'turn.start')[0].payload).toMatchObject({ input: { mode: 'build' } })
     })
   })
 

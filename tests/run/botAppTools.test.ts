@@ -103,7 +103,7 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
   const deps: BotAppToolDeps = { host, activity, models: { pickable: async () => options.choices ?? CHOICES } }
   const tools = new Map(botTools(() => deps).map((tool) => [tool.name, tool]))
   const ctx = (threadId = 'home', activationId = 'a1', appTools: readonly string[] = []): ToolCallContext => ({
-    caller: { threadId, runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+    caller: { threadId, runId: 'r1', provider: 'pi', accessLevel: 'lineage' },
     turn: { threadId, bot: { role: 'activation', activationId, appTools: new Set(appTools) } as unknown as BotAuthority } as ToolCallContext['turn'],
     toolCallId: 'call-1',
     signal: new AbortController().signal,

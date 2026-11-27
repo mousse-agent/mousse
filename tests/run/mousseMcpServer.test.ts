@@ -45,10 +45,10 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     server = new MousseMcpServer({ credentials, registry, ...(options.boundary ? { boundary: options.boundary } : {}), ...(options.attribute ? { attribute: options.attribute } : {}) })
     await server.start()
     const registered = turns.register(appTurn({ threadId: 'thread-a', runId: run.runId }))
-    const bearer = (input: { runId?: string; instanceId?: string; modeCeiling?: 'plan' | 'default'; binding?: McpTurnBinding; generation?: string } = {}) =>
+    const bearer = (input: { runId?: string; instanceId?: string; binding?: McpTurnBinding; generation?: string } = {}) =>
       server!.bearerForTurn({
         threadId: 'thread-a', instanceId: input.instanceId ?? 'codex', runId: input.runId ?? run.runId,
-        modeCeiling: input.modeCeiling ?? 'default', binding: input.binding ?? 'drained_turn', generation: input.generation ?? 'codex|default|0|0'
+        binding: input.binding ?? 'drained_turn', generation: input.generation ?? 'codex|default|0|0'
       })!
     const attachment = bearer()
     return { fx, run, credentials, server, attachment, bearer, turns, registered, ...fake }
@@ -260,7 +260,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     registry.register({ name: 'look', description: '', inputSchema: { type: 'object' }, access: 'reads', class: 'read', handler: () => ({ text: 'see', images: [{ data: 'AAAA', mimeType: 'image/png' }] }) })
     server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
     await server.start()
-    const { token } = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!
+    const { token } = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, binding: 'drained_turn', generation: 'g' })!
     const result = await rpc(server.url, token, call(1, 'look'))
     expect(result.body.result.content).toEqual([{ type: 'text', text: 'see' }, { type: 'image', data: 'AAAA', mimeType: 'image/png' }])
   })
@@ -285,7 +285,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     })
     server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
     await server.start()
-    const { token } = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!
+    const { token } = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, binding: 'drained_turn', generation: 'g' })!
     const result = await rpc(server.url, token, call(1, 'stale'))
     expect(result.body.error).toBeUndefined()
     expect(JSON.parse(result.body.result.content[0].text)).toEqual({
@@ -347,11 +347,6 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     expect(invalid.body.error).toBeUndefined()
     expect(invalid.body.result.isError).toBe(true)
 
-    server.revokeThread('thread-a')
-    const plan = bearer({ instanceId: 'p', modeCeiling: 'plan' })
-    const ceiling = await rpc(server.url, plan.token, call(5, 'thread_fork'))
-    expect(ceiling.body.error).toBeUndefined()
-    expect(refusalOfResponse(ceiling.body)).toMatchObject({ code: 'mousse_ceiling_exceeded', refused: { code: 'lacks_capability', retry: 'after_change', lacks: 'threads.start' } })
   })
 
   describe('in-flight tool calls', () => {
@@ -375,7 +370,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
       const attach = (threadId: string) => {
         const runId = fx!.store.getActiveRun(threadId)!.runId
         turns.register(appTurn({ threadId, runId }))
-        return { runId, ...server!.bearerForTurn({ threadId, instanceId: 'p', runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })! }
+        return { runId, ...server!.bearerForTurn({ threadId, instanceId: 'p', runId, binding: 'drained_turn', generation: 'g' })! }
       }
       const callHang = (token: string, signal?: AbortSignal) => fetch(server!.url, {
         method: 'POST', signal,

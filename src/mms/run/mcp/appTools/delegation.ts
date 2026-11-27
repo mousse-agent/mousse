@@ -52,11 +52,6 @@ export interface DelegateTaskInput {
    */
   title?: string
   /**
-   * The most the child may do (SPEC §15.1). Only the Mousse MCP server offers it; the host
-   * defaults it to the caller's ceiling and refuses a broader one.
-   */
-  modeCeiling?: 'plan' | 'default'
-  /**
    * Another of the user's computers to run the subagent on (issue #469): its name or id from
    * `computer_list`. Absent: this computer.
    */
@@ -85,8 +80,7 @@ export interface SubagentRef {
  */
 export interface DelegationToolHost {
   delegateTask(input: DelegateTaskInput, call: DelegationToolCall): Promise<unknown>
-  /** `mode: 'plan'` (from `thread_send`) runs the follow-up as a plan turn whatever the subagent's ceiling. */
-  continueSubagent(input: { subagent: string; prompt: string; mode?: 'plan' }, call: DelegationToolCall): Promise<unknown>
+  continueSubagent(input: { subagent: string; prompt: string }, call: DelegationToolCall): Promise<unknown>
   answerSubagent(input: { subagent: string; requestId: string; answers: Record<string, string | string[]> }, call: DelegationToolCall): Promise<unknown> | unknown
   /** `acknowledge: false`: the read is not the thread's own turn (a native helper's call), so the result stays unacknowledged. */
   taskStatus(input: SubagentRef, options?: { acknowledge?: false }): Promise<unknown> | unknown
@@ -185,7 +179,6 @@ export async function dispatchDelegationTool(host: DelegationToolHost, toolCall:
       if (args.readOnly !== undefined && typeof args.readOnly !== 'boolean') throw new Error('readOnly must be true or false')
       for (const key of ['instanceId', 'provider', 'model', 'effort', 'role'] as const)
         if (args[key] !== undefined && (typeof args[key] !== 'string' || !String(args[key]).trim())) throw new Error(`${key} must be a non-empty string`)
-      if (args.modeCeiling !== undefined && args.modeCeiling !== 'plan' && args.modeCeiling !== 'default') throw new Error('modeCeiling must be plan or default')
       if (args.computer !== undefined && (typeof args.computer !== 'string' || !args.computer.trim())) throw new Error('computer must be a non-empty string: a name from computer_list')
       if (args.maxMinutes !== undefined && !(Number.isInteger(args.maxMinutes) && (args.maxMinutes as number) >= 1))
         throw new Error('maxMinutes must be a whole number, at least 1')
@@ -196,7 +189,6 @@ export async function dispatchDelegationTool(host: DelegationToolHost, toolCall:
         instanceId: args.instanceId as string | undefined, provider: args.provider as string | undefined, model: args.model as string | undefined, role: args.role as string | undefined,
         ...(args.effort !== undefined ? { effort: (args.effort as string).trim() } : {}),
         ...(args.readOnly === true ? { readOnly: true } : {}),
-        ...(args.modeCeiling !== undefined ? { modeCeiling: args.modeCeiling as DelegateTaskInput['modeCeiling'] } : {}),
         ...(args.computer !== undefined ? { computer: (args.computer as string).trim() } : {}),
         ...(args.maxMinutes !== undefined ? { maxMinutes: args.maxMinutes as number } : {}) }, call)
     }
@@ -319,12 +311,11 @@ export interface DelegationToolsHost {
 }
 
 /**
- * The delegation tools of the registry. The listed ones carry the MCP extras (`modeCeiling`,
- * `clientRequestId`); the older names are hidden and run in process only, as before.
+ * The delegation tools of the registry. The listed ones carry the MCP extra `clientRequestId`; the older names are hidden and run in process only, as before.
  */
 export function delegationTools(host: DelegationToolsHost): MousseTool[] {
   const listed = new Set<string>(LISTED_DELEGATION_TOOL_NAMES)
-  const tool = (definition: Tool, extra: Record<string, JsonSchema>, before?: (args: Record<string, unknown>, caller: McpCaller) => void): MousseTool => ({
+  const tool = (definition: Tool, extra: Record<string, JsonSchema>): MousseTool => ({
     name: definition.name,
     description: definition.description,
     inputSchema: plainSchema(definition, extra),
@@ -340,8 +331,6 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
     readOnlySafe: true,
     describe: () => `Called mousse.${definition.name}`,
     handler: async (args, ctx): Promise<ToolOutcome> => {
-      // The ceiling checks and defaults are the MCP surface's; the in-process host applies its own.
-      if (ctx.transport === 'mcp') before?.(args, ctx.caller)
       // In process, only a turn the host gave delegation tools runs them (a trusted definition never
       // has them); over MCP the thread owner builds them for the caller.
       const own = ctx.turn.delegation ?? (ctx.transport === 'mcp' ? host.delegation(ctx.caller) : undefined)
@@ -356,20 +345,10 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
     }
   })
   return DELEGATION_TOOLS.map((definition) => {
-    if (definition.name === 'delegate_task')
-      return tool(definition, {
-        modeCeiling: { type: 'string', enum: ['plan', 'default'], description: 'The most the child may do. Defaults to yours and cannot exceed it.' },
-        clientRequestId: CLIENT_REQUEST_ID_SCHEMA
-      }, (args, caller) => {
-        const requested = args.modeCeiling
-        if (requested === 'default' && caller.modeCeiling === 'plan')
-          throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller cannot start a child with the default ceiling.')
-        if (requested === undefined) args.modeCeiling = caller.modeCeiling
-      })
-    // Both act on the caller's own subagent, which the host's handler checks; they stay `actsAsCaller`
-    // like `delegate_task` rather than loosening the thread-writing scope check for other tools.
+    // All three act on the caller's own thread or subagent, which the host's handler checks; they stay `actsAsCaller`
+    // rather than loosening the thread-writing scope check for other tools.
     // `continue_subagent` is `thread_send`'s variant: the same clientRequestId starts one follow-up under either name.
-    if (definition.name === 'continue_subagent' || definition.name === 'answer_subagent')
+    if (definition.name === 'delegate_task' || definition.name === 'continue_subagent' || definition.name === 'answer_subagent')
       return tool(definition, { clientRequestId: CLIENT_REQUEST_ID_SCHEMA })
     return tool(definition, {})
   })

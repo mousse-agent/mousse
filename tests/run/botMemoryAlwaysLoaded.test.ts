@@ -25,7 +25,7 @@ function registry() {
 
 describe('bot memory tools in tools/list', () => {
   it('lists memory_save and memory_forget fully loaded on a bot thread', () => {
-    const listed = registry().listFor({ readOnly: false, modeCeiling: 'default', botRole: 'activation' }).map(listedTool)
+    const listed = registry().listFor({ readOnly: false, botRole: 'activation' }).map(listedTool)
     const save = listed.find((tool) => tool.name === 'memory_save')
     expect(save).toMatchObject({ _meta: { [ALWAYS_LOAD_META]: true }, inputSchema: { type: 'object', properties: { text: { type: 'string' }, kind: expect.anything() } } })
     expect(save?.description).toContain('kind owner')

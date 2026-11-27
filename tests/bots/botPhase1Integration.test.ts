@@ -205,7 +205,7 @@ async function dispatch(activationId: string, work: (turn: { prepared: PreparedB
   w.alive.add(pid)
   w.registry.attachThread(payload.threadId, pid)
   const ctx: ToolCallContext = {
-    caller: { threadId: payload.threadId, runId: payload.runId, provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+    caller: { threadId: payload.threadId, runId: payload.runId, provider: 'pi', accessLevel: 'lineage' },
     turn: { turnToken: 't', ...appTurn({ threadId: payload.threadId, runId: payload.runId, bot: prepared.authority }) },
     toolCallId: 'call',
     signal: new AbortController().signal,
@@ -260,7 +260,7 @@ describe('Bot Phase 1, composed', () => {
     const second = chatActivation(botId)
     expect(said.activationId).toBe(second.id)
     // The memory and schedule tools are listed on the home thread: it runs the chat lane as bot turns.
-    expect(w.tools.get('memory_save')!.listed!({ readOnly: false, modeCeiling: 'default', botRole: w.engine.roleOf(home) })).toBe(true)
+    expect(w.tools.get('memory_save')!.listed!({ readOnly: false, botRole: w.engine.roleOf(home) })).toBe(true)
     const turn2 = await dispatch(second.id, async ({ call }) => {
       expect(await call('memory_save', { text: 'The owner is vegetarian.', kind: 'owner' })).not.toHaveProperty('isError', true)
       expect(JSON.parse((await call('bot_schedule_add', { when: { kind: 'interval', minutes: 60 }, prompt: 'Plan tonight\'s dinner.' })).text)).toMatchObject({ label: 'every hour' })

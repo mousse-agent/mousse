@@ -65,7 +65,7 @@ describe('work on a model the owner named', () => {
   async function call(activationId: string, name: string, args: Record<string, unknown>) {
     const threadId = f.store.dispatch(activationId, 1)!.threadId!
     const ctx = {
-      caller: { threadId, runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+      caller: { threadId, runId: 'r1', provider: 'pi', accessLevel: 'lineage' },
       turn: { threadId, bot: { activationId } as BotAuthority } as ToolCallContext['turn'],
       toolCallId: `call-${Math.random().toString(16).slice(2)}`,
       signal: new AbortController().signal

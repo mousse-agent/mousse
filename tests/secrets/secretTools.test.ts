@@ -17,7 +17,7 @@ const turn = (patch: Partial<AppToolTurn> & { readOnly?: boolean }): AppToolTurn
 // [turn, secret_request offered, secret_run usable]
 const ROWS: Array<[string, AppToolTurn, boolean, boolean]> = [
   ['Agent mode', turn({}), true, true],
-  ['Plan mode: a request card only', turn({ readOnly: true }), true, false],
+  ['a read-only turn: a request card only', turn({ readOnly: true }), true, false],
   ['a subagent', turn({ subagent: true }), false, false],
   ['no project folder', turn({ projectPath: undefined }), true, false]
 ]
@@ -26,13 +26,13 @@ describe('the secret tools', () => {
   it.each(ROWS)('%s', (_name, current, asks, runs) => {
     expect(request.offered!(current)).toBe(asks)
     expect(run.offered!(current)).toBe(runs)
-    // A call that was not offered (a runtime that lists every tool) is still refused in Plan mode and without a folder.
+    // A call that was not offered (a runtime that lists every tool) is still refused in a read-only turn and without a folder.
     if (current.modeFacts.readOnly || !current.projectPath) expect(run.available!(current)).not.toBe(true)
   })
 
   it('are not listed or usable where the owner has no secret store', () => {
-    expect(requestOff.listed!({ readOnly: false, modeCeiling: 'default' })).toBe(false)
-    expect(runOff.listed!({ readOnly: false, modeCeiling: 'default' })).toBe(false)
+    expect(requestOff.listed!({ readOnly: false })).toBe(false)
+    expect(runOff.listed!({ readOnly: false })).toBe(false)
     expect(requestOff.available!(turn({}))).not.toBe(true)
   })
 

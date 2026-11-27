@@ -22,7 +22,7 @@ import { sessionMcpServers } from './mcp'
 import { mousseServerToolOf } from '../../run/mcp/attachment'
 import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
-import { AGENT_DEFAULT_MODEL, agentModels, agentModes, mergeModelOptions, modelOptions, planModeId, thoughtConfigOption, type ModelControl, type ThoughtConfig } from './models'
+import { AGENT_DEFAULT_MODEL, agentModels, agentModes, mergeModelOptions, modelOptions, thoughtConfigOption, type ModelControl, type ThoughtConfig } from './models'
 import {
   answerPermission,
   classifyGenericOption,
@@ -590,8 +590,6 @@ export interface AcpChatInput {
   instanceId?: string
   cwd: string
   model: string
-  /** `plan`: the session runs in the agent's plan mode (only where the agent offers one). */
-  mode?: 'default' | 'plan'
   /**
    * The thread's permission mode for this turn: whether `session/request_permission` and client
    * file writes are answered without asking. Absent asks about everything.
@@ -1432,6 +1430,19 @@ export class AcpSessions {
   }
 
   /**
+   * A saved session that an older build left in the agent's own plan mode (named `plan` or `architect`) goes back to
+   * the agent's default mode, so its turns run as they would in a new session.
+   */
+  private async leaveAgentPlanMode(active: AcpProcess): Promise<void> {
+    const current = active.currentModeId
+    if (!current || !active.defaultModeId || current === active.defaultModeId) return
+    const mode = (active.modes ?? []).find((entry) => entry.id === current)
+    if (!/^(plan|architect)$/i.test(current) && !(mode && /^(plan|architect)$/i.test(mode.name))) return
+    await active.connection.agent.request(methods.agent.session.setMode, { sessionId: active.sessionId!, modeId: active.defaultModeId })
+    active.currentModeId = active.defaultModeId
+  }
+
+  /**
    * Records a session's models and modes; returns them. `known` is what a reopened session said
    * when it opened: it stands in for what a load's missing reply would have said, and `currentModeId`
    * is the mode the replay left it in.
@@ -1677,22 +1688,6 @@ export class AcpSessions {
       active.thoughtConfig = thoughtConfigOption({ configOptions: updatedOptions })
     } else {
       active.thoughtConfig = { ...thought, currentValue: target }
-    }
-  }
-
-  /** Puts the session in the agent's plan mode for a plan turn, and back for a normal one. */
-  private async selectMode(active: AcpProcess, mode: AcpChatInput['mode']): Promise<void> {
-    const plan = planModeId(active.modes ?? [])
-    if (mode === 'plan') {
-      if (!plan) throw new Error(`${this.options.label} has no plan mode`)
-      if (active.currentModeId === plan) return
-      await active.connection.agent.request(methods.agent.session.setMode, { sessionId: active.sessionId!, modeId: plan })
-      active.currentModeId = plan
-      return
-    }
-    if (plan && active.currentModeId === plan && active.defaultModeId && active.defaultModeId !== plan) {
-      await active.connection.agent.request(methods.agent.session.setMode, { sessionId: active.sessionId!, modeId: active.defaultModeId })
-      active.currentModeId = active.defaultModeId
     }
   }
 
@@ -2137,7 +2132,7 @@ export class AcpSessions {
       input.onSession?.(active.sessionId)
       if (!claimedContinuation) {
         await this.selectModel(active, input.model)
-        if (!quirks.modelConfigId) await this.selectMode(active, input.mode)
+        if (!quirks.modelConfigId) await this.leaveAgentPlanMode(active)
       }
       input.signal?.throwIfAborted()
       const imageBlocks = (input.images ?? []).map((image) => {

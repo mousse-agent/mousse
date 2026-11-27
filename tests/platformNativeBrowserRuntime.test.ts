@@ -158,7 +158,8 @@ describe('definition browser runtime binding', () => {
       } } }) },
       threads: { getThread: (id: string) => id === 'thread-main' ? { id, projectId: undefined } : undefined },
       projects: { getProject: () => undefined },
-      modeRegistry: { getModeSync: () => undefined },
+      // A custom mode that denies edits, as a reviewer's would.
+      modeRegistry: { getModeSync: (mode: string) => (mode === 'reviewer' ? { permission: { edit: 'deny' } } : undefined) },
       platform: { browser: { selectedTarget: () => selected ? { backend: 'electron-attached', uiTabId: 'tab-main' } : undefined } }
     } as unknown as MmsProfileServices
 
@@ -172,10 +173,10 @@ describe('definition browser runtime binding', () => {
     expect(Object.isFrozen(gui)).toBe(true)
     expect(Object.isFrozen(gui?.execution)).toBe(true)
 
-    const plan = mainBrowserBinding(services, {
-      threadId: 'thread-main', turnId: 'turn-plan', source: 'gui', mode: 'plan'
+    const reviewer = mainBrowserBinding(services, {
+      threadId: 'thread-main', turnId: 'turn-reviewer', source: 'gui', mode: 'reviewer'
     })
-    expect(plan?.policy.allowedTools).toEqual(['browser_observe'])
+    expect(reviewer?.policy.allowedTools).toEqual(['browser_observe'])
     selected = false
     expect(mainBrowserBinding(services, {
       threadId: 'thread-main', turnId: 'turn-missing', source: 'gui', mode: 'agent'

@@ -27,7 +27,7 @@ it.each([
   const tools = new Map(botMemoryTools({ activationOf: (id) => f!.bots.tools.activationOf(id), memory: store }).map((tool) => [tool.name, tool]))
   const call = async (name: string, args: Record<string, unknown>) => {
     const result = await tools.get(name)!.handler(args, {
-      caller: { threadId: payload.threadId, runId: payload.runId, provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+      caller: { threadId: payload.threadId, runId: payload.runId, provider: 'pi', accessLevel: 'lineage' },
       turn: { turnToken: 't', ...appTurn({ threadId: payload.threadId, runId: payload.runId }) },
       toolCallId: 'call', signal: new AbortController().signal, transport: 'mcp'
     })

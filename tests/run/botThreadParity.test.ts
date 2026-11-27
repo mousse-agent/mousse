@@ -106,7 +106,7 @@ describe('a bot uses what a thread\'s agent can', () => {
         return { error: true, text: error instanceof Error ? error.message : String(error) }
       }
     }
-    const listed = () => registry.listForThread('work', 'default', workRun.runId).map((tool) => tool.name)
+    const listed = () => registry.listForThread('work', workRun.runId).map((tool) => tool.name)
     return { compiled, call, listed, asked, host: fake.host, queueCommands: fake.queueCommands, onAppResult, files, base: base!, registry }
   }
 

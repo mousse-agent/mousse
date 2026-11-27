@@ -46,7 +46,7 @@ describe('the subagent tools as variants of the thread tools', () => {
   it('a read-only subagent lists thread_stop, as it listed task_cancel, and the tools its old variants read', () => {
     fx = delegationFixture()
     const { registry } = appToolRegistry(fx.engine, fakeAppToolHost().host)
-    const names = registry.listFor({ threadId: 'caller', readOnly: true, modeCeiling: 'default' }).map((tool) => tool.name)
+    const names = registry.listFor({ threadId: 'caller', readOnly: true }).map((tool) => tool.name)
     for (const name of ['thread_stop', 'thread_wait', 'thread_list', 'thread_send']) expect(names).toContain(name)
   })
 

@@ -80,7 +80,7 @@ describe('the gateway mints the bridge from the binding\'s approvals', () => {
         sink: sink(),
         control: { drainSteer: () => undefined, heartbeat: noop },
         host: host(),
-        ...(options.app === false ? {} : { app: { turnToken: 'tt', modeCeiling: 'default' as const, mcpEligible: false, instructions: () => ({ sessionInstructions: '', turnPreamble: '' }) } })
+        ...(options.app === false ? {} : { app: { turnToken: 'tt', mcpEligible: false, instructions: () => ({ sessionInstructions: '', turnPreamble: '' }) } })
       }
       await harness.startTurn(spec).result
       return { binding, bridge: hosts.at(-1)!.bridge! }

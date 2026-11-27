@@ -265,7 +265,7 @@ describe('activation and dispatch', () => {
     expect(prepared.authority.spend).toBeNull()
     expect(existsSync(join(prepared.scratch, 'tmp'))).toBe(true)
     expect(store.counters(activation.id).activeMs).toBe(BOT_TURN_WINDOW_MS)
-    expect(checked.at(-1)).toMatchObject({ origin: 'bot', mode: 'default' })
+    expect(checked.at(-1)).toMatchObject({ origin: 'bot' })
     // A second claim of the same turn.start is refused: the dispatch already started.
     expect(bots.prepare(payload)).toMatchObject({ code: 'bot_dispatch_started' })
   })

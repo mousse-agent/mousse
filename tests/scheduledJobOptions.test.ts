@@ -54,12 +54,6 @@ describe('scheduled job selection', () => {
     expect(() => validateScheduledJobOptions({ selection }, deps({ resolveStored: () => { throw new Error('approves tools itself') } }))).toThrow(/approves tools itself/)
     expect(() => validateScheduledJobOptions({ selection: { instanceId: 'x', llmProvider: '', model: ' ' } }, deps())).toThrow(/model is required/)
   })
-
-  it('accepts only agent and plan modes', () => {
-    expect(() => validateScheduledJobOptions({ mode: 'agent' }, deps())).not.toThrow()
-    expect(() => validateScheduledJobOptions({ mode: 'plan' }, deps())).not.toThrow()
-    expect(() => validateScheduledJobOptions({ mode: 'build' as never }, deps())).toThrow(/mode must be/)
-  })
 })
 
 describe('scheduled job workspace', () => {
@@ -79,10 +73,9 @@ describe('scheduled job workspace', () => {
     expect(() => validateScheduledJobOptions({ projectId: 'p1', threadId: 'owner', workspace: { kind: 'newWorktree' } }, deps())).toThrow(/bound to a thread/)
   })
 
-  it('needs a Git project for a new worktree and never provisions one for plan mode', () => {
+  it('needs a Git project for a new worktree', () => {
     expect(validateScheduledJobOptions({ projectId: 'p1', workspace: { kind: 'newWorktree' } }, deps())).toEqual({})
     expect(() => validateScheduledJobOptions({ projectId: 'p1', workspace: { kind: 'newWorktree' } }, deps({ isGitBacked: () => false }))).toThrow(/Git repository/)
-    expect(() => validateScheduledJobOptions({ projectId: 'p1', mode: 'plan', workspace: { kind: 'newWorktree' } }, deps())).toThrow(/plan-mode job never provisions/)
     expect(() => validateScheduledJobOptions({ projectId: 'missing', workspace: { kind: 'newWorktree' } }, deps())).toThrow(/Project not found/)
   })
 

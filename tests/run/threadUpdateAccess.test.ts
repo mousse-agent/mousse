@@ -76,7 +76,7 @@ describe('thread_update access: a parent lifts its subagent\'s read-only access'
     await d.send('Delegate it', 'agent', parentId)
     await waitFor(() => childTurns.length === 1 || failures.length > 0, 'the child\'s first turn')
     expect(failures).toEqual([])
-    const ask = async (prompt: string, args: Record<string, unknown>, mode: 'agent' | 'plan' = 'agent', threadId = parentId) => {
+    const ask = async (prompt: string, args: Record<string, unknown>, mode = 'agent', threadId = parentId) => {
       calls[prompt] = args
       parents.add(threadId)
       await d!.send(prompt, mode, threadId)
@@ -142,12 +142,10 @@ describe('thread_update access: a parent lifts its subagent\'s read-only access'
     expect(childTurns[1]!.mcp.token).not.toBe(childTurns[0]!.mcp.token)
   }, 30_000)
 
-  it('only the direct parent lifts it, and not from a Plan turn', async () => {
+  it('only the direct parent lifts it', async () => {
     const { child, ask } = await family()
     const childId = child()
     await waitFor(() => childRuns(childId).every((run) => run.status === 'completed'), 'the child\'s first turn to end')
-    const planned = await ask('Lift it in plan', { access: { readOnly: false } }, 'plan')
-    expect(refusalOf(planned)).toMatchObject({ refused: { code: 'lacks_capability', lacks: 'edit' } })
     const other = d!.store.createThread('Other')
     d!.orch.setThreadModelOverride(other.id, { llmProvider: 'claude-subscription', model: 'vendor-model' })
     const stranger = await ask('Lift it from elsewhere', { access: { readOnly: false } }, 'agent', other.id)

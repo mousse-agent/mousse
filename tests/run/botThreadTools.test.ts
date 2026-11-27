@@ -162,14 +162,14 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     // Of the tools this registry has (the git tools need a host that reads repositories).
     // Answering a thread's approvals (\`approval_respond\`) is a kind of \`request_answer\`: listed with it.
     const expected = shown.filter((name) => registry.get(name)?.name === name).sort()
-    expect(thread(registry.listForThread('home', 'default', runId).map((tool) => tool.name))).toEqual(expected)
+    expect(thread(registry.listForThread('home', runId).map((tool) => tool.name))).toEqual(expected)
     expect(thread(registry.listForTurn('home', runId).map((tool) => tool.name))).toEqual(expected)
-    expect(registry.listForThread('home', 'default', runId).some((tool) => tool.name === 'request_answer')).toBe(shown.includes('approval_respond'))
+    expect(registry.listForThread('home', runId).some((tool) => tool.name === 'request_answer')).toBe(shown.includes('approval_respond'))
     // With no turn of its own running, none; and never what no bot can hold.
-    expect(thread(registry.listForThread('home', 'default').map((tool) => tool.name))).toEqual([])
-    expect(registry.listForThread('home', 'default', runId).map((tool) => tool.name).filter((name) => name === 'delegate_task' || name === 'continue_subagent')).toEqual([])
+    expect(thread(registry.listForThread('home').map((tool) => tool.name))).toEqual([])
+    expect(registry.listForThread('home', runId).map((tool) => tool.name).filter((name) => name === 'delegate_task' || name === 'continue_subagent')).toEqual([])
     // An ordinary thread lists it as an agent's: its own thread when the turn ends, or another by id.
-    const own = registry.listForThread('mine', 'default').find((tool) => tool.name === 'thread_archive')
+    const own = registry.listForThread('mine').find((tool) => tool.name === 'thread_archive')
     expect(Object.keys((own?.inputSchema as { properties: object }).properties).sort()).toEqual(['archived', 'clientRequestId', 'threadId'])
   })
 
@@ -337,12 +337,11 @@ describe('a bot\'s thread tools ("use your threads")', () => {
   })
 
   // What a bot's thread_send does by the thread's state and what it asks for: it joins a running turn unless it asks to
-  // queue or for a plan turn; a running turn that can't take it (ended, not started, looser mode) gets a turn instead;
+  // queue; a running turn that can't take it (ended, not started, looser mode) gets a turn instead;
   // a question waiting on the owner refuses it.
   const joins: Array<[string, { running: boolean; args?: Record<string, unknown>; steer?: Record<string, unknown> }, 'steer' | 'send' | 'refused', string?]> = [
     ['a working thread: it joins the running turn', { running: true }, 'steer'],
     ['a working thread, queue: true: it waits behind the turn', { running: true, args: { queue: true } }, 'send'],
-    ['a working thread, mode plan: it waits for a plan turn', { running: true, args: { mode: 'plan' } }, 'send'],
     ['an idle thread: it starts a turn', { running: false }, 'send'],
     ['the run ended meanwhile: it starts a turn', { running: true, steer: { status: 'ignored', reason: 'not_active', activeRunId: null, runStatus: 'completed' } }, 'send', 'run_not_active'],
     ['the run has not started its turn: it waits behind it', { running: true, steer: { status: 'rejected', reason: 'steer_target_not_ready' } }, 'send', 'steer_target_not_ready'],
@@ -427,7 +426,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
 
   it('a bot reads its own description of thread_create and thread_send, with no in-a-row limit; an ordinary thread reads the agents\' one', async () => {
     const { registry, runId } = await world({ threads: 'all' })
-    const described = (threadId: string, name: string) => registry.listForThread(threadId, 'default', runId).find((tool) => tool.name === name)?.description ?? ''
+    const described = (threadId: string, name: string) => registry.listForThread(threadId, runId).find((tool) => tool.name === name)?.description ?? ''
     for (const name of ['thread_create', 'thread_send']) {
       expect(described('home', name)).toMatch(/no count per turn, per run or per day/)
       expect(described('home', name)).not.toMatch(/agent messages that follow(ed)? one person's message/)
@@ -678,10 +677,10 @@ describe('a bot\'s thread tools ("use your threads")', () => {
   // the rest through use_tool, which runs the tool it names through every check a direct call passes.
   it('on Codex and Pi, the thread lists only the core set, the same on every call, and use_tool runs a catalogued tool as a direct call would', async () => {
     const { registry, runId, text } = await world({ threads: 'all', catalogue: 'use_tool' })
-    const names = registry.listForThread('home', 'default', runId).map((tool) => tool.name)
+    const names = registry.listForThread('home', runId).map((tool) => tool.name)
     expect(names).toEqual(expect.arrayContaining(['thread_list', 'thread_read', 'thread_send', 'tool_catalogue', 'use_tool']))
     expect(names.filter((name) => !botCoreTool(name))).toEqual([])
-    expect(registry.listForThread('home', 'default', runId).map((tool) => tool.name)).toEqual(names)
+    expect(registry.listForThread('home', runId).map((tool) => tool.name)).toEqual(names)
     const direct = await text('thread_search', { query: 'login' })
     expect(direct).toMatchObject({ error: false, text: expect.stringContaining('Fix the login page') })
     expect(await text('use_tool', { tool: 'thread_search', arguments: { query: 'login' } })).toEqual(direct)
@@ -705,7 +704,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
 
   it('on Claude Code, use_tool is not listed and does nothing; tool_catalogue says how to load a group', async () => {
     const { registry, runId, text } = await world({ threads: 'read', catalogue: 'search' })
-    const names = registry.listForThread('home', 'default', runId).map((tool) => tool.name)
+    const names = registry.listForThread('home', runId).map((tool) => tool.name)
     expect(names).toContain('tool_catalogue')
     expect(names).toContain('thread_search')
     expect(names).not.toContain('use_tool')

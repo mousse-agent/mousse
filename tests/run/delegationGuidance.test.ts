@@ -35,7 +35,6 @@ describe('subagent guidance', () => {
       - When a subagent asks a question you can answer, use request_answer; otherwise ask the user. A subagent that needs input is reported as needing it.
       - To run a subagent on another of the user's computers (another operating system, a stronger machine, a job that should outlive this one), pass computer to thread_create (kind "subagent"); computer_list shows which ones you may use. It runs there under that computer's agents, in its copy of this repository; its questions are answered there, and its result names the branch its work is on there, for you to fetch.
       - clientRequestId: pass a fresh clientRequestId for every new action that changes state (thread_create, thread_send, request_answer). Reuse the same value only when retrying the same call after an error or timeout; Mousse then returns the first result instead of acting twice.
-      - A delegated task can never exceed your own mode ceiling: a planning turn may only start planning children.
       - Use question_ask for clarifying questions; use thread_read to read your thread's run events (and those of your parent or children).
       - message_parent (a subagent, or a thread a personal bot started) messages your parent while you work. Use it only when you need its input (a question, a blocker) or it must know something now; not for progress updates, which your final answer covers.
       - terminal_read reads the terminals the user has open in your thread's terminal panel (read-only). Use it when the user refers to their terminal ("the error in my terminal", "is the server up?") instead of asking them to paste the output, and before you start a dev server or watcher that may already run there.
@@ -188,21 +187,21 @@ describe('the delegation tools models are offered', () => {
       const threadCreate = registry.get('thread_create')!
       expect(registry.get('delegate_task')).toBe(threadCreate)
       expect(threadCreate.description).toContain(delegate.description)
-      const subagentArgs = [...Object.keys((delegate.parameters as { properties: Record<string, unknown> }).properties), 'kind', 'modeCeiling', 'clientRequestId']
+      const subagentArgs = [...Object.keys((delegate.parameters as { properties: Record<string, unknown> }).properties), 'kind', 'clientRequestId']
       expect(Object.keys((threadCreate.inputSchema as { properties: Record<string, unknown> }).properties)).toEqual(expect.arrayContaining(subagentArgs))
       for (const tool of pi) {
         const served = mcp.find((entry) => entry.name === tool.name)!
         expect(served.description).toBe(tool.description)
         const piProperties = Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
         const mcpProperties = Object.keys((served.inputSchema as { properties: Record<string, unknown> }).properties)
-        // The MCP server adds only what its callers need on top: a retry key on every tool that changes something, and a ceiling for delegate_task.
+        // The MCP server adds only what its callers need on top: a retry key on every tool that changes something.
         expect(mcpProperties.filter((name) => !piProperties.includes(name)).sort()).toEqual(
-          tool.name === 'delegate_task' ? ['clientRequestId', 'modeCeiling'] : tool.name === 'list_subagents' || tool.name === 'computer_list' || tool.name === 'model_list' || tool.name === 'task_status' ? [] : ['clientRequestId']
+          tool.name === 'list_subagents' || tool.name === 'computer_list' || tool.name === 'model_list' || tool.name === 'task_status' ? [] : ['clientRequestId']
         )
         expect(piProperties.every((name) => mcpProperties.includes(name))).toBe(true)
       }
       // The older names are not offered by either (they stay dispatchable in process only).
-      const listed = registry.listFor({ readOnly: false, modeCeiling: 'default' }).map((tool) => tool.name)
+      const listed = registry.listFor({ readOnly: false }).map((tool) => tool.name)
       // `create_subagent` is an old name of `thread_create kind: subagent` now (`MOUSSE_TOOL_ALIASES`).
       expect(registry.get('create_subagent')).toBe(threadCreate)
       for (const hidden of ['create_subagents', 'recall_subagent', 'integrate_delegation', 'integrate_subagent', 'list_delegations']) {

@@ -21,7 +21,8 @@ export type CursorMcpServers = Record<string, { type: 'http'; url: string; heade
 export interface CursorAgentSetup extends CursorLocal {
   apiKey: string
   model?: CursorModelSelection
-  mode?: 'agent' | 'plan'
+  /** Always `agent`: a run never resumes in a mode the agent was left in. */
+  mode?: 'agent'
   mcpServers?: CursorMcpServers
   /** Ambient settings layers the agent loads (rules, skills, MCP servers): the user's own setup. */
   settingSources: string[]
@@ -34,7 +35,7 @@ export interface CursorHostMethods {
   resume: { params: CursorAgentSetup & { agentId: string }; result: { agentId: string } }
   /** Starts a run; its updates arrive as `delta` events and its end as one `run_end` event. */
   send: {
-    params: { agentId: string; text: string; images?: Array<{ data: string; mimeType: string }>; model?: CursorModelSelection; mode?: 'agent' | 'plan'; mcpServers?: CursorMcpServers }
+    params: { agentId: string; text: string; images?: Array<{ data: string; mimeType: string }>; model?: CursorModelSelection; mode?: 'agent'; mcpServers?: CursorMcpServers }
     result: { runId: string }
   }
   cancel: { params: { runId: string }; result: { cancelled: boolean } }

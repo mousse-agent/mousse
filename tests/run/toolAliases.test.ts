@@ -37,7 +37,7 @@ describe('an old tool name', () => {
     server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
     await server.start()
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, ...turn }))
-    const token = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!.token
+    const token = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, binding: 'drained_turn', generation: 'g' })!.token
     const rpc = async (method: string, params: Record<string, unknown>): Promise<RpcBody> => {
       const response = await fetch(server!.url, {
         method: 'POST',

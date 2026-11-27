@@ -93,7 +93,7 @@ function urlHost(url: string): string {
 
 function planTitle(text: string | undefined): string {
   const heading = text?.split('\n').find((line) => /^#{1,6}\s+\S/.test(line))?.replace(/^#{1,6}\s+/, '').trim()
-  return heading && heading.length > 0 ? (heading.length > 90 ? `${heading.slice(0, 87)}…` : heading) : 'Implementation plan'
+  return heading && heading.length > 0 ? (heading.length > 90 ? `${heading.slice(0, 87)}…` : heading) : 'To-dos'
 }
 
 /**

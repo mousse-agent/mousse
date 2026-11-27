@@ -41,7 +41,6 @@ import { ALL_MIRROR_FIELDS, SIGN_OUT_MIRROR_FIELDS } from '../vendorMirror'
 
 export const CLAUDE_CODE_CAPS: HarnessCaps = Object.freeze({
   ...CLAUDE_SUBSCRIPTION_CAPABILITIES,
-  planMode: true,
   contextUsage: 'reported',
   // Claude Code asks Mousse through its permission callback under the mode Mousse sets.
   toolControl: 'approval_only',

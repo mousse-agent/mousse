@@ -1,29 +1,26 @@
 /**
- * docs/plans/tool-api.md §1.3, PR 2b: narrowing from above is live (read at every call, not when the credential was
- * minted), a subagent is known by its lineage, and the owner's own preferences never pass down to a subagent. PR 2b-2:
- * what narrowing takes away mid-work is `revoked`, a subagent's lacks are reported up its tree (§2.4), `person` is a
- * declared need, and a definition turn's list is held to its grants in the registry.
+ * docs/plans/tool-api.md §1.3: a subagent is known by its lineage, and the owner's own preferences never pass down to a
+ * subagent. A subagent's lacks are reported up its tree (§2.4), `person` is a declared need, and a definition turn's
+ * list is held to its grants in the registry.
  */
 import { describe, expect, it } from 'vitest'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
-import { AppToolTurns, plannedFromAbove, ToolRegistry, type AppToolHost, type AppToolTurn, type LacksReport, type MousseTool } from '../../src/mms/run/mcp/appTools'
+import { AppToolTurns, ToolRegistry, type AppToolHost, type AppToolTurn, type LacksReport, type MousseTool } from '../../src/mms/run/mcp/appTools'
 import { appletTools } from '../../src/mms/run/mcp/appTools/applets'
 import { skillTools } from '../../src/mms/run/mcp/appTools/skills'
 import { formatInboxNotice } from '../../src/mms/run/delegation/notice'
-import type { ModeCeiling } from '../../src/mms/run/types'
 import { appTurn, denied } from './appToolsFixture'
 
 const tool = (name: string, access: MousseTool['access'], extra: Partial<MousseTool> = {}): MousseTool =>
   ({ name, description: name, inputSchema: {}, access, class: 'mutation', handler: () => ({ text: 'ok' }), ...extra }) as MousseTool
 
-function registryFor(options: { liveCeiling?: (threadId: string) => ModeCeiling | undefined; subagent?: boolean }) {
+function registryFor(options: { subagent?: boolean }) {
   const turns = new AppToolTurns()
   turns.register(appTurn({ threadId: 'child', runId: 'run-child', ...(options.subagent ? { subagent: true } : {}) }))
   const registry = new ToolRegistry({
     activeRunId: (threadId) => `run-${threadId}`,
     turns,
     permissionModeFor: () => 'full',
-    ...(options.liveCeiling ? { liveCeiling: options.liveCeiling } : {}),
     subagentThread: () => options.subagent === true
   })
     .register(tool('starts', 'startsThreads'))
@@ -31,93 +28,21 @@ function registryFor(options: { liveCeiling?: (threadId: string) => ModeCeiling 
     .register(tool('theme', 'changesSettings', { capabilities: ['themes'] }))
   const call = (name: string) =>
     registry.call(name, {}, {
-      credential: { threadId: 'child', runId: 'run-child', provider: 'codex', modeCeiling: 'default', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
+      credential: { threadId: 'child', runId: 'run-child', provider: 'codex', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
       toolCallId: 'c',
       signal: new AbortController().signal
     })
   return { registry, call, turn: () => turns.get('run-child')! }
 }
 
-describe('narrowing from above', () => {
-  it.each([
-    ['a thread above switched to Plan while the person answered: refused as taken away, and its handler never runs', 'plan', false],
-    ['nothing changed while it asked: the approved call runs', undefined, true]
-  ] as const)('a call that asked first: %s', async (_name, after, runs) => {
-    let above: ModeCeiling | undefined
-    let ran = 0
-    const turns = new AppToolTurns()
-    turns.register(appTurn({ threadId: 'child', runId: 'run-child' }))
-    const registry = new ToolRegistry({
-      activeRunId: (threadId) => `run-${threadId}`,
-      turns,
-      permissionModeFor: () => 'ask',
-      liveCeiling: () => above,
-      // The person answers; meanwhile the thread above changed (or did not).
-      askApproval: async () => {
-        above = after
-        return { permission: 'allow' }
-      }
-    }).register(tool('settings', 'changesSettings', { handler: () => { ran += 1; return { text: 'ok' } } }))
-    const outcome = registry.call('settings', {}, {
-      credential: { threadId: 'child', runId: 'run-child', provider: 'codex', modeCeiling: 'default', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
-      toolCallId: 'c',
-      signal: new AbortController().signal
-    })
-    if (runs) await expect(outcome).resolves.toMatchObject({ text: 'ok' })
-    else expect(await denied(outcome)).toMatchObject({ refused: { code: 'revoked', lacks: 'settings' } })
-    expect(ran).toBe(runs ? 1 : 0)
-  })
-
-  it('a parent switching to Plan narrows its running child at the next call, with the credential minted before', async () => {
-    let above: ModeCeiling | undefined
-    const { registry, call, turn } = registryFor({ liveCeiling: () => above })
-    await expect(call('starts')).resolves.toMatchObject({ text: 'ok' })
-    above = 'plan'
-    // Held when the turn started and taken away during the work: `revoked`, never retried in it (§2.4).
-    expect(await denied(call('starts'))).toMatchObject({ refused: { code: 'revoked', retry: 'never', lacks: 'threads.start' } })
-    expect(registry.usableNow(turn())).not.toContain('starts')
-    // A Plan turn still writes threads and delegates: only what Plan itself lacks is refused.
-    await expect(call('writes')).resolves.toMatchObject({ text: 'ok' })
-    above = undefined
-    await expect(call('starts')).resolves.toMatchObject({ text: 'ok' })
-    expect(registry.usableNow(turn())).toContain('starts')
-  })
-
-  it('narrows to Plan when what is above cannot be read', async () => {
-    const { call } = registryFor({ liveCeiling: () => { throw new Error('lineage unreadable') } })
-    expect(await denied(call('starts'))).toMatchObject({ refused: { code: 'revoked', lacks: 'threads.start' } })
-  })
-
-  it('reads the ceiling of every ancestor of a subagent, and stops at a thread that is not one', () => {
-    const lineage: Record<string, { parentThreadId: string; relationship: string }> = {
-      grandchild: { parentThreadId: 'child', relationship: 'subagent' },
-      child: { parentThreadId: 'root', relationship: 'subagent' },
-      fork: { parentThreadId: 'root', relationship: 'fork' },
-      loop: { parentThreadId: 'loop', relationship: 'subagent' }
-    }
-    const ceilings: Record<string, ModeCeiling> = { root: 'plan', child: 'default', loop: 'default' }
-    const self = {
-      runEngine: { delegations: { getLineage: (id: string) => lineage[id] }, getActiveRun: (id: string) => (ceilings[id] ? { runId: `run-${id}` } : undefined) },
-      appToolTurns: { get: (runId: string) => ({ modeCeiling: ceilings[runId.slice('run-'.length)] }) as AppToolTurn }
-    }
-    const ancestorCeiling = (OrchestratorService.prototype as unknown as { ancestorCeiling(this: unknown, id: string): ModeCeiling | undefined }).ancestorCeiling
-    expect(ancestorCeiling.call(self, 'grandchild')).toBe('plan')
-    expect(ancestorCeiling.call(self, 'fork')).toBeUndefined()
-    expect(ancestorCeiling.call(self, 'root')).toBeUndefined()
-    ceilings.root = 'default'
-    expect(ancestorCeiling.call(self, 'grandchild')).toBeUndefined()
-    expect(() => ancestorCeiling.call(self, 'loop')).toThrow(/deeper than 64/)
-  })
-})
-
 /**
- * A subagent `child` of `parent` (whose turn runs in `parentMode`), with a run each. `personOf` says which runs hold
+ * A subagent `child` of `parent`, with a run each. `personOf` says which runs hold
  * `person` as the owner reads it; the registry adds that a subagent never does.
  */
-function tree(options: { parentMode?: ModeCeiling; childCeiling?: ModeCeiling; personOf?: (threadId: string) => boolean; liveCeiling?: () => ModeCeiling | undefined } = {}) {
+function tree(options: { personOf?: (threadId: string) => boolean } = {}) {
   const turns = new AppToolTurns()
-  turns.register(appTurn({ threadId: 'parent', runId: 'run-parent', modeCeiling: options.parentMode ?? 'default' }))
-  turns.register(appTurn({ threadId: 'child', runId: 'run-child', subagent: true, modeCeiling: options.childCeiling ?? 'default', modeFacts: { readOnly: false, agent: true, build: false } }))
+  turns.register(appTurn({ threadId: 'parent', runId: 'run-parent' }))
+  turns.register(appTurn({ threadId: 'child', runId: 'run-child', subagent: true, modeFacts: { readOnly: false, agent: true, build: false } }))
   const reports: LacksReport[] = []
   const registry = new ToolRegistry({
     activeRunId: (threadId) => `run-${threadId}`,
@@ -126,17 +51,16 @@ function tree(options: { parentMode?: ModeCeiling; childCeiling?: ModeCeiling; p
     subagentThread: (threadId) => threadId === 'child',
     parentThread: (threadId) => (threadId === 'child' ? 'parent' : undefined),
     personHeld: (caller) => options.personOf?.(caller.threadId) === true,
-    reportLacks: (report) => void reports.push(report),
-    ...(options.liveCeiling ? { liveCeiling: options.liveCeiling } : {})
+    reportLacks: (report) => void reports.push(report)
   })
     .register(tool('starts', 'startsThreads'))
     .register(tool('theme', 'changesSettings', { capabilities: ['themes'] }))
     .register(tool('archive', 'managesOthers', { needsPerson: true }))
     .register(tool('rename_or_run', 'writesThreads', { needsPerson: (args) => args.run === true }))
     .register(tool('facts', 'reads', { available: (turn) => (turn.modeFacts?.readOnly ? 'Not in a read-only turn.' : true) }))
-  const call = (threadId: string, name: string, args: Record<string, unknown> = {}, ceiling: ModeCeiling = 'default') =>
+  const call = (threadId: string, name: string, args: Record<string, unknown> = {}) =>
     registry.call(name, args, {
-      credential: { threadId, runId: `run-${threadId}`, provider: 'codex', modeCeiling: ceiling, accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
+      credential: { threadId, runId: `run-${threadId}`, provider: 'codex', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
       toolCallId: 'c',
       signal: new AbortController().signal
     })
@@ -152,13 +76,6 @@ describe('a subagent refused what it lacks tells its tree (§2.4)', () => {
     expect(reports).toEqual([{ threadId: 'child', runId: 'run-child', tool: 'theme', lacks: 'themes', fix: expect.any(String), to: 'parent', parentThreadId: 'parent' }])
   })
 
-  it('the root of its tree when its parent lacks it too, with what would give it', async () => {
-    const { call, reports } = tree({ parentMode: 'plan', childCeiling: 'plan' })
-    const refusal = await denied(call('child', 'starts', {}, 'plan'))
-    expect(refusal?.refused).toMatchObject({ code: 'lacks_capability', lacks: 'threads.start', message: expect.stringMatching(/root of your tree was told/) })
-    expect(reports).toEqual([expect.objectContaining({ lacks: 'threads.start', to: 'root', parentThreadId: 'parent', fix: expect.stringMatching(/Agent turn/) })])
-  })
-
   it('`person`: its parent when a person started the parent\'s turn, else the root', async () => {
     const held = tree({ personOf: (threadId) => threadId === 'parent' || threadId === 'child' })
     expect((await denied(held.call('child', 'archive')))?.refused).toMatchObject({ code: 'lacks_capability', lacks: 'person' })
@@ -168,14 +85,12 @@ describe('a subagent refused what it lacks tells its tree (§2.4)', () => {
     expect(none.reports.map((report) => report.to)).toEqual(['root'])
   })
 
-  it('never for a thread that is not a subagent, nor for what was revoked', async () => {
-    let above: ModeCeiling | undefined
-    const { call, reports } = tree({ parentMode: 'plan', liveCeiling: () => above })
-    expect((await denied(call('parent', 'starts', {}, 'plan')))?.refused.code).toBe('lacks_capability')
-    above = 'plan'
-    expect((await denied(call('child', 'starts')))?.refused).toMatchObject({ code: 'revoked', retry: 'never' })
+  it('never for a thread that is not a subagent', async () => {
+    const { call, reports } = tree()
+    expect((await denied(call('parent', 'archive')))?.refused.code).toBe('lacks_capability')
     expect(reports).toEqual([])
   })
+
 })
 
 describe('the owner reports a subagent\'s lacks once, to its parent or the root (§2.4)', () => {
@@ -246,20 +161,6 @@ describe('`person` as a declared need (§1.3 "Provenance")', () => {
   })
 })
 
-describe('a parent\'s Plan reaches its child\'s mode facts (§1.3 "Subagents")', () => {
-  it('the child\'s turn is checked as a Plan turn\'s, read-only, until the parent leaves Plan', async () => {
-    let above: ModeCeiling | undefined
-    const { call, registry, turn } = tree({ liveCeiling: () => above })
-    await expect(call('child', 'facts')).resolves.toMatchObject({ text: 'ok' })
-    above = 'plan'
-    expect((await denied(call('child', 'facts')))?.refused).toMatchObject({ code: 'revoked', message: expect.stringMatching(/Not in a read-only turn/) })
-    expect(registry.usableNow(turn('child'))).not.toContain('facts')
-    expect(plannedFromAbove(turn('child'))).toMatchObject({ mode: 'plan', modeCeiling: 'plan', modeFacts: { readOnly: true, agent: false, build: false } })
-    above = undefined
-    await expect(call('child', 'facts')).resolves.toMatchObject({ text: 'ok' })
-  })
-})
-
 describe('a definition turn\'s per-turn list (§1.3 "Removed": `offered` is the per-turn definition filter)', () => {
   it('holds only what its grants name, and never a delegation tool even when granted', () => {
     const turns = new AppToolTurns()
@@ -275,11 +176,11 @@ describe('a definition turn\'s per-turn list (§1.3 "Removed": `offered` is the 
   })
 })
 
-describe('skills in a Plan or read-only turn (§1.5)', () => {
+describe('skills in a read-only turn (§1.5)', () => {
   it('are offered to a runtime that lists tools per turn, as in an Agent turn', () => {
     const tools = skillTools({ skills: () => ({}) } as unknown as AppToolHost)
-    const plan = appTurn({ threadId: 'child', runId: 'r', mode: 'plan', modeFacts: { readOnly: true, agent: false, build: false }, enabledSkills: [{ name: 'review' }] as never }) as AppToolTurn
-    for (const skill of tools) expect(skill.offered!(plan)).toBe(true)
+    const readOnly = appTurn({ threadId: 'child', runId: 'r', modeFacts: { readOnly: true, agent: false, build: false }, enabledSkills: [{ name: 'review' }] as never }) as AppToolTurn
+    for (const skill of tools) expect(skill.offered!(readOnly)).toBe(true)
   })
 })
 

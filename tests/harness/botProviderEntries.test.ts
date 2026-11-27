@@ -54,7 +54,7 @@ function fakeClaude(version: string) {
   return { binary: script, setVersion: (next: string) => writeFileSync(versionFile, next) }
 }
 
-const botPolicy: RunPolicy = { mode: 'default', origin: 'bot', tools: { allow: ['Read'] }, approvals: 'grants', approve: 'host', authority: { kind: 'bot', digest: 'd' } }
+const botPolicy: RunPolicy = { origin: 'bot', tools: { allow: ['Read'] }, approvals: 'grants', approve: 'host', authority: { kind: 'bot', digest: 'd' } }
 
 function profile(options: { platform?: NodeJS.Platform; version?: string; owner?: 'subscription' | 'api_key' | 'signed_out'; stored?: (binary: string) => Record<string, unknown>; removed?: string[] } = {}) {
   const profileHome = tempDir('mousse-bot-entries-')

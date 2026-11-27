@@ -857,19 +857,19 @@ describe('CodexAdapter', () => {
     })
   })
 
-  it('runs plan turns read-only and declines approvals without asking', async () => {
+  it('runs a read-only child read-only and declines approvals without asking', async () => {
     const replay = transport([
       ...handshake(),
       ...threadStart(4, threadParams({ approvalPolicy: 'on-request', sandbox: 'read-only' })),
-      ...turnStart(5, 'plan it', 'turn-1', { approvalPolicy: 'on-request', sandboxPolicy: { type: 'readOnly', networkAccess: false } }),
+      ...turnStart(5, 'check it', 'turn-1', { approvalPolicy: 'on-request', sandboxPolicy: { type: 'readOnly', networkAccess: false } }),
       inn({ id: 'srv-1', method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: 'cmd-1', startedAtMs: 0, environmentId: null, command: 'touch x' } }),
       out({ id: 'srv-1', result: { decision: 'decline' } }),
-      ...message('msg-1', ['Plan']),
+      ...message('msg-1', ['Checked']),
       completed('completed')
     ])
     const codex = service(replay)
     const asked = answerQuestions(() => ({ permission: 'allow' }))
-    await new CodexAdapter(() => codex).startTurn(input({ prompt: 'plan it', mode: 'plan' }), recordingSink(), control(), host())
+    await new CodexAdapter(() => codex).startTurn(input({ prompt: 'check it', child: { readOnly: true } }), recordingSink(), control(), host())
     replay.assertDone()
     expect(asked).toEqual([])
   })

@@ -196,7 +196,6 @@ export const OPENCODE_CAPS: HarnessCaps = Object.freeze({
   historyInjection: 'prompt',
   mcp: true,
   childPolicy: 'isolated_only',
-  planMode: false,
   contextUsage: 'none',
   toolControl: 'approval_only',
   autoPermissionMode: false,

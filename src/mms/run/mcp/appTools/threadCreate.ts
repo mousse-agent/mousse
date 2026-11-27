@@ -5,11 +5,11 @@ import type { JsonSchema, MousseTool, ToolOutcome, ToolVariant, VariantSite } fr
  * `thread_create` (docs/plans/tool-api.md §2.1): one tool that starts a subagent or a thread. Each kind is a variant with
  * a declaration of its own (`MousseTool.variants`), so who may start what is read here:
  *
- * - `kind: subagent` needs `threads.delegate`, which every thread holds, readers and Plan included: a child no wider
+ * - `kind: subagent` needs `threads.delegate`, which every thread holds, readers included: a child no wider
  *   than its caller, here or on another computer (`computer`). It is `delegate_task`'s declaration and host
  *   (`delegation.ts`), under that name: a grant (a bot's, a definition's) judges it as `delegate_task`, whose old name
  *   is an alias of this kind (`MOUSSE_TOOL_ALIASES`).
- * - `kind: thread` needs `threads.start`, which a Plan ceiling and a read-only child lack, and a project: the thread
+ * - `kind: thread` needs `threads.start`, which a read-only child lacks, and a project: the thread
  *   family's independent thread (`thread.ts`). An agent's is a handoff (another project, or a thread the person asked
  *   for) and always shows in the person's sidebar; `hidden` is a personal bot's (#2004, #2003).
  *

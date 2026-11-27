@@ -67,7 +67,6 @@ export interface ScheduledJobRunRecord {
   queueItemId?: string
   /** The model the run actually used (the run's binding), not the job's field. */
   selection?: ModelOverride
-  mode?: 'agent' | 'plan'
   /** The permission mode the run's binding enforced (the stricter of the job, its ceiling and the thread). */
   permissionMode?: PermissionMode
   workspace?: ScheduledJobWorkspace
@@ -304,7 +303,6 @@ export interface ScheduledJob {
   bot?: ScheduledJobBot
   /** A bot's occurrence that did not start, and why (the bot was paused, or its last run still waited). Cleared when one starts. */
   botSkip?: { at: string; reason: string }
-  mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
   /** How much the job's runs may do without asking; never wider than `permissionCeiling`. Absent = the thread's mode. */
   permissionMode?: PermissionMode
@@ -374,6 +372,11 @@ export interface AutomationDraftState {
   ask?: { question: string; options: string[]; at: string }
   /** Turn on gives it one reusable thread for every run (Result: reuse). */
   reuseThread?: true
+  /**
+   * A signed request starts it (an `http` trigger). Its URL and secret are set up by the person (`scheduled.webhook.enable`),
+   * which a draft may have before Turn on; until then it shows as On request and cannot be turned on.
+   */
+  request?: true
 }
 
 /** Profile settings of the scheduler that people choose on the Scheduled page. */
@@ -412,7 +415,6 @@ export interface CreateScheduledJobInput {
   createThread?: boolean
   selection?: ModelOverride
   agent?: ScheduledJobAgent
-  mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
   permissionMode?: PermissionMode
   tellMe?: TellMe
@@ -446,7 +448,6 @@ export interface ScheduledJobPatch {
   selection?: ModelOverride | null
   /** `null` clears it: a model (the selection, else the default agent) does the work again. */
   agent?: ScheduledJobAgent | null
-  mode?: 'agent' | 'plan' | null
   /** `null` clears it: the run follows its thread's mode again. The job's ceiling is not part of a patch. */
   permissionMode?: PermissionMode | null
   workspace?: ScheduledJobWorkspace | null
@@ -1260,8 +1261,8 @@ export interface QueuedMessage {
   /** With `settleNotice`: the chain of the messages the notices are about (issue #1442); the turn stays in it. */
   settleChain?: string
   /**
-   * A settle notice that must not start a turn by itself (its thread is a subagent, the person stopped it, it is kept in
-   * Plan, or the notice says Mousse stopped watching): it waits until a person sends it (Send now), a notice that may
+   * A settle notice that must not start a turn by itself (its thread is a subagent, the person stopped it, or the notice
+   * says Mousse stopped watching): it waits until a person sends it (Send now), a notice that may
    * start a turn joins it, or a person's turn of the thread starts and it runs after that turn.
    */
   heldNotice?: true

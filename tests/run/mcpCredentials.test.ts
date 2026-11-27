@@ -26,13 +26,13 @@ describe('McpCredentials (SPEC §15.1)', () => {
     return { db, credentials, advance: (ms: number) => { clock += ms } }
   }
   const turn = (overrides: Partial<BearerTurn> = {}): BearerTurn => ({
-    threadId: 't1', instanceId: 'claude', runId: 'r1', modeCeiling: 'default', binding: 'per_call', generation: 'claude|default|0|0', ...overrides
+    threadId: 't1', instanceId: 'claude', runId: 'r1', binding: 'per_call', generation: 'claude|default|0|0', ...overrides
   })
 
   it('mints a random token and stores only its SHA-256', () => {
     const { db, credentials } = setup()
-    const minted = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'claude-subscription', modeCeiling: 'default' })
-    const other = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'claude-subscription', modeCeiling: 'default' })
+    const minted = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'claude-subscription' })
+    const other = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'claude-subscription' })
     expect(minted.token).not.toBe(other.token)
     expect(Buffer.from(minted.token, 'base64url')).toHaveLength(32)
     expect(minted.tokenHash).toBe(hashToken(minted.token))
@@ -41,29 +41,28 @@ describe('McpCredentials (SPEC §15.1)', () => {
     expect(rows).toHaveLength(2)
     for (const row of rows) expect(Object.values(row)).not.toContain(minted.token)
     expect(credentials.resolve(minted.token)).toMatchObject({
-      tokenHash: minted.tokenHash, threadId: 't1', runId: 'r1', provider: 'claude-subscription', modeCeiling: 'default', revokedAt: null, epoch: 0, binding: 'rotate'
+      tokenHash: minted.tokenHash, threadId: 't1', runId: 'r1', provider: 'claude-subscription', revokedAt: null, epoch: 0, binding: 'rotate'
     })
     expect(credentials.resolve('not-a-token')).toBeNull()
     expect(credentials.resolve('')).toBeNull()
     expect(credentials.resolve(minted.tokenHash)).toBeNull()
   })
 
-  it('refuses a mode ceiling other than plan or default, minting nothing and leaving a reusable credential as it was', () => {
+  it('a credential stored with the retired plan ceiling resolves like any other and carries no ceiling', () => {
     const { db, credentials } = setup()
-    const bad = { threadId: 't1', runId: 'r1', provider: 'p', modeCeiling: 'bypass' as never }
-    expect(() => credentials.mint(bad)).toThrow('modeCeiling must be plan or default.')
-    expect(db.database.prepare('SELECT * FROM credentials').all()).toEqual([])
-    const kept = credentials.bearerForTurn(turn({ modeCeiling: 'plan' }))
-    expect(() => credentials.bearerForTurn(turn({ runId: 'r2', modeCeiling: 'bypass' as never }))).toThrow('modeCeiling must be plan or default.')
-    expect(db.database.prepare('SELECT * FROM credentials').all()).toHaveLength(1)
-    expect(credentials.resolve(kept.token)).toMatchObject({ runId: 'r1', modeCeiling: 'plan' })
+    const minted = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'p' })
+    expect(db.database.prepare('SELECT mode_ceiling FROM credentials').get()).toEqual({ mode_ceiling: 'default' })
+    db.database.prepare("UPDATE credentials SET mode_ceiling = 'plan' WHERE token_hash = ?").run(minted.tokenHash)
+    const resolved = credentials.resolve(minted.token)
+    expect(resolved).toMatchObject({ runId: 'r1', revokedAt: null })
+    expect(resolved).not.toHaveProperty('modeCeiling')
   })
 
   it('revokes by run and by thread', () => {
     const { credentials } = setup()
-    const a = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'p', modeCeiling: 'plan' })
-    const b = credentials.mint({ threadId: 't1', runId: 'r2', provider: 'p', modeCeiling: 'default' })
-    const c = credentials.mint({ threadId: 't2', runId: 'r3', provider: 'p', modeCeiling: 'default' })
+    const a = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'p' })
+    const b = credentials.mint({ threadId: 't1', runId: 'r2', provider: 'p' })
+    const c = credentials.mint({ threadId: 't2', runId: 'r3', provider: 'p' })
     expect(credentials.revokeForRun('r1')).toBe(1)
     expect(credentials.revokeForRun('r1')).toBe(0)
     expect(credentials.resolve(a.token)).toBeNull()
@@ -72,15 +71,15 @@ describe('McpCredentials (SPEC §15.1)', () => {
     expect(credentials.resolve(b.token)).toBeNull()
     expect(credentials.resolve(c.token)).not.toBeNull()
     const listed = credentials.listForThread('t1')
-    expect(listed.map((row) => [row.runId, row.modeCeiling, Boolean(row.revokedAt)])).toEqual([['r1', 'plan', true], ['r2', 'default', true]])
+    expect(listed.map((row) => [row.runId, Boolean(row.revokedAt)])).toEqual([['r1', true], ['r2', true]])
     for (const row of listed) expect(row).not.toHaveProperty('tokenHash')
   })
 
   it('expires after 24 h idle; a request touches last_seen_at; pruneExpired deletes dead rows', () => {
     const { credentials, advance } = setup()
-    const live = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'p', modeCeiling: 'default' })
-    const idle = credentials.mint({ threadId: 't1', runId: 'r2', provider: 'p', modeCeiling: 'default' })
-    const revoked = credentials.mint({ threadId: 't1', runId: 'r3', provider: 'p', modeCeiling: 'default' })
+    const live = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'p' })
+    const idle = credentials.mint({ threadId: 't1', runId: 'r2', provider: 'p' })
+    const revoked = credentials.mint({ threadId: 't1', runId: 'r3', provider: 'p' })
     credentials.revokeForRun('r3')
     advance(CREDENTIAL_IDLE_TTL_MS - 1000)
     expect(credentials.resolve(live.token)?.lastSeenAt).toBe(new Date(T0 + CREDENTIAL_IDLE_TTL_MS - 1000).toISOString())
@@ -100,9 +99,9 @@ describe('McpCredentials (SPEC §15.1)', () => {
     const first = credentials.bearerForTurn(turn())
     expect(first.reused).toBe(false)
     advance(1000)
-    const second = credentials.bearerForTurn(turn({ runId: 'r2', modeCeiling: 'plan' }))
+    const second = credentials.bearerForTurn(turn({ runId: 'r2' }))
     expect(second).toEqual({ token: first.token, tokenHash: first.tokenHash, reused: true, epoch: first.epoch })
-    expect(credentials.resolve(first.token)).toMatchObject({ runId: 'r2', modeCeiling: 'plan', binding: 'per_call', lastSeenAt: new Date(T0 + 1000).toISOString() })
+    expect(credentials.resolve(first.token)).toMatchObject({ runId: 'r2', binding: 'per_call', lastSeenAt: new Date(T0 + 1000).toISOString() })
     expect(credentials.listForThread('t1')).toHaveLength(1)
 
     // Another thread gets its own token.
@@ -215,15 +214,15 @@ describe('McpCredentials (SPEC §15.1)', () => {
   describe('agent access level (SPEC §15.1)', () => {
     it('stores the level a credential was granted and reports it on resolve and in the summaries', () => {
       const { credentials } = setup()
-      const read = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'p', modeCeiling: 'default', accessLevel: 'read' })
+      const read = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'p', accessLevel: 'read' })
       expect(credentials.resolve(read.token)).toMatchObject({ accessLevel: 'read' })
       expect(credentials.listForThread('t1').map((row) => row.accessLevel)).toEqual(['read'])
     })
 
     it('an absent or unknown level is the most restrictive one, never a wider one', () => {
       const { db, credentials } = setup()
-      const absent = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'p', modeCeiling: 'default' })
-      const unknown = credentials.mint({ threadId: 't1', runId: 'r2', provider: 'p', modeCeiling: 'default', accessLevel: 'root' as never })
+      const absent = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'p' })
+      const unknown = credentials.mint({ threadId: 't1', runId: 'r2', provider: 'p', accessLevel: 'root' as never })
       expect(credentials.resolve(absent.token)?.accessLevel).toBe('lineage')
       expect(credentials.resolve(unknown.token)?.accessLevel).toBe('lineage')
       // A row of a database from before the column existed takes the column default.
@@ -259,7 +258,7 @@ describe('McpCredentials (SPEC §15.1)', () => {
       const home = mkdtempSync(join(tmpdir(), 'mousse-mcp-credentials-'))
       homes.push(home)
       const first = new ProfileDatabase({ profileHome: home })
-      const minted = new McpCredentials(new RunStore(first)).mint({ threadId: 't', runId: 'r', provider: 'p', modeCeiling: 'default', accessLevel: 'manage' })
+      const minted = new McpCredentials(new RunStore(first)).mint({ threadId: 't', runId: 'r', provider: 'p', accessLevel: 'manage' })
       first.close()
       const second = new ProfileDatabase({ profileHome: home })
       databases.push(second)
@@ -271,7 +270,7 @@ describe('McpCredentials (SPEC §15.1)', () => {
     const home = mkdtempSync(join(tmpdir(), 'mousse-mcp-credentials-'))
     homes.push(home)
     const first = new ProfileDatabase({ profileHome: home })
-    const minted = new McpCredentials(new RunStore(first)).mint({ threadId: 't', runId: 'r', provider: 'p', modeCeiling: 'default' })
+    const minted = new McpCredentials(new RunStore(first)).mint({ threadId: 't', runId: 'r', provider: 'p' })
     first.close()
     const second = new ProfileDatabase({ profileHome: home })
     databases.push(second)
@@ -279,7 +278,7 @@ describe('McpCredentials (SPEC §15.1)', () => {
     // A row from an earlier process is of epoch 0 and rotates (its epoch and binding were in that process's memory).
     expect(credentials.resolve(minted.token)).toMatchObject({ runId: 'r', epoch: 0, binding: 'rotate' })
     // The token is gone from memory after the restart: the next turn revokes the row and mints anew.
-    const next = credentials.bearerForTurn({ threadId: 't', instanceId: 'p', runId: 'r2', modeCeiling: 'default', binding: 'per_call', generation: 'g' })
+    const next = credentials.bearerForTurn({ threadId: 't', instanceId: 'p', runId: 'r2', binding: 'per_call', generation: 'g' })
     expect(next.reused).toBe(false)
     expect(credentials.resolve(minted.token)).toBeNull()
     expect(credentials.revokeForRun('r2')).toBe(1)

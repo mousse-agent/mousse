@@ -75,7 +75,6 @@ function setup() {
   harness.setMcpAttachment(mcp.provider)
   const app = (overrides: Partial<TurnAppContext> = {}): TurnAppContext => ({
     turnToken: 'turn-token',
-    modeCeiling: 'default',
     mcpEligible: true,
     instructions: (attached) => ({ sessionInstructions: attached ? 'SESSION+MCP' : 'SESSION', turnPreamble: 'PREAMBLE' }),
     ...overrides
@@ -102,7 +101,7 @@ describe('TurnBridge (PR 2 §2)', () => {
     await s.turn('claude')
     await s.turn('codex', { runId: 'run-2' })
     expect(s.mcp.bearers).toEqual([
-      expect.objectContaining({ threadId: 'thread-1', instanceId: 'claude', runId: 'run-1', modeCeiling: 'default', binding: 'per_call', generation: 'claude|default|0|0' }),
+      expect.objectContaining({ threadId: 'thread-1', instanceId: 'claude', runId: 'run-1', binding: 'per_call', generation: 'claude|default|0|0' }),
       expect.objectContaining({ instanceId: 'codex', runId: 'run-2', binding: 'drained_turn', generation: 'codex|default|0|0' })
     ])
     expect(s.claude.hosts[0].bridge).toMatchObject({

@@ -11,7 +11,7 @@
 export const REFUSAL_CODES = [
   /** The call names a thread, project or job the caller may not reach. */
   'scope_denied',
-  /** The caller's ceiling (Plan) does not allow what the call would do. */
+  /** The caller's permission mode is stricter than what the call would need (a steer of a run bound to a looser mode). */
   'ceiling_exceeded',
   /** A read-only subagent called a tool that changes something. */
   'read_only',
@@ -20,11 +20,6 @@ export const REFUSAL_CODES = [
    * `fix` what would give it. The older code it was refused under stays in `data.reason`.
    */
   'lacks_capability',
-  /**
-   * The turn held the capability when it started and lost it during this work (§2.4): a thread above it switched to Plan.
-   * Never retried in this work, and nobody is told: whoever took it away knows.
-   */
-  'revoked',
   /** The target is not in a state to take the call now; `data.conflict` names which state. */
   'conflict',
   /** The tool cannot be used in this turn (no browser bound to it, a feature switched off, a missing argument the turn needs). */
@@ -84,7 +79,6 @@ const DEFAULT_RETRY: Readonly<Record<RefusalCode, RefusalRetry>> = {
   ceiling_exceeded: 'never',
   read_only: 'never',
   lacks_capability: 'after_change',
-  revoked: 'never',
   conflict: 'after_change',
   unavailable: 'after_change',
   not_granted: 'after_change',
@@ -139,7 +133,6 @@ export const REFUSAL_FAULT_CODES: ReadonlySet<string> = new Set(['mousse_unautho
 
 const LEGACY_CODES: Readonly<Record<string, RefusalCode>> = {
   mousse_scope_denied: 'scope_denied',
-  mousse_ceiling_exceeded: 'ceiling_exceeded',
   mousse_read_only: 'read_only',
   mousse_conflict: 'conflict',
   mousse_unknown_tool: 'unknown_tool'

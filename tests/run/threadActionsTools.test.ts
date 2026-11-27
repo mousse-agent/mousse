@@ -111,8 +111,8 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
   describe('which threads they reach', () => {
     it('a call reaches the host with the caller as the actor, the call id, and a key scoped to the caller thread', async () => {
       const { call, host, runs } = await world()
-      await call('thread_send', { threadId: 'target', content: 'hello', mode: 'plan' }, { toolCallId: 'mcp:send-1' })
-      expect(host.sendToThread).toHaveBeenLastCalledWith('target', { content: 'hello', mode: 'plan' }, {
+      await call('thread_send', { threadId: 'target', content: 'hello' }, { toolCallId: 'mcp:send-1' })
+      expect(host.sendToThread).toHaveBeenLastCalledWith('target', { content: 'hello' }, {
         clientRequestId: 'thread_send:caller:mcp:send-1',
         actor: { kind: 'agent', threadId: 'caller', runId: runs.caller, toolCallId: 'mcp:send-1' }
       })
@@ -124,13 +124,6 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(host.steerRun).toHaveBeenLastCalledWith('target', runs.target, 'also this', expect.objectContaining({ clientRequestId: 'thread_steer:caller:mcp:steer-1' }))
       await call('thread_interrupt', { threadId: 'target', runId: runs.target }, { toolCallId: 'mcp:stop-1' })
       expect(host.stopRun).toHaveBeenLastCalledWith('target', runs.target, expect.objectContaining({ clientRequestId: 'thread_interrupt:caller:mcp:stop-1' }))
-    })
-
-    it('a plan-ceiling caller cannot send an agent turn, only a plan turn', async () => {
-      const { call, denied, host } = await world()
-      expect((await denied(call('thread_send', { threadId: 'target', content: 'x' }, { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
-      expect((await call('thread_send', { threadId: 'target', content: 'x', mode: 'plan' }, { modeCeiling: 'plan' })).isError).toBeUndefined()
-      expect(host.sendToThread).toHaveBeenCalledTimes(1)
     })
 
     it('reaches a thread of any project and one without a project, for all four tools', async () => {
@@ -165,8 +158,8 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       threads.set(child.childThreadId, thread(child.childThreadId))
       const delegation = (host.delegation as unknown as () => { continueSubagent: ReturnType<typeof vi.fn> })()
       delegation.continueSubagent.mockResolvedValueOnce({ delegationId: 'd2', childThreadId: child.childThreadId, childRunId: 'run:child:2', title: 'Helper', status: 'queued', note: 'busy' })
-      const sent = JSON.parse((await call('thread_send', { threadId: child.childThreadId, content: 'next step', mode: 'plan' }, { toolCallId: 'mcp:follow-1' })).text)
-      expect(delegation.continueSubagent).toHaveBeenCalledWith({ subagent: child.childThreadId, prompt: 'next step', mode: 'plan' }, { toolCallId: 'mcp:follow-1' })
+      const sent = JSON.parse((await call('thread_send', { threadId: child.childThreadId, content: 'next step' }, { toolCallId: 'mcp:follow-1' })).text)
+      expect(delegation.continueSubagent).toHaveBeenCalledWith({ subagent: child.childThreadId, prompt: 'next step' }, { toolCallId: 'mcp:follow-1' })
       expect(sent).toMatchObject({ threadId: child.childThreadId, runId: 'run:child:2', delivery: 'queued', queued: true, delegationId: 'd2', subagent: true })
       // A refusal (the subagent waits for an answer) comes back as continue_subagent gives it.
       delegation.continueSubagent.mockResolvedValueOnce({ started: false, code: 'needs_answer', message: 'answer it first' })
@@ -253,7 +246,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
 
     it('validates its input before it reaches the host', async () => {
       const { call, host } = await world()
-      for (const args of [{ threadId: 'target' }, { threadId: 'target', content: '   ' }, { threadId: 'target', content: 'x', mode: 'build' }, { content: 'x' }] as Array<Record<string, unknown>>)
+      for (const args of [{ threadId: 'target' }, { threadId: 'target', content: '   ' }, { content: 'x' }] as Array<Record<string, unknown>>)
         expect((await call('thread_send', args).catch((error) => ({ isError: true, error }))).isError, JSON.stringify(args)).toBe(true)
       expect(host.sendToThread).not.toHaveBeenCalled()
     })

@@ -37,7 +37,7 @@ import { tmpdir } from 'os'
 describe('chat mode helpers', () => {
   it('normalizes missing mode to agent', () => {
     expect(normalizeChatMode()).toBe('agent')
-    expect(normalizeChatMode('plan')).toBe('plan')
+    expect(normalizeChatMode('plan')).toBe('agent')
     expect(normalizeChatMode({ type: 'skill', skillId: 'reviewer' })).toEqual({
       type: 'skill',
       skillId: 'reviewer'
@@ -52,7 +52,6 @@ describe('chat mode helpers', () => {
   it('allows orchestration only in agent mode', () => {
     expect(allowsOrchestrationActions('agent')).toBe(true)
     expect(allowsOrchestrationActions('build')).toBe(false)
-    expect(allowsOrchestrationActions('plan')).toBe(false)
     expect(allowsOrchestrationActions({ type: 'skill', skillId: 'x' })).toBe(false)
   })
 
@@ -65,7 +64,6 @@ describe('chat mode helpers', () => {
     const directMessage = [{ type: 'message', content: 'ok' }]
 
     expect(filterActionsForMode([...actions], 'build')).toEqual(directMessage)
-    expect(filterActionsForMode([...actions], 'plan')).toEqual(directMessage)
     expect(filterActionsForMode([...actions], { type: 'skill', skillId: 'x' })).toEqual(directMessage)
     expect(filterActionsForChatMode([...actions], 'agent')).toHaveLength(2)
   })

@@ -26,7 +26,6 @@ import { codexBotRunsOnNote } from '../../../shared/harness/codexBotVersion'
 
 export const CODEX_CAPS: HarnessCaps = Object.freeze({
   ...CODEX_CAPABILITIES,
-  planMode: true,
   contextUsage: 'reported',
   // Codex asks Mousse before each tool under the approval policy Mousse sets.
   toolControl: 'approval_only',

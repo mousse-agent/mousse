@@ -56,8 +56,6 @@ export interface AcpAdapterOptions {
   /** The agent's name in errors. */
   label: string
   capabilities: ProviderCapabilities
-  /** The agent offers a plan mode (from its runtime facts); otherwise a plan turn is refused. */
-  planMode?: () => boolean
 }
 
 /**
@@ -98,8 +96,6 @@ export class AcpAdapter implements ProviderAdapter {
     ctl: TurnControl,
     host: AdapterHost
   ): Promise<TurnResult> {
-    const plan = input.mode === 'plan'
-    if (plan && !this.options.planMode?.()) throw new Error(`Use ${this.options.label}’s /plan command in a chat turn`)
     const client = this.client()
     const cwd = input.cwd ?? client?.standaloneWorkspace?.(input.threadId)
     if (!client || !cwd) throw new Error(`${input.llmProvider || this.options.label} requires a project workspace`)
@@ -127,7 +123,6 @@ export class AcpAdapter implements ProviderAdapter {
         instanceId: input.instanceId,
         cwd,
         model: input.model,
-        ...(plan ? { mode: 'plan' as const } : {}),
         permissionMode: input.permissionMode,
         ...(input.continuation ? { continuation: true } : {}),
         ...(input.continuationId ? { continuationId: input.continuationId } : {}),

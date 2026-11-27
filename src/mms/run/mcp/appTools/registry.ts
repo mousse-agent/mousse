@@ -14,7 +14,6 @@ import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
 import type { McpManager } from '../../../integrations/mcp/McpManager'
-import type { ModeCeiling } from '../../types'
 import type { RelayAdmission, RelayGrant } from '../relay/types'
 import { callForBot, type BotMcp } from '../../../bots/mcp/BotMcp'
 import { localizeIsoTimes } from '../../../bots/memory/render'
@@ -44,7 +43,6 @@ import {
   listsTool,
   offeredThisTurn,
   parentHolds,
-  plannedFromAbove,
   READ_ONLY_TOOL_NAMES,
   toolNeeds,
   userMcpForReader,
@@ -78,7 +76,6 @@ export interface McpCredentialAuthority {
   /** The run the credential is bound to; never re-pointed by a call. */
   runId: string
   provider: string
-  modeCeiling: ModeCeiling
   /** The level the credential recorded for this run (SPEC §15.1); it no longer limits anything. */
   accessLevel: AgentAccessLevel
   binding: McpTurnBinding
@@ -113,13 +110,6 @@ export interface ToolRegistryOptions {
   toolLedger?(runId: string): ToolLedger | undefined
   /** The thread is a read-only (`shared`) delegated child; it may call only `reads` and `readOnlySafe` tools. */
   readOnlyThread?(threadId: string): boolean
-  /** The ceiling a thread's delegations gave it, whatever its current turn's mode (the stable listing). */
-  threadCeiling?(threadId: string): ModeCeiling
-  /**
-   * Narrowing from above, read at every call (docs/plans/tool-api.md §1.3 "Subagents"): `plan` while an ancestor of the
-   * thread runs a Plan turn, so a subtree narrows at its next call. Absent or undefined: nothing above narrows it.
-   */
-  liveCeiling?(threadId: string): ModeCeiling | undefined
   /** The thread is a Mousse subagent, from its lineage: it lists and holds nothing that never passes down. */
   subagentThread?(threadId: string): boolean
   /**
@@ -139,8 +129,8 @@ export interface ToolRegistryOptions {
   /** The turns registered by the `turn.start` executor; MCP calls act only inside one. */
   turns?: AppToolTurns
   /**
-   * The permission mode the caller's run enforces, from its attempt's binding (never from the mode
-   * ceiling). Without it, or when it knows no mode, an `editsWorkspace` or `changesSettings` tool asks as under Ask:
+   * The permission mode the caller's run enforces, from its attempt's binding (never from a
+   * mode). Without it, or when it knows no mode, an `editsWorkspace` or `changesSettings` tool asks as under Ask:
    * a missing mode never lets a change through unasked.
    */
   permissionModeFor?(runId: string): PermissionMode | undefined
@@ -284,11 +274,6 @@ interface CallSite {
   credential: McpCredentialAuthority
   boundToken: string
   request: McpCallRequest
-  /**
-   * A thread above this one switched to Plan after the turn started (`liveCeiling`): the call is checked as a Plan turn's
-   * (`plannedFromAbove`), and what that alone refuses is `revoked`.
-   */
-  narrowed: boolean
 }
 
 /** The app tools a bot's chat calls within its quick-call budgets: they only read, and may take a while. */
@@ -388,8 +373,8 @@ export class ToolRegistry {
 
   /**
    * The ListTools result of a thread's credential (PR 2 §2 "Tool lists across turns"): stable for
-   * the thread, whatever the turn's mode, so a list a runtime cached on a plan turn still works on
-   * the next agent turn. What a turn may use is checked at call time. The authority compiler decides (`listsTool`).
+   * the thread, whatever the turn's mode, so a list a runtime cached on one turn still works on
+   * the next. What a turn may use is checked at call time. The authority compiler decides (`listsTool`).
    */
   listFor(listing: ToolListing): MousseTool[] {
     return this.list().filter((tool) => listsTool(tool, listing) || this.listsAsVariant(tool, listing))
@@ -411,18 +396,16 @@ export class ToolRegistry {
   }
 
   /**
-   * `listFor` a thread: its read-only status and the ceiling its delegations gave it, narrowed by a thread above it now
-   * (§1.3 "Listing": the thread's stable ceiling), never the current turn's mode (a Plan turn's narrower ceiling is
-   * enforced at call time). `fallback` is the ceiling when the owner does not say.
+   * `listFor` a thread: its read-only status and lineage (§1.3 "Listing"), never the current turn's mode (a read-only
+   * mode's narrower rights are enforced at call time).
    */
-  listForThread(threadId: string, fallback: ModeCeiling = 'default', runId?: string): MousseTool[] {
+  listForThread(threadId: string, runId?: string): MousseTool[] {
     const bot = this.botListing(threadId)
     // A bot's thread tools follow its turn: what the run's registered turn holds now.
     const turn = bot.botRole && runId ? this.options.turns?.get(runId) : undefined
     const listed = this.listFor({
       threadId,
       readOnly: this.options.readOnlyThread?.(threadId) === true,
-      modeCeiling: this.callCeiling(threadId, this.options.threadCeiling?.(threadId) ?? fallback),
       ...(this.options.subagentThread?.(threadId) === true ? { subagent: true } : {}),
       ...bot,
       ...(turn?.bot && turn.threadId === threadId ? { botTurnTools: turn.bot.appTools, ...(turn.bot.catalogue ? { botCatalogue: turn.bot.catalogue } : {}) } : {})
@@ -433,7 +416,7 @@ export class ToolRegistry {
 
   /**
    * The thread's capability revision (§1.3 "Listing"): a digest of the tools its stable listing holds. It changes only
-   * when that list does: `thread_update access`, a grant or settings change, or narrowing from above. A runtime caches
+   * when that list does: `thread_update access`, or a grant or settings change. A runtime caches
    * its list and the server cannot tell it the list changed, so a new revision starts a new credential epoch at the
    * next turn (the gateway's `generation`), and the runtime lists again. Undefined for a bot's thread, whose list
    * follows its turn's grant and rotates with its policy.
@@ -454,7 +437,6 @@ export class ToolRegistry {
     const listed = new Map(this.listFor({
       threadId,
       readOnly: this.options.readOnlyThread?.(threadId) === true,
-      modeCeiling: this.options.threadCeiling?.(threadId) ?? 'default',
       ...bot,
       botTurnTools: turn.bot.appTools
     }).map((tool) => [tool.name, asBotTool(tool)]))
@@ -470,7 +452,7 @@ export class ToolRegistry {
    * nothing). Any other turn gets the thread's stable listing.
    */
   listForTurn(threadId: string, runId: string | undefined): Array<Pick<MousseTool, 'name' | 'description' | 'inputSchema' | 'class'>> {
-    const listed = this.listForThread(threadId, 'default', runId)
+    const listed = this.listForThread(threadId, runId)
     const turn = runId ? this.options.turns?.get(runId) : undefined
     const plain = (tool: MousseTool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, class: tool.class })
     if (!turn?.definition || turn.threadId !== threadId) return listed.map(plain)
@@ -559,13 +541,11 @@ export class ToolRegistry {
 
   /**
    * The tools a turn's preamble names as usable now: the thread's list as the turn's run reads it, less what dispatch
-   * would refuse before any argument (`heldBeforeArguments`), under the turn's ceiling narrowed from above.
+   * would refuse before any argument (`heldBeforeArguments`).
    */
   usableNow(turn: AppToolTurn): string[] {
-    const ceiling = this.callCeiling(turn.threadId, turn.modeCeiling)
-    const inputs = { readOnly: this.options.readOnlyThread?.(turn.threadId) === true, ceiling, person: () => this.personHeld(turn) }
-    const now = ceiling === 'plan' && turn.modeCeiling !== 'plan' ? plannedFromAbove(turn) : turn
-    return this.listForThread(turn.threadId, 'default', turn.runId).filter((tool) => heldBeforeArguments(tool, now, inputs)).map((tool) => tool.name)
+    const inputs = { readOnly: this.options.readOnlyThread?.(turn.threadId) === true, person: () => this.personHeld(turn) }
+    return this.listForThread(turn.threadId, turn.runId).filter((tool) => heldBeforeArguments(tool, turn, inputs)).map((tool) => tool.name)
   }
 
   /**
@@ -585,8 +565,7 @@ export class ToolRegistry {
     if (!tool && (registered || !this.options.userMcp)) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
     const { threadId, active, turn, args, caller, boundToken } = await this.admit(callArgs, request)
     const { credential } = request
-    const narrowed = caller.modeCeiling === 'plan' && credential.modeCeiling !== 'plan' && turn.modeCeiling !== 'plan'
-    const site: CallSite = { threadId, active, turn, credential, boundToken, request, narrowed }
+    const site: CallSite = { threadId, active, turn, credential, boundToken, request }
     return this.reportingLacks(name, site, await this.dispatch(name, tool, args, caller, site))
   }
 
@@ -693,13 +672,10 @@ export class ToolRegistry {
     if (ask) {
       const refusal = await this.askFirst(tool, caller, request.signal, args, ask, request.helper)
       if (refusal) return refusal
-      // Asking took time: a thread above may have switched to Plan, or a bot's grant narrowed, while the person answered.
-      // The call runs only under what holds now, never the authority it had when it asked.
-      const ceiling = this.callCeiling(site.threadId, site.credential.modeCeiling)
-      const now = ceiling === caller.modeCeiling ? { caller, site } : this.narrowedSite(caller, site, ceiling)
-      const still = this.heldNow(tool, args, now.caller, now.site)
+      // Asking took time: a bot's grant may have narrowed while the person answered. The call runs only under what holds
+      // now, never the authority it had when it asked.
+      const still = this.heldNow(tool, args, caller, site)
       if ('refusal' in still) return still.refusal
-      caller = now.caller
       scope = still.scope
     }
     const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', ...(scope ? { scope } : {}) }
@@ -729,14 +705,13 @@ export class ToolRegistry {
   }
 
   /**
-   * What the call holds under `caller`'s ceiling now, checked step by step: the bot's grant, the targets, what the turn
+   * What the call holds for `caller` now, checked step by step: the bot's grant, the targets, what the turn
    * lacks, a person's provenance. The refusal, or the compiled tool and its scope. Run when the call is admitted, and
    * again once a person answered its ask (`askFirst`), so what changed while it waited holds.
    */
   private heldNow(tool: MousseTool, args: Record<string, unknown>, caller: McpCaller, site: CallSite): { refusal: ToolOutcome } | { compiled: CompiledTool; scope: ReturnType<CompiledTool['authorize']> } {
     const { turn } = site
-    // Narrowed from above since the turn started: checked as a Plan turn's, mode facts included.
-    const compiled = this.compiled(tool, site.narrowed ? plannedFromAbove(turn) : turn, caller)
+    const compiled = this.compiled(tool, turn, caller)
     // A bot's thread tool ("use your threads"): its grant first, which this turn holds only in the lanes that may use the
     // tool and only while this computer allows it (a refusal there is the bot's ask, never a scope error), then where the
     // call may reach, decided by the bot's rules.
@@ -751,10 +726,10 @@ export class ToolRegistry {
     } catch (error) {
       const outcome = refusalOutcome(error)
       if (!outcome) throw error
-      return { refusal: this.revokedIfNarrowed(outcome, tool, args, caller, site) }
+      return { refusal: outcome }
     }
     const lacks = compiled.lacks()
-    if (lacks) return { refusal: this.revokedIfNarrowed(lacks, tool, args, caller, site) }
+    if (lacks) return { refusal: lacks }
     // A variant only a turn a person started may make (§1.3 "Provenance").
     const person = compiled.personRefusal(args)
     if (person) return { refusal: person }
@@ -764,12 +739,6 @@ export class ToolRegistry {
       if (refusal) return { refusal }
     }
     return { compiled, scope }
-  }
-
-  /** `site` and `caller` under the ceiling `ceiling` read now, narrowed from above as `call` marks it. */
-  private narrowedSite(caller: McpCaller, site: CallSite, ceiling: ModeCeiling): { caller: McpCaller; site: CallSite } {
-    const narrowed = ceiling === 'plan' && site.credential.modeCeiling !== 'plan' && site.turn.modeCeiling !== 'plan'
-    return { caller: { ...caller, modeCeiling: ceiling }, site: { ...site, narrowed } }
   }
 
   /**
@@ -791,11 +760,10 @@ export class ToolRegistry {
   }
 
   /** `tool`'s authority in `turn` for this caller (`compileTool`). */
-  private compiled(tool: MousseTool, turn: AppToolTurn, caller: McpCaller, ceiling: ModeCeiling = caller.modeCeiling): CompiledTool {
+  private compiled(tool: MousseTool, turn: AppToolTurn, caller: McpCaller): CompiledTool {
     return compileTool(tool, {
       turn,
       readOnly: this.options.readOnlyThread?.(caller.threadId) === true,
-      ceiling,
       permissionMode: () => this.options.permissionModeFor?.(caller.runId),
       // A native helper's view of its run is a subagent's (`delegableTurn`): it never holds person either.
       person: () => turn.subagent !== true && this.personHeld(caller)
@@ -810,28 +778,6 @@ export class ToolRegistry {
     } catch {
       return false
     }
-  }
-
-  /**
-   * A refusal of a call narrowed from above (`CallSite.narrowed`): `revoked` when the turn as it started, under its
-   * credential's ceiling, would have held the call, since what the turn lost during the work is never retried in it
-   * (§2.4). Any other refusal stays as it is.
-   */
-  private revokedIfNarrowed(outcome: ToolOutcome, tool: MousseTool, args: Record<string, unknown>, caller: McpCaller, site: CallSite): ToolOutcome {
-    if (!site.narrowed) return outcome
-    const refusal = readRefusal(outcome.text)
-    if (!refusal) return outcome
-    const before = this.compiled(tool, site.turn, caller, site.credential.modeCeiling)
-    try {
-      before.authorize(caller, args, this.options.access)
-    } catch {
-      return outcome
-    }
-    if (before.lacks()) return outcome
-    return refused('revoked', `${refusal.message} A thread above this one switched to Plan during this work.`, {
-      ...(refusal.lacks ? { lacks: refusal.lacks } : {}),
-      data: { reason: 'narrowed_from_above' }
-    })
   }
 
   /**
@@ -865,7 +811,7 @@ export class ToolRegistry {
     return { ...outcome, text: refusalText(code, `${message} ${told}`, { ...rest, data: { ...(data ?? {}), told: to } }) }
   }
 
-  /** What `threadId` holds now (`parentHolds`): its lineage, its ceiling narrowed from above, its run's provenance. */
+  /** What `threadId` holds now (`parentHolds`): its lineage and its run's provenance. */
   private holderState(threadId: string): Parameters<typeof parentHolds>[1] {
     let active: string | null = null
     try {
@@ -873,11 +819,8 @@ export class ToolRegistry {
     } catch {
       active = null
     }
-    const turn = active ? this.options.turns?.get(active) : undefined
-    const ceiling = turn?.modeCeiling ?? this.options.threadCeiling?.(threadId) ?? 'default'
     return {
       readOnly: this.options.readOnlyThread?.(threadId) === true,
-      ceiling: this.callCeiling(threadId, ceiling),
       subagent: this.options.subagentThread?.(threadId) === true,
       person: active !== null && this.personHeld({ threadId, runId: active })
     }
@@ -920,25 +863,8 @@ export class ToolRegistry {
         : turnToken === turn.turnToken
       if (!tagged) throw notLive(`This call was made for an earlier turn of thread ${threadId}; it was not run.`)
     }
-    // The credential's ceiling, narrowed by what is above the thread now: an ancestor that switched to Plan narrows this
-    // call even though the credential was minted before.
-    const caller: McpCaller = { threadId, runId: active, provider: credential.provider, modeCeiling: this.callCeiling(threadId, credential.modeCeiling), accessLevel: credential.accessLevel }
+    const caller: McpCaller = { threadId, runId: active, provider: credential.provider, accessLevel: credential.accessLevel }
     return { threadId, active, turn, args, caller, boundToken }
-  }
-
-  /** `callCeiling` for the relay (`RelayAdmitter.ceilingNow`), read again once an approval came back. */
-  ceilingNow(threadId: string, ceiling: ModeCeiling): ModeCeiling {
-    return this.callCeiling(threadId, ceiling)
-  }
-
-  /** `ceiling` narrowed by the thread's ancestors now (`liveCeiling`); one that cannot be read narrows to `plan`. */
-  private callCeiling(threadId: string, ceiling: ModeCeiling): ModeCeiling {
-    if (ceiling === 'plan' || !this.options.liveCeiling) return ceiling
-    try {
-      return this.options.liveCeiling(threadId) === 'plan' ? 'plan' : ceiling
-    } catch {
-      return 'plan'
-    }
   }
 
   /**

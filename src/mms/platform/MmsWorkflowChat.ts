@@ -23,7 +23,6 @@ export interface ScheduledJobIngress {
   selection?: ModelOverride
   /** A saved agent does the work (`ScheduledJob.agent`): its latest published revision runs the prompt. */
   agent?: ScheduledJobAgent
-  mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
   /** The job's permission mode and ceiling (`ScheduledJob`); the run is the stricter of the two and its thread's mode. */
   permissionMode?: PermissionMode

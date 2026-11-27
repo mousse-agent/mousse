@@ -12,7 +12,7 @@ import {
   type McpTurnBinding
 } from '../../src/mms/run/mcp/appTools'
 import type { RunEngine } from '../../src/mms/run/RunEngine'
-import type { AgentActor, ModeCeiling } from '../../src/mms/run/types'
+import type { AgentActor } from '../../src/mms/run/types'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
 
 /** A fake thread owner for the app-tool registry, recording what each tool asked of it. */
@@ -60,7 +60,6 @@ export function appTurn(overrides: Partial<AppToolTurn> & Pick<AppToolTurn, 'thr
   return {
     mode: 'agent',
     modeFacts: { readOnly: false, agent: true, build: false },
-    modeCeiling: 'default',
     subagent: false,
     actor: { kind: 'main' },
     enabledSkills: [],
@@ -81,7 +80,6 @@ export function appToolRegistry(engine: RunEngine, host: AppToolHost, extra: Pic
     threadId: string
     runId: string
     binding?: McpTurnBinding
-    modeCeiling?: ModeCeiling
     /** The level the credential was granted; default `lineage`. */
     accessLevel?: AgentAccessLevel
     provider?: string
@@ -93,7 +91,6 @@ export function appToolRegistry(engine: RunEngine, host: AppToolHost, extra: Pic
       threadId: input.threadId,
       runId: input.runId,
       provider: input.provider ?? 'codex',
-      modeCeiling: input.modeCeiling ?? 'default',
       accessLevel: input.accessLevel ?? 'manage',
       binding: input.binding ?? 'drained_turn',
       current: input.current ?? (() => true)
