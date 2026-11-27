@@ -90,6 +90,8 @@ describe('a device that may view threads and chat with bots only', () => {
     it(`reads the transcript and chats with bots; starting, sending, steering, stopping and making a bot are refused (${index ? 'member' : 'keeper'} receives)`, async () => {
       const { receiver, caller, receiverNode, callerNode } = directions()[index]!
       const reached = standInBots(receiver)
+      // A bot reaches only its own computer until the owner adds a device to its Devices: the calling device is added.
+      receiver.botDeviceAccess.set(BOT, { mode: 'chosen', nodes: [callerNode] })
       const session = caller.net.session(receiverNode)
       const rpc = (method: string, params: unknown, extra: { id?: RpcId; idem?: string } = {}) =>
         session.rpc(method, params, { id: extra.id ?? newId('rpc'), deadlineMs: 15_000, ...(extra.idem ? { idem: extra.idem } : {}) })
