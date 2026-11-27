@@ -2630,13 +2630,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.search': {
       const p = isObject(params) ? params : {}
       const query = asString(p.query, 'query', 512)
-      // `perThread`: which threads match (the sidebar's filter), one message hit each, from this computer only; it may
-      // ask for every thread of the profile.
+      // `perThread`: which threads match (the sidebar's filter), one message hit each, from this computer only; a window
+      // may ask for every thread of the profile. With `others`, a window's filter asks the user's other computers
+      // instead (each with a short deadline), apart from this computer's answer, so a slow computer never holds it.
       const perThread = p.perThread === true
+      const others = perThread && p.others === true
       const limit =
         typeof p.limit === 'number' && Number.isFinite(p.limit) && p.limit > 0
-          ? Math.min(Math.floor(p.limit), perThread ? SEARCH_PER_THREAD_MAX_LIMIT : 200)
+          ? Math.min(Math.floor(p.limit), perThread && connectionIsLocal(ctx.connection) ? SEARCH_PER_THREAD_MAX_LIMIT : 200)
           : 50
+      if (others) {
+        if (ctx.connection?.clientType !== 'gui' || !ctx.mms.remoteLists) return { results: [] }
+        const remote = await ctx.mms.remoteLists.search(ctx.connection.id, query, Math.min(limit, 200), { perThread })
+        return { results: remote.results, ...(remote.skipped.length ? { skipped: remote.skipped } : {}) }
+      }
       // Search hides subagents for every client, the desktop app included: a subagent is reached
       // through its parent's Lineage, not as a result of its own.
       // A computer asked by another of the user's computers reads the transcripts of its newest threads only,

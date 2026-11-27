@@ -1154,7 +1154,8 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       // A replacement of a long thread's newest part (a resync) keeps the older pages this window loaded:
       // the rows before its boundary are not part of it, and the prompt stays where those pages left it.
       const boundary = earlier ? parseCursor(earlier.before).id : undefined
-      const boundaryAt = boundary === undefined ? -1 : s.messages.findIndex((message) => message.id === boundary)
+      const startsAtBoundary = boundary !== undefined && snapshot.messages.some((message) => message.id === boundary)
+      const boundaryAt = startsAtBoundary ? s.messages.findIndex((message) => message.id === boundary) : -1
       const kept = boundaryAt > 0 ? s.messages.slice(0, boundaryAt) : []
       // A snapshot that repeats the transcript (a hydration or resync while a reply streams) keeps it as it is.
       const messages = sharedMessages(s.messages, snapshot.replace

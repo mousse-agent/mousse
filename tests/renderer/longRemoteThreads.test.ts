@@ -198,6 +198,13 @@ describe('a resync of a long thread of another computer', () => {
     expect(prompt()).toBeUndefined()
   })
 
+  it('keeps no loaded page when the replacement does not start where they end (an undo removed it)', () => {
+    view([message('8'), message('9')], { before: '8', count: 7 })
+    useAppStore.getState().applyEarlierMessages('nod_a:t', [message('5'), message('6'), message('7')], { before: '5', count: 4 })
+    resync([message('1'), message('2')], { before: '8', count: 7 })
+    expect(shown()).toEqual(['1', '2'])
+  })
+
   it('drops the prompt for a replacement that is the whole thread', () => {
     view([message('8'), message('9')], { before: '8', count: 7 })
     resync([message('1'), message('9')])

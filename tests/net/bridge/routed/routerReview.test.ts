@@ -5,6 +5,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { AttachedThreads } from '../../../../src/mms/bridge/routed/attachedThreads'
+import { RemoteThreadView } from '../../../../src/mms/bridge/routed/threadView'
 import { RoutedClient } from '../../../../src/mms/bridge/routed/RoutedClient'
 import { MmsProtocolServer } from '../../../../src/mms/protocol/server'
 import {
@@ -72,6 +73,15 @@ describe('a window is told what the live stream knows, once it arrives', () => {
     inside.onUpdate(attachment, { kind: 'snapshot', value: snapshot(thread.id, { messages: newest, earlier: { before: 'm8', count: 7 } }) })
     const resync = t.events.slice(from).find((event) => event.threadId === id && event.type === 'thread.messages')!
     expect(resync.data).toMatchObject({ replace: true, earlier: { before: 'm8', count: 7 } })
+  })
+
+  it('forgets what was left to load once the owner replaces the transcript with the whole thread (an undo)', () => {
+    const view = new RemoteThreadView()
+    view.install(snapshot('t', { messages: [{ id: 'm8' }, { id: 'm9' }], earlier: { before: 'm8', count: 7 } }))
+    view.apply('thread.messages', { messages: [{ id: 'm1' }, { id: 'm2' }], replace: true })
+    expect(view.read()?.earlier).toBeUndefined()
+    view.apply('thread.messages', { messages: [{ id: 'm8' }], replace: true, earlier: { before: 'm8', count: 7 } })
+    expect(view.read()?.earlier).toEqual({ before: 'm8', count: 7 })
   })
 
   it('puts a window right after the offline copy, and never lets the copy replace a newer live view', async () => {
