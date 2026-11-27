@@ -929,6 +929,36 @@ describe('the split view used as the thread browser is', () => {
     expect(document.querySelector('[role="menu"]')).toBeNull()
   })
 
+  it('the page menu takes the keyboard: arrows move between its items, and Escape or Tab gives the keyboard back to the page', async () => {
+    browser = { ...browser, control: 'owner', holder: 'this-view', hold: HOLD }
+    await expanded()
+    await act(async () => useBotBrowserStore.getState().load('noobesh', false))
+    const openMenu = async () => {
+      await act(async () => { keys()!.focus() })
+      await act(async () => { frameOf().dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 420, clientY: 140, button: 2 })) })
+    }
+    const label = () => (document.activeElement as HTMLElement | null)?.querySelector('span')?.textContent
+    const key = async (name: string) => {
+      await act(async () => { (document.activeElement as HTMLElement).dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true })) })
+    }
+    await openMenu()
+    expect(label()).toBe('Cut')
+    await key('ArrowDown')
+    expect(label()).toBe('Copy')
+    await key('End')
+    expect((document.activeElement as HTMLElement).getAttribute('aria-label')).toBe('Zoom in')
+    await key('Escape')
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+    expect(document.activeElement).toBe(keys())
+    await openMenu()
+    await key('Tab')
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+    expect(document.activeElement).toBe(keys())
+    // None of it reached the page.
+    await settle()
+    expect(sentInputs()).toEqual([])
+  })
+
   it('Paste from the menu sends nothing when its hold ends before the clipboard answers, even if a new one has begun', async () => {
     browser = { ...browser, control: 'owner', holder: 'this-view', hold: HOLD }
     await expanded()

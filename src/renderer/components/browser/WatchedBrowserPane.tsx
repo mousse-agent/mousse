@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
 import type { StoreApi, UseBoundStore } from 'zustand'
 import { ArrowLeft, ArrowRight, ArrowShrink, Bot, Maximize, Minus, MoreVertical, Plus, RefreshCw, User, X } from '../../lib/icons'
 import { WATCHED_BROWSER_PANE, watchedBrowserPageSize, type WatchedBrowserDialog, type WatchedBrowserInput, type WatchedBrowserPageSize, type WatchedBrowserView } from '../../../shared/browser/watched'
@@ -218,11 +218,29 @@ export interface WatchedBrowserFullScreen {
 
 /**
  * The view's menu, in the thread browser's look: under its More button (`bar`), or at the pointer for a right click on
- * the page. A press anywhere else, or Escape, closes it.
+ * the page. It takes the keyboard when it opens (the page's keys stop reaching the page): the arrow keys, Home and End
+ * move between its items, Tab or Escape closes it and gives the keyboard back to where it came from. A press anywhere
+ * else closes it too.
  */
 function BrowserMenu({ at, anchor, onClose, children }: { at: { x: number; y: number } | 'bar'; anchor: RefObject<HTMLButtonElement | null>; onClose(refocus: boolean): void; children: ReactNode }) {
   const panel = useRef<HTMLDivElement>(null)
   const below = useFloatingPosition({ open: at === 'bar', anchorRef: anchor, contentRef: panel, placement: 'below-end', gap: 5 })
+  const items = () => [...(panel.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])]
+  useEffect(() => { items()[0]?.focus({ preventScroll: true }) }, [])
+  const move = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Tab') {
+      event.preventDefault()
+      onClose(true)
+      return
+    }
+    const list = items()
+    if (!list.length || !['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+    event.preventDefault()
+    const index = list.indexOf(document.activeElement as HTMLButtonElement)
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? list.length - 1
+      : event.key === 'ArrowDown' || event.key === 'ArrowRight' ? (index + 1) % list.length : (index - 1 + list.length) % list.length
+    list[next]?.focus({ preventScroll: true })
+  }
   useEffect(() => {
     const away = (event: PointerEvent) => {
       const target = event.target as Node
@@ -233,7 +251,7 @@ function BrowserMenu({ at, anchor, onClose, children }: { at: { x: number; y: nu
       if (event.key !== 'Escape') return
       event.preventDefault()
       event.stopPropagation()
-      onClose(at !== 'bar')
+      onClose(true)
     }
     document.addEventListener('pointerdown', away, true)
     document.addEventListener('keydown', keys, true)
@@ -245,7 +263,7 @@ function BrowserMenu({ at, anchor, onClose, children }: { at: { x: number; y: nu
     left: Math.max(8, Math.min(at.x + 2, window.innerWidth - 238)), top: Math.max(8, Math.min(at.y + 2, window.innerHeight - 208))
   }
   return <FloatingPortal>
-    <div ref={panel} className="browser-menu browser-menu-floating watched-browser-menu" role="menu" aria-label={at === 'bar' ? 'Browser menu' : 'Page menu'} style={style}>
+    <div ref={panel} className="browser-menu browser-menu-floating watched-browser-menu" role="menu" aria-label={at === 'bar' ? 'Browser menu' : 'Page menu'} style={style} onKeyDown={move}>
       {children}
     </div>
   </FloatingPortal>
@@ -408,9 +426,12 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   const mac = viewerPlatform() === 'mac'
   const primary = mac ? BROWSER_MODIFIERS.meta : BROWSER_MODIFIERS.ctrl
   const shortcut = (letter: string) => `${mac ? '⌘' : 'Ctrl+'}${letter}`
+  // Closed, the keyboard goes back where the menu came from: the More button, or the page.
+  const menuFrom = useRef<'bar' | 'page'>('page')
+  menuFrom.current = menuAt === 'bar' ? 'bar' : menuAt ? 'page' : menuFrom.current
   const closeMenu = useCallback((refocus: boolean) => {
     setMenuAt(null)
-    if (refocus) keys.current?.focus({ preventScroll: true })
+    if (refocus) (menuFrom.current === 'bar' ? menuButton.current : keys.current)?.focus({ preventScroll: true })
   }, [])
   const paste = async () => {
     // Bound now: the clipboard answers later, and by then the view may show another browser or the hold may have ended.
