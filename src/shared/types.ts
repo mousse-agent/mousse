@@ -675,7 +675,7 @@ export interface PendingUserQuestions {
    */
   helper?: { agentId: string }
   /**
-   * `false`: the agent asked without waiting (`ask_user` with `wait: false`) and keeps working. The question stays
+   * `false`: the agent asked without waiting (`question_ask` with `wait: false`) and keeps working. The question stays
    * open until it is answered, dismissed or withdrawn; a new message does not close it.
    */
   wait?: false

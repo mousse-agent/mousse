@@ -33,7 +33,7 @@ export function TryRunPanel({
   const [result, setResult] = useState<AgentTryRunResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   // A question the run waits on (a shell command's approval where the shell is not contained, an
-  // `ask_user`): asked on the run's own "Try Agent" thread, which is not on screen, so it is shown here.
+  // `question_ask`): asked on the run's own "Try Agent" thread, which is not on screen, so it is shown here.
   const [waiting, setWaiting] = useState<WaitingQuestion | null>(null)
   const boundaryRef = useRef({ profileId, id, client })
   boundaryRef.current = { profileId, id, client }

@@ -95,10 +95,10 @@ const CALLS: Array<[string, string, Record<string, unknown>]> = [
   ['remind', 'remind', { text: 'Check the oven.', inMinutes: 30 }],
   ['watch_start', 'watch_start', { command: 'echo hi', brief: 'Tell me how it went.' }],
   // `wait: false`: work that asks goes on, so the calls after it still run in the same turn.
-  ['ask_owner', 'ask_owner', { question: 'Which flat?', choices: ['The first', 'The second'], wait: false }],
+  ['question_ask', 'question_ask', { question: 'Which flat?', choices: ['The first', 'The second'], wait: false }],
   ['question_answer', 'question_answer', { questionId: 'q-missing', answer: 'The second' }],
   ['bot_list', 'bot_list', {}],
-  // #1446: held and refused wherever ask_owner is; past the turn's rule, the made-up question is not found.
+  // #1446: held and refused wherever question_ask is; past the turn's rule, the made-up question is not found.
   ['question_withdraw', 'question_withdraw', { questionId: 'q-missing' }],
   ['bot_send', 'bot_send', { bot: 'Beta', message: 'The login page returns a 500.' }],
   ['work_start', 'work_start', { title: 'Research', brief: 'Look up flats near the station.' }],
@@ -106,7 +106,7 @@ const CALLS: Array<[string, string, Record<string, unknown>]> = [
   // Last: work that waits is parked, which ends what its turn may do.
   ['work_wait', 'work_wait', { why: 'Check again.', inMinutes: 30 }]
 ]
-const HELD = ['bot_schedule_add', 'remind', 'watch_start', 'ask_owner', 'question_answer', 'question_withdraw', 'bot_list', 'bot_send', 'work_wait', 'work_start', 'subagent_start'] as const
+const HELD = ['bot_schedule_add', 'remind', 'watch_start', 'question_ask', 'question_answer', 'question_withdraw', 'bot_list', 'bot_send', 'work_wait', 'work_start', 'subagent_start'] as const
 
 type Start = 'chat:msg' | 'chat:after:msg' | 'answer:q' | 'create:bot' | 'resume:create:bot' | 'wake:w1' | 'resume:wake:w1' | 'question:q:default' | 'job:j1'
   | 'resume:resume:job:j1' | 'threadmsg:t1' | 'botmsg:b1:m1' | 'resume:act1' | 'action:a1' | 'future:start' | 'work' | 'schedule' | 'manual'
@@ -146,7 +146,7 @@ interface Observed {
  * answers: its reminders, background commands, questions, messages to bots and work are refused at the call
  * (`turnRefusals`); listing the other bots is reading, so it stays.
  */
-const CHAT_HELD = ['ask_owner', 'bot_list', 'bot_schedule_add', 'bot_send', 'question_answer', 'question_withdraw', 'remind', 'watch_start', 'work_start']
+const CHAT_HELD = ['bot_list', 'bot_schedule_add', 'bot_send', 'question_answer', 'question_ask', 'question_withdraw', 'remind', 'watch_start', 'work_start']
 function chatTurn(provenance: BotActivationProvenance, memoryLane: BotLane, threadsReadOnly: 'not_owner' | null): Observed {
   const owner = provenance === 'owner_message' || provenance === 'owner_tap'
   const acts = provenance === 'unknown' ? 'refused:not_granted' : 'ok'
@@ -154,7 +154,7 @@ function chatTurn(provenance: BotActivationProvenance, memoryLane: BotLane, thre
     provenance, memoryLane, threadsReadOnly, held: CHAT_HELD, subagents: false,
     calls: {
       thread_change: threadsReadOnly ? 'refused:not_granted' : 'ok',
-      say: memoryLane === 'chat' ? 'ok' : 'refused:failed', remind: acts, watch_start: acts, ask_owner: acts, question_withdraw: acts === 'ok' ? 'refused:failed' : acts,
+      say: memoryLane === 'chat' ? 'ok' : 'refused:failed', remind: acts, watch_start: acts, question_ask: acts, question_withdraw: acts === 'ok' ? 'refused:failed' : acts,
       question_answer: owner ? 'refused:failed' : 'refused:not_granted (owner only)', bot_list: 'ok', bot_send: acts, work_start: acts, subagent_start: 'refused:unavailable', work_wait: 'refused:not_granted'
     }
   }
@@ -168,10 +168,10 @@ function runTurn(provenance: 'work' | 'schedule' | 'manual'): Observed {
   const asks = provenance !== 'manual'
   return {
     provenance, memoryLane: 'run', threadsReadOnly: null,
-    held: asks ? ['ask_owner', 'bot_list', 'bot_schedule_add', 'bot_send', 'question_withdraw', 'remind', 'subagent_start', 'watch_start', 'work_wait'] : ['bot_schedule_add', 'remind', 'subagent_start', 'watch_start'], subagents: true,
+    held: asks ? ['bot_list', 'bot_schedule_add', 'bot_send', 'question_ask', 'question_withdraw', 'remind', 'subagent_start', 'watch_start', 'work_wait'] : ['bot_schedule_add', 'remind', 'subagent_start', 'watch_start'], subagents: true,
     calls: {
       thread_change: 'ok',
-      say: 'refused:failed', remind: 'ok', watch_start: 'ok', ask_owner: asks ? 'ok' : 'refused:unavailable', question_withdraw: asks ? 'refused:failed' : 'refused:unavailable', question_answer: 'refused:unavailable',
+      say: 'refused:failed', remind: 'ok', watch_start: 'ok', question_ask: asks ? 'ok' : 'refused:unavailable', question_withdraw: asks ? 'refused:failed' : 'refused:unavailable', question_answer: 'refused:unavailable',
       bot_list: asks ? 'ok' : 'refused:unavailable', bot_send: asks ? 'ok' : 'refused:unavailable', work_start: 'refused:not_granted', subagent_start: 'ok', work_wait: asks ? 'ok' : 'refused:not_granted'
     }
   }
@@ -206,7 +206,7 @@ const EXPECTED: Record<Start, Observed> = {
   'sched stored as owner_voice': {
     provenance: 'unknown', memoryLane: 'run', threadsReadOnly: 'not_owner', held: ['bot_schedule_add'], subagents: false,
     calls: {
-      thread_change: 'refused:not_granted', say: 'refused:failed', remind: 'refused:not_granted', watch_start: 'refused:not_granted', ask_owner: 'refused:unavailable', question_withdraw: 'refused:unavailable',
+      thread_change: 'refused:not_granted', say: 'refused:failed', remind: 'refused:not_granted', watch_start: 'refused:not_granted', question_ask: 'refused:unavailable', question_withdraw: 'refused:unavailable',
       question_answer: 'refused:unavailable', bot_list: 'refused:unavailable', bot_send: 'refused:unavailable', work_start: 'refused:not_granted', subagent_start: 'refused:unavailable', work_wait: 'refused:not_granted'
     }
   }
@@ -343,7 +343,7 @@ describe('the turn-kind matrix through registered dispatch', () => {
   it('question_answer and subagent_start do what the matrix allows: the owner\'s message passes on a real answer, work starts a subagent', async () => {
     const workId = await begin('work')
     const work = await start(f, workId)
-    const asked = await registryFor(work).call('ask_owner', { question: 'Which flat?', choices: ['The first', 'The second'], wait: false, clientRequestId: 'ask' })
+    const asked = await registryFor(work).call('question_ask', { question: 'Which flat?', choices: ['The first', 'The second'], wait: false, clientRequestId: 'ask' })
     expect(refusalOf(asked)).toBeUndefined()
     const questionId = chatOf(f, botId).find((message) => message.question && message.activationId === workId)!.question!.questionId
     const started = await registryFor(work).call('subagent_start', { title: 'Look', brief: 'List the folder.', clientRequestId: 'sub' })

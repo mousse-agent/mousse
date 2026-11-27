@@ -416,7 +416,7 @@ describe('ACP sessions', () => {
       expect(await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'ask me', onText: vi.fn(), prompter })).toBe('allowed')
     })
 
-    it('does not count the time one of Mousse’s own tools waits for the user (ask_user, plans, approvals), then counts again once it is answered', async () => {
+    it('does not count the time one of Mousse’s own tools waits for the user (question_ask, plans, approvals), then counts again once it is answered', async () => {
       let release: (() => void) | undefined
       const agent = scriptedAgent({
         prompt: async () => {
@@ -429,7 +429,7 @@ describe('ACP sessions', () => {
       const turn = sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'plan it', onText: vi.fn() })
       const outcome = turn.then(() => 'finished', (error: { code?: string }) => error.code)
       await vi.waitFor(() => expect(release).toBeDefined())
-      // The same call the Mousse MCP server makes for `ask_user`: through the thread's questions, not the ACP connection.
+      // The same call the Mousse MCP server makes for `question_ask`: through the thread's questions, not the ACP connection.
       const asked = questions.requestAnswers([{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], 't', { timeoutMs: 5_000 })
       await new Promise((resolve) => setTimeout(resolve, 400))
       expect(agent.connections[0].killed).toBe(false)
@@ -936,9 +936,9 @@ describe('ACP sessions', () => {
 
     describe.each([
       ['as Claude Code names MCP calls', 'mcp__mousse__ask_user'],
-      ['as some agents title them', 'ask_user (mousse MCP Server)'],
+      ['as some agents title them', 'question_ask (mousse MCP Server)'],
       ['a relayed tool waiting for its approval, named with capitals', 'mousse-relay/github__createIssue']
-    ])("Mousse's ask_user over MCP (%s): the steer cuts and answers it, on an agent whose window was never measured (strict)", (_name, title) => {
+    ])("Mousse's question_ask over MCP (%s): the steer cuts and answers it, on an agent whose window was never measured (strict)", (_name, title) => {
       const asks = (held: boolean) => {
         const toolStarted = gate()
         const finishTool = gate()

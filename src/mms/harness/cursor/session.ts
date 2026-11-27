@@ -116,7 +116,7 @@ export interface CursorSessionsOptions {
   host: CursorHostClient
   /**
    * The thread's questions: a person's steer that cancels a run answers the approvals and questions it waits on (Mousse's
-   * own, such as `ask_user`), as on every provider, so no card waits for a run that is being cut.
+   * own, such as `question_ask`), as on every provider, so no card waits for a run that is being cut.
    */
   questions?: { autoRejectPendingForThread(threadId: string): unknown }
   /** `JsonlLocalAgentStore` directory of the instance. */

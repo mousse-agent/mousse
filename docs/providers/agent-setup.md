@@ -306,7 +306,7 @@ with it, see [Claude's client name](claude-native-proxy.md).
 - An agent that gives no reply and no update for 15 minutes fails the turn with a timeout, and its
   process is ended; the next message starts a new session with the chat history. Time the agent
   spends waiting for you does not count: a permission or file request on the connection, or a
-  question from Mousse's own tools (`ask_user`, plans, approvals) on the thread. The bound covers
+  question from Mousse's own tools (`question_ask`, plans, approvals) on the thread. The bound covers
   the prompt only; an agent that hangs while starting or opening a session is not bounded by it.
 - Slash commands. A message that starts with `/` and a command name (`/review src`, not a path
   such as `/tmp/x`) is sent, trimmed, as the first text block, with the chat history as a second

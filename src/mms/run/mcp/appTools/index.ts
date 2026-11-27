@@ -32,6 +32,8 @@ import { webTools } from './web'
 
 /** The models a turn may name, a bot's or a thread's (`shareWakeTools`). */
 const MODEL_LIST_TOOL = 'model_list'
+/** Asking the person and taking a question back, a bot's (its owner) or a thread's (the user) (`shareWakeTools`). */
+const QUESTION_TOOLS: readonly string[] = ['question_ask', 'question_withdraw']
 
 export * from './types'
 export * from './refusal'
@@ -133,7 +135,7 @@ export function createAppToolRegistry(input: {
   const delegation = delegationTools(host)
   const models = shareWakeTools(bots.filter((tool) => tool.name === MODEL_LIST_TOOL), delegation.filter((tool) => tool.name === MODEL_LIST_TOOL))
   add('delegation', delegation.flatMap((tool) => (tool.name === MODEL_LIST_TOOL ? models : [tool])))
-  add('questions', [...askUserTools(host), ...secretTools(host), ...bugReportTools(host)])
+  add('questions', [...shareWakeTools(bots.filter((tool) => QUESTION_TOOLS.includes(tool.name)), askUserTools(host)), ...secretTools(host), ...bugReportTools(host)])
   add('tasks', [...taskTools(host), ...goalTools(host)])
   add('thread', engine ? threadTools(host, engine, input.bots) : [])
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])
@@ -145,7 +147,7 @@ export function createAppToolRegistry(input: {
   add('computer', computerTools(host))
   add('applets', appletTools())
   // `wake`, `reminder_list` and `reminder_cancel` serve a bot's turn and any thread's (`shareWakeTools`).
-  add('bots', [...shareWakeTools(bots.filter((tool) => tool.name !== MODEL_LIST_TOOL), threadWakeTools(host)), ...botCatalogueTools(() => registry), ...(input.botMemory ? [...botMemoryTools(input.botMemory), ...botItemTools(input.botMemory)] : [])])
+  add('bots', [...shareWakeTools(bots.filter((tool) => tool.name !== MODEL_LIST_TOOL && !QUESTION_TOOLS.includes(tool.name)), threadWakeTools(host)), ...botCatalogueTools(() => registry), ...(input.botMemory ? [...botMemoryTools(input.botMemory), ...botItemTools(input.botMemory)] : [])])
   add('projectGit', projectGitTools(host))
   add('profiler', profilerTools(host, engine))
   add('appearance', appearanceTools(host))

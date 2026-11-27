@@ -151,7 +151,7 @@ export function computerTools(host: AppToolHost): MousseTool[] {
     if (turn.subagent) return "Only the thread's own agent asks for computer use, not a subagent."
     if (turn.bot) {
       // A bot asks only in work its owner asked for in its chat: never from a schedule, a reminder or another bot.
-      if (!turn.bot.appTools.has(COMPUTER_USE_REQUEST_TOOL)) return 'Ask your owner for "use the computer" with escalate first.'
+      if (!turn.bot.appTools.has(COMPUTER_USE_REQUEST_TOOL)) return 'Ask your owner for "use the computer" with permission_ask first.'
       if (turn.bot.ownerRequested !== true) return 'Only work your owner asked for in your chat can ask for computer use. Say in your report that it needs setting up.'
       return true
     }

@@ -53,7 +53,7 @@ describe('a run whose row names no start it may have', () => {
     f.store.run('UPDATE bot_activations SET provenance = ? WHERE id = ?', provenance, activation.id)
     const turn = await start(f, activation.id)
     const held = turn.prepared.authority.appTools
-    for (const tool of ['remind', 'watch_start', 'ask_owner', 'work_wait', 'bot_send', 'subagent_start']) expect(held.has(tool), tool).toBe(false)
+    for (const tool of ['remind', 'watch_start', 'question_ask', 'work_wait', 'bot_send', 'subagent_start']) expect(held.has(tool), tool).toBe(false)
     expect(turn.prepared.authority.subagents).toBeUndefined()
     expect(turn.prepared.authority.threadsReadOnly).toBe('not_owner')
     expect(() => f.bots.tools.reminders.add(botId, activation.id, { dueAt: due(), text: 'Check the oven.' })).toThrow(/can't set a reminder/)

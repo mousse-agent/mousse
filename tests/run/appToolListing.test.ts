@@ -70,7 +70,7 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
       expect(onPlan.tools).not.toContain(name)
       expect(planNote).not.toContain(name)
     }
-    expect(planNote).toContain('ask_user')
+    expect(planNote).toContain('question_ask')
     expect(vendor.bridges[0].turnPreamble).toContain(PLAN_TURN_NOTE)
     expect(vendor.bridges[1].turnPreamble).not.toContain(PLAN_TURN_NOTE)
   }, 30_000)
@@ -81,16 +81,16 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
     const browser: BrowserRuntimePort = { resolveTarget: () => ({ backend: 'managed-chromium' }), dispatch: async () => ({}) }
     d.orch.setBrowserRuntime(browser)
     const tools = d.settings().integrations.tools
-    tools.enabledTools = tools.enabledTools!.filter((name) => name !== 'ask_user' && name !== 'task_create')
+    tools.enabledTools = tools.enabledTools!.filter((name) => name !== 'question_ask' && name !== 'task_create')
     await d.send('Hello')
     const note = usableNow(vendor.bridges[0].turnPreamble)
     expect(note).toEqual(expect.arrayContaining(['delegate_task', 'task_list', 'thread_read', 'thread_fork', 'queue_enqueue']))
-    expect(note).not.toContain('ask_user')
+    expect(note).not.toContain('question_ask')
     expect(note).not.toContain('task_create')
     expect(note.filter((name) => name.startsWith('browser_'))).toEqual([])
     // The thread's list still has them: they are listed, and refused with a reason at call time.
     const listed = d.orch.mcpToolRegistry().listForThread(d.thread.id).map((tool) => tool.name)
-    expect(listed).toEqual(expect.arrayContaining(['ask_user', 'task_create', 'browser_open']))
+    expect(listed).toEqual(expect.arrayContaining(['question_ask', 'task_create', 'browser_open']))
   }, 30_000)
 
   /** A vendor parent (in a project when `project`) that delegates a read-only (`shared`) plan-ceiling pi child. */
@@ -164,13 +164,13 @@ describe('listing and per-turn availability over the server', () => {
 
   it('a tool the turn cannot use now is a tool error that says why, not a protocol error', async () => {
     const browser: BrowserRuntimePort = { resolveTarget: () => ({ backend: 'managed-chromium' }), dispatch: async () => ({}) }
-    const { bearer, host } = await setup({ browserRuntime: () => browser }, { settingsEnabled: (name) => name !== 'ask_user' })
+    const { bearer, host } = await setup({ browserRuntime: () => browser }, { settingsEnabled: (name) => name !== 'question_ask' })
     const mcp = bearer()
     const tools = await listTools(mcp)
-    expect(tools).toEqual(expect.arrayContaining(['ask_user', 'browser_open']))
-    const off = await callTool(mcp, 'ask_user', { questions: [{ id: 'q1', question: 'Which?', options: [{ label: 'A' }] }] })
+    expect(tools).toEqual(expect.arrayContaining(['question_ask', 'browser_open']))
+    const off = await callTool(mcp, 'question_ask', { questions: [{ id: 'q1', question: 'Which?', options: [{ label: 'A' }] }] })
     expect(off).toMatchObject({ status: 200, error: undefined, isError: true })
-    expect(refusalOf(off)).toMatchObject({ message: 'Tool "ask_user" is disabled in Settings → Skills & MCP.', refused: { code: 'unavailable' } })
+    expect(refusalOf(off)).toMatchObject({ message: 'Tool "question_ask" is disabled in Settings → Skills & MCP.', refused: { code: 'unavailable' } })
     expect(host.askUser).not.toHaveBeenCalled()
     const unbound = await callTool(mcp, 'browser_open', {})
     expect(unbound).toMatchObject({ status: 200, error: undefined, isError: true })
@@ -199,7 +199,7 @@ describe('listing and per-turn availability over the server', () => {
     const tools = await listTools(mcp)
     const expected = registry.listFor({ readOnly: false, modeCeiling: 'default' }).filter((tool) => tool.access === 'reads' || tool.access === 'readsOthers' || tool.readOnlySafe || tool.messageIntent !== undefined).map((tool) => tool.name).sort()
     expect(tools).toEqual(expected)
-    expect(tools).toEqual(expect.arrayContaining(['thread_read', 'queue_list', 'ask_user']))
+    expect(tools).toEqual(expect.arrayContaining(['thread_read', 'queue_list', 'question_ask']))
     expect(tools).not.toContain('thread_fork')
     expect(tools).not.toContain('queue_enqueue')
     const refused = await callTool(mcp, 'queue_enqueue', { content: 'x' })

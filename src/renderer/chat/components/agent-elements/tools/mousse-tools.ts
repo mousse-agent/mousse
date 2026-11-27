@@ -151,9 +151,9 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   computer_use_request: ["request", "computer use setup"],
   model_list: ["list", "models in Mousse"],
   // Asking the person
-  ask_user: ["ask", "you a question"],
-  withdraw_question: ["withdraw", "a question"],
-  escalate: ["ask", "you for a permission"],
+  question_ask: ["ask", "you a question"],
+  question_withdraw: ["withdraw", "a question"],
+  permission_ask: ["ask", "you for a permission"],
   automation_ask: ["ask", "you a question"],
   secret_request: ["ask", "you for a secret"],
   secret_run: ["run", "a command with a secret"],

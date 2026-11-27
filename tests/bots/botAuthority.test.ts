@@ -120,7 +120,7 @@ describe('compileBotThread', () => {
   })
 
   it('refuses delegation and thread tools, even in a stored grant', () => {
-    for (const tool of ['delegate_task', 'thread_fork', 'queue_enqueue', 'create_subagent', 'ask_user'])
+    for (const tool of ['delegate_task', 'thread_fork', 'queue_enqueue', 'create_subagent', 'question_ask'])
       expect(compile({ grant: manifest({ appTools: [tool] }) }), tool).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', reason: expect.stringContaining(tool) } })
   })
 

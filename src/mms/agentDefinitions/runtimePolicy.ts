@@ -38,7 +38,7 @@ export const BUILTIN_TOOL_ALIASES: Readonly<Record<string, string>> = {
 const READ_FS_TOOLS = new Set(['read', 'grep', 'find', 'ls', 'git_status', 'git_diff'])
 const WRITE_FS_TOOLS = new Set(['write', 'edit'])
 const SCRIPT_TOOLS = new Set(['bash'])
-const ASK_TOOLS = new Set(['ask_user'])
+const ASK_TOOLS = new Set(['question_ask'])
 const PATH_ARG_KEYS = ['path', 'file_path', 'filePath', 'directory', 'dir'] as const
 const SUPPORTED_WORKSPACE_INTERPRETERS = new Set(['bash', 'sh', 'shell', 'powershell', 'pwsh', 'cmd'])
 
@@ -422,7 +422,7 @@ export function isToolPermittedByPolicy(
   if (!policy) return true
   const classification = classifyTrustedTool(toolName, isMcp)
   const canonical = canonicalizeBuiltinToolName(toolName)
-  if (!policy.approval.askUser && canonical === 'ask_user') return false
+  if (!policy.approval.askUser && canonical === 'question_ask') return false
   if (policy.workspace.mode === 'read_only' && (classification === 'write' || classification === 'script')) {
     return false
   }
@@ -473,8 +473,8 @@ export function prepareTrustedToolDispatch(input: {
   })
 
   if (!isToolPermittedByPolicy(input.toolName, input.policy, input.isMcp)) {
-    if (!input.policy.approval.askUser && canonicalToolName === 'ask_user') {
-      return deny('ask_user is disabled by /settings/approval/askUser.')
+    if (!input.policy.approval.askUser && canonicalToolName === 'question_ask') {
+      return deny('question_ask is disabled by /settings/approval/askUser.')
     }
     if (input.policy.workspace.mode === 'read_only' && (classification === 'write' || classification === 'script')) {
       return deny(

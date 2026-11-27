@@ -1,5 +1,5 @@
 /**
- * The rules that decide a question's follow-up (issue #1123), at the modules that decide them: what `ask_owner`'s
+ * The rules that decide a question's follow-up (issue #1123), at the modules that decide them: what `question_ask`'s
  * `ifNoAnswer`, `after` and `default` mean (`questionFollowOf`), and a bot's nudge budget (one an hour, three in any 24
  * hours), as rows.
  */
@@ -11,7 +11,7 @@ const SPEC = { choices: [{ label: 'Flat A' }, { label: 'Flat B' }] }
 const MIN = 60_000
 const HOUR = 60 * MIN
 
-describe('ask_owner’s follow-up (questionFollowOf)', () => {
+describe('question_ask’s follow-up (questionFollowOf)', () => {
   it.each([
     ['nothing named: a nudge after an hour', {}, { kind: 'nudge', afterMs: 60 * MIN }],
     ['a nudge after 15 minutes, the shortest', { ifNoAnswer: 'nudge', after: 15 }, { kind: 'nudge', afterMs: 15 * MIN }],

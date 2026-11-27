@@ -156,6 +156,8 @@ export function shareWakeTools(botTools: MousseTool[], threadTools: MousseTool[]
       botDescription: bot.description,
       botInputSchema: bot.inputSchema,
       ...(bot.class !== thread.class ? { botClass: bot.class } : {}),
+      // A thread's version asks its person (`question_ask`); a bot's asks its owner through its own channel.
+      ...(thread.asksUser && !bot.asksUser ? { botAsksOwner: true as const } : {}),
       listed: (listing) => (listing.botRole ? bot.listed?.(listing) ?? true : thread.listed?.(listing) ?? true),
       available: (turn) => (turn.bot ? bot.available?.(turn) ?? true : thread.available?.(turn) ?? true),
       offered: (turn) => (turn.bot ? bot.offered?.(turn) ?? true : thread.offered?.(turn) ?? true),

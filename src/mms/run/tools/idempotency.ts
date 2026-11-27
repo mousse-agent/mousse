@@ -36,7 +36,7 @@ export const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   // A bot's Mousse tools (PR 6 §3). A consult's effects are the consult run's own calls, each in the
   // ledger; an escalation writes only bots.db. Either cut off by a crash leaves nothing unknown.
   'consult',
-  'escalate'
+  'permission_ask'
 ])
 
 /** Tools with side effects. Listed for documentation; any unknown tool is also non-idempotent. */
@@ -60,7 +60,7 @@ export const NON_IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'answer_subagent',
   'task_status',
   'task_cancel',
-  'ask_user',
+  'question_ask',
   'queue_enqueue',
   // Start, stop or hold background work of the thread (issue #1605).
   'monitor_start',

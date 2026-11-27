@@ -3210,7 +3210,7 @@ export class MmsProfileServices {
     this.runReconciler?.stop()
     this.stopInboxWakes?.()
     this.stopInboxWakes = null
-    // No new credentials; in-flight Mousse tool calls (a blocked ask_user) abort so turns can drain.
+    // No new credentials; in-flight Mousse tool calls (a blocked question_ask) abort so turns can drain.
     // Only detach what start() attached; a partially constructed profile has no server.
     const mcpServer = this.mcpServer as MousseMcpServer | undefined
     if (mcpServer?.running) this.orchestrator.setMcpAttachment(null)

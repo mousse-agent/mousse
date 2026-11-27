@@ -33,6 +33,8 @@ export const TOOL_PERMISSION_MAP: Record<string, string> = {
   bash: 'bash',
   git_status: 'read',
   git_diff: 'read',
+  question_ask: 'question',
+  // Its old name, as a mode's tool map may still name it.
   ask_user: 'question',
 }
 
