@@ -83,9 +83,9 @@ export function sessionRules(mode: PermissionMode, threadServer?: string, relay 
 }
 
 /**
- * A one-shot's rules: nothing at all, so the model is offered no tool (`whollyDisabled`). `withRead`: OpenCode's own
- * free models refuse a request that carries no tool, so for those only, file reads are allowed in the one-shot's empty
- * scratch folder.
+ * A single request's rules (`opencode/oneShot.ts`): nothing at all, so the model is offered no tool (`whollyDisabled`).
+ * `withRead`: OpenCode's own free models refuse a request that carries no tool, so for those only `read` is offered;
+ * the request's `generate` runs no tool, so it is never run.
  */
 export function oneShotRules(withRead = false): OpencodeRule[] {
   return [

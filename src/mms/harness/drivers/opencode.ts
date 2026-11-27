@@ -1,5 +1,5 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { harnessAppError, type HarnessCaps } from '../../../shared/harness/types'
 import type { InstallOwner } from '../../../shared/harness/status'
@@ -17,7 +17,7 @@ import { LATEST_TTL_MS } from '../latest'
 import { OpencodeServer, type OpencodeLaunch, type StartedServer } from '../opencode/server'
 import { OpencodeSessions, type SavedOpencodeSession } from '../opencode/sessions'
 import { AcpAdapter, type AcpTurnClient } from './acp/adapter'
-import { legacyOneShotRoute } from '../oneShot/routes'
+import { opencodeDatabasePath, opencodeOneShotRoute, opencodeSignIns, sealedOpencodeTransport, type OpencodeOneShotCache, type OpencodeSignIn } from '../opencode/oneShot'
 
 /**
  * OpenCode on its own server API (`opencode serve`, `../opencode/`). It runs an executable the user sets, else the copy
@@ -178,6 +178,8 @@ export interface OpencodeDriverOptions {
   serverIdleMs?: number
   /** Test seam: how long a stop waits for OpenCode to confirm. */
   interruptWaitMs?: number
+  /** Test seam: config every sealed single-request server gets (`OPENCODE_CONFIG_CONTENT`), as a loopback stub provider. */
+  oneShotConfigContent?: string
 }
 
 /**
@@ -219,6 +221,8 @@ const OPENCODE_CAPABILITIES: ProviderCapabilities = Object.freeze({
 })
 
 export function opencodeDriver(options: OpencodeDriverOptions = {}): HarnessDriver {
+  /** What each entry's last check read that its single requests' routes depend on (`opencode/oneShot.ts`). */
+  const oneShotCache = new Map<string, OpencodeOneShotCache>()
   return {
     kind: 'opencode',
     label: OPENCODE_LABEL,
@@ -232,9 +236,9 @@ export function opencodeDriver(options: OpencodeDriverOptions = {}): HarnessDriv
     privateHome: false,
     canInstall: true,
     customModels: false,
-    // Chat titles, branch names, pull request drafts and commit messages: a session that denies every tool.
-    // Until its own slice, on its own one-shot code (`DriverRuntime.oneShot`), admitted with no facts claimed.
-    oneShotRoute: legacyOneShotRoute('opencode'),
+    // Chat titles, branch names, pull request drafts and commit messages: a sealed server of their own
+    // (`opencode:sealed`), from what the entry's last check read.
+    oneShotRoute: (input) => opencodeOneShotRoute(input.model, oneShotCache.get(input.instanceId)),
     methodLabel: 'OpenCode’s own sign-in',
     // OpenCode's sign-in is this computer's, whichever executable runs: never Mousse's own.
     sharedSignIn: true,
@@ -253,7 +257,7 @@ export function opencodeDriver(options: OpencodeDriverOptions = {}): HarnessDriv
     versionArgs: () => ['--version'],
     caps: () => ({ ...OPENCODE_CAPS }),
     updateCommand: opencodeUpdateCommand,
-    create: (context) => createOpencodeRuntime(context, options)
+    create: (context) => createOpencodeRuntime(context, options, oneShotCache)
   }
 }
 
@@ -262,8 +266,10 @@ interface OpencodeState {
   sessions?: Record<string, SavedOpencodeSession>
   models?: LlmModelOption[]
   modelsRefreshedAt?: string
-  /** What the last check of OpenCode's providers found. */
-  connected?: { providers: string[]; checkedAt: string }
+  /** What the last check of OpenCode's providers found, and how each was connected. */
+  connected?: { providers: string[]; checkedAt: string; signIns?: Record<string, OpencodeSignIn> }
+  /** OpenCode's own free models, as the last model listing priced them. */
+  freeModels?: string[]
   /** The ACP state of this entry (`acp.json`) was read in once: its saved sessions are OpenCode sessions. */
   importedAcp?: boolean
 }
@@ -292,7 +298,7 @@ export function sessionsFromAcpState(raw: unknown): Record<string, SavedOpencode
   return out
 }
 
-function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOptions): DriverRuntime {
+function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOptions, oneShotCache: Map<string, OpencodeOneShotCache>): DriverRuntime {
   const label = context.config.displayName ?? OPENCODE_LABEL
   const { agents, registry } = options
   const statePath = join(context.stateDir, 'opencode.json')
@@ -307,6 +313,10 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
     mkdirSync(context.stateDir, { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(statePath, state, { mode: 0o600 })
   }
+  const cacheOneShot = () => {
+    oneShotCache.set(context.instanceId, { ...(state.connected?.signIns ? { signIns: state.connected.signIns } : {}), ...(state.freeModels ? { free: state.freeModels } : {}) })
+  }
+  cacheOneShot()
   if (!state.importedAcp) {
     try {
       const acp = JSON.parse(readFileSync(join(context.stateDir, 'acp.json'), 'utf8')) as unknown
@@ -415,12 +425,6 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
     defaultInstanceId: context.instanceId,
     server: { running: () => server.running(), hold: () => server.hold(), client: (signal?: AbortSignal) => started(signal) },
     ...(options.interruptWaitMs !== undefined ? { interruptWaitMs: options.interruptWaitMs } : {}),
-    scratch: () => {
-      const path = join(context.stateDir, 'one-shot', randomUUID())
-      mkdirSync(path, { recursive: true, mode: 0o700 })
-      // A server that held the folder a moment longer leaves an empty one behind: harmless.
-      return { path, remove: () => { try { rmSync(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }) } catch { /* kept */ } } }
-    },
     store: {
       saved: (threadId) => state.sessions?.[threadId],
       setSaved: (threadId, saved) => {
@@ -432,10 +436,12 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
         save()
       },
       models: () => state.models ?? [],
-      setModels: (models) => {
+      setModels: (models, free) => {
         state.models = models
+        state.freeModels = free
         state.modelsRefreshedAt = new Date().toISOString()
         save()
+        cacheOneShot()
       }
     }
   })
@@ -448,8 +454,9 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
       .filter((integration) => Array.isArray(integration.connections) && integration.connections.length > 0)
       .map((integration) => String(integration.id ?? integration.name ?? ''))
       .filter(Boolean)
-    state.connected = { providers, checkedAt: new Date().toISOString() }
+    state.connected = { providers, checkedAt: new Date().toISOString(), signIns: opencodeSignIns(data) }
     save()
+    cacheOneShot()
     return providers
   }
 
@@ -494,9 +501,42 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
 
   const runtime: DriverRuntime = {
     adapter,
-    oneShot: async (spec, signal) => {
-      if (context.signedOut()) throw harnessAppError({ code: 'signed_out', message: `Sign in to ${label} in Settings → Providers.` })
-      return { text: await sessions.oneShot({ model: spec.model, system: spec.system, prompt: spec.prompt, signal, onActivity: () => spec.onActivity() }) }
+    /**
+     * `opencode:sealed` (`opencode/oneShot.ts`): the runner's request on a fresh OpenCode server in a place of its own,
+     * never the entry's server, ended and removed with the request.
+     */
+    oneShotTransport: (spec) => {
+      const transport = sealedOpencodeTransport({
+        label,
+        instanceId: context.instanceId,
+        profileHome: context.profileHome,
+        program: () => {
+          const found = program()
+          if (!found) throw harnessAppError({ code: 'not_installed', message: `${label} is not installed. Install it in Settings → Providers, or set its executable.`, instanceId: context.instanceId })
+          // Only Mousse's own copy is kept from updating itself (the sealed launch also keeps every copy from it).
+          return { command: found.command, args: found.args, path: found.path, env: found.env }
+        },
+        beforeLaunch: async (signal) => {
+          const found = program()
+          if (!found?.managed) return
+          await checkManaged(signal, true)
+          const root = found.root
+          return root && agents ? agents.track(root) : undefined
+        },
+        baseEnv: context.env.env,
+        ...(context.config.env ? { entryEnv: context.config.env } : {}),
+        ...(context.env.enforced ? { enforcedEnv: context.env.enforced } : {}),
+        models: () => state.models ?? [],
+        cache: () => oneShotCache.get(context.instanceId),
+        database: () => opencodeDatabasePath({ ...context.env.env, ...(context.config.env ?? {}) }),
+        ...(options.oneShotConfigContent !== undefined ? { configContent: options.oneShotConfigContent } : {})
+      }, spec)
+      return {
+        send: async (wire, events, signal) => {
+          if (context.signedOut()) throw harnessAppError({ code: 'signed_out', message: `Sign in to ${label} in Settings → Providers.`, instanceId: context.instanceId })
+          return transport.send(wire, events, signal)
+        }
+      }
     },
     // A broken managed copy stops only itself.
     configured: () => !managed()?.broken && Boolean(program()),

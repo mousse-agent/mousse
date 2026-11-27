@@ -2,8 +2,8 @@ import { useSyncExternalStore } from 'react'
 import type { ThreadProjectColorStyle } from '../../shared/settings'
 
 // Mirrors Settings > Appearance > Project colors on threads so the sidebar can read it without loading settings.
-// useTheme feeds it from the open profile's settings. It keeps the default fill until they load.
-let style: ThreadProjectColorStyle = 'fill'
+// useTheme feeds it from the open profile's settings. It keeps the default (off) until they load.
+let style: ThreadProjectColorStyle = 'off'
 const listeners = new Set<() => void>()
 
 export function setThreadProjectColors(next: ThreadProjectColorStyle): void {
