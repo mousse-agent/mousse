@@ -177,7 +177,7 @@ describe('definitions through the gateway', () => {
     expect(runs).toHaveLength(1)
     expect(runs[0]).toMatchObject({ source: 'definition', status: 'completed' })
     expect(engine.bindingForRun(runs[0]!.runId)?.policy).toEqual({
-      mode: 'default', origin: 'definition', approvals: 'grants', tools: { allow: ['question_ask', 'read', 'write'] },
+      origin: 'definition', approvals: 'grants', tools: { allow: ['question_ask', 'read', 'write'] },
       // The default limits are none, so the policy holds no count and any runtime can run it.
       budget: {},
       authority: { kind: 'definition', digest: expect.stringMatching(/^[0-9a-f]{64}$/) },
@@ -511,7 +511,7 @@ describe('definitions through the gateway', () => {
         input: { runId: `foreign-${origin}`, attemptId: `foreign-${origin}:1`, threadId, cwd: work, model: binding.model, instanceId: binding.instanceId, llmProvider: PROVIDER, modelPinned: true, mode: 'agent', prompt: 'plain', messages: [{ role: 'user', content: 'plain', timestamp: Date.now() }], signal: new AbortController().signal },
         sink, control: { drainSteer: () => undefined, heartbeat: noop },
         host: { tools: {}, context: { recoverOverflow: () => null, prepareNativeContext: () => null, nativeHistoryAfterTurn: () => '' } },
-        app: { turnToken: 't', modeCeiling: 'default', mcpEligible: false, instructions: () => ({ sessionInstructions: '', turnPreamble: '' }) }
+        app: { turnToken: 't', mcpEligible: false, instructions: () => ({ sessionInstructions: '', turnPreamble: '' }) }
       })
       await expect(turn.result).rejects.toMatchObject({ code: 'policy_unenforceable' })
     }
@@ -787,7 +787,7 @@ describe('definitions through the gateway', () => {
           seen.tools = registry.listForTurn(input.threadId, input.runId).map((tool) => tool.name)
           for (const [index, call] of calls.entries()) {
             seen.results.push(await registry.call(call.name, call.args, {
-              credential: { threadId: input.threadId, runId: input.runId, provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'rotate', current: () => true },
+              credential: { threadId: input.threadId, runId: input.runId, provider: 'pi', accessLevel: 'lineage', binding: 'rotate', current: () => true },
               toolCallId: `call-${index}`,
               signal: input.signal
             }))

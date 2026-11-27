@@ -991,7 +991,7 @@ describe('Claude Subscription native provider', () => {
     expect(decisions[1]).toMatchObject({ behavior: 'deny' })
     expect(asked).toHaveBeenCalledOnce()
   })
-  it('asks only for calls bypass mode escalates and keeps plan mode read-only without prompts', async () => {
+  it('asks only for calls bypass mode escalates, with Claude Code\'s plan-mode tools off', async () => {
     let decision: unknown
     let tool = 'Bash'
     const inputs: Options[] = []
@@ -1015,19 +1015,7 @@ describe('Claude Subscription native provider', () => {
     await service.chat(chatInput(home))
     expect(decision).toMatchObject({ behavior: 'deny' })
     expect(asked).toHaveBeenCalledOnce()
-    await service.chat({ ...chatInput(home), mode: 'plan' })
-    expect(decision).toMatchObject({
-      behavior: 'deny',
-      message: expect.stringContaining('planning only')
-    })
-    tool = 'Read'
-    await service.chat({ ...chatInput(home), mode: 'plan' })
-    expect(decision).toMatchObject({ behavior: 'allow' })
-    expect(asked).toHaveBeenCalledOnce()
-    // Read-only by Mousse's own checks, not Claude Code's plan mode, whose tools never reach the model.
-    expect(inputs[2].permissionMode).toBe('default')
-    expect(inputs[2].disallowedTools).toEqual(expect.arrayContaining(['EnterPlanMode', 'ExitPlanMode']))
-    expect(inputs[2].allowDangerouslySkipPermissions).toBeUndefined()
+    expect(inputs[0].disallowedTools).toEqual(expect.arrayContaining(['EnterPlanMode', 'ExitPlanMode']))
   })
   describe('permission modes', () => {
     /** Runs one turn in `mode`, probing `tools` through the hook and `canUseTool`; every prompt is rejected. */
@@ -1938,7 +1926,7 @@ it('reports available SDK usage on failure and caller abort without committing h
   expect(aborted.settings().sessions.thread.historyKey).toBeUndefined()
 })
 
-it('forces host review of every call only in plan mode', async () => {
+it('forces host review of every call only for a read-only child', async () => {
   const decisions: unknown[] = []
   const { service, home } = fixture(({ options }) => {
     const q = fakeQuery()
@@ -1960,7 +1948,7 @@ it('forces host review of every call only in plan mode', async () => {
     return q
   })
   await service.chat(chatInput(home))
-  await service.chat({ ...chatInput(home), mode: 'plan' })
+  await service.chat({ ...chatInput(home), child: { readOnly: true } })
   expect(decisions[0]).toEqual({})
   expect(decisions[1]).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
 })

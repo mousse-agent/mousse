@@ -61,7 +61,7 @@ describe('a fork records who made it (#2004 T5)', () => {
       const bot = options.bot ? { bot: { activationId: 'act-1', role: 'activation', appTools: new Set([...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS]), check: () => ({ ok: true }) } as unknown as BotAuthority } : {}
       d.orch.appToolTurns.register(appTurn({ threadId, runId, ...bot }))
       const answer = await d.orch.mcpToolRegistry().call('thread_fork', args, {
-        credential: { threadId, runId, provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
+        credential: { threadId, runId, provider: 'pi', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
         toolCallId: `call-${runId}`,
         signal: new AbortController().signal
       })

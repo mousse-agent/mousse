@@ -48,7 +48,6 @@ import {
   type DelegationWake,
   type DelegationWorkspace,
   type EffectRecord,
-  type ModeCeiling,
   type ProviderRef,
   type ReceiptRecord,
   type RunOutcome,
@@ -176,8 +175,6 @@ export interface SendDelegation {
   parentRunId: string
   prompt: string
   wake: DelegationWake
-  /** The follow-up's ceiling: the caller's authority narrowed by the subagent's own policy. */
-  modeCeiling?: ModeCeiling
   /** The follow-up's access level, narrowed the same way. */
   accessLevel?: AgentAccessLevel
   /** The subagent's workspace policy, role and selection, copied from its first task. */
@@ -305,8 +302,6 @@ export interface DelegationRequest {
   readOnly?: boolean
   wake: DelegationWake
   title?: string
-  /** The most the child may do (SPEC §15.1); the caller has already checked it against its own. */
-  modeCeiling?: ModeCeiling
   /** The agent access level the child is granted (SPEC §15.1); the caller has already narrowed it by its own. */
   accessLevel?: AgentAccessLevel
   /**
@@ -344,7 +339,6 @@ export interface RemoteDelegationTarget {
   /** The task as that computer's thread receives it (the subagent's guidance and the prompt). */
   prompt: string
   permissionMode: PermissionMode
-  chatMode: 'agent' | 'plan'
   worktree: boolean
   projectId: string | null
   instanceId: string | null
@@ -1734,7 +1728,6 @@ un_time_limits). */
       model: input.model,
       prompt: input.prompt,
       wake: input.wake,
-      modeCeiling: input.modeCeiling,
       accessLevel: input.accessLevel,
       workspace: input.workspace,
       role: input.role,
@@ -1800,7 +1793,6 @@ un_time_limits). */
           model: tracked.model,
           prompt: tracked.prompt,
           wake: tracked.wake,
-          modeCeiling: tracked.modeCeiling,
           accessLevel: narrowAgentAccess(tracked.accessLevel, narrowestAccess(this.delegations.listForChildThread(input.childThreadId))),
           workspace: tracked.workspace,
           role: tracked.role
@@ -2277,7 +2269,6 @@ un_time_limits). */
       parentRunId: parentRun.runId,
       prompt: command.prompt ?? '',
       wake: 'always',
-      modeCeiling: first.modeCeiling ?? undefined,
       // The narrowest level any task of this subagent was given: a follow-up never restores what an
       // earlier one narrowed (SPEC §15.1).
       accessLevel: narrowestAccess(tasks),
@@ -2361,7 +2352,6 @@ un_time_limits). */
           model: tracked.model,
           prompt: tracked.prompt,
           wake: tracked.wake,
-          modeCeiling: tracked.modeCeiling,
           accessLevel,
           workspace: tracked.workspace,
           role: tracked.role

@@ -60,7 +60,7 @@ function hello(lane: 'chat' | 'run', catalogue: 'search' | 'use_tool') {
     }
   })
   if (!compiled.ok) throw new Error(compiled.error.message)
-  const listed = registry.listFor({ readOnly: false, modeCeiling: 'default', botRole: 'activation', botTurnTools: new Set(compiled.permissions.appTools), botCatalogue: catalogue }).map(listedTool)
+  const listed = registry.listFor({ readOnly: false, botRole: 'activation', botTurnTools: new Set(compiled.permissions.appTools), botCatalogue: catalogue }).map(listedTool)
   const system = botInstructions({ name: 'Pip', description: 'Help me with my day, my threads and my projects.', filesFolder: 'C:/Users/me/.mousse/profiles/p/bots/files/bot-1', homeFolder: 'C:/Users/me', lane, allowed: botAllowedOf(EVERYTHING) })
   return { listed, system }
 }

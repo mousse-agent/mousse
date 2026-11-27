@@ -12,11 +12,6 @@ import { supportedPermissionModes, type PermissionMode } from '../../shared/perm
  * applies.
  */
 
-/** Whether the composer offers Plan mode, and a plan-mode policy can be enforced. */
-export function planModeAvailable(caps: Pick<HarnessCaps, 'planMode'>): boolean {
-  return caps.planMode
-}
-
 /**
  * Where the context gauge comes from: Mousse's own measurement, the runtime's report, or nowhere
  * (the gauge is hidden rather than fabricated).
@@ -192,7 +187,6 @@ export function botRuntimeGapReason(gaps: readonly string[]): string {
 export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: string, model?: SpendModelFacts, options: CheckPolicyOptions = {}): Enforceability {
   const missing: Array<keyof HarnessCaps> = []
   const control = toolControlLevel(caps)
-  if (policy.mode === 'plan' && !planModeAvailable(caps)) missing.push('planMode')
   // A bot's authority on a runtime that answers every approval with it: asking is enough there.
   const botHeld = policy.authority?.kind === 'bot' && options.hostApprovals === true && options.botApprovals === true && control === 'approval_only'
   const needsExact = !botHeld && (Boolean(policy.tools) || Boolean(policy.authority))

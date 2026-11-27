@@ -75,7 +75,6 @@ export interface RemoteThreadStart {
   /** What is sent once the thread is set up; none for a thread that only needs to exist. */
   message?: {
     content: string
-    mode: 'agent' | 'plan'
     clientRequestId: string
     /** A follow-up on a thread that may be paused by a usage limit refuses instead of waiting. */
     refuseWhilePaused?: boolean
@@ -198,7 +197,6 @@ export async function runRemoteThreadStart(start: RemoteThreadStart, io: RemoteT
   const sent = await io.call('orchestrator.send', {
     threadId: remoteThreadId,
     content: start.message.content,
-    mode: start.message.mode,
     clientRequestId: start.message.clientRequestId,
     ...(start.message.refuseWhilePaused ? { refuseWhilePaused: true } : {}),
     ...(start.message.deadlineMinutes ? { [ROUTED_DEADLINE_KEY]: start.message.deadlineMinutes } : {}),

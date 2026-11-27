@@ -49,7 +49,7 @@ class ArchivingAdapter implements ProviderAdapter {
       const orch = this.daemon().orch
       if (!orch.appToolTurns.get(input.runId)) orch.appToolTurns.register(appTurn({ threadId: input.threadId, runId: input.runId }))
       const answer = await orch.mcpToolRegistry().call('thread_archive', {}, {
-        credential: { threadId: input.threadId, runId: input.runId, provider: 'claude', modeCeiling: 'default', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
+        credential: { threadId: input.threadId, runId: input.runId, provider: 'claude', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
         toolCallId: `call-${this.prompts.length}`,
         signal: input.signal
       }).catch((error: Error) => ({ text: error.message, isError: true }))
@@ -261,7 +261,7 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
     await waitFor(() => w.adapter.answers.length === 1, 'turn running')
     const runId = w.d.engine.getActiveRun(w.thread.id)!.runId
     const archived = await orch.mcpToolRegistry().call('thread_archive', { threadId: other.id }, {
-      credential: { threadId: w.thread.id, runId, provider: 'claude', modeCeiling: 'default', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
+      credential: { threadId: w.thread.id, runId, provider: 'claude', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
       toolCallId: 'call-other',
       signal: new AbortController().signal
     })

@@ -37,8 +37,8 @@ export function toSkillSummary(skill: SkillDescriptor): Record<string, unknown> 
 }
 
 /**
- * The skill tools are offered when skills are enabled for the turn, outside Build (whose skill is its mode). Plan and
- * reader turns load skills too (docs/plans/tool-api.md §1.5): reading a skill changes nothing.
+ * The skill tools are offered when skills are enabled for the turn, outside Build (whose skill is its mode). Read-only
+ * and reader turns load skills too (docs/plans/tool-api.md §1.5): reading a skill changes nothing.
  */
 function offeredInMode(host: AppToolHost, turn: AppToolTurn): boolean {
   return Boolean(host.skills?.()) && turn.enabledSkills.length > 0 && turn.mode !== 'build'

@@ -307,8 +307,6 @@ export function piToolSetForMode(
       if (editDenied || bashDenied) return 'readonly'
       return 'all'
     }
-    if (mode === 'plan') return 'readonly'
-    if (mode === 'build' || mode === 'agent') return 'all'
     return 'all'
   }
   if (typeof mode === 'object' && mode.type === 'skill') return 'all'

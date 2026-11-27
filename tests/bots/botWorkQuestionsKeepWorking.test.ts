@@ -47,7 +47,7 @@ const call = <T = unknown>(method: string, params: Record<string, unknown>): Pro
 const tools = new Map(botTools(() => ({ host: f.bots.tools })).map((tool) => [tool.name, tool]))
 async function tool(name: string, prepared: PreparedBotTurn, threadId: string, args: Record<string, unknown>): Promise<{ text: string; isError?: boolean }> {
   const ctx = {
-    caller: { threadId, runId: 'r', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+    caller: { threadId, runId: 'r', provider: 'pi', accessLevel: 'lineage' },
     turn: { threadId, bot: prepared.authority },
     toolCallId: `call-${Math.random()}`,
     signal: new AbortController().signal,

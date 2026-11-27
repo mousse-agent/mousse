@@ -35,7 +35,7 @@ function world(onApproval: (state: { active: string | null; current: boolean }) 
   const registry = new ToolRegistry({ activeRunId: () => state.active, turns })
   registry.register({ name: 'task_create', description: 'Create a task', inputSchema: {}, access: 'actsAsCaller', class: 'mutation', handler: async (args) => (ran.push(args), { text: 'created' }) } as unknown as MousseTool)
   const call = () => registry.call('task_create', { description: 'a task', _mousse_turn: 'tt' }, {
-    credential: { threadId: 't1', runId: 'r1', provider: 'claude', modeCeiling: 'default', binding: 'rotate', current: () => state.current },
+    credential: { threadId: 't1', runId: 'r1', provider: 'claude', binding: 'rotate', current: () => state.current },
     toolCallId: 'call-1',
     signal: new AbortController().signal
   } as never)
@@ -75,7 +75,7 @@ describe('a definition app tool over MCP re-checks its run after the approval', 
     registry.register({ name: 'task_create', description: 'Create a task', inputSchema: {}, access: 'actsAsCaller', class: 'mutation', available: () => { state.active = 'r2'; return true }, handler: async (args) => (ran.push(args), { text: 'created' }) } as unknown as MousseTool)
     recordAuthorizedCall(definition, { turnToken: 'tt', toolName: 'task_create', callId: 'call-1', args: { description: 'a task' } })
     await expect(registry.call('task_create', { description: 'a task', _mousse_turn: 'tt' }, {
-      credential: { threadId: 't1', runId: 'r1', provider: 'pi', modeCeiling: 'default', binding: 'per_call', current: () => true },
+      credential: { threadId: 't1', runId: 'r1', provider: 'pi', binding: 'per_call', current: () => true },
       toolCallId: 'mcp:call-1',
       signal: new AbortController().signal
     } as never)).rejects.toMatchObject({ code: 'mousse_caller_not_live' })

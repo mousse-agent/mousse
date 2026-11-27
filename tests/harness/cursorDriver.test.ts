@@ -203,7 +203,7 @@ describe('Cursor behind the gateway', () => {
     })
     const { harness, turn, notices } = setup(host.connect)
     const selection = { instanceId: INSTANCE, llmProvider: '', model: 'default' }
-    expect(harness.resolveStored(selection, { purpose: 'composer' })).toMatchObject({ caps: { toolControl: 'uncontrolled', planMode: true, events: 'rich' } })
+    expect(harness.resolveStored(selection, { purpose: 'composer' })).toMatchObject({ caps: { toolControl: 'uncontrolled', events: 'rich' } })
     expect(() => harness.resolveStored(selection, { purpose: 'delegate_task' })).toThrow(expect.objectContaining({ code: 'policy_unenforceable' }))
     await (await turn('thread')).result
     await (await turn('thread')).result

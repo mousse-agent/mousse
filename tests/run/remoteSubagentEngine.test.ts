@@ -16,7 +16,6 @@ const REMOTE: RemoteDelegationTarget = {
   node: 'node-mac',
   prompt: 'Run the macOS tests',
   permissionMode: 'accept_edits',
-  chatMode: 'agent',
   worktree: true,
   projectId: 'far-project',
   instanceId: null,
@@ -40,7 +39,6 @@ describe('remote subagent tasks in the engine (issue #469)', () => {
       node: 'node-mac',
       state: 'starting',
       permissionMode: 'accept_edits',
-      chatMode: 'agent',
       worktree: true,
       projectId: 'far-project',
       remoteThreadId: null

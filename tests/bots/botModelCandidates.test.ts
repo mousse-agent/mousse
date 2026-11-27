@@ -11,7 +11,7 @@ import type { InstanceSnapshot } from '../../src/shared/harness/status'
 import type { InstanceModel, RunPolicy } from '../../src/shared/harness/types'
 import type { ModelCatalog } from '../../src/shared/modelCatalog'
 
-const policy: RunPolicy = { mode: 'default', origin: 'bot', approvals: 'grants', tools: { allow: ['read', 'web_search'] }, authority: { kind: 'bot', digest: 'd1' } }
+const policy: RunPolicy = { origin: 'bot', approvals: 'grants', tools: { allow: ['read', 'web_search'] }, authority: { kind: 'bot', digest: 'd1' } }
 
 const catalog: ModelCatalog = {
   format: 1,

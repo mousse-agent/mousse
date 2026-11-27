@@ -73,7 +73,7 @@ export interface PiTurnResponse {
   /** Replaces Pi's system prompt for the turn (an agent definition's, Mousse's tool instructions after it). */
   systemPrompt?: string
   tools: PiTurnTool[]
-  /** Pi's built-in tools active this turn (read-only ones in plan mode and read-only children). */
+  /** Pi's built-in tools active this turn (read-only ones for read-only children). */
   activeBuiltins: string[]
   /** The Mousse MCP server and the thread's bearer; null: no Mousse tools. */
   mcp: { url: string; token: string } | null

@@ -561,7 +561,6 @@ export type CodexChatInput = {
   history?: string
   images?: ChatImageAttachment[]
   signal?: AbortSignal
-  mode?: 'plan' | 'default'
   /**
    * The thread's permission mode for this turn; absent reads as the default (`accept_edits`). It
    * sets Codex's approval policy and sandbox (`codexTurnPolicy`) and decides which approvals Mousse
@@ -848,7 +847,6 @@ class TurnRun {
   constructor(
     readonly codexThreadId: string,
     readonly mousseThreadId: string,
-    readonly mode: 'plan' | 'default',
     readonly signal: AbortSignal,
     private readonly input: CodexChatInput,
     stray?: (threadId: string) => StrayThread | undefined
@@ -2876,7 +2874,7 @@ export class CodexProviderService {
   private async serve(request: CodexServerRequest): Promise<unknown> {
     const params = (request.params ?? {}) as { threadId?: string; itemId?: string }
     // A native helper's request is the run that started it's own (docs/plans/tool-api.md §2.7): it is asked in that run's
-    // thread, under that run's policy (bot, reader, Plan, approvals), and its item is read from the helper's own thread.
+    // thread, under that run's policy (bot, reader, approvals), and its item is read from the helper's own thread.
     const own = params.threadId ? this.turns.get(params.threadId) : undefined
     // Only the command and file-change approvals are a helper's that Mousse asks about; anything else a helper asks is
     // refused as before.
@@ -2899,7 +2897,7 @@ export class CodexProviderService {
           const answer = codexBotCommand(run.bot, { command: typeof asked === 'string' ? asked : undefined, cwd: approval.cwd ? resolve(run.cwd, approval.cwd) : run.cwd, reason: approval.reason ?? null })
           return { decision: run.questionSignal.aborted ? 'cancel' : answer.decision } satisfies Result<'item/commandExecution/requestApproval'>
         }
-        if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
+        if (run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
         // Full access never asks (Codex's own profile does not either; this is the backstop).
         if (permissionModeAllows(run.permissionMode, 'command')) return { decision: 'accept' } satisfies Result<'item/commandExecution/requestApproval'>
         const known = approval.command ?? (itemOf(approval.itemId) as { command?: string } | undefined)?.command
@@ -2938,7 +2936,7 @@ export class CodexProviderService {
           })
           return { decision: run.questionSignal.aborted ? 'cancel' : answer.decision } satisfies Result<'item/fileChange/requestApproval'>
         }
-        if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
+        if (run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
         // Edits go ahead under Auto-accept edits and Full access.
         if (permissionModeAllows(run.permissionMode, 'edit')) return { decision: 'accept' } satisfies Result<'item/fileChange/requestApproval'>
         const changes = (itemOf(approval.itemId) as { changes?: Array<{ path: string; diff?: string; kind?: unknown }> } | undefined)?.changes ?? []
@@ -3631,7 +3629,7 @@ export class CodexProviderService {
     if (webOff) overrides.web_search = 'disabled'
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
     const permissionMode = input.bot ? 'ask' : normalizePermissionMode(input.permissionMode)
-    const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, permissionMode, botSandbox)
+    const policy = codexTurnPolicy(input.bot ? undefined : input.child, permissionMode, botSandbox)
     // Mousse's short-lived folders in the temporary folder are left out of it: one that comes and goes doesn't reopen the
     // thread, and one made after the thread opened stays open to its commands until it reopens (docs/bots.md).
     // The policy a loaded thread was opened with: a change of child policy, permission mode, compaction
@@ -3793,7 +3791,7 @@ export class CodexProviderService {
       this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, account, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID, ...botInstructionsKey(input) } }
       this.save()
       input.onSession?.({ codexThreadId })
-      const current = new TurnRun(codexThreadId, input.threadId, input.mode ?? 'default', signal, input, (id) => this.strays.get(id))
+      const current = new TurnRun(codexThreadId, input.threadId, signal, input, (id) => this.strays.get(id))
       run = current
       current.conn = conn
       this.turns.set(codexThreadId, current)
@@ -3801,7 +3799,7 @@ export class CodexProviderService {
       const { baseId } = parseThinkingSuffixFromModelId(input.model)
       // A level the model does not offer (saved for another model) runs at the model's default.
       const effort = supportedEffortOf(input.model, this.settings.models ?? [], EFFORTS)
-      const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, current.permissionMode, thread.botSandbox)
+      const policy = codexTurnPolicy(input.bot ? undefined : input.child, current.permissionMode, thread.botSandbox)
       const turnParams = {
         cwd: resolve(input.cwd),
         approvalPolicy: policy.approvalPolicy,

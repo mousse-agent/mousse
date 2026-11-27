@@ -53,7 +53,7 @@ describe('a thread goal', () => {
   /** What the agent's `goal_update` call does: the registered tool's handler, over the orchestrator's host. */
   const report = (d: Phase6Daemon, input: Pick<TurnInput, 'threadId' | 'runId'>, args: Record<string, unknown>) => {
     const tool = goalTools(d.orch.mcpToolHost())[0]!
-    return tool.handler(args, { caller: { threadId: input.threadId, runId: input.runId, provider: 'test', modeCeiling: 'default', accessLevel: 'manage' }, transport: 'mcp' } as unknown as ToolCallContext)
+    return tool.handler(args, { caller: { threadId: input.threadId, runId: input.runId, provider: 'test', accessLevel: 'manage' }, transport: 'mcp' } as unknown as ToolCallContext)
   }
 
   /** An agent that reports `reports[i]` in its turn i (null: no report) and replies. */

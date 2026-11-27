@@ -56,7 +56,6 @@ describe('remote subagents over Bridge (issue #469)', () => {
           prompt: 'Run the tests there',
           // Wider than the limit the owner set for this computer (Auto-accept edits by default).
           permissionMode: 'auto',
-          chatMode: 'plan',
           worktree: false,
           projectId: null,
           instanceId: null,
@@ -144,7 +143,7 @@ describe('remote subagents over Bridge (issue #469)', () => {
       }
       const computer = portOf(t.caller)!.computers()[0]!.name
       const started = await orchestrator.delegationTools(orchestrator.getOrCreateSession(parentThread.id), parent.runId)
-        .delegateTask({ title: 'Far reviewer', prompt: 'Review it there', computer, readOnly: true }, { toolCallId: 'far-1' })
+        .delegateTask({ title: 'Far reviewer', prompt: 'Review it there', computer }, { toolCallId: 'far-1' })
       expect(started, JSON.stringify(started)).toMatchObject({ computer })
       // Here: the stand-in shows the task as the parent agent's, which opens the parent.
       const [asked] = t.caller.orchestrator.getMessages(started.childThreadId as string).filter((message) => message.role === 'user')
@@ -206,7 +205,7 @@ describe('remote subagents over Bridge (issue #469)', () => {
         role: 'research',
         wake: 'always',
         title: 'Remote checker',
-        remote: { node: t.node, prompt: 'Check it there', permissionMode: 'accept_edits', chatMode: 'plan', worktree: false, projectId: null, instanceId: null, model: null, deadlineAt: null }
+        remote: { node: t.node, prompt: 'Check it there', permissionMode: 'accept_edits', worktree: false, projectId: null, instanceId: null, model: null, deadlineAt: null }
       })
       const made = () => t.owner.threads.listAllThreads().filter((thread) => thread.startedFrom?.agent?.thread === parentThread.id)
       const first = await service.launch(accepted.delegationId)
@@ -255,7 +254,7 @@ describe('remote subagents over Bridge (issue #469)', () => {
         role: 'implement',
         wake: 'always',
         title: 'Remote builder',
-        remote: { node: t.node, prompt: 'Build it there', permissionMode: 'full', chatMode: 'agent', worktree: false, projectId: null, instanceId: null, model: null, deadlineAt: null }
+        remote: { node: t.node, prompt: 'Build it there', permissionMode: 'full', worktree: false, projectId: null, instanceId: null, model: null, deadlineAt: null }
       })
       const launched = await service.launch(accepted.delegationId)
       expect(launched, JSON.stringify(launched)).toMatchObject({ ok: true })
@@ -299,7 +298,7 @@ describe('remote subagents over Bridge (issue #469)', () => {
         wake: 'always',
         title: 'Remote soak',
         remote: {
-          node: t.node, prompt: 'Soak it there', permissionMode: 'accept_edits', chatMode: 'plan', worktree: false, projectId: null, instanceId: null, model: null,
+          node: t.node, prompt: 'Soak it there', permissionMode: 'accept_edits', worktree: false, projectId: null, instanceId: null, model: null,
           deadlineAt: new Date(Date.now() + 5 * 60_000).toISOString(), limitMinutes: 5
         }
       })

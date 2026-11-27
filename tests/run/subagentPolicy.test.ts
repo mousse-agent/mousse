@@ -66,7 +66,7 @@ describe('subagent target preflight table', () => {
     ['claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, false, null],
     ['codex', CODEX_CAPABILITIES, true, null],
     ['codex', CODEX_CAPABILITIES, false, null],
-    // Antigravity rejects plan mode, so it cannot be read-only; any other child is fine.
+    // Antigravity cannot hold a child read-only; any other child can be.
     ['antigravity', ANTIGRAVITY_CAPABILITIES, true, 'shared_unsupported_for_provider'],
     ['antigravity', ANTIGRAVITY_CAPABILITIES, false, null]
   ] as const)('%s, read-only %s', (driver, capabilities, readOnly, code) => {
@@ -538,7 +538,7 @@ describe('delegated child policy', () => {
       if (!name || probed.has(name)) return 'Looked.'
       probed.add(name)
       const tools = await registry
-      const credential = { threadId: input.threadId, runId: input.runId, provider: 'codex', modeCeiling: 'default' as const, accessLevel: 'lineage' as const, binding: 'drained_turn' as const, current: () => true }
+      const credential = { threadId: input.threadId, runId: input.runId, provider: 'codex', accessLevel: 'lineage' as const, binding: 'drained_turn' as const, current: () => true }
       for (const [tool, args] of [
         ['thread_read', {}],
         ['queue_list', {}],
@@ -598,7 +598,7 @@ describe('ToolRegistry read-only gate', () => {
     .register(tool('starts', 'startsThreads'))
   const call = (name: string, threadId: string) =>
     registry.call(name, {}, {
-      credential: { threadId, runId: `run-${threadId}`, provider: 'codex', modeCeiling: 'default', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
+      credential: { threadId, runId: `run-${threadId}`, provider: 'codex', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
       toolCallId: 'c',
       signal: new AbortController().signal
     })

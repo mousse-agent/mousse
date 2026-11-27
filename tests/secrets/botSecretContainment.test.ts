@@ -67,7 +67,7 @@ describe('a bot\'s secret command is held as its commands are', () => {
     const host = createSecretToolHost({ vault, requests, scratchRoot: join(base, 'profile', 'secrets', 'run'), baseEnv: { ...process.env, MOUSSE_TEST_AMBIENT: AMBIENT }, ...options })
     const [, run] = secretTools({ secrets: () => host, botHomeOf: (id: string) => (id === 'work' ? 'home' : undefined) } as unknown as AppToolHost)
     return (args: Record<string, unknown>, caller: 'bot' | 'thread') => run!.handler(args, {
-      caller: { threadId: caller === 'bot' ? 'work' : 'home', runId: 'r', provider: 'pi', modeCeiling: 'default', accessLevel: 'manage' },
+      caller: { threadId: caller === 'bot' ? 'work' : 'home', runId: 'r', provider: 'pi', accessLevel: 'manage' },
       turn: {
         threadId: caller === 'bot' ? 'work' : 'home',
         runId: 'r',

@@ -30,7 +30,7 @@ it('accepts exact DTOs for the composer calls a remote thread view makes and not
   validateBridgeHubLocal('bridge.hub.send', {
     ref,
     content: 'hi',
-    mode: 'plan',
+    mode: 'build',
     attachments: ['upload-0001']
   })
   validateBridgeHubLocal('bridge.hub.send', {

@@ -76,7 +76,7 @@ describe('the orchestrator binds bot threads as bot', () => {
   it('reads the origin only for a new binding: a retry keeps its run\'s binding without asking the index', async () => {
     let lookups = 0
     orch.setBotThreads({ roleOf: () => { lookups += 1; throw new Error('bots.db locked') } })
-    const existing = { instanceId: 'claude', policy: { mode: 'default', approvals: 'ask', origin: 'bot' } } as unknown as ExecutionBinding
+    const existing = { instanceId: 'claude', policy: { approvals: 'ask', origin: 'bot' } } as unknown as ExecutionBinding
     const bindTurn = (orch as unknown as { bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: unknown, mode: string, origin: () => TurnOrigin): Promise<ExecutionBinding> }).bindTurn.bind(orch)
     expect(await bindTurn(undefined, existing, {}, 'agent', () => origin('activation-1'))).toBe(existing)
     expect(lookups).toBe(0)

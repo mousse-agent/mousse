@@ -144,14 +144,14 @@ function state(appearance: AppearanceSettings): Record<string, unknown> {
 }
 
 /**
- * Refused where settings may not change: read-only and Plan turns, and a bot's subagents and consults. A Mousse
+ * Refused where settings may not change: read-only turns, and a bot's subagents and consults. A Mousse
  * subagent never holds the owner's `themes` (the authority compiler refuses it). A bot's own turn may, once its owner
  * allowed "change how Mousse looks" (the registry holds every call to that).
  */
 function mayChangeSettings(turn: AppToolTurn): Availability {
   if (!turn.settingsEnabled(THEME_SET_TOOL)) return disabledInSettings(THEME_SET_TOOL)
-  if (turn.modeFacts.readOnly || turn.modeCeiling === 'plan')
-    return 'Changing the theme changes Mousse\'s settings, which a read-only turn cannot do. Ask the person to switch to Agent mode.'
+  if (turn.modeFacts.readOnly)
+    return 'Changing the theme changes Mousse\'s settings, which a read-only turn cannot do. Ask the person to change it.'
   if (turn.bot && turn.bot.role !== 'activation') return 'Only the bot itself can change how Mousse looks, not a subagent or a consult.'
   return true
 }

@@ -191,10 +191,7 @@ export function acpDriver(options: AcpDriverOptions = {}): HarnessDriver {
     relay: { approvals: 'runtime' },
     decodeConfig: decodeAcpConfig,
     versionArgs: (config) => preset.versionArgs?.(config) ?? null,
-    caps: (_config, _version, facts?: RuntimeFacts): HarnessCaps => {
-      const caps = { ...preset.staticCaps }
-      return facts && preset.capsFromFacts ? preset.capsFromFacts(caps, facts) : caps
-    },
+    caps: (): HarnessCaps => ({ ...preset.staticCaps }),
     updateCommand: () => undefined,
     create: (context) => createAcpRuntime(context, preset, options, ptyRuns)
   }
@@ -543,8 +540,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
   const adapter = new AcpAdapter(() => client, {
     driver: hooks.driver ?? 'acp',
     label,
-    capabilities: preset.staticCaps,
-    planMode: () => Boolean(state.facts?.modes?.some((mode) => /^(plan|architect)$/i.test(mode.id) || /^(plan|architect)$/i.test(mode.name)))
+    capabilities: preset.staticCaps
   })
   const standaloneWorkspace = (threadId: string): string => {
     const directory = join(context.stateDir, 'workspaces', createHash('sha256').update(threadId).digest('hex'))

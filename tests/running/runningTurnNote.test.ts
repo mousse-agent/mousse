@@ -191,7 +191,7 @@ describe('running_list', () => {
     const fake = fakeAppToolHost({ running: async (turn) => { seen.push(turn.threadId); return 'LIST-7781' } })
     const { registry: tools, turns, request } = appToolRegistry(fx.engine, fake.host)
     turns.register(appTurn({ threadId: 't1', runId: run.runId }))
-    expect(tools.listForThread('t1', 'default', run.runId).map((tool) => tool.name)).toContain('running_list')
+    expect(tools.listForThread('t1', run.runId).map((tool) => tool.name)).toContain('running_list')
     expect(await tools.call('running_list', {}, request({ threadId: 't1', runId: run.runId }))).toMatchObject({ text: 'LIST-7781' })
     const child = await fx.runningRun('t1-child')
     turns.register(appTurn({ threadId: 't1-child', runId: child.runId, subagent: true }))
@@ -240,7 +240,7 @@ describe('running_list', () => {
     const fake = fakeAppToolHost({ running: async () => 'LIST-2290', botRole: (id) => (id === 'home' ? 'activation' : undefined) })
     const { registry: tools, turns, request } = appToolRegistry(fx.engine, fake.host)
     turns.register(appTurn({ threadId: 'home', runId: home.runId, bot: authority, approvals: 'never' }))
-    expect(tools.listForThread('home', 'default', home.runId).map((tool) => tool.name)).toContain('running_list')
+    expect(tools.listForThread('home', home.runId).map((tool) => tool.name)).toContain('running_list')
     expect(await tools.call('running_list', {}, request({ threadId: 'home', runId: home.runId }))).toMatchObject({ text: 'LIST-2290' })
   })
 

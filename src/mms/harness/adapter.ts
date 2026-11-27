@@ -104,7 +104,7 @@ export interface TurnInput {
   /**
    * The permission mode the turn runs in: the binding's (the thread's mode, or the nearest stricter
    * one the instance can enforce). Each adapter enforces it with its runtime's own controls on every
-   * turn; a plan turn carries it unchanged, and it does not matter there.
+   * turn.
    */
   permissionMode: PermissionMode
   /** Set when the thread is a delegated child; adapters apply it on every turn of the thread. */

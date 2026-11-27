@@ -2,7 +2,7 @@
  * Phase 5 end to end (docs/run-engine/SPEC.md §15): a real `OrchestratorService`, Run Engine,
  * effect worker, reconciler and Mousse MCP server. A vendor-shaped adapter with `caps.mcp` receives
  * the Mousse MCP server in its turn bridge (`AdapterHost.bridge`) and, inside its turn, calls `delegate_task` over HTTP for a pi child, then
- * `task_status`. The child inherits the caller's plan ceiling; a broader request is refused.
+ * `task_status`.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -102,13 +102,13 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
     home = undefined
   })
 
-  it('a plan-ceiling vendor parent delegates to a pi child over HTTP; the child inherits the ceiling', async () => {
+  it('a vendor parent delegates to a pi child over HTTP', async () => {
     home = mkdtempSync(join(tmpdir(), 'mousse-mcp-e2e-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
-    const seen: { started?: any; firstStatus?: any; broader?: any; unknown?: any; wakeStatus?: any; token?: string } = {}
+    const seen: { started?: any; firstStatus?: any; unknown?: any; wakeStatus?: any; token?: string } = {}
     const vendor = new McpVendorAdapter(async (input, mcp) => {
-      if (input.prompt === 'Plan the refactor') {
+      if (input.prompt === 'Survey the refactor') {
         seen.token = mcp.token
         const started = await callTool(mcp, 'delegate_task', {
           prompt: 'Survey the run engine', title: 'Engine surveyor', provider: 'openai', model: 'gpt-replay', workspace: 'shared', role: 'research', clientRequestId: 'survey-1'
@@ -121,7 +121,6 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
         expect(retried.value.delegationId).toBe(started.value.delegationId)
         expect(retried.value.replayed).toBe(true)
         seen.firstStatus = (await callTool(mcp, 'task_status', { delegationId: started.value.delegationId }, 3)).value
-        seen.broader = await callTool(mcp, 'delegate_task', { prompt: 'Edit everything', title: 'Editor', workspace: 'isolated', modeCeiling: 'default' }, 4)
         // SPEC §13.8: an unknown instance fails the tool call by name; nothing falls back to the pi loop.
         const raw = await fetch(mcp.url, {
           method: 'POST',
@@ -152,13 +151,13 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
 
     const parent = store.createThread('Parent')
     orch.setThreadModelOverride(parent.id, { llmProvider: 'claude-subscription', model: 'vendor-model' })
-    const response = await orch.send({ content: 'Plan the refactor', mode: 'plan' }, false, { threadId: parent.id, clientRequestId: 'parent-send' })
+    const response = await orch.send({ content: 'Survey the refactor', mode: 'agent' }, false, { threadId: parent.id, clientRequestId: 'parent-send' })
     expect(response.runId).toBeTruthy()
 
-    // The vendor turn received the server URL and its thread's bearer token, pointing at this run with the plan ceiling.
+    // The vendor turn received the server URL and its thread's bearer token, pointing at this run.
     expect(vendor.hosts[0]).toMatchObject({ url: server.url })
     expect(credentials.listForThread(parent.id)).toEqual([
-      expect.objectContaining({ runId: response.runId, provider: 'claude', modeCeiling: 'plan' })
+      expect.objectContaining({ runId: response.runId, provider: 'claude' })
     ])
     // The turn's end does not revoke, but with no active run on the thread the token acts for nothing.
     expect(credentials.listForThread(parent.id)[0].revokedAt).toBeNull()
@@ -166,20 +165,19 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
     expect(idle.status).toBe(200)
     expect(idle.body.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_caller_not_live })
 
-    // delegate_task created the lineage, the delegation row (with the inherited ceiling) and the child run.
+    // delegate_task created the lineage, the delegation row and the child run.
     const delegation = engine.delegations.get(seen.started.delegationId)!
-    expect(delegation).toMatchObject({ parentThreadId: parent.id, parentRunId: response.runId, provider: 'pi:openai', modeCeiling: 'plan' })
+    expect(delegation).toMatchObject({ parentThreadId: parent.id, parentRunId: response.runId, provider: 'pi:openai' })
     expect(engine.delegations.getLineage(delegation.childThreadId)).toMatchObject({ parentThreadId: parent.id, parentRunId: response.runId, relationship: 'subagent' })
     expect(seen.firstStatus).toMatchObject({ delegationId: delegation.delegationId, childThreadId: delegation.childThreadId, status: 'running' })
-    expect(refusalOfResponse(seen.broader.body)).toMatchObject({ code: 'mousse_ceiling_exceeded', refused: { code: 'ceiling_exceeded', retry: 'never' } })
     expect(refusalOf({ isError: seen.unknown.isError, text: seen.unknown.content?.[0]?.text })?.message).toContain('"nope"')
     expect(engine.delegations.listForParentThread(parent.id)).toHaveLength(1)
 
-    // The pi child ran in plan mode (its ceiling) without an MCP attachment (in-process ToolHost).
+    // The pi child ran in agent mode without an MCP attachment (in-process ToolHost).
     child.release()
     await waitFor(() => engine.getRun(delegation.childRunId)?.status === 'completed', 'the child run')
     const childTurn = child.turns.find((turn) => turn.threadId === delegation.childThreadId)!
-    expect(childTurn.mode).toBe('plan')
+    expect(childTurn.mode).toBe('agent')
     expect(child.hosts).toEqual([null])
 
     // The child's result is a stored inbox row; rule 4 wakes the idle parent, which reads it over MCP.
@@ -191,8 +189,8 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
     expect(engine.inbox.listForThread(parent.id).map((row) => row.status)).toEqual(['acknowledged'])
     // The wake turn reused the thread's token; the stored row now points at the wake run.
     expect(vendor.hosts.map((mcp) => mcp?.token)).toEqual([seen.token, seen.token])
-    expect(credentials.listForThread(parent.id).map((row) => [row.runId, row.modeCeiling, Boolean(row.revokedAt)])).toEqual([
-      [wakeRunId, 'plan', false]
+    expect(credentials.listForThread(parent.id).map((row) => [row.runId, Boolean(row.revokedAt)])).toEqual([
+      [wakeRunId, false]
     ])
 
     // Deleting the thread revokes it.

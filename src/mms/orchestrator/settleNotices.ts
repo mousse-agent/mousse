@@ -36,8 +36,6 @@ export interface SettleNoticeHost {
   resultText(threadId: string, runId: string): string | undefined
   stopGeneration(threadId: string): number
   isSubagent(threadId: string): boolean
-  /** The thread's person works in Plan (its latest message is a plan turn). */
-  inPlan(threadId: string): boolean
   /** Puts the notice in the sender's queue; `held`: it must not start a turn by itself. Throws when it cannot. */
   deliver(watcherThreadId: string, notice: PlannedSettleNotice, held: boolean): void
   /** The sender's queue already carries this notice (a delivery repeated after a restart). */
@@ -231,13 +229,12 @@ export class SettleNotices {
 
   /**
    * A notice never starts a turn (it waits in the queue) in a subagent's thread, whose result is its parent's; in a
-   * sender a person stopped after it subscribed; in a sender kept in Plan; and when it only says Mousse stopped watching.
+   * sender a person stopped after it subscribed; and when it only says Mousse stopped watching.
    */
   private held(watch: ThreadWatchRecord, event: SettleNoticeItem['event']): boolean {
     if (event === 'expired') return true
     if (this.host.isSubagent(watch.watcherThreadId)) return true
-    if (this.host.stopGeneration(watch.watcherThreadId) > watch.watcherStopGeneration) return true
-    return this.host.inPlan(watch.watcherThreadId)
+    return this.host.stopGeneration(watch.watcherThreadId) > watch.watcherStopGeneration
   }
 
   private plan(watch: ThreadWatchRecord, event: SettleNoticeItem['event']): PlannedSettleNotice {

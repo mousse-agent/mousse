@@ -198,7 +198,6 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       ctl.heartbeat()
     }
     const chatInput = (): ClaudeSubscriptionChatInput => ({
-      mode: input.mode === 'plan' ? 'plan' : 'default',
       onSendNowCut: () => {
         sendNowCut = true
       },

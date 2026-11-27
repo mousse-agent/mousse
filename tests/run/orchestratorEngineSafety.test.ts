@@ -1,7 +1,6 @@
 /**
  * Review round 2 (docs/run-engine/SPEC.md §5, §12-§16) through a real `OrchestratorService`, Run
- * Engine and effect worker: a cancelled child never reaches its provider (C2), the pi path enforces
- * the caller's mode ceiling like the MCP server (C3), remote turns are engine runs and a busy thread
+ * Engine and effect worker: a cancelled child never reaches its provider (C2), remote turns are engine runs and a busy thread
  * defers its wake instead of looping (C4), Stop follows `CommandPolicy.stopStrategy` (S2) and a
  * replayed stop re-enqueues its interrupt (M4), and thread deletion cancels the thread's work (H7).
  */
@@ -13,7 +12,6 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
-import { McpToolError } from '../../src/mms/run/mcp/appTools'
 import { Reconciler } from '../../src/mms/run/Reconciler'
 import type { EffectRecord, ProviderRef } from '../../src/mms/run/types'
 import { PI, phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
@@ -158,33 +156,6 @@ describe('orchestrator and engine safety (review round 2)', () => {
     await waitFor(() => d.engine.outbox.get(effect.effectId)!.status === 'succeeded', 'the executor to skip the run')
     expect(adapter.turns).toEqual([])
     expect(d.orch.getMessages(threadId)).toEqual([])
-  }, 30_000)
-
-  it('C3: a plan-mode pi turn cannot start a default child; the MCP host refuses the same way', async () => {
-    let parentId = ''
-    const outcomes: Record<string, unknown> = {}
-    const adapter = new HostAdapter(async (input, delegation) => {
-      if (input.threadId !== parentId) return 'child'
-      outcomes.broader = await delegation!.delegateTask({ prompt: 'Write code', workspace: 'isolated', modeCeiling: 'default' }, { toolCallId: 'broader' }).catch((error: unknown) => error)
-      outcomes.result = await Promise.resolve().then(() => delegation!.reportResult({ delegationId: 'delegation:any' })).catch((error: unknown) => error)
-      outcomes.inherited = await delegation!.delegateTask({ prompt: 'Plan it', workspace: 'isolated' }, { toolCallId: 'inherited' })
-      return 'planned'
-    })
-    const d = start(adapter)
-    parentId = thread(d, 'Planner')
-    const response = await d.orch.send({ content: 'Plan the work', mode: 'plan' }, false, { threadId: parentId, clientRequestId: 'plan' })
-    expect(outcomes.broader).toBeInstanceOf(McpToolError)
-    expect((outcomes.broader as McpToolError).code).toBe('mousse_ceiling_exceeded')
-    // The retired merge tool changes nothing, so a plan caller may ask for a result: it is refused only as unknown.
-    expect(outcomes.result).not.toBeInstanceOf(McpToolError)
-    const inherited = d.engine.delegations.get((outcomes.inherited as { delegationId: string }).delegationId)!
-    expect(inherited.modeCeiling).toBe('plan')
-    expect(d.engine.delegations.listForParentThread(parentId)).toHaveLength(1)
-
-    // The MCP server's host for a plan-ceiling caller is the same dispatch.
-    const mcp = d.orch.mcpToolHost().delegation({ threadId: parentId, runId: response.runId!, provider: 'claude-subscription', modeCeiling: 'plan' })
-    const broaderViaMcp = await mcp.delegateTask({ prompt: 'x', workspace: 'isolated', modeCeiling: 'default' }, { toolCallId: 'mcp-broader' }).catch((error: unknown) => error)
-    expect(broaderViaMcp).toMatchObject({ code: 'mousse_ceiling_exceeded' })
   }, 30_000)
 
   it('C4: a remote turn is an engine run of its own source', async () => {

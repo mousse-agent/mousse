@@ -20,7 +20,7 @@ import type { ApprovalRefusal } from '../../approvalRights'
 import type { SteerStrategy } from '../../CommandPolicy'
 import type { RunEngine } from '../../RunEngine'
 import type { AnsweredBy } from '../../ThreadApprovals'
-import type { AgentActor, AgentNotePayload, ModeCeiling } from '../../types'
+import type { AgentActor, AgentNotePayload } from '../../types'
 import type { HeldMessage } from '../../AgentChains'
 import type { AppearanceToolHost } from './appearance'
 import type { DelegationToolsHost } from './delegation'
@@ -51,8 +51,6 @@ export interface AgentSendResult {
   queued: boolean
   /** The same `clientRequestId` was sent before: this is the first result, nothing new was started. */
   replayed: boolean
-  /** The mode the message was sent in: Plan when the thread is kept in Plan, whatever the sender asked for. */
-  mode?: 'agent' | 'plan'
 }
 
 /** What `thread_create` asks for, checked for shape by the tool. */
@@ -67,8 +65,6 @@ export interface AgentThreadRequest {
   /** The model's reasoning level; needs `model`. Absent: its default. */
   effort?: string
   firstMessage?: string
-  /** Mode of the first message; defaults to agent. */
-  mode?: 'agent' | 'plan'
   /**
    * Keep the thread out of the person's sidebar (`Thread.hidden`): a bot's chat lists it, and the side panel of the
    * thread that launched it. Absent: hidden. false: an independent thread the person follows in the sidebar.
@@ -105,7 +101,6 @@ export interface AgentRemoteThreadRequest {
   model?: string
   effort?: string
   firstMessage?: string
-  mode?: 'agent' | 'plan'
   /** As for a thread here: absent or true keeps it out of the sidebar of the computer that runs it; false shows it there. */
   hidden?: boolean
 }
@@ -160,7 +155,7 @@ export interface RemoteThreadsHost {
   /** `thread_read` view `summary`: the thread record there and its newest runs (newest first), as that computer answers them. */
   summary(target: RemoteTarget): Promise<{ thread: Record<string, unknown>; runs: Array<Record<string, unknown>> }>
   wait(target: RemoteTarget, request: { runId?: string; timeoutMs: number; signal?: AbortSignal }): Promise<RemoteWaitResult>
-  send(target: RemoteTarget, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'sent'; runId?: string; queued: boolean; replayed: boolean; mode?: string } | RemoteUncertain>
+  send(target: RemoteTarget, input: { content: string }, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'sent'; runId?: string; queued: boolean; replayed: boolean; mode?: string } | RemoteUncertain>
   steer(target: RemoteTarget, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'accepted'; runId: string } | { status: 'ignored'; reason: string; runId?: string } | RemoteUncertain>
   interrupt(target: RemoteTarget, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'stopped' | 'left'; runId?: string; left?: string } | RemoteUncertain>
   /**
@@ -248,8 +243,8 @@ export interface QueueSnapshot {
 
 /** One change an agent asks of a thread's queue. `expectedRevision` is the revision the agent last read. */
 export type AgentQueueCommand =
-  | { op: 'enqueue'; content: string; mode: 'agent' | 'plan'; expectedRevision?: string }
-  | { op: 'edit'; itemId: string; content?: string; mode?: 'agent' | 'plan'; expectedRevision: string }
+  | { op: 'enqueue'; content: string; expectedRevision?: string }
+  | { op: 'edit'; itemId: string; content: string; expectedRevision: string }
   | { op: 'remove'; itemId: string; expectedRevision: string }
   | { op: 'reorder'; orderedIds: string[]; expectedRevision: string }
   | { op: 'promote'; itemId: string; expectedRevision: string; expectedRunId: string }
@@ -427,10 +422,6 @@ export interface AppToolHost extends DelegationToolsHost {
   readOnlyThread?(threadId: string): boolean
   /** The thread's project directory, which scopes the MCP relay's servers; absent: global servers only. */
   projectPathFor?(threadId: string): string | undefined
-  /** The ceiling the thread's delegations gave it (the listing ignores the turn's mode). */
-  threadCeiling?(threadId: string): ModeCeiling
-  /** `plan` while an ancestor of the thread runs a Plan turn: narrowing from above, read at every call. */
-  liveCeiling?(threadId: string): ModeCeiling | undefined
   /** The thread is a Mousse subagent, from its lineage. */
   subagentThread?(threadId: string): boolean
   /** The run holds `person`: a person started it and its thread is not a subagent (§1.3 "Provenance"). */
@@ -447,7 +438,7 @@ export interface AppToolHost extends DelegationToolsHost {
    */
   botHomeOf?(threadId: string): string | undefined
   awaitLiveRun?(threadId: string): Promise<LiveRunGate | undefined> | undefined
-  /** The permission mode the caller's run enforces, from its attempt's binding (never from the mode ceiling). */
+  /** The permission mode the caller's run enforces, from its attempt's binding. */
   permissionModeFor?(runId: string): PermissionMode | undefined
   /** Asks the thread's user to approve a call (an approval request: see `ApprovalTag`). */
   askApproval?(threadId: string, questions: PendingUserQuestions['questions'], options: { signal: AbortSignal; approval: ApprovalTag }): Promise<UserQuestionAnswers>
@@ -496,7 +487,7 @@ export interface AppToolHost extends DelegationToolsHost {
    * a steer, and refused while the thread waits on a question or approval or is paused. A retry with the same
    * `clientRequestId` returns the first result.
    */
-  sendToThread?(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; actor: AgentActor; notify?: { messageKey: string } }): Promise<AgentSendResult>
+  sendToThread?(threadId: string, input: { content: string }, options: { clientRequestId: string; actor: AgentActor; notify?: { messageKey: string } }): Promise<AgentSendResult>
   /**
    * Counts a note that asks for attention as one message of `actor`'s chain (issue #1442). Past the chain's budget the
    * note is kept for the person's Continue or Stop and `AgentMessageHeld` is thrown.
