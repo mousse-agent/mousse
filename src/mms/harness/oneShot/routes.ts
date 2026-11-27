@@ -37,6 +37,20 @@ export function claudeFacts(managed: boolean): RouteFacts {
   return managed ? CLAUDE_MANAGED_FACTS : CLAUDE_FACTS
 }
 
+/**
+ * Codex on OpenAI's own provider with its ChatGPT sign-in (`codex:direct`): one direct request with no tools to the
+ * ChatGPT backend, in Mousse's process, with Codex's own token. No retry and no WebSocket (counted at a stub); nothing
+ * of Codex's setup is in it (shown by an effects test). Held.
+ */
+export const CODEX_DIRECT_FACTS: RouteFacts = Object.freeze({ tools: 'none_offered', attempts: 'one', isolation: 'verified', launch: 'in_process', audience: 'any' })
+
+/**
+ * Codex on any other provider (a managed entry's, `codex:app_server`): a turn on the entry's app-server with every
+ * feature, web search and MCP server off. Codex still declares tools no setting removes (`apply_patch` on some models,
+ * `request_user_input`; F8, Codex 0.172), and retries as its provider config says. Best-effort.
+ */
+export const CODEX_APP_SERVER_FACTS: RouteFacts = Object.freeze({ tools: 'detected_on_report', attempts: 'unenforced', isolation: 'env_only', launch: 'sealed_child', audience: 'any' })
+
 /** A provider still on its own one-shot code (`DriverRuntime.oneShot`), admitted with no facts claimed. */
 export function legacyOneShotRoute(driver: string): () => OneShotRouteDecision {
   const decision: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: `legacy:${driver}` as const }) })

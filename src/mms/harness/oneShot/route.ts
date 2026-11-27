@@ -35,7 +35,7 @@ export interface RouteFacts {
  * A route's name. `legacy:<driver>` is a provider still on its own one-shot code until its slice: admitted through the
  * same step, with no facts claimed.
  */
-export type OneShotRouteId = 'pi:direct' | 'acp:generic' | 'acp:antigravity' | 'claude:cli' | `legacy:${string}`
+export type OneShotRouteId = 'pi:direct' | 'acp:generic' | 'acp:antigravity' | 'claude:cli' | 'codex:direct' | 'codex:app_server' | `legacy:${string}`
 
 export interface OneShotRoute {
   id: OneShotRouteId
