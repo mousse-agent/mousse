@@ -28,13 +28,18 @@ Ask the human only what no code or run can answer: product choices, what may bre
 
 Then write, in one or two sentences, what is wrong at the root. "Transport, identity and pairing live in one layer, so none can be tested alone." If the honest answer is "nothing", stop and go to slice.
 
-## 3. Propose shapes that differ
+## 3. Get options that differ
 
-Two or three alternatives that differ in shape: where each piece of state lives, which part owns it, where the boundaries are. One of them is always the smallest change to the current design.
+Two or three options that differ in shape: where each piece of state lives, which part owns it, where the boundaries are. One of them is always the smallest change to the current design. Each option gives the shape, what it makes easy, what it makes hard, what it costs to undo, the facts it depends on, and the thin slice it would build first.
 
-For each: one paragraph, the parts and who owns which data, what it makes easy, what it makes hard, and what it costs to undo.
+**Most designs:** write the options yourself.
 
-To get independent proposals, give each proposer the same brief (sections 1 and 2, with pointers to the code) separately, without the other proposals and without your own favourite. Compare afterwards. Proposers from different model families are worth their cost here, where the options are made, far more than in rounds of review later.
+**Really big work** gets independent proposals. That means work on the scale of a new engine: more than about ten slices, or a protocol, storage format or security boundary that will be costly to change once it ships.
+
+- Two or three proposers, each from a different model family, each write their own full proposal. They run in parallel, so this costs the time of one. The human names the families; if they have not, ask once in one line and reuse the answer.
+- Every proposer gets the same brief: sections 1 and 2 with pointers to the code, and nothing else. No other proposal, no favourite of yours, no hint at an answer.
+- You write none of them. Add one yourself only when no proposal is the smallest change to the current design.
+- Then compare side by side. Where they agree is probably right; where they differ is the decision to make. Two proposals that differ only in detail are one option. Do not blend them yet: a blend of three shapes is usually a fourth that nobody thought through.
 
 ## 4. Run the unknowns
 
@@ -42,7 +47,7 @@ Each alternative rests on facts: "a browser worker can hold this key", "SSH stdi
 
 ## 5. Decide, and say why
 
-Show the human the alternatives with your recommendation first. This is the one point to stop and wait for an answer.
+Show the human the options side by side with your recommendation first, and, for really big work, ask in the same message for the yes to the council in section 7. This is the one point to stop and wait for an answer. Taking a part from one proposal into another is fine once a shape is chosen, when the reason is written down.
 
 Before recommending, hold the choice against these:
 
@@ -63,4 +68,9 @@ Record the decision in the document: what was chosen, what was rejected and why,
 
 ## 7. Hand off
 
-The document goes in `docs/plans/<name>.md`, merged as a documentation PR and linked from the tracking issue. It gets one read by someone who did not write it ("Reviewing a plan" in [review](../review/SKILL.md)), or a [council](../council/SKILL.md) when the human agrees to one. Then [slice](../slice/SKILL.md) cuts it. When a later slice shows the design was wrong, change the document first, then the code.
+The chosen design, written up with its decision and proof plan, gets read once before it is built on.
+
+- **Really big work** goes to a [council](../council/SKILL.md): one round, with the yes the human gave at the decision. The reviewers check the design against the code; they do not propose a new one.
+- **Other designs**, and really big ones when the human says no to a council, get one read by someone who did not write it ("Reviewing a plan" in [review](../review/SKILL.md)).
+
+After the findings are answered, the document goes in `docs/plans/<name>.md`, merged as a documentation PR and linked from the tracking issue. Then [slice](../slice/SKILL.md) cuts it. When a later slice shows the design was wrong, change the document first, then the code.

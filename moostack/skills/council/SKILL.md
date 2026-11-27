@@ -9,7 +9,7 @@ Two independent reviewers check a design, a plan or a PR before it moves on. It 
 
 ## When to use it
 
-**Ask the human first, every time.** Say in one line what you want reviewed and why, and run it only after a yes. A yes covers that one review, not later ones.
+**Ask the human first, every time.** Say in one line what you want reviewed and why, and run it only after a yes. A yes covers that one review, not later ones. A really big design from [design](../design/SKILL.md) gets a council by default, and its yes is asked for together with the design decision.
 
 Use it for work that is both:
 
