@@ -16,20 +16,6 @@
       "expiresAt": "2026-11-27T17:32:25.878Z"
     },
     {
-      "task": "automations-webhook-trigger-end-to-end",
-      "session": "Aeonix-e431e5",
-      "machine": "Aeonix",
-      "branch": "mousse/automations-webhook-trigger-end-to-end",
-      "paths": [
-        "src/mms/automations/AutomationDrafts.ts",
-        "src/mms/automations/AutomationIndex.ts",
-        "src/mms/run/mcp/appTools/automations.ts",
-        "src/renderer/components/automations/AutomationDetail.tsx"
-      ],
-      "claimedAt": "2026-11-27T16:28:15.463Z",
-      "expiresAt": "2026-11-27T18:28:15.463Z"
-    },
-    {
       "task": "bot-skills-and-browser-handoff",
       "session": "Animatrix-17eea9",
       "machine": "Animatrix",
