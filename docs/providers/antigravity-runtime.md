@@ -109,41 +109,52 @@ Mousse started.
 ## Thread titles and other single requests
 
 Thread titles, branch names, pull request drafts, commit messages and a bot's name and digest are
-single requests. On `agy` each one runs on a launch of its own, and it is labelled best-effort:
-`agy` may run a native action before Mousse sees it and stops the request.
+single requests. They run on `acp:antigravity`: the same single-request path as any ACP agent
+(`acpOneShot`), in a place of its own (`src/mms/harness/oneShot/places.ts`), with Antigravity's own
+launch. The route is labelled best-effort: `agy` may run a native action before Mousse sees it and
+stops the request.
 
-- **Launch:** a new empty folder is both the process's working folder and the session's workspace.
+- **Place:** the request's record is written under `<profile>/one-shot-ledger/` before its folder
+  `<profile>/one-shot/<id>/` exists, and the process tree is recorded before `agy` starts (a
+  Windows job, or a POSIX process group with its watcher).
+- **Launch:** the place's empty `work` folder is both the process's working folder and the
+  session's workspace, and its `tmp` folder is the temporary folder.
   The process gets only system, locale and proxy variables, none of the user's arguments, variables
   or skill links, and `--include-default-customizations=false` where `agy acp --help` lists it.
-  Its settings go in a folder of their own (`--cli_dir_name one-shot-<id>`, beside the sign-in in
+  Its settings go in a folder of their own (`--cli_dir_name one-shot-<place id>`, beside the sign-in in
   `gemini-home/antigravity-acp`): `default` agent mode, `strict` tool permission, no access outside
   the workspace, and a rule denying every action `agy` names. An `agy` without `--cli_dir_name` is
   refused.
 - **Hooks and MCP servers:** `agy` reads them from `<gemini-dir>/config` (`hooks.json`,
   `mcp_config.json`), and neither `--cli_dir_name` nor `--include-default-customizations=false`
   keeps them out (checked on agy 1.5.18 with hooks and an MCP server that each write a marker). So
-  the request's `--gemini-dir` is an empty home of its own (`one-shot-homes/<id>`, beside
-  `gemini-home`), and `--app-data-dir` points back to `gemini-home/antigravity-acp` by a relative
+  the request's `--gemini-dir` is the place's empty `home`, and `--app-data-dir` points back to
+  `gemini-home/antigravity-acp` by a relative
   path: `agy` refuses an absolute one and reads a relative one from the gemini dir. The sign-in and
   sessions stay where they are. The keyring sign-in of the first entry was checked on a real request;
   an added entry's file-based sign-in was not, so an "authentication required" answer there fails
   the request without signing the entry out.
 - **During:** permission requests are cancelled and questions declined; file, terminal and unknown
   requests are refused. Each of these, and any tool call `agy` reports, ends the request as
-  `one_shot_tool_refused`, and Automatic naming moves on to its next model. The request ends after
-  180 s, or once the answer passes 128,000 characters.
+  `one_shot_tool_refused`, and Automatic naming moves on to its next model. The request ends at its
+  deadline, or once the answer passes 128,000 characters.
+- **Quota:** a quota notice sent as the answer ("Individual quota reached. … Resets in 2h28m19s.") is
+  never a title: the request fails as that model's usage limit, until the reset it names. This is
+  read at the ACP boundary, so any ACP agent that answers with the same notice is handled the same way.
 - **While it ends:** the process tree is ended while the refusals still listen, and its output is
   read until it closes, so a tool it reports while it ends still fails the request.
 - **After:** the request waits up to 8 s for the process to end; one still running fails it. The
-  request's files are touched only once the process has ended, however late. Then anything but
-  empty folders left in the workspace fails the request, and the workspace, the settings folder and
-  the empty home are removed, with the session's saved conversation, notes and annotations once the
-  saved conversation names this request's folder. A file that can't be removed (locked) is logged
-  and tried again after 10 s, 1 min and 5 min; the home keeps a record of the request (process id,
-  session id) until then. A minute after the entry's next single request, a sweep removes what
-  ended requests left, skipping any request still running here or whose recorded process still runs.
+  tree must be proven gone (its job empty, or its group gone) before anything is touched. Then
+  anything but empty folders left in `work` fails the request, and the place is removed with its
+  typed leftovers: the settings folder, and the session's saved conversation, notes and annotations
+  once the saved conversation names this place. Ownership is read again from the files at removal,
+  and the conversation that proves it goes last. Whatever can't be removed (a locked file, a tree
+  not proven gone) stays with the place's record for the places sweep, which runs a minute after the
+  daemon is ready and every 30 minutes after. The same sweep removes the folders older versions left
+  in the entry's own folders (`one-shot/<id>`, `one-shot-homes/<id>`, `one-shot-<id>`) once they
+  are 30 minutes old and no recorded process of theirs runs.
 
-The 1.1.1 server keeps the ordinary launch for single requests; that launch is not checked.
+The 1.1.1 server keeps its ordinary launch for single requests, in a place; that launch is not checked.
 
 ## Start-up time
 

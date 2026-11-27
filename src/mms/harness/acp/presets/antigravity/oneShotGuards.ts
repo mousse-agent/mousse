@@ -1,196 +1,93 @@
-import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { join, relative } from 'node:path'
-import { ANTIGRAVITY_APP_DATA_DIR, ANTIGRAVITY_ONE_SHOT_DIR, ANTIGRAVITY_ONE_SHOT_HOMES_DIR, antigravityOneShotCliDir, antigravityOneShotHome } from '../antigravity'
+import { lstatSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join } from 'node:path'
+import type { LeftoverRecord, LeftoverRule, Place } from '../../../oneShot/places'
+import { ANTIGRAVITY_APP_DATA_DIR, ANTIGRAVITY_ONE_SHOT_DIR } from '../antigravity'
 
 /**
- * The files around an Antigravity one-shot (`AntigravityProviderService.oneShot`). Each request has an id and:
- * - a scratch folder (`<state>/one-shot/<id>`), its workspace and working folder;
- * - an empty home (`<entry>/one-shot-homes/<id>`, `antigravityOneShotHome`), its `--gemini-dir`, holding the request's
- *   record ({@link OneShotRecord});
- * - a settings folder in the entry's app data (`one-shot-<id>`, `--cli_dir_name`);
- * - on `agy`, the files of the session it opened, in the entry's app data.
+ * What an Antigravity single request leaves outside its place (`oneShot/places.ts`), as typed leftovers removed with
+ * the place, by its release or by the places sweep:
+ * - its settings folder in the entry's app data, `one-shot-<place id>` (`--cli_dir_name`);
+ * - on `agy`, the files of the session it opened in that app data, once its saved conversation names the place.
  *
- * They are inspected or removed only once the request's process has ended. A request of this Mousse stays
- * {@link liveOneShots} until then; one of another Mousse counts as running while its recorded process does. What
- * cannot be removed is reported, kept in the record, and tried again.
+ * Ownership is read again from the object itself at removal time, never from a stored flag.
  */
 
-/** The ids of this Mousse's one-shots whose process may still run: the sweep never touches their files. */
-const liveOneShots = new Set<string>()
-
-/** Test seam: how the one-shot files are removed. */
-export const oneShotFs = {
-  rm: (path: string) => rmSync(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
-}
-
-/** A one-shot's paths, from its entry's state folder, its `gemini-home` and its id. */
-export interface OneShotPaths {
-  id: string
-  cwd: string
-  home: string
-  appData: string
-  settings: string
-}
-
-export function oneShotPaths(stateDir: string, geminiHome: string, id: string): OneShotPaths {
-  const cwd = join(stateDir, ANTIGRAVITY_ONE_SHOT_DIR, id)
-  const appData = join(geminiHome, ANTIGRAVITY_APP_DATA_DIR)
-  return { id, cwd, home: antigravityOneShotHome(geminiHome, cwd), appData, settings: join(appData, antigravityOneShotCliDir(cwd)) }
-}
-
-/** What a request's home records about it, so that a later sweep (of this Mousse or the next) knows what is its. */
-export interface OneShotRecord {
-  /** The agent process, once started: while it runs, the request's files stay. */
-  pid?: number
-  /** The session it opened, on `agy`. */
-  sessionId?: string
-  /** The saved conversation proved to be this request's (`conversationOf`): its files may go. */
-  owned?: boolean
-  /** On `agy`: the session's files are the request's to remove. */
-  native?: boolean
-}
-
-const RECORD = 'mousse-one-shot.json'
-
-function readRecord(home: string): OneShotRecord | undefined {
-  try {
-    const value = JSON.parse(readFileSync(join(home, RECORD), 'utf8')) as Record<string, unknown>
-    return {
-      ...(typeof value.pid === 'number' && Number.isInteger(value.pid) && value.pid > 0 ? { pid: value.pid } : {}),
-      ...(typeof value.sessionId === 'string' ? { sessionId: value.sessionId } : {}),
-      ...(value.owned === true ? { owned: true } : {}),
-      ...(value.native === true ? { native: true } : {})
-    }
-  } catch {
-    return undefined
-  }
-}
-
-/** Merges `patch` into the request's record. */
-export function recordOneShot(paths: OneShotPaths, patch: OneShotRecord): void {
-  try {
-    writeFileSync(join(paths.home, RECORD), JSON.stringify({ ...readRecord(paths.home), ...patch }), { mode: 0o600 })
-  } catch (error) {
-    console.warn('[antigravity] a single request could not be recorded', { id: paths.id, error: String(error) })
-  }
-}
-
-/** Makes the request's scratch folder and home, records it, and marks it live until {@link finishOneShot}. */
-export function beginOneShot(paths: OneShotPaths, record: OneShotRecord): void {
-  liveOneShots.add(paths.id)
-  mkdirSync(paths.cwd, { recursive: true, mode: 0o700 })
-  mkdirSync(paths.home, { recursive: true, mode: 0o700 })
-  recordOneShot(paths, record)
-}
-
-/** How far into a one-shot's scratch folder the check looks, and how many entries it reads, before it gives up (and fails). */
-const SCRATCH_DEPTH = 8
-const SCRATCH_ENTRIES = 1_000
-
-/**
- * What a one-shot left in its scratch folder `cwd` besides empty folders (the runtime's own), as a path inside it;
- * undefined when nothing. A link counts as something; so does a folder too deep or too full to read through.
- */
-export function leftInScratch(cwd: string): string | undefined {
-  let seen = 0
-  const walk = (dir: string, depth: number): string | undefined => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name)
-      if (++seen > SCRATCH_ENTRIES || !entry.isDirectory() || entry.isSymbolicLink()) return relative(cwd, path)
-      if (depth >= SCRATCH_DEPTH) return relative(cwd, path)
-      const found = walk(path, depth + 1)
-      if (found) return found
-    }
-    return undefined
-  }
-  try {
-    return walk(cwd, 0)
-  } catch {
-    return '(the folder could not be read)'
-  }
-}
+/** A request id: what `randomUUID` gives. */
+const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /** A session id `agy` gives: letters, digits and dashes, so it names a file of its own and never a path. */
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/
 
-/** The files `agy` keeps for session `sessionId` in its app data: its saved conversation, notes and annotations. */
+/** The leftover kinds (`LeftoverRecord.kind`). */
+export const AGY_SETTINGS_LEFTOVER = 'agy_settings'
+export const AGY_SESSION_LEFTOVER = 'agy_session'
+
+/** The files `agy` keeps for session `sessionId` in its app data: notes, annotations, then its saved conversation last. */
 function sessionFiles(appData: string, sessionId: string): string[] {
   const conversation = join(appData, 'conversations', `${sessionId}.db`)
-  return [conversation, `${conversation}-wal`, `${conversation}-shm`, join(appData, 'brain', sessionId), join(appData, 'annotations', `${sessionId}.pbtxt`)]
+  return [join(appData, 'brain', sessionId), join(appData, 'annotations', `${sessionId}.pbtxt`), `${conversation}-wal`, `${conversation}-shm`, conversation]
 }
 
-/**
- * Whether the session's saved conversation belongs to the request `id`: it names the request's scratch folder, whose
- * name is the id (UTF-8 or UTF-16), which no other request's has. True, false, or why it could not tell.
- */
-function ownsConversation(appData: string, sessionId: string, id: string): true | 'nothing saved' | string {
-  if (!SESSION_ID.test(sessionId)) return `session id ${JSON.stringify(sessionId.slice(0, 64))} is not one agy gives`
-  const conversation = sessionFiles(appData, sessionId)[0]
-  try {
-    lstatSync(conversation)
-  } catch {
-    return 'nothing saved'
-  }
-  try {
-    const bytes = readFileSync(conversation)
-    if (bytes.includes(Buffer.from(id, 'utf8')) || bytes.includes(Buffer.from(id, 'utf16le'))) return true
-    return `conversation ${sessionId} does not name this request's folder`
-  } catch {
-    return `conversation ${sessionId} could not be read`
-  }
+/** Whether the saved conversation of `sessionId` in `appData` names place `id` (its folder's path holds the id). */
+function conversationNames(appData: string, sessionId: string, id: string): boolean {
+  const conversation = join(appData, 'conversations', `${sessionId}.db`)
+  const stats = lstatSync(conversation)
+  if (!stats.isFile()) return false
+  const bytes = readFileSync(conversation)
+  return bytes.includes(Buffer.from(id, 'utf8')) || bytes.includes(Buffer.from(id, 'utf16le'))
 }
 
-/** Removes each of `paths`; returns those that stayed. */
-function removeAll(paths: string[]): string[] {
-  const failed: string[] = []
-  for (const path of paths) {
-    try { oneShotFs.rm(path) } catch { failed.push(path) }
-  }
-  return failed
+/** The session's files to register as leftovers of `place`, in removal order: the conversation that proves them goes last. */
+export function sessionLeftovers(appData: string, sessionId: string): LeftoverRecord[] {
+  if (!SESSION_ID.test(sessionId)) return []
+  return sessionFiles(appData, sessionId).map((path) => ({ kind: AGY_SESSION_LEFTOVER, path, proof: sessionId }))
 }
 
-/**
- * Removes what an ended request left: its settings folder and scratch folder and, on `agy`, its session's files once
- * its saved conversation proves to be this request's. The home and its record go last, only when everything else
- * went; otherwise they stay for the next try. Returns the paths that stayed. Never call it while the process runs.
- */
-function cleanUp(paths: OneShotPaths, record: OneShotRecord | undefined): string[] {
-  const failed = removeAll([paths.settings, paths.cwd])
-  if (record?.native && record.sessionId) {
-    let owned = record.owned === true
-    if (!owned) {
-      const verdict = ownsConversation(paths.appData, record.sessionId, paths.id)
-      if (verdict === true) {
-        owned = true
-        recordOneShot(paths, { owned: true })
-      } else if (verdict !== 'nothing saved') console.warn('[antigravity] a single request\'s session files were kept', { id: paths.id, reason: verdict })
+/** The settings folder of a single request in `appData`, as a leftover of the place `placeId`. */
+export function settingsLeftover(appData: string, placeId: string): LeftoverRecord {
+  return { kind: AGY_SETTINGS_LEFTOVER, path: join(appData, `${ANTIGRAVITY_ONE_SHOT_DIR}-${placeId}`), proof: placeId }
+}
+
+const inAppData = (path: string, levels: 1 | 2): boolean => {
+  if (!isAbsolute(path)) return false
+  const appData = levels === 1 ? dirname(path) : dirname(dirname(path))
+  return basename(appData) === ANTIGRAVITY_APP_DATA_DIR
+}
+
+/** The rules the places sweep and a release read Antigravity's leftovers by. */
+export const ANTIGRAVITY_LEFTOVER_RULES: readonly LeftoverRule[] = Object.freeze([
+  {
+    kind: AGY_SETTINGS_LEFTOVER,
+    allows: (path: string) => inAppData(path, 1) && REQUEST_ID.test(basename(path).slice(ANTIGRAVITY_ONE_SHOT_DIR.length + 1)) && basename(path).startsWith(`${ANTIGRAVITY_ONE_SHOT_DIR}-`),
+    // Named after this place's id, which no other request has.
+    owns: (path: string, proof: string, place: Place) => proof === place.id && basename(path) === `${ANTIGRAVITY_ONE_SHOT_DIR}-${place.id}`
+  },
+  {
+    kind: AGY_SESSION_LEFTOVER,
+    allows: (path: string) => inAppData(path, 2) && ['brain', 'annotations', 'conversations'].includes(basename(dirname(path))),
+    // One of the session's own files, and its saved conversation names this place.
+    owns: (path: string, proof: string, place: Place) => {
+      if (!SESSION_ID.test(proof)) return false
+      const appData = dirname(dirname(path))
+      return sessionFiles(appData, proof).includes(path) && conversationNames(appData, proof, place.id)
     }
-    if (owned) failed.push(...removeAll(sessionFiles(paths.appData, record.sessionId)))
   }
-  if (!failed.length) failed.push(...removeAll([paths.home]))
-  return failed
+])
+
+/** Test seam: how the files older versions left are removed. */
+export const legacyOneShotFs = {
+  rm: (path: string) => rmSync(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
 }
 
-/** When a request's files that stayed are tried again, after its first cleanup. */
-export const ONE_SHOT_RETRY_MS: readonly number[] = [10_000, 60_000, 5 * 60_000]
+/** A folder older versions left with no record this old is from a request that ended. */
+const LEFTOVER_AGE_MS = 30 * 60_000
 
-/**
- * The request's process has ended: removes its files ({@link cleanUp}) and ends its live mark. What stays is reported
- * and tried again after each of {@link ONE_SHOT_RETRY_MS}; after that the sweep keeps trying.
- */
-export function finishOneShot(paths: OneShotPaths): void {
-  liveOneShots.delete(paths.id)
-  retry(paths, 0)
+function names(dir: string): string[] {
+  try { return readdirSync(dir) } catch { return [] }
 }
 
-function retry(paths: OneShotPaths, attempt: number): void {
-  if (liveOneShots.has(paths.id)) return
-  const failed = cleanUp(paths, readRecord(paths.home))
-  if (!failed.length) return
-  const later = ONE_SHOT_RETRY_MS[attempt]
-  console.warn('[antigravity] a single request\'s files could not be removed', { id: paths.id, paths: failed, retry: later ? `${later / 1000} s` : 'next sweep' })
-  if (later === undefined) return
-  setTimeout(() => retry(paths, attempt + 1), later).unref?.()
+function olderThan(path: string, ms: number, now: number): boolean {
+  try { return now - statSync(path).mtimeMs >= ms } catch { return true }
 }
 
 /** Whether process `pid` runs (or exists and is not this user's to signal). */
@@ -203,37 +100,34 @@ function running(pid: number): boolean {
   }
 }
 
-/** A request id: what `randomUUID` gives. Anything else in the one-shot folders is not Mousse's to remove. */
-const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-/** A folder with no record this old is left over from a Mousse that ended mid-request: no request runs that long. */
-const LEFTOVER_AGE_MS = 30 * 60_000
-
-function youngerThan(path: string, ms: number, now: number): boolean {
-  try { return now - statSync(path).mtimeMs < ms } catch { return false }
-}
-
 /**
- * Removes what ended one-shots left, of this Mousse or an earlier one: each request whose id is in the scratch
- * folders under `stateDir`, the homes beside `geminiHome` or the settings folders in its app data. A request is
- * skipped while it is live here, while its recorded process runs, or, with no record, while its folders are younger
- * than {@link LEFTOVER_AGE_MS}. Run a while after start, never on the start path.
+ * Removes what single requests of older versions left in an entry's own folders (`<state>/one-shot/<id>`,
+ * `one-shot-homes/<id>` beside its `gemini-home`, and `one-shot-<id>` in its app data), now that requests run in places.
+ * A request is skipped while its recorded process runs, and while its folders are younger than 30 minutes; session
+ * files are left to `agy`. Runs in the places sweep (`schedulePlaceSweep`), never on the start path.
  */
-export function sweepOneShotLeftovers(stateDir: string, geminiHome: string, now = Date.now()): void {
-  const ids = new Set<string>()
-  const appData = join(geminiHome, ANTIGRAVITY_APP_DATA_DIR)
-  const settingsPrefix = `${ANTIGRAVITY_ONE_SHOT_DIR}-`
-  const names = (dir: string) => { try { return readdirSync(dir) } catch { return [] } }
-  for (const name of names(join(stateDir, ANTIGRAVITY_ONE_SHOT_DIR))) ids.add(name)
-  for (const name of names(join(geminiHome, '..', ANTIGRAVITY_ONE_SHOT_HOMES_DIR))) ids.add(name)
-  for (const name of names(appData)) if (name.startsWith(settingsPrefix)) ids.add(name.slice(settingsPrefix.length))
-  for (const id of ids) {
-    if (!REQUEST_ID.test(id) || liveOneShots.has(id)) continue
-    const paths = oneShotPaths(stateDir, geminiHome, id)
-    const record = readRecord(paths.home)
-    if (record?.pid !== undefined && running(record.pid)) continue
-    if (!record && [paths.cwd, paths.home, paths.settings].some((path) => youngerThan(path, LEFTOVER_AGE_MS, now))) continue
-    const failed = cleanUp(paths, record)
-    if (failed.length) console.warn('[antigravity] a single request\'s files could not be removed', { id, paths: failed, retry: 'next sweep' })
+export function sweepLegacyAntigravityOneShots(profileHome: string, now = Date.now()): void {
+  const entries = [{ stateDir: join(profileHome, 'providers', 'antigravity'), geminiHome: join(profileHome, 'providers', 'antigravity', 'gemini-home') }]
+  for (const name of names(join(profileHome, 'harness'))) {
+    const stateDir = join(profileHome, 'harness', name)
+    entries.push({ stateDir, geminiHome: join(stateDir, 'home', 'gemini-home') })
+  }
+  for (const { stateDir, geminiHome } of entries) {
+    const scratchRoot = join(stateDir, ANTIGRAVITY_ONE_SHOT_DIR)
+    const homesRoot = join(dirname(geminiHome), 'one-shot-homes')
+    const appData = join(geminiHome, ANTIGRAVITY_APP_DATA_DIR)
+    const ids = new Set<string>([...names(scratchRoot), ...names(homesRoot)])
+    for (const name of names(appData)) if (name.startsWith(`${ANTIGRAVITY_ONE_SHOT_DIR}-`)) ids.add(name.slice(ANTIGRAVITY_ONE_SHOT_DIR.length + 1))
+    for (const id of ids) {
+      if (!REQUEST_ID.test(id)) continue
+      const paths = [join(appData, `${ANTIGRAVITY_ONE_SHOT_DIR}-${id}`), join(scratchRoot, id), join(homesRoot, id)]
+      let pid: unknown
+      try { pid = (JSON.parse(readFileSync(join(homesRoot, id, 'mousse-one-shot.json'), 'utf8')) as { pid?: unknown }).pid } catch { /* no record */ }
+      if (typeof pid === 'number' && Number.isInteger(pid) && pid > 0 && running(pid)) continue
+      if (!paths.every((path) => olderThan(path, LEFTOVER_AGE_MS, now))) continue
+      for (const path of paths) {
+        try { legacyOneShotFs.rm(path) } catch { /* the next sweep */ }
+      }
+    }
   }
 }

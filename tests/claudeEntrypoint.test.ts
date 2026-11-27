@@ -131,7 +131,7 @@ describe('the client name of a turn', () => {
   it('a chat title or other one-shot carries the name too', async () => {
     const { service: claude, started } = service()
     await claude.status()
-    await claude.oneShot({ model: 'sonnet', prompt: 'Name this chat', onActivity: () => {} }, new AbortController().signal)
+    await claude.oneShotTransport({ model: 'sonnet' }).send({ model: 'sonnet', system: '', prompt: 'Name this chat' }, { activity: () => {}, text: () => {}, tool: () => {}, launching: () => {}, sending: () => {} }, new AbortController().signal)
     expect(started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
   })
 })

@@ -13,6 +13,7 @@ import { RESERVED_ROOTS, sealedEnv } from '../../src/mms/harness/oneShot/launch'
 import type { OneShotOp, OneShotRouteDecision, OneShotTransport, RouteFacts } from '../../src/mms/harness/oneShot/route'
 import { GENERIC_ACP_FACTS, PI_DIRECT_FACTS, PI_LOCAL_FACTS } from '../../src/mms/harness/oneShot/routes'
 import { candidateDeadlineMs, classifyOneShotFailure, executableKey, ONE_SHOT_INACTIVITY_MS, ONE_SHOT_INSTRUCTION, ONE_SHOT_STREAM_CAP, oneShotWasSent, runPlan } from '../../src/mms/harness/oneShot/runner'
+import { ANTIGRAVITY_LEFTOVER_RULES, sweepLegacyAntigravityOneShots } from '../../src/mms/harness/acp/presets/antigravity/oneShotGuards'
 import { PLACE_SWEEP_DELAY_MS, PLACE_SWEEP_INTERVAL_MS, schedulePlaceSweep } from '../../src/mms/harness/oneShot/sweep'
 import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
 import { harnessAppError } from '../../src/shared/harness/types'
@@ -302,6 +303,25 @@ describe('the post-ready sweep', () => {
     cancel()
     expect(reports).toHaveLength(2)
     expect(existsSync(place.dir)).toBe(false)
+  })
+
+  it("cleans what Antigravity's older versions left in its own folders in the same pass, with no naming request", async () => {
+    const profile = mkdtempSync(join(tmpdir(), 'mousse-sweep-'))
+    homes.push(profile)
+    // A single request of an older version, in the first entry's state folder, left by a daemon that ended mid-request.
+    const old = join(profile, 'providers', 'antigravity', 'one-shot', '00000000-0000-4000-8000-00000000000a')
+    mkdirSync(old, { recursive: true })
+    const hourAgo = (Date.now() - 60 * 60_000) / 1000
+    utimesSync(old, hourAgo, hourAgo)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    let swept!: () => void
+    const sweep = new Promise<void>((resolve) => { swept = resolve })
+    // As the daemon schedules it (`MmsProfileServices`).
+    const cancel = schedulePlaceSweep(profile, { stopped: () => false, rules: ANTIGRAVITY_LEFTOVER_RULES, also: () => sweepLegacyAntigravityOneShots(profile), done: () => swept() })
+    await vi.advanceTimersByTimeAsync(PLACE_SWEEP_DELAY_MS)
+    await sweep
+    cancel()
+    expect(existsSync(old)).toBe(false)
   })
 
   it('does not run once the daemon is stopping, or once cancelled', async () => {

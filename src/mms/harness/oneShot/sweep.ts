@@ -8,9 +8,10 @@ export const PLACE_SWEEP_INTERVAL_MS = 30 * 60_000
 /**
  * Schedules the sweep of what ended single requests left (`sweepPlaces`) in the daemon's post-ready maintenance pass:
  * {@link PLACE_SWEEP_DELAY_MS} after ready, whether or not anything was named since, then every
- * {@link PLACE_SWEEP_INTERVAL_MS} until stopped. Returns its cancel.
+ * {@link PLACE_SWEEP_INTERVAL_MS} until stopped. `rules` are the providers' typed leftovers; `also` cleans what a
+ * provider's older versions left outside places, in the same pass. Returns its cancel.
  */
-export function schedulePlaceSweep(profileDir: string, options: { stopped(): boolean; rules?: readonly LeftoverRule[]; delayMs?: number; intervalMs?: number; done?(report: SweepReport): void }): () => void {
+export function schedulePlaceSweep(profileDir: string, options: { stopped(): boolean; rules?: readonly LeftoverRule[]; also?(): void; delayMs?: number; intervalMs?: number; done?(report: SweepReport): void }): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined
   let cancelled = false
   const next = (ms: number) => {
@@ -20,6 +21,11 @@ export function schedulePlaceSweep(profileDir: string, options: { stopped(): boo
   }
   const run = () => {
     if (cancelled || options.stopped()) return
+    try {
+      options.also?.()
+    } catch (error) {
+      console.warn('[one-shot] leftovers of an older version could not be swept', { error: error instanceof Error ? error.message : String(error) })
+    }
     void sweepPlaces(profileDir, options.rules ?? []).then((report) => {
       if (report.kept.length) console.warn('[one-shot] places kept for the next sweep', { kept: report.kept.length })
       options.done?.(report)

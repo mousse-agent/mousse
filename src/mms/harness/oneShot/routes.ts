@@ -18,6 +18,25 @@ export const PI_LOCAL_FACTS: RouteFacts = Object.freeze({ ...PI_DIRECT_FACTS, au
  */
 export const GENERIC_ACP_FACTS: RouteFacts = Object.freeze({ tools: 'detected_on_report', attempts: 'unenforced', isolation: 'env_only', launch: 'sealed_child', audience: 'any' })
 
+/**
+ * Antigravity on `acpOneShot` with its preset's launch (#1936: an empty `--gemini-dir`, settings of its own, and its own
+ * environment, which keeps the account's sign-in). Its own tools still can't be removed: best-effort, as any ACP agent.
+ */
+export const ANTIGRAVITY_FACTS: RouteFacts = GENERIC_ACP_FACTS
+
+const CLAUDE_FACTS: RouteFacts = Object.freeze({ tools: 'none_offered', attempts: 'one', isolation: 'verified', launch: 'sealed_child', audience: 'any' })
+const CLAUDE_MANAGED_FACTS: RouteFacts = Object.freeze({ ...CLAUDE_FACTS, isolation: 'env_only' })
+
+/**
+ * Claude Code (`claude:cli`): no tool offered (`tools: []`), and one request on the wire (`CLAUDE_CODE_MAX_RETRIES=0`
+ * and no non-streaming fallback, counted at a stub on 429 and 503). No user config loads (`settingSources: []`), but an
+ * organisation's managed settings can enforce hooks no caller can turn off: with a managed settings file present only
+ * the environment is held (`env_only`), and the route is best-effort.
+ */
+export function claudeFacts(managed: boolean): RouteFacts {
+  return managed ? CLAUDE_MANAGED_FACTS : CLAUDE_FACTS
+}
+
 /** A provider still on its own one-shot code (`DriverRuntime.oneShot`), admitted with no facts claimed. */
 export function legacyOneShotRoute(driver: string): () => OneShotRouteDecision {
   const decision: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: `legacy:${driver}` as const }) })

@@ -9,6 +9,7 @@ import type { ChatImageAttachment } from '../../../shared/types'
 import { IMAGE_MAX_DATA_CHARS } from '../../../shared/imageLimits'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { harnessAppError } from '../../../shared/harness/types'
+import type { AppError } from '../../../shared/errors'
 import { compareVersions } from '../../../shared/net/version'
 import type { ContinuationInfo, LiveProcessHost } from '../driver'
 import { interruptWithDeadline, loadWithDeadline, SessionLoadTimeoutError } from '../supervise'
@@ -368,16 +369,8 @@ export interface OneShotInput {
   onText?(chunk: string): void
   /** Right before the prompt is sent, after the launch and session: a throw stops the request unsent. */
   beforePrompt?(): void
-  /** The session the agent opened, once it has: its files are this request's (`AntigravityProviderService.oneShot`). */
+  /** The session the agent opened, once it has: its files are this request's (`AntigravityProviderService.oneShotTransport`). */
   onSession?(sessionId: string): void
-  /** The agent process started, with its id when it has one. */
-  onStarted?(pid: number | undefined): void
-  /**
-   * Called once: the process tree has ended and its output is read (`AcpProcess.exited`), whenever that is (before
-   * this returns, or later when it outlived {@link ONE_SHOT_REAP_MS}), or no process started. Only then may the caller
-   * touch the request's files.
-   */
-  onEnded?(): void
   /**
    * The launch reads its sign-in somewhere turns do not (an added Antigravity entry's one-shot home): an
    * "authentication required" answer fails the request without marking the profile signed out.
@@ -386,6 +379,17 @@ export interface OneShotInput {
   /** Tests: {@link ONE_SHOT_DEADLINE_MS} and {@link ONE_SHOT_OUTPUT_CAP}. */
   deadlineMs?: number
   outputCap?: number
+}
+
+/**
+ * A single request's quota notice (`acpQuotaReply`) as the model's limit (`rate_limited`, scope `model`): the request
+ * ran on that model only, so the entry's other models stay eligible. Keeps the reset the notice names.
+ */
+function oneShotQuota(quota: AppError | undefined, label: string): AppError | undefined {
+  if (!quota) return undefined
+  const details = (quota.details ?? {}) as { resetsAt?: unknown; estimated?: unknown }
+  const resetAt = details.estimated !== true && typeof details.resetsAt === 'string' ? details.resetsAt : undefined
+  return harnessAppError({ code: 'rate_limited', scope: 'model', ...(resetAt ? { resetAt } : {}), message: `${label}'s quota for this model is used up: ${quota.message}` })
 }
 
 /** Waits for `process` to end; one still running after {@link ONE_SHOT_REAP_MS} fails the request. */
@@ -2552,28 +2556,18 @@ export class AcpSessions {
    * as `one_shot_tool_refused`. The answer is the agent's text, ended past {@link ONE_SHOT_OUTPUT_CAP} characters or
    * {@link ONE_SHOT_DEADLINE_MS}. One attempt, never saved or resumed; `signal` stops it. The process tree is ended
    * while the refusals still listen, so a tool it reports while it ends refuses the answer too, and is waited for up
-   * to {@link ONE_SHOT_REAP_MS}: one still running then fails the request, and `onEnded` says when it has gone.
+   * to {@link ONE_SHOT_REAP_MS}: one still running then fails the request. A quota notice sent as the answer, or reported
+   * as the agent's error, fails it as a usage limit.
    */
   async oneShot(input: OneShotInput): Promise<string> {
     const { label, quirks } = this.options
     input.signal.throwIfAborted()
     // xAI's tagged prompts end on a notice this request does not wait for.
     if (quirks.xaiExtensions) throw harnessAppError({ code: 'unsupported', message: `${label} cannot run a single request.` })
-    let active: AcpProcess
-    try {
-      await this.options.beforeLaunch?.('one_shot')
-      input.signal.throwIfAborted()
-      active = this.launch('one_shot', undefined, undefined, input.cwd)
-    } catch (error) {
-      // Nothing started: nothing of this request runs on.
-      input.onEnded?.()
-      throw error
-    }
+    await this.options.beforeLaunch?.('one_shot')
+    input.signal.throwIfAborted()
+    const active = this.launch('one_shot', undefined, undefined, input.cwd)
     active.cwd = input.cwd
-    input.onStarted?.(active.child.pid)
-    // Registered first, so the caller hears of the end before this request settles on it (`reaped`).
-    if (active.exited) void active.exited.then(() => input.onEnded?.())
-    else input.onEnded?.()
     let failed: Error | undefined
     const fail = (error: Error) => {
       failed ??= error
@@ -2638,6 +2632,10 @@ export class AcpSessions {
       const ended = promptStopOutcome(label, outcome)
       if (ended === 'cancelled') throw agentCancelledError(label)
       if (ended) throw ended
+      // A quota notice sent as the answer ("Individual quota reached. … Resets in 3h45m30s.", as agy writes it) is never
+      // a title, whichever agent sent it: the model's limit, until the reset it names.
+      const quota = oneShotQuota(acpQuotaReply(text, this.options.usageLimitProvider), label)
+      if (quota) throw quota
       return text
     } catch (error) {
       if (failed) throw failed
@@ -2646,7 +2644,8 @@ export class AcpSessions {
       // The agent asked for a sign-in: the entry is marked signed out, and the request fails as one.
       const signIn = this.authRequiredError(active, error)
       if (signIn) throw harnessAppError({ code: 'signed_out', message: signIn.message })
-      throw acpAgentError(error) ?? error
+      // A quota the agent reports as its error (`RESOURCE_EXHAUSTED (code 429): Individual quota reached…`) is a usage limit.
+      throw acpAgentError(error, this.options.usageLimitProvider) ?? error
     } finally {
       clearTimeout(deadline)
       input.signal.removeEventListener('abort', abort)
