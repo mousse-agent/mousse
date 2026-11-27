@@ -1,11 +1,11 @@
 ---
 name: council
-description: Two independent reviewers for a design, plan or PR, run only after the human agrees. For heavy changes to core infrastructure that must not break (run engine, persistence and migrations, auth and permissions, daemon protocol, networking and security, anything that deletes data). Not for UI work, docs or small fixes. One round by default.
+description: Several independent reviewers (two unless the human names more) for a design, plan or PR, run only after the human agrees. For heavy changes to core infrastructure that must not break (run engine, persistence and migrations, auth and permissions, daemon protocol, networking and security, anything that deletes data). Not for UI work, docs or small fixes. One round by default.
 ---
 
 # Council
 
-Two independent reviewers check a design, a plan or a PR before it moves on. It is expensive, so it runs only where a mistake is costly. It is [review](../review/SKILL.md) with two reviewers: that skill's rules for findings, severity, proof and the re-check apply here, and this file adds only when a council runs and how. It never replaces merge authorization.
+Several independent reviewers check a design, a plan or a PR before it moves on. It is expensive, so it runs only where a mistake is costly. It is [review](../review/SKILL.md) with more than one reviewer: that skill's rules for findings, severity, proof and the re-check apply here, and this file adds only when a council runs and how. It never replaces merge authorization.
 
 ## When to use it
 
@@ -20,15 +20,15 @@ Everything else gets the one review pass its tier sets in [review](../review/SKI
 
 ## Members
 
-Two reviewers at high effort, each from a different model family, neither of them the author. The council's families are the human's choice, never yours. Use the ones they have saved. When none are saved, ask them to name the families in the same line as the request, and save the answer as a standing preference so no later council asks again. Families the human names when asking for a council override the saved ones for that council, and the saved ones stay as they are. Use the newest model of each family that is available, looked up when the council starts. Never write a model ID into a skill or a brief. When the council judges design proposals, a member may share a family with a proposer, as long as it is a fresh session and the proposals carry no author names.
+Two reviewers unless the human names more, at high effort, each from a different model family, none of them the author. Every extra member costs a full review, so do not add one yourself. The council's families are the human's choice, never yours. Use the ones they have saved. When none are saved, ask them to name the families in the same line as the request, and save the answer as a standing preference so no later council asks again. Families the human names when asking for a council override the saved ones for that council, and the saved ones stay as they are. Use the newest model of each family that is available, looked up when the council starts. Never write a model ID into a skill or a brief. When the council judges design proposals, a member may share a family with a proposer, as long as it is a fresh session and the proposals carry no author names.
 
-If a member is unavailable or out of usage, say so and run with the other alone. Do not substitute another family, and do not retry a member that hit its limit.
+If a member is unavailable or out of usage, say so and run with the rest. Do not substitute another family, and do not retry a member that hit its limit.
 
-Reviewers need a shell to run git and focused tests. If one reports it cannot run commands, stop it and start it again with read and shell tools and no edit tools. Run both in the background, in parallel.
+Reviewers need a shell to run git and focused tests. If one reports it cannot run commands, stop it and start it again with read and shell tools and no edit tools. Run them in the background, in parallel.
 
 ## Rounds
 
-- **One round by default.** Both members run once. The author checks each finding and its severity against the code, fixes the real blockers and shoulds with the smallest change, and records in a line or two why the others are rejected. Notes go under Notes in the PR or into one follow-up issue.
+- **One round by default.** Every member runs once. The author checks each finding and its severity against the code, fixes the real blockers and shoulds with the smallest change, and records in a line or two why the others are rejected. Notes go under Notes in the PR or into one follow-up issue.
 - **A second round only for** a proven blocker, or shoulds whose fix is a redesign or a lot of new code. It reads only the fix: `git diff <commit round one saw>..HEAD`, plus the findings with what was done about each. Each member marks every finding `fixed` or `still open` and reports new breakage inside that diff.
 - No round for notes, wording, test names, or a fix of a few lines that has a test failing without it.
 - Three rounds at most. Say the count ("round 2 of at most 3"). If findings are still open, stop and show the human each one with both sides in two lines.
@@ -43,14 +43,14 @@ There is no score. A member ends with a verdict: ready, or the blockers and shou
 - Check each finding against the code as it arrives. A finding about code the default branch already changed is not a finding.
 - Keep scope. Findings outside the goal go to a follow-up issue. If fixes grew the diff more than the findings needed, cut.
 
-Record it in the PR under `## Council review`: one row per round with each reviewer's verdict, and how many findings were fixed and declined. Label them Reviewer 1 and Reviewer 2, not by model.
+Record it in the PR under `## Council review`: one row per round with each reviewer's verdict, and how many findings were fixed and declined. Label them Reviewer 1, Reviewer 2 and so on, not by model.
 
 ## Briefs
 
 Design or plan:
 
 ```text
-You are one of two independent reviewers of a design for <repo>. Review only: no edits, commits, GitHub comments or subagents.
+You are one of <n> independent reviewers of a design for <repo>. Review only: no edits, commits, GitHub comments or subagents.
 Request: <the request>
 Design: <path>   Issue: <link>
 Rules the change must keep: <list, or "none written">
@@ -64,7 +64,7 @@ Write findings, most severe first, to <file>, then what you would cut. No score.
 Judging proposals (level 3 of design), one round:
 
 ```text
-You are one of two independent judges of design proposals for <repo>. Review only: no edits, commits, GitHub comments or subagents.
+You are one of <n> independent judges of design proposals for <repo>. Review only: no edits, commits, GitHub comments or subagents.
 Problem, flows and rules: <path>
 Proposals: A <path>, B <path>, C <path>. You are not told who wrote them.
 Rubric: <path>   Results of the spikes: <path>
@@ -76,7 +76,7 @@ Write to <file>. Last line exactly WINNER: A, WINNER: B or WINNER: C.
 PR, round one:
 
 ```text
-You are one of two independent reviewers of a PR for <repo>. Review only: no edits, commits, GitHub comments or subagents.
+You are one of <n> independent reviewers of a PR for <repo>. Review only: no edits, commits, GitHub comments or subagents.
 Request: <the request>   Design: <path>
 Rules the change must keep: <list, or "none written">
 PR: <link>, base <sha>, head <sha>. Diff: git diff <base>...<head>

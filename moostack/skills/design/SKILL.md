@@ -17,7 +17,7 @@ The level follows what the choice costs to undo, not how much code it is. Use th
 |---|---|---|---|
 | 1 | A design inside one area that is cheap to undo | You, two or three options | The human picks |
 | 2 | A design that crosses areas, a new subsystem, or a replacement for one | Two proposers from different model families, and a third when the two disagree on shape | A rubric and one outside judge, then the human picks |
-| 3 | A protocol, storage format or security boundary that is costly to change once it ships | Three proposers from different model families | A [council](../council/SKILL.md) judges them against the rubric and names the winner; a split goes to the human |
+| 3 | A protocol, storage format or security boundary that is costly to change once it ships | Three proposers from different model families | A [council](../council/SKILL.md) judges them against the rubric and names the winner; without a majority it goes to the human |
 
 When the human names a level, use it. Otherwise say the level and why in one line. Levels 2 and 3 spend usage on other models, so wait for the go, and at level 3 ask in that same line for the yes to the council.
 
@@ -77,7 +77,7 @@ Proposals are labelled A, B and C before anyone judges them, with no word of who
 
 - **Level 1:** mark your options against the rubric and show them to the human with your recommendation first. The human picks.
 - **Level 2:** one judge marks the proposals against the rubric. The judge is a fresh subagent that wrote no proposal, from a model family other than yours when one is available. Mark them yourself as well, then compare. Where you and the judge differ, one of you is biased or a criterion was vague: reread both reasons before recommending. Show the human the options, both sets of marks and your recommendation first. The human picks.
-- **Level 3:** the council judges. Both members get the labelled proposals, the rubric and the spike results, mark every criterion with proof for any claim about the code, and name the proposal they would build. When both name the same one, that is the decision; tell the human and go on. When they differ, show the human each side in two lines and wait. One round.
+- **Level 3:** the council judges. Every member gets the labelled proposals, the rubric and the spike results, marks every criterion with proof for any claim about the code, and names the proposal it would build. When more than half name the same one, that is the decision; tell the human and go on. Otherwise show the human each side in two lines and wait. One round.
 
 Nobody deliberates. Proposers do not read each other's proposals and judges do not confer, because a group that talks tends to settle on a blend that nobody designed.
 
