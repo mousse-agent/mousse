@@ -1,4 +1,4 @@
-import { ROUTED_AGENT_ARCHIVE_SINCE, ROUTED_AGENT_KEY, ROUTED_AGENT_READ, ROUTED_RUN_WAIT_DEADLINE_MS, ROUTED_RUN_WAIT_MAX_MS, type RoutedAgentMark } from '../../shared/bridge/routed'
+import { ROUTED_AGENT_ARCHIVE_SINCE, ROUTED_AGENT_BOT_KEY, ROUTED_AGENT_KEY, ROUTED_AGENT_READ, ROUTED_RUN_WAIT_DEADLINE_MS, ROUTED_RUN_WAIT_MAX_MS, type RoutedAgentBot, type RoutedAgentMark } from '../../shared/bridge/routed'
 import { outgoingMessageText, qualifyRoutedResult, ROUTED_THREAD_ID_KEYS } from '../../shared/bridge/routedIds'
 import { parseQualifiedId, qualifyId } from '../../shared/threadRef'
 import { DomainRpcError } from '../protocol/domainRegistry'
@@ -249,7 +249,7 @@ export class RemoteLaunchedThreads {
       return { ok: true, record, node: ref.node, remoteThreadId: ref.id, computer, threadId: qualifyId(ref.node, ref.id) }
     }
     if (!listed && !found)
-      return { ok: false, code: 'unknown_computer', message: `${ref.node} is not one of the user's other computers (list_computers names them), so thread ${threadId} cannot be reached.` }
+      return { ok: false, code: 'unknown_computer', message: `${ref.node} is not one of the user's other computers (computer_list names them), so thread ${threadId} cannot be reached.` }
     const refused = this.computerRefusal(callerThreadId, ref.node, computer)
     if (refused) return { ok: false, ...refused, computer }
     return { ok: true, node: ref.node, remoteThreadId: ref.id, computer, threadId: qualifyId(ref.node, ref.id) }
@@ -268,7 +268,7 @@ export class RemoteLaunchedThreads {
   }
 
   /**
-   * `thread_list` and `thread_search` with `computer`: the computer `ref` names (a name or id from `list_computers`), as
+   * `thread_list` and `thread_search` with `computer`: the computer `ref` names (a name or id from `computer_list`), as
    * the caller may list and search it now, or why not.
    */
   computerFor(callerThreadId: string, ref: string): RemoteComputerReach {
@@ -279,7 +279,7 @@ export class RemoteLaunchedThreads {
     const byNode = computers.find((entry) => entry.node === wanted)
     const byName = computers.filter((entry) => entry.name.trim().toLowerCase() === wanted.toLowerCase())
     if (!byNode && byName.length > 1)
-      return { ok: false, code: 'ambiguous_computer', message: `Several of the user's computers are called "${wanted}"; name one by its id from list_computers.`, computers: byName.map(({ node, name }) => ({ id: node, name })) }
+      return { ok: false, code: 'ambiguous_computer', message: `Several of the user's computers are called "${wanted}"; name one by its id from computer_list.`, computers: byName.map(({ node, name }) => ({ id: node, name })) }
     const found = byNode ?? byName[0]
     if (!found) {
       const names = computers.map((entry) => entry.name)
@@ -520,7 +520,7 @@ export class RemoteLaunchedThreads {
    * `thread_send`: a marked `orchestrator.send` there, keyed by the caller's request key, so a retry reaches the first
    * send and never makes a second run. A send that computer may or may not have taken is `uncertain`.
    */
-  async send(target: RemoteTarget, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; mark: RoutedAgentMark }): Promise<{ status: 'sent'; runId?: string; queued: boolean; replayed: boolean; mode?: string } | RemoteUncertain> {
+  async send(target: RemoteTarget, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; mark: RoutedAgentMark; bot?: RoutedAgentBot }): Promise<{ status: 'sent'; runId?: string; queued: boolean; replayed: boolean; mode?: string } | RemoteUncertain> {
     this.assertAllowed(target)
     const self = this.deps.port()?.self?.()
     // A later message from here is new work: a Stop still on its way there from before must not end it.
@@ -532,6 +532,8 @@ export class RemoteLaunchedThreads {
         content: outgoingMessageText(input.content, { node: target.node, ...(self ? { self } : {}) }),
         mode: input.mode,
         clientRequestId: options.clientRequestId,
+        // A personal bot's message: that computer shows its name and face (one from before it, the agent label).
+        ...(options.bot ? { [ROUTED_AGENT_BOT_KEY]: options.bot } : {}),
         [ROUTED_AGENT_KEY]: options.mark
       }, { idem: options.clientRequestId, what: 'the message' })).result
     } catch (error) {

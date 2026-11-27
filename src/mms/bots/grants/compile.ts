@@ -10,6 +10,7 @@ import { BOT_ITEM_TOOLS } from '../../../shared/bots/personal/items'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
 import { stableStringify } from '../../run/json'
+import { canonicalToolName } from '../../../shared/toolAliases'
 
 /**
  * A bot thread's grant, compiled for one dispatch (PR 6 §4). Pure: the caller supplies the native
@@ -144,7 +145,7 @@ export interface CompileInput {
     applets?: boolean
     /**
      * A run's main turn: it may split its job among subagents (`BOT_SUBAGENT_TOOLS`), and lists the models they may run on
-     * (`work_models`). Never the chat, a consult or a subagent.
+     * (`model_list`). Never the chat, a consult or a subagent.
      */
     subagents?: boolean
     /** Work (including a reminder's work) and a scheduled run may park on time or events (`BOT_TURN_KINDS`). */
@@ -213,8 +214,9 @@ export function systemTempDirs(): string[] {
 
 export function compileBotThread(input: CompileInput): CompileResult {
   const narrowed = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
-  // A tool bots no longer have, still listed by a grant an older build approved, gives nothing.
-  const held = { ...narrowed, appTools: narrowed.appTools.filter((tool) => !BOT_RETIRED_APP_TOOLS.has(tool)) }
+  // A tool bots no longer have, still listed by a grant an older build approved, gives nothing. One it names by an old
+  // name gives the tool it was renamed to; the stored grant and its digest stay as approved.
+  const held = { ...narrowed, appTools: narrowed.appTools.filter((tool) => !BOT_RETIRED_APP_TOOLS.has(tool)).map(canonicalToolName) }
   // A subagent is the work, never more: what the work holds, less what is the bot's alone, and none of the bot's tools
   // but what a thread's subagent may use (the owner's threads, the profiler, its task list).
   const subagent = input.botTools?.subagent === true
@@ -281,7 +283,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(secrets ? BOT_SECRET_TOOLS.filter((tool) => tool !== 'secret_run' || manifest.tools.includes('shell')) : []),
     ...(quickActions ? BOT_QUICK_ACTION_TOOLS : []),
     ...(shared?.tasks ? BOT_TASK_TOOLS : []),
-    ...(skills.length || allSkills ? ['list_skills', 'load_skill'] : []),
+    ...(skills.length || allSkills ? ['skill_list', 'skill_load'] : []),
     ...(own?.escalate ? ['escalate'] : []),
     ...(own?.consult ? ['consult'] : []),
     ...(own?.workWaiting ? ['work_wait'] : []),
@@ -299,7 +301,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(own?.cards ? [BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL] : []),
     ...(own?.bots ? BOT_MESSAGE_TOOLS : []),
     // A run's main turn splits its job among subagents, on models from the same list the chat picks work's from.
-    ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'work_models'] : []),
+    ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'model_list'] : []),
     // The catalogue's own tools: they reach nothing themselves, and every tool called through them is held to this list.
     ...(own?.catalogue ? [BOT_CATALOGUE_TOOL, ...(own.catalogue === 'use_tool' ? [BOT_USE_TOOL] : [])] : [])
   ])].sort()

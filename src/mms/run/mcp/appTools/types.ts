@@ -263,6 +263,8 @@ export interface MousseTool {
    * (a bot has no project: the git tools take the thread or project it reads).
    */
   botInputSchema?: JsonSchema
+  /** What a personal bot's thread lists instead of `class`, where the bot's tool of a shared name is another kind. */
+  botClass?: ToolClass
   /**
    * A tool whose personal bot's call its grant answers: once the registry has held the call to the bot's grant, it asks
    * nobody, whatever `access` would ask of a thread (the owner allowing the permission is the bot's Full access for it).

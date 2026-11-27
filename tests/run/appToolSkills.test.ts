@@ -1,5 +1,5 @@
 /**
- * Skills for runtimes with their own loop (PR 2 §2): `list_skills` and `load_skill` over MCP, an
+ * Skills for runtimes with their own loop (PR 2 §2): `skill_list` and `skill_load` over MCP, an
  * explicit `/skill` loaded into the turn preamble, and resumed vendor sessions that keep getting it.
  */
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -64,7 +64,7 @@ function fakeSkills(skills: SkillDescriptor[]) {
   return { registry: registry as unknown as SkillsRegistry, reads }
 }
 
-describe('list_skills and load_skill over MCP', () => {
+describe('skill_list and skill_load over MCP', () => {
   let fx: DelegationFixture | undefined
   let server: MousseMcpServer | undefined
   afterEach(async () => {
@@ -86,7 +86,7 @@ describe('list_skills and load_skill over MCP', () => {
     await server.start()
     const mcp = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!
 
-    const listed = await callTool(mcp, 'list_skills')
+    const listed = await callTool(mcp, 'skill_list')
     expect(listed.error).toBeUndefined()
     expect(JSON.parse(listed.text!)).toEqual([
       expect.objectContaining({ id: 'review', name: 'review', modelInvocationDisabled: false }),
@@ -94,16 +94,16 @@ describe('list_skills and load_skill over MCP', () => {
       expect.objectContaining({ id: 'gone', name: 'gone' })
     ])
 
-    const loaded = await callTool(mcp, 'load_skill', { skill: 'review' })
+    const loaded = await callTool(mcp, 'skill_load', { skill: 'review' })
     expect(loaded).toMatchObject({ isError: undefined, text: BODY.review })
 
-    const refused = await callTool(mcp, 'load_skill', { skill: 'deploy' })
+    const refused = await callTool(mcp, 'skill_load', { skill: 'deploy' })
     expect(refused.error).toBeUndefined()
     expect(refusalOf(refused)).toMatchObject({ message: 'Skill deploy can only be loaded by explicit user invocation.' })
     // Listed when the turn began, removed since: that skill is unavailable, nothing else changes.
-    const gone = await callTool(mcp, 'load_skill', { skill: 'gone' })
+    const gone = await callTool(mcp, 'skill_load', { skill: 'gone' })
     expect(refusalOf(gone)).toMatchObject({ message: 'Skill gone is no longer available.' })
-    const unknown = await callTool(mcp, 'load_skill', { skill: 'nope' })
+    const unknown = await callTool(mcp, 'skill_load', { skill: 'nope' })
     expect(refusalOf(unknown)).toMatchObject({ message: 'Skill not found: nope' })
     // The refused skill was read for its policy as the file states it now; its text was not returned.
     expect(skills.reads).toEqual(['inst-review', 'inst-deploy', 'inst-gone'])
@@ -129,7 +129,7 @@ describe('list_skills and load_skill over MCP', () => {
           { id: inherited.installationId, revision: inherited.revision, source: 'inherited' as const },
           { id: explicit.installationId, revision: explicit.revision, source: 'explicit' as const }
         ],
-        builtinTools: [{ id: 'load_skill', source: 'explicit' as const }],
+        builtinTools: [{ id: 'skill_load', source: 'explicit' as const }],
         mcpTools: [],
         denied: []
       }
@@ -156,7 +156,7 @@ describe('list_skills and load_skill over MCP', () => {
       server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
       await server.start()
       const mcp = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!
-      const load = (skill: string) => callTool(mcp, 'load_skill', { skill })
+      const load = (skill: string) => callTool(mcp, 'skill_load', { skill })
 
       expect((await load('inherited-review')).text).toContain('Granted instructions.')
       settings.enabledSkills = []
@@ -178,8 +178,8 @@ describe('list_skills and load_skill over MCP', () => {
     await fx.runningRun('thread-a')
     const { registry } = appToolRegistry(fx.engine, fakeAppToolHost().host)
     const names = registry.listForThread('thread-a').map((tool) => tool.name)
-    expect(names).not.toContain('list_skills')
-    expect(names).not.toContain('load_skill')
+    expect(names).not.toContain('skill_list')
+    expect(names).not.toContain('skill_load')
   })
 })
 
@@ -190,11 +190,11 @@ describe('an explicit /skill in a vendor turn', () => {
     d = undefined
   })
 
-  it('loads the skill into the turn preamble on every turn that names it, and list_skills reports it', async () => {
+  it('loads the skill into the turn preamble on every turn that names it, and skill_list reports it', async () => {
     const skills = fakeSkills([REVIEW, GATED])
     let listed: ToolCallResult | undefined
     const vendor = new VendorAdapter(async ({ mcp }) => {
-      listed ??= await callTool(mcp!, 'list_skills')
+      listed ??= await callTool(mcp!, 'skill_list')
       return 'Reviewed.'
     })
     d = await vendorDaemon([vendor])
@@ -227,7 +227,7 @@ describe('an explicit /skill in a vendor turn', () => {
     let allowed: ToolCallResult | undefined
     try {
       d = await vendorDaemon([new VendorAdapter(async ({ mcp }) => {
-        const load = () => callTool(mcp!, 'load_skill', { skill: 'live-review' })
+        const load = () => callTool(mcp!, 'skill_load', { skill: 'live-review' })
         const check = async (label: string) => refused.push({ case: label, result: await load() })
         allowed = await load()
 

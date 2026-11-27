@@ -284,7 +284,7 @@ describe('normalizeToolName', () => {
     ['plan', 'PlanWrite'],
     ['web_search', 'WebSearch'],
     ['WebFetch', 'WebFetch'],
-    ['load_skill', 'Skill'],
+    ['skill_load', 'Skill'],
     ['Agent', 'Agent'],
     ['task', 'Task'],
     ['question', 'Question'],

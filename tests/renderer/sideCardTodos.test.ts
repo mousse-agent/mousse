@@ -13,7 +13,7 @@
  * | TodoWrite with an empty list (cleared)    | yes, to none  |
  *
  * Claude Code turns TodoWrite off by default and keeps its list with TaskCreate and TaskUpdate instead; the tasks an
- * agent keeps with Mousse's create_task follow the runtime's list.
+ * agent keeps with Mousse's task_create follow the runtime's list.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -124,7 +124,7 @@ describe('the side card To-dos', () => {
     expect(rows()).toEqual(['Done: Read the form', 'In progress: Fix the login bug', 'To do: Run the tests'])
   })
 
-  it('shows the tasks the agent keeps on the thread with create_task, after the runtime’s list', async () => {
+  it('shows the tasks the agent keeps on the thread with task_create, after the runtime’s list', async () => {
     await act(async () => useAppStore.setState({ tasks: [keptTask('a', 'Ship the fix', 'in_progress', 'Tests running'), keptTask('b', 'Tell the owner', 'pending')] }))
     expect(toggle().textContent).toBe('To-dos0 of 2 done')
     await show([todo([['Plan it', 'completed']])])

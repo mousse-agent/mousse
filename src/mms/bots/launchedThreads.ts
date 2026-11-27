@@ -268,7 +268,9 @@ export function remoteLaunchedThreadsOf(input: {
       ...(where ? { project: where } : {}),
       status,
       startedAt: row.startedAt || row.createdAt || updatedAt,
-      updatedAt
+      updatedAt,
+      // Out of the sidebar there and here (`Thread.hidden`, from that computer's lists): "Hidden", as for its threads here.
+      ...(row.hidden ? { hidden: true as const } : {})
     })
   }
   return out

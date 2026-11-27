@@ -33,6 +33,17 @@ export interface BotExecutionPort {
    * recorded already.
    */
   onSubagentSettled(rootActivationId: string, childThreadId: string, outcome: BotSubagentOutcome): boolean
+  /**
+   * A Stop of a bot work's row in the thread tree (`delegation/botWork.ts`): the bots stop the work as `work_stop` does.
+   * `ended`: it had ended already. A port without it stops nothing.
+   */
+  stopBotWork?(activationId: string): Promise<'stopped' | 'ended' | 'not_found'>
+  /**
+   * A message to a bot work's row: the bots pass it to the work as its owner's note (`work_note`), never through the
+   * work thread's inbox. `from`: the bot turn that sent it, so a turn its owner did not start never speaks for them;
+   * `requestKey`: a retry of the same request adds nothing. Returns what `work_note` returns (`noted`: the work takes it).
+   */
+  noteBotWork?(activationId: string, text: string, options?: { from?: string; requestKey?: string }): string
 }
 
 /**

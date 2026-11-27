@@ -1684,7 +1684,9 @@ export class BotStore {
         this.withdrawWorkQuestions(id)
         heldCalls(this.db)?.endWork(id, to)
         const refusalPrefix = `cursor:action-refusal:${id}:`
-        this.run('DELETE FROM bot_memory_state WHERE key IN (?, ?) OR substr(key, 1, ?) = ?', `cursor:action-note:${id}`, `cursor:action-owner:${id}`, refusalPrefix.length, refusalPrefix)
+        // And the requests `work_note` took (`noteWork`): ended work takes no note, so a retry needs no record.
+        const notePrefix = `work-note-request:${id}:`
+        this.run('DELETE FROM bot_memory_state WHERE key IN (?, ?) OR substr(key, 1, ?) = ? OR substr(key, 1, ?) = ?', `cursor:action-note:${id}`, `cursor:action-owner:${id}`, refusalPrefix.length, refusalPrefix, notePrefix.length, notePrefix)
         this.run("UPDATE bot_reminders SET status = 'cancelled', delivered_at = ? WHERE work_id = ? AND status = 'waiting'", this.now(), id)
       }
       return moved

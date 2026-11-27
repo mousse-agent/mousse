@@ -10,6 +10,7 @@ import {
   type InboxRecord,
   type RunRecord
 } from '../types'
+import { BOT_WORK_ROW_SQL } from './botWork'
 import { FOLLOW_UP_SOURCES } from './sources'
 
 /**
@@ -144,7 +145,8 @@ function hasInFlightDeliveryEffect(store: RunStore, threadId: string): boolean {
 /** The cheap inputs first; the provider's callback last. Each is a read of the current state. */
 export function childBusyInputs(store: RunStore, threadId: string): ChildBusyInputs {
   const runningOutboundDelegation = Boolean(
-    store.db.statement(`SELECT 1 FROM delegations WHERE parent_thread_id = ? AND status = 'running' LIMIT 1`).get(threadId)
+    // A bot's chat is not busy with its work: that is the bots' (`delegation/botWork.ts`).
+    store.db.statement(`SELECT 1 FROM delegations WHERE parent_thread_id = ? AND status = 'running' AND NOT ${BOT_WORK_ROW_SQL} LIMIT 1`).get(threadId)
   )
   const unconsumedInbox = actionableInbox(store, threadId)
   const inFlightEffects = hasInFlightDeliveryEffect(store, threadId)

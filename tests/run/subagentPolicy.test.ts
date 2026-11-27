@@ -486,7 +486,7 @@ describe('delegated child policy', () => {
     for (const turn of childTurns) {
       expect(turn.input.child).toEqual({ readOnly: true })
       expect(turn.delegation).toBeDefined()
-      for (const tool of ['write_file', 'edit_file', 'bash', 'integrate_delegation', 'create_task', 'queue_enqueue', 'thread_fork', 'thread_merge_back'])
+      for (const tool of ['write_file', 'edit_file', 'bash', 'integrate_delegation', 'task_create', 'queue_enqueue', 'thread_fork', 'thread_merge_back'])
         expect(turn.toolAccess?.allows(tool), tool).toBe(false)
       for (const tool of ['read_file', 'delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'list_delegations']) expect(turn.toolAccess?.allows(tool), tool).toBe(true)
     }
@@ -545,7 +545,7 @@ describe('delegated child policy', () => {
         ['thread_fork', {}],
         ['thread_merge_back', {}],
         ['delegate_task', { prompt: 'x', title: 'Writer', workspace: 'isolated', role: 'implement', instanceId: 'claude' }],
-        ['create_task', { title: 't' }]
+        ['task_create', { title: 't' }]
       ] as const) {
         results[name][tool] = await tools.call(tool, { ...args }, { credential, toolCallId: `${name}-${tool}`, signal: new AbortController().signal })
           // A refusal names the code it was refused with (`mousse_read_only`); a tool's own error result still counts as allowed.
@@ -574,7 +574,7 @@ describe('delegated child policy', () => {
       // The call reaches delegate_task, which refuses a non-read-only child as a value; a read-only one starts.
       delegate_task: 'read_only_caller_requires_shared',
       delegate_shared: 'started',
-      create_task: 'mousse_read_only'
+      task_create: 'mousse_read_only'
     })
     // The same calls are not refused by the policy for an isolated child.
     expect(Object.values(results.isolated)).not.toContain('mousse_read_only')

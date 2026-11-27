@@ -5,6 +5,7 @@ import { isRunningSubagent, type SubagentSummary } from '../../../shared/subagen
 import { formatAgo } from '../../lib/formatAgo'
 import type { SubagentCardModel } from '../../chat/adapters/subagentCards'
 import type { Thread } from '../../../shared/types'
+import { parseQualifiedId } from '../../../shared/threadRef'
 
 /** Finished rows shown, once their group is open, before the list asks to be expanded. */
 export const LINEAGE_COLLAPSED_COUNT = 5
@@ -235,12 +236,26 @@ export async function stopAllSubagents(
 export type LaunchedThread = Pick<Thread, 'id' | 'name' | 'updatedAt' | 'hidden' | 'archivedAt' | 'node' | 'createdByThreadId' | 'startedByBot' | 'startedFrom'>
 
 /**
+ * Whether `threadId` started `thread`: it names it as its launcher (`createdByThreadId`; on a row of another computer
+ * qualified with that computer, as `threadId` then is), or it is a row of another computer that an agent started from
+ * the computer of `threadId` (`startedFrom.agent`, whose thread is named by its id on that computer).
+ */
+function launchedBy(thread: LaunchedThread, threadId: string): boolean {
+  if (thread.createdByThreadId === threadId) return true
+  const agent = thread.startedFrom?.agent
+  if (!thread.node || !agent) return false
+  const launcher = parseQualifiedId(threadId)
+  return launcher ? launcher.node === thread.startedFrom!.node && launcher.id === agent.thread : agent.thread === threadId
+}
+
+/**
  * The threads `threadId` started with `thread_create`, newest first: here (`createdByThreadId`), and on another computer
  * (a row of that computer whose `startedFrom.agent` names this thread). The person reaches them here, since a thread an
- * agent starts is out of the sidebar unless it was started as independent. Archived ones are left out, as in the sidebar.
+ * agent starts is out of the sidebar unless it was started as independent. The same on a computer that reads both from
+ * another: its launcher and its rows are both that computer's. Archived ones are left out, as in the sidebar.
  */
 export function launchedThreadsOf<T extends LaunchedThread>(threads: readonly T[], threadId: string): T[] {
   return threads
-    .filter((thread) => !thread.archivedAt && !thread.startedByBot && (thread.node ? thread.startedFrom?.agent?.thread === threadId : thread.createdByThreadId === threadId))
+    .filter((thread) => !thread.archivedAt && !thread.startedByBot && launchedBy(thread, threadId))
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
 }

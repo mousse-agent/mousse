@@ -94,7 +94,8 @@ const AUTHORIZED = new WeakMap<DefinitionAuthority, Map<string, string>>()
 
 function authorizedKey(authority: DefinitionAuthority, call: AuthorizedCall): string {
   const mcp = (authority.mcpTools ?? []).find((tool) => tool.providerName === call.toolName)
-  const tool = mcp ? `mcp:${mcp.installationId ?? mcp.serverId}:${mcp.toolName}` : `tool:${call.toolName}`
+  // An old tool name is its new one (`canonicalizeBuiltinToolName`): the gate may see either, the registry the new one.
+  const tool = mcp ? `mcp:${mcp.installationId ?? mcp.serverId}:${mcp.toolName}` : `tool:${canonicalizeBuiltinToolName(call.toolName)}`
   return JSON.stringify([call.turnToken, tool, call.callId])
 }
 

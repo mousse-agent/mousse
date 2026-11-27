@@ -57,7 +57,7 @@ async function fixture(outputs: AssistantMessage[]) {
       return next
     } })
   const integrations = services.settings.get().integrations
-  services.settings.set({ integrations: { ...integrations, tools: { enabled: true, enabledTools: ['read', 'write', 'ask_user', 'create_task'] } } })
+  services.settings.set({ integrations: { ...integrations, tools: { enabled: true, enabledTools: ['read', 'write', 'ask_user', 'task_create'] } } })
   const server = new MmsProtocolServer({ mms: main, ownerToken: 'fixture-owner' })
   const endpoint = await server.start()
   const clients: LocalMmsClient[] = []
@@ -77,7 +77,7 @@ function settings(name: string, modelRef: { providerId: string; modelId: string 
   const value = defaultAgentSettings({ name, slug: name.toLowerCase().replaceAll(' ', '-') })
   value.primaryModel.ref = modelRef
   value.context.includeProjectInstructions = false
-  value.tools = { mode: 'explicit', allowlist: ['read', 'write', 'ask_user', 'create_task'] }
+  value.tools = { mode: 'explicit', allowlist: ['read', 'write', 'ask_user', 'task_create'] }
   value.approval.policy = approval
   value.recovery.retryCount = 0
   return value
@@ -86,7 +86,7 @@ function settings(name: string, modelRef: { providerId: string; modelId: string 
 describe('native Agent Editor Try Run production host', () => {
   it('runs an exact published revision through framed MMS in an isolated scratch and profile/thread history', async () => {
     const f = await fixture([
-      providerResponse([{ type: 'toolCall', id: 'task-1', name: 'create_task', arguments: { description: 'run-scoped task' } }], 'toolUse'),
+      providerResponse([{ type: 'toolCall', id: 'task-1', name: 'task_create', arguments: { description: 'run-scoped task' } }], 'toolUse'),
       providerResponse([{ type: 'toolCall', id: 'write-1', name: 'write', arguments: { path: 'result.txt', content: 'pinned bytes' } }], 'toolUse'),
       providerResponse([{ type: 'text', text: 'pinned answer' }], 'stop')
     ])

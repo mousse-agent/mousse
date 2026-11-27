@@ -3,6 +3,7 @@ import type { AppletReference } from './applets'
 import type { ModelOverride } from './providerInstances'
 import type { ThreadPullRequestLink } from './pullRequests'
 import type { PermissionMode } from './permissionMode'
+import type { BotLook } from './bots/personal/look'
 import type { ProviderRetryState } from './providerRetry'
 export type { PermissionMode } from './permissionMode'
 export type { GitPullRequestInfo, GitPullRequestLookup, PullRequestCheckState } from './pullRequests'
@@ -1383,6 +1384,11 @@ export interface AgentOrigin {
 export interface AgentOriginBot {
   id: string
   name: string
+  /**
+   * Its face, for a bot of another computer: a window there has no record of it (`ROUTED_AGENT_BOT_KEY`). Absent on a
+   * bot of this computer, whose window reads its face from the bots it lists.
+   */
+  look?: BotLook
 }
 
 /** The length of the header before an agent's words (`head`) and of the closing line after them (`tail`). */
@@ -1701,8 +1707,12 @@ export interface Thread {
    * Set on a thread one of the owner's bots started ("use your threads"): the bot and its name then, so the thread still
    * says who started it after the bot is renamed or deleted ("Started by Alpha (deleted)"). `createdByThreadId` is the
    * bot's chat thread.
+   *
+   * `node` is set when the bot is one of another computer's (`startedFrom.node`): it started this thread there with
+   * `computer`, and its first message named it (`ROUTED_AGENT_BOT_KEY`). Display only: no bot here has that id, so
+   * nothing that decides what a thread may do reads such a bot (`ownBotOf`).
    */
-  startedByBot?: { botId: string; name: string }
+  startedByBot?: { botId: string; name: string; node?: string }
   /**
    * Set on a thread kept out of the owner's sidebar: an agent started it (`thread_create`, here or from another computer)
    * and did not start it as independent, or a personal bot started it hidden or hid it later (a short background job).

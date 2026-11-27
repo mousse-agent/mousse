@@ -11,6 +11,7 @@
  * when the keys of a version change.
  */
 import type { NodeCapability } from '../net/capabilities'
+import type { BotLook } from '../bots/personal/look'
 
 /** What a row acts on. */
 export type RoutedTarget =
@@ -133,7 +134,8 @@ export const ROUTED_SEND_WINDOW_KEY = 'window'
 
 /** Optional behavior an older owner can omit while still providing its original answer. */
 export const ROUTED_DROPPABLE_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  'orchestrator.send': [ROUTED_SEND_WINDOW_KEY],
+  // An owner from before `agentBot` labels a bot's message as any agent's.
+  'orchestrator.send': [ROUTED_SEND_WINDOW_KEY, 'agentBot'],
   // An owner from before it shows every thread; it never had a way to hide one. One from before `subagent` records the
   // thread as one an agent started, without saying it is that agent's subagent.
   'threads.create': ['hidden', 'subagent'],
@@ -205,6 +207,24 @@ export interface RoutedAgentMark {
   hops: number
   /** The mode the sender runs in. The owner narrows it further and never widens anything by it. */
   mode: string
+}
+
+/**
+ * On an agent's `orchestrator.send` (with `agent`), set only by the calling computer's daemon when the sender is one of
+ * the user's personal bots: its id, name and look, so that computer shows the message with the bot's name and face. It
+ * is display only: that computer has no record of the bot, and the key grants nothing. An owner from before it is sent
+ * the call without it (`ROUTED_DROPPABLE_KEYS`) and shows the plain agent label.
+ */
+export const ROUTED_AGENT_BOT_KEY = 'agentBot'
+/** The version of `orchestrator.send` that added `agentBot`. */
+export const ROUTED_AGENT_BOT_SINCE = 9
+
+/** What `agentBot` carries: a few short strings (a face is a look, never an image), so it stays small. */
+export interface RoutedAgentBot {
+  /** The bot's id on the calling computer. */
+  id: string
+  name: string
+  look?: BotLook
 }
 
 /**
@@ -413,7 +433,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
       'expect',
       ROUTED_SEND_WINDOW_KEY,
       ROUTED_AGENT_KEY,
-      ROUTED_DEADLINE_KEY
+      ROUTED_DEADLINE_KEY,
+      ROUTED_AGENT_BOT_KEY
     ],
     // Version 3: `refuseWhilePaused`, a parent's follow-up to a subagent, which a thread paused by a usage limit refuses.
     // Version 4: `conversationBranchId`, the branch an edited prompt must land on.
@@ -421,7 +442,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     // Version 6: `window`, set by the calling computer: a window sent this (`ROUTED_SEND_WINDOW_KEY`).
     // Version 7: `agent`, an agent's message (`ROUTED_AGENT_KEY`).
     // Version 8: `deadlineMinutes`, the running time an agent's task may use there (`ROUTED_DEADLINE_KEY`).
-    { required: ['content'], ...staging(['content', 'images']), version: 8, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4, expect: 5, [ROUTED_SEND_WINDOW_KEY]: 6, [ROUTED_AGENT_KEY]: 7, [ROUTED_DEADLINE_KEY]: ROUTED_DEADLINE_SINCE } }
+    // Version 9: `agentBot`, the personal bot that sent an agent's message (`ROUTED_AGENT_BOT_KEY`).
+    { required: ['content'], ...staging(['content', 'images']), version: 9, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4, expect: 5, [ROUTED_SEND_WINDOW_KEY]: 6, [ROUTED_AGENT_KEY]: 7, [ROUTED_DEADLINE_KEY]: ROUTED_DEADLINE_SINCE, [ROUTED_AGENT_BOT_KEY]: ROUTED_AGENT_BOT_SINCE } }
   ),
   // Version 3 (both): `agent`, an agent's steer or Stop (`ROUTED_AGENT_KEY`).
   'orchestrator.steer': chat(

@@ -81,7 +81,7 @@ export interface AgentThreadRequest {
  * or in its copy of the caller's repository.
  */
 export interface AgentRemoteThreadRequest {
-  /** A computer's name or id from `list_computers`. */
+  /** A computer's name or id from `computer_list`. */
   computer: string
   /**
    * A project of that computer (plain, or qualified as `thread_list` with computer names it). Alone, the thread starts
@@ -382,7 +382,7 @@ export interface AppToolHost extends DelegationToolsHost {
   terminals?(): TerminalReadHost | undefined
   /** The thread's task queue; null when the owner keeps none (no task tools). */
   tasks(threadId: string | undefined): TaskQueue | null
-  /** The threads' goals (`/goal`): whether one is working, and the agent's `goal_status` report. Absent: no goal tool. */
+  /** The threads' goals (`/goal`): whether one is working, and the agent's `goal_update` report. Absent: no goal tool. */
   goals?: {
     working(threadId: string): boolean
     /** Records the report of the caller's run; returns what the agent is told. Throws on a report it refuses. */

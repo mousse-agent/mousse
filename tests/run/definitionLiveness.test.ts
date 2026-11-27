@@ -24,7 +24,7 @@ function world(onApproval: (state: { active: string | null; current: boolean }) 
   const ran: unknown[] = []
   const definition: DefinitionAuthority = {
     policy,
-    grants: { skills: [], mcpTools: [], builtinTools: [{ id: 'create_task', source: 'definition' as never }], denied: [] },
+    grants: { skills: [], mcpTools: [], builtinTools: [{ id: 'task_create', source: 'definition' as never }], denied: [] },
     approve: async (request: AgentRuntimeToolApprovalRequest) => {
       onApproval(state)
       return { status: 'approved', digest: request.argumentDigest }
@@ -33,8 +33,8 @@ function world(onApproval: (state: { active: string | null; current: boolean }) 
   const turns = new AppToolTurns()
   turns.register(appTurn({ threadId: 't1', runId: 'r1', turnToken: 'tt', definition }))
   const registry = new ToolRegistry({ activeRunId: () => state.active, turns })
-  registry.register({ name: 'create_task', description: 'Create a task', inputSchema: {}, access: 'actsAsCaller', class: 'mutation', handler: async (args) => (ran.push(args), { text: 'created' }) } as unknown as MousseTool)
-  const call = () => registry.call('create_task', { description: 'a task', _mousse_turn: 'tt' }, {
+  registry.register({ name: 'task_create', description: 'Create a task', inputSchema: {}, access: 'actsAsCaller', class: 'mutation', handler: async (args) => (ran.push(args), { text: 'created' }) } as unknown as MousseTool)
+  const call = () => registry.call('task_create', { description: 'a task', _mousse_turn: 'tt' }, {
     credential: { threadId: 't1', runId: 'r1', provider: 'claude', modeCeiling: 'default', binding: 'rotate', current: () => state.current },
     toolCallId: 'call-1',
     signal: new AbortController().signal
@@ -64,7 +64,7 @@ describe('a definition app tool over MCP re-checks its run after the approval', 
     const ran: unknown[] = []
     const definition: DefinitionAuthority = {
       policy,
-      grants: { skills: [], mcpTools: [], builtinTools: [{ id: 'create_task', source: 'definition' as never }], denied: [] },
+      grants: { skills: [], mcpTools: [], builtinTools: [{ id: 'task_create', source: 'definition' as never }], denied: [] },
       approve: async () => { throw new Error('the gate already asked; the registry must not ask again') }
     }
     const turns = new AppToolTurns()
@@ -72,9 +72,9 @@ describe('a definition app tool over MCP re-checks its run after the approval', 
     const registry = new ToolRegistry({ activeRunId: () => state.active, turns })
     // The run stops being the thread's active run after the registry's first liveness check, as it
     // can while the call travels from the gate to the registry.
-    registry.register({ name: 'create_task', description: 'Create a task', inputSchema: {}, access: 'actsAsCaller', class: 'mutation', available: () => { state.active = 'r2'; return true }, handler: async (args) => (ran.push(args), { text: 'created' }) } as unknown as MousseTool)
-    recordAuthorizedCall(definition, { turnToken: 'tt', toolName: 'create_task', callId: 'call-1', args: { description: 'a task' } })
-    await expect(registry.call('create_task', { description: 'a task', _mousse_turn: 'tt' }, {
+    registry.register({ name: 'task_create', description: 'Create a task', inputSchema: {}, access: 'actsAsCaller', class: 'mutation', available: () => { state.active = 'r2'; return true }, handler: async (args) => (ran.push(args), { text: 'created' }) } as unknown as MousseTool)
+    recordAuthorizedCall(definition, { turnToken: 'tt', toolName: 'task_create', callId: 'call-1', args: { description: 'a task' } })
+    await expect(registry.call('task_create', { description: 'a task', _mousse_turn: 'tt' }, {
       credential: { threadId: 't1', runId: 'r1', provider: 'pi', modeCeiling: 'default', binding: 'per_call', current: () => true },
       toolCallId: 'mcp:call-1',
       signal: new AbortController().signal
