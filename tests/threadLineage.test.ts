@@ -119,6 +119,34 @@ describe('visibleThreads', () => {
   })
 })
 
+describe('a subagent an agent started on another computer', () => {
+  // A started it on B (`delegate_task` with `computer`); C is any other computer. Each lists the others' rows by `<node>:<id>`.
+  const A = 'nod_' + 'a'.repeat(26)
+  const B = 'nod_' + 'b'.repeat(26)
+  const from = (subagent: boolean) => ({ node: A, agent: { thread: 'p', title: 'Plan', mode: 'default' as const, ...(subagent ? { subagent: true as const } : {}) } })
+  type Row = { id: string; node?: string; lineage?: ThreadLineage; startedFrom?: ReturnType<typeof from> }
+  const ids = (threads: readonly { id: string }[]) => threads.map((thread) => thread.id)
+
+  // Each row: the computer's list, what All lists, and the row the subagent's notifications and highlight go to.
+  const cases: Array<{ on: string; list: Row[]; listed: string[]; standsFor: [string, string] }> = [
+    // A: its stand-in (a subagent here) and B's row for the same subagent. Only the parent is listed.
+    { on: 'A', list: [main('p'), sub('stand-in', 'p'), { id: `${B}:x`, node: B, startedFrom: from(true) }], listed: ['p'], standsFor: [`${B}:x`, 'p'] },
+    // B: its own thread, with no lineage, below A's thread.
+    { on: 'B', list: [{ id: `${A}:p`, node: A }, { id: 'x', startedFrom: from(true) }], listed: [`${A}:p`], standsFor: ['x', `${A}:p`] },
+    // C: B's row below A's thread.
+    { on: 'C', list: [{ id: `${A}:p`, node: A }, { id: `${B}:x`, node: B, startedFrom: from(true) }], listed: [`${A}:p`], standsFor: [`${B}:x`, `${A}:p`] },
+    // B while A's threads are not listed there: on its own, as a subagent whose parent is gone.
+    { on: 'B without A', list: [{ id: 'x', startedFrom: from(true) }], listed: ['x'], standsFor: ['x', 'x'] },
+    // A thread the agent started as its own (`thread_create`), or one from a computer from before the mark, is listed on its own.
+    { on: 'B, not a subagent', list: [{ id: `${A}:p`, node: A }, { id: 'x', startedFrom: from(false) }], listed: [`${A}:p`, 'x'], standsFor: ['x', 'x'] }
+  ]
+
+  it.each(cases)('on $on, All lists it once, below its parent', ({ list, listed, standsFor: [id, shownAs] }) => {
+    expect(ids(visibleThreads(list))).toEqual(listed)
+    expect(nearestVisibleAncestor(id, list)).toBe(shownAs)
+  })
+})
+
 describe('openSubagentParentRow', () => {
   const list = [main('root'), sub('child', 'root'), sub('grandchild', 'child', 'root'), sub('orphan', 'trashed')]
 
