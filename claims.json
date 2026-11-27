@@ -149,6 +149,17 @@
       "expiresAt": "2026-11-26T10:19:50.899Z"
     },
     {
+      "task": "remote-thread-opening-cue",
+      "session": "Animatrix-2f78e8",
+      "machine": "Animatrix",
+      "branch": "remote-thread-opening-cue",
+      "paths": [
+        "src/renderer/lib/threadActions.ts"
+      ],
+      "claimedAt": "2026-11-27T05:30:43.900Z",
+      "expiresAt": "2026-11-27T07:30:43.900Z"
+    },
+    {
       "task": "steer-poll-no-queue-file",
       "session": "Avarnics-Mac-mini.local-b17aa1",
       "machine": "Avarnics-Mac-mini.local",
