@@ -693,10 +693,12 @@ export class GuiMmsController extends EventEmitter {
       this.profileTransitions.set(sender.id, (this.profileTransitions.get(sender.id) ?? 0) + 1)
       this.emit('window-profile-changing', {senderId: sender.id})
     }
+    let result: T
+    let rebound = false
     try {
       const client = await this.clientForCurrentSender()
       if (transition) await this.attachedBrowserHost?.releaseWindow(sender)
-      const result = await client.request<T>(method, params, timeoutMs, options)
+      result = await client.request<T>(method, params, timeoutMs, options)
       if (transition) {
         const session = this.windowSessions.get(sender.id)
         const bound = result as unknown as {profile?:{id?:string};epoch?:number}
@@ -704,12 +706,11 @@ export class GuiMmsController extends EventEmitter {
           session.binding = {profileId:bound.profile.id,epoch:bound.epoch}
           const subscribed = await session.client.subscribe(0)
           this.afterWindowSubscribe(sender.id, session.client, subscribed, 'profile-bound')
-          await this.attachedBrowserHost?.acknowledgeClosed(sender)
           // Only a switch that finished: after a failed one the window still shows the profile it had.
           this.rememberWindowProfile(sender, bound.profile.id)
+          rebound = true
         }
       }
-      return result
     } finally {
       if (transition) {
         this.emit('window-profile-changing', {senderId:sender.id})
@@ -718,6 +719,15 @@ export class GuiMmsController extends EventEmitter {
         else this.profileTransitions.delete(sender.id)
       }
     }
+    // The browser host reads the window's binding, which stays hidden until the switch has ended; a switch that
+    // overlaps another leaves this to the last one. The window is bound by now, so a closure proof that cannot be
+    // acknowledged stays for the next binding of that profile instead of failing a switch that already happened.
+    if (rebound && sender && this.getWindowBindingForSender(sender.id)) {
+      await this.attachedBrowserHost?.acknowledgeClosed(sender).catch((error: unknown) => {
+        this.log('window.browser-ack-failed', { window: sender.id, error: describeLinkError(error) })
+      })
+    }
+    return result
   }
 
   /** Whether the service this window talks to has `method` (one the app can do without; see `daemonSupports`). */

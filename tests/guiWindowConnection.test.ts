@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { GuiMmsController } from '../src/main/mms/GuiMmsController'
+import { AttachedBrowserHost } from '../src/main/browser/AttachedBrowserHost'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import type { ProtocolEvent } from '../src/mms/protocol/types'
 
@@ -177,6 +178,31 @@ describe("a window's own service connection", () => {
     await gui.runWithSender(sender, () => gui.request('threads.create', { name: 'Alice thread' }))
     await vi.waitFor(() => expect(events.some((event) => event.type === 'threads.row')).toBe(true))
     expect(events.filter((event) => event.profileId).every((event) => event.profileId === alice.id)).toBe(true)
+  })
+
+  it('a profile switch with the in-app browser host in place succeeds, and the host acknowledges on the new profile', async () => {
+    const host = mms.getInstallationHost()!
+    const alice = host.manager.create({ displayName: 'Alice', slug: 'alice' })
+    await (await mms.getProfileServices(alice.id)).start()
+    // Wired as the app wires it: the host reads the window's binding from the controller.
+    const browser = new AttachedBrowserHost({
+      binding: (senderId) => gui.getWindowBindingForSender(senderId),
+      request: (target, method, params) => gui.requestAttachedBrowser(target, method, params)
+    })
+    gui.setAttachedBrowserHost(browser)
+    const acknowledged: Array<string | undefined> = []
+    const acknowledge = browser.acknowledgeClosed.bind(browser)
+    vi.spyOn(browser, 'acknowledgeClosed').mockImplementation(async (target) => {
+      acknowledged.push(gui.getWindowBindingForSender(target.id)?.profileId)
+      return acknowledge(target)
+    })
+    const sender = windowSender(910)
+    await gui.prepareWindow(sender)
+
+    const bound = await gui.runWithSender(sender, () => gui.request<{ profile: { id: string } }>('profiles.bind', { profile: alice.id }))
+    expect(bound.profile.id).toBe(alice.id)
+    expect(gui.getWindowBindingForSender(910)?.profileId).toBe(alice.id)
+    expect(acknowledged.at(-1)).toBe(alice.id)
   })
 
   it('stops opening a window again once the main connection gives up, and both come back when the person asks', async () => {
