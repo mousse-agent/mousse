@@ -981,6 +981,28 @@ describe('tool rows without a name of their own', () => {
     expect(typeOf(named('d', 'FancyThing'))).toBe('tool-mcp__custom__fancything')
   })
 
+  it('shows no arguments for a call that sent none, rather than its own name as a summary', () => {
+    const inputOf = (message: ChatMessage) => partOf(mousseToUIMessages([message])[0]!).input
+    const named = (id: string, toolName: string, summary = toolName) =>
+      base({ id, kind: 'mcp_tool_call', toolCall: { title: toolName, summary, details: [], status: 'complete', toolName } })
+    // Antigravity's and Claude's spelling of a Mousse tool, and another server's tool.
+    expect(inputOf(named('a', 'mcp_mousse_web_search'))).toEqual({})
+    expect(inputOf(named('b', 'mcp__mousse__web_fetch'))).toEqual({})
+    expect(inputOf(named('c', 'mcp__github__list_issues'))).toEqual({})
+    // A summary that says something else stays.
+    expect(inputOf(named('d', 'mcp__github__list_issues', 'Listed open issues'))).toEqual({ summary: 'Listed open issues' })
+    // A call named only by its title keeps it: renderers read the tool from it.
+    expect(inputOf(unnamed('e', 'secret_request'))).toMatchObject({ summary: 'secret_request' })
+  })
+
+  it('gives a file card named from a title the file its arguments name their own way', () => {
+    const item = (input: Record<string, unknown>) => ({ ...activityBase, id: 'i', callId: 'i', toolName: 'Reading src/app.ts', kind: 'generic', input } as AgentActivityItem)
+    const inputOf = (message: ChatMessage) => partOf(mousseToUIMessages([message])[0]!).input as Record<string, unknown>
+    expect(inputOf(unnamed('a', 'Reading src/app.ts', { activity: item({ absolute_path: '/w/src/app.ts' }) })).file_path).toBe('/w/src/app.ts')
+    expect(inputOf(unnamed('b', 'Reading src/app.ts', { activity: item({ offset: 10 }) })).file_path).toBe('src/app.ts')
+    expect(inputOf(unnamed('c', 'Reading src/app.ts', { activity: item({ path: 'lib/x.ts' }) })).file_path).toBeUndefined()
+  })
+
   it('takes the name an older row kept only on its item', () => {
     const item = { ...activityBase, id: 'i', callId: 'i', toolName: 'mcp__mousse__profiler_overview', kind: 'generic', server: 'mousse', output: '{}' } as AgentActivityItem
     expect(typeOf(unnamed('i', 'Called a tool', { activity: item }))).toBe('tool-mcp__mousse__profiler_overview')

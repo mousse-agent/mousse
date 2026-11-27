@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { ActivityPatch } from '../../../shared/agentActivity'
+import { capRecord, type ActivityPatch } from '../../../shared/agentActivity'
+import { subagentToolName } from '../../../shared/subagentTools'
 import { classifyCuaCall, guardedInput, guardedOutput, isGuardedCall, mousseToolOfName, USE_TOOL, useToolTargetOf } from '../../../shared/cuaActivity'
 import type { ChatImageAttachment } from '../../../shared/types'
 import { cursorMcpServers } from '../../run/mcp/attachment'
@@ -296,16 +297,23 @@ export function cursorToolActivity(toolCall: unknown): ActivityPatch | undefined
   if (type === 'mcp') {
     // A computer use call (directly or through a bot's use_tool) keeps only what its allowlist lets through: its kept
     // arguments, and once it ends a bounded outcome (a computer_use_request's outcome line) or a fixed failure label.
-    // Any other MCP call keeps nothing here.
+    // Any other MCP call (a Mousse subagent call aside, which keeps its own record) shows its arguments, bounded, and its
+    // result text, as Claude's rows do.
     const args = record(record(call?.args)?.args)
-    const cua = classifyCuaCall(cursorToolName(toolCall), { input: args, useToolTarget: cursorUseToolTarget(toolCall) })
-    if (!isGuardedCall(cua)) return undefined
-    const input = args ? guardedInput(cua, args) : undefined
+    const name = cursorToolName(toolCall)
+    const cua = classifyCuaCall(name, { input: args, useToolTarget: cursorUseToolTarget(toolCall) })
     const result = record(call?.result)
     const value = record(result?.value)
     const ended = result?.status === 'success' || result?.status === 'error'
     const failed = result?.status === 'error' || value?.isError === true
     const text = records(value?.content).map((block) => str(record(block.text)?.text) ?? '').join('\n')
+    if (!isGuardedCall(cua)) {
+      if (subagentToolName(name)) return undefined
+      const kept = args && Object.keys(args).length > 0 ? capRecord(args) : undefined
+      const plain = { ...(kept ? { input: kept } : {}), ...(ended && text ? { output: text } : {}), ...(ended && failed ? { status: 'failed' } : {}) }
+      return Object.keys(plain).length ? ({ kind: 'generic', ...plain } as ActivityPatch) : undefined
+    }
+    const input = args ? guardedInput(cua, args) : undefined
     const output = ended ? guardedOutput(cua, text, failed) : undefined
     const patch = { ...(input ? { input } : {}), ...(output ? { output } : {}), ...(ended && failed ? { status: 'failed' } : {}) } as ActivityPatch
     return Object.keys(patch).length ? patch : undefined

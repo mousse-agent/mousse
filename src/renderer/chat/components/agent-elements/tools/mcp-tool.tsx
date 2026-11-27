@@ -4,7 +4,7 @@ import { getToolStatus, areToolPropsEqual } from "../utils/format-tool";
 import type { McpToolInfo } from "./tool-registry";
 import { Wrench } from "../../../../lib/icons";
 import { ToolRowBase } from "./tool-row-base";
-import { cuaPresentation, mousseToolLabels, mousseToolOf } from "./mousse-tools";
+import { cuaPresentation, mousseToolLabels, mousseToolOf, mousseToolSubject, webSearchSites } from "./mousse-tools";
 import { MousseToolIcon } from "./mousse-tool-icon";
 import { codeHighlighter } from "../code-highlighter";
 import { codeOnlyComponents } from "../code-block";
@@ -195,11 +195,11 @@ export const McpTool = memo(function McpTool({
   );
 
   // Mousse's own tools: its logo and what the call does, in words ("Creating a thread in Mousse").
+  const mousseTool = mousseToolOf(part.type);
   const mousse = useMemo(() => {
     if (cua) return cua.labels;
-    const tool = mousseToolOf(part.type);
-    return tool ? mousseToolLabels(tool) : null;
-  }, [cua, part.type]);
+    return mousseTool ? mousseToolLabels(mousseTool) : null;
+  }, [cua, mousseTool]);
 
   const title = useMemo(() => {
     if (mousse) return isPending ? mousse.running : failed ? mousse.failed : mousse.done;
@@ -213,21 +213,29 @@ export const McpTool = memo(function McpTool({
   const subtitle = useMemo(() => {
     if (cua) return cua.detail ?? "";
     if (part.state === "input-streaming") return "";
-    return formatMcpArgs(part.input);
-  }, [cua, part.input, part.state]);
+    // A Mousse tool names what it works on (a query, a URL, a title), not its arguments' keys; one whose arguments
+    // name nothing readable (only an id) shows them as any tool's.
+    return (mousseTool ? mousseToolSubject(mousseTool, part.input) : undefined) ?? formatMcpArgs(part.input);
+  }, [cua, mousseTool, part.input, part.state]);
+
+  // A web search lists the sites it found, not the text it returned.
+  const sites = useMemo(
+    () => (mousseTool === "web_search" && !isError ? webSearchSites(part.output) : []),
+    [mousseTool, isError, part.output],
+  );
 
   const displayOutput = useMemo(() => {
     const output = cua ? cua.output : part.output;
-    if (!output) return null;
+    if (!output || sites.length > 0) return null;
     return formatOutputForDisplay(output);
-  }, [cua, part.output]);
+  }, [cua, part.output, sites]);
 
   const codeBlock = useMemo(() => fenced(displayOutput), [displayOutput]);
 
   // A computer use row shows what it ran as well as what came of it.
   const inputBlock = useMemo(() => (cua?.input ? fenced(JSON.stringify(cua.input, null, 2)) : null), [cua]);
 
-  const hasExpandableContent = (!!codeBlock || !!inputBlock) && !isPending;
+  const hasExpandableContent = (!!codeBlock || !!inputBlock || sites.length > 0) && !isPending;
 
   if (isInterrupted) {
     return (
@@ -256,6 +264,17 @@ export const McpTool = memo(function McpTool({
               {inputBlock}
             </Streamdown>
           </div>
+        )}
+        {sites.length > 0 && (
+          // The same plain list a code search's results use: each site's title, and where it is.
+          <ul className="an-search-results flex flex-col gap-1 p-1 rounded-md bg-an-tool-background max-h-[200px] overflow-y-auto" aria-label="Sites">
+            {sites.map((site) => (
+              <li key={site.url} className="flex items-center gap-2 px-2 py-1 min-w-0" title={site.url}>
+                <span className="text-base text-foreground/90 truncate flex-1 min-w-0">{site.title}</span>
+                <span className="text-sm text-muted-foreground shrink-0 whitespace-nowrap">{site.host}</span>
+              </li>
+            ))}
+          </ul>
         )}
         {codeBlock && (
           // The output in the same plain block as a command's: no header bar, no border.
