@@ -944,6 +944,12 @@ export class MmsProfileServices {
       otherComputers: () => this.remoteAutomations?.computers() ?? [],
       // Which devices reach each bot: a new bot's choice is saved before the bot is published.
       deviceAccess: this.botDeviceAccess,
+      // The secrets a bot's home thread may use, for its profile: names and labels only, read when it asks.
+      secretsHeld: (threadId) => {
+        const vault = this.secretVault
+        if (!vault) return []
+        return vault.list().filter((entry) => vault.usableIn(entry.name, threadId)).map((entry) => ({ name: entry.name, ...(entry.label ? { label: entry.label } : {}) }))
+      },
       browser: botBrowsers,
       // "Use your threads" removed: what the bot sent that has not started leaves its owner's threads.
       threadsWithdrawn: (bot) => { this.orchestrator.withdrawBotThreadMessages(bot) },

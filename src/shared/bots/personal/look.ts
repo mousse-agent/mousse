@@ -150,6 +150,17 @@ export function defaultEyeColour(look: Pick<KnownBotLook, 'colour' | 'kind'>): B
 /** The look's eye colour: the picked one, or the default. */
 export const botEyeColourOf = (look: Pick<KnownBotLook, 'colour' | 'kind' | 'eyeColour'>): BotEyeColour => look.eyeColour ?? defaultEyeColour(look)
 
+/**
+ * A look in a few plain words, as the bot says it of itself: "a blue mouse with headphones and black round eyes". A
+ * Mousse is the app logo as a character, so it is named so.
+ */
+export function botLookWords(look: KnownBotLook): string {
+  const kind = botKindOf(look) === 'mousse' ? 'Mousse (the app logo as a character: mousse in a goblet)' : 'mouse'
+  const accessory = look.accessory === 'none' ? '' : ` with ${look.accessory === 'glasses' || look.accessory === 'goggles' || look.accessory === 'headphones' ? '' : 'a '}${BOT_ACCESSORY_LABELS[look.accessory].toLowerCase()}`
+  const eyes = `${botEyeColourOf(look)} ${BOT_EYES_LABELS[botEyesOf(look)].toLowerCase()} eyes`
+  return `${/^[aeiou]/.test(look.colour) ? 'an' : 'a'} ${look.colour} ${kind}${accessory} ${accessory ? 'and' : 'with'} ${eyes}`
+}
+
 /** Only the fields a look stores (colour, accessory, and kind, eyes and eye colour when given). */
 export function lookFields(look: BotLook): BotLook {
   return {

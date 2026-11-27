@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import { createBotActivitySink } from '../../src/mms/bots/activity/BotActivitySink'
 import type { BotModelChange, BotToolHost } from '../../src/mms/bots/seams'
+import type { BotProfileFacts } from '../../src/mms/bots/profile'
 import { createAppToolRegistry } from '../../src/mms/run/mcp/appTools'
 import { botTools, USE_MODEL_REFUSED, workNoteAnswer, type BotAppToolDeps } from '../../src/mms/run/mcp/appTools/bots'
 import { SILENT_REPLY } from '../../src/shared/bots/personal/wakes'
@@ -32,11 +33,11 @@ const ON_SUB = { instanceId: 'claude', model: 'claude-opus-4-6', credential: 'su
 const ON_KEY = { instanceId: 'pi:key', model: 'claude-opus-4-6', credential: 'api_key' }
 const ROWS_ON_SUB: BotModelSlots = { talk: ON_SUB, light: ON_SUB, medium: ON_SUB, hard: ON_SUB } as BotModelSlots
 
-function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: boolean; rows?: BotModelSlots; choices?: BotModelOption[]; work?: Partial<BotToolHost['work']>; cards?: boolean } = {}) {
+function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: boolean; rows?: BotModelSlots; choices?: BotModelOption[]; work?: Partial<BotToolHost['work']>; cards?: boolean; profile?: BotProfileFacts } = {}) {
   const schedules: Array<{ scheduleId: string; when: BotSchedule['when']; prompt: string; label: string; from?: string }> = []
   const wakes: Array<{ from: string; input: Parameters<NonNullable<BotToolHost['wakes']>['add']>[2] }> = []
   const watched: Array<{ from: string; input: Parameters<NonNullable<BotToolHost['watchers']>['start']>[2] }> = []
-  const profiles: Array<{ name?: string; description?: string }> = []
+  const profiles: Array<{ name?: string; description?: string; look?: Record<string, string> }> = []
   const models: Array<{ scope: 'now' | 'always'; choice: BotModelChange }> = []
   const works: Array<{ title: string; brief: string; key: string; level?: string }> = []
   const host = {
@@ -61,6 +62,7 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
     setProfile: (_botId, p) => {
       profiles.push(p)
     },
+    ...(options.profile ? { profile: () => options.profile! } : {}),
     setModel: (_botId, _activationId, scope, choice) => {
       models.push({ scope, choice })
       return { changed: options.changes ?? true }
@@ -111,7 +113,7 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
   })
   const call = async (name: string, args: Record<string, unknown>, context = ctx()) => {
     const outcome = await (tools.get(name) as MousseTool).handler(args, context)
-    return { ...outcome, value: outcome.isError ? undefined : JSON.parse(outcome.text) }
+    return { ...outcome, value: outcome.isError || !/^[[{]/.test(outcome.text) ? undefined : JSON.parse(outcome.text) }
   }
   return { schedules, profiles, models, works, wakes, watched, activity, call, ctx }
 }
@@ -399,6 +401,53 @@ describe('set_profile', () => {
     expect(await bots.call('set_profile', {})).toMatchObject({ isError: true })
     expect(await fakeBots('run').call('set_profile', { name: 'Taken over' })).toMatchObject({ isError: true })
   })
+
+  it('changes only the look fields given, from the lists the face draws, in the chat only', async () => {
+    const bots = fakeBots()
+    expect((await bots.call('set_profile', { look: { colour: 'blue', accessory: 'headphones' } })).value).toEqual({ ok: true })
+    expect(bots.profiles).toEqual([{ look: { colour: 'blue', accessory: 'headphones' } }])
+    for (const look of [{ colour: 'plaid' }, { hat: 'cap' }, {}, 'blue', { kind: 7 }]) {
+      expect(await bots.call('set_profile', { look })).toMatchObject({ isError: true })
+    }
+    expect(bots.profiles).toHaveLength(1)
+    expect(await fakeBots('run').call('set_profile', { look: { colour: 'blue' } })).toMatchObject({ isError: true })
+  })
+})
+
+describe('get_profile', () => {
+  const FACTS: BotProfileFacts = {
+    name: 'Inbox helper',
+    description: 'Sorts the inbox.',
+    look: { colour: 'blue', accessory: 'headphones' },
+    facePicture: '/bots/b1/files/face.png',
+    filesFolder: '/bots/b1/files',
+    rows: ROWS_ON_SUB,
+    depth: 'normal',
+    image: null,
+    custom: [],
+    devices: { here: 'Studio Mac', access: 'this_computer', reach: [] },
+    secrets: [{ name: 'GITHUB_TOKEN', label: 'GitHub' }],
+    allowed: { web: true, shell: false, browser: false, threads: false, mcp: [], automation: [] } as unknown as BotProfileFacts['allowed']
+  }
+
+  it('reads the bot its own profile in plain sections, models by the names its owner sees, in every lane', async () => {
+    for (const lane of ['chat', 'run'] as const) {
+      const { text, isError } = await fakeBots(lane, { profile: FACTS }).call('get_profile', {})
+      expect(isError).toBeFalsy()
+      for (const title of ['Who you are', 'How you run', 'What you can reach', 'What you may do']) expect(text).toContain(`${title}\n- `)
+      expect(text).toContain('Look: a blue mouse with headphones and black pill eyes (')
+      expect(text).toContain('/bots/b1/files/face.png')
+      expect(text).toContain('Talking (this chat): Opus 4.6 on Claude Code')
+      expect(text).toContain('GITHUB_TOKEN (GitHub)')
+      expect(text).toContain('Allowed: search the web and read pages')
+    }
+  })
+
+  it('says so when no face picture is saved yet, and errors where the host has no profile', async () => {
+    const { facePicture: _, ...none } = FACTS
+    expect((await fakeBots('chat', { profile: none }).call('get_profile', {})).text).toContain('Face picture: none saved yet')
+    expect(await fakeBots().call('get_profile', {})).toMatchObject({ isError: true })
+  })
 })
 
 describe('question_ask (#1123)', () => {
@@ -441,7 +490,7 @@ describe('question_ask (#1123)', () => {
 describe('registration', () => {
   it('lists the bot tools in the bots family, and WP6\'s memory tools beside them', () => {
     const { families } = createAppToolRegistry({ host: fakeAppToolHost().host, bots: () => undefined })
-    expect(families.bots).toEqual(['permission_ask', 'consult', 'bot_schedule_add', 'schedule_done', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_list', 'work_stop', 'work_note', 'remind', 'work_wait', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'show_card', 'bot_list', 'bot_send', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'tool_catalogue', 'use_tool'])
+    expect(families.bots).toEqual(['permission_ask', 'consult', 'bot_schedule_add', 'schedule_done', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'get_profile', 'set_depth', 'work_start', 'work_list', 'work_stop', 'work_note', 'remind', 'work_wait', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'show_card', 'bot_list', 'bot_send', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'tool_catalogue', 'use_tool'])
     // With `botMemory`, WP6's memory tools and the open items' tools follow them in the same family.
     const withMemory = createAppToolRegistry({ host: fakeAppToolHost().host, botMemory: { activationOf: () => undefined } })
     expect(withMemory.families.bots.slice(0, families.bots.length)).toEqual(families.bots)

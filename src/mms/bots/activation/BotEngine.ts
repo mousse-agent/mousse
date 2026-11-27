@@ -33,7 +33,10 @@ import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { basename, join } from 'node:path'
 import { askNoticeText, askText } from '../../../shared/bots/personal/askText'
-import { lookFields, type BotLook } from '../../../shared/bots/personal/look'
+import { lookFields, normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
+import { BotFacePictures } from '../facePicture'
+import { botIdentityLine, type BotProfileFacts } from '../profile'
+import { botDeviceAllowed, DEFAULT_BOT_DEVICE_ACCESS } from '../../../shared/bots/personal/deviceAccess'
 import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHold, type BotSubagentHold } from '../../../shared/bots/personal/subagentHold'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import { launchedActive, type BotChatMessage, type BotChip, type BotError, type BotLaunchedThread, type BotPermissionItem } from '../../../shared/bots/personal/chat'
@@ -345,9 +348,9 @@ export interface BotEngineHost {
   /**
    * The bot's system text (WP3's `botInstructions`): who it is, its files folder, the base
    * instructions and what its owner allows now (`allowed`). Built at each dispatch, never stored, so
-   * a rename or a changed permission applies at the next turn.
+   * a rename or a changed permission applies at the next turn. `identity`: its look and face picture in one line.
    */
-  instructions?(bot: { name: string; description: string; filesFolder: string; lane?: BotLane; allowed?: BotAllowed; secretFetchOffered?: boolean; browserOffline?: boolean; subagent?: true; withheld?: readonly string[]; promptChanged?: true }): string
+  instructions?(bot: { name: string; description: string; filesFolder: string; lane?: BotLane; allowed?: BotAllowed; secretFetchOffered?: boolean; browserOffline?: boolean; subagent?: true; withheld?: readonly string[]; promptChanged?: true; identity?: string }): string
   /** A schedule in plain words ("every weekday · 09:00"; WP3's `describeSchedule`). */
   scheduleLabel?(when: BotSchedule['when']): string
   /** The provider family of an instance in plain words ("Claude"), never a model. */
@@ -370,6 +373,8 @@ export interface BotEngineHost {
    * and the Bots list shows it. Absent: no bot is given a choice when it is made, and none is listed with one.
    */
   deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget'>
+  /** The secrets a thread's agents may use (the bot's home thread: the bot's), by name and label, never a value. */
+  secretsHeld?(threadId: string): Array<{ name: string; label?: string }>
   /**
    * The owner's MCP servers a bot may hold tools of (`BotMcp`): set up for the whole profile in Mousse. Absent: no bot
    * is offered an MCP tool, and an ask for one is refused with no card.
@@ -693,6 +698,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `BotEscalationSummary` when a wall asks the owner (the v1 form's event; no longer bridged).
    */
   readonly events = new EventEmitter()
+
+  /** Each bot's face picture in its files folder (`face.png`), which the app draws and Mousse writes. */
+  readonly facePictures = new BotFacePictures((botId) => this.filesFolder(botId))
 
   /**
    * The bot threads this process knows of, kept beside `bots.db`: when a read of it fails, a
@@ -3648,18 +3656,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   private instructionsOf(definition: BotDefinition, thread: BotThreadSpec, lane?: BotLane, permissions?: { allowed: BotAllowed; canAskMcp?: boolean; scheduled?: boolean; secretFetchOffered?: boolean; browserOffline?: boolean; subagent?: true; withheld?: readonly string[] }): { instructions?: string } {
     if (permissions) {
-      // Commands, the browser and the owner's threads the owner switched off for the bot are named as off, and so are
-      // MCP, skills and the automation tools, which every bot has unless switched off.
-      const off: Partial<Record<keyof BotSwitchedOff, true>> = {}
-      for (const row of this.store.disabledPermissions(definition.id)) {
-        const permission = switchedOffPermission(row)
-        const which = permission && namedPowerOf(permission)
-        if (which) off[which] = true
-      }
-      const defaults = this.defaultsOff(definition.id)
-      if (defaults.mcp) off.mcp = true
-      if (defaults.skills) off.skills = true
-      if (defaults.automations) off.automation = true
+      const off = this.switchedOff(definition.id)
       if (Object.keys(off).length) permissions = { ...permissions, allowed: { ...permissions.allowed, off } }
     }
     // Its name and prompt as they are now, read as this turn is prepared: the owner's edit in About (or a rename) reaches
@@ -3667,9 +3664,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const words = this.wordsNow(definition)
     // Replies of its own written before the owner's last prompt edit may still be in view: they must not set the style.
     const promptChanged = Boolean(words.promptChangedAt) && !permissions?.subagent && this.repliedBefore(definition.id, words.promptChangedAt!)
+    // Its look in a few words and its face picture (a stat, no read): the line changes only when either does.
+    let identity: string | undefined
+    if (!permissions?.subagent) {
+      try {
+        identity = botIdentityLine(normalizeBotLook(words.look), this.facePictures.current(definition.id)?.path)
+      } catch {
+        identity = undefined
+      }
+    }
     let system: string | undefined
     try {
-      system = this.host.instructions?.({ name: words.name, description: words.description, filesFolder: this.filesFolder(definition.id), ...(lane ? { lane } : {}), ...permissions, ...(promptChanged ? { promptChanged: true as const } : {}) })
+      system = this.host.instructions?.({ name: words.name, description: words.description, filesFolder: this.filesFolder(definition.id), ...(lane ? { lane } : {}), ...permissions, ...(promptChanged ? { promptChanged: true as const } : {}), ...(identity ? { identity } : {}) })
     } catch {
       system = undefined
     }
@@ -3686,10 +3692,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** The words a turn works under from the published revision now, else from `definition` (the activation's own). */
-  private wordsNow(definition: BotDefinition): Pick<BotDefinition, 'name' | 'description' | 'role' | 'promptChangedAt'> {
+  private wordsNow(definition: BotDefinition): Pick<BotDefinition, 'name' | 'description' | 'role' | 'promptChangedAt' | 'look'> {
     try {
       const now = this.published(definition.id)
-      return { name: now.name, description: now.description, role: now.role, ...(now.promptChangedAt ? { promptChangedAt: now.promptChangedAt } : {}) }
+      return { name: now.name, description: now.description, role: now.role, look: now.look, ...(now.promptChangedAt ? { promptChangedAt: now.promptChangedAt } : {}) }
     } catch {
       return definition
     }
@@ -3856,6 +3862,101 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const { maxActiveMs: _unread, ...budget } = given.budget
     const read: BotManifest = { ...given, appTools: given.appTools.filter((tool) => !BOT_RETIRED_APP_TOOLS.has(tool)), workspace: null, budget }
     return `${botManifestDigest(read)}${this.defaultsKey(botId)}`
+  }
+
+  /**
+   * What the owner switched off for the bot (About → Can use), as its system text and profile name it: commands, the
+   * browser, the owner's threads and the computer, and MCP, skills and the automation tools, which every bot has unless
+   * switched off.
+   */
+  private switchedOff(botId: string): Partial<Record<keyof BotSwitchedOff, true>> {
+    const off: Partial<Record<keyof BotSwitchedOff, true>> = {}
+    for (const row of this.store.disabledPermissions(botId)) {
+      const permission = switchedOffPermission(row)
+      const which = permission && namedPowerOf(permission)
+      if (which) off[which] = true
+    }
+    const defaults = this.defaultsOff(botId)
+    if (defaults.mcp) off.mcp = true
+    if (defaults.skills) off.skills = true
+    if (defaults.automations) off.automation = true
+    return off
+  }
+
+  /**
+   * The bot's own profile (`get_profile`), read from where each part is kept: the published revision (name, words, look,
+   * rows), the approved grant as its turns hold it (the owner's switches applied), the device choice, and the names of
+   * the secrets its home thread may use. Never a secret's value.
+   */
+  profileFacts(botId: string): BotProfileFacts {
+    const definition = this.published(botId)
+    const grant = this.store.activeGrant(botId)
+    const image = imagePickOf(definition.main)
+    let allowed: BotAllowed | undefined
+    if (grant) {
+      const held = this.revisionGives(botId, definition.permissions, grant.manifest, { defaults: true })
+      const off = this.switchedOff(botId)
+      allowed = {
+        ...botAllowedOf(narrowManifest(held, definition.main.narrow), (ids) => this.mcpServerNames(ids)),
+        ...(image ? { images: true as const } : {}),
+        ...(Object.keys(off).length ? { off } : {})
+      }
+    }
+    let devices: BotProfileFacts['devices']
+    try {
+      const access = this.host.deviceAccess?.get(botId).access ?? DEFAULT_BOT_DEVICE_ACCESS
+      const others = this.host.otherComputers?.() ?? []
+      devices = {
+        here: this.host.computerName?.() || 'this computer',
+        access: access.mode,
+        reach: others.filter((other) => botDeviceAllowed(access, other.node)).map((other) => other.name)
+      }
+    } catch {
+      devices = undefined
+    }
+    const homeThreadId = this.store.registry(botId)?.homeThreadId
+    let secrets: BotProfileFacts['secrets'] = []
+    try {
+      secrets = homeThreadId ? this.host.secretsHeld?.(homeThreadId) ?? [] : []
+    } catch {
+      secrets = []
+    }
+    const face = this.facePictures.current(botId)
+    return {
+      name: definition.name,
+      description: definition.description,
+      look: normalizeBotLook(definition.look),
+      ...(face ? { facePicture: face.path } : {}),
+      filesFolder: this.filesFolder(botId),
+      rows: slotsOf(definition.main),
+      depth: definition.main.model.depth,
+      image,
+      custom: customSlotsOf(definition.main).map((slot) => ({ name: slot.name, ...(slot.description ? { description: slot.description } : {}) })),
+      ...(devices ? { devices } : {}),
+      secrets,
+      ...(allowed ? { allowed } : {})
+    }
+  }
+
+  /**
+   * The app saves the bot's face picture (`bots.facePicture.save`), drawn from `key` (its look, the art version and the
+   * size): written whole into its files folder, then the bot's next turn names it, and the Bots list carries the key so
+   * the app draws it again only when the look or the art changes.
+   */
+  saveFacePicture(botId: string, key: string, png: Buffer): { path: string } {
+    this.published(botId)
+    const path = this.facePictures.save(botId, key, png)
+    this.changed({ botId })
+    return { path }
+  }
+
+  /** The key the bot's saved face picture was drawn from, or undefined when it has none (or one Mousse didn't write). */
+  facePictureKey(botId: string): string | undefined {
+    try {
+      return this.facePictures.current(botId)?.key
+    } catch {
+      return undefined
+    }
   }
 
   /**
@@ -9709,7 +9810,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       done: (threadId, why) => this.completeSchedule(threadId, why),
       list: (botId) => this.listSchedules(botId)
     },
-    setProfile: (botId, profile) => this.setProfile(botId, profile),
+    // A look the bot changes merges into the one it has, then goes the owner's way (`setProfile`), so the app's face
+    // changes at once.
+    setProfile: (botId, { look, ...rest }) => {
+      this.setProfile(botId, { ...rest, ...(look ? { look: normalizeBotLook({ ...this.published(botId).look, ...look }) } : {}) })
+    },
+    profile: (botId) => this.profileFacts(botId),
     setModel: (botId, activationId, scope, choice) => this.setModel(botId, activationId, scope, choice),
     ownerWords: (botId, activationId) => this.ownerWords(botId, activationId),
     rows: (botId) => this.ownerSlots(botId),

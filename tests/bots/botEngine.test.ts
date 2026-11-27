@@ -4,7 +4,7 @@
  * waits for the owner again. Manual activations run one dispatch each, written to `bots.db`
  * first and then atomically to the run database with an inert payload.
  */
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -23,6 +23,8 @@ import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/
 import { BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
 import type { Enforceability, RunPolicy } from '../../src/shared/harness/types'
 import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
+import { botInstructions } from '../../src/mms/bots/instructions'
+import sharp from 'sharp'
 import { BOT_ITEM_TOOLS } from '../../src/shared/bots/personal/items'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import { BOT_AUTOMATION_APP_TOOLS, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SUBAGENT_TOOLS, BOT_TASK_TOOLS, BOT_THEME_TOOLS } from '../../src/shared/bots/personal/manifest'
@@ -261,7 +263,7 @@ describe('activation and dispatch', () => {
     // A run's request ends with what its last message is for (bot-context.md §5.2).
     expect(prepared.prompt).toBe(` /deploy now\n\n${BOT_RUN_REPORT_LINE}`)
     expect(prepared.instructions).toBe('You keep the site tidy.\n\nAnswer briefly.')
-    expect(prepared.policy).toMatchObject({ approvals: 'grants', approve: 'host', tools: { allow: ['permission_ask', 'find', 'grep', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'report_bug', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'model_list', 'remind', 'watch_start', ...EVERY_BOT_WORK].sort() }, budget: { maxTurns: 30, maxWallMs: BOT_TURN_WINDOW_MS }, authority: { kind: 'bot' } })
+    expect(prepared.policy).toMatchObject({ approvals: 'grants', approve: 'host', tools: { allow: ['permission_ask', 'find', 'grep', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'get_profile', 'publish_applet', 'read', 'report_bug', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'model_list', 'remind', 'watch_start', ...EVERY_BOT_WORK].sort() }, budget: { maxTurns: 30, maxWallMs: BOT_TURN_WINDOW_MS }, authority: { kind: 'bot' } })
     expect(prepared.authority.spend).toBeNull()
     expect(existsSync(join(prepared.scratch, 'tmp'))).toBe(true)
     expect(store.counters(activation.id).activeMs).toBe(BOT_TURN_WINDOW_MS)
@@ -357,7 +359,7 @@ describe('activation and dispatch', () => {
     if ('refused' in prepared) throw new Error(prepared.refused)
     // The memory tools and the listing of the owner's MCP servers are every bot's, beside its grant (Bot Phase 1 §5.10);
     // a run also splits its job among subagents, on models from model_list, and reads the rest of its tools from its catalogue.
-    expect(prepared.policy).toMatchObject({ tools: { allow: ['permission_ask', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'report_bug', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'model_list', 'remind', 'watch_start', ...EVERY_BOT_WORK].sort() }, budget: { maxTurns: 5, maxWallMs: BOT_TURN_WINDOW_MS } })
+    expect(prepared.policy).toMatchObject({ tools: { allow: ['permission_ask', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'get_profile', 'publish_applet', 'read', 'report_bug', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'model_list', 'remind', 'watch_start', ...EVERY_BOT_WORK].sort() }, budget: { maxTurns: 5, maxWallMs: BOT_TURN_WINDOW_MS } })
     expect(store.counters(activation.id).activeMs).toBe(BOT_TURN_WINDOW_MS)
     // An ungranted tool in a run is refused and asked for once (Bot Phase 1 §5.4); the run goes on.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'search', nativeName: 'grep', args: { path: root } })).toMatchObject({ ok: false, refused: { askId: expect.stringMatching(/^esc_/) } })
@@ -520,5 +522,66 @@ describe('activation requests', () => {
     const [a, b] = await Promise.all([bots.activate(input), bots.activate(input)])
     expect(a.id).toBe(b.id)
     expect(store.listActivations('site-editor')).toHaveLength(1)
+  })
+})
+
+describe('its look and face picture (self-profile)', () => {
+  /** A real 4 px PNG, so the saved file is checked as a picture a program can open. */
+  const picture = (colour: { r: number; g: number; b: number }) => sharp({ create: { width: 4, height: 4, channels: 3, background: colour } }).png().toBuffer()
+  const pixels = async (png: Buffer) => (await sharp(png).raw().toBuffer()).toString('hex')
+
+  it('a partial look from the bot changes only those fields of the published look', () => {
+    publish()
+    bots.tools.setProfile('site-editor', { look: { colour: 'blue', accessory: 'headphones' } })
+    expect(bots.get('site-editor').published!.look).toMatchObject({ colour: 'blue', accessory: 'headphones' })
+    bots.tools.setProfile('site-editor', { look: { eyes: 'heart' } })
+    expect(bots.get('site-editor').published!.look).toMatchObject({ colour: 'blue', accessory: 'headphones', eyes: 'heart' })
+    expect(bots.get('site-editor').published!.name).toBe('Site editor')
+  })
+
+  it('face.png is written whole into its files folder, keeps its pixels, and gives back the key it was drawn from', async () => {
+    publish()
+    expect(bots.facePictureKey('site-editor')).toBeUndefined()
+    const png = await picture({ r: 10, g: 120, b: 200 })
+    const { path } = bots.saveFacePicture('site-editor', 'v1|blue|headphones', png)
+    expect(path).toBe(join(root, 'face.png'))
+    expect(await pixels(readFileSync(path))).toBe(await pixels(png))
+    expect(bots.facePictureKey('site-editor')).toBe('v1|blue|headphones')
+    // A picture someone else put there carries no key: the app draws it again.
+    writeFileSync(path, await picture({ r: 0, g: 0, b: 0 }))
+    expect(bots.facePictureKey('site-editor')).toBeUndefined()
+    expect(() => bots.saveFacePicture('site-editor', 'v1', Buffer.from('not a png'))).toThrow()
+    expect(readdirSync(root).filter((name) => name.startsWith('face'))).toEqual(['face.png'])
+  })
+
+  it('its system text says how it looks and, once saved, where its face picture is', async () => {
+    publish()
+    approve()
+    engineHost.instructions = (bot) => botInstructions(bot)
+    const system = async (key: string) => {
+      const activation = await bots.activate({ botId: 'site-editor', input: 'Hi', clientRequestId: key })
+      const runId = store.dispatch(activation.id, 1)!.runId!
+      const prepared = bots.prepare(turnStart(runId))
+      if ('refused' in prepared) throw new Error(prepared.refused)
+      finish(runId)
+      return prepared.instructions ?? ''
+    }
+    const before = await system('c1')
+    expect(before).toContain('You look like a teal')
+    expect(before).toContain('get_profile')
+    expect(before).not.toContain('face.png')
+    const { path } = bots.saveFacePicture('site-editor', 'v1', await picture({ r: 1, g: 2, b: 3 }))
+    expect(await system('c2')).toContain(`Your face picture is ${path}.`)
+  })
+
+  it('its profile names its secrets and devices from the host, and its grant once approved', async () => {
+    publish()
+    const home = bots.ensureHome('site-editor', 'Site editor')
+    // Only the secrets its home thread may use, by name: the vault's own filter, as the profile service wires it.
+    engineHost.secretsHeld = (threadId) => (threadId === home ? [{ name: 'GITHUB_TOKEN', label: 'GitHub' }] : [])
+    expect(bots.tools.profile!('site-editor')).toMatchObject({ name: 'Site editor', look: { colour: 'teal', accessory: 'cap' }, secrets: [{ name: 'GITHUB_TOKEN', label: 'GitHub' }], filesFolder: root })
+    expect(bots.tools.profile!('site-editor').allowed).toBeUndefined()
+    approve()
+    expect(bots.tools.profile!('site-editor').allowed).toBeDefined()
   })
 })

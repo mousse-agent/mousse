@@ -501,6 +501,24 @@ export class FaceRenderer {
     }
   }
 
+  /**
+   * A still picture of `look`, `side` pixels square, idle and front on, with 2×2 samples (the bot's face picture). Drawn
+   * at once into the shared buffer, which no tick holds between ticks, and copied out. Null while the faces can't draw
+   * live (the shader compiling, a lost or failed context), or for a side larger than the buffer may grow.
+   */
+  portrait(look: KnownBotLook, side: number, view: 'head' | 'full' = 'full'): HTMLCanvasElement | null {
+    const gpu = this.gpu
+    if (!gpu || !this.live() || side < 1 || side > ATLAS_WIDTH) return null
+    const copy = this.env.createCanvas()
+    copy.width = copy.height = side
+    const ctx = copy.getContext('2d')
+    if (!ctx) return null
+    gpu.ensureSize(side, side)
+    gpu.draw(0, 0, side, faceUniforms(look, stillPose('idle'), { view, size: side, samples: 2 }))
+    ctx.drawImage(gpu.canvas, 0, 0, side, side, 0, 0, side, side)
+    return copy
+  }
+
   stats(): FaceRendererStats {
     let visible = 0
     for (const slot of this.slots.values()) if (slot.visible) visible++
