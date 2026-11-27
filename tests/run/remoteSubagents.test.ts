@@ -236,7 +236,7 @@ describe('remote subagents (issue #469)', () => {
     const { d, parent, steps, out, say, mac, service, startOnMac } = remoteWorld()
     steps['go'] = async (tools) => { out.started = await startOnMac(tools, 'Mac tester') }
     steps['answer'] = async (tools) => {
-      out.answer = await tools.answerSubagent({ subagent: 'Mac tester', requestId: 'q-1', answers: { a: 'yes' } }) as Json
+      out.answer = await tools.answerSubagent({ subagent: 'Mac tester', requestId: 'q-1', answers: { a: 'yes' } }, { toolCallId: 'a1' }) as Json
       out.status = await tools.taskStatus({ subagent: 'Mac tester' }) as Json
       out.again = await tools.continueSubagent({ subagent: 'Mac tester', prompt: 'And iOS?' }, { toolCallId: 'c1' }) as Json
     }

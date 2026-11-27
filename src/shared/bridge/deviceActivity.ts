@@ -133,6 +133,8 @@ const MODE: Phrase = phrase('Changed the permission mode', 'changed the permissi
 const RULES: Phrase = phrase('Cleared "Always" rules', 'cleared "Always" rules', 'cleared "Always" rules {n} times')
 const PAUSE: Phrase = phrase('Resumed or cancelled a paused turn', 'resumed or cancelled a paused turn', 'resumed or cancelled {n} paused turns')
 const AGENTS: Phrase = phrase('Stopped subagents', 'stopped subagents', 'stopped subagents {n} times')
+/** Continue or Stop on a held chain of agent messages (`threads.chainHold`). */
+const CHAIN_HOLD: Phrase = phrase('Continued or stopped held agent messages', 'continued or stopped held agent messages', 'continued or stopped held agent messages {n} times')
 const TASKS: Phrase = phrase('Changed a task', 'changed a task', 'changed {n} tasks')
 const APPLET: Phrase = phrase('Saved an applet', 'saved an applet', 'saved {n} applets')
 const WORKFLOW: Phrase = phrase('Worked on a workflow run', 'worked on a workflow run', 'worked on workflow runs {n} times')
@@ -226,6 +228,7 @@ const PHRASES: Record<string, Phrase> = {
   'runs.cancelPause': PAUSE,
   'subagents.stopAll': AGENTS,
   'threads.stopBackground': AGENTS,
+  'threads.chainHold': CHAIN_HOLD,
   'agents.stop': AGENTS,
   'tasks.create': TASKS,
   'tasks.update': TASKS,

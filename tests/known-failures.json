@@ -24,12 +24,5 @@
   { "file": "tests/bots/botActions.test.ts", "test": "C4 bridge delivers a complete card or disables Send when oversized=true", "issue": 1982, "how": "writes to a hardcoded /tmp, which Windows does not have: ENOENT", "platform": "win32" },
   { "file": "tests/run/botComputerRequest.test.ts", "test": "the computer group of its catalogue says to ask once when the driver is not set up here, and to escalate without the permission", "issue": 2025, "how": "the catalogue text no longer matches /escalate/ (renamed permission_ask)" },
   { "file": "tests/bots/botSubagentDelegations.test.ts", "test": "an upgrade from Run DB v28 and bots.db v14 with work in flight: both migrate, the older subagent settles once, and new subagents run as delegations", "issue": 2025, "how": "table agent_chains already exists: the hand rollback to v28 leaves the v31 chain table" },
-  { "file": "tests/run/turnHandoff.test.ts", "test": "Undo restores the original checkout bytes after autocrlf changes", "issue": 2034, "how": "intermittent under load: after Undo, README.md holds LF instead of the original CRLF bytes" },
-  { "file": "tests/run/remoteSubagents.test.ts", "test": "a question waiting there shows as needs input, and the parent is told it is answered there", "issue": 2042, "how": "the status has no answered: false" },
-  { "file": "tests/bots/botGrantAlias.test.ts", "test": "still grants the tool, under its new name", "issue": 2042, "how": "a grant under the old name no longer grants the new tool" },
-  { "file": "tests/bots/botGrantAlias.test.ts", "test": "keeps the digest it was approved under, and a new ask names the new tool", "issue": 2042, "how": "a grant under the old name no longer grants the new tool" },
-  { "file": "tests/bots/botGrantAlias.test.ts", "test": "keeps the tool when a revision that asks for its new name runs inside the stored grant", "issue": 2042, "how": "a grant under the old name no longer grants the new tool" },
-  { "file": "tests/harness/grokHeld.test.ts", "test": "runs on the held home and signs in from the entry's own: Windows: variable names in any case", "issue": 2042, "how": "fails on master" },
-  { "file": "tests/harness/grokHeld.test.ts", "test": "allows a read, a listing or a search inside the folder, and the plan list; asks for everything else", "issue": 2042, "how": "fails on master" },
-  { "file": "tests/net/bridge/routed/deviceActivity.test.ts", "test": "has words for every change a routed row can make", "issue": 2042, "how": "a new routed row has no words" }
+  { "file": "tests/run/turnHandoff.test.ts", "test": "Undo restores the original checkout bytes after autocrlf changes", "issue": 2034, "how": "intermittent under load: after Undo, README.md holds LF instead of the original CRLF bytes" }
 ]
