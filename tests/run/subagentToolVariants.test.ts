@@ -43,11 +43,21 @@ describe('the subagent tools as variants of the thread tools', () => {
       expect(Object.keys((listed.find((tool) => tool.name === name)!.inputSchema as { properties: object }).properties)).toContain('subagent')
   })
 
+  it('a read-only subagent lists thread_stop, as it listed task_cancel, and the tools its old variants read', () => {
+    fx = delegationFixture()
+    const { registry } = appToolRegistry(fx.engine, fakeAppToolHost().host)
+    const names = registry.listFor({ threadId: 'caller', readOnly: true, modeCeiling: 'default' }).map((tool) => tool.name)
+    for (const name of ['thread_stop', 'thread_wait', 'thread_list', 'thread_send']) expect(names).toContain(name)
+  })
+
   it('runs the old tool under either name, recorded under the new one', async () => {
     const { call, fake, ledger } = await world()
-    for (const name of ['task_cancel', 'thread_stop']) expect((await call(name, { subagent: 'API reviewer' })).isError).toBeFalsy()
-    expect(fake.delegation.taskCancel).toHaveBeenCalledTimes(2)
-    expect(fake.delegation.taskCancel).toHaveBeenLastCalledWith({ subagent: 'API reviewer' })
+    for (const name of ['task_cancel', 'thread_stop']) expect((await call(name, { subagent: 'API reviewer' }, 'mcp:stop-1')).isError).toBeFalsy()
+    // Both reach the host with one request id, so the second replays the first's receipt (`continueSubagent.test.ts`).
+    expect(vi.mocked(fake.delegation.taskCancel).mock.calls).toEqual([
+      [{ subagent: 'API reviewer' }, { toolCallId: 'mcp:stop-1' }],
+      [{ subagent: 'API reviewer' }, { toolCallId: 'mcp:stop-1' }]
+    ])
     for (const name of ['task_status', 'thread_wait']) await call(name, { delegationId: 'd1' })
     expect(fake.delegation.taskStatus).toHaveBeenLastCalledWith({ delegationId: 'd1' })
     for (const name of ['list_subagents', 'thread_list']) await call(name, name === 'thread_list' ? { scope: 'family' } : {})

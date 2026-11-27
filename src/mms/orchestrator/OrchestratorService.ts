@@ -104,7 +104,7 @@ import { currentStopGeneration, runStopGeneration } from '../run/stopGeneration'
 import { buildSubagentView } from '../run/delegation/subagentView'
 import { correctionsStartingWith, reviseTree, type TreeRevision } from '../run/delegation/treeCorrection'
 import { resolveSubagent, subagentsTitled, type SubagentAddressSources } from '../run/delegation/subagentAddress'
-import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/delegation/policy'
+import { cancelRequestKey, delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/delegation/policy'
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { steerReleaseWindow, steerStrategy, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
@@ -9190,7 +9190,7 @@ export class OrchestratorService extends EventEmitter {
       continueSubagent,
       answerSubagent: (input) => this.answerSubagent(parentThreadId, parentRunId, input),
       taskStatus: (ref, options) => this.taskStatus(parentThreadId, ref, options),
-      taskCancel: (ref) => this.taskCancel(parentThreadId, ref),
+      taskCancel: (ref, call) => this.taskCancel(parentThreadId, ref, call ? cancelRequestKey(parentThreadId, parentRunId, call.toolCallId) : undefined),
       listDelegations,
       listSubagents: () => this.listSubagents(parentThreadId),
       listComputers: () => this.listComputers(parentThreadId),
@@ -10001,9 +10001,11 @@ export class OrchestratorService extends EventEmitter {
   /**
    * `task_cancel` is a Stop of the subagent (`stopThread`): it ends the subagent's work and everything
    * the subagent started. The caller asked, so it gets no notice row for it. A task whose result the
-   * caller has not read yet is the exception: naming it explicitly drops that result, as before.
+   * caller has not read yet is the exception: naming it explicitly drops that result, as before. A Stop by title with a
+   * `requestKey` records what it stopped: a retry (its reply was lost) replays that, and never stops a follow-up that
+   * started since.
    */
-  private async taskCancel(parentThreadId: string, ref: SubagentRef) {
+  private async taskCancel(parentThreadId: string, ref: SubagentRef, requestKey?: string) {
     const engine = this.requireRunEngine()
     if (ref.delegationId) {
       const task = this.ownedDelegation(parentThreadId, ref.delegationId)
@@ -10018,16 +10020,20 @@ export class OrchestratorService extends EventEmitter {
       const cancelled = await engine.cancelDelegation(task.delegationId)
       return { delegationId: task.delegationId, status: engine.delegations.get(task.delegationId)?.status, cancelled }
     }
+    const prior = requestKey ? engine.store.getReceipt(requestKey) : null
+    if (prior?.status === 'accepted' && prior.result && typeof prior.result === 'object') return { ...(prior.result as object), replayed: true }
     // A subagent title cancels everything that subagent still has open.
     const target = this.resolveSubagentTarget(parentThreadId, ref.subagent ?? '')
     if (!target.ok) return target.refusal
     const tasks = engine.delegations.listForChildThread(target.childThreadId).filter((task) => task.parentThreadId === parentThreadId)
     const open = tasks.filter((task) => task.status === 'running')
     // Nothing is stopped when no task is open: a repeat must not touch newer work.
-    if (open.length === 0)
-      return { subagent: target.title, childThreadId: target.childThreadId, cancelled: [], note: `"${target.title}" has no open task.` }
-    const stopped = await this.stopThread(target.childThreadId, 'task_cancel', { requesterThreadId: parentThreadId, byAgent: true })
-    return { subagent: target.title, childThreadId: target.childThreadId, cancelled: stopped.delegations }
+    const result = open.length === 0
+      ? { subagent: target.title, childThreadId: target.childThreadId, cancelled: [], note: `"${target.title}" has no open task.` }
+      : { subagent: target.title, childThreadId: target.childThreadId, cancelled: (await this.stopThread(target.childThreadId, 'task_cancel', { requesterThreadId: parentThreadId, byAgent: true })).delegations }
+    if (requestKey && !engine.store.getReceipt(requestKey))
+      engine.store.putReceipt({ clientRequestId: requestKey, threadId: target.childThreadId, commandKind: 'task_cancel', status: 'accepted', result, createdAt: new Date().toISOString() })
+    return result
   }
 
   private isRunLive(runId: string): boolean {

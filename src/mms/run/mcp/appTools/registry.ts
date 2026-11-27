@@ -386,7 +386,17 @@ export class ToolRegistry {
    * the next agent turn. What a turn may use is checked at call time. The authority compiler decides (`listsTool`).
    */
   listFor(listing: ToolListing): MousseTool[] {
-    return this.list().filter((tool) => listsTool(tool, listing))
+    return this.list().filter((tool) => listsTool(tool, listing) || this.listsAsVariant(tool, listing))
+  }
+
+  /**
+   * A new tool is listed where one of its old variants would have been (a read-only subagent lists `thread_stop` as it
+   * listed `task_cancel`). Listing it widens nothing: each call is still held to the variant it holds (`variantOf`).
+   */
+  private listsAsVariant(tool: MousseTool, listing: ToolListing): boolean {
+    for (const variant of this.variants.values())
+      if (canonicalToolName(variant.name) === tool.name && listsTool(variant, listing)) return true
+    return false
   }
 
   /** Whether `threadId` is a personal bot's thread. */

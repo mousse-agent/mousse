@@ -90,7 +90,8 @@ export interface DelegationToolHost {
   answerSubagent(input: { subagent: string; requestId: string; answers: Record<string, string | string[]> }, call: DelegationToolCall): Promise<unknown> | unknown
   /** `acknowledge: false`: the read is not the thread's own turn (a native helper's call), so the result stays unacknowledged. */
   taskStatus(input: SubagentRef, options?: { acknowledge?: false }): Promise<unknown> | unknown
-  taskCancel(input: SubagentRef): Promise<unknown>
+  /** `call`: a Stop by title records a receipt under its key, so a retry replays it instead of stopping newer work. */
+  taskCancel(input: SubagentRef, call?: DelegationToolCall): Promise<unknown>
   listDelegations(): unknown
   listSubagents(): unknown
   /** The user's other computers a subagent may run on, and whether each can take this caller's work. */
@@ -218,7 +219,7 @@ export async function dispatchDelegationTool(host: DelegationToolHost, toolCall:
     case 'task_status':
       return host.taskStatus(subagentRef(args, 'task_status'))
     case 'task_cancel':
-      return host.taskCancel(subagentRef(args, 'task_cancel'))
+      return host.taskCancel(subagentRef(args, 'task_cancel'), call)
     case 'list_delegations':
       return host.listDelegations()
     case 'integrate_delegation':
