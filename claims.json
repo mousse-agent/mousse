@@ -116,6 +116,22 @@
       "expiresAt": "2026-11-27T18:58:27.324Z"
     },
     {
+      "task": "remote-bots-levels",
+      "session": "Avarnics-Mac-mini.local-82964d",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "remote-bots-levels",
+      "paths": [
+        "src/mms/net/store",
+        "src/mms/bridge/remote",
+        "src/shared/net",
+        "src/shared/bots/personal/methodTable.ts",
+        "src/renderer/components/devices",
+        "src/cli/commands/net.ts"
+      ],
+      "claimedAt": "2026-11-27T20:03:26.729Z",
+      "expiresAt": "2026-11-27T22:03:26.729Z"
+    },
+    {
       "task": "remote-bots-method-table",
       "session": "Avarnics-Mac-mini.local-f3dadc",
       "machine": "Avarnics-Mac-mini.local",
