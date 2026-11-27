@@ -19,11 +19,11 @@ const proxy = { address: '127.0.0.1:8317', key: 'saved' as const }
 describe('the ring and its tooltip', () => {
   const rows: Array<[string, ProviderUsage | undefined, number | undefined, RegExp]> = [
     ['no reading', undefined, undefined, /^No usage info$/],
-    ['a subscription: the limit with the least left', usage({ windows: [window('five_hour', '5-hour', 72), window('seven_day', 'Weekly', 41)] }), 41, /^5-hour: 72% left · Weekly: 41% left$/],
+    ['a subscription: the limit with the least left', usage({ windows: [window('five_hour', '5-hour', 72), window('seven_day', 'Weekly', 41)] }), 41, /^5-hour: 72% left\nWeekly: 41% left$/],
     ['Claude on its own sign-in: not counted', usage({ id: CLAUDE_USAGE_ID, windows: [window('five_hour', '5-hour', 72)] }), undefined, /^No usage info$/],
     ['Claude through the CLI API proxy', usage({ id: CLAUDE_USAGE_ID, proxy, windows: [window('five_hour', '5-hour', 18)] }), 18, /^5-hour: 18% left$/],
     ['Claude through the proxy with nothing to read', usage({ id: CLAUDE_USAGE_ID, proxy, status: 'unavailable', windows: [] }), undefined, /^No usage info$/],
-    ['the proxy\'s sign-ins, pooled', usage({ id: CLAUDE_USAGE_ID, accounts: [account('a', [window('five_hour', '5-hour', 60)]), account('b', [window('five_hour', '5-hour', 80)])] }), 70, /5-hour.*70% left.* · 2 of 2 accounts active$/],
+    ['the proxy\'s sign-ins, pooled', usage({ id: CLAUDE_USAGE_ID, accounts: [account('a', [window('five_hour', '5-hour', 60)]), account('b', [window('five_hour', '5-hour', 80)])] }), 70, /5-hour.*70% left.*\n2 of 2 accounts active$/],
     ['another model\'s weekly does not count', usage({ windows: [window('five_hour', '5-hour', 72), window('seven_day_fable', 'Weekly · Fable', 9)] }), 72, /^5-hour: 72% left$/],
     ['a key with a spend budget', usage({ credit: { balanceUsd: 12.4, limitUsd: 50 } }), 24.8, /of .*50.* left$/],
     ['a key without a budget', usage({ credit: { balanceUsd: 0, usedUsd: 3.2 } }), undefined, /spent so far$/],
@@ -52,7 +52,7 @@ describe('the ring and its tooltip', () => {
   it('an old reading keeps its numbers and says when it is from', () => {
     const old = usageReading(usage({ windows: [window('five_hour', '5-hour', 40)], readAt: new Date(NOW - 30 * 60_000).toISOString() }), NOW, SONNET)
     expect(old.left).toBe(40)
-    expect(old.tooltip).toMatch(/ · as of \d\d:\d\d$/)
+    expect(old.tooltip).toMatch(/\nas of \d\d:\d\d$/)
     expect(usageReading(undefined, NOW, SONNET).tooltip).toBe(NO_USAGE_INFO)
   })
 })
