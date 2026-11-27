@@ -32,14 +32,25 @@ function caller(turn: Awaited<ReturnType<typeof start>>) {
     })
   })
   app.turns.register(appTurn({ threadId: payload.threadId, runId: payload.runId, bot: prepared.authority }))
-  return async (args: Record<string, unknown> = request, toolCallId = `mcp:${randomUUID()}`) => {
-    const result = await app.registry.call('work_start', args, app.request({ threadId: payload.threadId, runId: payload.runId, toolCallId }))
+  return async (args: Record<string, unknown> = request, toolCallId = `mcp:${randomUUID()}`, tool = 'work_start') => {
+    const result = await app.registry.call(tool, args, app.request({ threadId: payload.threadId, runId: payload.runId, toolCallId }))
     expect(result.isError, result.text).toBeFalsy()
     return JSON.parse(result.text)
   }
 }
 
 describe('work_start through the production registry', () => {
+  it('under its thread names (S7d4a): a retry as thread_create starts nothing new, and thread_list scope bot_work lists the work, never paged as a family', async () => {
+    const call = caller(await chat())
+    const first = await call(request, 'mcp:same')
+    expect(await call({ ...request, kind: 'subagent' }, 'mcp:same', 'thread_create')).toMatchObject({ runId: first.runId, workId: first.runId, replayed: true })
+    expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(1)
+    const listed = await call({ scope: 'bot_work' }, undefined, 'thread_list')
+    expect(listed).toEqual(await call({}, undefined, 'work_list'))
+    expect(Object.keys(listed).sort()).toEqual(['now', 'recent'])
+    expect(listed.now).toEqual([expect.objectContaining({ runId: first.runId, workId: first.runId })])
+  })
+
   it('random MCP ids return the same stored work within one chat turn', async () => {
     const call = caller(await chat())
     const first = await call()
