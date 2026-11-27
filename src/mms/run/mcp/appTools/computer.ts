@@ -1,3 +1,4 @@
+import { ownBotOf } from '../../../../shared/threadLineage'
 import { COMPUTER_TOOLS_TOOL, COMPUTER_USE_REQUEST_TOOL, COMPUTER_USE_TOOL, type ComputerUseStatus } from '../../../../shared/computerUse'
 import type { DriverCallResult, DriverTool } from '../../../computerUse/ComputerUseDriver'
 import type { AppToolHost } from './host'
@@ -34,7 +35,7 @@ export interface ComputerUseToolHost {
 
 /** What `computerUseAllowed` reads of a thread. */
 export interface ComputerUseLineage {
-  startedByBot?: { botId: string }
+  startedByBot?: { botId: string; node?: string }
   lineage?: { parentThreadId?: string }
   createdByThreadId?: string
 }
@@ -54,7 +55,9 @@ export function computerUseAllowed(threadId: string, readThread: (id: string) =>
     // The thread asked about may be one the store doesn't hold (started by no bot); a missing thread above it may have
     // been a bot's, so it allows nothing.
     if (!thread) return current === threadId
-    if (thread.startedByBot?.botId) return botHolds(thread.startedByBot.botId)
+    // A bot of another computer (`node`) holds nothing here: its thread is any agent's.
+    const bot = ownBotOf(thread)
+    if (bot?.botId) return botHolds(bot.botId)
     current = thread.lineage?.parentThreadId ?? thread.createdByThreadId
   }
   return true

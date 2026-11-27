@@ -23,6 +23,7 @@ import { useAppStore } from '../../src/renderer/stores/appStore'
 import { useBotsStore } from '../../src/renderer/stores/botsStore'
 import { agentMessage, botMessage } from '../../src/mms/run/mcp/appTools/agentMessage'
 import { useChatsStore } from '../../src/renderer/stores/chatsStore'
+import { NO_COMPUTERS, useComputersStore } from '../../src/renderer/lib/computers'
 import type { AgentOrigin, ChatMessage, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -123,6 +124,25 @@ describe('a message another thread\'s agent sent', () => {
     expect(header(bubble!)!.querySelector('a')).toBeNull()
     expect(bubble!.querySelector('.chat-user-text')?.textContent).toBe(WORDS)
     expect(prompt('m1').querySelector('button[aria-label="Edit"]')).toBeNull()
+  })
+
+  it('an agent of this computer that wrote in a thread of another computer is named by its thread here, which the title opens', async () => {
+    // This computer is `nod_self`; the message sits in a thread that runs on another computer, sent by SENDER here.
+    useComputersStore.setState({ ...NO_COMPUTERS, loaded: true, routed: true, devices: [{ node: 'nod_self', self: true } as never] })
+    const letter = agentMessage(SENDER, 'Old title', WORDS, { computer: 'HERE' })
+    const mine: ChatMessage = {
+      id: 'm1', role: 'user', content: letter.text, timestamp: '2026-11-15T10:00:00.000Z', turnId: 't1',
+      origin: { kind: 'agent', from: { node: 'nod_self', thread: SENDER, run: 'run:here', title: 'Old title' }, hops: 1, body: { head: letter.head, tail: letter.tail } }
+    }
+    try {
+      await show([mine, reply('t1')])
+      const [bubble] = bubbles()
+      expect(header(bubble!)?.textContent).toBe('Agent·Fix flaky test')
+      await act(async () => header(bubble!)!.querySelector('a')!.click())
+      expect(selectThread).toHaveBeenCalledWith(SENDER)
+    } finally {
+      useComputersStore.setState(NO_COMPUTERS)
+    }
   })
 
   it('a message stored before its words were marked shows whole, still labelled', async () => {

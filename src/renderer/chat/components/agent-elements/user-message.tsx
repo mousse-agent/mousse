@@ -19,6 +19,7 @@ import { promptSegments } from "./prompt-links";
 import { WithSentQuotes } from "../../../components/QuotePill";
 import { Bot, File as FileIcon, IconPhoto } from "../../../lib/icons";
 import { useAppStore } from "../../../stores/appStore";
+import { threadIdHere, useSelfNode } from "../../../lib/computers";
 import { useBotsStore } from "../../../stores/botsStore";
 import { useChatsStore } from "../../../stores/chatsStore";
 import { BotFace } from "../../../components/bots/face/BotFace";
@@ -115,9 +116,11 @@ function botOfOrigin<T extends { id: string; homeThreadId?: string }>(origin: Ag
  * sender that was deleted shows the title it had when it sent, with nothing to open.
  */
 function AgentSenderHeader({ origin }: { origin: AgentOrigin }) {
-  // A sender on another computer (`origin.from`) names a thread there, never one of this computer's: its title is shown
-  // as it was sent, with nothing to open here.
-  const localId = origin.from ? undefined : origin.threadId;
+  // A sender on another computer (`origin.from`) names its thread by its id there: this computer's own thread when the
+  // sender is here (a message in a thread of another computer), else that computer's row. Either opens when listed here;
+  // anything else shows its title as it was sent, with nothing to open.
+  const self = useSelfNode(Boolean(origin.from));
+  const localId = origin.from ? threadIdHere(origin.from.node, origin.from.thread, self) : origin.threadId;
   const live = useAppStore((state) => (localId ? state.threads.find((thread) => thread.id === localId)?.name : undefined));
   const title = live || origin.from?.title || origin.title;
   return (

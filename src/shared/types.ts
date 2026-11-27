@@ -1705,8 +1705,12 @@ export interface Thread {
    * Set on a thread one of the owner's bots started ("use your threads"): the bot and its name then, so the thread still
    * says who started it after the bot is renamed or deleted ("Started by Alpha (deleted)"). `createdByThreadId` is the
    * bot's chat thread.
+   *
+   * `node` is set when the bot is one of another computer's (`startedFrom.node`): it started this thread there with
+   * `computer`, and its first message named it (`ROUTED_AGENT_BOT_KEY`). Display only: no bot here has that id, so
+   * nothing that decides what a thread may do reads such a bot (`ownBotOf`).
    */
-  startedByBot?: { botId: string; name: string }
+  startedByBot?: { botId: string; name: string; node?: string }
   /**
    * Set on a thread kept out of the owner's sidebar: an agent started it (`thread_create`, here or from another computer)
    * and did not start it as independent, or a personal bot started it hidden or hid it later (a short background job).

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Bot, Sparkles } from '../lib/icons'
 import { openThread } from '../lib/openThread'
-import { useComputer } from '../lib/computers'
+import { threadIdHere, useComputer, useSelfNode } from '../lib/computers'
 import { showBotThreadInSidebar, useShownBotThread } from '../lib/botThread'
 import { setThreadHidden } from '../lib/threadActions'
 import { useAppStore } from '../stores/appStore'
@@ -13,16 +13,17 @@ import { remoteSubagentParentId } from '../../shared/threadLineage'
 
 /**
  * Top of a thread one of the owner's bots started ("use your threads"): one short line, "Started by <bot>", whose name
- * opens the bot's chat. A bot that was deleted keeps its name there, marked "(deleted)", with nothing to open. A thread the
- * bot keeps out of the sidebar adds "Hidden" and Show in sidebar (`onShow`).
+ * opens the bot's chat. A bot that was deleted keeps its name there, marked "(deleted)", with nothing to open. A bot of
+ * another computer is named with it ("on <computer>"). A thread the bot keeps out of the sidebar adds "Hidden" and Show in
+ * sidebar (`onShow`).
  */
-export function ThreadStartedByBarView({ name, onOpenBot, deleted = false, onShow }: { name: string; onOpenBot?: () => void; deleted?: boolean; onShow?: () => Promise<unknown> }) {
+export function ThreadStartedByBarView({ name, onOpenBot, deleted = false, computer, onShow }: { name: string; onOpenBot?: () => void; deleted?: boolean; computer?: string; onShow?: () => Promise<unknown> }) {
   const [showing, setShowing] = useState(false)
   return (
     <div className="thread-computer-bar thread-started-by" role="note">
       <Bot size={12} strokeWidth={2} aria-hidden="true" />
       <span className="thread-computer-bar-text">
-        Started by {onOpenBot ? <button type="button" className="thread-started-by-name" title={`Open ${name}'s chat`} onClick={onOpenBot}>{name}</button> : name}{deleted ? ' (deleted)' : ''}
+        Started by {onOpenBot ? <button type="button" className="thread-started-by-name" title={`Open ${name}'s chat`} onClick={onOpenBot}>{name}</button> : name}{deleted ? ' (deleted)' : ''}{computer ? ` on ${computer}` : ''}
         {onShow && <> · <span title={deleted ? 'Not in your sidebar' : `Not in your sidebar. ${name}'s chat lists it.`}>Hidden</span></>}
       </span>
       {onShow && <button type="button" className="thread-started-by-name thread-started-by-show" disabled={showing}
@@ -95,8 +96,14 @@ export function ThreadStartedByBar() {
   // as a subagent of this computer is: no bar, while that thread is listed here.
   const belowParent = useAppStore((state) =>
     Boolean(thread && remoteSubagentParentId(thread, (id) => state.threads.some((entry) => entry.id === id)) !== undefined))
-  // The computer an agent that started this thread runs on, when it is another one.
-  const launcherComputer = useComputer(thread?.node ? undefined : thread?.startedFrom?.agent ? thread.startedFrom.node : undefined)
+  // The agent that started this thread on another computer (`startedFrom.agent`): its thread as this computer names it,
+  // which may be listed here (this computer's own, or one of a third computer's rows).
+  const agentFrom = thread?.startedFrom?.agent ? thread.startedFrom : undefined
+  const self = useSelfNode(Boolean(agentFrom))
+  const agentLauncher = agentFrom ? threadIdHere(agentFrom.node, agentFrom.agent!.thread, self) : undefined
+  const agentLauncherTitle = useAppStore((state) => (agentLauncher === undefined ? undefined : state.threads.find((entry) => entry.id === agentLauncher)?.name))
+  // The computer that agent runs on, when it is another one.
+  const launcherComputer = useComputer(agentFrom && agentFrom.node !== self ? agentFrom.node : undefined)
   // Showing a hidden thread is asked of the computer that runs it (`threads.setHidden` is not routed).
   const threadId = thread?.id
   const onShow = threadId && thread.hidden && !thread.node ? () => setThreadHidden(threadId, false) : undefined
@@ -105,11 +112,18 @@ export function ThreadStartedByBar() {
   if (inBotPane) return onShow ? <BotThreadShowBarView onShow={() => onShow().then((shown) => { if (shown) showBotThreadInSidebar(threadId) })} /> : null
   // A thread of another computer whose bot this device does not reach names no bot (`botId` empty): "Started by a bot".
   if (started && !started.botId) return <ThreadStartedByBarView name={started.name || HIDDEN_BOT_NAME} />
+  // A bot of another computer started this thread there (`startedByBot.node`): named with that computer. Its chat is there.
+  if (started?.node) return <ThreadStartedByBarView name={started.name} computer={launcherComputer?.name ?? 'another computer'} onShow={onShow} />
   if (bot) return <ThreadStartedByBarView name={bot.name} onOpenBot={() => void useChatsStore.getState().openBot(bot.id)} onShow={onShow} />
   if (!started) {
-    // An agent on another computer started this thread of this computer (`startedFrom.agent`): its thread is there.
-    if (launcher === undefined && thread?.startedFrom?.agent && !thread.node && !belowParent)
-      return <ThreadStartedByAgentBarView title={thread.startedFrom.agent.title.trim() || 'Untitled thread'} computer={launcherComputer?.name ?? 'another computer'} onShow={onShow} />
+    // An agent on another computer started this thread, or an agent here started this thread of another computer
+    // (`startedFrom.agent`): its thread opens when it is listed here, else it is named with its computer.
+    if (launcher === undefined && agentFrom && !belowParent) {
+      const title = (agentLauncherTitle ?? agentFrom.agent!.title).trim() || 'Untitled thread'
+      const computer = agentFrom.node === self ? undefined : launcherComputer?.name ?? 'another computer'
+      if (agentLauncherTitle !== undefined) return <ThreadStartedByAgentBarView title={title} computer={computer} onOpen={() => void openThread(agentLauncher!)} onShow={onShow} />
+      if (!thread?.node) return <ThreadStartedByAgentBarView title={title} computer={computer} onShow={onShow} />
+    }
     if (launcher === undefined) return null
     if (launcherTitle !== undefined) return <ThreadStartedByAgentBarView title={launcherTitle.trim() || 'Untitled thread'} onOpen={() => void openThread(launcher)} onShow={onShow} />
     // Not listed: deleted, or a bot's chat thread whose bot is not read yet (or was deleted).

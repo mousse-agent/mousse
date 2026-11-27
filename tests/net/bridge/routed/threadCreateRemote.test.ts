@@ -28,6 +28,10 @@ import { cleanups, cleanupAll, linked } from './routerFixture'
 import { launchedThreadsOf } from '../../../../src/renderer/components/sideCard/lineageLogic'
 import { threadInFilter } from '../../../../src/renderer/lib/threadFilter'
 import type { Thread } from '../../../../src/shared/types'
+import { computerUseAllowed } from '../../../../src/mms/run/mcp/appTools/computer'
+import { withHiddenBots } from '../../../../src/mms/bridge/remote/botReach'
+import { HIDDEN_BOT_NAME } from '../../../../src/shared/bots/personal/deviceAccess'
+import { NotificationThreadIndex } from '../../../../src/main/notifications/threadNotificationTarget'
 
 type Loose = Record<string, any>
 let t: Awaited<ReturnType<typeof linked>>
@@ -546,6 +550,32 @@ describe('a personal bot\'s thread on another computer (issue #2003)', () => {
       expect(sender).toMatchObject({ kind: 'agent', from: { node: t.callerNode, thread: chat.id }, bot: { id: 'bot-pip', name: 'Pip', look: PIP_LOOK } })
   }, 120_000)
 
+  it('there, its thread is the bot\'s: in Bot threads, named by it, yet it holds nothing there and goes on as "a bot"', async () => {
+    standInForTurns()
+    const { chat, create } = await botCaller()
+    const out = await create({ clientRequestId: 'bot-own-there' })
+    expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
+    const [far] = launchedBy(chat.id)
+    expect(far).toMatchObject({ startedByBot: { botId: 'bot-pip', name: 'Pip', node: t.callerNode } })
+    expect(threadInFilter(far!, { query: '', show: 'bots', projectId: null, botId: null, computerIds: [], archived: false }, { groupOf: (id) => id, projectName: () => undefined, botName: () => undefined })).toBe(true)
+    // No bot there has that id: what the thread's agents may do is any agent's.
+    expect(computerUseAllowed(far!.id, (id) => t.owner.threads.getThread(id) ?? undefined, () => false)).toBe(true)
+    // That computer can't tell who may know the bot: to a third it is "a bot".
+    expect(withHiddenBots(far, undefined)!.startedByBot).toEqual({ botId: '', name: HIDDEN_BOT_NAME })
+  }, 120_000)
+
+  it('there, its hidden thread is quiet, as a hidden bot thread is', async () => {
+    standInForTurns()
+    const { chat, create } = await botCaller()
+    const out = await create({ hidden: true, clientRequestId: 'bot-quiet-there' })
+    expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
+    const [far] = launchedBy(chat.id)
+    const index = new NotificationThreadIndex()
+    index.note('p', { threads: [far] })
+    expect(index.resolve('p', far!.id, 'completed')).toBeNull()
+    expect(index.resolve('p', far!.id, 'completed', true)).not.toBeNull()
+  }, 120_000)
+
   it('a computer from before it gets neither, so its messages keep the agent label; a retry after it is updated sends the same', async () => {
     standInForTurns()
     const { chat, tool, create } = await botCaller()
@@ -580,6 +610,7 @@ describe('a personal bot\'s thread on another computer (issue #2003)', () => {
     expect(again.body).toMatchObject({ firstMessage: 'sent' })
     for (const params of sends) expect(params).not.toHaveProperty(ROUTED_AGENT_BOT_KEY)
     const [far] = launchedBy(chat.id)
+    expect(far!.startedByBot).toBeUndefined()
     // A later message to a computer from before it reaches it without them too.
     older = true
     const later = await tool('thread_send', { threadId: out.body.threadId, content: 'Also run the linter.', clientRequestId: 'bot-older-2' })

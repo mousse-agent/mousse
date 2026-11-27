@@ -1,7 +1,7 @@
 import { ALWAYS_OPTION_ID, PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { modelFacingReplyText } from '../../../../shared/applets'
 import type { PermissionMode } from '../../../../shared/permissionMode'
-import { isLocalOnlyThread, isNativeHelperThread, isSideChatThread, subagentDescendantsIn, visibleThreads } from '../../../../shared/threadLineage'
+import { isLocalOnlyThread, isNativeHelperThread, isSideChatThread, ownBotOf, subagentDescendantsIn, visibleThreads } from '../../../../shared/threadLineage'
 import type { QueuedMessage, Thread, ThreadNativeHelper, UserQuestionAnswers } from '../../../../shared/types'
 import type { ModelOverride } from '../../../../shared/providerInstances'
 import type { ThreadPullRequestLink } from '../../../../shared/pullRequests'
@@ -1081,7 +1081,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
   const messageParentOf = (threadId: string): { threadId: string } | { botId: string } | undefined => {
     const parent = threadFamily(host, engine).parentOf(threadId)
     if (parent) return { threadId: parent }
-    const botId = host.threadMeta?.(threadId)?.startedByBot?.botId
+    const botId = ownBotOf(host.threadMeta?.(threadId))?.botId
     return botId ? { botId } : undefined
   }
   /**
@@ -1142,7 +1142,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     const meta = host.threadMeta?.(threadId)
     if (!meta) return false
     if (meta.createdByThreadId === ctx.caller.threadId) return true
-    const botId = meta.startedByBot?.botId
+    const botId = ownBotOf(meta)?.botId
     return botId !== undefined && bots?.()?.host.activationOf(ctx.caller.threadId)?.botId === botId
   }
   /**

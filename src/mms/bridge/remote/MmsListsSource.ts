@@ -434,7 +434,8 @@ export class MmsListsSource {
           // runs an older Mousse reads no such key and lists it with the rest.
           ...(thread.hidden ? { hidden: true } : {}),
           // The Bot threads filter, the bot's face and its Started-by bar there read the bot (`Thread.startedByBot`).
-          ...(thread.startedByBot ? { startedByBot: { botId: thread.startedByBot.botId, name: thread.startedByBot.name } } : {}),
+          // A bot of another computer (`node`) goes as "a bot" (`withHiddenBots`).
+          ...(thread.startedByBot ? { startedByBot: { botId: thread.startedByBot.botId, name: thread.startedByBot.name, ...(thread.startedByBot.node ? { node: thread.startedByBot.node } : {}) } } : {}),
           ...(own
             ? {
                 lineage: thread.lineage,
