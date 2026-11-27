@@ -129,14 +129,14 @@ describe('the schedule tools (SPEC §15.1)', () => {
 
     it('lists the six tools for a host that has scheduled jobs', async () => {
       const { registry } = await world()
-      expect(registry.listForThread('caller', 'default').map((tool) => tool.name).filter((name) => name.startsWith('schedule_')).sort()).toEqual(TOOLS)
+      expect(registry.listForThread('caller').map((tool) => tool.name).filter((name) => name.startsWith('schedule_')).sort()).toEqual(TOOLS)
     })
 
     it('the tools are only for a host that has scheduled jobs', async () => {
       fx = delegationFixture()
       const { registry } = appToolRegistry(fx.engine, fakeAppToolHost().host)
       // Registered, so a host that gets its jobs later lists them then; until it does, none is listed.
-      expect(registry.listFor({ readOnly: false, modeCeiling: 'default' }).filter((tool) => tool.name.startsWith('schedule_'))).toEqual([])
+      expect(registry.listFor({ readOnly: false }).filter((tool) => tool.name.startsWith('schedule_'))).toEqual([])
     })
   })
 
@@ -146,7 +146,6 @@ describe('the schedule tools (SPEC §15.1)', () => {
       ['schedule_run', (id: string) => ({ jobId: id })],
       ['schedule_update of the prompt', (id: string) => ({ jobId: id, prompt: 'Something else' })],
       ['schedule_update of the schedule', (id: string) => ({ jobId: id, schedule: { kind: 'interval', minutes: 60 } })],
-      ['schedule_update of the mode', (id: string) => ({ jobId: id, mode: 'plan' })],
       ['schedule_update of the workspace', (id: string) => ({ jobId: id, workspace: { kind: 'newWorktree' } })],
       ['schedule_update of the thread', (id: string) => ({ jobId: id, threadId: 'caller' })],
       ['schedule_update of the model', (id: string) => ({ jobId: id, selection: { instanceId: 'claude', model: 'sonnet' } })]
@@ -220,15 +219,14 @@ describe('the schedule tools (SPEC §15.1)', () => {
   describe('schedule_create', () => {
     it('makes a job in the caller\'s project and records who made it, labelled as an agent\'s', async () => {
       const { call, result, schedules, stored, callerRun } = await world()
-      const { job } = await result(call('schedule_create', { ...CREATE, mode: 'plan' }, { toolCallId: 'mcp:c1' }))
-      expect(job).toMatchObject({ name: 'Nightly report', prompt: 'Write the nightly report', schedule: { kind: 'interval', minutes: 30 }, projectId: 'p1', threadId: null, mode: 'plan', createdByAgent: true, createdByYou: true })
+      const { job } = await result(call('schedule_create', CREATE, { toolCallId: 'mcp:c1' }))
+      expect(job).toMatchObject({ name: 'Nightly report', prompt: 'Write the nightly report', schedule: { kind: 'interval', minutes: 30 }, projectId: 'p1', threadId: null, createdByAgent: true, createdByYou: true })
       expect(stored(job.id)).toMatchObject({
         projectId: 'p1',
-        mode: 'plan',
         createdBy: { threadId: 'caller', runId: callerRun.runId, requestId: 'schedule_create:caller:mcp:c1' }
       })
       expect(stored(job.id).trigger).toBeUndefined()
-      expect(schedules.validate).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'p1', mode: 'plan' }))
+      expect(schedules.validate).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'p1' }))
     })
 
     it('records the caller\'s limits on the job, asking the owner who is calling', async () => {
@@ -330,13 +328,6 @@ describe('the schedule tools (SPEC §15.1)', () => {
       expect(jobs.listJobs()).toEqual([])
     })
 
-    it('a plan ceiling makes plan jobs only, and defaults to plan', async () => {
-      const { call, denied, result, stored } = await world()
-      expect((await denied(call('schedule_create', { ...CREATE, mode: 'agent' }, { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
-      const { job } = await result(call('schedule_create', CREATE, { modeCeiling: 'plan' }))
-      expect(stored(job.id).mode).toBe('plan')
-    })
-
     it('a refusal from the profile\'s checks reaches the agent and makes nothing', async () => {
       const { call, schedules, jobs } = await world()
       schedules.validate.mockImplementation(() => { throw new Error('The model is hidden') })
@@ -421,7 +412,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
   })
 
   describe('the limits are settings a person changes', () => {
-    const toolOf = (registry: Awaited<ReturnType<typeof world>>['registry'], name: string) => registry.listForThread('caller', 'default').find((tool) => tool.name === name)!
+    const toolOf = (registry: Awaited<ReturnType<typeof world>>['registry'], name: string) => registry.listForThread('caller').find((tool) => tool.name === name)!
     const scheduleOf = (tool: { inputSchema: unknown }) => (tool.inputSchema as { properties: { schedule: { properties: { minutes: { minimum: number } }; description: string } } }).properties.schedule
 
     it('enforces a changed number of active jobs at the next create, without a restart', async () => {
@@ -614,17 +605,17 @@ describe('the schedule tools (SPEC §15.1)', () => {
   describe('schedule_update', () => {
     it('changes only what it is given', async () => {
       const { call, create, stored } = await world()
-      const job = await create({ mode: 'plan' })
+      const job = await create({ workspace: { kind: 'newWorktree' } })
       const before = stored(job.id)
       await call('schedule_update', { jobId: job.id, prompt: ' A better prompt ', schedule: { kind: 'interval', minutes: 60 } })
-      expect(stored(job.id)).toMatchObject({ name: before.name, mode: 'plan', projectId: 'p1', prompt: 'A better prompt', schedule: { kind: 'interval', minutes: 60 }, createdBy: before.createdBy, expiresAt: before.expiresAt })
+      expect(stored(job.id)).toMatchObject({ name: before.name, workspace: { kind: 'newWorktree' }, projectId: 'p1', prompt: 'A better prompt', schedule: { kind: 'interval', minutes: 60 }, createdBy: before.createdBy, expiresAt: before.expiresAt })
     })
 
     it('null puts a field back to its default', async () => {
       const { call, create, stored } = await world()
-      const job = await create({ mode: 'plan' })
-      await call('schedule_update', { jobId: job.id, mode: null })
-      expect(stored(job.id).mode).toBeUndefined()
+      const job = await create({ workspace: { kind: 'newWorktree' } })
+      await call('schedule_update', { jobId: job.id, workspace: null })
+      expect(stored(job.id).workspace).toBeUndefined()
     })
 
     it('rebinds a job to the caller\'s thread and takes that thread\'s project, and frees it with null', async () => {
@@ -677,26 +668,14 @@ describe('the schedule tools (SPEC §15.1)', () => {
       expect((await call('schedule_pause', { jobId: job.id })).isError).toBeUndefined()
     })
 
-    it('a plan ceiling cannot touch a job that runs in agent mode, nor widen a plan job', async () => {
-      const { call, create, denied, stored } = await world()
-      const planJob = await create({ mode: 'plan' })
-      const agentJob = await create({ name: 'Agent mode' })
-      expect((await denied(call('schedule_update', { jobId: agentJob.id, name: 'x' }, { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
-      expect((await denied(call('schedule_run', { jobId: agentJob.id }, { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
-      expect((await denied(call('schedule_update', { jobId: planJob.id, mode: 'agent' }, { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
-      expect((await denied(call('schedule_update', { jobId: planJob.id, mode: null }, { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
-      expect((await call('schedule_update', { jobId: planJob.id, prompt: 'still planning' }, { modeCeiling: 'plan' })).isError).toBeUndefined()
-      expect(stored(planJob.id).mode).toBe('plan')
-    })
-
     it('validates the job as it would be after the change', async () => {
       const { call, create, schedules } = await world()
-      const job = await create({ mode: 'plan' })
+      const job = await create()
       await call('schedule_update', { jobId: job.id, workspace: { kind: 'newWorktree' } })
-      expect(schedules.validate).toHaveBeenLastCalledWith(expect.objectContaining({ mode: 'plan', workspace: { kind: 'newWorktree' }, projectId: 'p1' }))
-      schedules.validate.mockImplementation(() => { throw new Error('A plan-mode job never provisions a worktree') })
+      expect(schedules.validate).toHaveBeenLastCalledWith(expect.objectContaining({ workspace: { kind: 'newWorktree' }, projectId: 'p1' }))
+      schedules.validate.mockImplementation(() => { throw new Error('This project cannot make worktrees') })
       const outcome = await call('schedule_update', { jobId: job.id, workspace: { kind: 'newWorktree' } })
-      expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('never provisions a worktree') })
+      expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('cannot make worktrees') })
     })
   })
 
@@ -725,9 +704,9 @@ describe('the schedule tools (SPEC §15.1)', () => {
     it('clearing a restrictive setting keeps the ceiling', async () => {
       const { call, create, state, stored } = await world()
       state.limits = { permissionCeiling: 'ask' }
-      const job = await create({ mode: 'plan' })
+      const job = await create({ workspace: { kind: 'newWorktree' } })
       state.limits = { permissionCeiling: 'full' }
-      await call('schedule_update', { jobId: job.id, mode: null })
+      await call('schedule_update', { jobId: job.id, workspace: null })
       expect(stored(job.id)).toMatchObject({ permissionCeiling: 'ask' })
     })
 

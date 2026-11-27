@@ -504,8 +504,7 @@ describe('scheduled job webhook trigger', () => {
     it('fills placeholders from the body of a real signed request, and the headers and the secret are not reachable', async () => {
       const b = await boot({ start: true })
       const { job, secret } = webhookJob(b, {
-        prompt: 'Handle {{body.action}} | {{headers.authorization}} | {{headers.x-api-key}} | {{headers.x-mousse-signature}} | {{headers.x-mousse-timestamp}} | {{secret}} | {{body.missing}}',
-        mode: 'plan'
+        prompt: 'Handle {{body.action}} | {{headers.authorization}} | {{headers.x-api-key}} | {{headers.x-mousse-signature}} | {{headers.x-mousse-timestamp}} | {{secret}} | {{body.missing}}'
       })
       const bearer = 'Bearer s3cret-bearer-token'
       const apiKey = 'sk-live-0123456789'
@@ -522,8 +521,6 @@ describe('scheduled job webhook trigger', () => {
         expect(prompt).not.toContain(hidden)
         expect(JSON.stringify(ingress)).not.toContain(hidden)
       }
-      // The run stays in the job's own mode.
-      expect(ingress).toMatchObject({ mode: 'plan' })
       await until(() => deliveries(b, job.id).some((row) => row.outcome === 'completed'), 'the delivery to complete')
       expect(deliveries(b, job.id)[0]).toMatchObject({ outcome: 'completed', missingPlaceholders: ['body.missing'] })
     })

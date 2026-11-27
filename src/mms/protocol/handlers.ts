@@ -3872,10 +3872,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         threadId: patch.threadId === undefined ? existing.threadId : patch.threadId ?? undefined,
         projectId: patch.projectId === undefined ? existing.projectId : patch.projectId ?? undefined,
         selection: patch.selection === undefined ? existing.selection : patch.selection ?? undefined,
-        mode: patch.mode === undefined ? existing.mode : patch.mode ?? undefined,
         workspace: patch.workspace === undefined ? existing.workspace : patch.workspace ?? undefined
       }
-      const touchesOptions = ['selection', 'mode', 'workspace', 'threadId', 'projectId'].some((key) => (patch as Record<string, unknown>)[key] !== undefined)
+      const touchesOptions = ['selection', 'workspace', 'threadId', 'projectId'].some((key) => (patch as Record<string, unknown>)[key] !== undefined)
       const checked = touchesOptions ? checkJobOptions(ctx, merged) : {}
       // An edit never raises the job's ceiling above what the editor holds now. The person editing here may raise it
       // to their own mode by choosing a mode on purpose (see `permissionsAfterEdit`). It is worked out inside the store's
@@ -3916,7 +3915,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(patch.projectId !== undefined ? { projectId: patch.projectId === null ? undefined : patch.projectId } : {}),
         ...(patch.selection !== undefined ? { selection: patch.selection === null ? undefined : checked.selection ?? patch.selection } : {}),
         ...(patch.agent !== undefined ? { agent: patch.agent === null ? undefined : patch.agent } : {}),
-        ...(patch.mode !== undefined ? { mode: patch.mode === null ? undefined : patch.mode } : {}),
         ...(patch.workspace !== undefined ? { workspace: patch.workspace === null ? undefined : patch.workspace } : {}),
         ...(patch.tellMe !== undefined ? { tellMe: patch.tellMe } : {}),
         ...(patch.keys !== undefined ? { keys: patch.keys?.length ? patch.keys : undefined } : {}),

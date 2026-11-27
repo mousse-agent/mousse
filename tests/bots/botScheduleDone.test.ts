@@ -20,7 +20,7 @@ async function scheduled() {
   const row = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!
   const running = await start(f, row.id)
   const ctx: ToolCallContext = {
-    caller: { threadId: running.payload.threadId, runId: running.payload.runId, provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+    caller: { threadId: running.payload.threadId, runId: running.payload.runId, provider: 'pi', accessLevel: 'lineage' },
     turn: { turnToken: 't', ...appTurn({ threadId: running.payload.threadId, runId: running.payload.runId, bot: running.prepared.authority }) },
     toolCallId: 'done', signal: new AbortController().signal, transport: 'mcp'
   }

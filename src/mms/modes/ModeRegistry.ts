@@ -317,17 +317,6 @@ export class ModeRegistry {
         path: 'builtin:agent',
       },
       {
-        id: 'plan',
-        name: 'Plan',
-        description: 'Read-only planning',
-        mode: 'primary',
-        prompt: '',
-        permission: { read: 'allow', grep: 'allow', glob: 'allow', list: 'allow', edit: 'deny', bash: 'deny' },
-        scope: 'global',
-        source: 'builtin',
-        path: 'builtin:plan',
-      },
-      {
         id: 'build',
         name: 'Build',
         description: 'Direct implementation',

@@ -212,7 +212,7 @@ it.each(['digest', 'schema', 'configuration', 'device'] as const)('refuses a sta
   if (change === 'digest') answer.digest = 'old-digest'
   if (change === 'schema') t.descriptor.inputSchema = { type: 'object', required: ['extra'] } as never
   if (change === 'configuration') t.server.configDigest = 'changed'
-  if (change === 'device') f.store.narrowOwnerLimit(t.chatId, 'plan')
+  if (change === 'device') f.store.narrowOwnerLimit(t.chatId, 'ask')
   await expect(f.bots.actions.answer(answer)).rejects.toThrow('changed since')
   expect(t.calls).toEqual([])
   expect(f.bots.actions.forWork(t.workId)?.status).toBe('open')
@@ -339,12 +339,12 @@ it.each(['relay', 'pi'] as const)('%s holds through the common path, and journal
   const bot = t.work.prepared.authority
   const turn = appTurn({ threadId: 'bot-thread', runId: 'r1', turnToken: 'tt', bot })
   const ledger = { start: vi.fn(() => 'ledger'), commit: vi.fn(), failed: vi.fn() }
-  const request = { credential: { threadId: 'bot-thread', runId: 'r1', provider: runtime === 'pi' ? 'pi' : 'claude', modeCeiling: 'default', accessLevel: 'lineage', binding: runtime === 'pi' ? 'per_call' : 'rotate', relay: { approvals: 'runtime' }, current: () => true }, toolCallId: 'runtime-call', signal: new AbortController().signal } as never
+  const request = { credential: { threadId: 'bot-thread', runId: 'r1', provider: runtime === 'pi' ? 'pi' : 'claude', accessLevel: 'lineage', binding: runtime === 'pi' ? 'per_call' : 'rotate', relay: { approvals: 'runtime' }, current: () => true }, toolCallId: 'runtime-call', signal: new AbortController().signal } as never
   if (runtime === 'relay') {
     const handler = new RelayHandler({
       catalog: {} as never, manager: {} as never, botMcp: t.mcp, botOf: () => bot,
       projectPathFor: () => undefined, toolLedger: () => ledger as never,
-      registry: { admit: async rawArgs => ({ threadId: 'bot-thread', active: 'r1', turn, args: rawArgs, caller: { threadId: 'bot-thread', runId: 'r1', provider: 'claude', modeCeiling: 'default', accessLevel: 'lineage' as const }, boundToken: 'tt' }) }
+      registry: { admit: async rawArgs => ({ threadId: 'bot-thread', active: 'r1', turn, args: rawArgs, caller: { threadId: 'bot-thread', runId: 'r1', provider: 'claude', accessLevel: 'lineage' as const }, boundToken: 'tt' }) }
     })
     await handler.call('Mail__send', t.args, request)
   } else {
@@ -382,13 +382,13 @@ it.each([true, false].flatMap(on => ['pi', 'codex', 'claude'].map(runtime => ({ 
   for (const tool of botCatalogueTools(() => registry)) registry.register(tool)
   const app = vi.fn(async () => ({ text: 'registered read' }))
   registry.register({ name: 'git_status', description: 'Read Git status', inputSchema: { type: 'object' }, access: 'reads', class: 'read', handler: app })
-  const request = { credential: { threadId: 'bot-thread', runId: 'r1', provider: runtime, modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', relay: { approvals: 'runtime' }, current: () => true }, toolCallId: 'catalogue-call', signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2]
+  const request = { credential: { threadId: 'bot-thread', runId: 'r1', provider: runtime, accessLevel: 'lineage', binding: 'per_call', relay: { approvals: 'runtime' }, current: () => true }, toolCallId: 'catalogue-call', signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2]
   const callApp = () => registry.call(runtime === 'claude' ? 'git_status' : 'use_tool', { ...(runtime === 'claude' ? {} : { tool: 'git_status', arguments: {} }), [TURN_TOKEN_KEY]: 'tt' }, request)
   expect((await registry.userMcpForTurn('bot-thread', 'r1')).map(tool => tool.providerName)).toContain('mail_send')
   expect((await registry.userMcpListingForTurn('bot-thread', 'r1')).map(tool => tool.name)).toContain('mail_send')
   const relay = new RelayHandler({ catalog: {} as never, manager: {} as never, botMcp: t.mcp, botOf: () => bot, projectPathFor: () => undefined })
   expect(relay.list(request.credential).map(tool => tool.name)).toContain('Mail__send')
-  expect(registry.listForThread('bot-thread', 'default', 'r1').some(tool => tool.name === 'git_status')).toBe(runtime === 'claude')
+  expect(registry.listForThread('bot-thread', 'r1').some(tool => tool.name === 'git_status')).toBe(runtime === 'claude')
   const catalogue = await registry.call('tool_catalogue', { group: 'threads', [TURN_TOKEN_KEY]: 'tt' }, request)
   expect(catalogue.text).toContain(runtime === 'claude' ? 'ToolSearch' : 'use_tool')
   const wronglyWrapped = await registry.call('use_tool', { tool: 'mail_not_offered', arguments: t.args, [TURN_TOKEN_KEY]: 'tt' }, request)
@@ -429,7 +429,7 @@ function catalogueTurn(t: Awaited<ReturnType<typeof setup>>, app?: (() => Promis
     for (const tool of declarations) if (!registry.list().some(existing => existing.name === tool.name)) registry.register(tool)
     for (const tool of registry.list()) (tool as { handler: unknown }).handler = vi.fn(async () => ({ text: 'handler ran' }))
   }
-  const credential = { threadId: 'bot-thread', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true }
+  const credential = { threadId: 'bot-thread', runId: 'r1', provider: 'pi', accessLevel: 'lineage', binding: 'per_call', current: () => true }
   return Object.assign((name: string, args: Record<string, unknown>, toolCallId: string) =>
     registry.call(name, { ...args, [TURN_TOKEN_KEY]: 'tt' }, { credential, toolCallId, signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2]), { registry })
 }
@@ -2913,7 +2913,7 @@ it('C4 authority compiler fences every registered Mousse tool for held work and 
     })
     const handlers = registry.list().map(tool => vi.spyOn(tool, 'handler').mockResolvedValue({ text: 'ran' }))
     const names = registry.list().filter(tool => toolNeeds(tool).callable && botMayBeOffered(tool.name) && tool.name !== 'use_tool').map(tool => tool.name)
-    const request = { credential: { threadId, runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true }, toolCallId: 'compiler-held', signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2]
+    const request = { credential: { threadId, runId: 'r1', provider: 'pi', accessLevel: 'lineage', binding: 'per_call', current: () => true }, toolCallId: 'compiler-held', signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2]
     const call = (name: string, args: Record<string, unknown>) => registry.call(name, { ...args, [TURN_TOKEN_KEY]: 'tt' }, request)
     return { call, names, handlers }
   })
@@ -4056,9 +4056,9 @@ it.each(['only the held call', 'another call too', 'only another call with its a
   const turn = appTurn({ threadId, runId, turnToken: 'tt', bot })
   const handler = new RelayHandler({
     catalog: {} as never, manager: {} as never, botMcp: t.mcp, botOf: () => bot, projectPathFor: () => undefined, toolLedger: () => ledger as never,
-    registry: { admit: async rawArgs => ({ threadId, active: runId, turn, args: rawArgs, caller: { threadId, runId, provider: 'claude', modeCeiling: 'default', accessLevel: 'lineage' as const }, boundToken: 'tt' }) }
+    registry: { admit: async rawArgs => ({ threadId, active: runId, turn, args: rawArgs, caller: { threadId, runId, provider: 'claude', accessLevel: 'lineage' as const }, boundToken: 'tt' }) }
   })
-  await handler.call('Mail__send', t.args, { credential: { threadId, runId, provider: 'claude', modeCeiling: 'default', accessLevel: 'lineage', binding: 'rotate', relay: { approvals: 'runtime' }, current: () => true }, toolCallId: 'chat-call', signal: new AbortController().signal } as never)
+  await handler.call('Mail__send', t.args, { credential: { threadId, runId, provider: 'claude', accessLevel: 'lineage', binding: 'rotate', relay: { approvals: 'runtime' }, current: () => true }, toolCallId: 'chat-call', signal: new AbortController().signal } as never)
   const action = f.bots.actions.forWork(row.id)!
   expect(action).toMatchObject({ lane: 'chat', status: 'open' })
   if (unsettled === 'another call too') started('edit-call', 'Edit', { file_path: 'notes.md' })

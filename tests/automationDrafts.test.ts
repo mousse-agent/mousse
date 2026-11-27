@@ -392,7 +392,7 @@ describe('the tool list', () => {
     const tools: AutomationToolHost = { drafts, isManagerThread: (id) => id === 'manager', botOf: () => undefined }
     host.automations = () => tools
     const { registry } = createAppToolRegistry({ host, engine: { delegations: { getLineage: () => undefined } } as never })
-    const names = (threadId: string) => registry.listForThread(threadId, 'default', 'manage').map((tool) => tool.name)
+    const names = (threadId: string) => registry.listForThread(threadId, 'manage').map((tool) => tool.name)
     expect(names('t1')).not.toContain('schedule_list')
     host.schedules = { jobLimits: () => ({ maxActive: 10, minIntervalMinutes: 15, lifetimeDays: 7 }) } as AppToolHost['schedules']
     expect(names('t1')).toEqual(expect.arrayContaining(['schedule_list', 'schedule_create', 'schedule_update', 'schedule_pause', 'schedule_run']))

@@ -524,11 +524,11 @@ describe('other threads keep working through a delete', () => {
           callTool: ((_name: string, _args: unknown, _projectPath: unknown, signal?: AbortSignal) =>
             manager.runTimed('mcp-call', 60_000, 'Timed out calling MCP tool say', signal, async () => { await hold; return { content: [{ type: 'text', text: 'said' }], isError: false } })) as never
         } as RelayHost['manager'],
-        registry: { admit: async (rawArgs: Record<string, unknown>) => ({ threadId: other.id, active: 'run-other', turn, args: rawArgs, caller: { threadId: other.id, runId: 'run-other', provider: 'codex', modeCeiling: 'default', accessLevel: 'lineage' as const }, boundToken: 'tt' }) } as never,
+        registry: { admit: async (rawArgs: Record<string, unknown>) => ({ threadId: other.id, active: 'run-other', turn, args: rawArgs, caller: { threadId: other.id, runId: 'run-other', provider: 'codex', accessLevel: 'lineage' as const }, boundToken: 'tt' }) } as never,
         projectPathFor: () => undefined
       })
       const request: McpCallRequest = {
-        credential: { threadId: other.id, runId: 'run-other', provider: 'codex', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', relay: { approvals: 'runtime' }, current: () => true } as never,
+        credential: { threadId: other.id, runId: 'run-other', provider: 'codex', accessLevel: 'lineage', binding: 'per_call', relay: { approvals: 'runtime' }, current: () => true } as never,
         toolCallId: 'mcp:c1',
         signal: new AbortController().signal
       }

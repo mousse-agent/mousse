@@ -493,13 +493,11 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
         if (input.threadId === c.askCaller.id) {
           seen.enqueue = await call(mcp!, 'queue_enqueue', { threadId: c.target.id, content: 'run the migration', expectedRevision: await rev() })
           ids.item = (parse(seen.enqueue) as { item: { id: string } }).item.id
-          seen.plan = await call(mcp!, 'queue_enqueue', { threadId: c.target.id, content: 'only plan the cleanup', mode: 'plan', expectedRevision: await rev() })
-          ids.plan = (parse(seen.plan) as { item: { id: string } }).item.id
+          seen.second = await call(mcp!, 'queue_enqueue', { threadId: c.target.id, content: 'then tidy up', expectedRevision: await rev() })
+          ids.second = (parse(seen.second) as { item: { id: string } }).item.id
         }
         if (input.threadId === c.fullCaller.id) {
-          seen.reorder = await call(mcp!, 'queue_reorder', { threadId: c.target.id, orderedIds: [ids.plan, ids.item], expectedRevision: await rev() })
-          // Another writer cannot turn a plan turn into an agent turn.
-          seen.widen = await call(mcp!, 'queue_edit', { threadId: c.target.id, itemId: ids.plan, mode: 'agent', expectedRevision: await rev() })
+          seen.reorder = await call(mcp!, 'queue_reorder', { threadId: c.target.id, orderedIds: [ids.second, ids.item], expectedRevision: await rev() })
           seen.edit = await call(mcp!, 'queue_edit', { threadId: c.target.id, itemId: ids.item, content: 'run the migration, and drop the old tables', expectedRevision: await rev() })
         }
         return 'ok'
@@ -524,22 +522,21 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
 
       await w.d.orch.send(GO, false, { threadId: fullCaller.id, clientRequestId: 'go-full' })
       expect(verdict(seen.reorder)).toBe('ok')
-      expect(verdict(seen.widen)).toBe('mousse_scope_denied')
       expect(verdict(seen.edit)).toBe('ok')
       const rewritten = w.queue(target.id).find((item) => item.id === ids.item)!
       // The words are the full-mode agent's now, said so on the message; the limit is the stricter of the two, and it only tightens.
       expect(rewritten.content).toBe(agentMessageText(fullCaller.id, 'Full caller', 'run the migration, and drop the old tables'))
       expect(rewritten).toMatchObject({ permissionMode: 'ask', origin: { kind: 'agent', threadId: fullCaller.id, hops: 1, title: 'Full caller' } })
       expect(agentMessageWords(rewritten.content, rewritten.origin)).toBe('run the migration, and drop the old tables')
-      // The plan turn is still a plan turn from the ask agent; the reorder changed the order and nothing else.
-      expect(w.queue(target.id).map((item) => item.id)).toEqual([ids.plan, ids.item])
-      expect(w.queue(target.id)[0]).toMatchObject({ mode: 'plan', permissionMode: 'ask', origin: { kind: 'agent', threadId: askCaller.id } })
+      // The second message is still the ask agent's; the reorder changed the order and nothing else.
+      expect(w.queue(target.id).map((item) => item.id)).toEqual([ids.second, ids.item])
+      expect(w.queue(target.id)[0]).toMatchObject({ permissionMode: 'ask', origin: { kind: 'agent', threadId: askCaller.id } })
 
       release.resolve()
       await waitFor(() => w.turnsOf(target.id).length === 3, 'both queued turns', 30_000)
       // Each runs as its sender's, under the limit it carries though the thread is `full`.
       expect(w.turnsOf(target.id).slice(1)).toEqual([
-        expect.objectContaining({ prompt: agentMessageText(askCaller.id, 'Ask caller', 'only plan the cleanup'), mode: 'plan', permissionMode: 'ask', fromAgent: true }),
+        expect.objectContaining({ prompt: agentMessageText(askCaller.id, 'Ask caller', 'then tidy up'), permissionMode: 'ask', fromAgent: true }),
         expect.objectContaining({ prompt: rewritten.content, permissionMode: 'ask', fromAgent: true })
       ])
       await waitFor(() => w.d.engine.listRuns(target.id).every((run) => run.status === 'completed'), 'the runs')
@@ -1101,7 +1098,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
     })
   })
 
-  describe('a promoted message put back, a Plan thread, and the journal\'s upkeep', () => {
+  describe('a promoted message put back, and the journal\'s upkeep', () => {
     it('a promoted message the turn never read comes back with its own chat mode and its images, also when it is queued again from its entry', async () => {
       const release = deferred()
       const seen: Record<string, Response> = {}
@@ -1119,42 +1116,18 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       await w.d.orch.send('hold', false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack' })
       await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the held turn')
       const image = { data: 'aGk=', mimeType: 'image/png' }
-      ids.item = w.d.orch.enqueueForThread(w.other.id, { content: 'only plan the cleanup', mode: 'plan', images: [image] }, { source: 'gui' }).id
+      ids.item = w.d.orch.enqueueForThread(w.other.id, { content: 'tidy the cleanup', mode: 'build', images: [image] }, { source: 'gui' }).id
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
       expect(verdict(seen.promote)).toBe('ok')
       const session = w.d.orch.getOrCreateSession(w.other.id)
       // The entry carries what the message was, for the case the item is gone when the turn ends.
-      expect(session.activeTurn!.pendingSteer).toEqual([expect.objectContaining({ itemId: ids.item, mode: 'plan', images: [image], byAgent: true })])
+      expect(session.activeTurn!.pendingSteer).toEqual([expect.objectContaining({ itemId: ids.item, mode: 'build', images: [image], byAgent: true })])
       const entry = session.activeTurn!.pendingSteer[0]
       const settle = (w.d.orch as unknown as { settleUnreadItems(session: unknown, entries: unknown[], mode: string): void }).settleUnreadItems
       // An acknowledgement dropped the item while its drain was out: the entry queues it again.
       w.d.orch.removeQueuedItem(w.other.id, ids.item)
       settle.call(w.d.orch, session, [entry], 'agent')
-      expect(w.queue(w.other.id)).toEqual([expect.objectContaining({ content: 'only plan the cleanup', mode: 'plan', images: [image], state: 'pending' })])
-      release.resolve()
-    })
-
-    it('an agent that rewrites a message on a thread a person keeps in Plan leaves it a plan message', async () => {
-      const release = deferred()
-      const seen: Record<string, Response> = {}
-      const ids: Record<string, string> = {}
-      const w = world(async (input, mcp, _d, adapter) => {
-        if (input.prompt === 'hold') {
-          await adapter.hold(input, release.promise)
-          return 'held'
-        }
-        if (input.threadId === w.parent.id && input.prompt === GO)
-          seen.edit = await call(mcp!, 'queue_edit', { threadId: w.other.id, itemId: ids.item, content: 'now implement it', expectedRevision: (await list(mcp!, w.other.id)).revision })
-        return 'ok'
-      })
-      await w.attach()
-      // The person keeps the thread in Plan, and queues a message in agent mode while a turn runs.
-      await w.d.orch.send({ content: 'hold', mode: 'plan' }, false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack' })
-      await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the held turn')
-      ids.item = w.d.orch.enqueueForThread(w.other.id, { content: 'typed in agent mode', mode: 'agent' }, { source: 'gui' }).id
-      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(verdict(seen.edit)).toBe('ok')
-      expect(w.queue(w.other.id)[0]).toMatchObject({ mode: 'plan', origin: { kind: 'agent', threadId: w.parent.id } })
+      expect(w.queue(w.other.id)).toEqual([expect.objectContaining({ content: 'tidy the cleanup', mode: 'build', images: [image], state: 'pending' })])
       release.resolve()
     })
 

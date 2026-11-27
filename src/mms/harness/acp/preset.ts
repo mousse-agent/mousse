@@ -47,8 +47,6 @@ export interface AcpPreset {
   initializeMeta?: Record<string, unknown>
   /** What the agent can do before any handshake. */
   staticCaps: HarnessCaps
-  /** Caps refined by what the agent reported (plan mode). */
-  capsFromFacts?(caps: HarnessCaps, facts: RuntimeFacts): HarnessCaps
   /** Labels and scopes of permission options (default: the generic classes). */
   classifyOption?: ClassifyOption
   /** A request Mousse answers with allow-once without asking anyone: a read in the turn's folder (`AcpSessionsOptions.allowsUnasked`). */

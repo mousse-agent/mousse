@@ -52,7 +52,7 @@ export function scheduledJobOptionsDepsFrom(sources: ScheduledJobOptionsSources)
 }
 
 /** The fields of a job these checks read; the caller passes the job as it would be after the change. */
-export type ScheduledJobOptionsInput = Pick<ScheduledJob, 'threadId' | 'projectId' | 'selection' | 'mode' | 'workspace'>
+export type ScheduledJobOptionsInput = Pick<ScheduledJob, 'threadId' | 'projectId' | 'selection' | 'workspace'>
 
 /** The thread that owns a ready worktree at `path`, among the threads of one project. */
 export function findWorktreeOwner(
@@ -74,7 +74,7 @@ export function findWorktreeOwner(
 }
 
 /**
- * Checks the model, mode and workspace of a scheduled job. Throws with a message a person can act on.
+ * Checks the model and workspace of a scheduled job. Throws with a message a person can act on.
  * Returns the selection as the profile stores it, and the thread a `worktree` workspace resolves to
  * (the caller stores that as the job's `threadId`).
  */
@@ -89,7 +89,6 @@ export function validateScheduledJobOptions(
     selection = deps.overrideFor({ instanceId: job.selection.instanceId, llmProvider: job.selection.llmProvider, model: job.selection.model, ...(job.selection.effort ? { effort: job.selection.effort } : {}) })
     deps.resolveStored(selection, { purpose: 'schedule', scope: projectId ? { kind: 'project', projectId } : { kind: 'device' } })
   }
-  if (job.mode !== undefined && job.mode !== 'agent' && job.mode !== 'plan') throw new Error("mode must be 'agent' or 'plan'")
   return { ...(selection ? { selection } : {}), ...validateScheduledJobWorkspace(job, projectId, deps) }
 }
 
@@ -108,7 +107,6 @@ function validateScheduledJobWorkspace(job: ScheduledJobOptionsInput, projectId:
   if (job.threadId) throw new Error('A job bound to a thread runs in that thread\'s workspace; remove workspace or the thread')
   if (!job.projectId) throw new Error(workspace.kind === 'newWorktree' ? 'A job that runs in a new worktree needs a project' : 'A job that names a workspace needs a project')
   if (workspace.kind === 'newWorktree') {
-    if (job.mode === 'plan') throw new Error('A plan-mode job never provisions a worktree; use workspace project or mode agent')
     const project = deps.getProject(job.projectId)
     if (!project) throw new Error('Project not found: ' + job.projectId)
     if (!deps.isGitBacked(project.path)) throw new Error('A new worktree needs a project backed by a Git repository')

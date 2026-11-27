@@ -15,7 +15,6 @@ import {
   heldPermissionMode,
   isUnchanged,
   loweredPermission,
-  modeChoices,
   patchOf,
   scheduleOf,
   showsWorkspace,
@@ -610,7 +609,7 @@ export function AutomationDetail({
                   </div>
                 ) : null}
                 {fieldError('worktreePath')}
-                {draft.workspaceKind === 'project' && draft.mode !== 'plan' ? <p className="scheduled-note warn" data-testid="workspace-warning">{PROJECT_WORKSPACE_WARNING}</p> : null}
+                {draft.workspaceKind === 'project' ? <p className="scheduled-note warn" data-testid="workspace-warning">{PROJECT_WORKSPACE_WARNING}</p> : null}
               </>
             }>
               <Select<WorkspaceKind>
@@ -622,10 +621,6 @@ export function AutomationDetail({
               />
             </FormRow>
           ) : draft.threadId ? <FormRow label="Runs in"><span className="automation-form-value">The thread's own workspace</span></FormRow> : null}
-
-          <FormRow label="Mode" htmlFor={id('mode')}>
-            <Select<JobDraft['mode']> id={id('mode')} className="automation-field-select" value={draft.mode} options={modeChoices(draft)} onChange={(mode) => patch({ mode })} />
-          </FormRow>
 
           {remoteNode ? null : (
             <FormRow label="Keys" testId="keys-row" wide>

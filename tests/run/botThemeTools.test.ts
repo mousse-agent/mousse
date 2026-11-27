@@ -89,7 +89,7 @@ describe('a bot\'s theme tools', () => {
       // A refusal reads as its words; its shape is checked in toolRefusalShape.test.ts.
       return { error: outcome.isError === true, text: refusalOf(outcome)?.message ?? outcome.text }
     }
-    const listed = () => themeNames(registry.listForThread('home', 'default', homeRun.runId).map((tool) => tool.name))
+    const listed = () => themeNames(registry.listForThread('home', homeRun.runId).map((tool) => tool.name))
     /** A PNG at `folder` (the bot's files folder by default). */
     const picture = (folder = files, name = 'wall.png'): string => {
       mkdirSync(folder, { recursive: true })

@@ -636,7 +636,7 @@ describe('locked Claude Code: who runs bots', () => {
     const driver = claudeCodeDriver({ platform: 'linux', managedPolicy: () => false })
     expect(driver.decodeConfig({ home: 'private', profile: 'locked' }, 'claude')).not.toHaveProperty('profile')
     expect(driver.decodeConfig({ home: 'private', profile: 'locked' }, 'claude-bots')).toMatchObject({ profile: 'locked' })
-    // So its caps (Plan mode included) stay the user's.
+    // So its caps stay the user's.
     expect(driver.caps(driver.decodeConfig({ home: 'private', profile: 'locked' }, 'claude'), '2.1.0')).toBe(CLAUDE_CODE_CAPS)
   })
 
@@ -795,7 +795,7 @@ describe('locked Claude Code: who runs bots', () => {
 
 describe('locked Claude Code: its policy reading outside a turn (review r2)', () => {
   const lockedConfig: InstanceConfig = { home: 'private', profile: 'locked' }
-  const botPolicy: RunPolicy = { mode: 'default', origin: 'bot', tools: { allow: ['Read'] }, approvals: 'grants', approve: 'host', authority: { kind: 'bot', digest: 'd' } }
+  const botPolicy: RunPolicy = { origin: 'bot', tools: { allow: ['Read'] }, approvals: 'grants', approve: 'host', authority: { kind: 'bot', digest: 'd' } }
   const evidence = (): ContainmentEvidence[] => [{ driver: 'claude', kind: 'tools', cliVersion: '2.1.0', platform: process.platform, items: [1, 2, 3, 4, 5, 6, 7], recordedAt: '2026-10-27T00:00:00Z' }]
 
   function boundEntry(driver: ReturnType<typeof claudeCodeDriver>, instanceId: string) {

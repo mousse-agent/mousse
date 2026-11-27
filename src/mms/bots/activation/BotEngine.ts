@@ -2716,7 +2716,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const effective = this.effectiveManifest(row, definition.permissions, grant)
     const compiled = this.compileNeutral(definition.main, effective, { escalate: true, consult: definition.context.length > 0, memory: true }, row.botId)
     if (!compiled.ok) return { problem: 'no_provider' }
-    const policy: RunPolicy = { mode: 'default', origin: 'bot', ...compiled.policy }
+    const policy: RunPolicy = { origin: 'bot', ...compiled.policy }
     return models.resolve({ botId: row.botId, pick: turn.pick, depth: turn.depth, policy })
   }
 
@@ -2844,7 +2844,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!grant) return
     const compiled = this.compileNeutral(definition.main, withFullTrust(intersectManifest(definition.permissions, withFullTrust(grant.manifest))), { escalate: true, consult: definition.context.length > 0, memory: true }, botId)
     if (!compiled.ok) return
-    const policy: RunPolicy = { mode: 'default', origin: 'bot', ...compiled.policy }
+    const policy: RunPolicy = { origin: 'bot', ...compiled.policy }
     const tried: BotModelPick[] = []
     for (const [, entry] of live) {
       if (tried.some((pick) => samePickTarget(pick, entry.pick))) continue
@@ -3287,7 +3287,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     const compiled = compileWith(effective, grant.digest)
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
-    const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
+    const checked = this.host.harness.checkPolicy(selection.instanceId, { origin: 'bot', ...compiled.policy }, selection.model)
     if (!checked.ok) return this.block(row, 'policy_unenforceable', checked.error.reason ?? checked.error.message)
     // A chat activation starts from a cleared home context: the transcript stays, the turn carries
     // no thread history, and the pack supplies what it needs (bot-context.md §5.1). With chat epochs on, only the first
@@ -3736,7 +3736,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     const compiled = compileWith(effective, grant.digest)
     if (!compiled.ok) return refuse('policy_unenforceable', compiled.error.reason ?? compiled.error.message)
-    const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
+    const checked = this.host.harness.checkPolicy(selection.instanceId, { origin: 'bot', ...compiled.policy }, selection.model)
     if (!checked.ok) return refuse('policy_unenforceable', checked.error.reason ?? checked.error.message)
     // The start marker, only while the main dispatch is unsettled: a consult attaches before the
     // settlement and is waited for, or is refused and starts nothing.
@@ -7356,7 +7356,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!compiled.ok) return { refused: `${compiled.error.reason ?? compiled.error.message} ${SUBAGENT_NOTHING_STARTED}` }
     let resolved: BotModelResolution
     try {
-      resolved = await models.resolve({ botId: row.botId, pick: asked.pick, depth: 'normal', policy: { mode: 'default', origin: 'bot', ...compiled.policy } })
+      resolved = await models.resolve({ botId: row.botId, pick: asked.pick, depth: 'normal', policy: { origin: 'bot', ...compiled.policy } })
     } catch (error) {
       return { refused: `${name} could not be checked: ${error instanceof Error ? error.message : String(error)} ${SUBAGENT_NOTHING_STARTED}` }
     }
@@ -7498,7 +7498,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       botTools: subagentBotTools(row)
     })
     if (!compiled.ok) return { refused: `A subagent can't run there: ${compiled.error.reason ?? compiled.error.message} ${SUBAGENT_NOTHING_STARTED}` }
-    const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
+    const checked = this.host.harness.checkPolicy(selection.instanceId, { origin: 'bot', ...compiled.policy }, selection.model)
     if (!checked.ok) return { refused: `A subagent can't run there: ${checked.error.reason ?? checked.error.message} ${SUBAGENT_NOTHING_STARTED}` }
     return { compiled, effective, definition, grant, hold }
   }
@@ -9461,7 +9461,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const call = (async () => {
       const compiled = this.compileNeutral({ key: 'main', title: 'Main', agent: { instructions: '' }, model: { mode: 'auto', depth: 'normal' } }, starterManifest(), { escalate: true, consult: false, memory: true }, botId)
       if (!compiled.ok) return undefined
-      const resolved = await models.resolve({ botId, pick, depth: 'quick', policy: { mode: 'default', origin: 'bot', ...compiled.policy } })
+      const resolved = await models.resolve({ botId, pick, depth: 'quick', policy: { origin: 'bot', ...compiled.policy } })
       if ('problem' in resolved || signal.aborted) return undefined
       return oneShot({ selection: resolved.selection, prompt, signal })
     })().catch(() => undefined)

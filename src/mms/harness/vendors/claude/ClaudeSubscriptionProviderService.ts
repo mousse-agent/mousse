@@ -266,7 +266,6 @@ export type ClaudeSubscriptionChatInput = {
   onSession?: (session: { sessionId: string; promptId?: string }) => void
   images?: ChatImageAttachment[]
   signal?: AbortSignal
-  mode?: 'plan' | 'default'
   /**
    * The thread's permission mode for this turn (`ask`, `accept_edits`, `auto`, `full`); absent reads as
    * the default (`accept_edits`). Enforced through Claude Code's own permission mode, the PreToolUse
@@ -374,7 +373,7 @@ type TurnContext = {
   controller: AbortController
   integrations: ClaudeTurnIntegrations | undefined
   editCounter: ClaudeNativeEditCounter
-  planTurn: boolean
+  /** A read-only child: every call goes through the hook and canUseTool's read-only allowlist. */
   restricted: boolean
   /** The thread's permission mode this turn runs in (already lowered when Claude Code refuses to bypass). */
   permissionMode: ThreadPermissionMode
@@ -3114,7 +3113,7 @@ export class ClaudeSubscriptionProviderService {
                   isMousseServerTool(event.tool_name)
                   ? { updatedInput: { ...(event.tool_input as Record<string, unknown>), [TURN_TOKEN_KEY]: turn.input.mcpTurnToken } }
                   : undefined
-                // Restricted turns route every call through canUseTool so its read-only allowlist holds.
+                // A read-only child's turns route every call through canUseTool so its read-only allowlist holds.
                 // So does every command (and, under Ask, every edit) the thread's permission mode
                 // does not allow without asking: the user's own allow rules must not skip Mousse's
                 // check. Other tools (MCP tools, reads) follow Claude Code's own rules.
@@ -3183,7 +3182,7 @@ export class ClaudeSubscriptionProviderService {
           input.onToolAwaiting?.(context.toolUseID, true)
           return ask().finally(() => input.onToolAwaiting?.(context.toolUseID, false))
         }
-        // Mousse's own tools are scoped by the run's credential (mode ceiling, caller thread);
+        // Mousse's own tools are scoped by the run's credential (caller thread, read-only child);
         // the server refuses what the run may not do, so they need no extra prompt.
         if (input.mcp && toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX))
           return { behavior: 'allow', updatedInput: args }
@@ -3194,14 +3193,6 @@ export class ClaudeSubscriptionProviderService {
         if (input.mcp && toolName === 'ToolSearch')
           return { behavior: 'allow', updatedInput: args }
         // (A read-only child's own allowlist is `claudeChildToolDenial`, above.)
-        if (
-          turn.planTurn &&
-          !['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'].includes(toolName)
-        )
-          return {
-            behavior: 'deny',
-            message: 'This turn is planning only; edits and shell commands are disabled.'
-          }
         try {
           if (toolName === 'AskUserQuestion') {
             if (input.approvals === 'never') return { behavior: 'deny', message: QUESTIONS_REFUSED_MESSAGE }
@@ -3659,12 +3650,10 @@ export class ClaudeSubscriptionProviderService {
       if (live && liveRun) void live.interrupt().catch(() => undefined)
       else if (query) void query.interrupt().catch(() => cancel())
     }
-    const planTurn = input.mode === 'plan'
     const readOnlyChild = input.child?.readOnly === true
-    // Plan turns and read-only children route every call through the hook and canUseTool's
-    // read-only allowlist, in Claude Code's default permission mode: its own plan mode would
-    // inject its planning and ExitPlanMode flow, and a plan turn replies with its plan as a message.
-    const restricted = planTurn || readOnlyChild
+    // A read-only child routes every call through the hook and canUseTool's read-only allowlist, in
+    // Claude Code's default permission mode.
+    const restricted = readOnlyChild
     // Full access needs Claude Code to allow bypassing permissions. The gateway already lowers the
     // mode when the user's settings forbid it; reading them again here keeps a settings edit made
     // since then from ever starting a bypass Claude Code would refuse.
@@ -3675,7 +3664,7 @@ export class ClaudeSubscriptionProviderService {
     const threadMode: ThreadPermissionMode = (requestedMode === 'full' && bypassDisabled) || (requestedMode === 'auto' && claudeAutoModeDisabled(this.environment(), { cwd: input.cwd }))
       ? 'accept_edits'
       : requestedMode
-    const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted, permissionMode: threadMode, ...(lockedTurn ? { locked: new ClaudeLockedGate(lockedTurn, Boolean(input.mcp), () => { if (live?.meta.bot) live.meta.closeAfterTurn = true }) } : {}) }
+    const turn: TurnContext = { input, controller, integrations, editCounter, restricted, permissionMode: threadMode, ...(lockedTurn ? { locked: new ClaudeLockedGate(lockedTurn, Boolean(input.mcp), () => { if (live?.meta.bot) live.meta.closeAfterTurn = true }) } : {}) }
     // The bot's private temporary folder is in use until this turn ends; the last of its turns to end empties it.
     const releaseBotTemp = botTemp ? holdClaudeBotTemp(botTemp.dir) : undefined
     // The folder of the turn's settings file (`claudeLockedSettingsFile`), removed when it ends.
@@ -3845,7 +3834,7 @@ export class ClaudeSubscriptionProviderService {
           // Claude Code copies the session up to the cut into a new one and leaves the source as it was.
           ...(branch ? { resumeSessionAt: branch.at, forkSession: true, sessionId: branch.id } : {}),
           permissionMode,
-          // Claude Code's own plan tools never reach the model: Mousse's Plan mode is a read-only turn whose reply is the plan.
+          // Claude Code's own plan-mode tools never reach the model: their approval flow would hold the turn.
           disallowedTools: [...CLAUDE_PLAN_TOOLS],
           // A live query can switch to bypass on a later turn even when it starts in ask mode,
           // unless Claude Code's settings forbid bypassing permissions at all.

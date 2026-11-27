@@ -214,8 +214,7 @@ function formatWebhookSecret(out: WebhookSecretOutput, verb: string): string {
 
 /**
  * The `scheduled.create` input for `automation add`. The selection names the instance and model only: the
- * profile fills in the provider when it resolves them. `--mode` is also the global output format
- * (`text|json`), so only `agent` and `plan` are the job's mode.
+ * profile fills in the provider when it resolves them.
  */
 export function buildScheduleAddInput(
   name: string,
@@ -229,11 +228,6 @@ export function buildScheduleAddInput(
   if (instance || model) {
     if (!instance || !model) throw new Error('--instance and --model go together.')
     input.selection = { instanceId: instance, model } as CreateScheduledJobInput['selection']
-  }
-  const mode = flagString(flags, 'mode')
-  if (mode !== undefined && mode !== 'text' && mode !== 'json') {
-    if (mode !== 'agent' && mode !== 'plan') throw new Error('--mode must be agent or plan.')
-    input.mode = mode
   }
   const permission = flagString(flags, 'permission')
   if (permission !== undefined) {

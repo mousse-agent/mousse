@@ -2,7 +2,7 @@
  * Scheduled jobs run as turns: a real `OrchestratorService`, Run Engine, effect worker and scheduler
  * over a temporary profile and a real Git repository, with scripted adapters in place of providers.
  * A plain-prompt job is admitted like any send (`schedule:<job>:<occurrence>`), runs on its target or
- * per-run thread with the job's model, mode and workspace, and is held until its run is terminal.
+ * per-run thread with the job's model and workspace, and is held until its run is terminal.
  */
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -157,7 +157,7 @@ describe('scheduled jobs run as turns', () => {
     })
   }
 
-  describe('the job\'s model, mode and workspace are the turn\'s', () => {
+  describe('the job\'s model and workspace are the turn\'s', () => {
     it('binds the job\'s model and the schedule origin on a bound thread whose own model differs, and leaves that thread\'s model alone', async () => {
       const pi = piAdapter((input) => `pi: ${input.prompt}`)
       const claude = claudeAdapter((input) => `claude: ${input.prompt}`)
@@ -165,12 +165,12 @@ describe('scheduled jobs run as turns', () => {
       const project = projectOf(w)
       const thread = w.store.createThread('Target', project.id, project.path)
       w.orch.setThreadModelOverride(thread.id, PI)
-      const job = addJob(w, { threadId: thread.id, projectId: project.id, selection: CLAUDE_SELECTION, mode: 'agent' })
+      const job = addJob(w, { threadId: thread.id, projectId: project.id, selection: CLAUDE_SELECTION })
 
       await runNow(w, job)
       const record = await finished(w, job.id)
 
-      expect(record).toMatchObject({ status: 'ok', threadId: thread.id, mode: 'agent', occurrenceKey: expect.any(String) })
+      expect(record).toMatchObject({ status: 'ok', threadId: thread.id, occurrenceKey: expect.any(String) })
       expect(record.output).toContain('claude: ')
       expect(record.selection).toMatchObject({ instanceId: 'claude', model: 'sonnet' })
       expect(w.engine.getRun(record.runId!)).toMatchObject({ source: 'schedule', threadId: thread.id, status: 'completed', clientRequestId: `schedule:${job.id}:${record.occurrenceKey}` })
@@ -233,17 +233,24 @@ describe('scheduled jobs run as turns', () => {
       expect(perRunRecord.threadId).not.toBe(thread.id)
     })
 
-    it('runs a plan-mode job in plan mode', async () => {
-      const pi = piAdapter(() => 'a plan')
+    it('runs a job saved with the retired Plan mode as any other job', async () => {
+      const pi = piAdapter(() => 'done')
       const w = boot([pi])
       const project = projectOf(w)
-      const job = addJob(w, { projectId: project.id, mode: 'plan' })
+      const job = addJob(w, { projectId: project.id })
+      // As an older build saved it.
+      const config = (w.jobs as unknown as { config: MousseConfigStore }).config
+      config.updateScheduledSection({ jobs: config.getScheduledSection().jobs.map((definition) => ({ ...definition, mode: 'plan' })) as never })
+      expect(w.jobs.getJob(job.id)).toMatchObject({ mode: 'plan' })
 
       await runNow(w, job)
       const record = await finished(w, job.id)
 
-      expect(record).toMatchObject({ status: 'ok', mode: 'plan' })
-      expect(w.engine.bindingForRun(record.runId!)?.policy).toMatchObject({ mode: 'plan', origin: 'schedule' })
+      expect(record).toMatchObject({ status: 'ok' })
+      expect(record).not.toHaveProperty('mode')
+      const policy = w.engine.bindingForRun(record.runId!)?.policy
+      expect(policy).toMatchObject({ origin: 'schedule' })
+      expect(policy).not.toHaveProperty('mode')
     })
 
     it('runs a per-run job on the project\'s own checkout, with no provisioned workspace for tools that need an owned one', async () => {
@@ -1561,7 +1568,7 @@ describe('scheduled jobs run as turns', () => {
       const project = projectOf(w)
       const thread = w.store.createThread('Existing target', project.id, project.path)
       w.orch.setThreadModelOverride(thread.id, CLAUDE)
-      // The shape a job had before: name, prompt, schedule, target thread, repeat; no model, mode or workspace.
+      // The shape a job had before: name, prompt, schedule, target thread, repeat; no model or workspace.
       const job = w.jobs.createJob({ name: 'Old job', prompt: 'summarise', schedule: { kind: 'interval', minutes: 30 }, threadId: thread.id, repeat: { times: 2 } })
       makeDue(w, job)
       expect(job.selection).toBeUndefined()
@@ -1571,7 +1578,7 @@ describe('scheduled jobs run as turns', () => {
       await w.tick()
       const record = await finished(w, job.id)
 
-      expect(record).toMatchObject({ status: 'ok', threadId: thread.id, mode: 'agent' })
+      expect(record).toMatchObject({ status: 'ok', threadId: thread.id })
       expect(claude.turns).toHaveLength(1)
       expect(pi.turns).toHaveLength(0)
       expect(w.orch.getMessages(thread.id).filter((message) => message.role === 'assistant')).toHaveLength(1)

@@ -35,7 +35,7 @@ import { defaultIntegrationActor } from '../../../shared/integrations/actor'
 import { resolveEffectiveSkills } from '../../integrations/catalog/EffectiveIntegrationResolver'
 
 /** Chat modes a remote composer offers, as in the desktop composer's mode menu. */
-const REMOTE_CHAT_MODES = ['plan', 'agent', 'build'] as const
+const REMOTE_CHAT_MODES = ['agent', 'build'] as const
 
 /** A queued message without its image data, which can be megabytes. */
 function queueRow(item: QueuedMessage): Record<string, unknown> {

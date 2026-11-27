@@ -637,7 +637,7 @@ export interface HarnessDriver {
   retired?(instanceId: string): RetiredPrompt | undefined
   /**
    * Capabilities for an instance at an installed version. `facts` (when the runtime reported them)
-   * refine what a preset cannot know statically: fork, plan mode, models.
+   * refine what a preset cannot know statically: fork, models.
    */
   /** `instanceId`: the entry, for caps that depend on what was read for it (a locked entry's policy). */
   caps(config: InstanceConfig, installedVersion?: string, facts?: RuntimeFacts, instanceId?: string): HarnessCaps

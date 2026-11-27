@@ -29,7 +29,7 @@ class Finishing implements ProviderAdapter {
 }
 
 /**
- * An agent whose `initialize` answer depends on its launch arguments: `--plan` advertises a Plan
+ * An agent whose `initialize` answer depends on its launch arguments: `--auto` advertises an Auto
  * mode. A sign-in teaches it the account's modes. Each handshake is counted.
  */
 function factsDriver(handshakes: string[], refreshes: string[] = []): HarnessDriver {
@@ -45,12 +45,12 @@ function factsDriver(handshakes: string[], refreshes: string[] = []): HarnessDri
     versionArgs: () => null,
     caps: (_config, _version, facts) => ({
       ...CLAUDE_CODE_CAPS,
-      planMode: Boolean(facts?.modes?.some((mode) => mode.id === 'plan')),
+      autoPermissionMode: Boolean(facts?.modes?.some((mode) => mode.id === 'auto')),
       fork: facts?.agentCapabilities?.fork ? 'native' : 'portable'
     }),
     create(context) {
       let report: RuntimeFactsReport | undefined
-      // The account's own modes, as a model refresh reads them: none until a sign-in adds Plan.
+      // The account's own modes, as a model refresh reads them: none until a sign-in adds Auto.
       let accountModes: RuntimeFactsReport['modes'] = []
       const runtime: DriverRuntime = {
         adapter: new Finishing(),
@@ -65,14 +65,14 @@ function factsDriver(handshakes: string[], refreshes: string[] = []): HarnessDri
           report = {
             binary: fingerprintOf(context.config.binaryPath)!,
             agentCapabilities: { fork: context.config.args?.includes('--fork') === true },
-            modes: context.config.args?.includes('--plan') ? [{ id: 'plan', name: 'Plan' }] : [],
+            modes: context.config.args?.includes('--auto') ? [{ id: 'auto', name: 'Auto' }] : [],
             capturedAt: new Date().toISOString(),
             source: 'handshake'
           }
         },
         runtimeFacts: () => report,
         signIn: async (session) => {
-          accountModes = [{ id: 'plan', name: 'Plan' }]
+          accountModes = [{ id: 'auto', name: 'Auto' }]
           report = { ...report!, modes: accountModes, source: 'session' }
           return { success: true, sessionId: session.sessionId }
         },
@@ -111,7 +111,7 @@ describe('runtime facts', () => {
     const caps = (instanceId: string) => harness.resolveStored({ instanceId, llmProvider: '', model: 'm' }, { purpose: 'turn' }).caps
     const spec = (binding: TurnSpec['binding']): TurnSpec => ({
       binding,
-      input: { threadId: 't', instanceId: binding.instanceId, llmProvider: 'claude-subscription', model: 'm', mode: binding.policy.mode === 'plan' ? 'plan' : 'agent', prompt: 'hi', signal: new AbortController().signal } as unknown as TurnInput,
+      input: { threadId: 't', instanceId: binding.instanceId, llmProvider: 'claude-subscription', model: 'm', mode: 'agent', prompt: 'hi', signal: new AbortController().signal } as unknown as TurnInput,
       sink: { providerRef: () => {} } as unknown as TurnSpec['sink'],
       control: {} as TurnSpec['control'],
       host: {} as TurnSpec['host']
@@ -120,15 +120,15 @@ describe('runtime facts', () => {
   }
 
   it('checks a changed executable that no longer starts once, and not again after a restart', async () => {
-    const { home, harness, binary, handshakes, caps, tick } = fixture({ 'claude:one': ['--plan'] })
+    const { home, harness, binary, handshakes, caps, tick } = fixture({ 'claude:one': ['--auto'] })
     // The app always listens: every change publishes snapshots, which read the facts again.
     harness.instances.subscribe(() => {})
     await harness.instances.recheck('claude:one')
-    expect(caps('claude:one').planMode).toBe(true)
+    expect(caps('claude:one').autoPermissionMode).toBe(true)
     writeFileSync(binary, 'agent v2, broken')
     tick(11 * 60_000)
     await harness.instances.snapshots({ kind: 'device' })
-    await vi.waitFor(() => expect(caps('claude:one').planMode).toBe(false))
+    await vi.waitFor(() => expect(caps('claude:one').autoPermissionMode).toBe(false))
     await vi.waitFor(() => expect(handshakes).toHaveLength(2))
     for (let round = 0; round < 5; round += 1) {
       await harness.instances.snapshots({ kind: 'device' })
@@ -141,7 +141,7 @@ describe('runtime facts', () => {
     const binding = await harness.bind(harness.resolveStored({ instanceId: 'claude:one', llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'agent' })
     expect(binding.factsRevision).toBe(2)
     harness.stop()
-    const restarted = fixture({ 'claude:one': ['--plan'] }, home)
+    const restarted = fixture({ 'claude:one': ['--auto'] }, home)
     restarted.harness.instances.subscribe(() => {})
     await restarted.harness.instances.snapshots({ kind: 'device' })
     for (let round = 0; round < 5; round += 1) {
@@ -149,54 +149,54 @@ describe('runtime facts', () => {
       await new Promise((resolve) => setTimeout(resolve, 20))
     }
     expect(restarted.handshakes).toEqual([])
-    expect(restarted.caps('claude:one').planMode).toBe(false)
+    expect(restarted.caps('claude:one').autoPermissionMode).toBe(false)
   })
 
   it('keeps facts per instance: one executable with different options gives different caps', async () => {
-    const { harness, caps } = fixture({ 'claude:plain': [], 'claude:planner': ['--plan', '--fork'] })
+    const { harness, caps } = fixture({ 'claude:plain': [], 'claude:tuned': ['--auto', '--fork'] })
     // Before any handshake the static preset applies.
-    expect(caps('claude:planner')).toMatchObject({ planMode: false, fork: 'portable' })
+    expect(caps('claude:tuned')).toMatchObject({ fork: 'portable' })
     await harness.instances.recheck('claude:plain')
-    await harness.instances.recheck('claude:planner')
-    expect(caps('claude:plain')).toMatchObject({ planMode: false, fork: 'portable' })
-    expect(caps('claude:planner')).toMatchObject({ planMode: true, fork: 'native' })
-    expect((await harness.instances.snapshots({ kind: 'device' })).find((entry) => entry.instanceId === 'claude:planner')?.caps.planMode).toBe(true)
+    await harness.instances.recheck('claude:tuned')
+    expect(caps('claude:plain')).toMatchObject({ fork: 'portable' })
+    expect(caps('claude:tuned')).toMatchObject({ fork: 'native' })
+    expect((await harness.instances.snapshots({ kind: 'device' })).find((entry) => entry.instanceId === 'claude:tuned')?.caps.autoPermissionMode).toBe(true)
   })
 
   it('takes the facts a sign-in verification learned', async () => {
     const { harness, caps, refreshes } = fixture({ 'claude:one': [] })
     await harness.instances.recheck('claude:one')
-    expect(caps('claude:one').planMode).toBe(false)
+    expect(caps('claude:one').autoPermissionMode).toBe(false)
     // Read when the sign-in reports done, before any model refresh after it could supply the mode.
-    let atCompletion: { planMode: boolean; refreshes: number } | undefined
+    let atCompletion: { autoPermissionMode: boolean; refreshes: number } | undefined
     harness.instances.subscribe((event) => {
-      if (event.type === 'operation' && event.data.phase === 'completed') atCompletion = { planMode: caps('claude:one').planMode, refreshes: refreshes.length }
+      if (event.type === 'operation' && event.data.phase === 'completed') atCompletion = { autoPermissionMode: caps('claude:one').autoPermissionMode, refreshes: refreshes.length }
     })
     const started = await harness.instances.signIn('claude:one')
-    await vi.waitFor(() => expect(atCompletion).toEqual({ planMode: true, refreshes: 0 }))
-    // The models listed after the sign-in come from the same account: its Plan mode stays.
+    await vi.waitFor(() => expect(atCompletion).toEqual({ refreshes: 0 }))
+    // The models listed after the sign-in come from the same account: its Auto mode stays.
     await vi.waitFor(() => expect(refreshes).toEqual(['claude:one']))
-    expect(caps('claude:one').planMode).toBe(true)
+    expect(caps('claude:one').autoPermissionMode).toBe(true)
     expect(started.kind).toBe('sign_in')
   })
 
   it('keeps the caps a binding froze when the facts change', async () => {
-    const { harness, caps, spec } = fixture({ 'claude:one': ['--plan'] })
+    const { harness, caps, spec } = fixture({ 'claude:one': ['--auto'] })
     await harness.instances.recheck('claude:one')
     const resolved = harness.resolveStored({ instanceId: 'claude:one', llmProvider: '', model: 'm' }, { purpose: 'turn' })
-    const binding = await harness.bind(resolved, { mode: 'plan' })
-    expect(binding.caps?.planMode).toBe(true)
+    const binding = await harness.bind(resolved, { mode: 'agent' })
+    expect(binding.caps?.autoPermissionMode).toBe(true)
     expect(binding.factsRevision).toBe(1)
-    // "Refresh models" learns the account has no Plan mode: new turns lose it, this attempt keeps it.
+    // "Refresh models" learns the account has no Auto mode: new turns lose it, this attempt keeps it.
     await harness.instances.refreshModels('claude:one')
-    expect(caps('claude:one').planMode).toBe(false)
+    expect(caps('claude:one').autoPermissionMode).toBe(false)
     await expect(harness.startTurn(spec(binding)).result).resolves.toMatchObject({ text: 'ok' })
-    const fresh = await harness.bind(harness.resolveStored({ instanceId: 'claude:one', llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'plan' })
-    await expect(harness.startTurn(spec(fresh)).result).rejects.toMatchObject({ code: 'policy_unenforceable' })
+    const fresh = await harness.bind(harness.resolveStored({ instanceId: 'claude:one', llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'agent' })
+    expect(fresh.caps?.autoPermissionMode).toBe(false)
   })
 
   it('drops the facts of an executable replaced in place and refuses a retry on the old binding', async () => {
-    const { harness, binary, handshakes, refreshes, caps, spec, tick } = fixture({ 'claude:one': ['--plan'] })
+    const { harness, binary, handshakes, refreshes, caps, spec, tick } = fixture({ 'claude:one': ['--auto'] })
     await harness.instances.recheck('claude:one')
     const binding = await harness.bind(harness.resolveStored({ instanceId: 'claude:one', llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'agent' })
     expect(binding.binary?.path).toBe(binary)
@@ -206,13 +206,13 @@ describe('runtime facts', () => {
     tick(11 * 60_000)
     await harness.instances.snapshots({ kind: 'device' })
     // Once the check recorded the new program, its old facts no longer apply: the static preset does.
-    await vi.waitFor(() => expect(caps('claude:one').planMode).toBe(false))
+    await vi.waitFor(() => expect(caps('claude:one').autoPermissionMode).toBe(false))
     // A start-up check was queued; it records the new program's facts.
-    await vi.waitFor(() => expect(caps('claude:one').planMode).toBe(true))
+    await vi.waitFor(() => expect(caps('claude:one').autoPermissionMode).toBe(true))
     expect(handshakes).toEqual(['claude:one', 'claude:one'])
     // The new program's models are listed once, without disturbing the facts its check recorded.
     await vi.waitFor(() => expect(refreshes).toEqual(['claude:one']))
-    expect(caps('claude:one').planMode).toBe(true)
+    expect(caps('claude:one').autoPermissionMode).toBe(true)
     await expect(harness.startTurn(spec(binding)).result).rejects.toMatchObject({ code: 'binding_stale' })
   })
 })

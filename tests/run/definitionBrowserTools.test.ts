@@ -67,7 +67,7 @@ function world(options: { granted: string[]; vision?: boolean; approval?: Partia
   const registry = new ToolRegistry({ activeRunId: (threadId) => (threadId === 't1' ? state.active : 'chat'), turns, toolLedger: () => ledger })
   for (const tool of browserTools({ browserRuntime: () => runtime } as unknown as AppToolHost)) registry.register(tool)
   const call = (name: string, args: Record<string, unknown>) => registry.call(name, args, {
-    credential: { threadId: 't1', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'rotate', current: () => true },
+    credential: { threadId: 't1', runId: 'r1', provider: 'pi', accessLevel: 'lineage', binding: 'rotate', current: () => true },
     toolCallId: `call-${name}`,
     signal: new AbortController().signal
   })

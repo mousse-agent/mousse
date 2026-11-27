@@ -14,8 +14,8 @@
  * - what happens here: this daemon restarts (the watch resumes from its row); the link is down while the run ends;
  * - that computer refuses this device (blocked);
  * - the 24 hours pass;
- * - who hears: an idle launcher (the notice may start a turn, carrying the run's count there), a launcher kept in Plan and
- *   a subagent's thread (held).
+ * - who hears: an idle launcher (the notice may start a turn, carrying the run's count there) and a
+ *   subagent's thread (held).
  */
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
@@ -358,7 +358,6 @@ describe('notify on a thread launched on another computer (issue #1160)', () => 
   }, 120_000)
 
   it.each([
-    ['a launcher kept in Plan', () => vi.spyOn(callerOrch(), 'lastChatModeOf').mockReturnValue('plan')],
     ['a subagent\'s thread', (threadId: string) => {
       const real = t.caller.runEngine.delegations.getLineage.bind(t.caller.runEngine.delegations)
       vi.spyOn(t.caller.runEngine.delegations, 'getLineage').mockImplementation((id) => (id === threadId ? ({ relationship: 'subagent', parentThreadId: 'parent' } as never) : real(id)))

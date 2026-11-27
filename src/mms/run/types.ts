@@ -393,8 +393,6 @@ export interface DelegationRecord {
   result: DelegationResult | null
   createdAt: string
   completedAt: string | null
-  /** The most the child may do (SPEC §15.1); null when the delegation set none. */
-  modeCeiling: ModeCeiling | null
   /**
    * The agent access level the delegation passes to its child (SPEC §15.1): the caller's effective
    * level when it started the task. Null on rows from before version 11, which read as `lineage`.
@@ -422,12 +420,6 @@ export interface BotDelegation {
 }
 
 export type DelegationWorkspace = 'isolated' | 'shared'
-
-/**
- * What a run's Mousse MCP credential may do (SPEC §15.1): `plan` is read-only planning (no
- * writes, no integration, children stay `plan`); `default` is the thread's ordinary authority.
- */
-export type ModeCeiling = 'plan' | 'default'
 
 /**
  * The agent behind a change to another thread (SPEC §15.1): the thread and run that called the tool
@@ -539,8 +531,8 @@ export interface AgentNotePayload {
   senderThreadId: string
   senderRunId: string
   senderTitle: string | null
-  /** What the sender may do, for the label: a read-only subagent, a Plan ceiling, or an agent that may change files. */
-  senderAccess: 'read_only' | 'plan' | 'agent'
+  /** What the sender may do, for the label: a read-only subagent, or an agent that may change files. */
+  senderAccess: 'read_only' | 'agent'
   /**
    * Who the sender is to the receiver; `bot` is the owner's personal bot that started the receiving thread. `person`: a
    * person's correction to an ancestor, relayed down its tree (`treeCorrection.ts`); the sender is that ancestor, and

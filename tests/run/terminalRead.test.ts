@@ -56,7 +56,7 @@ describe('an agent reads its thread\'s terminals', () => {
         return { isError: true, body: {}, text: error instanceof Error ? error.message : String(error) }
       }
     }
-    listed = () => registry.listForThread('t1', 'default', run.runId).map((tool) => tool.name)
+    listed = () => registry.listForThread('t1', run.runId).map((tool) => tool.name)
   })
 
   afterEach(async () => {

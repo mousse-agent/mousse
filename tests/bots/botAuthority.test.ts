@@ -183,11 +183,11 @@ describe('compileBotThread', () => {
 })
 
 describe('host approvals in checkPolicy', () => {
-  const exact = { toolControl: 'exact', budgets: 'hard', spendLimits: 'reserved', planMode: false } as unknown as HarnessCaps
+  const exact = { toolControl: 'exact', budgets: 'hard', spendLimits: 'reserved' } as unknown as HarnessCaps
   const policy = (): RunPolicy => {
     const compiled = compile()
     if (!compiled.ok) throw new Error('compile')
-    return { mode: 'default', origin: 'bot', ...compiled.policy }
+    return { origin: 'bot', ...compiled.policy }
   }
 
   it('holds only where the runtime holds every call to the bot authority', () => {
@@ -222,7 +222,7 @@ describe('host approvals in checkPolicy', () => {
   it('a shell grant holds wherever a bot holds: Pi exactly, Claude Code and Codex through their approvals', () => {
     const compiled = compile({ grant: manifest({ tools: ['read', 'shell'] }) })
     if (!compiled.ok) throw new Error(compiled.error.message)
-    const shell: RunPolicy = { mode: 'default', origin: 'bot', ...compiled.policy }
+    const shell: RunPolicy = { origin: 'bot', ...compiled.policy }
     expect(checkPolicy(exact, shell, 'pi:x', undefined, { hostApprovals: true })).toEqual({ ok: true })
     const approvalOnly = { ...exact, toolControl: 'approval_only' } as HarnessCaps
     for (const instance of ['claude', 'codex']) expect(checkPolicy(approvalOnly, { ...shell, permissionMode: 'ask' }, instance, undefined, { hostApprovals: true, botApprovals: true }), instance).toEqual({ ok: true })
@@ -241,7 +241,7 @@ describe('host approvals in checkPolicy', () => {
     const refused = checkPolicy(exact, policy(), 'pi:x', undefined, { hostApprovals: true, botRuntimeGaps: gaps })
     expect(refused).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['containment'], reason: botRuntimeGapReason(gaps) } })
     // Policies without a bot authority are untouched.
-    expect(checkPolicy(exact, { mode: 'default', approvals: 'grants' })).toEqual({ ok: true })
+    expect(checkPolicy(exact, { approvals: 'grants' })).toEqual({ ok: true })
   })
 })
 

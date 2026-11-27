@@ -74,21 +74,24 @@ describe('protocol nested validators', () => {
     expect(() => asCreateScheduledJobInput({ name: 'n', prompt: 'p', schedule: { kind: 'sometimes' } })).toThrow(/once\|interval\|cron\|manual/)
   })
 
-  it('validates a job\'s model, mode and workspace', () => {
+  it('validates a job\'s model and workspace, and drops only the retired agent mode', () => {
     const input = asCreateScheduledJobInput({
       name: 'n',
       prompt: 'p',
       schedule: { kind: 'manual' },
       selection: { instanceId: 'codex', model: 'gpt-x' },
-      mode: 'plan',
+      mode: 'agent',
       workspace: { kind: 'worktree', path: '/repo/wt' }
     })
     expect(input.selection).toEqual({ instanceId: 'codex', llmProvider: '', model: 'gpt-x' })
-    expect(input.mode).toBe('plan')
+    expect(input).not.toHaveProperty('mode')
     expect(input.workspace).toEqual({ kind: 'worktree', path: '/repo/wt' })
     expect(asCreateScheduledJobInput({ name: 'n', prompt: 'p', schedule: { kind: 'manual' }, workspace: { kind: 'newWorktree' } }).workspace).toEqual({ kind: 'newWorktree' })
     const base = { name: 'n', prompt: 'p', schedule: { kind: 'manual' } }
-    expect(() => asCreateScheduledJobInput({ ...base, mode: 'yolo' })).toThrow(/agent\|plan/)
+    // A client older than this one may still send Plan: refused, never run as an agent turn.
+    expect(() => asCreateScheduledJobInput({ ...base, mode: 'plan' })).toThrow(/no longer supported/)
+    expect(() => asScheduledJobPatch({ mode: 'plan' })).toThrow(/no longer supported/)
+    expect(asScheduledJobPatch({ mode: null, name: 'x' })).toEqual({ name: 'x' })
     expect(() => asCreateScheduledJobInput({ ...base, workspace: { kind: 'elsewhere' } })).toThrow(/project\|newWorktree\|worktree/)
     expect(() => asCreateScheduledJobInput({ ...base, workspace: { kind: 'worktree' } })).toThrow(/path/)
     expect(() => asCreateScheduledJobInput({ ...base, selection: { model: 'm' } })).toThrow(/instanceId or selection.llmProvider/)
@@ -96,15 +99,14 @@ describe('protocol nested validators', () => {
 
   it('accepts what `schedule add` sends, and a stored empty provider', () => {
     // CLI to protocol: the flags become the request, and the protocol takes the request.
-    const argv = ['schedule', 'add', '--name', 'Check CI', '--prompt', 'Check CI', '--manual', '--instance', 'codex', '--model', 'gpt-x', '--mode', 'plan', '--workspace', 'new-worktree', '--project', 'p1']
+    const argv = ['schedule', 'add', '--name', 'Check CI', '--prompt', 'Check CI', '--manual', '--instance', 'codex', '--model', 'gpt-x', '--workspace', 'new-worktree', '--project', 'p1']
     const args = parseArgs(argv)
     const input = buildScheduleAddInput('Check CI', 'Check CI', { kind: 'manual' }, args.flags)
     const parsed = asCreateScheduledJobInput(JSON.parse(JSON.stringify(input)))
-    expect(parsed).toMatchObject({ selection: { instanceId: 'codex', model: 'gpt-x' }, mode: 'plan', workspace: { kind: 'newWorktree' }, projectId: 'p1', schedule: { kind: 'manual' } })
-    // `--mode json` is the output format, not a job mode.
-    const json = parseArgs(['--mode', 'json', ...argv.filter((_, index) => argv[index - 1] !== '--mode' && argv[index] !== '--mode')])
-    expect(buildScheduleAddInput('n', 'p', { kind: 'manual' }, json.flags).mode).toBeUndefined()
-    expect(() => buildScheduleAddInput('n', 'p', { kind: 'manual' }, parseArgs(['schedule', 'add', '--mode', 'yolo']).flags)).toThrow(/agent or plan/)
+    expect(parsed).toMatchObject({ selection: { instanceId: 'codex', model: 'gpt-x' }, workspace: { kind: 'newWorktree' }, projectId: 'p1', schedule: { kind: 'manual' } })
+    // `--mode json` is the output format, never a job field.
+    const json = parseArgs(['--mode', 'json', ...argv])
+    expect(buildScheduleAddInput('n', 'p', { kind: 'manual' }, json.flags)).not.toHaveProperty('mode')
     expect(() => buildScheduleAddInput('n', 'p', { kind: 'manual' }, parseArgs(['schedule', 'add', '--model', 'm']).flags)).toThrow(/go together/)
     // A selection saved with an empty provider still passes.
     expect(asCreateScheduledJobInput({ name: 'n', prompt: 'p', schedule: { kind: 'manual' }, selection: { instanceId: 'codex', llmProvider: '', model: 'gpt-x' } }).selection)
@@ -112,7 +114,7 @@ describe('protocol nested validators', () => {
   })
 
   it('lets a patch clear the model, mode and workspace with null', () => {
-    expect(asScheduledJobPatch({ selection: null, mode: null, workspace: null })).toMatchObject({ selection: null, mode: null, workspace: null })
+    expect(asScheduledJobPatch({ selection: null, workspace: null })).toMatchObject({ selection: null, workspace: null })
     expect(asScheduledJobPatch({ mode: 'agent', workspace: { kind: 'project' } })).toMatchObject({ mode: 'agent', workspace: { kind: 'project' } })
   })
 

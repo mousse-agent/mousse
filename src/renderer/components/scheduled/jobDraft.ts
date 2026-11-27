@@ -87,7 +87,6 @@ export interface JobDraft {
   agentId: string
   /** The model of a job whose provider no longer lists it; kept so saving without touching it changes nothing. */
   staleSelection?: ModelOverride
-  mode: '' | 'agent' | 'plan'
   /** How much the run may do without asking; `''` follows the thread. Never above what the person holds. */
   permissionMode: '' | PermissionMode
   projectId: string
@@ -116,7 +115,6 @@ export function newDraft(): JobDraft {
     expr: '0 9 * * *',
     modelKey: '',
     agentId: '',
-    mode: '',
     permissionMode: '',
     projectId: '',
     threadId: '',
@@ -141,7 +139,6 @@ export function draftFromJob(job: ScheduledJob, catalog: ScheduledCatalog, provi
     modelKey,
     agentId: job.agent?.definitionId ?? '',
     ...(job.selection && !known ? { staleSelection: job.selection } : {}),
-    mode: job.mode ?? '',
     permissionMode: job.permissionMode ? normalizePermissionMode(job.permissionMode) : '',
     projectId: job.projectId ?? '',
     threadId: job.threadId ?? '',
@@ -156,16 +153,6 @@ export const threadIsChosen = (draft: JobDraft): boolean => draft.workspaceKind 
 
 /** The workspace field applies to a job with a project that does not run on a thread of its own choosing. */
 export const showsWorkspace = (draft: JobDraft): boolean => draft.projectId !== '' && !threadIsChosen(draft)
-
-/** Modes the job may use with the workspace it has: a plan-mode run never provisions a worktree. */
-export function modeChoices(draft: JobDraft): Array<{ value: JobDraft['mode']; label: string }> {
-  const choices: Array<{ value: JobDraft['mode']; label: string }> = [
-    { value: '', label: 'Default' },
-    { value: 'agent', label: 'Agent' }
-  ]
-  if (!(showsWorkspace(draft) && draft.workspaceKind === 'newWorktree')) choices.push({ value: 'plan', label: 'Plan (no changes)' })
-  return choices
-}
 
 /**
  * The permission mode the person holds for this job, which is the job's ceiling: its target thread's mode, else the mode
@@ -200,7 +187,7 @@ export function loweredPermission(draft: JobDraft, initial: JobDraft, catalog: S
 
 export function workspaceChoices(draft: JobDraft): Array<{ value: WorkspaceKind; label: string }> {
   const choices: Array<{ value: WorkspaceKind; label: string }> = [{ value: 'project', label: 'Project checkout' }]
-  if (draft.mode !== 'plan') choices.push({ value: 'newWorktree', label: 'New worktree per run (recommended)' })
+  choices.push({ value: 'newWorktree', label: 'New worktree per run (recommended)' })
   choices.push({ value: 'worktree', label: 'Existing worktree' })
   return choices
 }
@@ -275,9 +262,6 @@ export function validateDraft(draft: JobDraft, context: { hasWebhook: boolean; r
     errors.permission = `An automation cannot run above the mode you hold here. ${describePermissionMode(draft.permissionMode)} is wider than ${describePermissionMode(context.held)}; choose ${describePermissionMode(context.held)} or stricter.`
   }
   if (showsWorkspace(draft) || draft.workspaceKind === 'worktree') {
-    if (draft.workspaceKind === 'newWorktree' && draft.mode === 'plan') {
-      errors.workspace = 'A plan-mode automation never creates a worktree. Choose Agent mode or the project checkout.'
-    }
     if (draft.workspaceKind === 'worktree' && !draft.worktreePath.trim()) errors.worktreePath = 'Enter the path of the worktree.'
   }
   return errors
@@ -308,7 +292,6 @@ export function patchOf(initial: JobDraft, draft: JobDraft, catalog: ScheduledCa
   if (!sameSchedule(initial, draft)) patch.schedule = scheduleOf(draft)
   if (draft.modelKey !== initial.modelKey) patch.selection = choiceOf(draft, catalog)?.selection ?? null
   if (draft.agentId !== initial.agentId) patch.agent = draft.agentId ? { definitionId: draft.agentId } : null
-  if (draft.mode !== initial.mode) patch.mode = draft.mode || null
   if (draft.permissionMode !== initial.permissionMode) patch.permissionMode = draft.permissionMode || null
   if (draft.projectId !== initial.projectId) patch.projectId = draft.projectId || null
   if (draft.tellMe !== initial.tellMe) patch.tellMe = draft.tellMe

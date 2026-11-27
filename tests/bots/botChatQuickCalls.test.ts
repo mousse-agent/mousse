@@ -243,7 +243,7 @@ describe('budgets, deadlines and the owner writing', () => {
     const work = await start(f, workId)
     const askOwner = botTools(() => ({ host: f.bots.tools })).find((entry) => entry.name === 'question_ask') as MousseTool
     await askOwner.handler({ question: 'Which flat?', choices: ['Flat A', 'Flat B'] }, {
-      caller: { threadId: work.payload.threadId, runId: 'r', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+      caller: { threadId: work.payload.threadId, runId: 'r', provider: 'pi', accessLevel: 'lineage' },
       turn: { threadId: work.payload.threadId, bot: work.prepared.authority }, toolCallId: 'ask-1', signal: new AbortController().signal, transport: 'mcp'
     } as unknown as ToolCallContext)
     await finish(f, work.payload, 'completed', { text: 'I asked which flat.' })

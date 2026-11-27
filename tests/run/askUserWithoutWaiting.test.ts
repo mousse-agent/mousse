@@ -17,7 +17,7 @@ function tools() {
     withdrawQuestion: vi.fn((threadId: string, id: string) => threadId === 'thread-1' && id === 'q_1')
   }
   const [ask, withdraw] = askUserTools(host as unknown as AppToolHost)
-  const ctx = { transport: 'mcp', caller: { threadId: 'thread-1', runId: 'run-1', provider: 'test', modeCeiling: 'default', accessLevel: 'manage' }, signal: new AbortController().signal } as unknown as ToolCallContext
+  const ctx = { transport: 'mcp', caller: { threadId: 'thread-1', runId: 'run-1', provider: 'test', accessLevel: 'manage' }, signal: new AbortController().signal } as unknown as ToolCallContext
   return { host, ask: (args: Record<string, unknown>) => ask!.handler(args, ctx), withdraw: (args: Record<string, unknown>) => withdraw!.handler(args, ctx), names: [ask!.name, withdraw!.name] }
 }
 

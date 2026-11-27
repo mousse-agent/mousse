@@ -759,25 +759,6 @@ describe('a live Claude query', () => {
     session.close()
   })
 
-  it('switches the permission mode for each turn: a read-only plan turn, then bypass on the same process', async () => {
-    const { cli, turn } = fixture()
-    await turn({ mode: 'plan' })
-    const process = cli.last
-    // A plan turn is read-only by Mousse's hook and allowlist, in Claude Code's default mode (not its plan mode).
-    expect(process.options.permissionMode).toBe('default')
-    // A live query that may switch to bypass later is created with the flag even for a plan turn.
-    expect(process.options.allowDangerouslySkipPermissions).toBe(true)
-    const hook = (name: string) => process.options.hooks!.PreToolUse![0].hooks[0](
-      { hook_event_name: 'PreToolUse', tool_use_id: 't', tool_name: name, tool_input: {} } as never, 't', { signal: new AbortController().signal }
-    )
-    expect(await hook('Read')).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
-    await turn({ mode: 'default' })
-    expect(cli.processes).toHaveLength(1)
-    expect(process.permissionModes).toEqual(['bypassPermissions'])
-    // The hook reads the turn that is running, not the one that created the query.
-    expect(await hook('Read')).toEqual({})
-  })
-
   it('follows a change of the thread\'s permission mode from the next turn, on the same process', async () => {
     const { cli, turn } = fixture()
     await turn({ permissionMode: 'ask' })
@@ -1710,14 +1691,14 @@ describe('result routing and steering edge cases', () => {
 
   it('a steer collected while the process is still being set up is delivered after the turn is pushed', async () => {
     const f = fixture()
-    await f.turn({ mode: 'plan', history: 'h' }, 'h')
+    await f.turn({ permissionMode: 'ask', history: 'h' }, 'h')
     const process = f.cli.last
     // The turn switches the permission mode before it pushes its prompt; that takes a while.
     process.permissionGate = later(250)
     silent(f.cli)
     const drainSteer = vi.fn<() => string | undefined>().mockReturnValueOnce('early steer').mockReturnValue(undefined)
     const onSteer = vi.fn()
-    const turn = f.chat({ mode: 'default', history: 'h', drainSteer, onSteer })
+    const turn = f.chat({ history: 'h', drainSteer, onSteer })
     await later(150)
     // Nothing was collected, or dropped, while the prompt was not pushed yet.
     expect(drainSteer).not.toHaveBeenCalled()
@@ -2697,11 +2678,11 @@ describe('result routing and steering edge cases', () => {
   it('the idle release cannot close the process between acquiring it and pushing the turn', async () => {
     vi.useFakeTimers()
     const f = fixture({ idleCloseMs: 1000 })
-    await f.turn({ mode: 'plan', history: 'h' }, 'h')
+    await f.turn({ permissionMode: 'ask', history: 'h' }, 'h')
     const process = f.cli.last
     process.permissionGate = new Promise((resolve) => setTimeout(resolve, 5000))
     f.cli.reply = (message, self) => self.answer(String(message.uuid), 'ok')
-    const turn = f.chat({ mode: 'default', history: 'h' })
+    const turn = f.chat({ history: 'h' })
     await vi.advanceTimersByTimeAsync(2500)
     expect(process.closed).toBe(false)
     await vi.advanceTimersByTimeAsync(4000)

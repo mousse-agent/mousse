@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { normalizeSubagentTitle, resolveSubagent, subagentsTitled, visibleSubagents } from '../../src/mms/run/delegation/subagentAddress'
-import { narrowCeiling, delegationRequestKey, followUpRequestKey } from '../../src/mms/run/delegation/policy'
+import { delegationRequestKey, followUpRequestKey } from '../../src/mms/run/delegation/policy'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 describe('addressing a subagent by title (issue #142)', () => {
@@ -66,22 +66,6 @@ describe('addressing a subagent by title (issue #142)', () => {
     // A thread id still singles one out.
     expect(resolveSubagent(sources, 'parent-a', writer.childThreadId)).toMatchObject({ ok: true, childThreadId: writer.childThreadId })
     expect(subagentsTitled(sources, 'parent-a', 'api REVIEWER')).toEqual([reviewer.childThreadId, writer.childThreadId])
-  })
-})
-
-describe('ceilings only narrow', () => {
-  it.each([
-    [[undefined, undefined], undefined],
-    [['default', undefined], 'default'],
-    [[undefined, 'default'], 'default'],
-    [['default', 'default'], 'default'],
-    [['plan', 'default'], 'plan'],
-    [['default', 'plan'], 'plan'],
-    [['plan', undefined], 'plan'],
-    [[null, 'plan'], 'plan'],
-    [['plan', 'plan'], 'plan']
-  ] as const)('%j gives %s', (ceilings, expected) => {
-    expect(narrowCeiling(...ceilings)).toBe(expected)
   })
 })
 

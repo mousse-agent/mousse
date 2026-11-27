@@ -196,7 +196,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
       const call = JSON.parse(body) as { id: string; params: { name: string; arguments: Record<string, unknown> } }
       const { clientRequestId, ...args } = call.params.arguments
       const outcome = await registry.call(call.params.name, args, {
-        credential: { threadId: 't1', runId: 'r1', provider: 'pi', modeCeiling: 'default', binding: 'per_call', current: () => true },
+        credential: { threadId: 't1', runId: 'r1', provider: 'pi', binding: 'per_call', current: () => true },
         toolCallId: `mcp:${String(clientRequestId)}`,
         signal: new AbortController().signal
       })
@@ -246,7 +246,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
       const call = JSON.parse(body) as { id: string; params: { name: string; arguments: Record<string, unknown> } }
       const { clientRequestId, ...args } = call.params.arguments
       const outcome = await registry.call(call.params.name, args, {
-        credential: { threadId: 't1', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true },
+        credential: { threadId: 't1', runId: 'r1', provider: 'pi', accessLevel: 'lineage', binding: 'per_call', current: () => true },
         toolCallId: `mcp:${String(clientRequestId)}`,
         signal: new AbortController().signal
       })

@@ -39,7 +39,7 @@ import type { AdapterHost, TurnBridge, TurnControl, TurnInput, TurnResult, TurnS
 import { mcpAttachable, type ChildPreflightContext, type SubagentRefusal } from '../run/policy/featureGates'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { TurnSettlement } from '../run/mcp/McpCredentials'
-import type { ModeCeiling, ProviderRef } from '../run/types'
+import type { ProviderRef } from '../run/types'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -583,8 +583,6 @@ export interface TurnSpec {
 export interface TurnAppContext {
   /** The token of the turn's registered app-tool context (`AppToolTurns`). */
   turnToken: string
-  /** The credential ceiling of the run. */
-  modeCeiling: ModeCeiling
   /** The agent access level granted to the run (SPEC §15.1); absent is `lineage`. */
   accessLevel?: AgentAccessLevel
   /**
@@ -814,11 +812,6 @@ function botRelayRevision(bot: BotAuthority): string {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-/** The policy mode a chat mode runs under: plan, else the instance's normal permissions. */
-function policyMode(mode: ChatMode): RunPolicy['mode'] {
-  return mode === 'plan' ? 'plan' : 'default'
 }
 
 /**
@@ -1296,7 +1289,6 @@ export class Harness implements HarnessGateway {
     }
     const policy = freezePolicy({
       ...input.policy,
-      mode: policyMode(input.mode),
       // A caller's own approvals policy (a definition's, a bot's) wins; otherwise Full access is the
       // agent approving its own tools and every other mode asks.
       approvals: input.policy?.approvals ?? input.approvals ?? (effective.mode === 'full' ? 'grants' : 'ask'),
@@ -1743,9 +1735,6 @@ export class Harness implements HarnessGateway {
     this.admissionGate(record)
     if (input.instanceId !== binding.instanceId || input.model !== binding.model)
       harnessFail('protocol', `The turn names ${input.instanceId ?? 'no instance'}/${input.model} but its binding is ${binding.instanceId}/${binding.model}.`, binding.instanceId)
-    // The runtime takes its permissions from the input's mode: it must be the binding's policy.
-    if (policyMode(input.mode) !== binding.policy.mode)
-      harnessFail('protocol', `The turn runs in ${policyMode(input.mode)} mode but its binding is ${binding.policy.mode} mode.`, binding.instanceId)
     // A stored binding runs on the policy it was made with, or not at all.
     if (binding.policyDigest !== undefined && binding.policyDigest !== policyDigest(binding.policy))
       harnessFail('protocol', 'The policy of this turn is not the one its binding was made with.', binding.instanceId)
@@ -2119,7 +2108,6 @@ export class Harness implements HarnessGateway {
           threadId: input.threadId,
           instanceId: binding.instanceId,
           runId: input.runId,
-          modeCeiling: app.modeCeiling,
           accessLevel: app.accessLevel,
           binding: record.driver.mcpTurnBinding ?? 'rotate',
           ...(relayGrant ? { relay: relayGrant } : {}),

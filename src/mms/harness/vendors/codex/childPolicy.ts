@@ -7,7 +7,7 @@ import type { AskForApproval, SandboxMode, SandboxPolicy } from './protocol'
 import { CODEX_MANAGED_VERSION } from './release'
 
 /**
- * What a turn's mode, permission mode and delegation policy decide about Codex's sandbox and approvals: one of Codex's
+ * What a turn's permission mode and delegation policy decide about Codex's sandbox and approvals: one of Codex's
  * sandbox modes, or (a bot's commands on Linux and macOS) the named permission profile its thread config defines
  * (`codexBotSandboxConfig`). Codex takes one or the other, never both.
  */
@@ -19,7 +19,7 @@ export type CodexTurnPolicy =
  * The sandbox and approval policy of one Codex turn, used for `thread/start` / `thread/resume` and
  * again for `turn/start`, so a resumed thread cannot keep an older policy.
  *
- * - A plan turn and a read-only child (`delegate_task` `readOnly`) run in the read-only sandbox with the approval
+ * - A read-only child (`delegate_task` `readOnly`) runs in the read-only sandbox with the approval
  *   policy `on-request`; Mousse answers each request that reaches it with a denial itself
  *   (`CodexProviderService.serve`), so a request never waits in a thread nobody watches.
  * - Ask before acting and Auto-accept edits run `untrusted` in the read-only sandbox (Codex's
@@ -35,8 +35,8 @@ export type CodexTurnPolicy =
  *
  * Nothing here edits the user's Codex configuration or their MCP servers.
  */
-export function codexTurnPolicy(mode: 'plan' | 'default', child: ChildTurnPolicy | undefined, permissionMode: PermissionMode, bot?: CodexBotSandbox): CodexTurnPolicy {
-  if (mode === 'plan' || child?.readOnly === true)
+export function codexTurnPolicy(child: ChildTurnPolicy | undefined, permissionMode: PermissionMode, bot?: CodexBotSandbox): CodexTurnPolicy {
+  if (child?.readOnly === true)
     return { approvalPolicy: 'on-request', sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false } }
   if (bot?.shell && bot.profile) return { approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE }
   if (bot?.shell)

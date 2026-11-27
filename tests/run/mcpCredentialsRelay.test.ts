@@ -32,7 +32,7 @@ describe('McpCredentials relay grant', () => {
     return new McpCredentials(new RunStore(db))
   }
   const turn = (overrides: Partial<BearerTurn> = {}): BearerTurn => ({
-    threadId: 't1', instanceId: 'codex', runId: 'r1', modeCeiling: 'default', binding: 'per_call', generation: 'codex|default|0|0', ...overrides
+    threadId: 't1', instanceId: 'codex', runId: 'r1', binding: 'per_call', generation: 'codex|default|0|0', ...overrides
   })
 
   it('records the grant on a fresh bearer, and none without one', () => {
@@ -60,7 +60,7 @@ describe('McpCredentials relay grant', () => {
 
   it('keeps the grant through mint', () => {
     const credentials = setup()
-    const minted = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'cursor', modeCeiling: 'plan', relay: { approvals: 'mousse' } })
+    const minted = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'cursor', relay: { approvals: 'mousse' } })
     expect(credentials.resolve(minted.token)).toMatchObject({ provider: 'cursor', relay: { approvals: 'mousse' } })
   })
 

@@ -213,7 +213,6 @@ export class CodexAdapter implements ProviderAdapter {
     // service adds for rows left open when a turn ends are not proof.
     const mousseCalls = new Map<string, boolean>()
     const chatInput = (): CodexChatInput => ({
-      mode: input.mode === 'plan' ? 'plan' : 'default',
       // A bot's turn runs in Codex's asking mode, and its authority answers every approval.
       permissionMode: bot ? 'ask' : input.permissionMode,
       ...(bot ? { bot } : { child: input.child }),

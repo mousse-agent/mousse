@@ -20,7 +20,7 @@ export interface ModeDescriptor {
   path: string
 }
 
-export const DEFAULT_MODE_IDS = ['agent', 'plan', 'build'] as const
+export const DEFAULT_MODE_IDS = ['agent', 'build'] as const
 export type BuiltInModeId = typeof DEFAULT_MODE_IDS[number]
 
 export const TOOL_PERMISSION_MAP: Record<string, string> = {

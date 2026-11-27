@@ -28,7 +28,7 @@ const turn = (threadId: string, activationId?: string): AppToolTurn => ({
 
 function context(threadId: string, activationId?: string): ToolCallContext {
   return {
-    caller: { threadId, runId: 'r', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+    caller: { threadId, runId: 'r', provider: 'pi', accessLevel: 'lineage' },
     turn: turn(threadId, activationId),
     toolCallId: 'call-1',
     signal: new AbortController().signal,
@@ -53,8 +53,8 @@ describe('the open items tools', () => {
     const registry = new ToolRegistry({ activeRunId: () => null })
     for (const tool of tools.values()) {
       registry.register(tool)
-      expect(tool.listed?.({ readOnly: false, modeCeiling: 'default' })).toBe(false)
-      expect(tool.listed?.({ readOnly: false, modeCeiling: 'default', botRole: 'activation' })).toBe(true)
+      expect(tool.listed?.({ readOnly: false })).toBe(false)
+      expect(tool.listed?.({ readOnly: false, botRole: 'activation' })).toBe(true)
       expect(tool.available?.(turn('x'))).toBe('Only a bot has a memory.')
       expect(tool.available?.(turn('x', 'act'))).toBe(true)
     }

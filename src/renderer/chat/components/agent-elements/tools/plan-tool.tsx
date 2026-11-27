@@ -55,13 +55,13 @@ export const PlanTool = memo(function PlanTool({
   const [isExpanded, setIsExpanded] = useState(false);
 
   const input = (part.input ?? {}) as { plan?: Plan };
-  const plan = input.plan ?? { title: "Plan" };
+  const plan = input.plan ?? { title: "To-dos" };
   const markdown = resolvePlanMarkdown(plan, part);
   const hasPlan = Boolean(markdown.trim());
 
   const isPending =
     part.state !== "output-available" && part.state !== "output-error";
-  const title = isPending ? "Planning" : (plan.title || "Plan");
+  const title = plan.title || "To-dos";
 
   return (
     <div

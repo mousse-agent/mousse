@@ -84,12 +84,13 @@ describe('daemon protocol across clients', () => {
     await c.close()
   })
 
-  it('creates the job `schedule add --instance --model --mode --workspace` describes', async () => {
+  it('creates the job `schedule add --instance --model --workspace` describes', async () => {
     const c = await connect('cli')
     const project = mms.projects.openProject(home)
-    const input = buildScheduleAddInput('Check CI', 'Check CI', { kind: 'manual' }, parseArgs(['schedule', 'add', '--instance', 'claude', '--model', 'sonnet', '--mode', 'plan', '--workspace', 'project', '--project', project.id]).flags)
+    const input = buildScheduleAddInput('Check CI', 'Check CI', { kind: 'manual' }, parseArgs(['schedule', 'add', '--instance', 'claude', '--model', 'sonnet', '--workspace', 'project', '--project', project.id]).flags)
     const created = await c.request<{ job: { selection?: { instanceId?: string; model: string }; mode?: string; workspace?: { kind: string } } }>('scheduled.create', { input })
-    expect(created.job).toMatchObject({ selection: { instanceId: 'claude', model: 'sonnet' }, mode: 'plan' })
+    expect(created.job).toMatchObject({ selection: { instanceId: 'claude', model: 'sonnet' } })
+    expect(created.job).not.toHaveProperty('mode')
     await c.close()
   })
 

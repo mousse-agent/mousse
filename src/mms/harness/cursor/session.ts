@@ -57,7 +57,6 @@ export interface CursorChatInput {
   cwd: string
   /** `default` lets Cursor choose (its Auto model). */
   model: string
-  mode?: 'default' | 'plan'
   prompt: string
   /** Prefixed to every prompt (skills, the mode's instructions, the applet catalogue, usable tools). */
   turnPreamble?: string
@@ -579,7 +578,7 @@ export class CursorSessions {
       apiKey,
       ...this.local(input.cwd),
       model: { id: input.model || CURSOR_DEFAULT_MODEL },
-      mode: input.mode === 'plan' ? 'plan' : 'agent',
+      mode: 'agent',
       ...(input.mcp ? { mcpServers: cursorMcpServers(input.mcp) } : {}),
       settingSources: [...this.options.settingSources],
       // Cursor approves tools itself; Auto-review is the gate it offers.
@@ -784,7 +783,7 @@ export class CursorSessions {
     for (;;) {
       if (stop.aborted) throw new TurnStopped()
       if (steerFailure) throw steerFailure
-      const params = { agentId, text: prompt, ...(images.length ? { images } : {}), model, mode: input.mode === 'plan' ? 'plan' as const : 'agent' as const, ...(mcpServers ? { mcpServers } : {}) }
+      const params = { agentId, text: prompt, ...(images.length ? { images } : {}), model, mode: 'agent' as const, ...(mcpServers ? { mcpServers } : {}) }
       // The run is registered before it is sent: a Stop while the send is in flight cancels it as
       // soon as its id is known (and the gateway's deadline ends the host when that never comes).
       let endRun!: (end: RunEnd) => void

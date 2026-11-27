@@ -372,7 +372,7 @@ export function asStringArray(
   return out
 }
 
-const BUILTIN_MODES = new Set(['agent', 'plan', 'build'])
+const BUILTIN_MODES = new Set(['agent', 'build'])
 
 function invalidParams(message: string) {
   return knownAppError({ code: 'invalid_params', message }, { category: 'invalid', retryable: false })
@@ -387,7 +387,7 @@ function imageTooLarge(message: string, image?: string) {
 export function asChatMode(v: unknown, name = 'mode'): ChatMode {
   if (typeof v === 'string') {
     if (!BUILTIN_MODES.has(v)) {
-      throw invalidParams(`${name} must be agent|plan|build or { type: 'skill', skillId }`)
+      throw invalidParams(`${name} must be agent|build or { type: 'skill', skillId }`)
     }
     return v
   }
@@ -397,7 +397,7 @@ export function asChatMode(v: unknown, name = 'mode'): ChatMode {
     }
     return { type: 'skill', skillId: v.skillId }
   }
-  throw invalidParams(`${name} must be agent|plan|build or { type: 'skill', skillId }`)
+  throw invalidParams(`${name} must be agent|build or { type: 'skill', skillId }`)
 }
 
 export function asOptionalChatMode(v: unknown, name = 'mode'): ChatMode | undefined {
@@ -767,7 +767,6 @@ export type CreateScheduledJobInputValidated = {
   createThread?: boolean
   selection?: ModelOverride
   agent?: ScheduledJobAgent
-  mode?: 'agent' | 'plan'
   permissionMode?: PermissionMode
   workspace?: ScheduledJobWorkspace
   repeat?: { times?: number }
@@ -819,9 +818,12 @@ export function asJobSelection(v: unknown, name = 'selection'): ModelOverride {
   return upgradeSelection({ ...(instanceId ? { instanceId } : {}), llmProvider: llmProvider ?? '', model, ...(effort ? { effort } : {}) })
 }
 
-export function asJobMode(v: unknown, name = 'mode'): 'agent' | 'plan' {
-  if (v !== 'agent' && v !== 'plan') throw new Error(`${name} must be agent|plan`)
-  return v
+/**
+ * A job's retired `mode` field, from a client older than this one: `agent` (or `null` in a patch) was the default and is
+ * dropped; anything else, `plan` included, is refused, since the job would run with more than the client asked for.
+ */
+function assertRetiredJobMode(v: unknown, name: string): void {
+  if (v !== undefined && v !== null && v !== 'agent') throw new Error(`${name} is no longer supported: a job runs as an agent turn`)
 }
 
 /** A job's permission mode. The job's ceiling has no validator: no request may carry one (the key is refused). */
@@ -865,7 +867,7 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
   if (o.createThread !== undefined) input.createThread = asBoolean(o.createThread, 'createThread')
   if (o.selection !== undefined) input.selection = asJobSelection(o.selection)
   if (o.agent !== undefined) input.agent = asJobAgent(o.agent)
-  if (o.mode !== undefined) input.mode = asJobMode(o.mode)
+  assertRetiredJobMode(o.mode, 'mode')
   if (o.permissionMode !== undefined) input.permissionMode = asJobPermissionMode(o.permissionMode)
   if (o.workspace !== undefined) input.workspace = asJobWorkspace(o.workspace)
   if (o.tellMe !== undefined) input.tellMe = asTellMe(o.tellMe)
@@ -910,7 +912,6 @@ export function asScheduledJobPatch(v: unknown): {
   createThread?: boolean
   selection?: ModelOverride | null
   agent?: ScheduledJobAgent | null
-  mode?: 'agent' | 'plan' | null
   permissionMode?: PermissionMode | null
   workspace?: ScheduledJobWorkspace | null
   repeat?: { times?: number } | null
@@ -940,6 +941,7 @@ export function asScheduledJobPatch(v: unknown): {
   for (const key of Object.keys(o)) {
     if (!allowed.has(key)) throw new Error(`patch.${key} is not allowed`)
   }
+  assertRetiredJobMode(o.mode, 'patch.mode')
   const patch: ReturnType<typeof asScheduledJobPatch> = {}
   if (o.name !== undefined) patch.name = asString(o.name, 'name', 256)
   if (o.prompt !== undefined) patch.prompt = asString(o.prompt, 'prompt')
@@ -953,8 +955,6 @@ export function asScheduledJobPatch(v: unknown): {
   // `null` clears the field: the job goes back to the default.
   if (o.selection === null) patch.selection = null
   else if (o.selection !== undefined) patch.selection = asJobSelection(o.selection)
-  if (o.mode === null) patch.mode = null
-  else if (o.mode !== undefined) patch.mode = asJobMode(o.mode)
   if (o.permissionMode === null) patch.permissionMode = null
   else if (o.permissionMode !== undefined) patch.permissionMode = asJobPermissionMode(o.permissionMode)
   if (o.workspace === null) patch.workspace = null

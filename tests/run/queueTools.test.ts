@@ -25,7 +25,7 @@ const item = (id: string, patch: Partial<QueuedMessage> = {}): QueuedMessage => 
  * as the `op` of `queue_update` that replaced it. `key` is the name its request key keeps (the old tool's).
  */
 const TOOLS: Array<{ tool: string; args: Record<string, unknown>; command: AgentQueueCommand; key?: string }> = [
-  { tool: 'queue_enqueue', args: { content: 'hello', expectedRevision: 'rev-1' }, command: { op: 'enqueue', content: 'hello', mode: 'agent', expectedRevision: 'rev-1' } },
+  { tool: 'queue_enqueue', args: { content: 'hello', expectedRevision: 'rev-1' }, command: { op: 'enqueue', content: 'hello', expectedRevision: 'rev-1' } },
   { tool: 'queue_edit', args: { itemId: 'i1', content: 'new', expectedRevision: 'rev-1' }, command: { op: 'edit', itemId: 'i1', content: 'new', expectedRevision: 'rev-1' } },
   { tool: 'queue_remove', args: { itemId: 'i1', expectedRevision: 'rev-1' }, command: { op: 'remove', itemId: 'i1', expectedRevision: 'rev-1' } },
   { tool: 'queue_reorder', args: { orderedIds: ['i2', 'i1'], expectedRevision: 'rev-1' }, command: { op: 'reorder', orderedIds: ['i2', 'i1'], expectedRevision: 'rev-1' } },
@@ -103,17 +103,6 @@ describe('the queue tools (SPEC §15.1)', () => {
       const keys = vi.mocked(host.queueCommand!).mock.calls.map((entry) => entry[2].clientRequestId)
       expect(new Set(keys).size).toBe(2)
       expect(keys.every((key) => /^queue_remove:caller:mcp:/.test(key))).toBe(true)
-    })
-
-    it('a plan ceiling cannot ask for an agent turn', async () => {
-      const { call, denied, host } = await world()
-      const ceiling = { modeCeiling: 'plan' as const }
-      for (const [tool, args] of [['queue_enqueue', { content: 'x', mode: 'agent' }], ['queue_edit', { itemId: 'i1', mode: 'agent', expectedRevision: 'rev-1' }]] as const)
-        expect((await denied(call(tool, { ...args }, ceiling)))!.code, tool).toBe('mousse_ceiling_exceeded')
-      expect(host.queueCommand).not.toHaveBeenCalled()
-      // Its default under a plan ceiling is a plan turn.
-      await call('queue_enqueue', { content: 'x' }, ceiling)
-      expect(host.queueCommand).toHaveBeenLastCalledWith('caller', { op: 'enqueue', content: 'x', mode: 'plan' }, expect.anything())
     })
   })
 
@@ -224,7 +213,7 @@ describe('the queue tools (SPEC §15.1)', () => {
       expect(await denied(call('queue_edit', args))).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'revision_mismatch', expectedRevision: 'rev-1', revision: 'rev-9' } })
       answer.result = () => { throw new QueueConflictError('ceiling_exceeded', 'Too loose.', { callerMode: 'ask', targetMode: 'full' }) }
       expect(await denied(call('queue_promote_to_steer', { itemId: 'i1', expectedRevision: 'rev-1', expectedRunId: 'r' }))).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'ceiling_exceeded', callerMode: 'ask', targetMode: 'full' } })
-      answer.result = () => { throw new QueueAccessError('A message queued as a plan turn cannot be turned into an agent turn by another writer.') }
+      answer.result = () => { throw new QueueAccessError('This message cannot be changed by another writer.') }
       expect(await denied(call('queue_edit', args))).toMatchObject({ code: 'mousse_scope_denied', message: expect.stringContaining('another writer') })
       answer.result = () => { throw new DomainRpcError('agent_queue_full', 'full') }
       expect(await denied(call('queue_edit', args))).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_queue_full' } })

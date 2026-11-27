@@ -17,7 +17,7 @@ import { harnessAppError, HARNESS_ERROR_CODES, type HarnessCaps, type RunPolicy 
 import { CLAUDE_CODE_CAPS } from '../../src/mms/harness/drivers/claudeCode'
 
 const caps = (patch: Partial<HarnessCaps> = {}): HarnessCaps => ({ ...CLAUDE_CODE_CAPS, toolControl: 'exact', budgets: 'hard', spendLimits: 'reserved', ...patch })
-const policy = (patch: Partial<RunPolicy> = {}): RunPolicy => ({ mode: 'default', approvals: 'ask', ...patch })
+const policy = (patch: Partial<RunPolicy> = {}): RunPolicy => ({ approvals: 'ask', ...patch })
 const model = (patch: Partial<SpendModelFacts> = {}): SpendModelFacts => ({ label: 'Model X', outputCap: true, priced: true, ...patch })
 const missing = (result: ReturnType<typeof checkPolicy>) => (result.ok ? [] : result.error.missing)
 const reason = (result: ReturnType<typeof checkPolicy>) => (result.ok ? undefined : result.error.reason)

@@ -28,9 +28,9 @@ describe('independent routing turns on one host', () => {
     }
   })
 
-  it.each([['agent', true], ['plan', true], ['agent', false], ['plan', false]] as const)('routes %s turns with project=%s through Claude', async (mode, projectBound) => {
+  it.each([true, false])('routes turns with project=%s through Claude', async (projectBound) => {
     const host = main!.getInstallationHost()!
-    const profile = host.manager.create({ displayName: `Routing ${mode} ${projectBound}`, slug: `routing-${mode}-${projectBound}` })
+    const profile = host.manager.create({ displayName: `Routing ${projectBound}`, slug: `routing-${projectBound}` })
     const service = await main!.getProfileServices(profile.id)
     await service.start()
     const workspace = mkdtempSync(join(home, 'workspace-'))
@@ -44,7 +44,6 @@ describe('independent routing turns on one host', () => {
           expect(input.drainSteer?.()).toBe('accepted guidance')
           input.onSteer?.('accepted guidance')
         }
-        expect(input.mode).toBe(mode === 'plan' ? 'plan' : 'default')
         expect(input.cwd).toBe(projectBound ? workspace : service.claudeSubscription.standaloneWorkspace(input.threadId))
         input.onThinking?.('Considering the request')
         input.onText('Claude answer')
@@ -53,7 +52,7 @@ describe('independent routing turns on one host', () => {
       const committed = vi.spyOn(service.claudeSubscription, 'commitConversation')
       const project = service.projects.openProject(workspace)
       const thread = projectBound ? service.threads.createThread('Existing conversation', project.id, workspace) : service.threads.createThread('Standalone conversation')
-      await service.orchestrator.send({ content: 'first request', mode }, false, {
+      await service.orchestrator.send({ content: 'first request' }, false, {
         threadId: thread.id
       })
       expect(chat).toHaveBeenCalledOnce()
@@ -63,7 +62,7 @@ describe('independent routing turns on one host', () => {
         expect.objectContaining({ role: 'user', content: 'accepted guidance' }),
         expect.objectContaining({ role: 'assistant', provider: 'claude-subscription', content: [{ type: 'text', text: 'Claude answer' }] })
       ]))
-      await service.orchestrator.send({ content: 'second request', mode }, false, { threadId: thread.id })
+      await service.orchestrator.send({ content: 'second request' }, false, { threadId: thread.id })
       expect(inputs[1]?.history).toContain('first request')
       expect(inputs[1]?.history).toContain('accepted guidance')
       expect(inputs[1]?.history).toContain('Claude answer')
