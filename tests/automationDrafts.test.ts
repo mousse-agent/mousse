@@ -414,7 +414,7 @@ describe('the automation tools', () => {
     const { drafts } = setup()
     const tools: AutomationToolHost = { drafts, isManagerThread: (id) => id === 'manager', botOf: (id) => (id === 'bot-thread' ? 'bot_1' : undefined) }
     const list = automationTools({ automations: () => tools } as unknown as AppToolHost)
-    expect(list.map((tool) => tool.name)).toEqual(['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause', 'run_report'])
+    expect(list.map((tool) => tool.name)).toEqual(['automation_draft_save', 'automation_enable', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause', 'run_report'])
     const save = list[0]!
     expect(save.available!({ threadId: 'other' } as never)).toMatch(/Only a conversation, the Automation manager or a bot/)
     expect(save.available!({ threadId: 'manager' } as never)).toBe(true)
@@ -449,6 +449,44 @@ describe('the automation tools', () => {
     request = `Make it run the full suite\n\n[Project: mousse (p1) · Change automation: ${draftId}]`
     expect((await update.handler({ id: draftId, prompt: 'Run the full suite.' }, ctx('manager'))).isError).toBeFalsy()
     expect(service.getJob(draftId)).toMatchObject({ prompt: 'Run the full suite.', enabled: false })
+  })
+
+  it('let a bot turn on only the drafts it wrote, or write one and turn it on at once, and keep a draft with problems a draft', async () => {
+    const { drafts, service } = setup()
+    const tools: AutomationToolHost = { drafts, isManagerThread: (id) => id === 'manager', botOf: (id) => (id === 'bot-thread' ? 'bot_1' : id === 'bot2-thread' ? 'bot_2' : undefined) }
+    const enable = automationTools({ automations: () => tools } as unknown as AppToolHost).find((tool) => tool.name === 'automation_enable')!
+    // A bot's alone: the manager and an ordinary chat write drafts the person turns on.
+    expect(enable.available!({ threadId: 'manager' } as never)).toMatch(/Only a bot/)
+    expect(enable.listed!({ threadId: 'manager' })).toBe(false)
+    expect(enable.available!({ threadId: 'bot-thread' } as never)).toBe(true)
+    await expect(Promise.resolve().then(() => enable.handler({ draftId: 'x' }, ctx('manager')))).rejects.toThrow(/Only the Automation manager or a bot/)
+
+    // A draft the bot wrote, turned on by id: the person's own automation, as their Turn on makes it.
+    const { draftId } = drafts.save({ ...PR_CHECK, project: 'mousse', permissionMode: 'full' }, { botId: 'bot_1' })
+    // Another bot can't turn it on, nor can it turn on the manager's.
+    expect(await enable.handler({ draftId }, ctx('bot2-thread'))).toMatchObject({ isError: true, text: `No draft ${draftId}.` })
+    const managers = drafts.save({ ...PR_CHECK, project: 'mousse' }, { managerThreadId: 'manager' }).draftId
+    expect(await enable.handler({ draftId: managers }, ctx('bot-thread'))).toMatchObject({ isError: true, text: `No draft ${managers}.` })
+    expect(service.getJob(managers)).toMatchObject({ enabled: false, draft: { draft: true } })
+    const on = JSON.parse((await enable.handler({ draftId }, ctx('bot-thread'))).text) as { id: string; enabled: boolean; problems: string[]; automation: { draft: boolean } }
+    expect(on).toMatchObject({ id: draftId, enabled: true, problems: [], automation: { draft: false, enabled: true } })
+    const job = service.getJob(draftId)!
+    expect(job.draft).toBeUndefined()
+    expect(job).toMatchObject({ enabled: true, permissionCeiling: 'accept_edits', permissionMode: 'accept_edits' })
+    expect(job.nextRunAt).not.toBeNull()
+
+    // Fields and no draft: written and turned on in one call.
+    const made = JSON.parse((await enable.handler({ ...PR_CHECK, name: 'Morning digest', project: 'mousse' }, ctx('bot-thread'))).text) as { id: string; enabled: boolean }
+    expect(made.enabled).toBe(true)
+    expect(service.getJob(made.id)).toMatchObject({ name: 'Morning digest', enabled: true })
+    expect(service.getJob(made.id)!.draft).toBeUndefined()
+
+    // What keeps Turn on off keeps it a draft: the bot reads why, and nothing runs.
+    const held = JSON.parse((await enable.handler({ ...PR_CHECK, name: 'No project' }, ctx('bot-thread'))).text) as { id: string; enabled: boolean; problems: string[] }
+    expect(held).toMatchObject({ enabled: false, problems: ['Which project should it run in?'] })
+    expect(service.getJob(held.id)).toMatchObject({ enabled: false, draft: { draft: true, botId: 'bot_1', problems: ['Which project should it run in?'] } })
+    // Nothing to turn on: said in words.
+    expect(await enable.handler({}, ctx('bot-thread'))).toMatchObject({ isError: true, text: expect.stringMatching(/^Pass draftId/) })
   })
 })
 
