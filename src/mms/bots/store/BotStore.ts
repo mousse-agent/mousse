@@ -2464,6 +2464,7 @@ export class BotStore {
     this.run('DELETE FROM bot_questions WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_actions WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_jobs WHERE bot_id = ?', botId)
+    this.dropChainHolds(botId)
     this.run('UPDATE bot_registry SET model_json = NULL, error_json = NULL WHERE bot_id = ?', botId)
   }
 
@@ -2818,6 +2819,12 @@ export class BotStore {
   /** Moves a held step to its end; false when it had already left `held` (sent, stopped or failed before). */
   settleChainHold(holdId: string, status: Exclude<BotChainHoldStatus, 'held'>, reason?: string): boolean {
     return this.run("UPDATE bot_chain_holds SET status = ?, reason = ?, settled_at = ? WHERE hold_id = ? AND status = 'held'", status, reason ?? null, this.now(), holdId) > 0
+  }
+
+  /** Removes everything the bot held for its owner, and its latest Continue (a reset, a delete, the purge). */
+  dropChainHolds(botId: string): void {
+    this.run('DELETE FROM bot_chain_holds WHERE bot_id = ?', botId)
+    this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, 'chain-renewed')
   }
 
   /** The owner's Continue gives the bot's chain a new budget from here, as their own message would (`chainBudgetFrom`). */

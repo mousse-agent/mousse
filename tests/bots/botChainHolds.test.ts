@@ -6,6 +6,9 @@
  * What each case covers:
  * - a held message: what the bot is told, the card, nothing sent; Continue sends them in order and renews the budget
  * - Stop: nothing sent, a line the bot reads in its chat; a second answer, or one for another bot, is `hold_settled`
+ * - an answer covers what was held when it came: what the bot holds while Continue sends waits under a new card
+ * - a held wake: never set again beside it, even after the owner writes
+ * - a reset, a delete and the purge: what was held goes, and nothing can send it
  * - a crash: what is held survives a restart, and Continue after a crash midway sends each message once
  * - who may answer: only a person at a window on this computer, never the CLI, an agent or another device
  */
@@ -18,6 +21,7 @@ import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../src/mms/protocol/handlers'
 import { MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER } from '../../src/shared/bots/personal/botMessages'
+import { MAX_SAME_WAKES } from '../../src/shared/bots/personal/wakes'
 import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
@@ -105,6 +109,74 @@ describe('a message past the limit waits for the owner', () => {
     expect(await answer(plusy, held!.holdId, 'continue')).toEqual({ sent: 0, stopped: 0, failed: 1 })
     expect(chatOf(f, plusy).find((message) => message.id === `bm_chainhold_${held!.holdId}`)?.text).toBe('Continue could not send the message to Alpha: Alpha is paused.')
     expect(received(alpha)).toEqual([])
+  })
+})
+
+describe('what an answer covers', () => {
+  it('Continue sends only what was held when the owner clicked: a message held while it sends waits under a new card', async () => {
+    const turn = await plusyPastItsLimit()
+    const first = (await send(plusy, turn.activation.id, 'Alpha', 'First.')).held!
+    await send(plusy, turn.activation.id, 'Alpha', 'Second.')
+    // While Continue sends the first, Plusy's turn sends a third: it waits behind the second, still held.
+    const engine = f.bots as unknown as { continueHeld(hold: BotChainHold): Promise<boolean> }
+    const continueHeld = engine.continueHeld.bind(f.bots)
+    let third: { held?: { holdId: string } } | undefined
+    engine.continueHeld = async (hold) => {
+      const sent = await continueHeld(hold)
+      third ??= await send(plusy, turn.activation.id, 'Alpha', 'Third.')
+      return sent
+    }
+    expect(await answer(plusy, first.holdId, 'continue')).toEqual({ sent: 2, stopped: 0, failed: 0 })
+    expect(received(alpha)).toEqual([expect.stringContaining('First.'), expect.stringContaining('Second.')])
+    expect(third?.held).toBeDefined()
+    expect(card(plusy)).toEqual({ holdId: third!.held!.holdId, held: 1, to: ['Alpha'], wakes: 0 })
+  })
+
+  it('a held wake is never set again beside it: not after the owner writes, and Continue sets one', async () => {
+    const turnOf = async (text: string, id: string) => {
+      await f.bots.service.chatSend({ botId: plusy, text, clientRequestId: id })
+      const activation = f.store.laneActivations(plusy, 'chat', ['running'])[0]!
+      return { activation, ...(await start(f, activation.id)) }
+    }
+    const due = () => new Date(f.clock.now + 5 * 60_000).toISOString()
+    const wake = (from: string) => f.bots.tools.wakes!.add(plusy, from, { brief: 'Check the deploy.', dueAt: due() })
+    let turn = await turnOf('Keep checking the deploy', 'w1')
+    for (let n = 0; n < MAX_SAME_WAKES; n += 1) await wake(turn.activation.id)
+    const held = await wake(turn.activation.id) as { held: { holdId: string } }
+    expect(held.held.holdId).toMatch(/^bhold_/)
+    await finish(f, turn.payload, 'completed', { text: 'Watching.' })
+    // The owner writes: the count starts again, the held one still waits.
+    f.clock.now += 60_000
+    turn = await turnOf('Any news?', 'w2')
+    const count = f.store.wakesSetSince(plusy, '').length
+    await expect(wake(turn.activation.id)).rejects.toThrow('already waits for your owner')
+    expect(await answer(plusy, held.held.holdId, 'continue')).toEqual({ sent: 1, stopped: 0, failed: 0 })
+    expect(f.store.wakesSetSince(plusy, '').length).toBe(count + 1)
+  })
+})
+
+describe('a reset, a delete and the purge', () => {
+  it('a reset drops what the bot held: no card, and the answer sends nothing', async () => {
+    const turn = await plusyPastItsLimit()
+    const { held } = await send(plusy, turn.activation.id, 'Alpha', 'The login page returns a 500.')
+    await finish(f, turn.payload, 'completed', { text: 'It waits for you.' })
+    await f.bots.service.reset(plusy)
+    expect(card(plusy)).toBeUndefined()
+    await expect(answer(plusy, held!.holdId, 'continue')).rejects.toMatchObject({ code: 'hold_settled' })
+    expect(received(alpha)).toEqual([])
+  })
+
+  it('a delete removes its rows, and so does the purge 30 days on', async () => {
+    const turn = await plusyPastItsLimit()
+    const { held } = await send(plusy, turn.activation.id, 'Alpha', 'The login page returns a 500.')
+    await finish(f, turn.payload, 'completed', { text: 'It waits for you.' })
+    await f.bots.service.delete(plusy)
+    expect(f.store.chainHold(held!.holdId)).toBeUndefined()
+    // A row left by a build before this one goes with the purge.
+    const left = f.store.holdChainStep(plusy, 'message', { to: alpha, toName: 'Alpha', message: 'Left behind.' })
+    f.clock.now += 31 * 24 * 3_600_000
+    expect(await f.bots.sweepDeleted()).toContain(plusy)
+    expect(f.store.chainHold(left.holdId)).toBeUndefined()
   })
 })
 

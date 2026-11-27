@@ -1300,6 +1300,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.watchers.stopBot(botId)
       this.store.cancelReminders(botId)
       this.store.withdrawQuestions(botId)
+      // What it held for its owner goes too: no card, and nothing a Continue could still send.
+      this.store.dropChainHolds(botId)
       return running
     })
     // Its messages still waiting in its owner's threads ("use your threads") go with it, each thread saying so, as after
@@ -9665,6 +9667,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const limited = Object.values(this.store.registry(botId)?.model?.limits ?? {}).map((limit) => limit.instanceId)
     this.store.db.transaction(() => {
       this.store.deleteMessages(botId)
+      // A fresh start holds nothing for its owner: the card goes, and a Continue already on its way sends nothing.
+      this.store.dropChainHolds(botId)
       this.store.setPaused(botId, null)
       this.store.setError(botId, null)
       if (limited.length) this.updateModelStateInTx(botId, (state) => ({ ...state, limits: {} }))
@@ -10507,11 +10511,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (due > this.now() + MAX_EVENT_WAKE_HOURS * HOUR_MS) throw new BotEngineError('invalid_params', `A wake-up is at most ${MAX_EVENT_WAKE_HOURS / 24} days ahead. For later, use remind or a schedule.`)
       dueAt = new Date(Math.max(due, this.now())).toISOString()
     }
-    // The chat's same wake again and again is held for the owner (issue #1443); a work wait's loop is refused.
+    // The chat's same wake again and again is held for the owner (issue #1443); a work wait's loop is refused. One
+    // already held is never set beside it, whatever the count says since (an owner's message resets the count, not it).
+    const key = wakeLoopKey(brief, event)
+    if (!workWait && this.store.heldChainSteps(botId).some((hold) => hold.kind === 'wake' && wakeLoopKey((hold.payload as HeldWake).brief, (hold.payload as HeldWake).event) === key))
+      throw new BotEngineError('wake_loop', 'This same wake-up already waits for your owner. Nothing more was set: end your turn, and tell your owner where things stand.')
     if (!workWait && this.sameWakes(botId, brief, event) >= MAX_SAME_WAKES) {
-      const key = wakeLoopKey(brief, event)
-      if (this.store.heldChainSteps(botId).some((hold) => hold.kind === 'wake' && wakeLoopKey((hold.payload as HeldWake).brief, (hold.payload as HeldWake).event) === key))
-        throw new BotEngineError('wake_loop', 'This same wake-up already waits for your owner. Nothing more was set: end your turn, and tell your owner where things stand.')
       const hours = input.hours === undefined ? DEFAULT_EVENT_WAKE_HOURS : input.hours
       const hold = this.store.holdChainStep(botId, 'wake', { brief, dueAt, event, hours, chain, replyTo: this.ownerMessageOf(from) ?? null } satisfies HeldWake)
       this.changed({ botId })
@@ -10813,8 +10818,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * The owner's Continue or Stop on what bot `botId` holds (issue #1443), named by the card's batch (`holdId`, its oldest
-   * held step): one for a batch already settled is refused (`hold_settled`). Continue gives the bot's chain a new budget
-   * and sends what it holds, oldest first; each step leaves `held` in the transaction that sends it, so after a crash
+   * held step): one for a batch already settled is refused (`hold_settled`). The answer covers what the bot holds when it
+   * arrives, and nothing held after: that waits under a new card. Continue gives the bot's chain a new budget
+   * and sends those, oldest first; each step leaves `held` in the transaction that sends it, so after a crash
    * Continue sends what was not sent yet and nothing twice. Stop drops it. Either way a step that did not go leaves a line
    * in the bot's chat, which it reads with its next turn.
    */
@@ -10830,15 +10836,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.chat.post({ id: `bm_chainhold_${hold.holdId}`, botId, author: 'bot', kind: 'notice', text: line.replace('{what}', what), lane: 'chat' })
       return true
     })
+    // Taken once: a step the bot holds while these are sent is not part of this answer.
+    const answered = this.store.heldChainSteps(botId)
     this.answeringHolds.add(botId)
     try {
       if (answer === 'stop') {
-        for (const hold of this.store.heldChainSteps(botId)) if (settle(hold, 'stopped', 'Not sent, as you chose Stop: {what}.')) counts.stopped += 1
+        for (const hold of answered) if (settle(hold, 'stopped', 'Not sent, as you chose Stop: {what}.')) counts.stopped += 1
         return counts
       }
       this.store.renewChainBudget(botId)
-      for (let hold = this.store.heldChainSteps(botId)[0]; hold; hold = this.store.heldChainSteps(botId)[0]) {
-        const current = hold
+      for (const current of answered) {
         try {
           if (await this.continueHeld(current)) counts.sent += 1
         } catch (error) {
