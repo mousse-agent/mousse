@@ -103,6 +103,17 @@
       "expiresAt": "2026-11-26T11:12:48.179Z"
     },
     {
+      "task": "remote-snapshot-newest-part",
+      "session": "Animatrix-ceb583",
+      "machine": "Animatrix",
+      "branch": "remote-snapshot-newest-part",
+      "paths": [
+        "src/mms/bridge/remote/MmsBackend.ts"
+      ],
+      "claimedAt": "2026-11-27T06:28:55.918Z",
+      "expiresAt": "2026-11-27T08:28:55.918Z"
+    },
+    {
       "task": "remote-subagent-result-notice",
       "session": "Avarnics-Mac-mini.local-1565f6",
       "machine": "Avarnics-Mac-mini.local",
