@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useActiveProjectLocation } from '../../src/renderer/hooks/useActiveProjectPath'
 import { useAppStore } from '../../src/renderer/stores/appStore'
+import { NO_COMPUTERS, useComputersStore } from '../../src/renderer/lib/computers'
 import type { ActiveProject } from '../../src/renderer/lib/activeProject'
 import { qualifyId } from '../../src/shared/threadRef'
 import type { Thread, TurnState } from '../../src/shared/types'
@@ -44,7 +45,7 @@ beforeEach(() => {
     }
   }
   const thread = { id: 't1', name: 'Sync the local repository', projectId: 'p1', worktreeEnabled: true, startedAt: '2026-11-10T09:51:00.000Z', createdAt: '2026-11-10T09:51:00.000Z', updatedAt: '2026-11-10T09:51:00.000Z' } as unknown as Thread
-  useAppStore.setState({ activeThreadId: 't1', profileId: 'prf', projects: [{ id: 'p1', name: 'repo', path: PROJECT, createdAt: '', order: 0 }], threads: [thread], messages: [], turnStates: {} })
+  useAppStore.setState({ activeThreadId: 't1', profileId: 'prf', profileReady: true, projects: [{ id: 'p1', name: 'repo', path: PROJECT, createdAt: '', order: 0 }], threads: [thread], messages: [], turnStates: {} })
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
@@ -54,6 +55,8 @@ afterEach(() => {
   act(() => root.unmount())
   host.remove()
   useAppStore.setState(initialStore, true)
+  // Each case starts with no computers listed, as a fresh window does.
+  useComputersStore.setState(NO_COMPUTERS)
 })
 
 describe('the folder of a new worktree thread', () => {

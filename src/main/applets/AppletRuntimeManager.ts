@@ -12,6 +12,10 @@ import type { AppletAppearance } from '../../shared/appletAppearance'
 import { appletFrameHeight } from '../../shared/appletRuntime'
 import { APPLET_EVENT_PREFIX, APPLET_APPLY_APPEARANCE, appletDocument, type AppletSource } from './document'
 
+/** How long a shown applet may leave a liveness probe unanswered before it is stopped. */
+export const APPLET_UNRESPONSIVE_MS = 5000
+const WHEEL_PREFIX = `${APPLET_EVENT_PREFIX}{"type":"wheel"`
+
 // Fail closed between profile managers without retaining a former owner.
 const denyRequests: Parameters<Session['webRequest']['onBeforeRequest']>[0] = (
   _details,
@@ -49,8 +53,15 @@ interface Runtime {
   epoch: number
   slot: number
   documentUrl: string
+  /** When the page last answered a liveness probe (or could not be expected to). */
   heartbeat: number
+  /** A probe is waiting for the page's answer. */
+  probing: boolean
+  wheels: number
+  wheelEpoch: number
   visible: boolean
+  /** The part of the owner window the applet shows in, in device-independent pixels. */
+  shown: Rectangle
   parkedAt?: number
 }
 
@@ -73,21 +84,23 @@ export class AppletRuntimeManager {
   ) {
     this.partitionPrefix = `mousse-applet-owner-${owner.webContents.id}`
     owner.once('closed', this.onOwnerClosed)
+    // Liveness is asked for, not volunteered: the probe is a task on the page's main thread, which a loop blocks but
+    // timer throttling (a covered or hidden window, Chromium's intensive throttling) does not delay.
     this.watchdog = setInterval(() => {
       const now = Date.now()
-      for (const runtime of this.runtimes.values()) {
+      for (const runtime of [...this.runtimes.values()]) {
         if (!runtime.visible || owner.isDestroyed() || !owner.isVisible() || owner.isMinimized()) {
           runtime.heartbeat = now
           continue
         }
-        if (now - runtime.heartbeat > 5000) {
+        if (now - runtime.heartbeat > APPLET_UNRESPONSIVE_MS) {
           this.notify(
             runtime,
             'error',
             'The applet stopped responding and was stopped. Restart it to try again.'
           )
           this.unmount(runtime.mount.runtimeId)
-        }
+        } else this.probe(runtime)
       }
     }, 500)
     this.watchdog.unref()
@@ -174,7 +187,11 @@ export class AppletRuntimeManager {
       slot,
       documentUrl,
       heartbeat: Date.now(),
-      visible: false
+      probing: false,
+      wheels: 0,
+      wheelEpoch: 0,
+      visible: false,
+      shown: { x: 0, y: 0, width: 0, height: 0 }
     }
     this.runtimes.set(input.runtimeId, runtime)
     const wc = guest.webContents
@@ -245,6 +262,7 @@ export class AppletRuntimeManager {
       )
     runtime.parkedAt = undefined
     runtime.visible = right > left && bottom > top
+    runtime.shown = { x: left, y: top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) }
     runtime.container.setBounds({
       x: Math.round(left),
       y: Math.round(top),
@@ -355,6 +373,44 @@ export class AppletRuntimeManager {
     return runtime.guest.webContents.capturePage()
   }
 
+  /** One probe at a time; its answer, however late, counts as the page being alive at that moment. */
+  private probe(runtime: Runtime): void {
+    if (runtime.probing || runtime.guest.webContents.isDestroyed()) return
+    runtime.probing = true
+    runtime.guest.webContents
+      .executeJavaScript('0')
+      .then(
+        () => {
+          runtime.heartbeat = Date.now()
+        },
+        () => {}
+      )
+      .finally(() => {
+        runtime.probing = false
+      })
+  }
+  /**
+   * Replays a wheel turn the applet could not use as real wheel input on the owner's page, at the pointer's place over
+   * the applet and never outside the part of the window the applet shows in. The page then scrolls exactly as it would
+   * over any other part of a reply: the browser's own wheel animation, latching and chaining, and the conversation's own
+   * wheel listeners. Never with modifiers, so it cannot zoom.
+   */
+  private replayWheel(runtime: Runtime, deltaY: number, discrete: boolean, x: number, y: number): void {
+    if (this.runtimes.get(runtime.mount.runtimeId) !== runtime || !runtime.visible || this.owner.isDestroyed()) return
+    const zoom = this.owner.webContents.getZoomFactor()
+    const { shown } = runtime
+    const at = (value: number, from: number, size: number) => Math.round(Math.min(from + size - 1, Math.max(from, value)))
+    this.owner.webContents.sendInputEvent({
+      type: 'mouseWheel',
+      x: at((runtime.mount.bounds.x + x) * zoom, shown.x, shown.width),
+      y: at((runtime.mount.bounds.y + y) * zoom, shown.y, shown.height),
+      deltaX: 0,
+      // The page reports CSS pixels in the DOM's sign; native input is device-independent and in the legacy wheel sign.
+      deltaY: -deltaY * zoom,
+      hasPreciseScrollingDeltas: !discrete,
+      canScroll: true
+    })
+  }
   private notify(runtime: Runtime, type: AppletRuntimeEvent['type'], payload: unknown): void {
     if (this.runtimes.get(runtime.mount.runtimeId) !== runtime) return
     const { runtimeId, threadId, revisionId } = runtime.mount
@@ -385,6 +441,26 @@ export class AppletRuntimeManager {
   }
   private receive(runtime: Runtime, message: string): void {
     if (!message.startsWith(APPLET_EVENT_PREFIX) || message.length > 65536) return
+    if (message.startsWith(WHEEL_PREFIX)) {
+      // Wheel turns come at the display's rate during a gesture; they have their own budget.
+      if (Date.now() - runtime.wheelEpoch >= 1000) {
+        runtime.wheelEpoch = Date.now()
+        runtime.wheels = 0
+      }
+      if (message.length > 256 || ++runtime.wheels > 120) return
+      try {
+        const payload = (JSON.parse(message.slice(APPLET_EVENT_PREFIX.length)) as { payload?: { deltaY?: unknown; discrete?: unknown; x?: unknown; y?: unknown } }).payload
+        const { deltaY, x, y } = payload ?? {}
+        if (
+          typeof deltaY === 'number' && Number.isFinite(deltaY) && deltaY !== 0 && Math.abs(deltaY) <= 10000 &&
+          typeof x === 'number' && Number.isFinite(x) && typeof y === 'number' && Number.isFinite(y)
+        )
+          this.replayWheel(runtime, deltaY, payload?.discrete === true, x, y)
+      } catch {
+        /* Untrusted. */
+      }
+      return
+    }
     if (Date.now() - runtime.epoch >= 1000) {
       runtime.epoch = Date.now()
       runtime.messages = 0
@@ -395,8 +471,7 @@ export class AppletRuntimeManager {
         type: string
         payload: unknown
       }
-      if (event.type === 'heartbeat') runtime.heartbeat = Date.now()
-      else if (event.type === 'ready') this.notify(runtime, 'ready', null)
+      if (event.type === 'ready') this.notify(runtime, 'ready', null)
       else if (event.type === 'visual-changed') this.notify(runtime, 'visual-changed', null)
       else if (event.type === 'scroll-changed' && Array.isArray(event.payload)) {
         for (const position of event.payload.slice(0, 64)) this.rememberScroll(runtime, position)

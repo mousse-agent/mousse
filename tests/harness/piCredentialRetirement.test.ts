@@ -38,6 +38,12 @@ function scratch(): string {
 const unused = () => { throw new Error('must not spawn or reach a provider') }
 const grant = (id: string) => ({ access: `fake-${id}`, expires: Date.now() + 3_600_000, fields: {}, subject: `credential:${id}` })
 
+/**
+ * An empty catalogue: reading a model id checks it for an exact listed id first (a local server's `phi3:medium`),
+ * which reads the catalogue but neither spawns nor reaches a provider. The launch input (`runtime`) still throws.
+ */
+const emptyCatalog = () => ({ revision: 1, provider: { id: 'openrouter', builtin: true, models: [] } })
+
 /** An engine whose processes are never spawned (the launch input throws), over a fake vault. */
 function fixture() {
   const dir = scratch()
@@ -45,7 +51,7 @@ function fixture() {
   mkdirSync(home)
   let current = grant('A')
   const oauth: PiOAuthSource = { credential: async () => current, refresh: async () => current }
-  const engine = new PiRpcEngine({ instanceId: 'pi:openrouter', provider: 'openrouter', label: 'OpenRouter', capabilities: {} as never, env: () => ({ home, env: {} }) as never, stateDir: dir, runtime: unused, catalog: unused, oauth })
+  const engine = new PiRpcEngine({ instanceId: 'pi:openrouter', provider: 'openrouter', label: 'OpenRouter', capabilities: {} as never, env: () => ({ home, env: {} }) as never, stateDir: dir, runtime: unused, catalog: emptyCatalog, oauth })
   cleanups.push(() => engine.stop())
   const internals = engine as unknown as {
     bridge: { start(): Promise<void>; register(handlers: unknown): unknown }

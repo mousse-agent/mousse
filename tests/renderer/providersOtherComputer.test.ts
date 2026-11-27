@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProvidersSettings } from '../../src/renderer/components/providers/ProvidersSettings'
 import { ArgsRow, EnvRow, ExecutableRow } from '../../src/renderer/components/providers/CliSections'
 import { NO_COMPUTERS, useComputersStore } from '../../src/renderer/lib/computers'
+import { useAppStore } from '../../src/renderer/stores/appStore'
 import type { InstanceSnapshot } from '../../src/shared/harness/status'
 import type { ProviderEventEntry, ProviderOperationEvent } from '../../src/shared/harness/types'
 import { openAddProvider, openProvider } from '../../src/renderer/lib/settingsNavigation'
@@ -67,6 +68,8 @@ describe('Settings → Providers of another computer', () => {
   beforeEach(() => {
     ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
     useComputersStore.setState(NO_COMPUTERS)
+    // Settings shows only once the window's profile is bound; before that nothing reads the computers.
+    useAppStore.setState({ profileReady: true })
     nodes = [device('nod_self00000000000000000000000', 'This PC', { self: true }), device(MAC, 'Mac mini')]
     macEvents = []
     macCursor = 0
