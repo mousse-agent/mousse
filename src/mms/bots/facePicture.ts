@@ -1,4 +1,5 @@
-import { closeSync, mkdirSync, openSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { closeSync, constants, lstatSync, mkdirSync, openSync, readSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -76,7 +77,11 @@ export function faceKeyOf(head: Buffer): string | undefined {
 export class BotFacePictures {
   private readonly known = new Map<string, { mtimeMs: number; size: number; key: string | undefined }>()
 
-  constructor(private readonly filesFolder: (botId: string) => string) {}
+  /** `randomName`: the temporary file's random part (tests pass a fixed one). */
+  constructor(
+    private readonly filesFolder: (botId: string) => string,
+    private readonly randomName: () => string = () => randomBytes(12).toString('hex')
+  ) {}
 
   path(botId: string): string {
     return join(this.filesFolder(botId), FACE_PICTURE_FILE)
@@ -87,7 +92,8 @@ export class BotFacePictures {
     const path = this.path(botId)
     let stat: { mtimeMs: number; size: number; isFile(): boolean }
     try {
-      stat = statSync(path)
+      // A link the bot put there is no picture: never read through it, and it is drawn again (the rename replaces it).
+      stat = lstatSync(path)
     } catch {
       this.known.delete(botId)
       return undefined
@@ -97,7 +103,7 @@ export class BotFacePictures {
     if (seen && seen.mtimeMs === stat.mtimeMs && seen.size === stat.size) return { path, key: seen.key }
     let key: string | undefined
     try {
-      const fd = openSync(path, 'r')
+      const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
       try {
         const head = Buffer.alloc(Math.min(HEAD_BYTES, stat.size))
         readSync(fd, head, 0, head.length, 0)
@@ -112,16 +118,32 @@ export class BotFacePictures {
     return { path, key }
   }
 
-  /** Writes the picture whole (a temporary file, then a rename), carrying `key`. Throws when `png` is no PNG. */
+  /**
+   * Writes the picture whole, carrying `key`: a new temporary file, then a rename over `face.png`. The bot can write in
+   * its files folder, so nothing here follows a link it planted: the temporary file has a random name and is created
+   * only if no file or link is there (`O_EXCL`, and `O_NOFOLLOW` where the platform has it), and a rename replaces a link
+   * at `face.png` itself, never what it points to. Throws when `png` is no PNG; a failed write or rename leaves no
+   * temporary file.
+   */
   save(botId: string, key: string, png: Buffer): string {
     if (!isFacePictureKey(key)) throw new Error('A face picture key is 1 to 512 printable characters.')
     if (png.length > MAX_FACE_PICTURE_BYTES || !isPng(png)) throw new Error('A face picture is a PNG of at most 2 MB.')
     const folder = this.filesFolder(botId)
     mkdirSync(folder, { recursive: true, mode: 0o700 })
     const path = this.path(botId)
-    const temporary = `${path}.${process.pid}.tmp`
-    writeFileSync(temporary, withFaceKey(png, key))
-    renameSync(temporary, path)
+    const temporary = join(folder, `.${FACE_PICTURE_FILE}.${this.randomName()}.tmp`)
+    const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o644)
+    try {
+      try {
+        writeFileSync(fd, withFaceKey(png, key))
+      } finally {
+        closeSync(fd)
+      }
+      renameSync(temporary, path)
+    } catch (failure) {
+      rmSync(temporary, { force: true })
+      throw failure
+    }
     this.known.delete(botId)
     return path
   }

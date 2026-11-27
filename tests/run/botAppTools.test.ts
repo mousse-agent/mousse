@@ -419,7 +419,7 @@ describe('get_profile', () => {
     name: 'Inbox helper',
     description: 'Sorts the inbox.',
     look: { colour: 'blue', accessory: 'headphones' },
-    facePicture: '/bots/b1/files/face.png',
+    facePicture: { path: '/bots/b1/files/face.png', current: true },
     filesFolder: '/bots/b1/files',
     rows: ROWS_ON_SUB,
     depth: 'normal',
@@ -443,9 +443,12 @@ describe('get_profile', () => {
     }
   })
 
-  it('says so when no face picture is saved yet, and errors where the host has no profile', async () => {
+  it('says so when no face picture is saved yet or it shows an older look, and errors where the host has no profile', async () => {
     const { facePicture: _, ...none } = FACTS
     expect((await fakeBots('chat', { profile: none }).call('get_profile', {})).text).toContain('Face picture: none saved yet')
+    const stale = (await fakeBots('chat', { profile: { ...FACTS, facePicture: { path: '/bots/b1/files/face.png', current: false } } }).call('get_profile', {})).text
+    expect(stale).toContain("Face picture: /bots/b1/files/face.png doesn't show your look now")
+    expect(stale).not.toContain('Use it where your owner wants your picture')
     expect(await fakeBots().call('get_profile', {})).toMatchObject({ isError: true })
   })
 })

@@ -7,7 +7,7 @@
 import { mkdirSync, readdirSync, readFileSync, truncateSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import sharp from 'sharp'
+import { faceKeyOf } from '../../src/mms/bots/facePicture'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../src/mms/protocol/handlers'
@@ -402,7 +402,8 @@ it('only the local app window saves a bot\'s face picture; the Bots list then ca
   const botId = await created()
   const listed = async () => (await call<{ bots: BotSummary[] }>('bots.personal.list')).bots.find((bot) => bot.id === botId)!
   expect((await listed()).facePicture).toEqual({})
-  const png = (await sharp({ create: { width: 8, height: 8, channels: 4, background: { r: 0, g: 128, b: 255, alpha: 1 } } }).png().toBuffer()).toString('base64')
+  // A 1 px PNG.
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
   const params = { botId, key: 'v1|blue|headphones', png }
   for (const clientType of ['cli', 'agent', 'mcp', undefined]) {
     const caller = { connection: { ...context.connection, clientType } } as unknown as HandlerContext
@@ -417,6 +418,6 @@ it('only the local app window saves a bot\'s face picture; the Bots list then ca
   expect((await listed()).facePicture).toEqual({})
   const { path } = await domains.dispatch(gui, 'bots.facePicture.save', params) as { path: string }
   expect(path.endsWith('face.png')).toBe(true)
-  expect((await sharp(readFileSync(path)).metadata()).width).toBe(8)
+  expect(faceKeyOf(readFileSync(path))).toBe('v1|blue|headphones')
   expect((await listed()).facePicture).toEqual({ key: 'v1|blue|headphones' })
 })

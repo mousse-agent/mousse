@@ -516,6 +516,8 @@ export class FaceRenderer {
     gpu.ensureSize(side, side)
     gpu.draw(0, 0, side, faceUniforms(look, stillPose('idle'), { view, size: side, samples: 2 }))
     ctx.drawImage(gpu.canvas, 0, 0, side, side, 0, 0, side, side)
+    // The buffer grew for the picture: with no face on screen it shrinks again, as it does when the last face goes.
+    if (this === shared && sharedListeners.size === 0) scheduleIdleShrink()
     return copy
   }
 

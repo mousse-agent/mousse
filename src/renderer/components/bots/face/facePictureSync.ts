@@ -1,4 +1,4 @@
-import { botEyeColourOf, botEyesOf, botKindOf, normalizeBotLook, type KnownBotLook } from '../../../../shared/bots/personal/look'
+import { faceLookKey, normalizeBotLook, type KnownBotLook } from '../../../../shared/bots/personal/look'
 import type { BotSummary } from '../../../../shared/bots/personal/chat'
 import { faceArtVersion, type FaceRenderer } from './faceRenderer'
 
@@ -21,7 +21,7 @@ let artVersion: string | undefined
 /** What a picture of `look` is drawn from: the look as the face shows it, the view and size, and the art version. */
 export function facePictureKey(look: KnownBotLook): string {
   artVersion ??= faceArtVersion()
-  return `v1|${look.colour}|${look.accessory}|${botKindOf(look)}|${botEyesOf(look)}|${botEyeColourOf(look)}|${FACE_PICTURE_VIEW}|${FACE_PICTURE_PX}|${artVersion}`
+  return `${faceLookKey(look)}${FACE_PICTURE_VIEW}|${FACE_PICTURE_PX}|${artVersion}`
 }
 
 export interface FacePictureSyncDeps {
@@ -69,9 +69,13 @@ export function startFacePictureSync(deps: FacePictureSyncDeps): () => void {
       unsubscribeRenderer ??= renderer.subscribe(() => check())
       return
     }
-    tried.add(`${next.bot.id}|${next.key}`)
     const canvas = renderer.portrait(next.look, FACE_PICTURE_PX, FACE_PICTURE_VIEW)
-    if (!canvas) return
+    if (!canvas) {
+      // The faces stopped drawing live a moment (a lost context): tried again once they draw.
+      unsubscribeRenderer ??= renderer.subscribe(() => check())
+      return
+    }
+    tried.add(`${next.bot.id}|${next.key}`)
     busy = true
     try {
       const png = await deps.encode(canvas)

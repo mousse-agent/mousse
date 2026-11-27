@@ -4,7 +4,8 @@
  * waits for the owner again. Manual activations run one dispatch each, written to `bots.db`
  * first and then atomically to the run database with an inert payload.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { crc32 } from 'node:zlib'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -24,7 +25,8 @@ import { BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
 import type { Enforceability, RunPolicy } from '../../src/shared/harness/types'
 import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
 import { botInstructions } from '../../src/mms/bots/instructions'
-import sharp from 'sharp'
+import { BotFacePictures } from '../../src/mms/bots/facePicture'
+import { faceLookKey } from '../../src/shared/bots/personal/look'
 import { BOT_ITEM_TOOLS } from '../../src/shared/bots/personal/items'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import { BOT_AUTOMATION_APP_TOOLS, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SUBAGENT_TOOLS, BOT_TASK_TOOLS, BOT_THEME_TOOLS } from '../../src/shared/bots/personal/manifest'
@@ -526,9 +528,22 @@ describe('activation requests', () => {
 })
 
 describe('its look and face picture (self-profile)', () => {
-  /** A real 4 px PNG, so the saved file is checked as a picture a program can open. */
-  const picture = (colour: { r: number; g: number; b: number }) => sharp({ create: { width: 4, height: 4, channels: 3, background: colour } }).png().toBuffer()
-  const pixels = async (png: Buffer) => (await sharp(png).raw().toBuffer()).toString('hex')
+  /** A real 1 px PNG. */
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64')
+  /** A PNG's chunks, each checked against its CRC, so the saved file is one a program can open. */
+  const chunks = (png: Buffer) => {
+    const found: Array<{ type: string; data: string }> = []
+    for (let at = 8; at < png.length;) {
+      const length = png.readUInt32BE(at)
+      const typed = png.subarray(at + 4, at + 8 + length)
+      expect(png.readUInt32BE(at + 8 + length)).toBe(crc32(typed))
+      found.push({ type: typed.toString('latin1', 0, 4), data: typed.subarray(4).toString('hex') })
+      at += 12 + length
+    }
+    return found
+  }
+  /** The key the app draws a look's picture from: its look, then the view, size and art version. */
+  const keyOf = (look: Parameters<typeof faceLookKey>[0]) => `${faceLookKey(look)}full|512|art1`
 
   it('a partial look from the bot changes only those fields of the published look', () => {
     publish()
@@ -539,22 +554,51 @@ describe('its look and face picture (self-profile)', () => {
     expect(bots.get('site-editor').published!.name).toBe('Site editor')
   })
 
-  it('face.png is written whole into its files folder, keeps its pixels, and gives back the key it was drawn from', async () => {
+  it('face.png is written whole into its files folder, keeps its pixels, and gives back the key it was drawn from', () => {
     publish()
     expect(bots.facePictureKey('site-editor')).toBeUndefined()
-    const png = await picture({ r: 10, g: 120, b: 200 })
-    const { path } = bots.saveFacePicture('site-editor', 'v1|blue|headphones', png)
+    const { path } = bots.saveFacePicture('site-editor', 'v1|blue|headphones', PNG)
     expect(path).toBe(join(root, 'face.png'))
-    expect(await pixels(readFileSync(path))).toBe(await pixels(png))
+    const saved = chunks(readFileSync(path))
+    expect(saved.filter((chunk) => chunk.type !== 'tEXt')).toEqual(chunks(PNG))
     expect(bots.facePictureKey('site-editor')).toBe('v1|blue|headphones')
     // A picture someone else put there carries no key: the app draws it again.
-    writeFileSync(path, await picture({ r: 0, g: 0, b: 0 }))
+    writeFileSync(path, PNG)
     expect(bots.facePictureKey('site-editor')).toBeUndefined()
     expect(() => bots.saveFacePicture('site-editor', 'v1', Buffer.from('not a png'))).toThrow()
-    expect(readdirSync(root).filter((name) => name.startsWith('face'))).toEqual(['face.png'])
+    expect(readdirSync(root).filter((name) => name.includes('face'))).toEqual(['face.png'])
   })
 
-  it('its system text says how it looks and, once saved, where its face picture is', async () => {
+  /**
+   * The bot writes in its files folder, and the service that saves the picture is not sandboxed: a link it plants at
+   * the temporary path or at face.png must never be written (or read) through.
+   */
+  it('a link planted at the temporary file or at face.png is never followed', () => {
+    publish()
+    const outside = join(base, 'authorized_keys')
+    writeFileSync(outside, 'ssh-ed25519 KEEP')
+    const pictures = new BotFacePictures(() => root, () => 'fixed')
+    // At the temporary file's name: the save refuses, and leaves the link and its target as they were.
+    symlinkSync(outside, join(root, '.face.png.fixed.tmp'))
+    expect(() => pictures.save('site-editor', 'v1', PNG)).toThrow()
+    expect(readFileSync(outside, 'utf8')).toBe('ssh-ed25519 KEEP')
+    expect(lstatSync(join(root, '.face.png.fixed.tmp')).isSymbolicLink()).toBe(true)
+    rmSync(join(root, '.face.png.fixed.tmp'))
+    // At a name a bot could guess (the process id): the engine's own save leaves it alone.
+    symlinkSync(outside, join(root, `face.png.${process.pid}.tmp`))
+    bots.saveFacePicture('site-editor', 'v1', PNG)
+    expect(readFileSync(outside, 'utf8')).toBe('ssh-ed25519 KEEP')
+    rmSync(join(root, 'face.png'))
+    // At face.png: it is no picture, and the save replaces the link itself.
+    symlinkSync(outside, join(root, 'face.png'))
+    expect(pictures.current('site-editor')).toBeUndefined()
+    pictures.save('site-editor', 'v1', PNG)
+    expect(readFileSync(outside, 'utf8')).toBe('ssh-ed25519 KEEP')
+    expect(lstatSync(join(root, 'face.png')).isFile()).toBe(true)
+    expect(pictures.current('site-editor')?.key).toBe('v1')
+  })
+
+  it('its system text says how it looks and, once saved, where its face picture is, unless it shows an older look', async () => {
     publish()
     approve()
     engineHost.instructions = (bot) => botInstructions(bot)
@@ -570,8 +614,16 @@ describe('its look and face picture (self-profile)', () => {
     expect(before).toContain('You look like a teal')
     expect(before).toContain('get_profile')
     expect(before).not.toContain('face.png')
-    const { path } = bots.saveFacePicture('site-editor', 'v1', await picture({ r: 1, g: 2, b: 3 }))
+    const { path } = bots.saveFacePicture('site-editor', keyOf({ colour: 'teal', accessory: 'cap' }), PNG)
     expect(await system('c2')).toContain(`Your face picture is ${path}.`)
+    expect(bots.tools.profile!('site-editor').facePicture).toEqual({ path, current: true })
+    // The look changed; the app hasn't drawn it yet.
+    bots.tools.setProfile('site-editor', { look: { colour: 'blue', accessory: 'headphones' } })
+    const stale = await system('c3')
+    expect(stale).toContain('You look like a blue mouse with headphones')
+    expect(stale).not.toContain(path)
+    expect(stale).toContain("Your face picture doesn't show your look now")
+    expect(bots.tools.profile!('site-editor').facePicture).toEqual({ path, current: false })
   })
 
   it('its profile names its secrets and devices from the host, and its grant once approved', async () => {

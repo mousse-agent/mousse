@@ -1,4 +1,4 @@
-import { BOT_ACCESSORIES, BOT_COLOURS, BOT_EYE_COLOURS, BOT_EYES, BOT_KINDS, botEyeColourOf, botEyesOf, botKindOf, botLookWords, type KnownBotLook } from '../../shared/bots/personal/look'
+import { botEyeColourOf, botEyesOf, botKindOf, botLookWords, type KnownBotLook } from '../../shared/bots/personal/look'
 import type { BotDepth, BotModelPick, BotModelSlots, BotWorkLevel } from '../../shared/bots/personal/definition'
 import { pickSourceOf } from '../../shared/bots/personal/modelSlots'
 import type { BotDeviceAccess } from '../../shared/bots/personal/deviceAccess'
@@ -13,8 +13,11 @@ export interface BotProfileFacts {
   name: string
   description: string
   look: KnownBotLook
-  /** `face.png` in its files folder, by its full path, once Mousse has saved it; absent until then. */
-  facePicture?: string
+  /**
+   * `face.png` in its files folder, by its full path, once Mousse has saved it; absent until then. `current` is false
+   * when it was drawn from an older look (the app draws it again the next time it is open).
+   */
+  facePicture?: BotFacePicture
   filesFolder: string
   rows: BotModelSlots
   /** Its standing level: work that names none runs at it. */
@@ -30,6 +33,12 @@ export interface BotProfileFacts {
   allowed?: BotAllowed
 }
 
+/** A saved face picture: its path, and whether it shows the bot's look now. */
+export interface BotFacePicture {
+  path: string
+  current: boolean
+}
+
 /** A model pick in plain words: its model and entry, and its reasoning level. Null is a row Mousse chooses for. */
 export type BotPickName = (pick: BotModelPick | null) => string
 
@@ -40,9 +49,6 @@ interface Section {
 
 type SectionBuilder = (facts: BotProfileFacts, name: BotPickName) => Section
 
-/** The look's fields as `set_profile` takes them, with the values each may have. */
-export const BOT_LOOK_FIELDS_TEXT = `kind (${BOT_KINDS.join(', ')}), colour (${BOT_COLOURS.join(', ')}), accessory (${BOT_ACCESSORIES.join(', ')}), eyes (${BOT_EYES.join(', ')}), eyeColour (${BOT_EYE_COLOURS.join(', ')})`
-
 const whoYouAre: SectionBuilder = (facts) => {
   const { look } = facts
   return {
@@ -51,9 +57,11 @@ const whoYouAre: SectionBuilder = (facts) => {
       `Name: ${facts.name}`,
       `Description: ${facts.description.trim()}`,
       `Look: ${botLookWords(look)} (kind ${botKindOf(look)}, colour ${look.colour}, accessory ${look.accessory}, eyes ${botEyesOf(look)}, eyeColour ${botEyeColourOf(look)}). set_profile changes it when your owner asks.`,
-      facts.facePicture
-        ? `Face picture: ${facts.facePicture} (a 512 px PNG of your face, front view, as the app draws it; Mousse draws it again when your look changes). Use it where your owner wants your picture, such as an account's profile picture.`
-        : 'Face picture: none saved yet. Mousse saves one as face.png in your files folder the next time the app is open.',
+      !facts.facePicture
+        ? 'Face picture: none saved yet. Mousse saves one as face.png in your files folder the next time the app is open.'
+        : facts.facePicture.current
+          ? `Face picture: ${facts.facePicture.path} (a 512 px PNG of your face, front view, as the app draws it; Mousse draws it again when your look changes). Use it where your owner wants your picture, such as an account's profile picture.`
+          : `Face picture: ${facts.facePicture.path} doesn't show your look now. Mousse draws your look the next time the app is open; don't use it as your picture until then.`,
       `Files folder: ${facts.filesFolder}`
     ]
   }
@@ -142,6 +150,7 @@ export function botProfileText(facts: BotProfileFacts, name: BotPickName): strin
  * The one line on the bot's look in its system text: its look in a few words, its face picture when saved, and where
  * the rest is. It changes only when the look or the picture does, so a runtime keeps its cache.
  */
-export function botIdentityLine(look: KnownBotLook, facePicture?: string): string {
-  return `You look like ${botLookWords(look)}.${facePicture ? ` Your face picture is ${facePicture}.` : ''} get_profile has the rest about you.`
+export function botIdentityLine(look: KnownBotLook, facePicture?: BotFacePicture): string {
+  const face = !facePicture ? '' : facePicture.current ? ` Your face picture is ${facePicture.path}.` : ' Your face picture doesn\'t show your look now; the app draws it again when it is open.'
+  return `You look like ${botLookWords(look)}.${face} get_profile has the rest about you.`
 }

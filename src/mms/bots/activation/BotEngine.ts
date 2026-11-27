@@ -33,9 +33,9 @@ import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { basename, join } from 'node:path'
 import { askNoticeText, askText } from '../../../shared/bots/personal/askText'
-import { lookFields, normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
+import { facePictureShowsLook, lookFields, normalizeBotLook, type BotLook, type KnownBotLook } from '../../../shared/bots/personal/look'
 import { BotFacePictures } from '../facePicture'
-import { botIdentityLine, type BotProfileFacts } from '../profile'
+import { botIdentityLine, type BotFacePicture, type BotProfileFacts } from '../profile'
 import { botDeviceAllowed, DEFAULT_BOT_DEVICE_ACCESS } from '../../../shared/bots/personal/deviceAccess'
 import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHold, type BotSubagentHold } from '../../../shared/bots/personal/subagentHold'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
@@ -3668,7 +3668,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     let identity: string | undefined
     if (!permissions?.subagent) {
       try {
-        identity = botIdentityLine(normalizeBotLook(words.look), this.facePictures.current(definition.id)?.path)
+        const look = normalizeBotLook(words.look)
+        identity = botIdentityLine(look, this.facePictureOf(definition.id, look))
       } catch {
         identity = undefined
       }
@@ -3921,12 +3922,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch {
       secrets = []
     }
-    const face = this.facePictures.current(botId)
+    const look = normalizeBotLook(definition.look)
+    const face = this.facePictureOf(botId, look)
     return {
       name: definition.name,
       description: definition.description,
-      look: normalizeBotLook(definition.look),
-      ...(face ? { facePicture: face.path } : {}),
+      look,
+      ...(face ? { facePicture: face } : {}),
       filesFolder: this.filesFolder(botId),
       rows: slotsOf(definition.main),
       depth: definition.main.model.depth,
@@ -3948,6 +3950,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const path = this.facePictures.save(botId, key, png)
     this.changed({ botId })
     return { path }
+  }
+
+  /**
+   * The bot's saved face picture, and whether it shows `look` (its key, read once per change of the file, names the look
+   * it was drawn from); undefined when it has none.
+   */
+  private facePictureOf(botId: string, look: KnownBotLook): BotFacePicture | undefined {
+    const face = this.facePictures.current(botId)
+    return face ? { path: face.path, current: facePictureShowsLook(face.key, look) } : undefined
   }
 
   /** The key the bot's saved face picture was drawn from, or undefined when it has none (or one Mousse didn't write). */

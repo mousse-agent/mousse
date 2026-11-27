@@ -10,7 +10,7 @@ import type { BotLook } from '../../src/shared/bots/personal/look'
 
 const bot = (id: string, look: BotLook, facePicture?: { key?: string }): BotSummary => ({ id, name: id, look, ...(facePicture ? { facePicture } : {}) }) as BotSummary
 
-function fakeWindow(bots: BotSummary[], status: 'pending' | 'ready' | 'failed' = 'ready', save: (key: string) => Promise<unknown> = async () => ({})) {
+function fakeWindow(bots: BotSummary[], status: 'pending' | 'ready' | 'failed' = 'ready', save: (key: string) => Promise<unknown> = async () => ({}), lostDraws = 0) {
   let list = bots
   let state = status
   const idle: Array<() => void> = []
@@ -34,6 +34,8 @@ function fakeWindow(bots: BotSummary[], status: 'pending' | 'ready' | 'failed' =
           return () => {}
         },
         portrait: (look, side) => {
+          // A lost context: the faces can't draw for a moment.
+          if (lostDraws > 0) { lostDraws--; return null }
           drawn.push({ look, side })
           return document.createElement('canvas')
         }
@@ -99,6 +101,16 @@ describe('face picture sync', () => {
     startFacePictureSync(failed.deps)
     await failed.settle()
     expect(failed.drawn).toEqual([])
+  })
+
+  it('a picture the renderer could not draw a moment is drawn once the faces draw again', async () => {
+    const w = fakeWindow([bot('b1', BLUE, {}), bot('b2', TEAL, {})], 'ready', async () => ({}), 1)
+    startFacePictureSync(w.deps)
+    await w.settle()
+    expect(w.saved).toEqual([])
+    w.becomeReady()
+    await w.settle()
+    expect(w.saved.map((entry) => entry.botId)).toEqual(['b1', 'b2'])
   })
 
   it('tries a refused save once in this window, and draws again when the look changes', async () => {
