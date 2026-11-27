@@ -7,6 +7,9 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { UsageLimitTracker } from '../../src/mms/models/usageLimits'
+import { admit, type AdmissionEntry, type OneShotPlan } from '../../src/mms/harness/oneShot/admission'
+import { GENERIC_ACP_FACTS } from '../../src/mms/harness/oneShot/routes'
+import { runPlan } from '../../src/mms/harness/oneShot/runner'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
 import { branchNamingPrompt } from '../../src/mms/workspace/branchNaming'
@@ -39,7 +42,7 @@ interface Providers {
 
 interface Harness {
   orch: {
-    nameThreadOnFirstSend(threadId: string, content: string, images: number, restoreSignal?: AbortSignal, namingSignal?: AbortSignal): void
+    nameThreadOnFirstSend(threadId: string, content: string, images: number, restoreSignal?: AbortSignal, namingSignal?: AbortSignal, binding?: { instanceId: string; llmProvider: string; model: string; effort?: string }): void
     nameThreadAfterTurn(threadId: string, completed: boolean): void
     askBranchName(request: { threadId: string; system: string; prompt: string }, signal?: AbortSignal): Promise<string | undefined>
     generateThreadTitle(messages: ChatMessage[], threadId?: string): Promise<string>
@@ -70,11 +73,11 @@ function setup(options: {
   scope?: ProviderScope
   mode?: 'off'
   /** The thread runs on a local server's `phi3:medium` (stored split, as the picker stores it), in memory or not. */
-  local?: { resident: boolean | undefined; via?: 'override' | 'default' }
+  local?: { resident: boolean | undefined; via?: 'override' | 'default' | 'send' }
 } = {}): Harness {
   let thread: Thread = {
     id: 't1', name: options.name ?? 'New Chat', createdAt: '', updatedAt: '', ...(options.localOnly ? { localOnly: true as const } : {}),
-    ...(options.local && options.local.via !== 'default' ? { modelOverride: { instanceId: 'pi:local-ollama', llmProvider: 'local-ollama', model: 'phi3', effort: 'medium' } } : {})
+    ...(options.local && (options.local.via ?? 'override') === 'override' ? { modelOverride: { instanceId: 'pi:local-ollama', llmProvider: 'local-ollama', model: 'phi3', effort: 'medium' } } : {})
   }
   const answers = [...(options.answers ?? [])]
   const oneShot = vi.fn(async (request: OneShotRequest) => {
@@ -185,6 +188,18 @@ const ready = {
 /** An entry whose first check has not ended (a daemon that just started). */
 const unchecked = (ready: InstanceSnapshot): InstanceSnapshot => ({ ...ready, checkedAt: undefined, runs: { state: 'unknown' }, auth: { state: 'unknown' } } as InstanceSnapshot)
 const picked = (h: Harness) => h.requests().map((request) => `${request.selection.instanceId}/${request.selection.model}`)
+
+/** A failure as the runner reports it, sent or not (`oneShotWasSent`), from a route with facts. */
+async function ranFailure(code: Parameters<typeof harnessAppError>[0]['code'], options: { sent: boolean }): Promise<unknown> {
+  const identity = { instanceId: 'claude', runtime: 'k' }
+  const entry: AdmissionEntry = {
+    instanceId: 'claude', label: 'Claude', enabled: true, retired: false, stopped: false, signedOut: false, locked: false, checked: true,
+    route: () => ({ route: { id: 'acp:generic', facts: GENERIC_ACP_FACTS } }), model: () => ({ hidden: false, local: false }), identity: () => identity
+  }
+  const plan = admit('thread_title', { kind: 'model', instanceId: 'claude', model: 'haiku' }, { entry: () => entry }) as OneShotPlan
+  const transport = { send: async (_wire: unknown, events: { sending(): void }) => { if (options.sent) events.sending(); throw harnessAppError({ code, message: 'Failed.' }) } }
+  return runPlan({ plan, transport, live: () => identity, label: 'Claude', system: 's', prompt: 'p', maxChars: 80 }).catch((error: unknown) => error)
+}
 
 describe('naming a thread', () => {
   it('with Automatic and no connected model, the title from the message is final and no model runs', async () => {
@@ -423,6 +438,23 @@ describe('Automatic naming', () => {
     expect(h.thread()).toMatchObject({ name: 'OAuth callback loop', titleSource: 'auto' })
   })
 
+  it('a failure after the request was sent counts toward the three, a tool a legacy route stopped included', async () => {
+    const stopped = await ranFailure('policy_unenforceable', { sent: true })
+    const h = setup({ providers: connected(), answer: () => stopped })
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await h.settle()
+    expect(picked(h)).toHaveLength(3)
+  })
+
+  it('a model the entry cannot run, found before anything was sent, skips that model alone: the entry is not held back', async () => {
+    const unsent = await ranFailure('model_unavailable', { sent: false })
+    const h = setup({ providers: connected(), answer: (request) => request.selection.model === 'haiku' ? unsent : 'OAuth callback loop' })
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await h.settle()
+    expect(picked(h)).toEqual(['claude/haiku', 'claude/sonnet'])
+    expect(h.thread()).toMatchObject({ name: 'OAuth callback loop', titleSource: 'auto' })
+  })
+
   it.each(['provider_cancelled', 'aborted'])('%s ends the naming with no other model asked', async (code) => {
     const error = Object.assign(new Error(code), { code })
     const h = setup({ providers: connected(), answer: () => error })
@@ -494,6 +526,52 @@ describe('Automatic naming', () => {
     await warm.settle()
     expect(warm.thread()).toMatchObject({ name: 'OAuth callback loop', titleSource: 'auto' })
     expect(picked(warm)).toEqual(['pi:local-ollama/phi3:medium'])
+  })
+
+  it('an answer from a pass whose title model changed while it ran is not applied, at the first send or after the reply', async () => {
+    let release!: (title: string) => void
+    const h = setup({ answer: () => new Promise<string>((resolve) => { release = resolve }) })
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await vi.waitFor(() => expect(h.oneShot).toHaveBeenCalledTimes(1))
+    h.settings.title = { ...h.settings.title, model: 'gpt-other' }
+    release('Old model title')
+    await h.settle()
+    expect(h.thread().name).toBe('Fix the OAuth loop')
+    h.messages.push(user('Please fix the OAuth loop'), assistant('The state parameter is lost.'))
+    h.orch.nameThreadAfterTurn('t1', true)
+    await vi.waitFor(() => expect(h.oneShot).toHaveBeenCalledTimes(2))
+    h.settings.title = { ...h.settings.title, mode: 'off', llmProvider: '', model: '' }
+    release('Old pass refinement')
+    await h.settle()
+    expect(h.thread().name).toBe('Fix the OAuth loop')
+  })
+
+  it('a chosen model that meets a usage limit keeps it, as Automatic would, and nothing else is asked', async () => {
+    const quota = usageLimitError({ provider: 'openai', resetsAt: new Date(Date.now() + 60 * 60_000).toISOString(), estimated: false, limitKind: 'five_hour' })
+    const h = setup({ answers: [quota] })
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await h.settle()
+    expect(h.oneShot).toHaveBeenCalledTimes(1)
+    expect(h.limits.isLimited('pi:openai')).toBe(true)
+    expect(h.thread().name).toBe('Fix the OAuth loop')
+  })
+
+  it("a send whose turn runs on a local model (a per-send choice or a skill's) is named by that model only, whatever the thread's saved override or the default says", async () => {
+    const binding = { instanceId: 'pi:local-ollama', llmProvider: 'local-ollama', model: 'phi3', effort: 'medium' }
+    // The thread itself names no model and the default is a cloud model: only the send's binding is local.
+    const cold = setup({ providers: connected(), local: { resident: false, via: 'send' }, answers: ['Cloud title'] })
+    cold.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0, undefined, undefined, binding)
+    await cold.settle()
+    expect(cold.oneShot).not.toHaveBeenCalled()
+    expect(cold.thread().name).toBe('Fix the OAuth loop')
+    // Its refinement after the reply reads the same binding.
+    await finishTurn(cold)
+    expect(cold.oneShot).not.toHaveBeenCalled()
+    const warm = setup({ providers: connected(), local: { resident: true, via: 'send' }, answers: ['OAuth callback loop', 'OAuth redirect state'] })
+    warm.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0, undefined, undefined, binding)
+    await warm.settle()
+    await finishTurn(warm)
+    expect(picked(warm)).toEqual(['pi:local-ollama/phi3:medium', 'pi:local-ollama/phi3:medium'])
   })
 
   it('Regenerate falls back to the title from the first message when every model fails, or none is connected', async () => {

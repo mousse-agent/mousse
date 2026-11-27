@@ -436,6 +436,7 @@ export const PROTOCOL_METHODS = [
   'settings.get',
   'settings.set',
   'settings.getOptions',
+  'settings.titleOptions',
   'providers.getUsage',
   'providers.getSubscriptionUsage',
   'providers.usageSlots',

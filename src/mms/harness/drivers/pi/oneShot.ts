@@ -31,10 +31,23 @@ export async function runPiOneShot(models: PiOneShotModels, providerId: string, 
     messages: [{ role: 'user' as const, content: spec.prompt, timestamp: Date.now() }]
   }
   const reasoning = (spec.effort ?? effort ?? 'off') as ThinkingLevel
-  const options = getReasoningStreamOptions(model.api, reasoning, signal, getCacheSessionId(spec.sessionKey), providerId)
+  // One request on the wire: no retry in the provider's SDK client, and Codex over plain HTTP (its WebSocket transport
+  // sends again, or falls back to HTTP, after a failure before any output).
+  const options = { ...getReasoningStreamOptions(model.api, reasoning, signal, getCacheSessionId(spec.sessionKey), providerId), maxRetries: 0, transport: 'sse' as const }
+  spec.beforeSend?.()
   spec.onActivity()
   const stream = models.streamSimple(model, context, options as { reasoning: ThinkingLevel })
-  const message = await consumeAssistantStream(stream, {}, { signal, onProgress: () => spec.onActivity() })
+  // Each new part of the text as it streams: the events carry each block's text so far.
+  const seen = new Map<number, number>()
+  const onText = spec.onText
+    ? (event: { phase: string; content: string; contentIndex: number }) => {
+        if (event.phase !== 'delta') return
+        const before = seen.get(event.contentIndex) ?? 0
+        seen.set(event.contentIndex, event.content.length)
+        if (event.content.length > before) spec.onText!(event.content.slice(before))
+      }
+    : undefined
+  const message = await consumeAssistantStream(stream, onText ? { onText } : {}, { signal, onProgress: () => spec.onActivity() })
   assertAssistantResponseSucceeded(message)
   return { text: message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('') }
 }

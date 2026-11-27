@@ -40,3 +40,11 @@ process.stdin.on('error', end)
 for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) process.on(signal, end)
 process.stdin.resume()
 `
+
+/**
+ * The per-request launcher on POSIX (`places.ts`), run as `/bin/sh -c PLACE_LAUNCHER <command> <args…>` in a new
+ * process group with the agent's environment and stdio, and a control pipe on fd 3. It waits for `go` on that pipe,
+ * which the daemon sends only once the group is durable in the place's record, then closes the pipe and `exec`s the
+ * agent: same pid, same group, nothing in between. If the pipe closes first (the daemon died), it exits and nothing ran.
+ */
+export const PLACE_LAUNCHER = 'IFS= read -r go <&3 && [ "$go" = go ] || exit 125; exec 3<&-; exec "$0" "$@"'

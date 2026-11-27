@@ -98,7 +98,7 @@ export function piInstanceRuntime(instanceId: string, providerId: string, creden
       send: async (wire, events, signal) => {
         const models = credentials()?.models
         if (!models) throw harnessAppError({ code: 'signed_out', message: 'Mousse has no provider credentials loaded yet.', instanceId })
-        const { text } = await runPiOneShot(models, providerId, { ...spec, system: wire.system, prompt: wire.prompt, onActivity: () => events.activity() }, signal)
+        const { text } = await runPiOneShot(models, providerId, { ...spec, system: wire.system, prompt: wire.prompt, onActivity: () => events.activity(), onText: (chunk) => events.text(chunk), beforeSend: () => events.sending() }, signal)
         return text
       }
     }),

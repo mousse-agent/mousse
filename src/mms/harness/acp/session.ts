@@ -366,6 +366,8 @@ export interface OneShotInput {
   onActivity(): void
   /** Each part of the answer as it streams (the runner's cap). */
   onText?(chunk: string): void
+  /** Right before the prompt is sent, after the launch and session: a throw stops the request unsent. */
+  beforePrompt?(): void
   /** The session the agent opened, once it has: its files are this request's (`AntigravityProviderService.oneShot`). */
   onSession?(sessionId: string): void
   /** The agent process started, with its id when it has one. */
@@ -2633,6 +2635,7 @@ export class AcpSessions {
       }
       if (failed) throw failed
       const prompt = [ONE_SHOT_INSTRUCTION, input.system, input.prompt].filter((part) => part.trim()).join('\n\n')
+      input.beforePrompt?.()
       prompting = true
       const outcome = await active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId, prompt: [{ type: 'text', text: prompt }] })
       // What the agent wrote just before it answered is still on its way (see `chat`).
@@ -2647,7 +2650,10 @@ export class AcpSessions {
       if (failed) throw failed
       if (input.signal.aborted) throw error
       if (input.signInUnverified && isAuthRequired(error)) throw harnessAppError({ code: 'signed_out', message: `${label} answered that this request is not signed in.` })
-      throw this.authRequiredError(active, error) ?? acpAgentError(error) ?? error
+      // The agent asked for a sign-in: the entry is marked signed out, and the request fails as one.
+      const signIn = this.authRequiredError(active, error)
+      if (signIn) throw harnessAppError({ code: 'signed_out', message: signIn.message })
+      throw acpAgentError(error) ?? error
     } finally {
       clearTimeout(deadline)
       input.signal.removeEventListener('abort', abort)

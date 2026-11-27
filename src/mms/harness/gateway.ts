@@ -68,7 +68,7 @@ import { LatestVersionCache, type LatestVersionSource } from './latest'
 import { RuntimeFactsStore } from './facts'
 import { questionsPrompter, refusingPrompter } from './acp/permissions'
 import { admit, isPlan, opOfTask, routeFactsText, type AdmissionEntry, type AdmissionView, type NotAdmitted, type OneShotBinding, type OneShotIdentity, type OneShotPlan } from './oneShot/admission'
-import { ONE_SHOT_INACTIVITY_MS, runPlan } from './oneShot/runner'
+import { executableKey, ONE_SHOT_INACTIVITY_MS, runPlan } from './oneShot/runner'
 import type { OneShotOp, OneShotTransport } from './oneShot/route'
 import { checkPermissionMode, checkPolicy, type CheckPolicyOptions, freezePolicy, hasSpendLimit, mapNeutralTools, permissionModeRefusal, policyDigest, purposeAllowed, toolControlLevel } from './policy'
 import { budgetLimitsOf, RunCounterBook, type CounterScope, type SpendScope } from './budget'
@@ -1704,9 +1704,11 @@ export class Harness implements HarnessGateway {
       enabled: entry.enabled,
       retired: Boolean(driver.retired?.(instanceId)),
       stopped: Boolean(record?.stopped),
-      signedOut: config.signedOutInMousse === true,
+      // Signed out in Mousse, or as the provider last reported it.
+      signedOut: config.signedOutInMousse === true || probe?.lastGood?.auth.state === 'signed_out' || probe?.lastGood?.auth.state === 'expired',
       locked: config.profile === 'locked',
-      checked: Boolean(probe?.lastGood),
+      // A check that ended with the program running: one that could not start it read no facts to admit on.
+      checked: probe?.lastGood?.runs.state === 'yes',
       route: (model) => {
         if (!driver.oneShotRoute) return undefined
         const known = listed(model)
@@ -1725,13 +1727,16 @@ export class Harness implements HarnessGateway {
    */
   private oneShotIdentity(instanceId: string, live: boolean): OneShotIdentity {
     const probe = this.probes.get(instanceId)
-    const probed = probe?.lastGood?.fingerprint
+    // The program the last check read: its version check's, else the one the runtime reported its facts for.
+    const probed = probe?.lastGood?.fingerprint ?? this.currentFacts(instanceId)?.binary
     const binary = live && probed ? fingerprintOf(probed.path) : probed
+    const auth = probe?.lastGood?.auth as { credential?: string } | undefined
     return {
       instanceId,
       runtime: this.records.get(instanceId)?.key ?? '',
-      ...(binary ? { executable: `${binary.path}|${binary.size}|${binary.mtimeMs}` } : probed ? { executable: 'gone' } : {}),
-      ...(probe?.fingerprint ? { credential: probe.fingerprint } : {}),
+      ...(probed ? { executable: executableKey(binary) ?? 'gone' } : {}),
+      // The kind of sign-in the check saw, the account generation, and the account itself when it is read.
+      credential: `${auth?.credential ?? ''}|${this.counters.get(instanceId).accountGeneration}|${probe?.fingerprint ?? ''}`,
       ...(probe?.lastGood && probe.checkedAtMs !== undefined ? { facts: String(probe.checkedAtMs) } : {})
     }
   }
@@ -1792,8 +1797,7 @@ export class Harness implements HarnessGateway {
       if (!driver) continue
       let models: InstanceModel[] = []
       try {
-        // A turned-off entry is listed with its reason alone: its runtime is not built for this.
-        if (entry.enabled) models = this.catalog.models(instanceId, { kind: 'device' })
+        models = this.catalog.models(instanceId, { kind: 'device' })
       } catch {
         // An entry whose models cannot be read is listed with its reason alone.
       }
@@ -1870,16 +1874,27 @@ export class Harness implements HarnessGateway {
       throw asHarnessError(error, request.selection.instanceId ?? '')
     }
     const op = request.op ?? opOfTask(request.task)
+    // An id the entry lists exactly (a local server's `phi3:medium`) is that model, never the model at a level.
+    const exact = resolved.effort ? agentModelId(resolved.model, resolved.effort) : undefined
+    const listsExact = exact !== undefined && (() => {
+      try {
+        return this.catalog.models(resolved.instanceId, { kind: 'device' }).some((model) => model.id === exact)
+      } catch {
+        return false
+      }
+    })()
+    const model = listsExact ? exact! : resolved.model
+    const effort = listsExact ? undefined : resolved.effort
     const binding: OneShotBinding = request.localThread
-      ? { kind: 'local_thread', instanceId: resolved.instanceId, model: resolved.model, resident: request.localThread.resident }
-      : { kind: 'model', instanceId: resolved.instanceId, model: resolved.model, ...(resolved.effort ? { effort: resolved.effort } : {}) }
+      ? { kind: 'local_thread', instanceId: resolved.instanceId, model, resident: request.localThread.resident }
+      : { kind: 'model', instanceId: resolved.instanceId, model, ...(effort ? { effort } : {}) }
     const admitted = this.admitOneShot(op, binding)
     if (!isPlan(admitted)) {
       const code: HarnessErrorCode = admitted.notAdmitted === 'signed_out' ? 'signed_out' : admitted.notAdmitted === 'disabled' ? 'instance_disabled' : 'unsupported'
       throw harnessAppError({ code, reason: 'not_admitted', message: admitted.reason, instanceId: admitted.instanceId })
     }
     // A local thread's binding keeps the reasoning level the thread chose.
-    const plan: OneShotPlan = binding.kind === 'local_thread' && resolved.effort ? Object.freeze({ ...admitted, effort: resolved.effort }) : admitted
+    const plan: OneShotPlan = binding.kind === 'local_thread' && effort ? Object.freeze({ ...admitted, effort }) : admitted
     const record = this.record(resolved.instanceId)
     if (record.stopped) throw this.stopError(record, record.stopped.reason)
     this.admissionGate(record)
@@ -1887,6 +1902,7 @@ export class Harness implements HarnessGateway {
       plan,
       transport: this.oneShotTransportOf(record, plan, request),
       live: () => (this.instanceMap.get(plan.instanceId) ? this.oneShotIdentity(plan.instanceId, true) : undefined),
+      fingerprint: (path) => fingerprintOf(path),
       label: this.displayName(record),
       system: request.system,
       prompt: request.prompt,

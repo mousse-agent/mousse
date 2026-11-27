@@ -66,6 +66,17 @@ export interface OneShotEvents {
   text(chunk: string): void
   /** A tool the provider used or asked for: the runner ends the request. */
   tool(what: string): void
+  /**
+   * The transport is about to start its program, `executable` as it resolved it now: the runner checks it is the
+   * program admitted, and throws when not, so nothing starts.
+   */
+  launching(executable: string): void
+  /**
+   * The request is about to leave for the provider, after the transport's own preparation (a launch, a credential
+   * read): the runner checks the entry is still the one admitted and counts the request as sent. Throws when it may
+   * not go, and nothing is sent.
+   */
+  sending(): void
 }
 
 /**

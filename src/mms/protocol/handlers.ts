@@ -71,7 +71,8 @@ import {
   botProviderOptions,
   buildAgentTypesFromCatalogs,
   lastUsedChatModel,
-  type MousseSettingsUpdate
+  type MousseSettingsUpdate,
+  type TitleOptions
 } from '../../shared/settings'
 import type { HarnessGateway } from '../harness/gateway'
 import { usageText } from '../providers/usageText'
@@ -4176,6 +4177,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('settings.changed', { settings })
       return { settings }
     }
+    case 'settings.titleOptions': {
+      // Settings → Agents → Thread titles, from cached state only: no provider check, no bot model read is waited for.
+      const harness = ctx.mms.harness
+      const titleOptions: TitleOptions = {
+        llmProviders: harness?.listedLlmProviders({ kind: 'device' }) ?? [],
+        ...(harness?.titleListing ? { titleListing: harness.titleListing(ctx.mms.settings.get().title) } : {})
+      }
+      return { titleOptions }
+    }
     case 'settings.getOptions': {
       await ctx.mms.providerAuth.init()
       // The first read after start waits for each instance's first check (`awaitFirstChecks`).
@@ -4188,8 +4198,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           themes: THEME_OPTIONS,
           accentColors: ACCENT_COLORS,
           llmProviders,
-          // Read from cached state only (`HarnessGateway.titleListing`): it never waits for a check.
-          ...(ctx.mms.harness?.titleListing ? { titleListing: ctx.mms.harness.titleListing(ctx.mms.settings.get().title) } : {}),
           agentTypes,
           botProviders: botProviderOptions(llmProviders, holdable)
         }

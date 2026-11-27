@@ -202,6 +202,7 @@ import { forEachYielding, startupBackgroundTimed, startupPhase } from './startup
 import { logInfo } from './log/diag'
 import { onThreadBranchChanged } from './workspace/threadHeads'
 import { schedulePlaceSweep } from './harness/oneShot/sweep'
+import { botDigestOneShot, botNameOneShot } from './bots/botOneShots'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.delete'
@@ -912,15 +913,7 @@ export class MmsProfileServices {
       },
       archiveThread: (threadId) => { this.threads.setThreadArchived(threadId, true) },
       // Naming a new bot: one short call on the model its activations would use.
-      oneShot: async ({ selection, prompt, signal }) => (await harness.oneShot({
-        selection: { instanceId: selection.instanceId, llmProvider: selection.instanceId.split(':')[0] ?? '', model: selection.model, ...(selection.effort ? { effort: selection.effort } : {}) },
-        signal,
-        purpose: 'title',
-        op: 'bot_name',
-        system: 'Name a helper in 2–3 words.',
-        prompt,
-        maxChars: 60
-      })).text,
+      oneShot: ({ selection, prompt, signal }) => botNameOneShot(harness, { selection, prompt, ...(signal ? { signal } : {}) }),
       // The owner's home folder by its real path: `~` and variables are refused in a bot's paths.
       instructions: (bot) => botInstructions({ ...bot, homeFolder: homedir() }),
       scheduleLabel: (when) => botScheduleLabel(when),
@@ -979,15 +972,7 @@ export class MmsProfileServices {
           reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
             .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') })),
           // The digest of a fold (docs/plans/bot-context.md §14): one call with no tools on the bot's chat model.
-          digest: async ({ selection, system, prompt, signal }) => (await harness.oneShot({
-            selection: { instanceId: selection.instanceId, llmProvider: selection.instanceId.split(':')[0] ?? '', model: selection.model },
-            signal,
-            purpose: 'title',
-            task: 'chat_digest',
-            system,
-            prompt,
-            maxChars: BOT_CHAT_DIGEST.digest * 8
-          })).text
+          digest: ({ selection, system, prompt, signal }) => botDigestOneShot(harness, { selection, system, prompt, ...(signal ? { signal } : {}) })
         }
       })
       botMemory = memory

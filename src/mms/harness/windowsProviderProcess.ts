@@ -66,8 +66,8 @@ public static class MousseProviderJob {
     public uint PageFaults, TotalProcesses, ActiveProcesses, TerminatedProcesses;
   }
 
-  [DllImport("kernel32", SetLastError = true)]
-  static extern IntPtr CreateJobObjectW(IntPtr security, IntPtr name);
+  [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern IntPtr CreateJobObjectW(IntPtr security, string name);
   [DllImport("kernel32", SetLastError = true)]
   static extern bool SetInformationJobObject(IntPtr job, int kind, ref JobLimits limits, int size);
   [DllImport("kernel32", SetLastError = true)]
@@ -149,11 +149,13 @@ public static class MousseProviderJob {
     }
   }
 
-  public static int Run(string command, string pipeName) {
+  public static int Run(string command, string pipeName, string jobName) {
     using (var control = new NamedPipeClientStream(".", pipeName, PipeDirection.In)) {
       control.Connect(5000);
-      IntPtr job = CreateJobObjectW(IntPtr.Zero, IntPtr.Zero);
+      // A named job (given by the caller) can be found again by a later sweep. A name that already exists is not ours.
+      IntPtr job = CreateJobObjectW(IntPtr.Zero, string.IsNullOrEmpty(jobName) ? null : jobName);
       Check(job != IntPtr.Zero);
+      if (!string.IsNullOrEmpty(jobName) && Marshal.GetLastWin32Error() == 183) { CloseHandle(job); throw new Win32Exception(183); }
       try {
         var limits = new JobLimits();
         limits.Basic.Flags = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE. Breakaway stays disabled.
@@ -215,7 +217,7 @@ public static class MousseProviderJob {
   }
 }
 '@
-  exit [MousseProviderJob]::Run($launch.command, $launch.pipeName)
+  exit [MousseProviderJob]::Run($launch.command, $launch.pipeName, [string]$launch.jobName)
 } catch {
   [Console]::Error.WriteLine($_.Exception.Message)
   exit 253
@@ -242,15 +244,17 @@ export function windowsProviderTree(child: object): WindowsProviderTree | undefi
 export function spawnProviderProcess(
   command: string,
   args: string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal }
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal; /** Windows: names the job (e.g. `Local\…`), so a later sweep can open it and see whether it is empty. */ jobName?: string }
 ): ChildProcessWithoutNullStreams {
-  if (process.platform !== 'win32')
-    return spawn(command, args, { ...options, windowsHide: true, stdio: 'pipe' })
+  if (process.platform !== 'win32') {
+    const { jobName: _jobName, ...posix } = options
+    return spawn(command, args, { ...posix, windowsHide: true, stdio: 'pipe' })
+  }
   options.signal?.throwIfAborted()
   const root = process.env.SystemRoot || 'C:\\Windows'
   const powershell = win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   const pipeName = 'mousse-provider-' + randomUUID()
-  const launch = JSON.stringify({ command: [command, ...args].map(quoteWindowsArgument).join(' '), pipeName })
+  const launch = JSON.stringify({ command: [command, ...args].map(quoteWindowsArgument).join(' '), pipeName, jobName: options.jobName ?? '' })
   let socket: Socket | undefined
   let stopRequested = false
   const control = createServer((connection) => {

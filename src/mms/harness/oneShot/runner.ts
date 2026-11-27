@@ -28,6 +28,24 @@ export function candidateDeadlineMs(budgetLeftMs: number): number {
   return Math.max(0, Math.min(CANDIDATE_DEADLINE_MS, budgetLeftMs - NEXT_CANDIDATE_RESERVE_MS))
 }
 
+/** Whether a failed request had left for the provider (`OneShotEvents.sending`), as the runner saw it. */
+const sentOutcomes = new WeakMap<object, boolean>()
+
+/**
+ * Whether a single request that failed with `error` was sent: true or false when the runner ran it, undefined for a
+ * failure from before it (resolution, admission). A legacy route counts as sent once its transport is called.
+ */
+export function oneShotWasSent(error: unknown): boolean | undefined {
+  return error && typeof error === 'object' ? sentOutcomes.get(error) : undefined
+}
+
+/** The key an executable's fingerprint is compared by. */
+export function executableKey(fingerprint: { path: string; size: number; mtimeMs: number } | undefined): string | undefined {
+  if (!fingerprint) return undefined
+  const path = process.platform === 'win32' ? fingerprint.path.toLowerCase() : fingerprint.path
+  return `${path}|${fingerprint.size}|${fingerprint.mtimeMs}`
+}
+
 /** Every way a single request ends without an answer. */
 export type OneShotFailureKind =
   | 'tool_refused'
@@ -61,6 +79,8 @@ export function classifyOneShotFailure(error: unknown): OneShotFailureKind {
   const code = codeOf(error)
   if (code === 'aborted' || code === 'cancelled' || code === 'provider_cancelled') return 'cancelled'
   if (code === 'one_shot_tool_refused') return detailOf(error, 'reason') === 'tool_detected' ? 'tool_detected' : 'tool_refused'
+  // A legacy route reports a tool it stopped after sending as a policy it could not hold.
+  if (code === 'policy_unenforceable' && oneShotWasSent(error) === true) return 'tool_detected'
   if (code === 'timeout' || code === 'provider_timeout' || name === 'TimeoutError') return 'timeout'
   if (extractLimitFromError(error)) return 'rate_limited'
   if (detailOf(error, 'retriesExhausted') === true) return 'retry_detected'
@@ -74,8 +94,10 @@ export function classifyOneShotFailure(error: unknown): OneShotFailureKind {
 export interface RunPlanInput {
   plan: OneShotPlan
   transport: OneShotTransport
-  /** The entry as it is now; undefined when it is gone. Read just before sending. */
+  /** The entry as it is now; undefined when it is gone. Read before the transport starts and again as it sends. */
   live(): OneShotIdentity | undefined
+  /** The fingerprint of an executable as it is now (the program a transport is about to start). */
+  fingerprint?(path: string): { path: string; size: number; mtimeMs: number } | undefined
   label: string
   system: string
   prompt: string
@@ -94,14 +116,32 @@ export interface RunPlanInput {
 export async function runPlan(input: RunPlanInput): Promise<string> {
   const { plan, label } = input
   input.signal?.throwIfAborted()
-  const now = input.live()
-  if (!now || !sameIdentity(now, plan.identity))
-    throw harnessAppError({ code: 'binding_stale', reason: 'not_admitted', message: `${label} changed since this request was admitted, so Mousse did not send it.`, instanceId: plan.instanceId })
+  const stale = () => {
+    const error = harnessAppError({ code: 'binding_stale', reason: 'not_admitted', message: `${label} changed since this request was admitted, so Mousse did not send it.`, instanceId: plan.instanceId })
+    sentOutcomes.set(error, false)
+    return error
+  }
+  const checkIdentity = () => {
+    const now = input.live()
+    if (!now || !sameIdentity(now, plan.identity)) throw stale()
+  }
+  checkIdentity()
+  // A route with facts says when its request leaves (`sending`); a legacy one counts as sent once called.
+  let sent = !plan.route.facts
+  const outcome = (error: unknown): unknown => {
+    if (error && typeof error === 'object' && !sentOutcomes.has(error)) sentOutcomes.set(error, sent)
+    return error
+  }
   const ended = new AbortController()
   let failure: Error | undefined
+  // Settles the request the moment the runner ends it: the transport's own teardown goes on without holding it.
+  let settle!: (error: Error) => void
+  const settled = new Promise<never>((_, reject) => { settle = reject })
+  settled.catch(() => {})
   const end = (error: Error) => {
     failure ??= error
     ended.abort(error)
+    settle(failure)
   }
   let idle: ReturnType<typeof setTimeout> | undefined
   const activity = () => {
@@ -124,7 +164,7 @@ export async function runPlan(input: RunPlanInput): Promise<string> {
   }
   activity()
   try {
-    const text = await input.transport.send(wire, {
+    const sending = input.transport.send(wire, {
       activity: () => { if (!failure) activity() },
       text: (chunk) => {
         if (failure) return
@@ -132,8 +172,21 @@ export async function runPlan(input: RunPlanInput): Promise<string> {
         streamed += chunk.length
         if (streamed > ONE_SHOT_STREAM_CAP) end(tooLong())
       },
-      tool: (what) => end(harnessAppError({ code: 'one_shot_tool_refused', reason: 'tool_detected', message: `${label} tried to use a tool (${what}) in a request that runs none, so Mousse stopped it.`, instanceId: plan.instanceId }))
+      tool: (what) => end(harnessAppError({ code: 'one_shot_tool_refused', reason: 'tool_detected', message: `${label} tried to use a tool (${what}) in a request that runs none, so Mousse stopped it.`, instanceId: plan.instanceId })),
+      launching: (executable) => {
+        if (failure) throw failure
+        const admitted = plan.identity.executable
+        if (admitted && admitted !== executableKey(input.fingerprint?.(executable))) throw stale()
+      },
+      sending: () => {
+        if (failure) throw failure
+        checkIdentity()
+        sent = true
+      }
     }, signal)
+    // Once the runner has ended the request, the transport's late answer or failure is its own to clean up.
+    sending.catch(() => {})
+    const text = await Promise.race([sending, settled])
     if (failure) throw failure
     input.signal?.throwIfAborted()
     if (text.length > ONE_SHOT_STREAM_CAP) throw tooLong()
@@ -141,8 +194,8 @@ export async function runPlan(input: RunPlanInput): Promise<string> {
     return text.slice(0, Math.max(0, input.maxChars))
   } catch (error) {
     // The runner's own ending outranks whatever the transport threw when it was stopped.
-    if (failure) throw failure
-    throw error
+    if (failure) throw outcome(failure)
+    throw outcome(error)
   } finally {
     clearTimeout(deadline)
     if (idle) clearTimeout(idle)

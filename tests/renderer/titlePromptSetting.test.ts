@@ -10,7 +10,7 @@ import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import type { OneShotRequest } from '../../src/mms/harness/gateway'
-import { getDefaultSettings, type LlmProviderOption, type SettingsOptions } from '../../src/shared/settings'
+import { getDefaultSettings, type LlmProviderOption, type SettingsOptions, type TitleOptions } from '../../src/shared/settings'
 import { TITLE_SYSTEM_PROMPT } from '../../src/shared/threadTitleText'
 import type { ChatMessage } from '../../src/shared/types'
 
@@ -266,14 +266,16 @@ describe('the Thread titles row with Antigravity connected', () => {
   })
 })
 
-describe('the Thread titles row reads the per-model listing', () => {
+describe('the Thread titles row reads the cached title listing', () => {
   const AGENT = {
     id: 'acp:scripted', instanceId: 'acp:scripted', label: 'Scripted agent', oneShot: true,
     models: [{ id: 'default', label: 'Agent default', title: { state: 'best_effort', route: 'acp:generic', facts: ['The agent has tools of its own.'] } }]
   } as LlmProviderOption
-  const UNABLE = { ...AGENT, id: 'acp:other', instanceId: 'acp:other', label: 'Other agent', models: [{ id: 'default', label: 'Agent default', title: { state: 'unavailable', reason: 'Other agent has not been checked yet.' } }] } as LlmProviderOption
+  const UNABLE = { ...AGENT, id: 'acp:other', instanceId: 'acp:other', label: 'Other agent', oneShot: false, models: [{ id: 'default', label: 'Agent default', title: { state: 'unavailable', reason: 'Other agent has not been checked yet.' } }] } as LlmProviderOption
+  const OFF = { instanceId: 'acp:off', driver: 'acp', label: 'Turned-off agent', models: [], reason: 'Turned-off agent is turned off.' }
   let root: Root
   let host: HTMLElement
+  const mousse = (globalThis as { window: { mousse?: unknown } }).window
   beforeEach(() => {
     host = document.createElement('div')
     document.body.append(host)
@@ -282,27 +284,47 @@ describe('the Thread titles row reads the per-model listing', () => {
   afterEach(() => {
     act(() => root.unmount())
     host.remove()
+    delete mousse.mousse
   })
-  const show = (providers: LlmProviderOption[], title: Partial<ReturnType<typeof getDefaultSettings>['title']> = {}, titleListing?: SettingsOptions['titleListing']) => {
+  /** Settings → Agents with the daemon's cached listing (`settings.titleOptions`); `getOptions` still waits on checks. */
+  const show = async (titleOptions: TitleOptions, title: Partial<ReturnType<typeof getDefaultSettings>['title']> = {}) => {
+    const getTitleOptions = vi.fn(async () => titleOptions)
+    mousse.mousse = { settings: { getTitleOptions } }
     const settings = getDefaultSettings()
-    act(() => root.render(createElement(AgentsSettings, {
+    await act(async () => root.render(createElement(AgentsSettings, {
       settings: { ...settings, title: { ...settings.title, ...title } },
-      options: { ...OPTIONS, llmProviders: providers, ...(titleListing ? { titleListing } : {}) },
+      // The slow listing has nothing yet: the row reads the cached one alone.
+      options: { ...OPTIONS, llmProviders: [] },
       updateSettings: async () => {}
     })))
     const row = host.querySelector<HTMLElement>('[data-settings-anchor="agents-title-model"]')!
-    return { row, spans: [...row.querySelectorAll<HTMLElement>('span[title]')] }
+    return { row, spans: [...row.querySelectorAll<HTMLElement>('span[title]')], getTitleOptions }
   }
 
-  it('a best-effort model says so, with the facts behind it in its tooltip', () => {
-    const { spans } = show([CLAUDE, AGENT], { llmProvider: 'acp:scripted', instanceId: 'acp:scripted', model: 'default' })
+  it('a best-effort model says so, with the facts behind it in its tooltip, from the cached listing alone', async () => {
+    const { spans, getTitleOptions } = await show({ llmProviders: [CLAUDE, AGENT] }, { llmProvider: 'acp:scripted', instanceId: 'acp:scripted', model: 'default' })
+    expect(getTitleOptions).toHaveBeenCalled()
     expect(spans.find((span) => span.textContent?.includes('best-effort'))?.title).toBe('The agent has tools of its own.')
   })
 
-  it('a saved choice that cannot name threads shows as its own row with the exact reason, even when nothing live matches it', () => {
+  it('entries that cannot name threads are listed in the picker with their reason', async () => {
+    const entries = [{ instanceId: 'acp:other', driver: 'acp', label: 'Other agent', models: [{ id: 'default', label: 'Agent default', state: 'unavailable' as const, reason: 'Other agent has not been checked yet.' }] }, OFF]
+    const { row } = await show({ llmProviders: [CLAUDE, UNABLE], titleListing: { entries } })
+    await act(async () => row.querySelector<HTMLButtonElement>('#agents-title-model')!.click())
+    const disabled = [...document.querySelectorAll<HTMLElement>('[role="option"][aria-disabled="true"]')].map((option) => option.title)
+    expect(disabled).toEqual(expect.arrayContaining(['Other agent has not been checked yet.', 'Turned-off agent is turned off.']))
+  })
+
+  it('a saved choice that cannot name threads shows its exact reason; a reason read for an earlier choice is not shown', async () => {
     const saved = { instanceId: 'acp:other', model: 'default', label: 'Other default', state: 'unavailable' as const, reason: 'Other agent has not been checked yet.' }
-    const { row, spans } = show([CLAUDE, UNABLE], { llmProvider: 'acp:other', instanceId: 'acp:other', model: 'default' }, { entries: [], saved })
-    expect(row.textContent).toContain("Other default can't name threads here")
-    expect(spans.some((span) => span.title === 'Other agent has not been checked yet.')).toBe(true)
+    const listing = { llmProviders: [CLAUDE, UNABLE], titleListing: { entries: [], saved } }
+    const now = await show(listing, { llmProvider: 'acp:other', instanceId: 'acp:other', model: 'default' })
+    expect(now.row.textContent).toContain("Other default can't name threads here")
+    expect(now.spans.some((span) => span.title === 'Other agent has not been checked yet.')).toBe(true)
+    act(() => root.unmount())
+    root = createRoot(host)
+    // Haiku chosen since: the listing read before still describes the old choice.
+    const later = await show(listing, { llmProvider: 'claude-subscription', instanceId: 'claude', model: 'haiku' })
+    expect(later.row.textContent).not.toContain("can't name threads")
   })
 })

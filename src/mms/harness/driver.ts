@@ -220,6 +220,13 @@ export interface OneShotSpec {
   namingOrigin?: NamingOrigin
   /** Called on every event the provider sends; the gateway's inactivity timeout restarts. */
   onActivity(): void
+  /** Each new part of the answer as it streams (the runner's streaming cap), where the runtime can report it. */
+  onText?(chunk: string): void
+  /**
+   * Called once, right before the request leaves for the provider, after the runtime's own preparation (a credential
+   * read): the runner checks the entry is still the admitted one. A throw stops the request unsent.
+   */
+  beforeSend?(): void
 }
 
 /**

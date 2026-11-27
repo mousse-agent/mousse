@@ -327,7 +327,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
   }
 
   /** The places of the single requests running now, by the folder each runs in (`oneShotTransport`). */
-  const oneShotPlaces = new Map<string, { place: Place; proc?: PlaceProcess }>()
+  const oneShotPlaces = new Map<string, { place: Place; proc?: PlaceProcess; launching(executable: string): void }>()
 
   /**
    * A single request's agent (`acpOneShot`): in its place only, on the sealed launch (`oneShot/launch.ts`): the
@@ -340,6 +340,8 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     const { resolved, launch, root, track } = launchOf(request.purpose)
     if (root && (!verified || verified.hash !== installedNow()?.hash || Date.now() - verified.atMs > 60_000))
       throw new Error(`Mousse did not check the files of ${label} before starting it.`)
+    // The program as it resolves now must be the one admitted (`OneShotEvents.launching`), or nothing starts.
+    held.launching(resolved.path)
     const env = sealedEnv({ base: context.env.env, entry: launch.env, ...(context.env.enforced ? { preset: context.env.enforced } : {}), root: join(held.place.dir, ONE_SHOT_ROOT) })
     const proc = spawnInPlace(held.place, { command: resolved.command, args: [...resolved.args, ...GENERIC_ACP_ARGUMENTS(launch.args)], env, purpose: 'acp-one_shot', instanceId: context.instanceId, cwd: request.cwd! })
     held.proc = proc
@@ -728,7 +730,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
           if (state.signedOut) throw harnessAppError({ code: 'signed_out', message: `Sign in to ${label} in Settings → Providers.`, instanceId: context.instanceId })
           const place = reservePlace(context.profileHome, { route: 'acp:generic', instanceId: context.instanceId })
           const work = join(place.dir, ONE_SHOT_WORK)
-          const held: { place: Place; proc?: PlaceProcess } = { place }
+          const held: { place: Place; proc?: PlaceProcess; launching(executable: string): void } = { place, launching: (executable) => events.launching(executable) }
           let text = ''
           let failure: unknown
           try {
@@ -741,7 +743,8 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
               prompt: wire.prompt,
               signal,
               onActivity: () => events.activity(),
-              onText: (chunk) => events.text(chunk)
+              onText: (chunk) => events.text(chunk),
+              beforePrompt: () => events.sending()
             })
           } catch (error) {
             failure = error

@@ -727,6 +727,12 @@ export interface TitleListing {
   saved?: TitleListingSaved
 }
 
+/** What Settings → Agents → Thread titles reads (`settings.titleOptions`): the cached listings, never a check. */
+export interface TitleOptions {
+  llmProviders: LlmProviderOption[]
+  titleListing?: TitleListing
+}
+
 export interface AgentTypeOption {
   id: AgentTypeId
   label: string
@@ -737,8 +743,6 @@ export interface SettingsOptions {
   themes: ThemeOption[]
   accentColors: AccentColorOption[]
   llmProviders: LlmProviderOption[]
-  /** Thread titles' listing per model, from cached state; absent from a computer that does not send it. */
-  titleListing?: TitleListing
   agentTypes: AgentTypeOption[]
   /**
    * The bot model choices (`botModel`): the listing narrowed to the ready instances and models that

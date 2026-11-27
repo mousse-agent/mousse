@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { findListedModel, modelLabel } from '../../../shared/modelChoice'
 import { TITLE_PROMPT_MAX } from '../../../shared/threadTitleText'
 import { resolveModelChoice } from '../../lib/modelChoice'
-import type { IdleCompactionSetting, LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
+import type { IdleCompactionSetting, LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions, TitleListing, TitleOptions } from '../../../shared/settings'
+import type { UnavailableModelProvider } from '../ModelFamilyMenu'
 import { normalizeContextSettings, normalizeExperimentalSettings } from '../../../shared/settings'
 import { Select, type SelectOption } from '../ui/Select'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
@@ -150,8 +151,11 @@ export function AgentsSettings({
 }) {
   const providers = options.llmProviders
   const hasProviders = providers.length > 0
-  // Titles are one request with no tools: only the models admitted for one are offered (`LlmModelOption.title`).
-  const titleProviders = titlePickerProviders(providers)
+  // Titles are one request with no tools: only the models admitted for one are offered (`LlmModelOption.title`), read
+  // from the daemon's cached listing (`settings.titleOptions`), which never waits for a provider check.
+  const titleOptions = useTitleOptions(settings.title)
+  const titleProviders = titlePickerProviders(titleOptions?.llmProviders ?? providers)
+  const titleUnavailableProviders = unavailableTitleProviders(titleOptions?.titleListing, titleProviders)
 
   // Blank title keys mean "Automatic": the first line names the thread at once, then the best connected model renames
   // it. `mode: 'off'` with blank keys is "First line only": no model is asked.
@@ -163,7 +167,9 @@ export function AgentsSettings({
   // The saved choice as the daemon reads it, with its exact reason when it cannot name threads now; a computer that
   // does not send it is read from the picker's own listing.
   const titleInstance = settings.title?.instanceId
-  const saved = titleIsAutomatic ? undefined : options.titleListing?.saved
+  // Only the listing's saved row for the choice made now: one read before a new choice describes the old one.
+  const listedSaved = titleIsAutomatic ? undefined : titleOptions?.titleListing?.saved
+  const saved = listedSaved && listedSaved.model === titleModel && (!titleInstance || listedSaved.instanceId === titleInstance) ? listedSaved : undefined
   const titleUnavailable = !titleIsAutomatic && (saved
     ? saved.state === 'unavailable'
     : providers.length > 0 && !titleProviders.some((provider) =>
@@ -247,6 +253,7 @@ export function AgentsSettings({
               ariaLabel="Thread title model"
               placeholder={titleIsOff ? 'First line only' : 'Automatic'}
               providers={titleProviders}
+              unavailableProviders={titleUnavailableProviders}
               providerId={titleIsAutomatic ? '' : titleProvider}
               instanceId={titleIsAutomatic ? undefined : settings.title?.instanceId}
               modelId={titleIsAutomatic ? '' : titleModel}
@@ -384,4 +391,29 @@ function bestEffortNamer(provider: LlmProviderOption | undefined, model?: string
   if (listed) return { label: provider.label, why: listed.title?.facts?.join(' ') ?? '' }
   const info = (DRIVER_INFO as Partial<Record<string, DriverInfo>>)[provider.id]
   return info?.bestEffortNaming && models.some((each) => !each.title || each.title.state === 'legacy') ? { label: info.label, why: info.bestEffortNaming } : undefined
+}
+
+/**
+ * Thread titles' choices from the daemon's cached listing (`settings.titleOptions`), read again when the title choice
+ * or a provider's state changes. Undefined until read, or from a daemon that does not offer it.
+ */
+function useTitleOptions(title: MousseSettings['title'] | undefined): TitleOptions | undefined {
+  const [value, setValue] = useState<TitleOptions>()
+  const { snapshots } = useProviderSnapshots(DEVICE_SCOPE)
+  const key = JSON.stringify(title ?? null)
+  useEffect(() => {
+    const read = window.mousse?.settings?.getTitleOptions
+    if (!read) return
+    let live = true
+    read().then((next) => { if (live) setValue(next) }, () => undefined)
+    return () => { live = false }
+  }, [key, snapshots])
+  return value
+}
+
+/** The entries none of whose models can name threads now, each with its reason (turned off, signed out, unchecked). */
+function unavailableTitleProviders(listing: TitleListing | undefined, offered: readonly LlmProviderOption[]): UnavailableModelProvider[] {
+  return (listing?.entries ?? [])
+    .filter((entry) => !offered.some((provider) => provider.instanceId === entry.instanceId))
+    .map((entry) => ({ instanceId: entry.instanceId, label: entry.label, reason: entry.reason ?? entry.models.find((model) => model.reason)?.reason ?? `${entry.label} can't name threads now.` }))
 }

@@ -12,8 +12,8 @@ import { admit, isPlan, routeLabel, type AdmissionEntry, type OneShotBinding, ty
 import { RESERVED_ROOTS, sealedEnv } from '../../src/mms/harness/oneShot/launch'
 import type { OneShotOp, OneShotRouteDecision, OneShotTransport, RouteFacts } from '../../src/mms/harness/oneShot/route'
 import { GENERIC_ACP_FACTS, PI_DIRECT_FACTS, PI_LOCAL_FACTS } from '../../src/mms/harness/oneShot/routes'
-import { candidateDeadlineMs, classifyOneShotFailure, ONE_SHOT_INACTIVITY_MS, ONE_SHOT_INSTRUCTION, ONE_SHOT_STREAM_CAP, runPlan } from '../../src/mms/harness/oneShot/runner'
-import { PLACE_SWEEP_DELAY_MS, schedulePlaceSweep } from '../../src/mms/harness/oneShot/sweep'
+import { candidateDeadlineMs, classifyOneShotFailure, executableKey, ONE_SHOT_INACTIVITY_MS, ONE_SHOT_INSTRUCTION, ONE_SHOT_STREAM_CAP, oneShotWasSent, runPlan } from '../../src/mms/harness/oneShot/runner'
+import { PLACE_SWEEP_DELAY_MS, PLACE_SWEEP_INTERVAL_MS, schedulePlaceSweep } from '../../src/mms/harness/oneShot/sweep'
 import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
 import { harnessAppError } from '../../src/shared/harness/types'
 
@@ -23,7 +23,7 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
-const IDENTITY = { instanceId: 'x', runtime: 'acp|1|home', executable: '/bin/agent|10|1', facts: '5' }
+const IDENTITY = { instanceId: 'x', runtime: 'acp|1|home', executable: executableKey({ path: '/bin/agent', size: 10, mtimeMs: 1 })!, facts: '5' }
 
 function entry(patch: Partial<AdmissionEntry> & { decision?: OneShotRouteDecision | undefined; hidden?: boolean; local?: boolean } = {}): AdmissionEntry {
   const { decision: given, hidden = false, local = false, ...rest } = patch
@@ -126,7 +126,7 @@ describe('the runner', () => {
 
   it.each([
     ['the runtime was rebuilt', { runtime: 'acp|2|home' }],
-    ['the executable changed since its check', { executable: '/bin/agent|11|2' }],
+    ['the executable changed since its check', { executable: executableKey({ path: '/bin/agent', size: 11, mtimeMs: 2 }) }],
     ['the sign-in changed', { credential: 'another' }],
     ['the facts were read again', { facts: '6' }]
   ])('refuses before sending when %s', async (_name, change) => {
@@ -134,6 +134,25 @@ describe('the runner', () => {
     await expect(run(t.transport, { live: () => ({ ...IDENTITY, ...change }) })).rejects.toMatchObject({ code: 'binding_stale' })
     await expect(run(t.transport, { live: () => undefined })).rejects.toMatchObject({ code: 'binding_stale' })
     expect(t.transport.send).not.toHaveBeenCalled()
+  })
+
+  it('checks again at the boundary: a program that resolves to another file, or a sign-in that changed during preparation, stops the request unsent', async () => {
+    const program = { path: '/bin/agent', size: 10, mtimeMs: 1 }
+    const launched = vi.fn()
+    const launch = (resolved: { path: string; size: number; mtimeMs: number }) => transport(async (events) => { events.launching(resolved.path); launched(); events.sending(); return 'A title' })
+    const files = new Map([[program.path, program], ['/opt/other-agent', { path: '/opt/other-agent', size: 10, mtimeMs: 1 }]])
+    const fingerprint = (path: string) => files.get(path)
+    expect(await run(launch(program).transport, { fingerprint })).toBe('A title')
+    const other = await run(launch(files.get('/opt/other-agent')!).transport, { fingerprint }).catch((caught: unknown) => caught)
+    expect(other).toMatchObject({ code: 'binding_stale' })
+    expect(oneShotWasSent(other)).toBe(false)
+    expect(launched).toHaveBeenCalledTimes(1)
+    // The sign-in changes while the transport reads its credential: the request never leaves.
+    let generation = 0
+    const reading = transport(async (events) => { generation++; events.sending(); return 'A title' })
+    const signedAgain = await run(reading.transport, { live: () => ({ ...IDENTITY, ...(generation ? { credential: 'api_key|2|' } : {}) }) }).catch((caught: unknown) => caught)
+    expect(signedAgain).toMatchObject({ code: 'binding_stale' })
+    expect(oneShotWasSent(signedAgain)).toBe(false)
   })
 
   it('a tool the provider reports ends the request as detected, and stops the transport', async () => {
@@ -174,6 +193,16 @@ describe('the runner', () => {
     expect(await pending).toMatchObject({ code: 'timeout', message: expect.stringContaining('sent nothing') })
   })
 
+  it('settles at its deadline even while the transport is still tearing down, so the next candidate keeps its time', async () => {
+    vi.useFakeTimers()
+    // A transport that ignores the stop and never settles (a slow teardown).
+    const stuck = transport(async () => new Promise<string>(() => undefined))
+    const ending = run(stuck.transport, { deadlineMs: 15_000 }).catch((caught: unknown) => caught)
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(await ending).toMatchObject({ code: 'timeout' })
+    expect(stuck.signals[0]!.aborted).toBe(true)
+  })
+
   it('a candidate gets the smaller of 15 s and what the pass has left minus 3 s', () => {
     expect([25_000, 18_000, 10_000, 3_000, 1_000].map(candidateDeadlineMs)).toEqual([15_000, 15_000, 7_000, 0, 0])
   })
@@ -185,7 +214,7 @@ describe('the failure table', () => {
     ['a provider cancel', harnessAppError({ code: 'cancelled', message: 'x' }), 'cancelled'],
     ['a refused tool request', harnessAppError({ code: 'one_shot_tool_refused', message: 'x' }), 'tool_refused'],
     ['a reported tool', harnessAppError({ code: 'one_shot_tool_refused', reason: 'tool_detected', message: 'x' }), 'tool_detected'],
-    ['a quota', usageLimitError('Antigravity', { limitKind: 'session', resetsAt: '2099-01-01T00:00:00.000Z' }), 'rate_limited'],
+    ['a quota', usageLimitError({ provider: 'claude', resetsAt: new Date(Date.now() + 60 * 60_000).toISOString(), estimated: false, limitKind: 'five_hour' }), 'rate_limited'],
     ['too many requests', harnessAppError({ code: 'rate_limited', message: 'x' }), 'rate_limited'],
     ['retries that ran out below Mousse', harnessAppError({ code: 'protocol', retriesExhausted: true, message: 'x' }), 'retry_detected'],
     ['signed out', harnessAppError({ code: 'signed_out', message: 'x' }), 'signed_out'],
@@ -253,6 +282,26 @@ describe('the post-ready sweep', () => {
     await swept
     expect(readdirSync(join(profile, 'one-shot'))).toEqual([])
     expect(readdirSync(join(profile, 'one-shot-ledger'))).toEqual([])
+  })
+
+  it('runs again while the daemon runs: what an ended request leaves later is removed at the next sweep', async () => {
+    const profile = mkdtempSync(join(tmpdir(), 'mousse-sweep-'))
+    homes.push(profile)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const reports: unknown[] = []
+    let swept!: () => void
+    let sweep = new Promise<void>((resolve) => { swept = resolve })
+    const cancel = schedulePlaceSweep(profile, { stopped: () => false, done: (report) => { reports.push(report); swept() } })
+    await vi.advanceTimersByTimeAsync(PLACE_SWEEP_DELAY_MS)
+    await sweep
+    // Left after the first sweep, by a request that ended badly an hour into a long-running daemon.
+    const place = leftover(profile)
+    sweep = new Promise<void>((resolve) => { swept = resolve })
+    await vi.advanceTimersByTimeAsync(PLACE_SWEEP_INTERVAL_MS)
+    await sweep
+    cancel()
+    expect(reports).toHaveLength(2)
+    expect(existsSync(place.dir)).toBe(false)
   })
 
   it('does not run once the daemon is stopping, or once cancelled', async () => {
