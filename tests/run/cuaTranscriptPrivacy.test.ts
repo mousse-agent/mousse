@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 /**
- * A computer use call, in each of the five runtimes, directly or through a bot's `use_tool`: nothing it typed, ran or
+ * A computer use call, in each of the six runtimes, directly or through a bot's `use_tool`: nothing it typed, ran or
  * got back reaches a saved row (checked after every event the transcript takes, and in the event itself, which the live
  * window gets), and the window shows what it did in words, one detail, and only the kept arguments and outcome, when
  * the row is opened too. A call of another tool through `use_tool` is shown as before.
  *
  * Each runtime runs its real event mapping into the real transcript assembler: Claude Code's frame reader and adapter,
  * Codex's item mapping and adapter, ACP's session with the mapper its adapter wraps it in, Cursor's driver through the
- * harness, and Pi's engine fed the RPC events of its process (hand-authored, no model).
+ * harness, OpenCode's driver against a hand-authored server (its Mousse tools named `mousse_<12 hex>_<tool>`, as OpenCode
+ * 2.0.20 names an MCP server's tools), and Pi's engine fed the RPC events of its process (hand-authored, no model).
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -24,6 +25,9 @@ import { withClosure } from '../../src/mms/harness/drivers/acp/adapter'
 import { ClaudeSubscriptionAdapter, type ClaudeSubscriptionClient } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import { CodexAdapter, type CodexClient } from '../../src/mms/harness/drivers/codex/adapter'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
+import { opencodeDriver } from '../../src/mms/harness/drivers/opencode'
+import { instanceEnv } from '../../src/mms/harness/env'
+import { mousseServerName } from '../../src/mms/harness/opencode/rules'
 import { PI_RPC_CAPS } from '../../src/mms/harness/drivers/pi'
 import type { Harness } from '../../src/mms/harness/gateway'
 import { instanceStateDir } from '../../src/mms/harness/instances'
@@ -44,6 +48,7 @@ import { callTitle } from '../../src/renderer/chat/components/agent-elements/tur
 import type { ProviderToolEvent } from '../../src/shared/agentActivity'
 import type { ChatMessage } from '../../src/shared/types'
 import { FakeCursorHost } from '../harness/fakeCursorHost'
+import { fakeOpencodeServer } from '../harness/fakeOpencodeServer'
 import { transcriptSink } from '../support/transcriptSink'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -216,6 +221,38 @@ async function cursorRows() {
   return transcript
 }
 
+async function opencodeRows() {
+  const fake = await fakeOpencodeServer()
+  const root = mkdtempSync(join(tmpdir(), 'mousse-cua-opencode-'))
+  const binaryPath = join(root, process.platform === 'win32' ? 'opencode.exe' : 'opencode')
+  writeFileSync(binaryPath, '#!/bin/sh\n', { mode: 0o755 })
+  const driver = opencodeDriver({ startServer: (launch, signal) => fake.start(launch, signal), interruptWaitMs: 2_000 })
+  const runtime = driver.create({
+    instanceId: 'opencode:opencode', builtIn: false, config: driver.decodeConfig({ binaryPath }),
+    env: instanceEnv({ instanceId: 'opencode:opencode', driver: 'opencode', configRevision: 0, searchPath: [], base: { PATH: '' } }),
+    profileHome: root, installationHome: root, stateDir: root, questions: new UserQuestionService(),
+    findBinary: () => undefined, changed: () => {}, signedOut: () => false, saveLaunch: async () => {}
+  })
+  cleanups.push(() => { void runtime.stop().then(() => fake.close()); rmSync(root, { recursive: true, force: true }) })
+  // OpenCode names an MCP tool `<server>_<tool>`; Mousse's server for this thread is `mousse_<12 hex>`.
+  const tool = (name: string) => `${mousseServerName('thread-1')}_${name}`
+  fake.onPrompt = (session) => {
+    const event = (type: string, data: Record<string, unknown>) => fake.emit(type, { sessionID: session.id, assistantMessageID: 'm', ...data })
+    const call = (id: string, name: string, input: unknown, end: Record<string, unknown>, failed = false) => {
+      event('session.tool.input.started', { id, name })
+      event('session.tool.called', { id, input, executed: false })
+      event(failed ? 'session.tool.failed' : 'session.tool.success', { id, executed: true, ...end })
+    }
+    call('o-type', tool('computer_use'), TYPE, { content: [{ type: 'text', text: `Typed ${SECRET}.` }] })
+    call('o-bot', tool('use_tool'), BOT_SCRIPT, { error: { type: 'tool.failed', message: `script said ${SECRET}` } }, true)
+    call('o-none', tool('use_tool'), { arguments: { text: SECRET } }, { content: [{ type: 'text', text: SECRET }] })
+    fake.reply(session.id, 'done')
+  }
+  const transcript = watchedTranscript()
+  await runtime.adapter.startTurn(turnInput({ threadId: 'thread-1', instanceId: 'opencode:opencode', llmProvider: '', model: 'anthropic/claude-haiku-5-5', permissionMode: 'full', cwd: root } as Partial<TurnInput>), transcript.sink, control(), host())
+  return transcript
+}
+
 function piRows() {
   const transcript = watchedTranscript()
   const engine = new PiRpcEngine({ instanceId: 'pi:x', provider: 'x', label: 'X', capabilities: PI_RPC_CAPS, env: () => ({ env: {} }) } as unknown as PiRpcEngineOptions)
@@ -316,6 +353,15 @@ describe('a computer use call keeps nothing it typed, ran or got back', () => {
     expect(rows.get('k-type')).toMatchObject({ title: 'Type text Notes', part: { output: 'Completed' } })
     expect(saved.filter((row) => row.toolCall)[1].activity).toMatchObject({ status: 'interrupted' })
     expect(rows.get('k-bot')!.text).toBe('Stopped run script')
+  })
+
+  it('OpenCode: a call, a bot’s failed call, and use_tool without a tool, named as OpenCode names Mousse’s tools', async () => {
+    const transcript = await opencodeRows()
+    const rows = drawn(transcript.saved(), ['o-type', 'o-bot', 'o-none'])
+    expectNoSecret(transcript, rows)
+    expect(rows.get('o-type')).toMatchObject({ title: 'Type text Notes', part: { input: { tool: 'type_text', arguments: { app: 'Notes' } } } })
+    expect(rows.get('o-bot')).toMatchObject({ title: 'Run script failed' })
+    expect(rows.get('o-none')).toMatchObject({ title: 'Used a tool' })
   })
 
   it('Pi: a call, a bot’s failed call, and use_tool without a tool', () => {
