@@ -221,7 +221,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   const deactivateFile = useFileWorkspaceStore((s) => s.deactivateFile)
   const openPaths = workspace?.openPaths ?? []
   const selectedPath = workspace?.activePath ?? null
-  const { root: filesRoot, loading: filesRootLoading } = useFilesRoot()
+  const { root: filesRoot, loading: filesRootLoading, unavailable: filesRootUnavailable } = useFilesRoot()
   // A thread of another computer shows its own folder; so does an app whose main process cannot browse others yet.
   const remote = Boolean(thread?.node) || typeof window.mousse.fs.listDrives !== 'function'
   // Where the person went in this panel, per thread; a thread they never moved in follows its own folder.
@@ -983,9 +983,12 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       onOpenFile={searchHandlers.onOpenFile} onOpenLine={searchHandlers.onOpenLine} />}
     {/* Hidden, not unmounted, while results show: the tree keeps its open folders. */}
     <div className="files-browse" hidden={searchShowsResults}>
-      <FileTree key={`${navKey}|${browseRoot}`} memory={treeMemories.current.get(`${navKey}|${browseRoot}`)} filesRoot={browseRoot} listRoot={listRoot} threadId={activeThreadId}
+      {/* The lookup finished with no folder (another computer offline, a thread with none): say so, never load forever. */}
+      {!browseRoot && filesRootUnavailable && !(draftWorktree && !remote)
+        ? <div className="file-tree-empty" role="status" title={filesRootUnavailable}>The thread’s folder is unavailable.</div>
+        : <FileTree key={`${navKey}|${browseRoot}`} memory={treeMemories.current.get(`${navKey}|${browseRoot}`)} filesRoot={browseRoot} listRoot={listRoot} threadId={activeThreadId}
         selectedPath={treePathOf(selectedLocation)} refreshKey={refreshKey}
-        onSelectFile={(path) => openInPanel(joinFolder(browseRoot, path), browseRoot)} />
+        onSelectFile={(path) => openInPanel(joinFolder(browseRoot, path), browseRoot)} />}
     </div>
   </div>
 
@@ -1077,7 +1080,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
           : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selectedKey ?? selected.path} keepModel value={selected.content} readOnly={lacksWorkspaceBinding(selected)} onChange={updateContent} onSave={() => void flushPath(selectedKey)} onEditorMount={onMarkdownMount} showViewTabs={false} wordWrap={wordWrap} minimap={false} viewMode={(selectedKey && markdownViews[selectedKey]) || 'preview'} onViewModeChange={(mode) => selectedKey && setMarkdownViews((views) => ({ ...views, [selectedKey]: mode }))} aria-label={selected.path} />
           : selected && selected.kind === 'html' && selectedPreview ? <iframe className="files-asset-preview files-html-preview" srcDoc={selected.content} sandbox="" title={`HTML preview: ${selected.path}`} />
           : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} keepCurrentModel beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ readOnly: lacksWorkspaceBinding(selected), automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: false }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, ariaLabel: selected.path, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: wordWrap ? 'on' : 'off' }} /></div>
-          : !remote && projectId && !filesRoot && !filesRootLoading ? <div className="files-editor-empty">The thread’s folder is unavailable.</div>
+          : !filesRoot && !filesRootLoading && (filesRootUnavailable || (!remote && projectId)) ?<div className="files-editor-empty">The thread’s folder is unavailable.</div>
           : <DelayedLoader label={`Opening ${basename(selectedPath)}`} className="files-editor-loader" />}
       </div>}
     </div>

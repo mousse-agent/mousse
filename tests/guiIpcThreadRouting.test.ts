@@ -52,7 +52,6 @@ const request = vi.fn(async (method: string, params?: unknown): Promise<unknown>
   if (method === 'orchestrator.answerQuestions' || method === 'orchestrator.dismissQuestions') return { ok: true }
   if (method === 'pty.isAlive') return { alive: true }
   if (method === 'git.cancelOperation') return { cancelled: true }
-  if (method === 'files.root') return { root: '/remote/worktree' }
   if (method === 'workspace.getStatus') return { metadata: { branch: 'recorded', lifecycle: 'ready' }, execution: { projectPath: '/remote/worktree', branch: 'live-branch', lifecycle: 'ready' } }
   if (method === 'git.status') return { status: { isRepo: true, branch: 'project-main' } }
   if (method === 'providers.instances.setSecret') return { snapshot: { instanceId: 'pi:openai' } }
@@ -599,11 +598,10 @@ it('connects to a service without git.heads and uses its existing workspace and 
 
 it('routes a remote workspace and a Git read to the same qualified thread', async () => {
   request.mockReset()
-  expect(await invoke('app:getFilesRoot', REMOTE)).toBe('/remote/worktree')
-  await invoke('workspace:getStatus', REMOTE)
+  // The Files panel of a thread on another computer takes its folder from this lookup: that computer refuses files.root.
+  expect(await invoke('workspace:getStatus', REMOTE)).toMatchObject({ execution: { projectPath: '/remote/worktree' } })
   await invoke('git:status', { projectId: qualifyId(NODE, 'project'), workspaceThreadId: REMOTE, workspaceGeneration: 2, attempt: 5 })
   expect(calls).toEqual([
-    { method: 'files.root', params: { threadId: REMOTE } },
     { method: 'workspace.getStatus', params: { threadId: REMOTE } },
     { method: 'git.status', params: { threadId: REMOTE, workspaceGeneration: 2, attempt: 5 } }
   ])

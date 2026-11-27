@@ -15,6 +15,11 @@ interface ResolvedWorkspace {
   workspaceGeneration?: number
   /** Why the thread's own worktree cannot be read now; `path` is then null. */
   unavailable?: string
+  /**
+   * For a thread of another computer whose worktree is not made yet: the project folder that computer reads the
+   * thread's files in meanwhile (`files.list` there). The Files panel shows it; `path` stays null for the Git section.
+   */
+  filesFolder?: string
 }
 
 /** Said when a storage rule retired the thread's worktree: it comes back when the thread runs or its files are opened. */
@@ -27,7 +32,7 @@ async function resolveRoutedWorkspace(threadId: string, fresh: boolean): Promise
   try {
     const status = await window.mousse.workspace.getStatus(threadId, fresh) as {
       metadata?: { kind?: string; generation?: number; lifecycle?: string } | null
-      execution?: { projectPath?: string; generation?: number; lifecycle?: string; placement?: 'project-folder' }
+      execution?: { projectPath?: string; primaryPath?: string; generation?: number; lifecycle?: string; placement?: 'project-folder' }
       retiredByCleanup?: unknown
     }
     const { execution, metadata } = status
@@ -36,7 +41,9 @@ async function resolveRoutedWorkspace(threadId: string, fresh: boolean): Promise
     }
     const lifecycle = execution?.lifecycle ?? metadata?.lifecycle
     if (!metadata || lifecycle === 'unprovisioned' || lifecycle === 'provisioning') {
-      return { path: null, workspaceThreadId: threadId, pending: true }
+      // Named only while that computer reads the project folder itself (no worktree record yet, or one only prepared).
+      const filesFolder = execution?.lifecycle === 'unprovisioned' && execution.projectPath === execution.primaryPath ? execution.projectPath : undefined
+      return { path: null, workspaceThreadId: threadId, pending: true, ...(filesFolder ? { filesFolder } : {}) }
     }
     if (execution?.projectPath && lifecycle === 'ready') {
       return { path: execution.projectPath, workspaceThreadId: threadId, workspaceGeneration: execution.generation ?? metadata.generation }
@@ -207,26 +214,48 @@ export function useActiveProjectPath(): string | null {
   return useActiveProjectLocation().path
 }
 
-export function useFilesRoot(): { root: string; label: string; loading: boolean } {
+/** Said when a thread of another computer has no folder there (no project). */
+const NO_THREAD_FOLDER = 'This thread has no folder'
+
+/**
+ * The folder the Files panel and the terminal name for the selected thread. Empty with `unavailable` when the
+ * lookup finished without one, so a panel says why instead of loading forever.
+ */
+export function useFilesRoot(): { root: string; label: string; loading: boolean; unavailable?: string } {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const profileId = useAppStore((s) => s.profileId)
   const scope = `${profileId}:${activeThreadId ?? '__blank__'}`
-  const [resolved, setResolved] = useState<{ scope: string; root: string } | null>(null)
+  const [resolved, setResolved] = useState<{ scope: string; root: string; unavailable?: string } | null>(null)
   // Follow the daemon's Files root when a turn makes the first checkout or a later workspace change replaces it.
   const changed = useSyncExternalStore(subscribeChanges, () => activeThreadId ? changedAt.get(activeThreadId) ?? 0 : 0, noChange)
-  const turnPhase = useAppStore((s) => activeThreadId && s.threads.find((thread) => thread.id === activeThreadId)?.projectId
-    ? s.turnStates[activeThreadId]?.phase ?? null
-    : null)
+  const hasProject = useAppStore((s) => Boolean(activeThreadId && s.threads.find((thread) => thread.id === activeThreadId)?.projectId))
+  const turnPhase = useAppStore((s) => activeThreadId && hasProject ? s.turnStates[activeThreadId]?.phase ?? null : null)
 
   useEffect(() => {
     let cancelled = false
-    void window.mousse.app.getFilesRoot(activeThreadId, changed > 0 || turnPhase !== null).then((root) => {
-      if (!cancelled) setResolved({ scope, root })
-    }).catch(() => { if (!cancelled) setResolved({ scope, root: '' }) })
+    const settle = (root: string, unavailable?: string): void => {
+      if (!cancelled) setResolved({ scope, root, ...(root ? {} : { unavailable: unavailable || 'No folder' }) })
+    }
+    if (activeThreadId && isQualifiedId(activeThreadId)) {
+      // `files.root` answers a window of the thread's own computer only. A thread of another computer names its folder
+      // through the routed workspace lookup the side card shares; listing and reading go to that computer by thread.
+      void resolveShared(scope, activeThreadId, changed).then((workspace) => {
+        if (workspace.path) settle(workspace.path)
+        else if (workspace.filesFolder) settle(workspace.filesFolder)
+        // A worktree still being made: the next turn phase or worktree change looks again.
+        else if (workspace.pending && hasProject) return
+        else settle('', workspace.unavailable ?? NO_THREAD_FOLDER)
+      }, (error: unknown) => settle('', failureText(error)))
+      return () => { cancelled = true }
+    }
+    void window.mousse.app.getFilesRoot(activeThreadId, changed > 0 || turnPhase !== null).then(
+      (root) => settle(root),
+      (error: unknown) => settle('', failureText(error))
+    )
     return () => { cancelled = true }
-  }, [activeThreadId, scope, changed, turnPhase])
+  }, [activeThreadId, scope, changed, turnPhase, hasProject])
 
   const loading = resolved?.scope !== scope
   const root = loading ? '' : resolved.root
-  return { root, label: root || '~', loading }
+  return { root, label: root || '~', loading, ...(!loading && resolved.unavailable ? { unavailable: resolved.unavailable } : {}) }
 }

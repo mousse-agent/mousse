@@ -39,8 +39,13 @@ interface TerminalInstance {
 }
 
 export function ProjectTerminalPanel() {
-  const { root: terminalCwd } = useFilesRoot()
+  const { root: filesRoot } = useFilesRoot()
   const activeThreadId = useAppStore((s) => s.activeThreadId)
+  // A thread of another computer starts its terminal in its own folder there: this window names none, so the panel
+  // waits for no folder, and never offers that computer's path as a folder here.
+  const remoteThread = Boolean(activeThreadId && isQualifiedId(activeThreadId))
+  const terminalCwd = remoteThread ? '' : filesRoot
+  const ready = remoteThread || Boolean(terminalCwd)
   const mainView = useAppStore((s) => s.mainView)
   // The other computers' terminals are listed only while someone can see the list.
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
@@ -211,8 +216,9 @@ export function ProjectTerminalPanel() {
     async (tabId: string) => {
       if (spawningRef.current.has(tabId)) return
       let tab = useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)
-      let cwd = tab?.cwd || terminalCwd || undefined
-      if (!tab || !cwd) return
+      const remoteTab = Boolean(tab?.ownerThreadId && isQualifiedId(tab.ownerThreadId))
+      let cwd = remoteTab ? undefined : tab?.cwd || terminalCwd || undefined
+      if (!tab || (!cwd && !remoteTab)) return
       spawningRef.current.add(tabId)
 
       try {
@@ -278,7 +284,7 @@ export function ProjectTerminalPanel() {
       if (spawningRef.current.has(tabId) || failedRef.current.has(tabId)) return
 
       const tab = useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)
-      if (!tab || (!tab.cwd && !terminalCwd)) return
+      if (!tab || (!tab.cwd && !terminalCwd && !(tab.ownerThreadId && isQualifiedId(tab.ownerThreadId)))) return
       if (tab.ownerThreadId !== activeThreadId && tab.ownerThreadId !== null) return
 
       let isAlive = false
@@ -322,10 +328,10 @@ export function ProjectTerminalPanel() {
   )
 
   const handleAddTab = useCallback(() => {
-    if (!terminalCwd) return
+    if (!ready) return
     const tabId = addProjectTerminalTab(activeThreadId)
     void spawnShellForTab(tabId)
-  }, [addProjectTerminalTab, activeThreadId, terminalCwd, spawnShellForTab])
+  }, [addProjectTerminalTab, activeThreadId, ready, spawnShellForTab])
 
   useEffect(() => {
     const unsub = window.mousse.pty.onData(({ ptyId, data }) => {
@@ -362,13 +368,13 @@ export function ProjectTerminalPanel() {
   }, [activeTab?.id, activeThreadId, requestedActiveId, setActiveProjectTerminalTab])
 
   useEffect(() => {
-    if (mainView !== 'terminal' || !terminalCwd) return
+    if (mainView !== 'terminal' || !ready) return
     for (const tab of tabs) {
       if (tab.ownerThreadId === activeThreadId || tab.ownerThreadId === null) {
         void reconcileTabSession(tab.id)
       }
     }
-  }, [tabs, terminalCwd, mainView, activeThreadId, reconcileTabSession])
+  }, [tabs, ready, mainView, activeThreadId, reconcileTabSession])
 
   useEffect(() => {
     if (activePtyRef.current === activePtyId) return
@@ -436,12 +442,12 @@ export function ProjectTerminalPanel() {
         className={`terminal-container${visibleTabs.length === 0 ? ' terminal-container-empty' : ''}`}
         ref={containerRef}
       >
-        {!terminalCwd && (
+        {!ready && (
           <div className="terminal-empty">
             <DelayedLoader label="Loading terminal" />
           </div>
         )}
-        {activeTab?.exited && terminalCwd && (
+        {activeTab?.exited && ready && (
           <div className="terminal-exited-overlay">
             <span>Shell exited</span>
             <button
@@ -469,7 +475,7 @@ export function ProjectTerminalPanel() {
             </button>
           </div>
         )}
-        {terminalCwd && visibleTabs.length === 0 && !notice && (
+        {ready && visibleTabs.length === 0 && !notice && (
           <div className="terminal-empty">
             <p>No terminals open</p>
             <button type="button" className="btn btn-primary" onClick={handleAddTab}>
