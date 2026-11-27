@@ -6,7 +6,7 @@ import { app, BrowserWindow, nativeImage, webContents, type WebContents } from '
 import { execFileSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
-import { AppletRuntimeManager, isAppletWebviewSource, type AppletRuntimeEvent } from '../src/main/applets/AppletRuntimeManager'
+import { AppletRuntimeManager, AppletSlotsBusyError, isAppletWebviewSource, type AppletRuntimeEvent } from '../src/main/applets/AppletRuntimeManager'
 import { exportAppletHtml } from '../src/shared/appletExport'
 
 const directory = process.argv[2]!
@@ -246,7 +246,8 @@ app.whenReady().then(async () => {
       await ready(id)
       console.log(`mount-to-ready ${id}: ${Date.now() - started} ms`)
     }
-    assert.throws(() => mount('fifth', { html: '', css: '', js: '' }), /Only three/)
+    // A transcript applet waits while all three are on screen; main reports it busy, not an error to show.
+    assert.throws(() => mount('fifth', { html: '', css: '', js: '' }), AppletSlotsBusyError)
     manager.setVisible('second', false)
     await pause(10)
     manager.setVisible('third', false)
