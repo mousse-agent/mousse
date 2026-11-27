@@ -155,6 +155,20 @@
       "expiresAt": "2026-11-27T12:40:41.104Z"
     },
     {
+      "task": "t3/s3b-chain-hold-card",
+      "session": "LAPTOP-HIEROJK7-dee0b2",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "t3/s3b-chain-hold-card",
+      "paths": [
+        "src/mms/run/AgentChains.ts",
+        "src/mms/orchestrator/OrchestratorService.ts",
+        "src/renderer/chat/components/ChainHoldNotice.tsx",
+        "src/shared/bridge/routed.ts"
+      ],
+      "claimedAt": "2026-11-27T13:50:13.257Z",
+      "expiresAt": "2026-11-27T15:50:13.257Z"
+    },
+    {
       "task": "tree-corrections",
       "session": "LAPTOP-HIEROJK7-dfae29",
       "machine": "LAPTOP-HIEROJK7",
