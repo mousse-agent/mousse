@@ -75,15 +75,21 @@ export interface AgentThreadRequest {
   hidden?: boolean
 }
 
-/** `thread_create` with `computer`: a thread on another of the user's computers, in its copy of the caller's repository. */
+/**
+ * `thread_create` with `computer`: a thread on another of the user's computers, in the project of it the caller names,
+ * or in its copy of the caller's repository.
+ */
 export interface AgentRemoteThreadRequest {
   /** A computer's name or id from `list_computers`. */
   computer: string
-  /** A project of that computer, to choose among several checkouts of the repository there. */
+  /**
+   * A project of that computer (plain, or qualified as `thread_list` with computer names it). Alone, the thread starts
+   * in it with no Git match; with `fromProjectId` it chooses among that computer's checkouts of the repository.
+   */
   projectId?: string
   /**
-   * The owner's bot only, which has no project of its own: the project of this computer whose repository the thread
-   * starts in there (an agent's thread uses its own project's).
+   * A project of this computer whose repository the thread starts in there (else the caller's own project's). A bot,
+   * which has no project of its own, gives this or `projectId`.
    */
   fromProjectId?: string
   title?: string
