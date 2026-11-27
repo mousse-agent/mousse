@@ -40,9 +40,10 @@ export interface BotExecutionPort {
   stopBotWork?(activationId: string): Promise<'stopped' | 'ended' | 'not_found'>
   /**
    * A message to a bot work's row: the bots pass it to the work as its owner's note (`work_note`), never through the
-   * work thread's inbox. Returns what `work_note` returns (`noted` when the work will take it).
+   * work thread's inbox. `from`: the bot turn that sent it, so a turn its owner did not start never speaks for them;
+   * `requestKey`: a retry of the same request adds nothing. Returns what `work_note` returns (`noted`: the work takes it).
    */
-  noteBotWork?(activationId: string, text: string): string
+  noteBotWork?(activationId: string, text: string, options?: { from?: string; requestKey?: string }): string
 }
 
 /**

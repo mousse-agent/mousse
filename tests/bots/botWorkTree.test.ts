@@ -6,21 +6,24 @@
  */
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { botAuthoredNote } from '../../src/mms/bots/activation/BotEngine'
 import { botInstructions } from '../../src/mms/bots/instructions'
-import { botWorkDelegationId } from '../../src/mms/run/delegation/botWork'
+import { botWorkDelegationId, botWorkInto } from '../../src/mms/run/delegation/botWork'
 import { buildSubagentView } from '../../src/mms/run/delegation/subagentView'
 import { Inbox } from '../../src/mms/run/Inbox'
+import { getDefaultSettings } from '../../src/shared/settings'
 import { botFixture, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
 describe('a bot\'s work in the thread tree', () => {
   let f: BotFixture
   let botId: string
+  let firstActivation: string
 
   beforeEach(async () => {
     f = botFixture()
     f.host.instructions = (bot) => botInstructions(bot)
     await f.bots.reconcileOnStartup()
-    botId = (await createBot(f, { name: 'Pip', description: 'Look things up for me.', reply: 'Hello.' })).botId
+    ;({ botId, firstActivation } = await createBot(f, { name: 'Pip', description: 'Look things up for me.', reply: 'Hello.' }))
   })
   afterEach(() => f.close())
 
@@ -31,17 +34,17 @@ describe('a bot\'s work in the thread tree', () => {
     return { id: activation.id, threadId: f.store.activation(activation.id)!.threadId!, home: f.store.registry(botId)!.homeThreadId!, ...started }
   }
 
-  const projection = (activationId: string) => f.runs.delegations.get(botWorkDelegationId(activationId))
+  const projection = (job: { threadId: string }) => botWorkInto(f.runs.store, job.threadId)
   const reports = (activationId: string) => f.store.all("SELECT id FROM bot_messages WHERE activation_id = ? AND kind = 'run_report'", activationId)
   const tree = (threadId: string) => buildSubagentView({ delegations: f.runs.delegations, inbox: new Inbox(f.runs.store), store: f.runs.store, thread: (id) => ({ name: id }), hasPendingQuestion: () => false }, threadId)
 
   it('the bot\'s chat lists its running work, and the work\'s end follows bots.db', async () => {
     const job = await work('w1')
-    expect(projection(job.id)).toMatchObject({ status: 'running', parentThreadId: job.home, childThreadId: job.threadId })
+    expect(projection(job)).toMatchObject({ status: 'running', parentThreadId: job.home, childThreadId: job.threadId })
     expect(tree(job.home)).toEqual([expect.objectContaining({ childThreadId: job.threadId, state: 'working' })])
     await finish(f, job.payload, 'completed', { text: 'The second one.' })
     expect(f.store.activation(job.id)!.status).toBe('done')
-    expect(projection(job.id)).toMatchObject({ status: 'acknowledged', result: { runStatus: 'completed' } })
+    expect(projection(job)).toMatchObject({ status: 'acknowledged', result: { runStatus: 'completed' } })
     expect(tree(job.home)).toEqual([expect.objectContaining({ childThreadId: job.threadId, state: 'done' })])
   })
 
@@ -62,7 +65,7 @@ describe('a bot\'s work in the thread tree', () => {
         db.close()
       }
     })
-    expect(projection(job.id)).toMatchObject({ status: 'acknowledged', result: { runStatus: 'completed' }, parentThreadId: job.home, childThreadId: job.threadId })
+    expect(projection(job)).toMatchObject({ status: 'acknowledged', result: { runStatus: 'completed' }, parentThreadId: job.home, childThreadId: job.threadId })
     expect(reports(job.id)).toHaveLength(1)
     // Rebuilding again writes nothing new.
     const events = f.runs.store.db.statement("SELECT COUNT(*) AS n FROM thread_events WHERE type = 'delegation.status' AND thread_id = ?").get(job.home)!.n
@@ -76,7 +79,7 @@ describe('a bot\'s work in the thread tree', () => {
     expect(await f.runs.stopBotWork(job.threadId)).toBe('stopped')
     expect(f.store.activation(job.id)).toMatchObject({ status: 'cancelled', endReason: 'stopped' })
     await flush()
-    expect(projection(job.id)).toMatchObject({ status: 'cancelled', result: { runStatus: 'cancelled' } })
+    expect(projection(job)).toMatchObject({ status: 'cancelled', result: { runStatus: 'cancelled' } })
     // Ended work is no longer the port's to stop: the thread is stopped as any thread is.
     expect(await f.runs.stopBotWork(job.threadId)).toBeNull()
   })
@@ -88,5 +91,28 @@ describe('a bot\'s work in the thread tree', () => {
     expect(new Inbox(f.runs.store).listByStatus(job.threadId, 'pending')).toEqual([])
     // Not a bot work's thread: nothing is forwarded.
     expect(f.runs.noteBotWork(job.home, 'Hello.')).toBeNull()
+  })
+
+  it('a message sent from a turn its owner did not start is the bot\'s, not the owner\'s, and moves no ask-first cursor', async () => {
+    const settings = getDefaultSettings()
+    settings.experimental.botAsksFirstOff = false
+    f.host.settings = { get: () => settings, set: () => undefined } as never
+    const job = await work('w1')
+    // The bot's first message is a turn no owner's message started.
+    expect(f.runs.noteBotWork(job.threadId, 'Only cordless ones.', { from: firstActivation })).toBe('noted')
+    const notes = f.store.pendingWorkNotes(job.id)
+    expect(notes).toHaveLength(1)
+    expect(botAuthoredNote(notes[0]!.fromMessage)).toBe(true)
+    expect(f.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:action-note:${job.id}`)).toBeUndefined()
+  })
+
+  it('a retry of the same message adds no second note', async () => {
+    const job = await work('w1')
+    expect(f.runs.noteBotWork(job.threadId, 'Only cordless ones.', { requestKey: 'send-1' })).toBe('noted')
+    expect(f.runs.noteBotWork(job.threadId, 'Only cordless ones.', { requestKey: 'send-1' })).toBe('noted')
+    expect(f.store.pendingWorkNotes(job.id).map((note) => note.text)).toEqual(['Only cordless ones.'])
+    // Another request is another note.
+    expect(f.runs.noteBotWork(job.threadId, 'And quiet.', { requestKey: 'send-2' })).toBe('noted')
+    expect(f.store.pendingWorkNotes(job.id)).toHaveLength(2)
   })
 })

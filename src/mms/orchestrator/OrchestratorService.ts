@@ -4338,7 +4338,7 @@ export class OrchestratorService extends EventEmitter {
     // the work as `work_stop` does (and its thread with it). Work that has ended already, as when the bots' own Stop
     // reaches its thread, is stopped below as any thread is.
     if (reason === 'user' || reason === 'agent' || reason === 'remote') {
-      if (await this.runEngine?.stopBotWork(threadId) === 'stopped')
+      if (await this.runEngine?.stopBotWork(threadId, { runId: opts.runId, clientRequestId: opts.clientRequestId }) === 'stopped')
         return { ok: true, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
     }
     // A `/compact` the thread runs stops with it; the full history stays.

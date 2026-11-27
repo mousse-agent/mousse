@@ -1164,11 +1164,16 @@ un_time_limits). */
 
   /**
    * A Stop of a bot work's row in the thread tree (`thread_stop`) goes to the bots through the port, which stop the work
-   * as `work_stop` does; never to the projection or the work's runs directly. Null when the thread is no running work's.
+   * as `work_stop` does; never to the projection or the work's runs directly. Null when the thread is no running work's,
+   * and when `stopSubtree` would not stop anything for this request: a Stop it already answered (its receipt) or one
+   * naming a run that is not the thread's active run (an old turn of the work). The ordinary Stop then answers it.
    */
-  async stopBotWork(threadId: string): Promise<'stopped' | 'ended' | 'not_found' | 'no_port' | null> {
+  async stopBotWork(threadId: string, request: { runId?: string; clientRequestId?: string } = {}): Promise<'stopped' | 'ended' | 'not_found' | 'no_port' | null> {
     const work = this.runningBotWork(threadId)
     if (!work) return null
+    const key = request.clientRequestId ? (request.runId ? request.clientRequestId : stopReceiptKey(threadId, request.clientRequestId)) : null
+    if (key && this.store.getReceipt(key)) return null
+    if (request.runId && this.staleStopTarget(request.runId, threadId)) return null
     const port = this.botExecution
     return port?.stopBotWork ? port.stopBotWork(work.activationId) : 'no_port'
   }
@@ -1177,11 +1182,11 @@ un_time_limits). */
    * A message to a bot work's row (`thread_send`) goes to the bots through the port as the owner's note (`work_note`),
    * never into the work thread's inbox. Null when the thread is no running work's.
    */
-  noteBotWork(threadId: string, text: string): string | null {
+  noteBotWork(threadId: string, text: string, options: { from?: string; requestKey?: string } = {}): string | null {
     const work = this.runningBotWork(threadId)
     if (!work) return null
     const port = this.botExecution
-    return port?.noteBotWork ? port.noteBotWork(work.activationId, text) : 'no_port'
+    return port?.noteBotWork ? port.noteBotWork(work.activationId, text, options) : 'no_port'
   }
 
   /**

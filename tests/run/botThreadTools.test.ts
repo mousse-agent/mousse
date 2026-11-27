@@ -17,7 +17,7 @@ import { BOT_THREADS_NOT_OWNER_TEXT } from '../../src/shared/bots/personal/walls
 import { botCatalogueGroup, botCoreTool } from '../../src/shared/bots/personal/catalogue'
 import type { BotAuthority, NormalisedCall } from '../../src/shared/bots/personal/authority'
 import type { ChatMessage, Thread } from '../../src/shared/types'
-import { botWorkDelegationId, projectBotWork } from '../../src/mms/run/delegation/botWork'
+import { botWorkInto, projectBotWork } from '../../src/mms/run/delegation/botWork'
 import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -784,6 +784,6 @@ describe('a bot\'s chat reaching its work\'s row in the thread tree (thread_stop
     expect(fake.host.noteOnThread).not.toHaveBeenCalled()
     expect(engine.store.db.statement("SELECT COUNT(*) AS n FROM inbox WHERE thread_id = 'work'").get()!.n).toBe(0)
     // The projection is the bots' alone: nothing here changed it.
-    expect(engine.delegations.get(botWorkDelegationId('act-9'))!.status).toBe('running')
+    expect(botWorkInto(engine.store, 'work')!.status).toBe('running')
   })
 })

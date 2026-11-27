@@ -167,8 +167,12 @@ export class Delegations {
     })
   }
 
+  /**
+   * A bot work's projection is not a task here either (`list`): a task id naming one is unknown, so no generic path
+   * (`task_cancel`, `task_status`, acknowledging, an address) cancels or moves it. Only the bot port reaches the work.
+   */
   get(delegationId: string): DelegationRecord | null {
-    const row = this.db.statement('SELECT * FROM delegations WHERE delegation_id = ?').get(delegationId)
+    const row = this.db.statement(`SELECT * FROM delegations WHERE delegation_id = ? AND NOT ${BOT_WORK_ROW_SQL}`).get(delegationId)
     return row ? toDelegation(row) : null
   }
 
