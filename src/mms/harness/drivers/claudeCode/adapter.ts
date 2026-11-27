@@ -164,7 +164,11 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     sink.providerRef(providerRef)
     const locked = await this.lockedTurn(input, host, service)
     const cwd = locked ? locked.cwd : input.cwd ?? service.standaloneWorkspace(input.threadId)
-    let history = host.context.prepareNativeContext(input.llmProvider, input.model)?.nativeHistory ?? input.nativeHistory
+    // A turn that continues a failed one goes on in the live process that failure left, at the history the turn carries
+    // now: nothing is compacted in between, so it matches the boundary that process holds.
+    let history = input.continuesFailedRequest
+      ? input.nativeHistory
+      : host.context.prepareNativeContext(input.llmProvider, input.model)?.nativeHistory ?? input.nativeHistory
     const streams = promptStreams(sink)
     // One per turn: it follows each call by its id, so a computer use call's row stays held on every event.
     const toolRows = createRuntimeToolMapper({ aborted: () => input.signal.aborted })
@@ -333,8 +337,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       if (host.context.nativeHistoryNow) {
         const history = host.context.nativeHistoryNow()
         if (input.signal.aborted) service.commitInterrupted?.(input.threadId, history)
-        // A turn that failed leaves the same boundary: the next request continues the live process from it.
-        else service.commitFailed?.(input.threadId, history)
+        // A turn that failed leaves the same boundary: the next request continues the live process from it, and so does
+        // a turn that continues this one (`continuesFailedRequest`).
+        else if (service.commitFailed?.(input.threadId, history)) sink.sessionKept?.()
       }
       throw error
     }

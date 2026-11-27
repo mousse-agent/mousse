@@ -17,7 +17,7 @@ export const providerErrors = createErrorProvider({
   provider_unavailable: { category: 'unavailable', retryable: true, message: 'The provider is temporarily unavailable. Please try again.' },
   provider_timeout: { category: 'timeout', retryable: true, message: 'The provider response timed out. Please try again.' },
   provider_cancelled: { category: 'cancelled', retryable: false, message: 'The provider request was cancelled.' },
-  provider_retry_exhausted: { category: 'unavailable', retryable: false, message: 'The provider is still unavailable after five retries. Please try again later.' },
+  provider_retry_exhausted: { category: 'unavailable', retryable: false, message: 'The provider is still unavailable after its retries. Please try again later.' },
   provider_unknown: { category: 'internal', retryable: false, message: 'The provider request failed. Please try again or check your provider connection.' },
   provider_api_error: { category: 'unavailable', retryable: false, message: 'The provider returned an error.' }
 })

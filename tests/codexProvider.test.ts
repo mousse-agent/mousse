@@ -1665,6 +1665,33 @@ describe('CodexProviderService options (managed Codex)', () => {
     expect(failure).toMatchObject({ message: 'usage limit', httpStatus: 429, codexErrorInfo: { responseStreamFailed: { httpStatusCode: 429 } } })
   })
 
+  it('a turn that failed mid-way (#1999) keeps its Codex thread for a turn that continues it, and only for that', async () => {
+    // Recorded shape from Codex 0.162.1: `/v1/responses` answered 400 with a bare "Bad Request" envelope.
+    const envelope = JSON.stringify({ error: { message: 'Bad Request', type: null, code: null, param: null }, status: 400 }, null, 2)
+    const turns: Array<'failed' | 'completed'> = ['failed', 'completed', 'failed', 'completed']
+    const server = turnServer({
+      provider: () => MANAGED,
+      turn: () => turns.shift() === 'failed' ? { status: 'failed', error: { message: envelope, additionalDetails: null, codexErrorInfo: 'other' } } : { status: 'completed' }
+    })
+    const service = managed(server)
+    const threadOf = (message: { params?: unknown }) => (message.params as { threadId: string }).threadId
+
+    await expect(chat(service, { history: 'H1' })).rejects.toBeInstanceOf(CodexTurnFailure)
+    expect(service.failedThreadKept('t')).toBe(true)
+    // The continuation: the adapter fingerprints the history the turn carries now, and the same Codex thread goes on.
+    service.commitInterrupted('t', 'H1 + request')
+    await chat(service, { history: 'H1 + request', prompt: 'continue' })
+    expect(server.requests('thread/start')).toHaveLength(1)
+    expect(server.requests('turn/start').map(threadOf)).toEqual(['thr-1', 'thr-1'])
+    service.commitConversation('t', 'H2')
+
+    // Control: a failed turn nobody continues leaves the thread's next turn on a fresh Codex thread, as before.
+    await expect(chat(service, { history: 'H2' })).rejects.toBeInstanceOf(CodexTurnFailure)
+    await chat(service, { history: 'H2 + request' })
+    expect(server.requests('thread/start')).toHaveLength(2)
+    expect(server.requests('turn/start').map(threadOf).at(-1)).toBe('thr-2')
+  })
+
   it('a models source replaces model/list and no fallback model is listed before it', async () => {
     const server = turnServer({ provider: () => MANAGED })
     const service = managed(server, { models: { list: async () => [{ id: 'gpt-5', label: 'GPT-5' }] } })

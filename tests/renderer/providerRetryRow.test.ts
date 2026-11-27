@@ -41,9 +41,9 @@ const text = () => host.textContent?.replace(/\s+/g, ' ') ?? ''
 
 describe('the provider retry row', () => {
   it('counts the retries while they run', () => {
-    show([prompt, { id: 'r1', role: 'assistant', kind: 'provider_retry', content: 'Provider error · retrying 3/10', streaming: true, timestamp: later(1_000),
+    show([prompt, { id: 'r1', role: 'assistant', kind: 'provider_retry', content: 'Retrying provider… (3/10)', streaming: true, timestamp: later(1_000),
       providerRetry: { status: 'retrying', attempt: 3, maxAttempts: 10, cause: 'connection error' } }], 'thinking')
-    expect(text()).toContain('Provider error · retrying 3/10')
+    expect(text()).toContain('Retrying provider… (3/10)')
     expect(host.querySelector('[title="Last failure: connection error"]')).not.toBeNull()
   })
 

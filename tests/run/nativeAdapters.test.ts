@@ -410,6 +410,22 @@ describe('ClaudeSubscriptionAdapter', () => {
       expect(client.commitFailed).toHaveBeenCalledExactlyOnceWith('thread-1', 'history')
     })
 
+    it('says the session is kept only when the live process holds the failed turn, and a continuation carries the history as it is', async () => {
+      const seen: Array<string | undefined> = []
+      for (const holds of [true, false]) {
+        const client = { ...claudeClient(async (chatInput) => { seen.push(chatInput.history); throw new Error('boom') }), commitInterrupted: vi.fn(), commitFailed: vi.fn(() => holds) }
+        const kept = vi.fn()
+        await expect(
+          new ClaudeSubscriptionAdapter(() => client).startTurn(input({ nativeHistory: 'H1' }), { ...recordingSink(), sessionKept: kept }, control(), host({ nativeHistoryNow: () => 'H1 + request', prepareNativeContext: () => ({ messages: [], nativeHistory: 'compacted' }) }))
+        ).rejects.toThrow('boom')
+        expect(kept).toHaveBeenCalledTimes(holds ? 1 : 0)
+      }
+      const client = { ...claudeClient(async (chatInput) => { seen.push(chatInput.history); return 'done' }), commitFailed: vi.fn(() => false) }
+      await new ClaudeSubscriptionAdapter(() => client).startTurn(input({ nativeHistory: 'H1 + request', continuesFailedRequest: true }), recordingSink(), control(), host({ prepareNativeContext: () => ({ messages: [], nativeHistory: 'compacted' }) }))
+      // An ordinary turn may compact first; a continuation goes on at the boundary the live process holds.
+      expect(seen).toEqual(['compacted', 'compacted', 'H1 + request'])
+    })
+
     it('cannot fingerprint without the host\'s history or the service\'s support, and still rethrows the stop', async () => {
       const { stop, client } = stopped()
       await expect(

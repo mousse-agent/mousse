@@ -1366,7 +1366,7 @@ export class CodexProviderService {
   private readonly oneShots = new Map<string, (notification: CodexNotification) => void>()
   private readonly controllers = new Set<AbortController>()
   private readonly readyToCommit = new Set<string>()
-  /** Threads whose last turn was stopped or ended on a usage limit after its Codex thread was opened, by that Codex thread id (`commitInterrupted`). */
+  /** Threads whose last turn ended unfinished (stopped, a usage limit, a failure) after its Codex thread was opened, by that Codex thread id (`commitInterrupted`). */
   private readonly interruptedThreads = new Map<string, string>()
   /** Mousse MCP tokens handed to Codex; never echoed into errors or status messages. */
   private readonly secrets = new Set<string>()
@@ -2928,6 +2928,15 @@ export class CodexProviderService {
     this.save()
   }
 
+  /**
+   * Whether the thread's last turn failed after its Codex thread was opened, and that thread is still the one the thread
+   * keeps: a turn that continues the failed one resumes it once the adapter fingerprints it (`commitInterrupted`).
+   */
+  failedThreadKept(threadId: string): boolean {
+    const codexThreadId = this.interruptedThreads.get(threadId)
+    return codexThreadId !== undefined && this.settings.threads?.[threadId]?.codexThreadId === codexThreadId
+  }
+
   /** Interrupts the running turn on `codexThreadId`, if any. */
   async interrupt(codexThreadId: string | undefined): Promise<'interrupted' | 'not_active'> {
     const run = codexThreadId ? this.turns.get(codexThreadId) : undefined
@@ -3931,8 +3940,10 @@ export class CodexProviderService {
       if (run) void this.startSweep(run)
       run?.closeTools('stop')
       const stopped = signal.aborted && input.signal?.aborted
-      // The thread exists on the server: the adapter may fingerprint it (`commitInterrupted`).
-      if ((stopped || readUsageLimit(error)) && run && scope === this.scope) this.interruptedThreads.set(input.threadId, run.codexThreadId)
+      // The thread exists on the server and holds the turn up to where it ended: the adapter may fingerprint it
+      // (`commitInterrupted`): after a stop or a usage limit, or for a turn that continues a failed one
+      // (`failedThreadKept`).
+      if (run && scope === this.scope) this.interruptedThreads.set(input.threadId, run.codexThreadId)
       if (stopped) throw input.signal?.reason ?? error
       throw error
     } finally {
