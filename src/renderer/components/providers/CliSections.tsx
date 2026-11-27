@@ -201,6 +201,12 @@ export function SetupRow({
         {below}
       </SettingsRow>
       {snapshot.settingsNotice && <OlderSettingsRow notice={snapshot.settingsNotice} actions={actions} />}
+      {snapshot.toolControlReason && (
+        <SettingsRow
+          title="Permissions"
+          description={<span className="prov-warning-text" title={snapshot.toolControlReason} data-testid="prov-tool-control">Full access only</span>}
+        />
+      )}
     </>
   )
 }

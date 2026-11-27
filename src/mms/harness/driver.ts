@@ -1,7 +1,7 @@
 import { accessSync, constants, realpathSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { AuthState, CredentialKind, InstallOwner, PromptCacheHour } from '../../shared/harness/status'
-import type { AddOptionMethod, CustomModel, HarnessCaps, HarnessDriverKind, InstanceConfigPatch, RemoveInstallResult, RuntimeFacts, TelemetrySetting } from '../../shared/harness/types'
+import type { AddOptionMethod, CustomModel, HarnessCaps, HarnessDriverKind, InstanceConfigPatch, RemoveInstallResult, RuntimeFacts, TelemetrySetting, BinaryFingerprint } from '../../shared/harness/types'
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { PermissionLimits } from '../../shared/permissionMode'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult, ProviderUsage, UseLimitResetResponse } from '../../shared/providerAuth'
@@ -450,6 +450,13 @@ export interface DriverRuntime {
    * Recheck and after install, never on the periodic probe. Throws when the runtime cannot start.
    */
   handshake?(signal: AbortSignal): Promise<void>
+  /**
+   * A check of the entry finished and found this executable version (absent when it read none), at this fingerprint.
+   * Work it starts runs in the background, never on the check's own path (Grok's held check on a version it has no
+   * record for); `soon` is a check a person asked for (Add, Check again, an install), else the work waits a while.
+   * Checks Mousse makes for its own model listings do not report here.
+   */
+  probed?(installedVersion: string | undefined, info: { fingerprint?: BinaryFingerprint; soon: boolean }): void
   /** A runtime with live processes per thread reports to `host` (null detaches it). */
   setLiveHost?(host: LiveProcessHost | null): void
   /** The turn the thread's live process started itself and is running now, if any. */
@@ -520,6 +527,22 @@ export interface HarnessDriver {
    * chats. Without it, its runtimes run turns only (absent = false).
    */
   readonly oneShot?: boolean
+  /**
+   * Why this entry's one-shots cannot run now, for a driver whose one-shot route is proven per version and platform
+   * (Grok): undefined when they can. A driver that has it proves its route itself, so its one-shots do not also need
+   * turns Mousse controls (`purposeAllowed`). Absent: `oneShot` decides alone.
+   */
+  oneShotRefusal?(config: InstanceConfig, installedVersion: string | undefined, instanceId: string): string | undefined
+  /**
+   * Why the entry's tool control is less than its driver can reach, in words for the user (Grok: its held launch is not
+   * proven for this version). The card and every refusal of a mode or purpose the entry cannot hold say it.
+   */
+  toolControlReason?(config: InstanceConfig, installedVersion: string | undefined, instanceId: string): string | undefined
+  /**
+   * Its caps are proven for one executable (Grok's held check): every admission stats the executable again, and one that
+   * changed since its last check is refused until it is checked again, as a known-broken version's is.
+   */
+  readonly binaryBoundCaps?: boolean
   /** How the driver's instances sign in, for display. */
   readonly methodLabel?: string
   /**

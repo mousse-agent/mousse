@@ -219,6 +219,8 @@ export interface InstanceSnapshot {
   update?: UpdateAffordance
   binary?: InstanceBinary
   caps: HarnessCaps
+  /** Why the entry controls fewer tools than its agent can, when it does (Grok: its held launch is not proven yet). */
+  toolControlReason?: string
   /**
    * What limits the permission modes the instance can enforce right now (Claude: the user's
    * settings forbid bypassing permissions). Read on every snapshot; absent when nothing does.
