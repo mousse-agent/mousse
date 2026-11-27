@@ -37,6 +37,20 @@
       "expiresAt": "2026-11-26T17:29:52.364Z"
     },
     {
+      "task": "grok-held-launch",
+      "session": "Animatrix-72e6d9",
+      "machine": "Animatrix",
+      "branch": "grok-held-launch",
+      "paths": [
+        "src/mms/harness/grok",
+        "src/mms/harness/drivers/grok.ts",
+        "src/mms/harness/acp",
+        "src/mms/harness/gateway.ts"
+      ],
+      "claimedAt": "2026-11-27T06:36:43.465Z",
+      "expiresAt": "2026-11-27T08:36:43.465Z"
+    },
+    {
       "task": "lan-first-paths",
       "session": "Avarnics-Mac-mini.local-8600b4",
       "machine": "Avarnics-Mac-mini.local",
