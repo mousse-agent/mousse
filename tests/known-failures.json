@@ -3,5 +3,6 @@
   { "file": "tests/run/profileDatabase.test.ts", "test": "refuses a symlinked run directory", "issue": 1964, "how": "creating the symlink fails with EPERM without Developer Mode", "platform": "win32" },
   { "file": "tests/net/bridge/routed/threadToolsRemote.test.ts", "test": "kept while that computer is offline, it is sent by the restarted daemon once that computer answers", "issue": 1965, "how": "intermittent: the archive is still pending, not sent" },
   { "file": "tests/docs/setupMatrix.test.ts", "issue": 1966, "how": "the file does not load: SyntaxError: Invalid or unexpected token" },
-  { "file": "tests/net/bridge/routed/remoteSubagents.test.ts", "issue": 1967, "how": "intermittent: all tests pass, then the cleanup hook times out" }
+  { "file": "tests/net/bridge/routed/remoteSubagents.test.ts", "issue": 1967, "how": "intermittent: all tests pass, then the cleanup hook times out" },
+  { "file": "tests/threadRuntimeProtocol.test.ts", "test": "PTY output is replayable from the sequence and scrollback after client disconnect", "issue": 1975, "how": "the replayed output holds only ConPTY's mode switches, not 'replay-marker-1'", "platform": "win32" }
 ]

@@ -107,7 +107,8 @@ export interface ApprovalContext {
 }
 
 export type SettleResult =
-  | { ok: true; decision?: 'allow' | 'reject' }
+  /** `fenced`: the answer allowed an action a correction overtook; it settled as a rejection and the action did not run. */
+  | { ok: true; decision?: 'allow' | 'reject'; fenced?: true }
   | {
       ok: false
       reason: 'unknown' | 'answerer_required' | 'already_answered' | 'cancelled' | ApprovalRefusal
@@ -499,7 +500,7 @@ export class UserQuestionService extends EventEmitter {
     // Without a worker nothing would run the `request.respond` effect: deliver here.
     if (outcome.record.answerPath === 'live' && !binding.effectDelivery()) this.deliver(requestId)
     if (outcome.continuationDue && options.continuation !== false) binding.continuationDue(outcome.continuationDue, answeredBy)
-    return { ok: true, decision: outcome.decision }
+    return { ok: true, decision: outcome.decision, ...(outcome.fenced ? { fenced: true as const } : {}) }
   }
 
   /** `settle` for callers that only need to know whether the request was settled. */
@@ -516,7 +517,8 @@ export class UserQuestionService extends EventEmitter {
     const waiter = this.settledWaiters.get(requestId)
     if (!waiter) return false
     this.settledWaiters.delete(requestId)
-    const row = this.binding?.store.get(requestId) ?? null
+    // Checked again right before dispatch: a correction that arrived since the answer fences an allow.
+    const row = this.binding?.store.fenceBeforeDispatch(requestId) ?? null
     if (!row || row.status !== 'answered') {
       waiter.reject(new Error(cancelMessage(row?.cancelReason ?? 'withdrawn')))
       return false
@@ -651,9 +653,20 @@ export class UserQuestionService extends EventEmitter {
         ...(record.reason ? { reason: record.reason } : {}),
         answerPath: record.answerPath,
         ...(record.uncertain ? { uncertain: true, uncertainTools: record.uncertainTools ?? [] } : {}),
-        ...(progress ? { answered: progress.answered, total: progress.total } : {})
+        ...(progress ? { answered: progress.answered, total: progress.total } : {}),
+        ...(record.status === 'pending' && this.binding?.store.fencedBy(record) ? { correctionArrived: true as const } : {})
       },
       ...this.helperOf(record.requestId)
+    }
+  }
+
+  /**
+   * A correction reached these threads (`OrchestratorService.correctSubagents`): the cards of the requests it fenced are
+   * shown again, marked "correction arrived". `updated` is for clients only; it asks nobody anything new.
+   */
+  correctionArrived(threadIds: readonly string[]): void {
+    for (const threadId of new Set(threadIds)) {
+      for (const view of this.savedPending(threadId)) if (view.approval?.correctionArrived) this.emit('updated', view)
     }
   }
 

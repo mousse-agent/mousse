@@ -5274,7 +5274,7 @@ export class OrchestratorService extends EventEmitter {
     const settled = this.questions.settle(requestId, answers, answerer)
     if (settled.ok) {
       this.showApprovalAnswer(threadId, actor, settled.decision ?? 'reject', requestId, answers, supervising?.name)
-      return { ok: true, decision: settled.decision ?? 'reject', replayed: false }
+      return { ok: true, decision: settled.decision ?? 'reject', replayed: false, ...(settled.fenced ? { fenced: true as const } : {}) }
     }
     switch (settled.reason) {
       case 'already_answered': {
@@ -6298,6 +6298,8 @@ export class OrchestratorService extends EventEmitter {
       },
       waitsOnPerson: (id) => this.questions.listPendingForThread(id).length > 0 || engine.approvals.listPending(id).length > 0
     })
+    // The approvals it fenced show "correction arrived" (§2.5).
+    this.questions.correctionArrived(revision.deliveries.map((entry) => entry.threadId))
     return revision
   }
 
@@ -9675,7 +9677,8 @@ export class OrchestratorService extends EventEmitter {
     }
     // As in the GUI: the model gets the answers as the tool result; the transcript shows what was said.
     this.recordQuestionResponseMessage(target.childThreadId, formatQuestionAnswersMessage(pending.questions, input.answers), describeQuestionAnswers(pending.questions, input.answers))
-    return { answered: true as const, subagent: target.title, childThreadId: target.childThreadId, requestId: input.requestId }
+    // A correction reached the subagent after it asked: the allow released nothing, and it asks again if still needed.
+    return { answered: true as const, subagent: target.title, childThreadId: target.childThreadId, requestId: input.requestId, ...(settled.fenced ? { outcome: 'fenced' as const } : {}) }
   }
 
   private ownedDelegation(parentThreadId: string, delegationId: string): DelegationRecord {
