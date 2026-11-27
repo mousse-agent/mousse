@@ -46,7 +46,7 @@ const TURN: PiTurnResponse = {
   sessionInstructions: 'Use Mousse tools.',
   tools: [
     { name: 'delegate_task', description: 'd', parameters: { type: 'object', properties: {} }, class: 'delegation' },
-    { name: 'ask_user', description: 'a', parameters: { type: 'object', properties: {} }, class: 'read' }
+    { name: 'question_ask', description: 'a', parameters: { type: 'object', properties: {} }, class: 'read' }
   ],
   activeBuiltins: ['read', 'grep'],
   mcp: { url: 'http://127.0.0.1:1/mcp', token: 'bearer' },
@@ -139,8 +139,8 @@ describe('Mousse’s Pi extension', () => {
     expect(result.systemPrompt).toBe('base\n\nUse Mousse tools.')
     // Off Windows the contained `bash` tool is registered at load, before any turn's tools.
     const shell = process.platform === 'win32' ? [] : [['bash', undefined]]
-    expect(tools.map((tool) => [tool.name, tool.executionMode])).toEqual([...shell, ['delegate_task', 'sequential'], ['ask_user', undefined]])
-    expect(active.at(-1)).toEqual(['read', 'grep', 'delegate_task', 'ask_user'])
+    expect(tools.map((tool) => [tool.name, tool.executionMode])).toEqual([...shell, ['delegate_task', 'sequential'], ['question_ask', undefined]])
+    expect(active.at(-1)).toEqual(['read', 'grep', 'delegate_task', 'question_ask'])
   })
 
   it('asks the gate for every call with the attempt token, blocks a denial, and blocks when the gate is down', async () => {

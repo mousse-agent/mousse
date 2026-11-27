@@ -369,7 +369,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
         }
         const run = d.engine.getActiveRun(w.other.id)!
         seen.first = parse(await call(mcp!, 'thread_interrupt', { threadId: w.other.id, runId: run.runId, clientRequestId: 'stop-1' }))
-        seen.again = parse(await call(mcp!, 'thread_interrupt', { threadId: w.other.id, runId: run.runId, clientRequestId: 'stop-1' }))
+        seen.again = parse(await call(mcp!, 'thread_stop', { threadId: w.other.id, runId: run.runId, clientRequestId: 'stop-1' }))
         return 'ok'
       })
       await w.attach()
@@ -387,8 +387,8 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(w.messages(w.other.id).filter((message) => message.role === 'system' && message.content.startsWith('Changed by an agent')).map((message) => message.content)).toEqual([
         `Changed by an agent in thread «Parent» (${w.parent.id}): stopped run ${run.runId}`
       ])
-      // Both calls are in the caller's ledger; only the first stopped anything.
-      expect(w.d.engine.tools.listForRun(w.latestRun(w.parent.id).runId).filter((entry) => entry.tool === 'thread_interrupt')).toHaveLength(2)
+      // Both calls are in the caller's ledger under the new name; the old name and the new one are one request, so only the first stopped anything.
+      expect(w.d.engine.tools.listForRun(w.latestRun(w.parent.id).runId).filter((entry) => entry.tool === 'thread_stop')).toHaveLength(2)
     })
 
     it('a run that ended, with another one active now, is a conflict that names the active run, and the active run is untouched', async () => {
@@ -1255,7 +1255,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       const seen: Record<string, unknown> = {}
       const w = world(async (input, mcp) => {
         if (isChild(w, input.threadId)) {
-          const answer = JSON.parse((await call(mcp!, 'ask_user', { questions: [{ id: 'which', prompt: 'A or B?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] })).result!.content![0].text) as Record<string, unknown>
+          const answer = JSON.parse((await call(mcp!, 'question_ask', { questions: [{ id: 'which', prompt: 'A or B?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] })).result!.content![0].text) as Record<string, unknown>
           return `picked ${String(answer.which)}`
         }
         const child = parse(await call(mcp!, 'delegate_task', { prompt: 'Pick one', title: 'Asker', workspace: 'shared', role: 'research', instanceId: 'claude' })) as { childRunId: string; childThreadId: string }

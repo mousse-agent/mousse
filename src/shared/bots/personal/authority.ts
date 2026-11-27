@@ -269,7 +269,7 @@ export interface BotAuthority {
    */
   spend: SpendScope | null
   /**
-   * The `escalate` app tool (6c-2): the bot asks its owner for a permission it lacks. The dispatch
+   * The `permission_ask` app tool (6c-2): the bot asks its owner for a permission it lacks. The dispatch
    * ends at the wall; the text is what the call returns. Absent: the turn cannot escalate.
    */
   escalate?(request: { permission: unknown; reason: string; toolCallId?: string }): string

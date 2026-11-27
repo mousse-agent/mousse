@@ -23,7 +23,7 @@ const BUDGET_KEYS = ['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTok
  * so they are not permissions: every bot has them, they never raise an ask, and About never lists them.
  */
 export const BOT_OWN_APP_TOOLS: readonly string[] = [
-  'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'set_profile', 'set_depth', 'use_model', 'escalate', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS,
+  'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'set_profile', 'set_depth', 'use_model', 'permission_ask', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS,
   // An automation run's report on its own run (the Automations inbox); only a scheduled run has one to give.
   'run_report'
 ]
@@ -98,21 +98,21 @@ export const BOT_IMAGE_TOOL = 'make_image'
 export const BOT_APPLET_TOOL = 'publish_applet'
 
 /**
- * Asking the owner a question with answers to tap (`ask_owner`, issue #1123). It grants nothing (a "Yes" allows no
- * permission: that is `escalate`), so like memory it is always on and never grantable. Offered to a chat turn and to work
+ * Asking the owner a question with answers to tap (`question_ask`, issue #1123). It grants nothing (a "Yes" allows no
+ * permission: that is `permission_ask`), so like memory it is always on and never grantable. Offered to a chat turn and to work
  * the owner asked for (`work_start`, a reminder's work), which waits for the answer; scheduled runs, consults and
  * subagents never get it.
  */
-export const BOT_QUESTION_TOOL = 'ask_owner'
+export const BOT_QUESTION_TOOL = 'question_ask'
 
 /**
  * Passing on to work an answer the owner gave in the chat to the question it waits on (`question_answer`, issue #1123).
- * A chat turn their own message started gets it with `ask_owner`; it grants nothing either.
+ * A chat turn their own message started gets it with `question_ask`; it grants nothing either.
  */
 export const BOT_QUESTION_ANSWER_TOOL = 'question_answer'
 
 /**
- * Taking back a question the bot asked and no longer needs (`question_withdraw`, issue #1446). Held with `ask_owner`,
+ * Taking back a question the bot asked and no longer needs (`question_withdraw`, issue #1446). Held with `question_ask`,
  * wherever a turn may ask; it grants nothing either.
  */
 export const BOT_QUESTION_WITHDRAW_TOOL = 'question_withdraw'
@@ -199,7 +199,7 @@ export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_
  * another bot's message started does not.
  */
 export const BOT_THREAD_ACT_TOOLS: readonly string[] = [
-  'thread_create', 'thread_send', 'thread_interrupt', 'thread_archive', 'thread_hide', 'thread_update', 'thread_steer', 'thread_fork', 'thread_merge_back',
+  'thread_create', 'thread_send', 'thread_stop', 'thread_archive', 'thread_update', 'thread_fork', 'thread_return',
   'queue_enqueue', 'queue_update', 'approval_respond'
 ]
 
@@ -367,7 +367,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   BOT_CARD_TOOL,
   BOT_REPORT_BUG_TOOL,
   ...BOT_MESSAGE_TOOLS,
-  'skill_list', 'skill_load', 'escalate', 'consult',
+  'skill_list', 'skill_load', 'permission_ask', 'consult',
   // The tool catalogue (docs/plans/bot-context.md §15): looking up a group, and calling its tools on Codex and Pi.
   BOT_CATALOGUE_TOOL, BOT_USE_TOOL
 ])
@@ -420,7 +420,7 @@ export function botGrantTool(name: string): string {
 
 /** Whether `tool` is one of the bot's own tools: not a permission, never listed in About. */
 export function isOwnBotAppTool(tool: string): boolean {
-  return OWN_APP_TOOLS.has(tool)
+  return OWN_APP_TOOLS.has(canonicalToolName(tool))
 }
 
 /**
@@ -571,8 +571,9 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
   const given = withFullTrust(granted)
   const tools = new Set(given.tools)
   for (const tool of wanted.tools) if (!tools.has(tool)) lines.push(toolLine(tool))
-  const appTools = new Set(given.appTools)
-  for (const tool of wanted.appTools) if (!appTools.has(tool) && !BOT_RETIRED_APP_TOOLS.has(tool)) lines.push(appToolLine(tool))
+  // Under the names tools have now: a grant stored under an old name holds its new one (`canonicalToolName`).
+  const appTools = new Set(given.appTools.map(canonicalToolName))
+  for (const tool of wanted.appTools) if (!appTools.has(canonicalToolName(tool)) && !BOT_RETIRED_APP_TOOLS.has(tool)) lines.push(appToolLine(tool))
   const mcp = new Set(granted.mcp.map(mcpIdentity))
   for (const pair of wanted.mcp) if (!mcp.has(mcpIdentity(pair))) lines.push(mcpLine(pair))
   // A tool the grant holds as asking first, wanted without asking: a looser hold is more, as a new tool is.

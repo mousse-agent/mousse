@@ -21,10 +21,10 @@ const OPENCODE_TOOL = /^mousse_[0-9a-f]{12}_(?:relay_([A-Za-z0-9_]+)|([a-z][a-z0
 
 /**
  * Which server Mousse serves a call's tool name belongs to, and the tool's own name there, however the runtime names
- * an MCP call: `mcp__mousse__ask_user` (Claude, Codex, Cursor), `mcp_mousse_ask_user` (Antigravity),
- * `mousse_<12 hex>_ask_user` (OpenCode, see `OPENCODE_TOOL`), and the forms
- * some ACP agents use, `mousse__ask_user`, `mousse.ask_user`, `mousse/ask_user`, `mousse: ask_user` or
- * `ask_user (mousse MCP Server)`. The server's name is matched exactly (lower case, as Mousse names it). A Mousse
+ * an MCP call: `mcp__mousse__question_ask` (Claude, Codex, Cursor), `mcp_mousse_question_ask` (Antigravity),
+ * `mousse_<12 hex>_question_ask` (OpenCode, see `OPENCODE_TOOL`), and the forms
+ * some ACP agents use, `mousse__question_ask`, `mousse.question_ask`, `mousse/question_ask`, `mousse: question_ask` or
+ * `question_ask (mousse MCP Server)`. The server's name is matched exactly (lower case, as Mousse names it). A Mousse
  * tool's name must be snake case, as Mousse's tools are, so a title such as `Mousse.md` is no Mousse call; a relayed
  * tool's may be any of letters, digits and `_`, as the relay names it (`github__createIssue`). `exact`: the
  * `mcp__<server>__`, `mcp_<server>_` or OpenCode form, which only an MCP call has.

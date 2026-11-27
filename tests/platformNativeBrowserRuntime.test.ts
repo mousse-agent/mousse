@@ -98,7 +98,7 @@ function recordingPort(
 function browserSnapshot() {
   const snapshot = resolvedDefinition()
   snapshot.settings.browser.mode = 'structured'
-  grantTools(snapshot, ['browser_open', 'browser_observe', 'browser_act', 'ask_user', 'read'])
+  grantTools(snapshot, ['browser_open', 'browser_observe', 'browser_act', 'question_ask', 'read'])
   return snapshot
 }
 
@@ -258,7 +258,7 @@ describe('definition browser runtime binding', () => {
       'browser_open',
       'browser_observe',
       'browser_act',
-      'ask_user'
+      'question_ask'
     ]))
     const openResult = JSON.stringify(captured[1]!.messages)
     expect(openResult).toContain('obs-1')
@@ -289,7 +289,7 @@ describe('definition browser runtime binding', () => {
   it('does not advertise or dispatch browser tools when settings keep browser disabled', async () => {
     const snapshot = resolvedDefinition()
     snapshot.settings.browser.mode = 'disabled'
-    grantTools(snapshot, ['browser_open', 'ask_user', 'read'])
+    grantTools(snapshot, ['browser_open', 'question_ask', 'read'])
     const recorded = recordingPort([{ observation: observation() }])
     const { captured, pending } = runDefinition(snapshot, [
       providerResponse([{ type: 'text', text: 'no browser' }], 'stop')
@@ -305,7 +305,7 @@ describe('definition browser runtime binding', () => {
   it('advertises only the browser tools granted by the admitted definition', async () => {
     const snapshot = resolvedDefinition()
     snapshot.settings.browser.mode = 'structured'
-    grantTools(snapshot, ['browser_open', 'ask_user'])
+    grantTools(snapshot, ['browser_open', 'question_ask'])
     const { result, captured } = await runBrowserNative({
       snapshot,
       outputs: [providerResponse([{ type: 'text', text: 'ready' }], 'stop')]

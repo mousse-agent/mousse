@@ -12,7 +12,7 @@ import { archivedAtOf } from '../../shared/archivedAt'
 
 /**
  * The thread tools on a thread of another of the user's computers (issue #1160): `thread_read`, `thread_wait`,
- * `thread_send`, `thread_steer`, `thread_interrupt` and `thread_archive` with a qualified id (`<node>:<id>`), `thread_list` and
+ * `thread_send`, `thread_stop` and `thread_archive` with a qualified id (`<node>:<id>`), `thread_list` and
  * `thread_search` with `computer`, and the Stop a person's Stop (or the deletion or expiry) of a launcher sends there.
  *
  * - **Which threads.** `reach` is the one place that decides. A thread `remote_launches` records as launched by the
@@ -551,7 +551,7 @@ export class RemoteLaunchedThreads {
     }
   }
 
-  /** `thread_steer`: a marked `orchestrator.steer` there. What the owner refuses is thrown with its code. */
+  /** A note (`thread_send` intent note): a marked `orchestrator.steer` there. What the owner refuses is thrown with its code. */
   async steer(target: RemoteTarget, runId: string, text: string, options: { clientRequestId: string; mark: RoutedAgentMark }): Promise<{ status: 'accepted'; runId: string } | { status: 'ignored'; reason: string; runId?: string } | RemoteUncertain> {
     this.assertAllowed(target)
     let result: unknown
@@ -566,7 +566,7 @@ export class RemoteLaunchedThreads {
     } catch (error) {
       const code = codeOf(error)
       if (code === 'outcome_uncertain' || code === 'cancelled')
-        return { status: 'uncertain', computer: target.computer, message: `${target.computer} has not confirmed the steer. Call thread_steer again with the same clientRequestId to learn what became of it; it is never sent twice.` }
+        return { status: 'uncertain', computer: target.computer, message: `${target.computer} has not confirmed the steer. Call thread_send again with the same clientRequestId to learn what became of it; it is never sent twice.` }
       if (code === 'run_not_found') return { status: 'ignored', reason: 'run_not_found', runId }
       // A refusal of that computer about the run or the thread (a looser run, a question waiting) keeps its own code and details.
       if (error instanceof DomainRpcError && !UNREACHED.has(code) && !['computer_forbidden', 'computer_outdated', 'agent_reach', 'thread_not_found', 'deadline_exceeded', 'bridge_off'].includes(code))
@@ -579,7 +579,7 @@ export class RemoteLaunchedThreads {
   }
 
   /**
-   * `thread_interrupt`: a marked `orchestrator.abort` there. That computer stops the run only when an agent of this
+   * `thread_stop`: a marked `orchestrator.abort` there. That computer stops the run only when an agent of this
    * computer started it; a thread a person took over is left as it is, and the answer says so.
    */
   async interrupt(target: RemoteTarget, runId: string | undefined, options: { clientRequestId: string; mark: RoutedAgentMark }): Promise<{ status: 'stopped' | 'left'; runId?: string; left?: string } | RemoteUncertain> {
@@ -597,7 +597,7 @@ export class RemoteLaunchedThreads {
     } catch (error) {
       const code = codeOf(error)
       if (code === 'outcome_uncertain' || code === 'cancelled')
-        return { status: 'uncertain', computer: target.computer, message: `${target.computer} has not confirmed the Stop. Call thread_interrupt again with the same clientRequestId to learn what became of it.` }
+        return { status: 'uncertain', computer: target.computer, message: `${target.computer} has not confirmed the Stop. Call thread_stop again with the same clientRequestId to learn what became of it.` }
       if (code === 'run_not_found') return { status: 'left', left: 'run_not_active', ...(runId ? { runId } : {}) }
       throw remoteReachRefusal(error, target.computer, 'the Stop')
     }
@@ -640,7 +640,7 @@ export class RemoteLaunchedThreads {
       if (code === 'outcome_uncertain' || code === 'cancelled')
         return { status: 'uncertain', computer: target.computer, message: `${target.computer} has not confirmed ${what} of ${target.threadId}, so nothing was changed here. Call thread_archive again with the same clientRequestId to learn what became of it; it never acts twice there.` }
       if (code === 'thread_running')
-        throw new RemoteThreadRefusal('thread_running', `Thread ${target.threadId} on ${target.computer} is still working, so it was not archived there or here. If the user wants it archived anyway, stop it first with thread_interrupt, then archive it with a new clientRequestId (that computer keeps this answer under the old one).`, target.computer)
+        throw new RemoteThreadRefusal('thread_running', `Thread ${target.threadId} on ${target.computer} is still working, so it was not archived there or here. If the user wants it archived anyway, stop it first with thread_stop, then archive it with a new clientRequestId (that computer keeps this answer under the old one).`, target.computer)
       throw remoteReachRefusal(error, target.computer, what)
     }
     const done = isRecord(result) ? result : {}

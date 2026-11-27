@@ -67,7 +67,7 @@ export class MmsAgentExecutionService {
   /**
    * The questions a connection's running Try Runs of a definition wait on. Their thread is a hidden
    * "Try Agent" thread, so the Try Run panel shows them (a shell command's approval where the shell is
-   * not contained, an `ask_user`, an approval under `always`).
+   * not contained, an `question_ask`, an approval under `always`).
    */
   pending(input: { definitionId: string; connectionId: string }): DefinitionTryRunPending {
     const runs: DefinitionTryRunPending['runs'] = []

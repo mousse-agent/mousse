@@ -261,7 +261,7 @@ describe('activation and dispatch', () => {
     // A run's request ends with what its last message is for (bot-context.md §5.2).
     expect(prepared.prompt).toBe(` /deploy now\n\n${BOT_RUN_REPORT_LINE}`)
     expect(prepared.instructions).toBe('You keep the site tidy.\n\nAnswer briefly.')
-    expect(prepared.policy).toMatchObject({ approvals: 'grants', approve: 'host', tools: { allow: ['escalate', 'find', 'grep', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'report_bug', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'model_list', 'remind', 'watch_start', ...EVERY_BOT_WORK].sort() }, budget: { maxTurns: 30, maxWallMs: BOT_TURN_WINDOW_MS }, authority: { kind: 'bot' } })
+    expect(prepared.policy).toMatchObject({ approvals: 'grants', approve: 'host', tools: { allow: ['permission_ask', 'find', 'grep', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'report_bug', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'model_list', 'remind', 'watch_start', ...EVERY_BOT_WORK].sort() }, budget: { maxTurns: 30, maxWallMs: BOT_TURN_WINDOW_MS }, authority: { kind: 'bot' } })
     expect(prepared.authority.spend).toBeNull()
     expect(existsSync(join(prepared.scratch, 'tmp'))).toBe(true)
     expect(store.counters(activation.id).activeMs).toBe(BOT_TURN_WINDOW_MS)
@@ -357,7 +357,7 @@ describe('activation and dispatch', () => {
     if ('refused' in prepared) throw new Error(prepared.refused)
     // The memory tools and the listing of the owner's MCP servers are every bot's, beside its grant (Bot Phase 1 §5.10);
     // a run also splits its job among subagents, on models from model_list, and reads the rest of its tools from its catalogue.
-    expect(prepared.policy).toMatchObject({ tools: { allow: ['escalate', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'report_bug', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'model_list', 'remind', 'watch_start', ...EVERY_BOT_WORK].sort() }, budget: { maxTurns: 5, maxWallMs: BOT_TURN_WINDOW_MS } })
+    expect(prepared.policy).toMatchObject({ tools: { allow: ['permission_ask', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'report_bug', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'model_list', 'remind', 'watch_start', ...EVERY_BOT_WORK].sort() }, budget: { maxTurns: 5, maxWallMs: BOT_TURN_WINDOW_MS } })
     expect(store.counters(activation.id).activeMs).toBe(BOT_TURN_WINDOW_MS)
     // An ungranted tool in a run is refused and asked for once (Bot Phase 1 §5.4); the run goes on.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'search', nativeName: 'grep', args: { path: root } })).toMatchObject({ ok: false, refused: { askId: expect.stringMatching(/^esc_/) } })

@@ -60,6 +60,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
+import { canonicalToolName } from '../../../shared/toolAliases'
 import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_AUTOMATIONS_SWITCH, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_DROPPED_PERMISSIONS, BOT_IMAGE_TOOL, BOT_RETIRED_APP_TOOLS, BOT_MCP_SERVER_SWITCH, BOT_MCP_SWITCH, BOT_SKILLS_SWITCH, BOT_THREADS_PERMISSION, BOT_CHAT_NATIVE_OFF, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, isBotDefaultSwitch, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
@@ -446,7 +447,7 @@ export const BOT_MCP_UNAVAILABLE_TEXT = 'Your owner has no MCP servers set up in
 export const BOT_ASK_UNKNOWN_TEXT = 'There is no such skill or tool here. Carry on without it.'
 /** What Allow on an MCP ask whose server has not listed its tools yet answers (the card's Allow is off meanwhile). */
 const MCP_ASK_LOADING_TEXT = 'Its tools are still loading: Allow turns on once they are listed.'
-/** `ask_owner` or `work_wait` from a scheduled run whose schedule the owner removed while it ran (`scheduleGone`). */
+/** `question_ask` or `work_wait` from a scheduled run whose schedule the owner removed while it ran (`scheduleGone`). */
 const SCHEDULE_GONE_TEXT = "Your owner removed this schedule while you ran, so nothing waits on this run: it can't ask or wait. End it with your report."
 
 /** An MCP ask that lists no tools: its server has not answered, and Allow would grant nothing the owner has seen. */
@@ -670,7 +671,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private readonly carried = new Map<string, { chips: BotChip[]; calls?: BotActivityCalls; text?: string }>()
   /**
-   * Work that asked its owner a question (`ask_owner`), by activation: the main dispatch it asked in. Every later call of
+   * Work that asked its owner a question (`question_ask`), by activation: the main dispatch it asked in. Every later call of
    * that dispatch is refused so the turn ends (`QUESTION_END_TURN_TEXT`), and the answer continues the work. In memory
    * only: after a restart that dispatch has ended.
    */
@@ -3368,7 +3369,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // holds (it hands those jobs off), a run what it holds itself, and whether its browser could be offered.
     const told = this.instructionsOf(definition, definition.main, row.lane, {
       // MCP servers set up later reach the bot without asking, unless its owner switched MCP off for it.
-      canAskMcp: effective.appTools.includes('escalate') && !this.defaultsOff(row.botId).mcp, scheduled: row.trigger.kind === 'schedule',
+      canAskMcp: effective.appTools.some((tool) => canonicalToolName(tool) === 'permission_ask') && !this.defaultsOff(row.botId).mcp, scheduled: row.trigger.kind === 'schedule',
       // Guidance follows the actual local service-read authority; hand-started runs have none.
       secretFetchOffered: Boolean(authority.secretFetch),
       allowed: { ...botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)), ...(compiled.permissions.appTools.includes(BOT_IMAGE_TOOL) ? { images: true } : {}) },
@@ -4395,7 +4396,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (problem) return `${problem} ${WHAT_TO_ASK_TEXT}${botAsksFirst(this.host.settings?.get()) ? WHAT_TO_ASK_ALONE_TEXT : ''}`
         // A new bot's first message answers no request: it asks once the owner wants something that needs more.
         if (firstMessage) return BOT_ASK_NOT_YET_TEXT
-        const live = base.check({ kind: 'app', tool: 'escalate', args: {} })
+        const live = base.check({ kind: 'app', tool: 'permission_ask', args: {} })
         if (!live.ok && ('refused' in live || live.wall.kind !== 'tool')) return checkMessage(live)
         // An ask for any browser tool is the one "use the browser" ask.
         let asked = grantRequestOf(request.permission as BotAskRequest)
@@ -6057,7 +6058,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         // A chat turn the owner wrote to again while it answered, and that never read it, answers it now in its thread.
         noted = retryUnanswered || (!reload && run.status === 'completed' && (this.store.pendingWorkNotes(row.id).length > 0 || allowed.length > 0))
         const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
-        // Work that asked its owner a question (`ask_owner`) waits for the answer, holding no run slot, and never reports
+        // Work that asked its owner a question (`question_ask`) waits for the answer, holding no run slot, and never reports
         // now: its question's bubble is what the owner sees. Answered while its turn was ending, it goes on at once.
         const question = !reload && run.status === 'completed' && row.lane === 'run' ? this.store.workQuestion(row.id) : undefined
         // Its question forgotten while this turn was still ending: the work has nothing to go on with, and ends saying so.
@@ -6204,7 +6205,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const replyRow = this.replyRows.get(key)
     this.replyRows.delete(key)
     const transcriptMessageId = row.lane === 'chat' && replyRow && text === replyRow.text ? replyRow.messageId : undefined
-    // The questions a chat turn asked (`ask_owner`) show under its reply. A turn that stopped at a wall shows none: a tap
+    // The questions a chat turn asked (`question_ask`) show under its reply. A turn that stopped at a wall shows none: a tap
     // there would count as Not now, so they are withdrawn, and its continuation says to ask again.
     const atWall = row.lane === 'chat' && row.status === 'waiting_grant'
     if (atWall) this.store.withdrawUnpostedQuestions(row.id)
@@ -8601,11 +8602,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * `BotExecutionPort.noteBotWork`: a message to the work's row reaches the work as `work_note` does, credited to the
-   * turn that sent it (`from`: only a turn its owner started speaks for the owner), once per request (`requestKey`).
+   * turn that sent it (`from`: only a turn its owner started speaks for the owner, and never a note the bot sends as its
+   * own, `own`), once per request (`requestKey`).
    */
-  noteBotWork(activationId: string, text: string, options: { from?: string; requestKey?: string } = {}): ReturnType<BotEngine['noteWork']> {
+  noteBotWork(activationId: string, text: string, options: { from?: string; requestKey?: string; own?: boolean } = {}): ReturnType<BotEngine['noteWork']> {
     const row = this.store.activation(activationId)
-    return row ? this.noteWork(row.botId, activationId, text, options.from, options.requestKey) : 'not_found'
+    return row ? this.noteWork(row.botId, activationId, text, options.from, options.requestKey, options.own) : 'not_found'
   }
 
   private async reconcileAll(): Promise<void> {
@@ -8951,7 +8953,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     if (run.status !== 'interrupted') return
-    // Work that asked its owner a question (`ask_owner`) before Mousse stopped had ended its work for now: it waits for the
+    // Work that asked its owner a question (`question_ask`) before Mousse stopped had ended its work for now: it waits for the
     // answer (or goes on with it when a slot is free), never carried on as if cut mid-work.
     // Its question forgotten before Mousse stopped: it ends with the same line as waiting work, never carried on without it.
     if (row.lane === 'run' && this.store.forgottenWorkQuestion(row.id)) {
@@ -9168,7 +9170,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   async threadMessage(botId: string, threadId: string, input: { message: string; title: string; requestKey: string; maxWaiting: number }): Promise<{ bot: string; replayed: boolean }> {
     const registry = this.store.registry(botId)
-    if (!registry || registry.deletedAt) throw new BotEngineError('bot_not_found', 'The bot that started this thread was deleted, so nothing was sent. Ask the user with ask_user if you need an answer.')
+    if (!registry || registry.deletedAt) throw new BotEngineError('bot_not_found', 'The bot that started this thread was deleted, so nothing was sent. Ask the user with question_ask if you need an answer.')
     let name = 'The bot'
     try {
       name = this.definitionOf(botId).name
@@ -9177,7 +9179,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const key = `${THREAD_MESSAGE_KEY_PREFIX}${threadId}:${input.requestKey}`
     if (this.store.activationByKey(key)) return { bot: name, replayed: true }
-    if (registry.pausedReason) throw new BotEngineError('bot_paused', `${name} is paused, so it reads no messages now. Nothing was sent: carry on, or ask the user with ask_user.`)
+    if (registry.pausedReason) throw new BotEngineError('bot_paused', `${name} is paused, so it reads no messages now. Nothing was sent: carry on, or ask the user with question_ask.`)
     const waiting = this.store.laneActivations(botId, 'chat', ['queued']).filter((row) => row.idempotencyKey.startsWith(`${THREAD_MESSAGE_KEY_PREFIX}${threadId}:`)).length
     if (waiting >= input.maxWaiting)
       throw new BotEngineError('agent_queue_full_per_sender', `${name} has ${waiting} messages from this thread it has not read yet, the most one thread may have waiting. Nothing was sent: carry on, and send again once it has read them.`)
@@ -9191,7 +9193,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!error) this.chat.post({ id: `${rowPrefix}${activationId}`, botId, author: 'bot', kind: 'notice', text: threadMessageLabel(input.title), external: true, lane: 'chat' })
       return error
     })
-    if (refused) throw new BotEngineError(refused.code, `${name} can't take messages now: ${refused.message} Nothing was sent: carry on, or ask the user with ask_user.`)
+    if (refused) throw new BotEngineError(refused.code, `${name} can't take messages now: ${refused.message} Nothing was sent: carry on, or ask the user with question_ask.`)
     this.changed({ botId })
     await this.startQueuedChat(botId, activationId)
     return { bot: name, replayed: false }
@@ -9844,7 +9846,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * `ask_owner` (issue #1123): a chat turn asks its owner one question with answers to tap, or up to
+   * `question_ask` (issue #1123): a chat turn asks its owner one question with answers to tap, or up to
    * `MAX_QUESTIONS_PER_CALL` together. They are kept now and shown under the turn's reply when the turn ends (`postReply`);
    * nothing waits on them, and they grant nothing. A turn that asked for a permission first (`escalate`) asks once the
    * owner answered that: a tap at a wall would count as Not now. Questions are not counted (issue #1363): the same
@@ -9918,7 +9920,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * `ask_owner` in work (issue #1123): in one transaction each new question is kept and its bubble posted at once, a
+   * `question_ask` in work (issue #1123): in one transaction each new question is kept and its bubble posted at once, a
    * notice that answers the owner's message that asked for the work. The rest of this dispatch refuses every call so the
    * turn ends (`askedIn`), and the work then waits for the answers without holding a run slot (`advance`: `blocked`,
    * `question`); once every question it waits on is answered, it carries on in the same thread with all the answers
@@ -10250,7 +10252,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * turn ends, before it reports (`advance`); `noteReach` says which. Ended work can't take it, nor work that waits for
    * the owner's answer to its question: the answer is the way on (`question_answer`).
    */
-  noteWork(botId: string, workId: string, note: string, from?: string, requestKey?: string): 'noted' | 'held' | 'ended' | 'not_found' | 'question' | 'approval' | 'waiting' {
+  noteWork(botId: string, workId: string, note: string, from?: string, requestKey?: string, own = false): 'noted' | 'held' | 'ended' | 'not_found' | 'question' | 'approval' | 'waiting' {
     const text = note.trim()
     const row = this.store.activation(workId)
     if (!row || row.botId !== botId || row.lane !== 'run' || !text) return 'not_found'
@@ -10263,10 +10265,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!['queued', 'running', 'waiting_grant'].includes(current.status) && !workWaits(current)) return 'held' as const
       // A retry of the same request (`requestKey`) was noted already: it adds nothing.
       if (requestKey && !this.store.run("INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, '1')", botId, `work-note-request:${workId}:${requestKey}`)) return 'noted' as const
-      // The note keeps the owner's message it came from (the chat turn's), so a forget of that message reaches it.
-      if (from && this.store.activation(from) && ownerChatTurn(this.store.activation(from)!)) this.resetWorkWaitChain(workId)
-      this.store.addWorkNote(workId, botId, text, from ? this.noteSourceOf(from) : undefined)
-      if ((botAsksFirst(this.host.settings?.get()) || this.actions.forWork(workId)) && (!from || (this.store.activation(from) && ownerChatTurn(this.store.activation(from)!))))
+      // The note keeps the owner's message it came from (the chat turn's), so a forget of that message reaches it. The
+      // bot's own note (`own`) names its turn instead, as one from a turn the owner did not start does.
+      const owners = from !== undefined && !own && Boolean(this.store.activation(from)) && ownerChatTurn(this.store.activation(from)!)
+      if (owners) this.resetWorkWaitChain(workId)
+      this.store.addWorkNote(workId, botId, text, from ? (own ? `${BOT_NOTE_SOURCE_PREFIX}${from}` : this.noteSourceOf(from)) : undefined)
+      if ((botAsksFirst(this.host.settings?.get()) || this.actions.forWork(workId)) && (!from || owners))
         this.store.run(`INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, '1') ON CONFLICT(bot_id, key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)`, botId, `cursor:action-note:${workId}`)
       return 'noted' as const
     })
@@ -10470,7 +10474,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const minutes = input.minutes === undefined ? DEFAULT_WATCHER_MINUTES : input.minutes
     if (!Number.isFinite(minutes) || minutes < 1 || minutes > MAX_WATCHER_MINUTES) throw new BotEngineError('invalid_params', `minutes is its time limit: 1 to ${MAX_WATCHER_MINUTES}.`)
     if (this.store.registry(botId)?.pausedReason) throw new BotEngineError('bot_paused', 'You are paused, so nothing runs in the background.')
-    if (!this.holdsCommands(botId)) throw new BotEngineError('permission_required', 'Background commands need "run commands". Ask for it with escalate (the tool shell), then start it again.')
+    if (!this.holdsCommands(botId)) throw new BotEngineError('permission_required', 'Background commands need "run commands". Ask for it with permission_ask (the tool shell), then start it again.')
     // The turn itself must hold it too: a run whose thread is narrowed to no commands starts none in the background.
     if (!this.turnHoldsCommands(setting)) throw new BotEngineError('permission_required', "This turn doesn't run commands, so it can't start a background command. Say in your reply what you would run.")
     // From a run it is detached: its end wakes the chat (a wake on a `watcher` event), never the run that started it.
@@ -12072,7 +12076,7 @@ function grantHolds(manifest: BotManifest, asked: BotAskRequest): boolean {
   if (!('tool' in asked) || typeof asked.tool !== 'string') return false
   const tool = botGrantTool(asked.tool)
   // The web tools are neutral tools that a grant keeps with the app tools (the starter grant does): either holds them.
-  return (isNeutralTool(tool) && (manifest.tools as readonly string[]).includes(tool)) || manifest.appTools.includes(tool)
+  return (isNeutralTool(tool) && (manifest.tools as readonly string[]).includes(tool)) || manifest.appTools.some((held) => canonicalToolName(held) === tool)
 }
 
 /**
@@ -12111,11 +12115,11 @@ function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skill
  */
 export function askAgainLine(question: string): string {
   const line = question.replace(/\s+/g, ' ').trim()
-  return `Your question "${line.length > 200 ? `${line.slice(0, 199)}…` : line}" was not shown to the owner, because you also asked for a permission. Ask it again with ask_owner if you still need to know.`
+  return `Your question "${line.length > 200 ? `${line.slice(0, 199)}…` : line}" was not shown to the owner, because you also asked for a permission. Ask it again with question_ask if you still need to know.`
 }
 
 /**
- * Whether the activation may ask its owner a question (`ask_owner`, issue #1123): a chat turn, work and a scheduled run
+ * Whether the activation may ask its owner a question (`question_ask`, issue #1123): a chat turn, work and a scheduled run
  * (`BOT_TURN_KINDS`), which wait for the answer. Never a run started by hand, which nobody waits on, a turn whose start
  * no build names, nor a consult or a subagent (they compile their own tools).
  */

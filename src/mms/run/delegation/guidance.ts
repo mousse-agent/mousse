@@ -42,7 +42,7 @@ const parentReadLine = (parentRef: string): string => `If your brief is unclear,
 export function subagentGuidanceLines(parentTitle?: string, parentRef?: string): string[] {
   return [
     `You are a subagent${parentTitle ? ` of "${parentTitle}"` : ''}. Your final message is your result: keep it self-contained and bounded.`,
-    'ask_user questions reach your parent and the user.',
+    'question_ask questions reach your parent and the user.',
     'You may start your own subagents unless your instructions say not to.',
     ...(parentRef ? [parentReadLine(parentRef)] : [])
   ]

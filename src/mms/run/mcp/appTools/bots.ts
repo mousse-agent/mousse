@@ -23,7 +23,7 @@ import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallCont
 /**
  * The personal-bot app tools (PR 6 §5, Bot Phase 1 §5.5, §5.6, §5.10). They exist only on bot
  * turns and act on the bot itself, never on another thread:
- * - `escalate` asks the owner for a permission the bot lacks (the one way to ask, since an
+ * - `permission_ask` asks the owner for a permission the bot lacks (the one way to ask, since an
  *   ungranted tool does not exist for the model);
  * - `consult` asks one of the bot's context threads;
  * - `bot_schedule_add`, `bot_schedule_remove`, `bot_schedule_list` keep the bot's own schedules (in
@@ -100,7 +100,7 @@ const card = (description?: string) => Type.Union([
   }, { description: 'Pictures from your files folder: ones you made, saved or a tool handed you.' })
 ], description ? { description } : {})
 
-/** What one `ask_owner` question takes besides its words: its answers and what happens if the owner doesn't answer. */
+/** What one `question_ask` question takes besides its words: its answers and what happens if the owner doesn't answer. */
 const questionFields = {
   choices: Type.Optional(Type.Array(Type.Union([
     Type.String({ description: `A short label, at most ${MAX_CHOICE_LABEL_CHARS} characters.` }),
@@ -119,7 +119,7 @@ const questionFields = {
 
 export const BOT_TOOLS: Tool[] = [
   {
-    name: 'escalate',
+    name: 'permission_ask',
     description: 'Ask your owner for a permission you do not have, in one plain sentence. Ask as soon as you need it; never ask the owner whether to ask. In the chat, the owner answers after your message and you continue then. In a run, carry on without it and say in your report what you skipped.',
     parameters: Type.Object({
       permission: PERMISSION,
@@ -337,7 +337,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: BOT_QUESTION_TOOL,
-    description: `Ask your owner a question they answer with a tap: ${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} short choices (or yesNo), and "Other…" so they can write their own answer. To ask several things at once, give questions: up to ${MAX_QUESTIONS_PER_CALL}, each with its own choices; each shows as its own bubble. Ask only when the answer changes what you do; settle a minor choice yourself and say what you picked. Never use it for a permission: that is escalate, and a "Yes" here allows nothing. Ask as yourself, in the first person. It returns the question's id (questionIds for several): question_withdraw takes one back when you no longer need it. Asking the same question again before your owner answers or writes is refused. In the chat it shows under your reply: don't repeat the question in your reply, and end your turn; their answer comes as their next message. In work it reaches them at once. By default your work waits for the answers: end your turn, and you carry on in this thread once every question is answered. Wait when nothing useful can happen without them. When you can carry on with other parts of the job meanwhile, set wait to false: keep working, and each answer reaches you as a note naming its question (or carries your work on in this thread if your turn ended first); don't do the part that needs it until then. If they don't answer, Mousse reminds them (ifNoAnswer 'nudge', the default: at most twice). Only for a minor choice that is easy to undo, you may instead name a default, one of your choices: if they haven't answered within after minutes, you go with it and say so. Never default on anything that spends money, can't be undone, or speaks for your owner.`,
+    description: `Ask your owner a question they answer with a tap: ${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} short choices (or yesNo), and "Other…" so they can write their own answer. To ask several things at once, give questions: up to ${MAX_QUESTIONS_PER_CALL}, each with its own choices; each shows as its own bubble. Ask only when the answer changes what you do; settle a minor choice yourself and say what you picked. Never use it for a permission: that is permission_ask, and a "Yes" here allows nothing. Ask as yourself, in the first person. It returns the question's id (questionIds for several): question_withdraw takes one back when you no longer need it. Asking the same question again before your owner answers or writes is refused. In the chat it shows under your reply: don't repeat the question in your reply, and end your turn; their answer comes as their next message. In work it reaches them at once. By default your work waits for the answers: end your turn, and you carry on in this thread once every question is answered. Wait when nothing useful can happen without them. When you can carry on with other parts of the job meanwhile, set wait to false: keep working, and each answer reaches you as a note naming its question (or carries your work on in this thread if your turn ended first); don't do the part that needs it until then. If they don't answer, Mousse reminds them (ifNoAnswer 'nudge', the default: at most twice). Only for a minor choice that is easy to undo, you may instead name a default, one of your choices: if they haven't answered within after minutes, you go with it and say so. Never default on anything that spends money, can't be undone, or speaks for your owner.`,
     parameters: Type.Object({
       question: Type.Optional(Type.String({ description: `The question, at most ${MAX_QUESTION_CHARS} characters. It must read on its own: the owner may see it in a notification. Leave it out when you give questions.` })),
       ...questionFields,
@@ -356,9 +356,9 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: BOT_QUESTION_WITHDRAW_TOOL,
-    description: 'Take back a question you asked with ask_owner, by its id, when you no longer need the answer (you found it out, or the plan changed). Its bubble says it was withdrawn. Only a question asked in this chat turn or this piece of work, while it is still open. If your owner answered first, nothing is withdrawn and you get their answer.',
+    description: 'Take back a question you asked with question_ask, by its id, when you no longer need the answer (you found it out, or the plan changed). Its bubble says it was withdrawn. Only a question asked in this chat turn or this piece of work, while it is still open. If your owner answered first, nothing is withdrawn and you get their answer.',
     parameters: Type.Object({
-      questionId: Type.String({ description: 'The id ask_owner returned.' })
+      questionId: Type.String({ description: 'The id question_ask returned.' })
     })
   },
   {
@@ -691,7 +691,7 @@ const SUBAGENTS_WORK_ONLY = 'Only your work starts subagents: not the chat, a co
 
 export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] {
   const byName = new Map(BOT_TOOLS.map((tool) => [tool.name, tool]))
-  const escalate = byName.get('escalate')!
+  const escalate = byName.get('permission_ask')!
   const consult = byName.get('consult')!
   return [
     {
@@ -1070,7 +1070,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         } else if (args.thread !== undefined) {
           if (typeof args.thread !== 'string' || !args.thread.trim()) return error("thread is a thread's id, from thread_list.")
           // The owner's threads are theirs to share: a bot waits on one only while it may read them.
-          if (!ctx.turn.bot?.appTools?.has('thread_wait')) return error('Waiting for a thread needs "use your threads": ask for it with escalate (the tool threads).')
+          if (!ctx.turn.bot?.appTools?.has('thread_wait')) return error('Waiting for a thread needs "use your threads": ask for it with permission_ask (the tool threads).')
           input = { brief, event: { kind: 'thread', threadId: args.thread.trim() }, ...hours }
         } else {
           const pr = pullRequestOf(args.pr)
@@ -1112,7 +1112,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         } else if (args.thread !== undefined) {
           if (typeof args.thread !== 'string' || !args.thread.trim()) return error("thread is a thread's id, from thread_list.")
           // The owner's threads are theirs to share: a bot waits on one only while it may read them.
-          if (!ctx.turn.bot?.appTools?.has('thread_wait')) return error('Waiting for a thread needs "use your threads": ask for it with escalate (the tool threads).')
+          if (!ctx.turn.bot?.appTools?.has('thread_wait')) return error('Waiting for a thread needs "use your threads": ask for it with permission_ask (the tool threads).')
           input = { brief, event: { kind: 'thread', threadId: args.thread.trim() }, ...hours }
         } else {
           const pr = pullRequestOf(args.pr)
@@ -1299,14 +1299,14 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
           const call = botCall(deps, ctx)
           if (isOutcome(call)) return call
           if (!call.deps.host.questions?.withdraw) return error(QUESTION_NOT_OFFERED_TEXT)
-          if (typeof args.questionId !== 'string' || !args.questionId.trim()) return error('question_withdraw needs the id ask_owner returned.')
+          if (typeof args.questionId !== 'string' || !args.questionId.trim()) return error('question_withdraw needs the id question_ask returned.')
           const result = call.deps.host.questions.withdraw(call.botId, call.activationId, args.questionId.trim())
           if ('refused' in result) return error(result.refused)
           if (result.withdrawn) return json({ withdrawn: true, note: 'Withdrawn: its bubble says so. Carry on without its answer.' })
           return json({ ...result, note: result.status === 'answered' ? 'Your owner answered it first: go with their answer.' : 'It is no longer open, so nothing was withdrawn.' })
         }
       }),
-      // Held with `ask_owner` (`compileBotThread`), wherever a turn may ask.
+      // Held with `question_ask` (`compileBotThread`), wherever a turn may ask.
       listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_QUESTION_WITHDRAW_TOOL)),
       available: (turn) => (turn.bot?.appTools.has(BOT_QUESTION_WITHDRAW_TOOL) && deps?.() ? true : QUESTION_NOT_OFFERED_TEXT),
       offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_QUESTION_WITHDRAW_TOOL) && deps?.())
@@ -1387,7 +1387,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
           return json({ ok: true, note: `"${relayed.title}" carries on with their answer. Tell the owner in a few words, as yourself, that you're on it again ("Got it, carrying on with the flats").` })
         }
       }),
-      // Only a chat turn holds it, with `ask_owner`.
+      // Only a chat turn holds it, with `question_ask`.
       listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_QUESTION_ANSWER_TOOL)),
       available: (turn) => (turn.bot?.appTools.has(BOT_QUESTION_ANSWER_TOOL) && deps?.() ? true : ANSWER_CHAT_ONLY),
       offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_QUESTION_ANSWER_TOOL) && deps?.())

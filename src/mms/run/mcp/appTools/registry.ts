@@ -963,7 +963,7 @@ export class ToolRegistry {
         caller.threadId,
         [{
           id: 'permission',
-          prompt: (typeof tool.approvalPrompt === 'function' ? tool.approvalPrompt(args) : tool.approvalPrompt) ?? (tool.name === 'thread_merge_back'
+          prompt: (typeof tool.approvalPrompt === 'function' ? tool.approvalPrompt(args) : tool.approvalPrompt) ?? (tool.name === 'thread_return'
             ? "Allow Mousse to hand this fork's work back to the thread it was forked from?"
             : 'Allow this Mousse tool to change files in this workspace?'),
           options: [{ id: 'allow', label: 'Allow once' }, { id: 'reject', label: 'Reject' }]

@@ -280,7 +280,7 @@ export const MOUSSE_BUILTIN_TOOLS: MousseBuiltInToolInfo[] = [
   { id: 'ls', label: 'ls', description: 'List files and directories in the project.', group: 'project' },
   { id: 'git_status', label: 'git_status', description: 'Get git status for the project repository.', group: 'project' },
   { id: 'git_diff', label: 'git_diff', description: 'Get a git diff for one file.', group: 'project' },
-  { id: 'ask_user', label: 'ask_user', description: 'Ask the user clarifying questions.', group: 'interaction' },
+  { id: 'question_ask', label: 'question_ask', description: 'Ask the user clarifying questions.', group: 'interaction' },
   { id: 'task_list', label: 'task_list', description: 'List tasks in the thread queue.', group: 'tasks' },
   { id: 'task_create', label: 'task_create', description: 'Create a task in the thread queue.', group: 'tasks' },
   { id: 'task_update', label: 'task_update', description: 'Update an existing task by id.', group: 'tasks' },

@@ -319,6 +319,19 @@ describe('a note reaches running work while it works', () => {
       expect(own).toMatch(/never say the owner sent/)
     })
 
+    it('is the bot\'s own when it sends it as its own note (thread_send intent note), even from a turn the owner started', async () => {
+      const { work, message, chat } = await handOff(['Vacuums'], 'm1')
+      const live = await start(f, work[0]!.workId)
+      live.prepared.steer!.attached()
+      expect(f.bots.noteBotWork(work[0]!.workId, 'Prices changed since you started.', { from: chat, own: true })).toBe('noted')
+      // It names the bot's turn, never the owner's message that started it.
+      expect(sources(work[0]!.workId)).toEqual([`activation:${chat}`])
+      expect(sources(work[0]!.workId)).not.toContain(message.id)
+      const text = live.prepared.steer!.peek()!
+      expect(text).not.toContain('<mousse_message from="owner"')
+      expect(text).toContain('not from the owner')
+    })
+
     it('on a runtime that takes no notes while it runs, its next turn lists it apart from the owner\'s', async () => {
       const { work } = await handOff(['Vacuums'], 'm1')
       const live = await start(f, work[0]!.workId)

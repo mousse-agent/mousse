@@ -1738,7 +1738,7 @@ export class PiRpcEngine implements ProviderAdapter {
       builtins = builtins.filter((name) => allowed.has(name))
     }
     // A bot's turn offers only its granted built-ins: an ungranted one does not exist for the model,
-    // as on the locked Claude turn (`escalate` is how it asks). `bash` comes with "run commands",
+    // as on the locked Claude turn (`permission_ask` is how it asks). `bash` comes with "run commands",
     // granted as a whole; it runs in the locked environment, from the bot's files folder.
     if (host.bot) {
       const granted = new Set([...host.bot.tools].flatMap((tool) => PI_NATIVE_TOOLS[tool] ?? []))
@@ -2772,7 +2772,7 @@ export class PiRpcEngine implements ProviderAdapter {
    * steer answers the questions the turn asks them, as the person (docs/design/steer-and-interruptions.md §2.1).
    */
   private releaseGate(turn: PiTurn, answer: boolean): void {
-    // Every question pending on the thread, Mousse's own (`ask_user`, a quick action's approval) as well as Pi's, as
+    // Every question pending on the thread, Mousse's own (`question_ask`, a quick action's approval) as well as Pi's, as
     // a steer on the other agents does (§2.1).
     if (answer) {
       try {

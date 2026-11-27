@@ -31,7 +31,7 @@ export const BOT_CORE_TOOLS: readonly string[] = [
   'item_save', 'item_list',
   'work_start', 'work_note', 'work_list',
   'remind', 'wake',
-  'escalate', 'ask_owner',
+  'permission_ask', 'question_ask',
   // A card under a message: listed only in a group, Codex asked the owner instead of showing one (§15).
   'show_card',
   'thread_list', 'thread_read', 'thread_send', 'thread_create', 'thread_archive',
@@ -57,9 +57,9 @@ export interface BotCatalogueGroup {
 }
 
 const THREADS_GUIDANCE = [
-  "These reach your owner's Mousse threads, here and on their other computers that let agents work there (computer_list): search them (thread_search), wait on one (thread_wait), read the terminals open in them (terminal_read), look at their queues and Git status and diffs, steer or stop one's turn, change what waits in its queue, fork one or hand a fork's work back, hide or show a thread you started, and archive one whose work is merged or dropped (and unarchive it again).",
+  "These reach your owner's Mousse threads, here and on their other computers that let agents work there (computer_list): search them (thread_search), wait on one (thread_wait), read the terminals open in them (terminal_read), look at their queues and Git status and diffs, stop one's turn or add a note to it (thread_send with intent note), change what waits in its queue, fork one or hand a fork's work back, hide or show a thread you started, and archive one whose work is merged or dropped (and unarchive it again).",
   'thread_list names their projects and the models a thread can run on. Each thread comes with a link: put it in your reply when you name a thread, and your owner can click it to open it.',
-  "A thread you start stays out of your owner's sidebar, your chat lists it, until your owner writes in it. Start it with hidden: false when they asked to follow, answer or continue that work in their sidebar. thread_hide (or thread_update with hidden) hides or shows a thread you started later.",
+  "A thread you start stays out of your owner's sidebar, your chat lists it, until your owner writes in it. Start it with hidden: false when they asked to follow, answer or continue that work in their sidebar. thread_update with hidden hides or shows a thread you started later.",
   "In a thread you didn't start, answer an approval (approval_respond) only when your owner asks and lets agents answer approvals, never a question."
 ].join('\n')
 
@@ -69,7 +69,7 @@ const BROWSER_GUIDANCE = [
   'A page that is still loading is no failure: carry on with what is there, or wait for it. A cookie banner you may dismiss.',
   'You have no sign-ins of your own: when a page needs one, ask your owner to sign in (they can take over your browser), and it stays signed in for you. When a page shows a human check or a consent wall a person can get past, ask your owner to take over your browser and do it; don\'t retry it or work around it yourself. When a site refused your browser, don\'t retry it: say so in your report, and carry on with the rest.',
   'browser_screenshot saves the picture in your files folder and shows it to your owner by itself, under your next message or with the question you ask them; its result says where, or that it was not kept. Save another copy only when your owner asks for one by name.',
-  'When a page needs your owner (to take it over, to check it before you submit, or for details you don\'t have), ask them with ask_owner when you have it: your work waits with the page open and carries on with their answer (a tap, or their own words with Other…).'
+  'When a page needs your owner (to take it over, to check it before you submit, or for details you don\'t have), ask them with question_ask when you have it: your work waits with the page open and carries on with their answer (a tap, or their own words with Other…).'
 ].join('\n')
 
 const WORK_GUIDANCE = [
@@ -129,8 +129,8 @@ const SKILLS_GUIDANCE = 'skill_list lists your owner\'s skills; skill_load loads
 export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   {
     id: 'threads',
-    line: "more for your owner's threads: search, wait, steer, hide, fork, queues, terminals, Git, approvals, their other computers (needs \"use your threads\")",
-    tools: ['thread_search', 'thread_wait', 'thread_interrupt', 'thread_steer', 'thread_hide', 'thread_update', 'thread_fork', 'thread_merge_back', 'terminal_read', 'queue_list', 'queue_enqueue', 'queue_update', 'git_status', 'git_diff', 'computer_list', 'approval_respond'],
+    line: "more for your owner's threads: search, wait, stop, hide, fork, queues, terminals, Git, approvals, their other computers (needs \"use your threads\")",
+    tools: ['thread_search', 'thread_wait', 'thread_stop', 'thread_update', 'thread_fork', 'thread_return', 'terminal_read', 'queue_list', 'queue_enqueue', 'queue_update', 'git_status', 'git_diff', 'computer_list', 'approval_respond'],
     guidance: THREADS_GUIDANCE
   },
   {

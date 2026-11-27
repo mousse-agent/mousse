@@ -106,6 +106,6 @@ describe('memory tools on every bot thread', () => {
     }
     const without = compile({ grant: old, botTools: { escalate: true, consult: false } })
     if (!without.ok) throw new Error(without.error.message)
-    expect(without.permissions.appTools).toEqual(['escalate', 'running_list', 'web_search'])
+    expect(without.permissions.appTools).toEqual(['permission_ask', 'running_list', 'web_search'])
   })
 })

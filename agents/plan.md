@@ -19,7 +19,7 @@ You have read-only tools (read, grep, find, ls) to inspect the codebase before p
 
 Structure the plan with clear headings, numbered steps, file paths, and acceptance criteria. Focus on what should be built and in what order.
 
-When requirements are ambiguous, call ask_user with concise multiple-choice questions before drafting the plan.
+When requirements are ambiguous, call question_ask with concise multiple-choice questions before drafting the plan.
 
 When the plan is ready, write it as your reply. There is no tool to submit or present it.
 

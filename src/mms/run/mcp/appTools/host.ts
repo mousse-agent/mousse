@@ -275,7 +275,7 @@ export interface ApprovalRequestInfo {
   /** The thread that asked. */
   threadId: string
   status: 'pending' | 'answered' | 'cancelled'
-  /** A saved approval (a command, a file change, a tool), whose answers the rule `canAnswerApproval` governs; false for a plain question for the user (`ask_user`). */
+  /** A saved approval (a command, a file change, a tool), whose answers the rule `canAnswerApproval` governs; false for a plain question for the user (`question_ask`). */
   approval: boolean
   questions: UserQuestion[]
 }
@@ -365,14 +365,14 @@ export interface AppToolHost extends DelegationToolsHost {
     questions: PendingUserQuestions['questions'],
     options: { signal?: AbortSignal; timeoutMs?: number; onAttachments?: (attachments: UserQuestionAttachments) => void }
   ): Promise<UserQuestionAnswers>
-  /** Dismisses the thread's open questions (an in-process `ask_user` whose turn stopped). */
+  /** Dismisses the thread's open questions (an in-process `question_ask` whose turn stopped). */
   dismissQuestions?(threadId: string): void
   /**
-   * `ask_user` with `wait: false`: the question is saved and shown, and its id comes back at once. The answer reaches the
+   * `question_ask` with `wait: false`: the question is saved and shown, and its id comes back at once. The answer reaches the
    * thread later, through its inbox. Absent: questions always wait.
    */
   askWithoutWaiting?(threadId: string, questions: PendingUserQuestions['questions'], runId: string | null): string
-  /** `withdraw_question`: the thread's agent no longer needs its open question. False when it was not open there. */
+  /** `question_withdraw`: the thread's agent no longer needs its open question. False when it was not open there. */
   withdrawQuestion?(threadId: string, requestId: string): boolean
   /** Secret requests and commands that use them (`secret_request`, `secret_run`); absent: those tools refuse. */
   secrets?(): SecretToolHost | undefined
@@ -538,15 +538,15 @@ export interface AppToolHost extends DelegationToolsHost {
    * result. Throws a `QueueConflictError` when the queue is not as the caller expects.
    */
   queueCommand?(threadId: string, command: AgentQueueCommand, options: { clientRequestId: string; actor: AgentActor }): AgentQueueResult
-  /** Stops run `runId` of another thread and what is below it, as `actor`'s Stop (`thread_interrupt`). */
+  /** Stops run `runId` of another thread and what is below it, as `actor`'s Stop (`thread_stop`). */
   stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** Archives (`archived`) or unarchives another thread through the app's own Archive, as a personal bot's call (`thread_archive`). */
   setThreadArchived?(threadId: string, archived: boolean, options: { actor: AgentActor; clientRequestId: string }): Promise<AgentArchiveResult>
   /** Archives the caller's own thread once its running turn ends well (`thread_archive` from a thread's agent). */
   archiveOwnThreadAfterTurn?(options: { actor: AgentActor }): AgentArchiveOwnResult
   /**
-   * Hides a thread the calling bot started from its owner's sidebar, or shows it there again (`thread_hide`). `changed`
-   * is false when it already was so.
+   * Hides a thread the calling bot started from its owner's sidebar, or shows it there again (`thread_update hidden`).
+   * `changed` is false when it already was so.
    */
   setThreadHidden?(threadId: string, hidden: boolean, options: { actor: AgentActor }): { hidden: boolean; changed: boolean }
   /**
@@ -561,10 +561,10 @@ export interface AppToolHost extends DelegationToolsHost {
    */
   steerStrategyOf?(threadId: string): SteerStrategy | null
   /**
-   * Steers run `runId` of another thread with `text` as `actor`'s message (`thread_steer`, and a personal bot's
-   * `thread_send` to a working thread). `tool` is the bot tool the call came from, for its grant (default `thread_steer`).
+   * Steers run `runId` of another thread with `text` as `actor`'s message: a note that joins it (`thread_send` intent
+   * note, once `thread_steer`), and a personal bot's `thread_send` to a working thread.
    */
-  steerRun?(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor; tool?: 'thread_steer' | 'thread_send' }): Promise<AgentRunCommandResult>
+  steerRun?(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /**
    * A personal bot's note to a thread it started: throws unless its turn may message threads and the thread runs no wider
    * than the device the owner wrote from may run (`device_limit`).

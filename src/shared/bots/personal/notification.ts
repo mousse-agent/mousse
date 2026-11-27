@@ -18,7 +18,7 @@ export function botNotificationKind(
   if (Number.isFinite(at) && now - at > maxAgeMs) return null
   if (message.action) return message.action.status === 'open' ? 'question' : null
   if (message.ask) return message.ask.status === 'open' ? 'question' : null
-  // A bot's question with answers to tap (`ask_owner`) is announced as a question, as an ask is.
+  // A bot's question with answers to tap (`question_ask`) is announced as a question, as an ask is.
   if (message.question) return message.question.status === 'open' ? 'question' : null
   return 'completed'
 }

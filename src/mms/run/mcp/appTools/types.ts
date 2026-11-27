@@ -330,7 +330,7 @@ export interface MousseTool {
    */
   alwaysLoad?: true
   /**
-   * The call waits for the user: an approval (a quick action) or a question (`ask_user`). A run
+   * The call waits for the user: an approval (a quick action) or a question (`question_ask`). A run
    * whose approvals are `never` refuses it before the handler runs.
    */
   asksUser?: 'approval' | 'question'
@@ -400,7 +400,7 @@ export type ToolLedger = {
   failed(id: string): void
 }
 
-/** `ask_user` over MCP blocks at most this long (or until the caller's run ends). */
+/** `question_ask` over MCP blocks at most this long (or until the caller's run ends). */
 export const ASK_USER_TIMEOUT_MS = 60 * 60 * 1000
 
 export const CLIENT_REQUEST_ID_SCHEMA: JsonSchema = {

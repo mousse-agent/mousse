@@ -41,14 +41,14 @@ const grants = (...ids: string[]) => ({ skills: [], mcpTools: [], builtinTools: 
 describe('app tools under a definition’s authority (MCP)', () => {
   it('a tool outside the grants never reaches its handler', async () => {
     const s = await setup({ policy: policy(), grants: grants('task_create') })
-    expect(await s.registry.call('ask_user', { questions: [] }, s.ctx())).toEqual(refused('not_granted', 'Tool "ask_user" is not granted to this agent definition.'))
+    expect(await s.registry.call('question_ask', { questions: [] }, s.ctx())).toEqual(refused('not_granted', 'Tool "question_ask" is not granted to this agent definition.'))
     expect(s.host.askUser).not.toHaveBeenCalled()
     expect((await s.registry.call('task_create', { description: 'fine' }, s.ctx())).isError).toBe(false)
   })
 
-  it('askUser off refuses ask_user even when granted', async () => {
-    const s = await setup({ policy: policy({ askUser: false }), grants: grants('ask_user') })
-    expect(await s.registry.call('ask_user', { questions: [] }, s.ctx())).toMatchObject({ isError: true, text: expect.stringContaining('askUser') })
+  it('askUser off refuses question_ask even when granted', async () => {
+    const s = await setup({ policy: policy({ askUser: false }), grants: grants('question_ask') })
+    expect(await s.registry.call('question_ask', { questions: [] }, s.ctx())).toMatchObject({ isError: true, text: expect.stringContaining('askUser') })
     expect(s.host.askUser).not.toHaveBeenCalled()
   })
 

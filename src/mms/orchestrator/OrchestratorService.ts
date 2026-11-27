@@ -915,7 +915,7 @@ const BOT_ANSWERED_QUESTIONS_KEPT = 500
 
 /** The tools with which the owner's bot acts on their threads ("use your threads"), as `botSenderOf` holds them. */
 type BotThreadActTool =
-  | 'thread_create' | 'thread_send' | 'thread_interrupt' | 'thread_archive' | 'thread_hide' | 'thread_steer'
+  | 'thread_create' | 'thread_send' | 'thread_stop' | 'thread_archive' | 'thread_update'
   | 'queue_enqueue' | 'queue_update' | 'approval_respond'
 
 /** The queue tool a queue command came from: every change but an enqueue is one `op` of `queue_update`. */
@@ -1933,7 +1933,7 @@ export class OrchestratorService extends EventEmitter {
         }
       }
       if (signal.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
-      // The granted app tools (the browser, `ask_user`, …) reach the runtime only over the Mousse MCP
+      // The granted app tools (the browser, `question_ask`, …) reach the runtime only over the Mousse MCP
       // server: without its bearer the turn is refused, never run without them.
       const allowed = new Set(tools?.allow ?? [])
       const requiredTools = this.mcpToolRegistry().listForTurn(threadId, runId)
@@ -3850,7 +3850,7 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * A subagent's question reaches its parent (issue #142). Every question the daemon asks on a
-   * subagent's thread (the model's own `ask_user`, a plan question, a provider's approval such as
+   * subagent's thread (the model's own `question_ask`, a plan question, a provider's approval such as
    * Codex's command approval; they all go through `UserQuestionService`) writes a `child_question`
    * row (a `reconcile_notice`) into the parent's inbox, and rule 4 wakes or steers the parent with
    * it: it answers with `answer_subagent` or asks the user. The user still sees the question under
@@ -5207,7 +5207,7 @@ export class OrchestratorService extends EventEmitter {
       personHeld: (caller) => this.runHoldsPerson(caller),
       parentThread: (threadId) => this.subagentParentOf(threadId),
       reportLacks: (report) => this.reportSubagentLacks(report),
-      // Only a bot's threads list the bot tools (`escalate`; `consult` on its activation thread).
+      // Only a bot's threads list the bot tools (`permission_ask`; `consult` on its activation thread).
       botRole: (threadId) => this.botThreads?.roleOf(threadId),
       botHomeOf: (threadId) => this.botThreads?.homeOf?.(threadId),
       awaitLiveRun: (threadId) => this.continuationGate(threadId),
@@ -6306,8 +6306,8 @@ export class OrchestratorService extends EventEmitter {
         const bot = options.actor.remote ? undefined : this.botSenderOf(options.actor, 'thread_send')
         return service.send(target, input, { clientRequestId: options.clientRequestId, mark, ...(bot ? { bot: this.routedBot(bot) } : {}) })
       },
-      steer: (target, runId, text, options) => service.steer(target, runId, text, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, true, 'thread_steer') }),
-      interrupt: (target, runId, options) => service.interrupt(target, runId, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, false, 'thread_interrupt') }),
+      steer: (target, runId, text, options) => service.steer(target, runId, text, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, true, 'thread_send') }),
+      interrupt: (target, runId, options) => service.interrupt(target, runId, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, false, 'thread_stop') }),
       archive: (target, archived, options) => service.archive(target, archived, { idem: options.idem, mark: this.remoteAgentMark(options.actor, false, 'thread_archive') })
     }
   }
@@ -6467,7 +6467,7 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /** `thread_interrupt`: the one Stop (`stopThread`), asked for by an agent, aimed at one run. */
+  /** `thread_stop`: the one Stop (`stopThread`), asked for by an agent, aimed at one run. */
   private async stopRunAsAgent(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult> {
     const engine = this.requireRunEngine()
     // A native helper's mirror has no runs of its own: the Stop goes to its runtime, whatever run was named.
@@ -6477,7 +6477,7 @@ export class OrchestratorService extends EventEmitter {
       return stopped.stopped ? { status: 'accepted', runId, sequence: 0, replayed: false } : { status: 'rejected', reason: stopped.message }
     }
     // A bot's thread stops another thread's turn only as the owner's bot, from a chat turn the owner's message started.
-    const bot = this.botSenderOf(options.actor, 'thread_interrupt')
+    const bot = this.botSenderOf(options.actor, 'thread_stop')
     // A Stop would close what waits on the owner there (an approval, a question): a bot leaves those to
     // them, with the same words as a message it may not send.
     if (bot) {
@@ -6810,7 +6810,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * `thread_hide`: an agent hides a thread it started from the person's sidebar, or shows it there again
+   * `thread_update hidden`: an agent hides a thread it started from the person's sidebar, or shows it there again
    * (`Thread.hidden`). The owner's bot does so only from its chat in a chat turn its owner's message started
    * (`botSenderOf`), and only for a thread this bot started (`Thread.startedByBot`), since its chat lists it. Any other
    * agent only for a thread its own thread launched (`Thread.createdByThreadId`), which that thread's side panel lists.
@@ -6820,7 +6820,7 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.requireRunEngine()
     const thread = this.threadStore?.getThread(threadId)
     // A bot's thread that may not make the call is refused here; any other thread is no bot's.
-    const bot = this.botSenderOf(options.actor, 'thread_hide')
+    const bot = this.botSenderOf(options.actor, 'thread_update')
     if (bot) {
       if (!thread || ownBotOf(thread)?.botId !== bot.botId)
         throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not one you started: you hide or show only threads you started.`)
@@ -6884,11 +6884,11 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * `thread_steer`: joins a run that is live. A running turn cannot be narrowed, so a caller whose permission
-   * mode is stricter than the one the run is bound to is refused: its words would run with more authority than
-   * the caller itself has. A run bound to a stricter mode than the caller's takes the steer. The owner's bot steers
-   * with "use your threads" (`botSenderOf`), as its message does: in the thread's own mode, or no wider than the device
-   * its owner wrote from, labelled as the bot's words.
+   * A note that joins a run that is live (`thread_send` intent note, once `thread_steer`). A running turn cannot be
+   * narrowed, so a caller whose permission mode is stricter than the one the run is bound to is refused: its words would
+   * run with more authority than the caller itself has. A run bound to a stricter mode than the caller's takes the steer.
+   * The owner's bot steers with "use your threads" (`botSenderOf`), as its message does: in the thread's own mode, or no
+   * wider than the device its owner wrote from, labelled as the bot's words, held to the same repeat check.
    */
   /**
    * A personal bot's note to a thread it started (`thread_send` with intent `note`): its turn must hold `thread_send`,
@@ -6901,9 +6901,9 @@ export class OrchestratorService extends EventEmitter {
       throw new DomainRpcError('device_limit', `The thread runs in ${describePermissionMode(this.storedPermissionMode(threadId))}, more than the device your owner wrote from may run (${describePermissionMode(bot.limit)}).`)
   }
 
-  private async steerRunAsAgent(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor; tool?: 'thread_steer' | 'thread_send' }): Promise<AgentRunCommandResult> {
+  private async steerRunAsAgent(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult> {
     const engine = this.requireRunEngine()
-    const bot = options.actor.remote ? undefined : this.botSenderOf(options.actor, options.tool ?? 'thread_steer')
+    const bot = options.actor.remote ? undefined : this.botSenderOf(options.actor, 'thread_send')
     // A steer settles what waits on the owner there (a question, an approval): a bot leaves those to them, with the same
     // words as a message it may not send.
     if (bot && this.awaitsAnswer(threadId)) return { status: 'rejected', reason: 'questions_pending' }
@@ -6923,7 +6923,7 @@ export class OrchestratorService extends EventEmitter {
     const letter = bot ? this.botLetter(sender, bot, text) : this.agentLetter(sender, text)
     // A bot's message that joins the running turn (`thread_send`) is held to the same repeat check as one that starts or
     // waits for a turn: the same text again within the window is refused, decided at admission so a retry replays.
-    const repeat = bot && options.tool === 'thread_send' ? { key: agentRepeatKey(threadId, agentSenderKey(options.actor), text), claim: { at: 0 } } : undefined
+    const repeat = bot ? { key: agentRepeatKey(threadId, agentSenderKey(options.actor), text), claim: { at: 0 } } : undefined
     const steer = () => this.steerRun(runId, letter.content, options.clientRequestId, threadId, letter.sender, callerMode, undefined, sender.remote ? { node: sender.remote.node } : undefined, repeat ? () => this.claimAgentMessage(repeat.key, repeat.claim) : undefined)
     const result = repeat ? await this.sendGuardedAgainstRepeat(repeat.key, repeat.claim, steer) : await steer()
     // A steer the engine admitted and then refused (the run ended meanwhile) sent nothing: a fresh try is no repeat.
@@ -6958,7 +6958,7 @@ export class OrchestratorService extends EventEmitter {
     return { ...sent, deadlineMinutes: runningMinutes }
   }
 
-  /** A routed `orchestrator.steer` marked as an agent's: `thread_steer`'s path, refused for a run looser than the sender. */
+  /** A routed `orchestrator.steer` marked as an agent's: a note's path, refused for a run looser than the sender. */
   async steerForRemoteAgent(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult> {
     if (!options.actor.remote) throw new Error('steerForRemoteAgent needs an agent on another computer.')
     this.assertNotBotThread(threadId)
@@ -14521,7 +14521,7 @@ export class OrchestratorService extends EventEmitter {
    * Cross-process: if a live peer holds the execution lease, atomically enqueue into the
    * durable MMS queue rather than starting a second turn.
    *
-   * A turn blocked on ask_user / plan ask / quick-action approval never strands a
+   * A turn blocked on question_ask / plan ask / quick-action approval never strands a
    * fresh message behind the unanswered prompt: the pending question is
    * default-rejected, the blocked turn is stopped, and the new message runs as
    * a fresh turn instead of queueing. The fresh message is always delivered as
@@ -16522,7 +16522,7 @@ export class OrchestratorService extends EventEmitter {
       const hold = new SteerHold({
         caps: opts?.externalDrainSteer && !opts.externalPeekSteer ? { ...instance.caps, steerBoundary: 'none' } : instance.caps,
         strict: release.strict,
-        // A question Mousse itself asks (`ask_user`, an approval) is answered by the steer, as a provider's is: while one
+        // A question Mousse itself asks (`question_ask`, an approval) is answered by the steer, as a provider's is: while one
         // waits, Mousse's own calls that ask the person do not hold.
         foreground: (waiting) => assembler.foregroundTools(waiting, this.mousseCallsAskingPerson(session.threadId)),
         // Such a question, asked by one of the turn's own calls, means the turn waits for a person, as a provider's own
@@ -17618,7 +17618,7 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * While the thread has a question pending, which of the turn's calls may be the one asking it: Mousse's own tools
-   * that ask the person (`asksUser`: `ask_user`, a quick action's approval), the ones that ask before they edit
+   * that ask the person (`asksUser`: `question_ask`, a quick action's approval), the ones that ask before they edit
    * (`editsWorkspace`), and the relay's (its approvals). A Mousse tool the registry does not know counts too. Such a
    * call does not hold a steer, which answers the question, as it answers one the provider asks. Undefined while no
    * question waits: every call holds as usual.

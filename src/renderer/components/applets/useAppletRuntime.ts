@@ -80,9 +80,13 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     }
     let snapshotTimer: ReturnType<typeof setTimeout> | undefined
     let capturing = false
+    // Bumped whenever the applet's pixels change, so a picture taken before the change never replaces a newer one.
     let snapshotVersion = 0
-    // Prepare the DOM frame while stationary, never on the wheel's critical path.
-    const refreshSnapshot = () => {
+    // Captures that came back empty (a slow or hidden capture) for the current version; a few more are tried later.
+    let snapshotMisses = 0
+    // Prepare the DOM frame while stationary, never on the wheel's critical path. The last frame stays in place until a
+    // newer one replaces it: a slightly old picture while scrolling looks far better than an empty box.
+    const refreshSnapshot = (wait = 100) => {
       clearTimeout(snapshotTimer)
       if (!scroller || disposed || scrollPaused || parked || !runtime.current) return
       const captureSnapshot = async () => {
@@ -90,26 +94,34 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
         if (capturing) { refreshSnapshot(); return }
         const id = runtime.current, version = snapshotVersion
         capturing = true
+        let image: string | null = null
         try {
-          const result = await api.snapshot({ runtimeId: id })
-          if (!result.image) return
-          const image = new Image()
-          image.src = result.image
-          await image.decode()
-          if (!disposed && !scrollPaused && !parked && runtime.current === id && version === snapshotVersion)
-            setScrollImage(result.image)
+          image = (await api.snapshot({ runtimeId: id })).image
+          if (image) {
+            const decoded = new Image()
+            decoded.src = image
+            await decoded.decode()
+          }
         } catch {
-          /* A missing cached frame must never prevent native scrolling. */
+          image = null
         } finally {
           capturing = false
         }
+        if (disposed || runtime.current !== id || version !== snapshotVersion) return
+        // Taken while the view was still on screen, so it is current even if a scroll has started since.
+        if (image) {
+          snapshotMisses = 0
+          setScrollImage(image)
+        } else if (++snapshotMisses <= 3) refreshSnapshot(300 * snapshotMisses)
       }
-      snapshotTimer = setTimeout(() => { void captureSnapshot() }, 100)
+      snapshotTimer = setTimeout(() => { void captureSnapshot() }, wait)
     }
+    // Before the native view goes, the whole cached frame is put in the page at once, so the moment between the two
+    // shows the frame rather than nothing.
+    const showWholeFrame = () => flushSync(() => setLiveArea(null))
     const suspend = async () => {
       scrollPaused = true
-      setLiveArea(null)
-      snapshotVersion++
+      showWholeFrame()
       clearTimeout(snapshotTimer)
       cancelAnimationFrame(frame)
       frame = 0
@@ -160,7 +172,7 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
         const id = runtime.current
         if (id && !parked) {
           parked = true
-          setLiveArea(null)
+          showWholeFrame()
           clearTimeout(snapshotTimer)
           void api.update({ runtimeId: id, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, clip, visible: false }).catch(() => {})
         }
@@ -306,9 +318,10 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
       }
       if (event.type === 'ready') { setReady(true); refreshSnapshot() }
       if (event.type === 'state-changed' || event.type === 'visual-changed') {
-        // Inner scroll/input changed pixels without changing saved state.
+        // Inner scroll/input changed pixels without changing saved state. The frame already shown stays until the new
+        // one is ready.
         snapshotVersion++
-        setScrollImage(null)
+        snapshotMisses = 0
         refreshSnapshot()
       }
       if (event.type === 'conversation-input' && typeof event.text === 'string')

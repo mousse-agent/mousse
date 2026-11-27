@@ -264,7 +264,7 @@ export class MousseMcpServer implements McpAttachmentProvider {
   /**
    * The thread's turn ended: whether its bearer is kept for the next turn is settled first (a call
    * still running counts against a drained turn), then its in-flight tool calls abort (a blocked
-   * `ask_user`).
+   * `question_ask`).
    */
   turnEnded(input: { threadId: string; runId: string; tokenHash?: string; settlement: TurnSettlement }): 'kept' | 'rotated' | undefined {
     const settled = input.tokenHash ? this.options.credentials.settleTurn(input.tokenHash, input.runId, input.settlement) : undefined

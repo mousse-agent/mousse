@@ -80,7 +80,7 @@ const mainDispatches = (workId: string) => f.store.dispatches(workId).filter((di
 describe('question_withdraw', () => {
   it('takes back the work\'s own open question: its bubble says so in every window, and the work goes on without it', async () => {
     const running = await work('flats')
-    const { questionId } = result(await tool('ask_owner', running.prepared, running.payload.threadId, FLATS))
+    const { questionId } = result(await tool('question_ask', running.prepared, running.payload.threadId, FLATS))
     const bubble = chatOf(f, botId).find((message) => message.question?.questionId === questionId)!
     const sent = published()
     expect(result(await tool('question_withdraw', running.prepared, running.payload.threadId, { questionId }))).toMatchObject({ withdrawn: true })
@@ -96,7 +96,7 @@ describe('question_withdraw', () => {
 
   it('refuses another piece of the bot\'s work, and another bot, without touching the question', async () => {
     const asking = await work('flats')
-    const { questionId } = result(await tool('ask_owner', asking.prepared, asking.payload.threadId, FLATS))
+    const { questionId } = result(await tool('question_ask', asking.prepared, asking.payload.threadId, FLATS))
     const other = await work('movers')
     expect(result(await tool('question_withdraw', other.prepared, other.payload.threadId, { questionId }))).toEqual({ error: expect.stringContaining('no question with that id') })
     const otherBot = (await createBot(f, { name: 'Quill', reply: 'Hi.' })).botId
@@ -107,7 +107,7 @@ describe('question_withdraw', () => {
 
   it('when the owner\'s tap landed first, nothing is withdrawn and the bot gets the answer', async () => {
     const running = await work('flats')
-    const { questionId } = result(await tool('ask_owner', running.prepared, running.payload.threadId, FLATS))
+    const { questionId } = result(await tool('question_ask', running.prepared, running.payload.threadId, FLATS))
     await tap(questionId, 'Flat B')
     expect(result(await tool('question_withdraw', running.prepared, running.payload.threadId, { questionId }))).toMatchObject({ withdrawn: false, status: 'answered', answer: 'Flat B' })
     expect(f.store.question(questionId)).toMatchObject({ status: 'answered', answer: { choice: 'Flat B' } })
@@ -115,7 +115,7 @@ describe('question_withdraw', () => {
 
   it('a chat turn takes back a question it asked before its reply: it is never shown', async () => {
     const turn = await chat('Find me a flat', 'c1')
-    const { questionId } = result(await tool('ask_owner', turn.prepared, turn.payload.threadId, FLATS))
+    const { questionId } = result(await tool('question_ask', turn.prepared, turn.payload.threadId, FLATS))
     expect(result(await tool('question_withdraw', turn.prepared, turn.payload.threadId, { questionId }))).toMatchObject({ withdrawn: true })
     await finish(f, turn.payload, 'completed', { text: 'Never mind, I found one.' })
     expect(chatOf(f, botId).some((message) => message.question)).toBe(false)
@@ -125,20 +125,20 @@ describe('question_withdraw', () => {
 describe('repeats and batches in work (issue #1363)', () => {
   it('a question shown and taken back is not asked again until the owner writes', async () => {
     const running = await work('flats')
-    const { questionId } = result(await tool('ask_owner', running.prepared, running.payload.threadId, FLATS))
+    const { questionId } = result(await tool('question_ask', running.prepared, running.payload.threadId, FLATS))
     await tool('question_withdraw', running.prepared, running.payload.threadId, { questionId })
     // Reworded, with its answers the other way round: the same question.
     const again = { question: 'which flat should I book a viewing for', choices: ['Flat B', 'Flat A'], wait: false }
-    expect(result(await tool('ask_owner', running.prepared, running.payload.threadId, again))).toEqual({ error: QUESTION_DUPLICATE_TEXT })
+    expect(result(await tool('question_ask', running.prepared, running.payload.threadId, again))).toEqual({ error: QUESTION_DUPLICATE_TEXT })
     // Another question is not a repeat.
-    expect(result(await tool('ask_owner', running.prepared, running.payload.threadId, { question: 'Which day?', yesNo: true, wait: false })).asked).toBe(true)
+    expect(result(await tool('question_ask', running.prepared, running.payload.threadId, { question: 'Which day?', yesNo: true, wait: false })).asked).toBe(true)
     await f.bots.service.chatSend({ botId, text: 'How is the flat hunt going?', clientRequestId: 'm-how' })
-    expect(result(await tool('ask_owner', running.prepared, running.payload.threadId, again)).asked).toBe(true)
+    expect(result(await tool('question_ask', running.prepared, running.payload.threadId, again)).asked).toBe(true)
   })
 
   it('work that asks several and waits goes on once every one is answered, with every answer once', async () => {
     const running = await work('move')
-    const asked = result(await tool('ask_owner', running.prepared, running.payload.threadId, { questions: [{ question: 'Which flat?', choices: ['Flat A', 'Flat B'] }, { question: 'Book the movers?', yesNo: true }] }))
+    const asked = result(await tool('question_ask', running.prepared, running.payload.threadId, { questions: [{ question: 'Which flat?', choices: ['Flat A', 'Flat B'] }, { question: 'Book the movers?', yesNo: true }] }))
     expect(asked.questionIds).toHaveLength(2)
     await finish(f, running.payload, 'completed', { text: 'I asked.' })
     expect(f.store.activation(running.workId)).toMatchObject({ status: 'blocked', endReason: 'question' })
