@@ -160,6 +160,22 @@ function choiceHint(choice: AddChoice): string | undefined {
   return DRIVER_INFO[choice.driver].description
 }
 
+/**
+ * The label of a choice's sign-in path, when it has one: an agent that signs in from Mousse (`signInLabel`), not one
+ * on an API key or a command, and not one Mousse found missing with nothing to install; a model API with a browser
+ * sign-in and no credential saved yet. Undefined: Configure manually is the only path.
+ */
+export function signInPathOf(choice: AddChoice): string | undefined {
+  if (choice.kind === 'api') return choice.methods.includes('oauth') && !choice.option.hasSavedKey ? `Continue with ${choice.option.label}` : undefined
+  if (choice.kind !== 'new' || choice.target) return undefined
+  const info = DRIVER_INFO[choice.driver]
+  if (!info.signInLabel || info.customCommand) return undefined
+  const known = choice.existing
+  const unrunnable = Boolean(known && (known.checkedAt || known.stale) && known.install.state === 'not_installed' && !known.install.canInstall)
+  // A managed Codex is Mousse's own download: it never depends on the person's executable.
+  return unrunnable && !choice.setups ? undefined : info.signInLabel
+}
+
 function matches(query: string, ...fields: Array<string | undefined>): boolean {
   const q = query.trim().toLowerCase()
   return !q || fields.some((field) => field?.toLowerCase().includes(q))
@@ -173,8 +189,11 @@ export interface AddProviderHandlers {
    * (nothing when a credential is saved on this device already); resolves with the entry's id.
    */
   connectApi: (option: ProviderAddOption, method: AddOptionMethod, apiKey: string) => Promise<string>
-  /** Starts the sign-in of an entry just added, in the sign-in dialog. */
-  signIn: (instanceId: string, name: string) => void
+  /**
+   * Starts the sign-in of an entry just added, in the sign-in dialog. `unlessSignedIn`: checks the entry first and
+   * starts nothing when it is signed in already (the person's own setup, signed in from their terminal).
+   */
+  signIn: (instanceId: string, name: string, options?: { unlessSignedIn?: boolean }) => void
   /** Adds the entry of a local server already connected (`pi:<providerId>`) and turns it on; resolves with its id. */
   connectLocal: (providerId: string) => Promise<string>
 }
@@ -259,14 +278,16 @@ export function AddProviderDialog({
   }
 
   /**
-   * Adds a further entry of an agent (`another`) under its name and starts its sign-in, with no step in between. An
-   * agent with setups adds it as managed (its own download, started now). It takes the executable the first entry was
-   * set to; when that entry is not installed, the install starts instead and the sign-in waits for it.
+   * The sign-in path: adds the agent with its defaults under its name and starts its sign-in, with no step in between.
+   * An agent with setups adds it as managed (its own download, started now). A further entry (`another`) is another
+   * account with a home of its own, on the executable the first entry was set to. When the agent is not installed, the
+   * install starts instead and the sign-in waits for it. The first entry on the person's own setup signs in only when
+   * it is not signed in already (their terminal may be).
    */
-  const addAnother = (choice: Extract<AddChoice, { kind: 'new' }>) =>
+  const addAndSignIn = (choice: Extract<AddChoice, { kind: 'new' }>) =>
     void run(choice.key, async () => {
       const { instances } = api
-      const name = choice.label
+      const name = choice.another ? choice.label : DRIVER_INFO[choice.driver].label
       const known = choice.existing
       if (choice.setups) {
         const instanceId = await handlers.add(choice.driver, { displayName: name, setup: 'managed' })
@@ -276,18 +297,32 @@ export function AddProviderDialog({
         handlers.signIn(instanceId, name)
         return
       }
-      const binaryPath = known?.binary?.source === 'override' ? known.config?.binaryPath : undefined
+      const binaryPath = choice.another && known?.binary?.source === 'override' ? known.config?.binaryPath : undefined
+      const multi = DRIVER_INFO[choice.driver].multiInstance
       const instanceId = await handlers.add(choice.driver, {
         displayName: name,
-        home: 'private',
+        ...(choice.another ? { home: 'private' as const } : multi ? { home: 'default' as const } : {}),
         ...(binaryPath ? { binaryPath } : {})
       })
-      const missing = known?.install.state === 'not_installed'
+      const options = choice.another ? undefined : { unlessSignedIn: true }
+      const missing = choice.another && known?.install.state === 'not_installed'
       const install = missing && known?.install.canInstall ? await instances.install(instanceId) : undefined
       finish(instanceId)
-      if (!missing) handlers.signIn(instanceId, name)
+      if (!missing) handlers.signIn(instanceId, name, options)
       // Not on this computer yet: the sign-in opens once that install completes, never after a failed or cancelled one.
-      else if (install) void operationOutcome(install).then((outcome) => { if (outcome.phase === 'completed') handlers.signIn(instanceId, name) })
+      else if (install) void operationOutcome(install).then((outcome) => { if (outcome.phase === 'completed') handlers.signIn(instanceId, name, options) })
+    })
+
+  /** A model API's sign-in path: its browser sign-in at once. When it fails, the Connect step shows why and retries. */
+  const connectAndSignIn = (choice: Extract<AddChoice, { kind: 'api' }>) =>
+    void run(choice.key, async () => {
+      setMethod('oauth')
+      try {
+        finish(await handlers.connectApi(choice.option, 'oauth', ''))
+      } catch (failure) {
+        setStep(last)
+        throw failure
+      }
     })
 
   const signInStep = apiMethod !== undefined && CONNECT_KIND[apiMethod] === 'subscription'
@@ -341,22 +376,26 @@ export function AddProviderDialog({
 
   if (!open) return null
 
-  /** A further entry picked on the first step: Add adds it and starts its sign-in. */
-  const quick = step === 0 && selected?.kind === 'new' && selected.another ? selected : null
+  /** On the first step, a provider that signs in from Mousse offers that as its primary path, beside Configure manually. */
+  const signInPath = step === 0 && selected ? signInPathOf(selected) : null
+  const startSignIn = (choice: AddChoice) => {
+    if (choice.kind === 'new') addAndSignIn(choice)
+    else if (choice.kind === 'api') connectAndSignIn(choice)
+  }
 
   const footer = (
     <>
       <button type="button" className="btn" disabled={busy !== null} onClick={back}>
         {step === 0 ? 'Cancel' : 'Back'}
       </button>
-      {step < last && (!quick || quick.setups) && (
-        <button type="button" className={quick ? 'btn' : 'btn btn-primary'} disabled={!selected || busy !== null} onClick={() => goTo(step + 1)}>
-          {quick ? 'Choose setup' : 'Next'}
+      {step < last && (
+        <button type="button" className={signInPath ? 'btn' : 'btn btn-primary'} disabled={!selected || busy !== null} onClick={() => goTo(step + 1)}>
+          {signInPath ? 'Configure manually' : 'Next'}
         </button>
       )}
-      {quick && (
-        <button type="button" className="btn btn-primary" disabled={busy !== null} onClick={() => addAnother(quick)}>
-          {busy === quick.key ? 'Adding…' : 'Add'}
+      {signInPath && selected && (
+        <button type="button" className="btn btn-primary" disabled={busy !== null} onClick={() => startSignIn(selected)}>
+          {busy === selected.key ? 'Signing in…' : signInPath}
         </button>
       )}
     </>
@@ -400,7 +439,7 @@ export function AddProviderDialog({
                         onClick={() => choose(choice)}
                         onDoubleClick={() => {
                           choose(choice)
-                          if (choice.kind === 'new' && choice.another) addAnother(choice)
+                          if (signInPathOf(choice)) startSignIn(choice)
                           else setStep(1)
                         }}
                       >
@@ -508,7 +547,7 @@ export function AddProviderDialog({
                   error={error}
                   description={selected.setups.length > 1 ? undefined : SETUP_INFO.managed.description}
                   onAdd={() =>
-                    selected.another ? addAnother(selected) : void run(selected.key, async () => {
+                    selected.another ? addAndSignIn(selected) : void run(selected.key, async () => {
                       const instanceId = await handlers.add(selected.driver, { displayName: DRIVER_INFO[selected.driver].label, setup: 'managed' })
                       // The download starts at once; it shows in the downloads indicator and the editor.
                       await api.instances.install(instanceId)
@@ -633,7 +672,7 @@ export function AgentConnectStep({
   onAdd
 }: {
   choice: Extract<AddChoice, { kind: 'new' }>
-  /** The CLI's name when the entry's label names something else ("ChatGPT subscription" runs Codex). */
+  /** The CLI's name when the entry's label names something else ("Claude Code (API key)" runs Claude Code). */
   cliLabel?: string
   busy: boolean
   disabled: boolean

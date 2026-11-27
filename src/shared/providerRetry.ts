@@ -30,7 +30,7 @@ export function providerRetryText(state: ProviderRetryState): string {
   const retries = `${state.attempt} ${state.attempt === 1 ? 'retry' : 'retries'}`
   if (state.status === 'recovered') return `Provider recovered after ${retries}`
   if (state.status === 'stopped') return `Stopped retrying the provider after ${retries}`
-  return `Provider error · retrying ${count(state.attempt, state.maxAttempts)}`
+  return `Retrying provider… (${count(state.attempt, state.maxAttempts)})`
 }
 
 /** The retries an error's details carry, when they are well formed. */

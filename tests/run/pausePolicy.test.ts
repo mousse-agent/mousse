@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
+import { appLimitError, normalizeProviderError, usageLimitError } from '../../src/mms/orchestrator/providerErrors'
+import { extractLimitFromError } from '../../src/mms/models/usageLimits'
+import { turnRetryPlan } from '../../src/mms/orchestrator/turnRetry'
+import { classifyProviderFailure } from '../../src/mms/agentDefinitions/runtimeFallback'
 import { decideUsageLimit, pauseCount, usageLimitOf, type UsageLimitDecision } from '../../src/mms/run/pausePolicy'
 import type { RunPause } from '../../src/mms/run/types'
 import { AppError } from '../../src/shared/errors'
@@ -57,6 +60,24 @@ describe('the usage-limit pause decision', () => {
   it('leaves a run that is being stopped to the Stop', () => {
     const error = usageLimitError({ provider: 'claude', estimated: true })
     expect(decide(error, { run: { outcome: { stopRequested: true } } })).toBeUndefined()
+  })
+})
+
+describe('a ChatGPT app limit', () => {
+  // The plan may still have usage: nothing waits for a plan reset, marks the entry or sends the turn again.
+  it('does not pause the run, mark the entry limited or retry the turn; another provider may take it', () => {
+    const error = appLimitError('codex', new Error('stream disconnected before completion: The ChatGPT user has reached their Subscription Sharing usage limit.'))
+    expect(decideUsageLimit({ error, run: { outcome: {} }, lookup: () => null, cap: 3, autoResume: true, nowMs: NOW })).toBeUndefined()
+    expect(extractLimitFromError(error)).toBeUndefined()
+    expect(turnRetryPlan(error, { retries: 0, failingMs: 0, progressed: false, sessionKept: false, runtimeRetried: false, bot: false })).toBeUndefined()
+    expect(classifyProviderFailure(error)).toBe('rate_limit')
+    expect(error.message).not.toMatch(/subscription sharing/i)
+  })
+
+  it("is read from OpenAI's code or wording wherever a provider error is normalized", () => {
+    expect(normalizeProviderError(Object.assign(new Error('Usage limit exceeded'), { status: 429, code: 'subscription_sharing_usage_limit_exceeded' }), 'openai-codex')).toMatchObject({ code: 'provider_app_limit' })
+    expect(normalizeProviderError(new Error('The ChatGPT user has reached their Subscription Sharing usage limit.'))).toMatchObject({ code: 'provider_app_limit' })
+    expect(normalizeProviderError(new Error('You have hit your ChatGPT usage limit (plus plan).'))).toMatchObject({ code: 'provider_usage_limit' })
   })
 })
 

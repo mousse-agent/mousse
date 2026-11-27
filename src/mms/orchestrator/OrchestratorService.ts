@@ -97,7 +97,7 @@ import { childBusy, deleteRunResults, readRunResultText } from '../run/delegatio
 import { SettleNotices, type PlannedSettleNotice } from './settleNotices'
 import { decideUsageLimit, usageLimitOf, type UsageLimitDecision } from '../run/pausePolicy'
 import { boundedResetIso, estimatedReset } from './providerErrors'
-import { TURN_RETRY, turnRetryCause, turnRetryDelay, waitOrAbort, withRetries } from './turnRetry'
+import { TURN_RETRY, continuationPrompt, turnRetryCause, turnRetryPlan, waitOrAbort, withRetries } from './turnRetry'
 import { providerRetryText, type ProviderRetries, type ProviderRetryState } from '../../shared/providerRetry'
 import { CONTINUE_TEXT, MANUAL_CONTINUE_TEXT, pausedLine } from '../run/pauseText'
 import { currentStopGeneration, runStopGeneration } from '../run/stopGeneration'
@@ -16037,8 +16037,15 @@ export class OrchestratorService extends EventEmitter {
     let retryRow: ChatMessage | undefined
     /** The retries of the turn's current request, until the provider answers it: a failure after them says how many. */
     let pendingRetries: ProviderRetries | undefined
-    /** The runtime retried one of the turn's requests itself: Mousse never runs the turn again on top (`turnRetryDelay`). */
+    /**
+     * The runtime retried the turn's current request itself: Mousse never runs the turn again on top of a failure after
+     * those retries (`turnRetryPlan`). The provider answering again ends it.
+     */
     let runtimeRetried = false
+    /** The runtime kept its session as the current attempt's failure left it (`TurnSink.sessionKept`). */
+    let sessionKept = false
+    /** When the provider last answered this turn (`progress`): a run of failures after it has its own deadline. */
+    let answeredAt = 0
     /** The runtime or Mousse compacted the history inside the turn: the turn is never sent again as it was. */
     let providerCompacted = false
     /**
@@ -16501,6 +16508,8 @@ export class OrchestratorService extends EventEmitter {
         },
         progress: () => {
           providerProgress = true
+          answeredAt = Date.now()
+          runtimeRetried = false
           attachBotSteer()
           this.setTurnStep(session.threadId, undefined)
           endRetries('recovered')
@@ -16594,7 +16603,8 @@ export class OrchestratorService extends EventEmitter {
           try { opts?.bot?.metrics?.(metrics) }
           catch (error) { logDebug('OrchestratorService', 'bot turn metrics could not be recorded', error, { threadId: session.threadId }) }
         },
-        lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
+        lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines),
+        sessionKept: () => { sessionKept = true }
       }, { dropLate: true })
       // Every word from the runtime is progress.
       const turnSink = Object.fromEntries(Object.entries(sinkCalls).map(([key, call]) => [key, typeof call === 'function'
@@ -16762,19 +16772,25 @@ export class OrchestratorService extends EventEmitter {
       attachBotSteer()
       turnBoundaryStarted(session.threadId, 'harness')
       turnTimingMark(session.threadId, 'harness')
-      const firstRequestAt = Date.now()
-      // A request that failed for a passing reason before the provider answered, ran a tool or took a steer is sent
-      // again after a capped, spread-out wait (`turnRetryDelay`): nothing of it happened, so nothing is repeated. The
-      // run stays running meanwhile; a Stop ends the wait.
+      // A request that failed on the provider is tried again after a capped, spread-out wait (`turnRetryPlan`), up to
+      // `TURN_RETRY.attempts` times per turn. Before anything of the turn happened it is sent again as it was. Once the
+      // provider answered, a tool ran or a steer went in, it is never sent again: a runtime that kept its session as
+      // the failure left it gets a short continuation turn on that session instead (`continuesFailedRequest`), so the
+      // model picks up where the request stopped and no tool runs twice; any other runtime's failure is final. The run
+      // stays running meanwhile; a Stop ends the wait.
+      let attemptInput = turnInput
+      /** Since the first failure after the provider last answered. */
+      let failingSince: number | undefined
       for (let retries = 0; ; retries += 1) {
         const releaseCopies = this.secretCopiesForTurn(session.threadId, binding.driver)
         let delay: number | undefined
+        sessionKept = false
         try {
           result = await this.harness.startTurn({
             binding,
             ...(previous ? { previous } : {}),
             ...(attemptOrdinal ? { attemptOrdinal } : {}),
-            input: turnInput,
+            input: attemptInput,
             sink: turnSink,
             control: turnControl,
             host: adapterHost,
@@ -16787,19 +16803,43 @@ export class OrchestratorService extends EventEmitter {
           }).result
           break
         } catch (error) {
-          delay = turn.abort.signal.aborted ? undefined : turnRetryDelay(error, {
+          const now = Date.now()
+          if (failingSince === undefined || answeredAt > failingSince) failingSince = now
+          const plan = turn.abort.signal.aborted ? undefined : turnRetryPlan(error, {
             retries,
-            elapsedMs: Date.now() - firstRequestAt,
-            answered: providerProgress || providerCompacted || nativeCheckpointed,
-            toolStarted: conversationToolsUsed,
-            steered: drains > 0 || acceptedDrains.size > 0 || takenDrains.size > 0,
+            failingMs: now - failingSince,
+            progressed: providerProgress || providerCompacted || nativeCheckpointed || conversationToolsUsed ||
+              drains > 0 || acceptedDrains.size > 0 || takenDrains.size > 0 || attemptInput !== turnInput,
+            sessionKept,
             runtimeRetried,
             bot: Boolean(opts?.bot)
           })
-          if (delay === undefined) throw error
-          logDebug('OrchestratorService', 'provider request failed before it was answered; trying again', error, { threadId: session.threadId, retry: retries + 1, delayMs: delay })
-          noteRetry(retries + 1, TURN_RETRY.attempts, turnRetryCause(error))
+          if (!plan) throw error
+          delay = plan.delayMs
+          const cause = turnRetryCause(error)
+          logDebug('OrchestratorService', plan.how === 'continue'
+            ? "provider request failed mid-turn; continuing the runtime's session"
+            : 'provider request failed before it was answered; trying again', error, { threadId: session.threadId, retry: retries + 1, delayMs: delay })
+          noteRetry(retries + 1, TURN_RETRY.attempts, cause)
           this.setTurnStep(session.threadId, { kind: 'retrying', attempt: retries + 1, maxAttempts: TURN_RETRY.attempts, delayMs: delay })
+          if (plan.how === 'continue') {
+            // The text and thought the failed request left open end here; the continuation's own output starts new rows
+            // below them. Calls stay as they are: one the kept session still runs (a background agent) reports on, and
+            // the turn's end closes any left.
+            this.transcript.closeThinking()
+            this.transcript.abandonAssistant(this.transcript.openAssistantContent() ?? '', true)
+            // The session holds the turn and its history as it is now: the continuation carries that history, a note in
+            // place of the request, and nothing it handed over or attached the first time.
+            const { images: _images, historyHandedOver: _handedOver, handoffUnplanned: _unplanned, ...base } = turnInput
+            attemptInput = {
+              ...base,
+              prompt: continuationPrompt(cause),
+              messages: getActiveMessages(this.nativeContext),
+              contextSummary: getCompactionSummary(this.nativeContext),
+              nativeHistory: nativeAgentHistory(this.nativeContext),
+              continuesFailedRequest: true
+            }
+          }
         } finally {
           // Copies held off for this turn come back once it has settled (a Claude Code turn holds none).
           releaseCopies()
