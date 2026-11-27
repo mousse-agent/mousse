@@ -373,6 +373,29 @@ describe('Settings → Devices, new networking', () => {
     expect(detail()!.dataset.deviceDetail).toBe('n1')
   })
 
+  it('says on an unchosen row what waits on this owner, and opens on the first device that needs something', async () => {
+    daemon({
+      devices: [
+        device({ node: 'n1' }),
+        device({ node: 'n2', name: 'Server', offered: ['wss://x.example/mousse-net/1'] }),
+        device({ node: 'n3', name: 'Mini', direction: 'out', olderApp: true }),
+        device({ node: 'n4', name: 'Desk', direction: 'in', other: { offer: 'ask', asked: 'declined' } }),
+        device({ node: 'n5', name: 'Box', direction: 'in', other: { offer: 'ask', asked: 'waiting' } })
+      ]
+    })
+    await mount()
+    expect(detail()!.dataset.deviceDetail).toBe('n2')
+    const need = (node: string) => rowOf(node)!.querySelector<HTMLElement>('[data-device-needs]')
+    expect(need('n1')).toBeNull()
+    expect(need('n2')!.textContent).toBe('New route')
+    expect(need('n2')!.title).toBe('Server offered new ways to reach it')
+    expect(need('n3')!.textContent).toBe('Older Mousse')
+    expect(need('n4')!.textContent).toBe('Said Not now')
+    expect(need('n4')!.title).toBe('Desk said Not now')
+    // Waiting on the other computer's owner is not this owner's to do.
+    expect(need('n5')).toBeNull()
+  })
+
   it('shows the level picked at Allow for a device that uses this computer one way, which the old networking calls disconnected', async () => {
     // One way, this computer never dials the device, so the old networking's node says disconnected while the
     // engine says connected (as two real computers paired this way showed).

@@ -43,7 +43,7 @@ import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from '../setting
 import { DelayedLoader } from '../ui/DelayedLoader'
 import { Modal } from '../ui/Modal'
 import { AccessPanel, showsLevel } from './AccessPanel'
-import { DevicesPane, type PaneEntry, type PaneStatus } from './DevicesPane'
+import { DevicesPane, type PaneEntry, type PaneNeed, type PaneStatus } from './DevicesPane'
 import { AllowPrompt } from './AllowPrompt'
 import { EnginePlusGroup } from './EnginePlusGroup'
 import { LetDeviceInDialog, type LetDeviceInStart } from './LetDeviceInDialog'
@@ -402,6 +402,12 @@ export function EngineDevicesSection() {
     )
   }
 
+  /** "Behind" for a row, with its version line as the tooltip. */
+  const behindNeed = (name: string, device: Device | undefined): PaneNeed[] => {
+    const tag = device ? versionTag({ ...device, name }, current) : undefined
+    return tag?.label === 'Behind' ? [{ word: 'Behind', line: tag.detail }] : []
+  }
+
   const block = (node: string) => (blocked: boolean) => void action('bridge.policy', { node, blocked })
 
   /** A pairing of the new networking: both its directions are one device. */
@@ -571,6 +577,21 @@ export function EngineDevicesSection() {
         )}
       </span>
     )
+    // The same notes as words for its row, so a device that needs this owner shows it unselected too.
+    const needs: PaneNeed[] = [
+      ...(device.offered?.length ? [{ word: 'New route', line: `${device.name} offered new ways to reach it` }] : []),
+      ...(device.relay?.offered ?? []).map((destination) => ({
+        word: 'New relay',
+        line: relayOfferLine(device.name, destination)
+      })),
+      ...(asked && !asked.waiting
+        ? [{ word: device.other?.asked === 'declined' ? 'Said Not now' : 'No answer', line: asked.line }]
+        : []),
+      ...(device.olderApp && (sides.includes('out') || device.direction === 'in')
+        ? [{ word: 'Older Mousse', line: `${device.name} runs an older Mousse` }]
+        : []),
+      ...behindNeed(device.name, node)
+    ]
     const how = connected ? engineWhere(device) : undefined
     const inView = views.find(({ side }) => side === 'in')?.view
     const showsAccess = !!inView?.actions.includes('access')
@@ -589,6 +610,7 @@ export function EngineDevicesSection() {
       status: statusView,
       how,
       howDetail: engineAddresses(device),
+      needs,
       menu,
       detail: (
         <>
@@ -658,6 +680,7 @@ export function EngineDevicesSection() {
       how: connected ? how : undefined,
       // Signed out, devices that are not nearby are quiet.
       quiet: signedOut && device.state !== 'open',
+      needs: computer ? behindNeed(device.name, device) : [],
       menu,
       detail: (
         <>

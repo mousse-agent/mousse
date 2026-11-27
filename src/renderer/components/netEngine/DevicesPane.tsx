@@ -29,9 +29,17 @@ export interface PaneEntry {
   howDetail?: string
   /** Signed out, a device that is not nearby is quiet. */
   quiet?: boolean
+  /** What waits on this owner in its detail, most pressing first: its row shows the first word. */
+  needs?: PaneNeed[]
   menu: RowMenuItem[]
   /** The detail's sections. */
   detail: ReactNode
+}
+
+/** Something in a device's detail that waits on this owner: a word for its row, its whole line for the tooltip. */
+export interface PaneNeed {
+  word: string
+  line: string
 }
 
 const DIRECTION_ICON = { both: ArrowLeftRight, out: ArrowRight, in: ArrowLeft } as const
@@ -68,7 +76,12 @@ export function DevicesPane({
   busy: boolean
 }) {
   const listRef = useRef<HTMLDivElement>(null)
-  const chosen = entries.find((entry) => entry.node === selected) ?? entries[0]
+  // Until one is picked, the page opens on the first device that needs something, else the first.
+  const opened = useRef<string | undefined>(undefined)
+  if (opened.current === undefined && entries.length)
+    opened.current = (entries.find((entry) => entry.needs?.length) ?? entries[0]!).node
+  const chosen =
+    entries.find((entry) => entry.node === selected) ?? entries.find((entry) => entry.node === opened.current) ?? entries[0]
   const move = (event: KeyboardEvent<HTMLDivElement>) => {
     const index = entries.findIndex((entry) => entry.node === chosen?.node)
     const next =
@@ -118,6 +131,18 @@ export function DevicesPane({
                       <>
                         <span className={entry.status.tone === 'warn' ? 'settings-status-warn' : undefined} title={entry.status.detail}>
                           {entry.status.short}
+                        </span>
+                        {' · '}
+                      </>
+                    )}
+                    {!!entry.needs?.length && (
+                      <>
+                        <span
+                          className="settings-status-warn"
+                          data-device-needs=""
+                          title={entry.needs.map((need) => need.line).join('\n')}
+                        >
+                          {entry.needs[0]!.word}
                         </span>
                         {' · '}
                       </>

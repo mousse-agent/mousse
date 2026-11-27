@@ -104,6 +104,10 @@ describe('Settings → Devices, versions', () => {
       ]
     }
     await mount()
+    // Behind shows on its row too, and the page opens on it.
+    expect(host.querySelector('[data-device-node="node_b"] [data-device-needs]')?.textContent).toBe('Behind')
+    expect(host.querySelector<HTMLElement>('[data-device-detail]')?.dataset.deviceDetail).toBe('node_b')
+    expect(host.querySelector('[data-device-node="node_c"] [data-device-needs]')).toBeNull()
     expect(await rowText('node_b')).toMatch(/· Behind/)
     expect(titled('Behind')?.title).toBe(
       "Laptop runs 0.9.0 (stable), this computer 0.9.2. It can't update itself: Updates on macOS need a signed build."
