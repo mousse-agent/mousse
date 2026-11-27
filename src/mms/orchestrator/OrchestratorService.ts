@@ -236,6 +236,7 @@ import {
   type TurnStep,
   type TurnSetupStep,
   type TurnState,
+  type ChainHoldView,
   type HeldSteer,
   type TurnStateSnapshot,
   type UserQuestion,
@@ -2702,6 +2703,8 @@ export class OrchestratorService extends EventEmitter {
     if (patch?.step && isTurnActivePhase(phase)) state.step = patch.step
     // A held steer stays shown through the turn's phases (a tool ends, the model writes) until its hold changes.
     if (existing?.heldSteer && isTurnActivePhase(phase) && state.turnId === existing.turnId) state.heldSteer = existing.heldSteer
+    // A chain's held messages wait for the person whatever the thread's own turn does (`showChainHold`).
+    if (existing?.chainHold) state.chainHold = existing.chainHold
     if ((phase === 'queued' || phase === 'thinking') && !existing?.startedAt) state.startedAt = now
     if (phase !== 'idle' && !state.startedAt) state.startedAt = existing?.startedAt ?? now
     this.turnStates.set(threadId, state)
@@ -2779,6 +2782,41 @@ export class OrchestratorService extends EventEmitter {
     this.emit('turn-state', state)
   }
 
+  /**
+   * The card of the chain held longest of those that started in `rootThreadId` (`TurnState.chainHold`): who is talking,
+   * how many messages they sent each other and how many wait; none once nothing they started holds anything. Every
+   * computer that shows the thread gets it with the thread's turn state, and answers it here (`threads.chainHold`).
+   */
+  private showChainHold(rootThreadId: string): void {
+    let view: ChainHoldView | undefined
+    try {
+      view = this.chainHoldOf(rootThreadId)
+    } catch (error) {
+      console.warn('the card of a held chain could not be shown', { rootThreadId, error: error instanceof Error ? error.message : String(error) })
+      return
+    }
+    const existing = this.turnStates.get(rootThreadId)
+    if (!view && !existing?.chainHold) return
+    if (view && existing?.chainHold && JSON.stringify(view) === JSON.stringify(existing.chainHold)) return
+    // A new time: a window that compares its copy with this one by time (its catch-up after a gap) sees the change.
+    const state: TurnState = { ...(existing ?? { threadId: rootThreadId, turnId: null, phase: 'idle' }), updatedAt: new Date().toISOString() }
+    if (view) state.chainHold = view
+    else delete state.chainHold
+    this.turnStates.set(rootThreadId, state)
+    this.emit('turn-state', state)
+  }
+
+  /** The card as the chains are now (`showChainHold`); never a copy kept in an earlier turn state. */
+  private chainHoldOf(rootThreadId: string): ChainHoldView | undefined {
+    const engine = this.runEngine
+    const chain = engine?.chains.heldChains(rootThreadId)[0]
+    if (!engine || !chain) return undefined
+    const holds = engine.chains.heldFor(chain.chainId)
+    if (!holds[0]) return undefined
+    const ids = [...new Set(holds.flatMap((hold) => [hold.senderThreadId, hold.targetThreadId]))]
+    return { chainId: chain.chainId, holdId: holds[0].holdId, used: chain.used, held: holds.length, between: ids.map((id) => ({ threadId: id, title: this.titleOf(id) ?? null })) }
+  }
+
   /** Liveness touch for an engine run (SPEC §12.4 rule 2), at most once per throttle window. */
   private heartbeatRun(runId: string | null | undefined): void {
     const engine = this.runEngine
@@ -2831,7 +2869,14 @@ export class OrchestratorService extends EventEmitter {
         this.setTurnPhase(threadId, 'idle')
         return
       }
-      const state: TurnState = { ...before, updatedAt: new Date().toISOString() }
+      const { chainHold: _saved, ...earlier } = before
+      let card: ChainHoldView | undefined
+      try {
+        card = this.chainHoldOf(threadId)
+      } catch {
+        card = existing.chainHold
+      }
+      const state: TurnState = { ...earlier, updatedAt: new Date().toISOString(), ...(card ? { chainHold: card } : {}) }
       this.turnStates.set(threadId, state)
       this.emit('turn-state', state)
       this.runtimeManager?.setActivity(threadId, turnPhaseActivity(state.phase))
@@ -3223,6 +3268,8 @@ export class OrchestratorService extends EventEmitter {
     engine.store.setUnreadSteers((threadId) => this.hasUnreadSteers(threadId))
     this.questionRouterOff = this.routeSubagentQuestions(engine)
     this.settleNotices = this.startSettleNotices(engine)
+    // The cards of chains held before a restart.
+    for (const root of engine.chains.heldRoots()) this.showChainHold(root)
     engine.handoffs.setTranscriptSource((threadId) => this.handoffTranscript(threadId))
     engine.setDelegationHost({
       createThread: (creation) =>
@@ -5659,6 +5706,7 @@ export class OrchestratorService extends EventEmitter {
     const admission = chains.admit({ chainId: sender.chain, senderThreadId: sender.threadId, senderRunId: sender.runId, targetThreadId, kind, requestKey, payload, holdable })
     if (admission.status === 'go') return admission.chainId
     const rootThreadId = chains.get(admission.chainId)?.rootThreadId ?? sender.threadId
+    if (!admission.replayed) this.showChainHold(rootThreadId)
     throw new AgentMessageHeld({ holdId: admission.hold.holdId, chainId: admission.chainId, rootThreadId, targetThreadId, replayed: admission.replayed })
   }
 
@@ -5669,13 +5717,34 @@ export class OrchestratorService extends EventEmitter {
    * held until its own message is sent, in the transaction that records it: after a restart, Continue finds what was
    * not sent yet and nothing twice, and the chain's new messages wait behind it until Continue has sent it all.
    */
-  async answerChainHold(threadId: string, chainId: string, answer: 'continue' | 'stop'): Promise<{ chainId: string; sent: number; stopped: number; failed: number }> {
+  async answerChainHold(
+    threadId: string,
+    chainId: string,
+    answer: 'continue' | 'stop',
+    opts: { holdId?: string; deviceLimit?: PermissionMode } = {}
+  ): Promise<{ chainId: string; sent: number; stopped: number; failed: number }> {
     const engine = this.requireRunEngine()
     const { chains } = engine
     const chain = chains.get(chainId)
     if (!chain || chain.rootThreadId !== threadId) throw new CommandRejection('conflict', `Chain ${chainId} did not start in this thread.`)
     if (this.answeringChains.has(chainId)) throw new CommandRejection('conflict', 'This chain was already answered; what it held is being sent.')
     if (!chains.heldFor(chainId).length) throw new CommandRejection('conflict', 'Nothing of this chain is held any more.')
+    // The card's batch: an answer to one already settled never acts on what the chain held after it.
+    const batch = opts.holdId === undefined ? undefined : chains.getHold(opts.holdId)
+    if (opts.holdId !== undefined && (batch?.chainId !== chainId || batch.status !== 'held'))
+      throw new CommandRejection('hold_settled', 'These messages were already answered. The card shows what waits now.')
+    // A person on another computer lets nothing run above what this computer allows their device.
+    const limit = opts.deviceLimit
+    const aboveLimit = (hold: ChainHoldRecord): PermissionMode | undefined => {
+      if (!limit || hold.kind !== 'work') return undefined
+      const mode = this.senderMode((hold.payload as HeldWork).actor)
+      return isStricter(limit, mode) ? mode : undefined
+    }
+    if (answer === 'continue' && limit) {
+      const mode = chains.heldFor(chainId).map(aboveLimit).find(Boolean)
+      if (mode)
+        throw new DomainRpcError('permission_mode_above_ceiling', `A waiting message would run with ${describePermissionMode(mode)}, and the computer that runs this thread lets this device allow ${describePermissionMode(limit)} at most. Continue it on that computer, or Stop it here.`, { threadId, limit, reason: 'device_limit' })
+    }
     const counts = { chainId, sent: 0, stopped: 0, failed: 0 }
     this.answeringChains.add(chainId)
     try {
@@ -5691,6 +5760,8 @@ export class OrchestratorService extends EventEmitter {
       // Until nothing is held: a message the chain sends meanwhile is held behind these, and goes after them.
       for (let hold = chains.heldFor(chainId)[0]; hold; hold = chains.heldFor(chainId)[0]) {
         const current = hold
+        // One held meanwhile above the device's limit stays held, with its card, for an answer that may send it.
+        if (aboveLimit(current)) break
         try {
           if (current.kind === 'work') {
             const work = current.payload as HeldWork
@@ -5702,6 +5773,8 @@ export class OrchestratorService extends EventEmitter {
               chains.count(chainId)
               postNote(engine, current.requestKey, current.payload as AgentNotePayload, current.targetThreadId)
             })
+            // An idle thread wakes for it now, as for a note its sender posted, not at the reconciler's next pass.
+            this.wakeThreadNow(current.targetThreadId)
           }
           // A replay of a send that already went settled nothing: it is not held any more either way.
           chains.settleHold(current.holdId, 'continued')
@@ -5716,6 +5789,7 @@ export class OrchestratorService extends EventEmitter {
       return counts
     } finally {
       this.answeringChains.delete(chainId)
+      this.showChainHold(threadId)
     }
   }
 

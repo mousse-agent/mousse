@@ -567,6 +567,27 @@ describe("a chat's first message, sent from a window on this computer", () => {
   }, 60_000)
 })
 
+describe("the answer to a held chain of agent messages, from a window on this computer", () => {
+  it("is marked a person's by this computer's router, whatever the window says; the owner refuses a routed one without the mark", async () => {
+    const id = t.qualified(t.thread().id)
+    const params = { threadId: id, chainId: 'chain:none', holdId: 'hold:none', answer: 'stop' }
+    // Marked: it reaches the owner's chains, which do not know this one.
+    expect((await t.refused(t.dispatch('threads.chainHold', params))).code).not.toBe('forbidden')
+    expect((await t.refused(t.dispatch('threads.chainHold', { ...params, window: 'nobody' }))).code).not.toBe('forbidden')
+    // A routed call that comes without it (a device's own call, not a window's through its router) is no person's.
+    const unmark = (value: unknown): unknown =>
+      Array.isArray(value) ? value.map(unmark)
+        : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).filter(([key, item]) => !(key === 'window' && item === 'person')).map(([key, item]) => [key, unmark(item)]))
+          : value
+    const unmarked = clientWith((real) => ({
+      rpc: async (method: string, given: unknown, options: unknown) => real.rpc(method, method === 'routed.threads.chainHold' ? unmark(given) : given, options)
+    }))
+    await withClient(unmarked, async () => {
+      expect(await t.refused(t.dispatch('threads.chainHold', params))).toMatchObject({ code: 'forbidden' })
+    })
+  }, 60_000)
+})
+
 describe('a call that takes too long', () => {
   it('is sent once: a slow read on a connected computer is not a lost link', async () => {
     const thread = t.thread()

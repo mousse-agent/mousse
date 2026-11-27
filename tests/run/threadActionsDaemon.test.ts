@@ -741,6 +741,68 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
         expect(w.d.engine.chains.get(chainId)?.used).toBe(3)
       })
 
+      it('one card where the chain started, for as long as anything is held: its batch, how many messages and who is talking; it goes once answered', async () => {
+        const { w, chainId } = await heldWorld()
+        const shown = w.d.orch.getTurnState(w.parent.id)
+        expect(shown.chainHold).toEqual({
+          chainId, holdId: w.d.engine.chains.heldFor(chainId)[0]!.holdId, used: 12, held: 2, between: [{ threadId: w.parent.id, title: 'Parent' }, { threadId: w.other.id, title: 'Other work' }]
+        })
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        await w.d.orch.answerChainHold(w.parent.id, chainId, 'stop')
+        const after = w.d.orch.getTurnState(w.parent.id)
+        expect(after.chainHold).toBeUndefined()
+        // A window that compares turn states by time after a gap sees that the card went.
+        expect(Date.parse(after.updatedAt)).toBeGreaterThan(Date.parse(shown.updatedAt))
+      })
+
+      it('an answer names the card\'s batch: one for a batch already settled is refused and leaves what was held later', async () => {
+        const { w, chainId } = await heldWorld()
+        const stale = w.d.orch.getTurnState(w.parent.id).chainHold!.holdId
+        await w.d.orch.answerChainHold(w.parent.id, chainId, 'stop', { holdId: stale })
+        // The chain holds again: a new batch, and a new card.
+        const sender = w.d.engine.listRuns(w.parent.id)[0]!
+        const note = { kind: 'agent_note', senderThreadId: w.parent.id, senderRunId: sender.runId, senderTitle: 'Parent', senderAccess: 'agent', from: 'sibling', text: 'Later.', attention: 'needed' }
+        expect(w.d.engine.chains.admit({ chainId, senderThreadId: w.parent.id, senderRunId: sender.runId, targetThreadId: w.other.id, kind: 'note', requestKey: 'later', payload: note })).toMatchObject({ status: 'held' })
+        await expect(w.d.orch.answerChainHold(w.parent.id, chainId, 'stop', { holdId: stale })).rejects.toMatchObject({ reason: 'hold_settled' })
+        expect(w.d.engine.chains.heldFor(chainId)).toHaveLength(1)
+      })
+
+      it('a Continue from a device limited below what a held message would run with is refused, and nothing is sent', async () => {
+        const { w, chainId } = await heldWorld()
+        await expect(w.d.orch.answerChainHold(w.parent.id, chainId, 'continue', { deviceLimit: 'ask' })).rejects.toMatchObject({ code: 'permission_mode_above_ceiling', details: { reason: 'device_limit' } })
+        expect(w.d.engine.chains.heldFor(chainId)).toHaveLength(2)
+        expect(w.d.engine.chains.get(chainId)?.used).toBe(12)
+        expect(w.d.orch.getTurnState(w.parent.id).chainHold).toMatchObject({ held: 2 })
+      })
+
+      it('a card settled while a question waited does not come back when the question clears', async () => {
+        const { w, chainId } = await heldWorld()
+        ;(w.d.orch as any).setTurnPhase(w.parent.id, 'stopped')
+        w.d.orch.setAwaitingInput(w.parent.id)
+        await w.d.orch.answerChainHold(w.parent.id, chainId, 'stop')
+        w.d.orch.inputAnswered(w.parent.id)
+        expect(w.d.orch.getTurnState(w.parent.id)).toMatchObject({ phase: 'stopped' })
+        expect(w.d.orch.getTurnState(w.parent.id).chainHold).toBeUndefined()
+      })
+
+      it('Continue posts a held note that asks for attention, which wakes its thread in the chain', async () => {
+        const w = world(async () => 'ok')
+        await w.attach()
+        await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+        await waitFor(() => w.d.engine.listRuns(w.parent.id).every((run) => run.status === 'completed'), 'the sender\'s turn')
+        const sender = w.d.engine.listRuns(w.parent.id)[0]!
+        const chainId = `chain:${sender.runId}`
+        spendChain(w.d.engine, chainId, w.parent.id, w.other.id)
+        // A note that asks for attention, past the budget (the tool path: `admitAgentNote`).
+        const note = { kind: 'agent_note', senderThreadId: w.parent.id, senderRunId: sender.runId, senderTitle: 'Parent', senderAccess: 'agent', from: 'sibling', text: 'A held note.', attention: 'needed' }
+        expect(w.d.engine.chains.admit({ chainId, senderThreadId: w.parent.id, senderRunId: sender.runId, targetThreadId: w.other.id, kind: 'note', requestKey: 'note-key', payload: note })).toMatchObject({ status: 'held' })
+        expect(await w.d.orch.answerChainHold(w.parent.id, chainId, 'continue')).toMatchObject({ sent: 1 })
+        await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the note to wake its thread', 30_000)
+        expect(String(w.turnsOf(w.other.id)[0]!.prompt)).toContain('A held note.')
+        expect(w.d.engine.listRuns(w.other.id)[0]).toMatchObject({ source: 'wake', outcome: { agentChain: chainId } })
+        expect(w.d.engine.chains.get(chainId)?.used).toBe(1)
+      })
+
       it('Stop drops what was held, once, and tells the sender with a note that starts no turn', async () => {
         const { w, chainId } = await heldWorld()
         const [first, second] = await answerTwice(w, chainId, 'stop')
