@@ -2563,7 +2563,7 @@ export class Harness implements HarnessGateway {
    * Single-flight probe of one instance; a timeout keeps the last good values (stale). `handshake`
    * (Add, Recheck, after install) also runs the runtime's start-up check, which records its facts.
    */
-  private probe(instanceId: string, force: boolean, options: { handshake?: boolean; refreshModels?: boolean } = {}): Promise<void> {
+  private probe(instanceId: string, force: boolean, options: { handshake?: boolean; refreshModels?: boolean; quiet?: boolean } = {}): Promise<void> {
     const state = this.probeState(instanceId)
     if (options.refreshModels) state.refreshModelsAfterProbe = true
     if (state.probing) return state.probing
@@ -2632,10 +2632,11 @@ export class Harness implements HarnessGateway {
       })
       .finally(() => {
         state.probing = undefined
-        // A version the runtime has not seen may start background work of its own (Grok's held check).
-        if (!this.stopped && state.lastGood && state.result === state.lastGood) {
+        // A version the runtime has not seen may start background work of its own (Grok's held check); a check for
+        // Mousse's own model listings (the startup and scheduled passes) does not.
+        if (!this.stopped && !options.quiet && state.lastGood && state.result === state.lastGood) {
           try {
-            this.recordOrUndefined(instanceId)?.runtime.probed?.(state.lastGood.binary?.version)
+            this.recordOrUndefined(instanceId)?.runtime.probed?.(state.lastGood.binary?.version, { ...(state.lastGood.fingerprint ? { fingerprint: state.lastGood.fingerprint } : {}), soon: force })
           } catch (error) {
             console.warn('[harness] after-check work failed', { instanceId, error: errorText(error) })
           }
@@ -3420,7 +3421,7 @@ export class Harness implements HarnessGateway {
    * is dropped. Only a driver with known-broken versions is held to this.
    */
   private refuseKnownProblem(record: InstanceRecord): void {
-    if (!record.driver.knownBroken?.length) return
+    if (!record.driver.knownBroken?.length && !record.driver.binaryBoundCaps) return
     const good = this.probes.get(record.instanceId)?.lastGood
     const probed = good?.fingerprint
     if (!good || !probed) return
@@ -3431,7 +3432,7 @@ export class Harness implements HarnessGateway {
       this.checkAgainSoon(record.instanceId)
       harnessFail('binding_stale', `The ${this.displayName(record)} program changed, so Mousse is checking it again. Send the message again in a moment.`, record.instanceId)
     }
-    if (good.compatibility.state !== 'known_broken') return
+    if (!record.driver.knownBroken?.length || good.compatibility.state !== 'known_broken') return
     if (consent) {
       const receipt = good.binary?.source === 'managed' ? record.runtime.managed?.()?.receiptHash : undefined
       if (consent.version === good.binary?.version && sameBinary(consent.binary, now) && consent.receiptHash === receipt) return
@@ -3942,7 +3943,7 @@ export class Harness implements HarnessGateway {
       if (!record || this.retiredSkip(instanceId)) return
       if (when) {
         if (when.reason === 'setup' && !record.runtime.refreshModels) return
-        if (!this.probes.get(instanceId)?.result) await this.probe(instanceId, false)
+        if (!this.probes.get(instanceId)?.result) await this.probe(instanceId, false, { quiet: true })
         if (this.stopped || this.modelRefreshSkip(instanceId) || this.modelsAgeMs(record) < when.minAgeMs) return
       }
       const state = this.probeState(instanceId)

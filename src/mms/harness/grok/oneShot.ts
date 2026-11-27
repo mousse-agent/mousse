@@ -11,7 +11,8 @@ import { grokHeldEnv } from './held'
  * check (`heldCheck.ts`), against a stub model:
  * - one model request: `models.max_retries = 0` (a 429, 503 or 401 is not sent again), `--max-turns 1` (a tool call
  *   ends the run instead of asking the model again), turn summaries off, and Grok's own session title sent to a model
- *   whose address is port 0, so it fails on this computer and nothing leaves it;
+ *   at port 0 on the loopback: Grok still tries that request, but nothing can listen there, so it is never delivered
+ *   (the check also watches, through a proxy, that nothing else is sent anywhere);
  * - no tools: every built-in the version offers is disallowed (the check records their names), web search and
  *   subagents are off, and a deny rule for every tool stops any that is left;
  * - only Mousse's text: Mousse's system prompt replaces Grok's, the prompt is sent as written, memory is off, nothing
@@ -30,7 +31,7 @@ export const GROK_ONE_SHOT_CONFIG = [
   'max_retries = 0',
   'session_summary = "mousse-no-title"',
   '',
-  '# Grok names its own session from the prompt: that request goes to port 0 and fails here.',
+  '# Grok names its own session from the prompt: that request is sent to port 0, where nothing can receive it.',
   '[model.mousse-no-title]',
   'model = "none"',
   'base_url = "http://127.0.0.1:0/v1"',

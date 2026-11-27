@@ -8,7 +8,7 @@ import { atomicWriteJsonSync } from '../../data/AtomicFs'
  */
 
 /** Bumped whenever the check proves more or differently: an older local record is checked again. */
-export const GROK_HELD_CHECK_VERSION = 1
+export const GROK_HELD_CHECK_VERSION = 2
 
 export interface GrokHeldRecord {
   cliVersion: string
@@ -39,20 +39,22 @@ const GROK_1_0_9X_TOOLS: readonly string[] = Object.freeze([
 
 /**
  * Records shipped with Mousse: `heldCheck.ts` run against the real Grok on that platform (`tests/live/grokHeldCheck.test.ts`,
- * whose controls show the same check failing without the held config, and with the ask rule alone).
- * - 1.0.92 and 1.0.89, Windows 11 x64: every turn item and every one-shot item held.
- * Any other version or platform is checked on the computer that runs it, after a check of the entry finds it.
+ * whose controls show the same check failing without the held config, with the ask rule alone, when a worktree may take
+ * its main checkout's answers, and without the startup switches).
+ * - 1.0.92 and 1.0.89, Windows 11 x64: every turn item in all three phases, no startup marker, and every one-shot item.
+ * Any other version or platform, or a record of an older check, is checked on the computer that runs it, after a check
+ * of the entry finds it.
  */
 export const GROK_HELD_SHIPPED: readonly GrokHeldRecord[] = Object.freeze([
-  Object.freeze({ cliVersion: '1.0.92', platform: 'win32', turns: true, titles: true, tools: GROK_1_0_9X_TOOLS, checkVersion: 1, recordedAt: '2026-11-27T06:17:13Z' }),
-  Object.freeze({ cliVersion: '1.0.89', platform: 'win32', turns: true, titles: true, tools: GROK_1_0_9X_TOOLS, checkVersion: 1, recordedAt: '2026-11-27T06:17:26Z' })
+  Object.freeze({ cliVersion: '1.0.92', platform: 'win32', turns: true, titles: true, tools: GROK_1_0_9X_TOOLS, checkVersion: 2, recordedAt: '2026-11-27T07:17:08Z' }),
+  Object.freeze({ cliVersion: '1.0.89', platform: 'win32', turns: true, titles: true, tools: GROK_1_0_9X_TOOLS, checkVersion: 2, recordedAt: '2026-11-27T07:17:20Z' })
 ] satisfies GrokHeldRecord[])
 
 /** The record for `cliVersion` on `platform`: a local one of this check version, else a shipped one. */
 export function grokHeldRecord(cliVersion: string | undefined, platform: NodeJS.Platform, local: readonly GrokHeldRecord[], shipped: readonly GrokHeldRecord[] = GROK_HELD_SHIPPED): GrokHeldRecord | undefined {
   if (!cliVersion) return undefined
   const matches = (record: GrokHeldRecord) => record.cliVersion === cliVersion && record.platform === platform
-  return local.find((record) => matches(record) && record.checkVersion === GROK_HELD_CHECK_VERSION) ?? shipped.find(matches)
+  return local.find((record) => matches(record) && record.checkVersion === GROK_HELD_CHECK_VERSION) ?? shipped.find((record) => matches(record) && record.checkVersion === GROK_HELD_CHECK_VERSION)
 }
 
 interface EvidenceFile {

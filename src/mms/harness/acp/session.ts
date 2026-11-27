@@ -1202,8 +1202,9 @@ export class AcpSessions {
           if (answer.outcome.outcome === 'cancelled') active.cancelRequested = true
           return answer
         }
-        // A read in the turn's folder goes ahead unasked, as Claude Code's and Codex's do.
-        if (scope.cwd && this.options.allowsUnasked?.(request, scope.cwd) && !scope.aborted()) {
+        // A read confined to the turn's folder goes ahead unasked, as Claude Code's and Codex's do; a run that refuses
+        // approvals refuses it too.
+        if (scope.cwd && scope.approvals !== 'never' && !scope.aborted() && this.options.allowsUnasked?.(request, scope.cwd)) {
           const allow = request.options.map(classify).find((option) => option?.kind === 'allow_once')
           if (allow) return { outcome: { outcome: 'selected', optionId: allow.optionId } }
         }

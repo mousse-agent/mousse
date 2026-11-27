@@ -85,6 +85,8 @@ export interface AcpRuntimeHooks {
   program?(purpose: AcpPurpose): { resolved: CliLaunch; launch?: AcpLaunch; track?: () => () => void } | undefined
   /** The variables of a process, last (the instance's secrets win). */
   env?(env: NodeJS.ProcessEnv, purpose: AcpPurpose): NodeJS.ProcessEnv
+  /** Every process, whatever its executable came from, just before it starts; a throw stops the launch. */
+  launching?(purpose: AcpPurpose, executable: string): void
   /**
    * The preset's own file check, run wherever a registry agent's install is checked: before every
    * new process (turns, checks, sign-in and sign-out included) and on Recheck. A throw stops the launch.
@@ -311,6 +313,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
 
   const spawnAgent = (request: AcpLaunchRequest): AcpConnection => {
     const { resolved, launch, root, track } = launchOf(request.purpose)
+    hooks.launching?.(request.purpose, resolved.path)
     // Every registry launch follows a file check (`beforeLaunch`); none starts without one.
     if (root && (!verified || verified.hash !== installedNow()?.hash || Date.now() - verified.atMs > 60_000))
       throw new Error(`Mousse did not check the files of ${label} before starting it.`)

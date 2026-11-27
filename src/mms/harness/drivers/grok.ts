@@ -17,7 +17,9 @@ import { compareVersions, decodeInstanceConfig, type AuthReading, type DriverCon
 import { cliNames, resolveCommand } from '../env'
 import { grokCredential, grokHome, type GrokCredential } from '../grok/credential'
 import { GROK_API_KEY_VARIABLE } from '../grok/variables'
-import { ensureGrokHeldHome, grokHeldEnv, grokHeldHome } from '../grok/held'
+import { ensureGrokHeldHome, grokHeldEnv, grokHeldHome, grokHeldPolicyProblem } from '../grok/held'
+import { fingerprintOf, sameBinary } from '../status'
+import type { BinaryFingerprint } from '../../../shared/harness/types'
 import { runGrokHeldCheck } from '../grok/heldCheck'
 import { GROK_HELD_SHIPPED, GrokHeldStore, grokHeldRecord, type GrokHeldRecord } from '../grok/heldEvidence'
 import { collectRun, grokOneShotArgs, grokOneShotEnv, grokOneShotResult, writeGrokOneShotFiles } from '../grok/oneShot'
@@ -104,6 +106,9 @@ export const GROK_HELD_RETRY_MS = 10 * 60_000
 /** How long a read of whether the entry's sign-in can run on a held home is reused. */
 const HELD_PROBLEM_TTL_MS = 2_000
 
+/** A check found on its own (not one a person asked for) starts its held check this long after, never at app start. */
+export const GROK_HELD_CHECK_DELAY_MS = 60_000
+
 /** The sign-in methods Mousse offers for Grok, in order. */
 export const GROK_SIGN_IN_METHODS = [
   { id: 'account', label: 'Sign in with your Grok account', description: 'Opens a device code to confirm in your browser.' },
@@ -143,6 +148,8 @@ export function grokDriver(options: GrokDriverOptions = {}): HarnessDriver {
     relay: { approvals: 'runtime' },
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: true }),
     versionArgs: () => ['--version'],
+    // Proven per executable: every admission stats it again (`HarnessDriver.binaryBoundCaps`).
+    binaryBoundCaps: true,
     // Asks before every tool only where its held launch is proven for this version and platform.
     caps: (config, version, _facts, instanceId) => grokCaps(!gap('turns', config.displayName ?? GROK_LABEL, version, instanceId)),
     toolControlReason: (config, version, instanceId) => {
@@ -166,8 +173,11 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions, r
   /** The held check running now, and when each version's last inconclusive one ended. */
   let checking: AbortController | undefined
   const inconclusive = new Map<string, number>()
-  /** The version the last check of the entry read. */
-  let lastVersion: string | undefined
+  /** What the last check of the entry read: the version, at the executable fingerprint it read it from. */
+  let probedBinary: { version: string; fingerprint?: BinaryFingerprint } | undefined
+  /** A held check waiting for its delay (`GROK_HELD_CHECK_DELAY_MS`). */
+  let checkTimer: ReturnType<typeof setTimeout> | undefined
+  let stopped = false
   const vault = new InstanceVault(join(context.stateDir, 'secrets.json'))
   const agents = options.agents
   const ptyRuns = () => (options.pty ? options.pty.available() : ptyAvailable())
@@ -257,21 +267,46 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions, r
     const now = Date.now()
     if (problemRead && now - problemRead.atMs < HELD_PROBLEM_TTL_MS) return problemRead.value
     const found = credential()
-    const value = found.kind === 'unknown' ? `Mousse cannot tell which account ${label} signs in with (${found.reason}), so it cannot run it on a home that asks before every tool.` : undefined
+    const value = found.kind === 'unknown'
+      ? `Mousse cannot tell which account ${label} signs in with (${found.reason}), so it cannot run it on a home that asks before every tool.`
+      : grokHeldPolicyProblem(heldHome, { ...(options.systemDir ? { systemDir: options.systemDir } : {}), env: context.env.env })
     problemRead = { atMs: now, value }
     return value
   }
   register({ store: heldStore, problem: heldProblem })
 
   /**
-   * After a check of the entry: a version with no record is checked in the background (`runGrokHeldCheck`). One that
-   * could not conclude keeps the last record and is tried again after `GROK_HELD_RETRY_MS`.
+   * The executable a held launch starts must be the one the last check read: another one (a self-update, a replaced
+   * file) has no proof yet, so nothing held starts on it until it is checked again. Throws with the reason.
    */
-  const probed = (version: string | undefined): void => {
-    if (version) lastVersion = version
-    if (!version || checking || recordOf(version) || heldProblem()) return
+  const refuseChangedBinary = (path: string): void => {
+    if (!probedBinary?.fingerprint) return
+    if (!sameBinary(fingerprintOf(path), probedBinary.fingerprint))
+      throw harnessAppError({ code: 'binding_stale', message: `The ${label} program changed since Mousse last checked it, so it does not start until it is checked again. Check again in Settings → Providers.` })
+  }
+
+  /**
+   * After a check of the entry: a version with no record is checked in the background (`runGrokHeldCheck`), at once
+   * when a person asked for the check, else after `GROK_HELD_CHECK_DELAY_MS`. One that could not conclude keeps the
+   * last record and is tried again after `GROK_HELD_RETRY_MS`.
+   */
+  const probed = (version: string | undefined, info: { fingerprint?: BinaryFingerprint; soon: boolean } = { soon: false }): void => {
+    probedBinary = version ? { version, ...(info.fingerprint ? { fingerprint: info.fingerprint } : {}) } : undefined
+    if (stopped || !version || checking || checkTimer || recordOf(version) || heldProblem()) return
     const last = inconclusive.get(version)
     if (last !== undefined && Date.now() - last < GROK_HELD_RETRY_MS) return
+    if (info.soon) startCheck(version)
+    else {
+      checkTimer = setTimeout(() => {
+        checkTimer = undefined
+        if (!stopped && probedBinary?.version === version && !recordOf(version)) startCheck(version)
+      }, GROK_HELD_CHECK_DELAY_MS)
+      checkTimer.unref?.()
+    }
+  }
+
+  const startCheck = (version: string): void => {
+    if (checking || stopped) return
     const found = program()
     if (!found) return
     const controller = new AbortController()
@@ -329,6 +364,10 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions, r
       return { resolved: found.resolved, ...(found.root && agents ? { track: () => agents.track(found.root!) } : {}) }
     },
     env: (env, purpose) => processEnv(purpose, env),
+    // A turn starts only on the executable its caps were proven for.
+    launching: (purpose, executable) => {
+      if (purpose === 'turn') refuseChangedBinary(executable)
+    },
     checkInstall: ({ signal, reuse }) => checkManaged(signal, reuse),
     // A sign-out never signs the user's own home out of Grok; a private home is Mousse's own.
     agentLogout: () => Boolean(context.env.home),
@@ -499,17 +538,19 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions, r
       const found = credential()
       if (found.kind === 'none' || (found.kind === 'account' && found.state === 'expired'))
         throw harnessAppError({ code: 'signed_out', message: `Sign in to ${label} in Settings → Providers.` })
-      // The gateway admits a one-shot only on a version the check proved; its record names the tools to leave out.
-      const record = recordOf(lastVersion)
+      // The gateway admits a one-shot only on a version the check proved, and only on the executable it read.
+      const record = recordOf(probedBinary?.version)
+      if (!record?.titles) throw harnessAppError({ code: 'unsupported', message: `Mousse has not proven that this ${label} runs a request with no tools.` })
       const running = program()
       if (!running) throw harnessAppError({ code: 'not_installed', message: `${label} is not installed.` })
+      refuseChangedBinary(running.resolved.path)
       if (running.managed) await checkManaged(signal, true)
       const { baseId, effort } = parseThinkingSuffixFromModelId(spec.model)
       const root = join(context.stateDir, 'one-shot', randomUUID())
-      const files = writeGrokOneShotFiles({ root, system: spec.system, prompt: spec.prompt })
       try {
+        const files = writeGrokOneShotFiles({ root, system: spec.system, prompt: spec.prompt })
         const env = grokOneShotEnv(keyed(withUserEnv(context.env.env, { ...(context.config.env ?? {}) })), files)
-        const args = grokOneShotArgs({ ...files, ...(baseId && baseId !== AGENT_DEFAULT_MODEL ? { model: baseId } : {}), ...(effort ? { effort } : {}), ...(record ? { tools: record.tools } : {}) })
+        const args = grokOneShotArgs({ ...files, ...(baseId && baseId !== AGENT_DEFAULT_MODEL ? { model: baseId } : {}), ...(effort ? { effort } : {}), tools: record.tools })
         const child = spawnHarness({ ...context.env, env }, 'grok-one-shot', running.resolved.command, [...running.resolved.args, ...args], { cwd: files.cwd, stdio: ['ignore', 'pipe', 'pipe'] })
         spec.onActivity()
         const run = await collectRun(child, signal, () => killTree(child))
@@ -521,11 +562,16 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions, r
     },
     signIn,
     stop: () => {
+      stopped = true
+      if (checkTimer) clearTimeout(checkTimer)
+      checkTimer = undefined
       checking?.abort()
       return base.stop()
     },
     signOut: async () => {
       checking?.abort()
+      if (checkTimer) clearTimeout(checkTimer)
+      checkTimer = undefined
       problemRead = undefined
       loginGeneration += 1
       vault.set(SECRET.apiKey, undefined)

@@ -1,6 +1,7 @@
 import type { HarnessCaps } from '../../../../shared/harness/types'
 import { ACP_BASE_CAPABILITIES } from '../capabilities'
-import { insideFolder, type AllowsUnasked, type ClassifyOption, type PermissionApprovals } from '../permissions'
+import { confinedRead, confinedSearch } from '../confinedRead'
+import type { AllowsUnasked, ClassifyOption, PermissionApprovals } from '../permissions'
 import { compatibilityFields } from '../../compatibility'
 import type { AcpPreset } from '../preset'
 import type { AcpQuirks } from '../quirks'
@@ -51,10 +52,10 @@ export const classifyGrokOption: ClassifyOption = (option) => {
 
 /**
  * On its held launch (`grok/held.ts`), Grok asks Mousse for every tool, its reads and searches included. Mousse
- * answers these without asking anyone, in every mode, as Claude Code and Codex read their folder unasked: a file read,
- * a folder listing or a search inside the turn's folder (Grok names each in `rawInput.variant`, with its path; a
- * search without a path searches the folder), and Grok's own plan list. Anything else, and any of these outside the
- * folder, goes to the turn's permission mode.
+ * answers these without asking anyone, in every mode but a run that refuses approvals, as Claude Code and Codex read
+ * their folder unasked: a file read, a folder listing or a search confined to the turn's folder (`confinedRead.ts`;
+ * Grok names each in `rawInput.variant`, with its path; a search without a path searches the folder), and Grok's own
+ * plan list. Anything else, and any of these that is not confined, goes to the turn's permission mode.
  */
 export const grokAllowsUnasked: AllowsUnasked = (request, cwd) => {
   const raw = request.toolCall?.rawInput
@@ -64,11 +65,11 @@ export const grokAllowsUnasked: AllowsUnasked = (request, cwd) => {
     case 'TodoWrite':
       return true
     case 'ReadFile':
-      return typeof input.target_file === 'string' && insideFolder(cwd, input.target_file)
+      return typeof input.target_file === 'string' && confinedRead(cwd, input.target_file)
     case 'ListDir':
-      return typeof input.target_directory === 'string' && insideFolder(cwd, input.target_directory)
+      return typeof input.target_directory === 'string' && confinedRead(cwd, input.target_directory)
     case 'Grep':
-      return input.path === null || input.path === undefined ? true : typeof input.path === 'string' && insideFolder(cwd, input.path)
+      return input.path === null || input.path === undefined ? confinedSearch(cwd, cwd) : typeof input.path === 'string' && confinedSearch(cwd, input.path)
     default:
       return false
   }
