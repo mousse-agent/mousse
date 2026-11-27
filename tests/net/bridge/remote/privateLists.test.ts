@@ -168,7 +168,7 @@ describe('the snapshot an owner sends', () => {
     await expect(backend.stop(bot.id)).rejects.toMatchObject({ code: 'stream_unknown' })
   })
 
-  it('lists no thread a bot keeps out of the sidebar, nor a subagent below one, on a phone or another computer, and still opens it by id', async () => {
+  it('lists a thread a bot keeps out of the sidebar on a phone and another computer, marked hidden, with its state, and opens it by id', async () => {
     const shown = row(1)
     const hidden = row(2, { hidden: true, startedByBot: { botId: 'b1', name: 'Alpha' }, name: 'Quick check' })
     const below = row(3, { lineage: { parentThreadId: hidden.id, rootThreadId: hidden.id, relationship: 'subagent' } } as Partial<Thread>)
@@ -180,16 +180,18 @@ describe('the snapshot an owner sends', () => {
       questions: { listPendingForThread: () => [] },
       platform: { chats: { snapshot: () => ({ chats: [] }), onChange: () => () => undefined } }
     } as never
-    for (const options of [{}, { private: true }]) {
+    // A phone folds the subagent under its parent; another computer lists it with its lineage.
+    for (const [options, ids] of [[{}, [shown.id, hidden.id]], [{ private: true }, [shown.id, hidden.id, below.id]]] as const) {
       const snapshot = new MmsListsSource(fake, undefined, options).snapshot()
-      expect(snapshot.threads.map((thread) => thread.id), JSON.stringify(options)).toEqual([shown.id])
-      expect(Object.keys(snapshot.status)).toEqual([shown.id])
+      expect(snapshot.threads.map((thread) => thread.id), JSON.stringify(options)).toEqual(ids)
+      expect(snapshot.threads.find((thread) => thread.id === hidden.id)).toMatchObject({ hidden: true, startedByBot: { botId: 'b1', name: 'Alpha' } })
+      expect(Object.keys(snapshot.status)).toEqual(ids)
     }
     // Hidden is not private: the bot's chat on any device opens it by id.
     expect(new MmsRemoteBackend(fake).snapshot(hidden.id)).toMatchObject({ thread: { id: hidden.id } })
   })
 
-  it('gives the person\'s other computers a thread an agent keeps out of the sidebar, marked hidden, with its subagents; a phone gets neither', () => {
+  it('gives the person\'s other computers a thread an agent keeps out of the sidebar, marked hidden, with its subagents; a phone gets it marked hidden', () => {
     const shown = row(1)
     const launched = row(2, { hidden: true, startedFrom: { node: 'n-far', agent: { thread: 't-launcher', run: 'r', title: 'Launcher', hops: 1, mode: 'auto' } }, name: 'Agent check' } as Partial<Thread>)
     const below = row(3, { lineage: { parentThreadId: launched.id, rootThreadId: launched.id, relationship: 'subagent' } } as Partial<Thread>)
@@ -209,8 +211,8 @@ describe('the snapshot an owner sends', () => {
     // The computer that reads it keeps the mark on its row.
     expect(threadRow(own.find((thread) => thread.id === launched.id)!, 0, { node: 'n-far', offline: false })).toMatchObject({ hidden: true, startedFrom: { agent: { thread: 't-launcher' } } })
     expect(threadRow(own.find((thread) => thread.id === shown.id)!, 0, { node: 'n-far', offline: false })).not.toHaveProperty('hidden')
-    // A phone has no side panel to find it from: its list leaves it out, as a bot's.
-    expect(new MmsListsSource(fake, undefined, {}).snapshot().threads.map((thread) => thread.id)).toEqual([shown.id])
+    // A phone lists it too, marked hidden, with its subagent folded under it.
+    expect(new MmsListsSource(fake, undefined, {}).snapshot().threads.map((thread) => [thread.id, thread.hidden ?? false])).toEqual([[shown.id, false], [launched.id, true]])
   })
 
   it('gives the person\'s other computers a title still being named, so its row is dimmed there; a phone does not read it', () => {

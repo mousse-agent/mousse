@@ -27,6 +27,11 @@ import { listedThreadsFor, projectEventFor } from '../../../../src/mms/protocol/
 import { NetError, newId, type NodeId } from '../../../../src/shared/net'
 import { qualifyId } from '../../../../src/shared/threadRef'
 import type { Project, Thread } from '../../../../src/shared/types'
+import { MmsListsSource } from '../../../../src/mms/bridge/remote/MmsListsSource'
+import { HIDDEN_BOT_NAME } from '../../../../src/shared/bots/personal/deviceAccess'
+import { visibleThreads } from '../../../../src/shared/threadLineage'
+import { threadInFilter } from '../../../../src/renderer/lib/threadFilter'
+import { launchedThreadsOf } from '../../../../src/renderer/components/sideCard/lineageLogic'
 
 const cleanups: Array<() => void> = []
 afterEach(() => {
@@ -1521,5 +1526,102 @@ describe('a thread a bot here started there', () => {
     h.lists.applyMetadata(h.node, { id: 'bots', name: 'Renamed', createdAt: iso(0), updatedAt: iso(5), startedFrom: from.agent('bot-chat') })
     expect(changed).toEqual([['bot-chat']])
     expect(launchedHereAndThere([], h.lists, new Set(['bot-chat']))[0]?.title).toBe('Renamed')
+  })
+})
+
+// #2004: computer A started these threads (an agent's or a bot's) and runs them; computer C reads A's private lists, and
+// a phone reads A's shared lists. C must list, filter, nest and link them as A does. A's snapshot comes from the real
+// `MmsListsSource`, and C's rows from the real `MergedLists`.
+describe('threads A started, read on another computer C', () => {
+  const thread = (id: string, extra: Partial<Thread> = {}): Thread => ({
+    id, name: id, projectId: 'p', createdAt: iso(0), updatedAt: iso(1), order: 0, startedAt: iso(0), ...extra
+  })
+  /** A's lists: its private stream for `reader` (another computer), or its shared stream for phones. */
+  const listsOfA = (threads: Thread[], options: { private?: boolean; reader?: string } = {}, hiddenBot?: string) =>
+    new MmsListsSource({
+      projects: { listProjects: () => [] },
+      threads: { listAllThreads: () => threads },
+      orchestrator: { getTurnSnapshot: () => ({}) },
+      threadRuntimes: { getActivitySnapshot: () => ({}) },
+      platform: { chats: { snapshot: () => ({ chats: [] }), onChange: () => () => undefined } },
+      // The reader may not see `hiddenBot` (its Devices leave it out).
+      botReach: { hiddenFor: () => (botId: string) => botId === hiddenBot }
+    } as never, undefined, options).snapshot()
+  const filterContext = { groupOf: (id: string) => id, projectName: () => undefined, botName: () => undefined }
+  const shows = (row: Thread | undefined, show: 'mine' | 'bots' | 'all') =>
+    Boolean(row) && threadInFilter(row!, { query: '', show, projectId: null, botId: null, computerIds: [], archived: false }, filterContext)
+
+  it('lists a bot\'s threads under Bot threads, shown or hidden, and names a bot C may not see as "a bot"', async () => {
+    const h = harness()
+    await h.feed(listsOfA([
+      thread('bot-shown', { startedByBot: { botId: 'b1', name: 'Alpha' }, createdByThreadId: 'alpha-chat' }),
+      thread('bot-hidden', { startedByBot: { botId: 'b1', name: 'Alpha' }, createdByThreadId: 'alpha-chat', hidden: true }),
+      thread('secret-bot', { startedByBot: { botId: 'b2', name: 'Beta' }, createdByThreadId: 'beta-chat' }),
+      thread('mine')
+    ], { private: true, reader: h.self }, 'b2'))
+    const row = (id: string) => h.lists.threads().find((entry) => entry.id === h.q(id))
+    expect(['bot-shown', 'bot-hidden', 'secret-bot', 'mine'].filter((id) => shows(row(id), 'bots'))).toEqual(['bot-shown', 'bot-hidden', 'secret-bot'])
+    expect(row('bot-shown')).toMatchObject({ startedByBot: { botId: 'b1', name: 'Alpha' }, createdByThreadId: h.q('alpha-chat') })
+    expect(row('secret-bot')!.startedByBot).toEqual({ botId: '', name: HIDDEN_BOT_NAME })
+    expect(row('secret-bot')).not.toHaveProperty('createdByThreadId')
+  })
+
+  it('lists a thread kept out of the sidebar under All, not My threads, on C and on a phone, an agent\'s or a bot\'s', async () => {
+    const threads = [
+      thread('launcher'),
+      thread('agent-hidden', { createdByThreadId: 'launcher', hidden: true }),
+      thread('bot-hidden', { startedByBot: { botId: 'b1', name: 'Alpha' }, createdByThreadId: 'alpha-chat', hidden: true }),
+      thread('below', { lineage: { parentThreadId: 'bot-hidden', rootThreadId: 'bot-hidden', relationship: 'subagent' } } as Partial<Thread>)
+    ]
+    const h = harness()
+    await h.feed(listsOfA(threads, { private: true, reader: h.self }))
+    const row = (id: string) => h.lists.threads().find((entry) => entry.id === h.q(id))
+    for (const id of ['agent-hidden', 'bot-hidden']) {
+      expect(row(id)?.hidden, id).toBe(true)
+      expect(shows(row(id), 'all'), id).toBe(true)
+      expect(shows(row(id), 'mine'), id).toBe(false)
+    }
+    // The subagent below the hidden thread sits under it there as on A.
+    expect(row('below')?.lineage?.parentThreadId).toBe(h.q('bot-hidden'))
+    // A phone gets them too, marked hidden; its subagents stay under their parent.
+    const phone = listsOfA(threads).threads
+    expect(phone.map((entry) => [entry.id, entry.hidden ?? false])).toEqual([['launcher', false], ['agent-hidden', true], ['bot-hidden', true]])
+  })
+
+  it('lists in the launcher\'s Started threads what its agent started, on A itself and on a third computer B', async () => {
+    const a = newId('node'), b = newId('node')
+    const h = harness({ computers: [{ node: a, name: 'A' }, { node: b, name: 'B' }] })
+    await h.feed(listsOfA([
+      thread('launcher'),
+      thread('here', { createdByThreadId: 'launcher', hidden: true, updatedAt: iso(3) }),
+      thread('other')
+    ], { private: true, reader: h.self }), a)
+    // B runs a thread A's agent started there: B names the agent's thread by A's id for it.
+    await h.feed(snapshot([
+      { id: 'there', updatedAt: iso(2), hidden: true, startedFrom: { node: a, agent: { thread: 'launcher', title: 'launcher', mode: 'auto' } } },
+      { id: 'not-from-a', updatedAt: iso(1), startedFrom: { node: newId('node'), agent: { thread: 'launcher', title: 'x', mode: 'auto' } } }
+    ]), b)
+    expect(launchedThreadsOf(h.lists.threads(), h.q('launcher', a)).map((entry) => entry.id)).toEqual([h.q('here', a), h.q('there', b)])
+  })
+
+  it('keeps what a stand-in, a helper\'s mirror and the Automation manager are, and opens a stand-in\'s thread on the computer that runs it', async () => {
+    const b = newId('node')
+    const native = { runtime: 'claude', instanceId: 'i', sessionEpoch: 'e', agentId: 'ag', hostRunId: 'r', state: 'running' }
+    const threads = [
+      thread('parent'),
+      thread('stand-in', { lineage: { parentThreadId: 'parent', rootThreadId: 'parent', relationship: 'subagent' }, runsOn: { node: b, computerName: 'Desk', ref: qualifyId(b, 'real') } } as Partial<Thread>),
+      thread('helper', { lineage: { parentThreadId: 'parent', rootThreadId: 'parent', relationship: 'native' }, native } as Partial<Thread>),
+      thread('manager', { automationManager: true })
+    ]
+    const c = harness()
+    await c.feed(listsOfA(threads, { private: true, reader: c.self }))
+    const rowOn = (h: typeof c, id: string) => h.lists.threads().find((entry) => entry.id === h.q(id))
+    expect(rowOn(c, 'stand-in')!.runsOn).toEqual({ node: b, computerName: 'Desk', ref: qualifyId(b, 'real') })
+    expect(rowOn(c, 'helper')!.native).toEqual(native)
+    expect(visibleThreads(c.lists.threads()).map((entry) => entry.id)).toEqual([c.q('parent')])
+    // On B, which runs the subagent, its thread is B's own.
+    const onB = harness({ self: b })
+    await onB.feed(listsOfA(threads, { private: true, reader: b }))
+    expect(rowOn(onB, 'stand-in')!.runsOn).toEqual({ node: b, computerName: 'Desk', ref: 'real' })
   })
 })

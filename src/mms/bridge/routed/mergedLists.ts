@@ -774,7 +774,7 @@ export class MergedLists implements RemoteListsPort {
       c.online = true
       c.refused = false
     }
-    const context = { node: c.node, offline: !live, notShared: !live && c.refused }
+    const context = { node: c.node, offline: !live, notShared: !live && c.refused, self: this.options.self() }
     const qualified = qualifyRoutedResult('lists.snapshot', snapshot, {
       node: c.node,
       self: this.options.self()
@@ -1096,7 +1096,7 @@ export class MergedLists implements RemoteListsPort {
     const known =
       qualified && typeof qualified.id === 'string' ? c.threads.get(qualified.id) : undefined
     if (!qualified || !known) return
-    const row = this.withBot(threadRow(qualified, known.order, { node, offline: known.offline === true }))
+    const row = this.withBot(threadRow(qualified, known.order, { node, offline: known.offline === true, self: this.options.self() }))
     if (sameRow(known, row)) return
     c.threads.set(known.id, row)
     this.pushLists(true, false, false)

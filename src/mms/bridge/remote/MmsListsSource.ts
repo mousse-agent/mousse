@@ -5,6 +5,7 @@ import type { MmsProfileServices } from '../../MmsProfileServices'
 import { rollUpActivities, visibleThreads, isLocalOnlyThread } from '../../../shared/threadLineage'
 import { mmsJson } from './jsonOutput'
 import { remoteBotSummary } from './RemoteBots'
+import { withHiddenBots } from './botReach'
 import type { BotsSharingPort } from '../../protocol/botsSharingPort'
 import type { BotReachPort } from '../../protocol/botReachPort'
 import { copyLimits } from '../copyLimits'
@@ -108,9 +109,26 @@ export interface ListsSnapshot {
       /** `archivedAt` again, for a reader that runs an older Mousse. */
       settledAt?: string
     } &
-      /** Only in a private lists stream: the subagent rows' place in the tree, and what the thread runs with. */
+      /** Out of the sidebar, and the bot that started it ("a bot" for a reader that may not see that bot). */
+      Partial<Pick<Thread, 'hidden' | 'startedByBot'>> &
+      /**
+       * Only in a private lists stream: the subagent rows' place in the tree, what the thread runs with, and who started
+       * it, so another computer lists, nests and links it as this one does.
+       */
       Partial<
-        Pick<Thread, 'lineage' | 'permissionMode' | 'modelOverride' | 'startedFrom' | 'sentFrom' | 'hidden' | 'titleSource'>
+        Pick<
+          Thread,
+          | 'lineage'
+          | 'permissionMode'
+          | 'modelOverride'
+          | 'startedFrom'
+          | 'sentFrom'
+          | 'titleSource'
+          | 'createdByThreadId'
+          | 'native'
+          | 'automationManager'
+          | 'runsOn'
+        >
       >
   >
   /** Threads that are not idle, by id. */
@@ -313,14 +331,10 @@ export class MmsListsSource {
     const own = this.options.private === true
     // A phone lists threads the way the CLI does: subagents sit under their parent, not beside it. Another
     // computer lists them all, with their lineage, and builds the tree itself like the desktop sidebar.
-    // A thread a bot keeps out of the sidebar (`Thread.hidden`) is left out of every device's list too, with the subagents
-    // below it; its bot's chat lists it. One an agent keeps out of the sidebar reaches the person's other computers,
-    // marked hidden: the side panel of the thread that started it there lists it, and All and search find it. A phone
-    // has neither, so its list leaves it out like a bot's.
-    const quiet = (thread: Thread) => Boolean(thread.hidden) && (!own || Boolean(thread.startedByBot))
-    const hidden = new Set(inventory.filter(quiet).map((thread) => thread.id))
-    const listed = (thread: Thread) => !quiet(thread) && !(thread.lineage && hidden.has(thread.lineage.rootThreadId))
-    const threads = (own ? inventory : visibleThreads(inventory)).filter(listed)
+    // A thread an agent or a bot keeps out of the sidebar (`Thread.hidden`) is listed on every device too, marked hidden,
+    // with the subagents below it: All and search find it there as here, and so do the side panel of the thread that
+    // started it and the bot's chat.
+    const threads = own ? inventory : visibleThreads(inventory)
     const snapshot = this.build(s, inventory, threads, own, activity, turns, chats, bots)
     return own ? this.trimmed(snapshot, inventory) : snapshot
   }
@@ -388,7 +402,8 @@ export class MmsListsSource {
           order: project.order,
           pinnedAt: project.pinnedAt
         })),
-        threads: threads.map((thread) => ({
+        // A bot the reader may not see is "a bot" on its threads, with no launcher (`withHiddenBots`).
+        threads: withHiddenBots(threads.map((thread) => ({
           id: thread.id,
           name: thread.name,
           projectId: thread.projectId,
@@ -404,6 +419,11 @@ export class MmsListsSource {
           // When it archives itself, for the menu's Archive after (a phone keeps "stop a running turn" when it changes the time).
           ...(thread.expiresAt ? { expiresAt: thread.expiresAt } : {}),
           ...(thread.expiresAt && thread.expiryStopsRun ? { expiryStopsRun: true } : {}),
+          // Out of the sidebar there as here (`Thread.hidden`): its My threads leaves it out, All lists it. A reader that
+          // runs an older Mousse reads no such key and lists it with the rest.
+          ...(thread.hidden ? { hidden: true } : {}),
+          // The Bot threads filter, the bot's face and its Started-by bar there read the bot (`Thread.startedByBot`).
+          ...(thread.startedByBot ? { startedByBot: { botId: thread.startedByBot.botId, name: thread.startedByBot.name } } : {}),
           ...(own
             ? {
                 lineage: thread.lineage,
@@ -413,15 +433,22 @@ export class MmsListsSource {
                 settingsRevision: thread.settingsRevision ?? 0,
                 startedFrom: thread.startedFrom,
                 sentFrom: thread.sentFrom,
-                // Out of the sidebar there as here (`Thread.hidden`); an older computer reads no such key and lists it.
-                ...(thread.hidden ? { hidden: true } : {}),
+                // The thread whose agent (or bot) started it: its side panel's Started threads and the Started-by bar
+                // there name it, qualified with this computer as the lists are read.
+                ...(thread.createdByThreadId ? { createdByThreadId: thread.createdByThreadId } : {}),
+                // A native helper's mirror opens watch-only there as here.
+                ...(thread.native ? { native: thread.native } : {}),
+                // The Automation manager's thread is listed nowhere there either.
+                ...(thread.automationManager ? { automationManager: true } : {}),
+                // A remote subagent's stand-in still says which computer runs it, and opens its thread there.
+                ...(thread.runsOn ? { runsOn: thread.runsOn } : {}),
                 // A chat made for its first message: a window binds that message (`Thread.firstSendPending`).
                 ...(thread.firstSendPending ? { firstSendPending: true } : {}),
                 // A title still being named shows dimmed there as here; the other sources look the same, so only this one is sent.
                 ...(thread.titleSource === 'provisional' ? { titleSource: 'provisional' as const } : {})
               }
             : {})
-        })),
+        })), s.botReach?.hiddenFor(this.options.reader)),
         status,
         chats,
         bots
