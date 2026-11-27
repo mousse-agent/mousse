@@ -940,6 +940,24 @@ describe('the schedule tools (SPEC §15.1)', () => {
       expect(w.jobs.listJobs()).toEqual([])
     })
 
+    it('after a restart, a retried delete replays, and a stale retry of the create that made the job does not make it again', async () => {
+      const w = await world()
+      const job = await w.create({ name: 'Once', clientRequestId: 'make-1' })
+      expect((await w.result(w.call('schedule_delete', { jobId: job.id, clientRequestId: 'del-1' }))).removed).toBe(true)
+      // A restart: the tools are built again over the same run store, with nothing kept in memory.
+      const restarted = appToolRegistry(w.fx.engine, w.host)
+      restarted.turns.register(appTurn({ threadId: 'caller', runId: w.callerRun.runId }))
+      const again = (name: string, args: Record<string, unknown>) => restarted.registry.call(name, args, restarted.request({ threadId: 'caller', runId: w.callerRun.runId }))
+      const records = w.recordAgentAction.mock.calls.length
+      expect(await w.result(again('schedule_delete', { jobId: job.id, clientRequestId: 'del-1' }))).toMatchObject({ removed: true, alreadyRemoved: true, replayed: true, job: { id: job.id, name: 'Once' } })
+      expect(await w.result(again('schedule_delete', { jobId: job.id }))).toMatchObject({ removed: true, alreadyRemoved: true, job: { id: job.id } })
+      expect(await w.result(again('schedule_create', { ...CREATE, name: 'Once', clientRequestId: 'make-1' }))).toMatchObject({ replayed: true, removed: true, job: { id: job.id, name: 'Once' } })
+      expect(w.jobs.listJobs()).toEqual([])
+      expect(w.recordAgentAction.mock.calls.length).toBe(records)
+      // A new key makes a new job.
+      expect((await w.result(again('schedule_create', { ...CREATE, name: 'Once', clientRequestId: 'make-2' }))).job.id).not.toBe(job.id)
+    })
+
     it('says when a run of the job had started or waits in its thread\'s queue, since that run still finishes', async () => {
       const w = await world()
       const job = await w.create({ threadId: 'caller' })

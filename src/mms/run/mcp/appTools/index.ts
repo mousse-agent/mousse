@@ -1,8 +1,8 @@
 import { isRunningVariant, isToolAlias } from '../../../../shared/toolAliases'
 import { isNativeHelperThread, ownBotOf } from '../../../../shared/threadLineage'
 import type { RunEngine } from '../../RunEngine'
-import { recordAddress, recordedAddress, resolveAddress, type AddressSources } from '../../addressing'
-import { visibleSubagents } from '../../delegation/subagentAddress'
+import { familyOf, recordAddress, recordedAddress, resolveAddress, type AddressSources } from '../../addressing'
+import { resolveSubagent, visibleSubagents } from '../../delegation/subagentAddress'
 import type { ThreadAddresses } from './addressedCall'
 import { appearanceTools } from './appearance'
 import { appletTools } from './applets'
@@ -129,7 +129,15 @@ function threadAddresses(host: AppToolHost, engine: RunEngine, bots: (() => BotA
   return {
     resolve: (callerThreadId, address, options) => resolveAddress(sources, callerThreadId, address, options),
     recorded: (key) => recordedAddress(engine.store, key),
-    record: (key, callerThreadId, resolved) => recordAddress(engine.store, key, callerThreadId, resolved)
+    record: (key, callerThreadId, resolved) => recordAddress(engine.store, key, callerThreadId, resolved),
+    subagentOf: (callerThreadId, ref) => {
+      const found = resolveSubagent({ delegations: engine.delegations, titleOf }, callerThreadId, ref)
+      return found.ok ? found.childThreadId : undefined
+    },
+    family: (callerThreadId) => {
+      const { members, complete } = familyOf(sources, callerThreadId)
+      return { members: [{ threadId: callerThreadId, title: titleOf(callerThreadId) ?? '', relation: 'self' }, ...members], complete }
+    }
   }
 }
 

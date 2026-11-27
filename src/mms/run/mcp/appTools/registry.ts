@@ -36,7 +36,7 @@ import {
   type ToolTimeline
 } from './types'
 import { asRefusal, readRefusal, refused, refusalText } from './refusal'
-import { addressedArgs, fanOutCalls, fanOutRow, fanOutRows, notSentRow, OUT_OF_REACH, withAddress, type ThreadAddresses } from './addressedCall'
+import { addressedArgs, familyPage, fanOutCalls, fanOutRow, fanOutRows, notSentRow, OUT_OF_REACH, withAddress, type ThreadAddresses } from './addressedCall'
 import { ADDRESSED_TOOLS, type BotReach } from '../../addressing'
 import { BOT_SEND_TOOL } from '../../../../shared/bots/personal/botMessages'
 import { delegableTurn, hostingTurn, type CallAttribution } from '../../nativeHelpers'
@@ -583,7 +583,11 @@ export class ToolRegistry {
     const { threadId, active, turn, args, caller, boundToken } = await this.admit(callArgs, request)
     const { credential } = request
     const site: CallSite = { threadId, active, turn, credential, boundToken, request }
-    return this.reportingLacks(name, site, await this.dispatch(name, tool, args, caller, site))
+    const outcome = await this.dispatch(name, tool, args, caller, site)
+    // `thread_list scope: family` lists the family, with paging; called by its old name `list_subagents`, it returns
+    // that tool's rows as it always did.
+    const family = name === 'thread_list' && args.scope === 'family' && calledAs !== 'list_subagents' && !outcome.isError ? this.options.addresses?.family?.(caller.threadId) : undefined
+    return this.reportingLacks(name, site, family ? familyPage(family, outcome, this.readableBy(caller, turn), caller.threadId, args) : outcome)
   }
 
   /** `call` once the call is admitted: a bot catalogue's `use_tool`, a user MCP tool, or an app tool. */
