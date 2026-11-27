@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { appLimitError, normalizeProviderError, usageLimitError } from '../../src/mms/orchestrator/providerErrors'
 import { extractLimitFromError } from '../../src/mms/models/usageLimits'
-import { turnRetryDelay } from '../../src/mms/orchestrator/turnRetry'
+import { turnRetryPlan } from '../../src/mms/orchestrator/turnRetry'
 import { classifyProviderFailure } from '../../src/mms/agentDefinitions/runtimeFallback'
 import { decideUsageLimit, pauseCount, usageLimitOf, type UsageLimitDecision } from '../../src/mms/run/pausePolicy'
 import type { RunPause } from '../../src/mms/run/types'
@@ -69,7 +69,7 @@ describe('a ChatGPT app limit', () => {
     const error = appLimitError('codex', new Error('stream disconnected before completion: The ChatGPT user has reached their Subscription Sharing usage limit.'))
     expect(decideUsageLimit({ error, run: { outcome: {} }, lookup: () => null, cap: 3, autoResume: true, nowMs: NOW })).toBeUndefined()
     expect(extractLimitFromError(error)).toBeUndefined()
-    expect(turnRetryDelay(error, { retries: 0, elapsedMs: 0, answered: false, toolStarted: false, steered: false, runtimeRetried: false, bot: false })).toBeUndefined()
+    expect(turnRetryPlan(error, { retries: 0, failingMs: 0, progressed: false, sessionKept: false, runtimeRetried: false, bot: false })).toBeUndefined()
     expect(classifyProviderFailure(error)).toBe('rate_limit')
     expect(error.message).not.toMatch(/subscription sharing/i)
   })
