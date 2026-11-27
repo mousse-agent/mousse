@@ -102,20 +102,6 @@
       "expiresAt": "2026-11-27T12:40:03.362Z"
     },
     {
-      "task": "remote-project-add-and-projectless-threads",
-      "session": "Aeonix-82f81a",
-      "machine": "Aeonix",
-      "branch": "remote-project-add-and-projectless-threads",
-      "paths": [
-        "src/mms/orchestrator",
-        "src/mms/run/mcp/appTools/thread.ts",
-        "src/renderer/components/NewProjectDialog.tsx",
-        "src/renderer/components/RemoteProjectDialog.tsx"
-      ],
-      "claimedAt": "2026-11-27T07:49:16.036Z",
-      "expiresAt": "2026-11-27T09:49:16.036Z"
-    },
-    {
       "task": "remove-plan-mode",
       "session": "Avarnics-Mac-mini.local-397193",
       "machine": "Avarnics-Mac-mini.local",
