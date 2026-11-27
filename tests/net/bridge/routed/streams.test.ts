@@ -930,7 +930,9 @@ describe('a thread stream opened cold', () => {
   }, 120_000)
 
   it('returns a stream that is open already without reading or building again', async () => {
-    const { ok, t } = await owner()
+    const { ok, thread, f } = await routedOwner({ streams: true })
+    const t = thread()
+    f.mms.orchestrator.getOrCreateSession(t.id).messages = [message(0, 'hello')] as never
     const first = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
     const warm = vi.spyOn(MmsRemoteBackend.prototype, 'warm'),
       builds = vi.spyOn(MmsRemoteBackend.prototype, 'snapshot')

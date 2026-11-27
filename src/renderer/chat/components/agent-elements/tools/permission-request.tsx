@@ -1,7 +1,7 @@
 import { createContext, memo, useContext, useEffect, useState } from "react";
 import type { UIMessage } from "ai";
 import { ChevronDown, Edit, Shield, Terminal } from "../../../../lib/icons";
-import { ALWAYS_OPTION_LABEL, ALWAYS_OPTION_NOTE } from "../../../../../shared/permissionKeys";
+import { ALWAYS_OPTION_LABEL, ALWAYS_OPTION_NOTE, CORRECTION_ARRIVED_NOTE } from "../../../../../shared/permissionKeys";
 import type {
   PendingApprovalInfo,
   PendingUserQuestions,
@@ -262,10 +262,12 @@ export function permissionAnswerLabel(data: PermissionRequestData): string | nul
   return byAgent ? "Denied by an agent" : "Denied";
 }
 
-/** The lines under a waiting request: why it asks, and what answering does after a restart. */
+/** The lines under a waiting request: a correction that fenced it, why it asks, and what answering does after a restart. */
 function waitingNotes(approval: PendingApprovalInfo | undefined): string[] {
   if (!approval) return [];
   const notes: string[] = [];
+  // A correction fenced it (docs/plans/tool-api.md §2.5): the row stays to be read or denied.
+  if (approval.correctionArrived) notes.push(CORRECTION_ARRIVED_NOTE);
   if (approval.reason) notes.push(approval.reason);
   if (approval.answerPath === "continue") {
     const tools = approval.uncertainTools?.length ? approval.uncertainTools.join(", ") : "a tool";

@@ -4,9 +4,13 @@
  * whatever the runtime. A call that sent no arguments shows its tool's words alone, never "summary: <tool> details: []".
  *
  * ACP runs its real session (a scripted in-process agent, hand-authored) through the mapper its adapter wraps it in;
- * Cursor's events are built by its own `cursorToolActivity`, as its session sends them. Both go into the real
+ * Cursor's events are built by its own `cursorToolActivity`, as its session sends them; OpenCode's driver runs against a
+ * hand-authored server (`fakeOpencodeServer.ts`) that names Mousse's tools as OpenCode 2.0.20 does. All go into the real
  * transcript assembler and are drawn by the real tool renderer.
  */
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { methods, PROTOCOL_VERSION, type AgentApp } from '@agentclientprotocol/sdk'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -15,6 +19,10 @@ import { AcpSessions } from '../../src/mms/harness/acp/session'
 import { NO_QUIRKS } from '../../src/mms/harness/acp/quirks'
 import { withClosure } from '../../src/mms/harness/drivers/acp/adapter'
 import { cursorToolActivity, cursorToolName } from '../../src/mms/harness/cursor/session'
+import type { TurnInput } from '../../src/mms/harness/adapter'
+import { opencodeDriver } from '../../src/mms/harness/drivers/opencode'
+import { instanceEnv } from '../../src/mms/harness/env'
+import { mousseServerName } from '../../src/mms/harness/opencode/rules'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
 import { createRuntimeToolMapper } from '../../src/mms/run/transcript/promptRuntime'
@@ -23,6 +31,7 @@ import { ToolRenderer } from '../../src/renderer/chat/components/agent-elements/
 import { callTitle } from '../../src/renderer/chat/components/agent-elements/turn-progress'
 import type { ProviderToolEvent } from '../../src/shared/agentActivity'
 import type { ChatMessage } from '../../src/shared/types'
+import { fakeOpencodeServer } from '../harness/fakeOpencodeServer'
 import { transcriptSink } from '../support/transcriptSink'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -36,6 +45,18 @@ const RESULTS = [
   'Title: Vacuum price tracker',
   'URL: https://prices.test/vacuum?ref=1',
   'Text: Prices fall in November.'
+].join('\n')
+
+/** OpenCode's own web search result text: a `## [title](url)` heading, its date and its text, a result each. */
+const OPENCODE_RESULTS = [
+  '## [Best robot vacuums of 2026](https://www.example.com/vacuums)',
+  'Published: 2026-11-01T00:00:00.000Z',
+  '',
+  'Our picks…',
+  '',
+  '## [https://prices.test/vacuum?ref=1](https://prices.test/vacuum?ref=1)',
+  '',
+  'Prices fall in November.'
 ].join('\n')
 
 const cleanups: Array<() => void> = []
@@ -88,6 +109,45 @@ function cursorRows(): ChatMessage[] {
   return JSON.parse(JSON.stringify(transcript.messages)) as ChatMessage[]
 }
 
+async function opencodeRows(): Promise<ChatMessage[]> {
+  const fake = await fakeOpencodeServer()
+  const root = mkdtempSync(join(tmpdir(), 'mousse-tool-rows-opencode-'))
+  const binaryPath = join(root, process.platform === 'win32' ? 'opencode.exe' : 'opencode')
+  writeFileSync(binaryPath, '#!/bin/sh\n', { mode: 0o755 })
+  const driver = opencodeDriver({ startServer: (launch, signal) => fake.start(launch, signal), interruptWaitMs: 2_000 })
+  const runtime = driver.create({
+    instanceId: 'opencode:opencode', builtIn: false, config: driver.decodeConfig({ binaryPath }),
+    env: instanceEnv({ instanceId: 'opencode:opencode', driver: 'opencode', configRevision: 0, searchPath: [], base: { PATH: '' } }),
+    profileHome: root, installationHome: root, stateDir: root, questions: new UserQuestionService(),
+    findBinary: () => undefined, changed: () => {}, signedOut: () => false, saveLaunch: async () => {}
+  })
+  cleanups.push(() => { void runtime.stop().then(() => fake.close()); rmSync(root, { recursive: true, force: true }) })
+  fake.onPrompt = (session) => {
+    const event = (type: string, data: Record<string, unknown>) => fake.emit(type, { sessionID: session.id, assistantMessageID: 'm', ...data })
+    // OpenCode names an MCP tool `<server>_<tool>`; Mousse's server for this thread is `mousse_<12 hex>`.
+    event('session.tool.input.started', { id: 'o-search', name: `${mousseServerName('t')}_web_search` })
+    event('session.tool.called', { id: 'o-search', input: { query: 'robot vacuum prices' }, executed: false })
+    event('session.tool.success', { id: 'o-search', content: [{ type: 'text', text: RESULTS }], executed: true })
+    // OpenCode's own web search and fetch, with their results as OpenCode 2.0.20 writes them
+    // (`packages/core/src/tool/plugin/websearch.ts`: one `## [title](url)` heading a result).
+    event('session.tool.input.started', { id: 'o-own-search', name: 'websearch' })
+    event('session.tool.called', { id: 'o-own-search', input: { query: 'robot vacuum prices' }, executed: false })
+    event('session.tool.success', { id: 'o-own-search', content: [{ type: 'text', text: OPENCODE_RESULTS }], metadata: { provider: 'exa' }, executed: true })
+    event('session.tool.input.started', { id: 'o-fetch', name: 'webfetch' })
+    event('session.tool.called', { id: 'o-fetch', input: { url: 'https://example.com/vacuums/review', format: 'markdown' }, executed: false })
+    event('session.tool.success', { id: 'o-fetch', content: [{ type: 'text', text: '# Review' }], metadata: { contentType: 'text/html' }, executed: true })
+    fake.reply(session.id, 'done')
+  }
+  const transcript = transcriptSink()
+  await runtime.adapter.startTurn(
+    { runId: 'r', attemptId: 'a', threadId: 't', instanceId: 'opencode:opencode', llmProvider: '', model: 'anthropic/claude-haiku-5-5', modelPinned: true, mode: 'agent', permissionMode: 'full', prompt: 'Find vacuum prices', messages: [], cwd: root, nativeHistory: '', signal: new AbortController().signal } as unknown as TurnInput,
+    transcript.sink,
+    { drainSteer: () => undefined, heartbeat: () => {} } as never,
+    { tools: {}, context: { nativeHistoryAfterTurn: (text: string) => text } } as never
+  )
+  return JSON.parse(JSON.stringify(transcript.messages)) as ChatMessage[]
+}
+
 let root: Root
 let mount: HTMLDivElement
 beforeEach(() => {
@@ -125,6 +185,17 @@ describe('a tool row says what the call did', () => {
     expect(fetch!.text).toContain('https://example.com/vacuums/review')
     for (const row of [search, fetch, bare]) expect(row!.text).not.toMatch(/summary:|details:|mcp_mousse_/)
     expect(bare!.title).toBe('Checked what is running in Mousse')
+  })
+
+  it('OpenCode: Mousse’s web search and its own name their query and the sites they found; its fetch names its URL', async () => {
+    const [search, ownSearch, fetch] = drawn((await opencodeRows()).filter((row) => row.toolCall))
+    expect(search!.title).toBe('Searched the web robot vacuum prices')
+    expect(search!.sites).toEqual(['Best robot vacuums of 2026example.com', 'Vacuum price trackerprices.test'])
+    expect(ownSearch!.text).toContain('robot vacuum prices')
+    expect(ownSearch!.text).toMatch(/Found 2 results/)
+    expect(ownSearch!.text).toMatch(/Best robot vacuums of 2026\s*(?:www\.)?example\.com/)
+    expect(ownSearch!.text).toMatch(/https:\/\/prices\.test\/vacuum\?ref=1\s*prices\.test/)
+    expect(fetch!.title).toContain('https://example.com/vacuums/review')
   })
 
   it('Cursor: a web search names its query and the sites it found', () => {

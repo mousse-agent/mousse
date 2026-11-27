@@ -1,6 +1,6 @@
 import { useEffect, useImperativeHandle, useRef, useState, type KeyboardEvent, type Ref } from 'react'
 import { Check, IconMessageCircleQuestion } from '../lib/icons'
-import { ALWAYS_OPTION_NOTE } from '../../shared/permissionKeys'
+import { ALWAYS_OPTION_NOTE, CORRECTION_ARRIVED_NOTE } from '../../shared/permissionKeys'
 import { ReadAloudButton } from '../readAloud/ReadAloudButton'
 import type {
   ChatImageAttachment,
@@ -151,9 +151,11 @@ export function describeAnswerOutcome(outcome: QuestionAnswerOutcome | undefined
   return null
 }
 
-/** The lines under a saved approval request's prompt: why it asks, and what answering it does after a restart. */
+/** The lines under a saved approval request's prompt: a correction that fenced it, why it asks, and what answering it does after a restart. */
 export function approvalNotes(approval: PendingApprovalInfo): string[] {
   const notes: string[] = []
+  // A correction fenced it (docs/plans/tool-api.md §2.5): the card stays to be read or rejected.
+  if (approval.correctionArrived) notes.push(CORRECTION_ARRIVED_NOTE)
   if (approval.reason) notes.push(approval.reason)
   if (approval.answerPath === 'continue') {
     const tools = approval.uncertainTools?.length ? approval.uncertainTools.join(', ') : 'a tool'

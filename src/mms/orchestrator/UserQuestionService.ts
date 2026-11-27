@@ -32,6 +32,7 @@ import {
   type LineageLookup
 } from '../run/approvalRights'
 import { approvalFingerprint } from '../run/approvalFingerprint'
+import { FENCED_FEEDBACK } from '../run/delegation/approvalFence'
 import type { OpenQuestionCloseReason, OpenQuestionRecord, OpenQuestions } from '../run/OpenQuestions'
 import { describeQuestionAnswers } from './questionAnswers'
 import {
@@ -107,7 +108,8 @@ export interface ApprovalContext {
 }
 
 export type SettleResult =
-  | { ok: true; decision?: 'allow' | 'reject' }
+  /** `fenced`: the answer allowed an action a correction overtook; it settled as a rejection and the action did not run. */
+  | { ok: true; decision?: 'allow' | 'reject'; fenced?: true }
   | {
       ok: false
       reason: 'unknown' | 'answerer_required' | 'already_answered' | 'cancelled' | ApprovalRefusal
@@ -138,6 +140,8 @@ interface PendingRequest {
   resolve: (answers: UserQuestionAnswers) => void
   reject: (error: Error) => void
   timer?: ReturnType<typeof setTimeout>
+  /** An approval kept only in memory (its save failed): when it was asked, on the store's clock, for the fence. */
+  askedAt?: string
   /** Told the images sent with the answer, before the answers resolve (`requestAnswers`' `onAttachments`). */
   onAttachments?: (attachments: UserQuestionAttachments) => void
 }
@@ -389,6 +393,7 @@ export class UserQuestionService extends EventEmitter {
       }
     }
     const durable = record !== null
+    const askedAt = binding && !durable ? binding.store.now() : undefined
     if (options.approval?.helper) this.noteHelper(requestId, options.approval.helper)
     // The person takes as long as they need, whoever started the turn: only the caller's own deadline ends it.
     const timeoutMs = options.timeoutMs
@@ -420,6 +425,7 @@ export class UserQuestionService extends EventEmitter {
         questions: shown.questions,
         ...(shown.approval ? { approval: shown.approval } : {}),
         durable,
+        ...(askedAt ? { askedAt } : {}),
         resolve,
         reject,
         ...(timer ? { timer } : {}),
@@ -447,6 +453,7 @@ export class UserQuestionService extends EventEmitter {
     if ((pending?.durable || (!pending && this.binding))) return this.settleSaved(requestId, answers, answeredBy, options)
     if (!pending) return { ok: false, reason: 'unknown' }
     let decision: 'allow' | 'reject' | undefined
+    let fenced = false
     if (pending.approval) {
       // An approval is never settled for an unnamed answerer: nothing here may skip the rule.
       if (!answeredBy) return { ok: false, reason: 'answerer_required' }
@@ -459,6 +466,14 @@ export class UserQuestionService extends EventEmitter {
         this.lineage
       )
       if (!rights.ok) return { ok: false, reason: rights.code }
+      // The same fence as a saved request's (`ThreadApprovals.settleRow`): a correction since it was asked refuses an allow.
+      if (decision === 'allow' && pending.askedAt && this.binding?.store.fencedBy({ threadId: pending.threadId, createdAt: pending.askedAt })) {
+        const reject = pending.approval.options.find((option) => option.decision === 'reject')
+        const questionId = pending.questions[0]?.id
+        answers = { ...(reject && questionId !== undefined ? { [questionId]: reject.id } : {}), feedback: FENCED_FEEDBACK }
+        decision = 'reject'
+        fenced = true
+      }
     }
 
     if (pending.timer) clearTimeout(pending.timer)
@@ -468,7 +483,7 @@ export class UserQuestionService extends EventEmitter {
     }
     pending.resolve(answers)
     this.emit('cleared', { requestId, threadId: pending.threadId })
-    return { ok: true, ...(decision ? { decision } : {}) }
+    return { ok: true, ...(decision ? { decision } : {}), ...(fenced ? { fenced: true as const } : {}) }
   }
 
   private settleSaved(requestId: string, answers: UserQuestionAnswers, answeredBy: Answerer | undefined, options: { continuation?: boolean }): SettleResult {
@@ -499,7 +514,7 @@ export class UserQuestionService extends EventEmitter {
     // Without a worker nothing would run the `request.respond` effect: deliver here.
     if (outcome.record.answerPath === 'live' && !binding.effectDelivery()) this.deliver(requestId)
     if (outcome.continuationDue && options.continuation !== false) binding.continuationDue(outcome.continuationDue, answeredBy)
-    return { ok: true, decision: outcome.decision }
+    return { ok: true, decision: outcome.decision, ...(outcome.fenced ? { fenced: true as const } : {}) }
   }
 
   /** `settle` for callers that only need to know whether the request was settled. */
@@ -516,7 +531,8 @@ export class UserQuestionService extends EventEmitter {
     const waiter = this.settledWaiters.get(requestId)
     if (!waiter) return false
     this.settledWaiters.delete(requestId)
-    const row = this.binding?.store.get(requestId) ?? null
+    // Checked again right before dispatch: a correction that arrived since the answer fences an allow.
+    const row = this.binding?.store.fenceBeforeDispatch(requestId) ?? null
     if (!row || row.status !== 'answered') {
       waiter.reject(new Error(cancelMessage(row?.cancelReason ?? 'withdrawn')))
       return false
@@ -651,9 +667,20 @@ export class UserQuestionService extends EventEmitter {
         ...(record.reason ? { reason: record.reason } : {}),
         answerPath: record.answerPath,
         ...(record.uncertain ? { uncertain: true, uncertainTools: record.uncertainTools ?? [] } : {}),
-        ...(progress ? { answered: progress.answered, total: progress.total } : {})
+        ...(progress ? { answered: progress.answered, total: progress.total } : {}),
+        ...(record.status === 'pending' && this.binding?.store.fencedBy(record) ? { correctionArrived: true as const } : {})
       },
       ...this.helperOf(record.requestId)
+    }
+  }
+
+  /**
+   * A correction reached these threads (`OrchestratorService.correctSubagents`): the cards of the requests it fenced are
+   * shown again, marked "correction arrived". `updated` is for clients only; it asks nobody anything new.
+   */
+  correctionArrived(threadIds: readonly string[]): void {
+    for (const threadId of new Set(threadIds)) {
+      for (const view of this.savedPending(threadId)) if (view.approval?.correctionArrived) this.emit('updated', view)
     }
   }
 
