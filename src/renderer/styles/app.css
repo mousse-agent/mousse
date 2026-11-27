@@ -2698,10 +2698,11 @@ html[data-chat-width='full'] .chat {
   margin: 0 -5px;
 }
 
-/* A Reply pill: text quoted from the conversation (lib/composerQuotes.ts). */
+/* A Reply pill: text quoted from the conversation (lib/composerQuotes.ts). It does not bleed to the right, so the
+ * space put in after it stays a visible gap. */
 .composer-quote-chip {
-  padding: 1px 2px;
-  margin: 0 -2px;
+  padding: 1px 0 1px 2px;
+  margin: 0 0 0 -2px;
   color: var(--text-secondary);
   background: color-mix(in srgb, var(--text-primary) 9%, transparent);
   -webkit-box-decoration-break: clone;
@@ -2805,8 +2806,6 @@ html[data-chat-width='full'] .chat {
   border-radius: 7px;
   background: color-mix(in srgb, var(--text-primary) 8%, transparent);
   color: var(--text-secondary);
-  font-size: 0.82em;
-  line-height: 1.4;
   white-space: normal;
 }
 
@@ -2820,14 +2819,14 @@ html[data-chat-width='full'] .chat {
 
 .sent-quote-icon {
   flex-shrink: 0;
-  margin-top: 0.2em;
+  margin-top: calc((1lh - 13px) / 2);
   opacity: 0.8;
 }
 
 .sent-quote-text {
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   overflow: hidden;
 }
 
