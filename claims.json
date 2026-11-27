@@ -20,6 +20,18 @@
       "expiresAt": "2026-11-26T17:29:52.364Z"
     },
     {
+      "task": "codex-loaded-threads-never-wait",
+      "session": "Animatrix-33f3d9",
+      "machine": "Animatrix",
+      "branch": "codex-loaded-threads-never-wait",
+      "paths": [
+        "src/mms/harness/vendors/codex/CodexProviderService.ts",
+        "tests/codexProvider.test.ts"
+      ],
+      "claimedAt": "2026-11-27T10:11:45.533Z",
+      "expiresAt": "2026-11-27T12:11:45.533Z"
+    },
+    {
       "task": "lan-first-paths",
       "session": "Avarnics-Mac-mini.local-8600b4",
       "machine": "Avarnics-Mac-mini.local",
@@ -45,19 +57,6 @@
       ],
       "claimedAt": "2026-11-26T08:22:51.331Z",
       "expiresAt": "2026-11-26T10:22:51.331Z"
-    },
-    {
-      "task": "no-console-windows",
-      "session": "Animatrix-4d1091",
-      "machine": "Animatrix",
-      "branch": "no-console-windows",
-      "paths": [
-        "src/mms/git/windowsGitProcess.ts",
-        "src/main/notifications/completionSound.ts",
-        "eslint.config.js"
-      ],
-      "claimedAt": "2026-11-26T08:08:22.887Z",
-      "expiresAt": "2026-11-26T10:08:22.887Z"
     },
     {
       "task": "remote-project-add-and-projectless-threads",
@@ -87,18 +86,6 @@
       ],
       "claimedAt": "2026-11-26T09:12:48.179Z",
       "expiresAt": "2026-11-26T11:12:48.179Z"
-    },
-    {
-      "task": "remote-subagent-thread-id",
-      "session": "Avarnics-Mac-mini.local-d81b44",
-      "machine": "Avarnics-Mac-mini.local",
-      "branch": "remote-subagent-thread-id",
-      "paths": [
-        "src/mms/orchestrator/OrchestratorService.ts",
-        "src/mms/orchestrator/RemoteLaunchedThreads.ts"
-      ],
-      "claimedAt": "2026-11-26T08:04:42.196Z",
-      "expiresAt": "2026-11-26T10:04:42.196Z"
     },
     {
       "task": "remote-thread-offline-backoff",
