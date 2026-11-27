@@ -205,10 +205,19 @@ describe('a bot uses what a thread\'s agent can', () => {
       expect(remoteThreads.computerFor).toHaveBeenCalledWith('work', 'Mac mini')
     })
 
-    it('starts a thread on another computer in the repository of a project it names', async () => {
+    it('starts a thread on another computer in the repository of a project it names, or in no project there', async () => {
       const createRemoteThread = vi.fn(async () => ({ status: 'launched' as const, threadId: 'n2:t9', computer: 'Mac mini', title: 'Build', replayed: false, firstMessage: 'sent' as const }))
       const { call } = await world({ host: { createRemoteThread: createRemoteThread as never } })
-      expect(await call('thread_create', { computer: 'Mac mini', title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: true, text: expect.stringMatching(/projectId.*fromProjectId/) })
+      const last = () => (createRemoteThread.mock.calls.at(-1) as unknown as [Record<string, unknown>])[0]
+      // No project here named: the thread starts in no project there.
+      expect(await call('thread_create', { computer: 'Mac mini', title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: false })
+      expect(last()).not.toHaveProperty('fromProjectId')
+      expect(await call('thread_create', { computer: 'Mac mini', projectId: null, title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: false })
+      expect(last()).toMatchObject({ noProject: true })
+      // No project and a project at once is refused before any call.
+      const calls = createRemoteThread.mock.calls.length
+      expect(await call('thread_create', { computer: 'Mac mini', projectId: null, fromProjectId: 'p1', title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: true, text: expect.stringMatching(/no project/) })
+      expect(createRemoteThread.mock.calls.length).toBe(calls)
       expect(await call('thread_create', { computer: 'Mac mini', fromProjectId: 'p1', title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: false })
       expect(createRemoteThread).toHaveBeenCalledWith(expect.objectContaining({ computer: 'Mac mini', fromProjectId: 'p1' }), expect.objectContaining({ clientRequestId: expect.stringMatching(/^thread_create:work:/) }))
       // Its request names no hidden: the thread shows there, and a key it stored before hidden existed keeps its

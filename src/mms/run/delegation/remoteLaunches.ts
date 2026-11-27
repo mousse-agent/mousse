@@ -28,8 +28,8 @@ export interface RemoteLaunchRecord {
   computerName: string
   /** The thread's name there. */
   title: string
-  /** The project there that is the same repository as the launcher's. */
-  remoteProjectId: string
+  /** The project there that is the same repository as the launcher's; null for a thread in no project there. */
+  remoteProjectId: string | null
   worktree: boolean
   /**
    * The `hidden` the create sends that computer: whether it keeps the thread out of its sidebar. Null sends none (a
@@ -136,7 +136,7 @@ function fromRow(row: Row): RemoteLaunchRecord {
     node: String(row.node),
     computerName: String(row.computer_name),
     title: String(row.title),
-    remoteProjectId: String(row.remote_project_id),
+    remoteProjectId: str(row.remote_project_id) || null,
     worktree: int(row.worktree) === 1,
     hidden: row.hidden === null || row.hidden === undefined ? null : int(row.hidden) === 1,
     instanceId: str(row.instance_id),
@@ -192,7 +192,8 @@ export class RemoteLaunchRecords {
         input.node,
         input.computerName,
         input.title,
-        input.remoteProjectId,
+        // The column is NOT NULL: a thread in no project there is stored as ''.
+        input.remoteProjectId ?? '',
         input.worktree ? 1 : 0,
         input.hidden === null ? null : input.hidden ? 1 : 0,
         input.instanceId,

@@ -13,6 +13,8 @@ import { useGitStatus, type GitStatusView } from '../stores/gitStatusStore'
 import { LOCAL_RUN_ON_ID, buildRunOnOptions, canPickComputer, runOnLabel } from './sideCard/deviceMenu'
 import { runOnWithProject } from '../lib/addToMachine'
 import { RemoteProjectDialog } from './RemoteProjectDialog'
+import { sourceControlClient } from '../lib/sourceControl'
+import { remoteReason } from '../lib/remoteComputers'
 import { ProjectIcon } from './ProjectIcon'
 import { branchSearchAria, localBranchNames } from './sideCard/gitSectionLogic'
 import '../styles/composer-workspace.css'
@@ -185,6 +187,10 @@ export function ComposerProjectPicker({ projects, workspace, disabled, device, o
         <RemoteProjectDialog
           deviceName={runOnLabel(device.localName, device.devices, workspace.node)}
           recents={projects.map((entry) => entry.path)}
+          browse={(path) => sourceControlClient.browse(workspace.node!, path).catch((error: unknown) => {
+            // In that computer's own words when it gave a reason (an older Mousse there cannot browse).
+            throw new Error(remoteReason(error, runOnLabel(device.localName, device.devices, workspace.node)))
+          })}
           onSubmit={device.onOpenRemoteProject}
           onClose={() => setRemoteDialog(false)}
         />
