@@ -1,7 +1,7 @@
 import { Globe } from '../../lib/icons'
 import type { ThreadBrowserView as View } from '../../../shared/browser/threadView'
 import { threadBrowserKit, useThreadBrowser, useThreadBrowserStore } from '../../stores/threadBrowserStore'
-import { WatchedBrowserPane, watchedBrowserStatus, type WatchedBrowserHolding } from './WatchedBrowserPane'
+import { WatchedBrowserPane, watchedBrowserStatus, type WatchedBrowserFullScreen, type WatchedBrowserHolding } from './WatchedBrowserPane'
 import './threadBrowser.css'
 
 /**
@@ -44,16 +44,25 @@ export function ThreadBrowserLayer({ threadId }: { threadId: string }) {
   const paneOpen = useThreadBrowserStore((state) => state.pane === threadId)
   const view = useThreadBrowserStore((state) => state.views[threadId])
   if (!paneOpen || !view) return null
+  return <div className="thread-browser-layer">
+    <ThreadBrowserPane threadId={threadId} view={view} label="The agent's browser" />
+  </div>
+}
+
+/**
+ * A thread agent's browser, watched and taken over as in its thread's panel: also a tab of a bot's Browser view, for
+ * a thread the bot started (`BotSidePanel`).
+ */
+export function ThreadBrowserPane({ threadId, view, label, fullScreen }: { threadId: string; view: View; label: string; fullScreen?: WatchedBrowserFullScreen }) {
   const line = (holding: WatchedBrowserHolding): string => {
     if (holding === 'this-window') return 'You have the agent\'s browser. Give it back when you\'re done.'
     if (holding === 'another-window') return view.asks !== undefined ? 'The agent asks for you. Take over to help.' : 'Held in another window. Take over to use it here.'
     if (holding === 'agent') return 'The agent\'s browser, without a window. Take over to click or type.'
     return 'No browser is open for this thread.'
   }
-  return <div className="thread-browser-layer">
-    <WatchedBrowserPane kit={threadBrowserKit} browserKey={threadId} label="The agent's browser" user="The agent" view={view}
-      closed={() => <p>No browser open</p>}
-      line={line}
-      lineDetail={(holding) => holding === 'another-window' && view.asks ? view.asks : undefined} />
-  </div>
+  return <WatchedBrowserPane kit={threadBrowserKit} browserKey={threadId} label={label} user="The agent" view={view}
+    {...(fullScreen ? { fullScreen } : {})}
+    closed={() => <p>No browser open</p>}
+    line={line}
+    lineDetail={(holding) => holding === 'another-window' && view.asks ? view.asks : undefined} />
 }

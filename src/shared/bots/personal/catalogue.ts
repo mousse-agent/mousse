@@ -65,6 +65,7 @@ const THREADS_GUIDANCE = [
 
 const BROWSER_GUIDANCE = [
   "Your own browser, apart from the owner's tabs: open pages, click, type and read them. Use it when reading a page with web_fetch is not enough. The owner can watch it and take it over from your message.",
+  "Your owner sees it once a browser call of yours has opened it: under your message in your chat, and in Browser in your side panel, where the browser of a thread you started has its own tab. Until then, say you will use it, not that you are.",
   'A page that is still loading is no failure: carry on with what is there, or wait for it. A cookie banner you may dismiss.',
   'You have no sign-ins of your own: when a page needs one, ask your owner to sign in (they can take over your browser), and it stays signed in for you. When a page shows a human check or a consent wall a person can get past, ask your owner to take over your browser and do it; don\'t retry it or work around it yourself. When a site refused your browser, don\'t retry it: say so in your report, and carry on with the rest.',
   'browser_screenshot saves the picture in your files folder and shows it to your owner by itself, under your next message or with the question you ask them; its result says where, or that it was not kept. Save another copy only when your owner asks for one by name.',
