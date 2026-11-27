@@ -26,6 +26,8 @@ export interface ThreadViewState {
 export interface ViewChange {
   /** The pending requests that appeared and the ones that went, after a questions note. */
   questions?: { added: Json[]; removed: string[] }
+  /** The messages of a transcript sync the view took, when it left out older ones it does not hold (see `apply`). */
+  messages?: Json[]
 }
 
 const idOf = (value: unknown): string | undefined =>
@@ -83,13 +85,21 @@ export class RemoteThreadView {
           // A replacement is the whole transcript unless it says what is left before it.
           if (data.earlier !== undefined) state.earlier = data.earlier
           else delete state.earlier
-        } else
-          for (const message of data.messages as Json[]) {
-            const at = state.messages.findIndex((row) => row.id === message.id)
-            if (at >= 0) state.messages[at] = message
-            else state.messages.push(message)
-          }
-        return {}
+          return {}
+        }
+        // A view of a long thread's newest part takes only the messages from the oldest one it holds: older ones stay
+        // where `earlier` says, to be paged. An owner that sends its whole transcript would otherwise add them after
+        // the newest, while `earlier` still counts them.
+        const incoming = data.messages as Json[]
+        const first = state.earlier !== undefined ? idOf(state.messages[0]) : undefined
+        const from = first === undefined ? 0 : Math.max(0, incoming.findIndex((row) => row.id === first))
+        const taken = from ? incoming.slice(from) : incoming
+        for (const message of taken) {
+          const at = state.messages.findIndex((row) => row.id === message.id)
+          if (at >= 0) state.messages[at] = message
+          else state.messages.push(message)
+        }
+        return from ? { messages: taken } : {}
       }
       case 'queue.updated':
         if (Array.isArray(data.items)) state.queue = data.items as Json[]

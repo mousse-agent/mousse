@@ -10,6 +10,7 @@ import {
 import { MmsRemoteBackend } from '../../../../src/mms/bridge/remote/MmsBackend'
 import { ThreadDbClient } from '../../../../src/mms/data/threadDb/threadDbClient'
 import { MmsThreadSource } from '../../../../src/mms/bridge/remote/MmsThreadSource'
+import { RemoteThreadView } from '../../../../src/mms/bridge/routed/threadView'
 import {
   PRIVATE_STREAM_QUOTA,
   PRIVATE_THREAD_STREAMS_TOTAL,
@@ -848,6 +849,39 @@ describe('a long thread on a private stream', () => {
     const older = await pageBack(ok, t.id, snapshot.earlier)
     expect([...older.map((row) => row.id), ...newest]).toEqual(all.map((row) => row.id))
   }, 180_000)
+
+  it('sends a sync of the whole transcript after a turn only from where the reader holds it', async () => {
+    const { ok, thread, f } = await routedOwner({ streams: true })
+    const t = thread()
+    const session = f.mms.orchestrator.getOrCreateSession(t.id)
+    session.messages = Array.from({ length: 202 }, (_, index) => message(index, `${index}`)) as never
+    const opened = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
+    const stream = (opened.descriptor as { id: never }).id
+    const view = new RemoteThreadView()
+    view.install(readStream(f, stream, t.id).snapshot)
+    expect(view.read()?.earlier).toEqual({ before: 'm-2', count: 2 })
+
+    // A turn completes: one new message, and the whole transcript synced, as the orchestrator does.
+    session.messages = [...session.messages, message(202, 'reply')] as never
+    f.mms.orchestrator.emit('thread-messages', { threadId: t.id, messages: f.mms.orchestrator.getMessages(t.id) })
+    const sync = readStream(f, stream, t.id).events.filter((event) => event.type === 'thread.messages')
+    expect(sync).toHaveLength(1)
+    const sent = (sync[0]!.data.messages as Array<{ id: string }>).map((row) => row.id)
+    expect(sent[0]).toBe('m-2')
+    expect(sent.at(-1)).toBe('m-202')
+    view.apply('thread.messages', sync[0]!.data)
+    expect(view.read()?.messages).toHaveLength(201)
+    expect(view.read()?.earlier).toEqual({ before: 'm-2', count: 2 })
+
+    // The message the reader's part began at is gone (a rewind): a fresh snapshot says where its part begins now.
+    const snapshotId = () => (recordsOf(f, stream).find((record) => record.type === 'thread.snapshot.begin')!.body as { snapshot: string }).snapshot
+    const first = snapshotId()
+    session.messages = (session.messages as Array<{ id: string }>).filter((row) => row.id !== 'm-2') as never
+    f.mms.orchestrator.emit('thread-messages', { threadId: t.id, messages: f.mms.orchestrator.getMessages(t.id) })
+    expect(snapshotId()).not.toBe(first)
+    const { snapshot } = readStream(f, stream, t.id)
+    expect(snapshot.earlier).toEqual({ before: 'm-3', count: 2 })
+  }, 120_000)
 
   it('carries the newest 200 of 450 messages kept in thread.db, read without loading the thread', async () => {
     const { ok, f } = await routedOwner({ streams: true })
