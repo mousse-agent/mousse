@@ -2875,11 +2875,12 @@ export function registerGuiIpc(
       return res.threads
     }
   )
-  registerHandler('threads:search', async (_e, query: string, limit?: number, options?: { perThread?: boolean }) => {
+  registerHandler('threads:search', async (_e, query: string, limit?: number, options?: { perThread?: boolean; others?: boolean }) => {
     const res = await guiMms.request<ThreadSearchResponse>('threads.search', {
       query,
       limit,
-      ...(options?.perThread === true ? { perThread: true } : {})
+      ...(options?.perThread === true ? { perThread: true } : {}),
+      ...(options?.perThread === true && options.others === true ? { others: true } : {})
     })
     // The computers that were not searched are named with the matches of the others.
     return { results: res.results, ...(res.skipped?.length ? { skipped: res.skipped } : {}) }

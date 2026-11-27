@@ -960,8 +960,8 @@
     "security": "ceacd93869361a7a"
   },
   "threads.search": {
-    "version": 1,
-    "digest": "70c38e267069982a",
+    "version": 2,
+    "digest": "2ff441b514231e56",
     "security": "2455464eaace895f"
   },
   "threads.setExpiry": {

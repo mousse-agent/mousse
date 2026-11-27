@@ -117,22 +117,27 @@ describe('the sidebar filter', () => {
     expect(listed()).toEqual(['t1', 't2'])
   })
 
-  it('typing also lists the threads whose messages hold it, as the service finds them', async () => {
-    const search = vi.fn(async (query: string) => ({
-      results: query === 'flaky retry'
-        ? [{ threadId: 't2', threadName: 'Appointment reminders', matchType: 'message', messageId: 'm1', snippet: 'a flaky retry' }]
-        : []
-    }))
+  it('typing also lists the threads whose messages hold it, on this computer and the others', async () => {
+    const remote = thread('mac:r1', 'Deploy notes', { node: 'mac' })
+    const hit = (threadId: string) => ({ threadId, threadName: '', matchType: 'message', messageId: 'm1', snippet: 'a flaky retry' })
+    // The other computers answer later than this one.
+    let answerOthers: (() => void) | undefined
+    const search = vi.fn(async (query: string, _limit: number, options: { others?: boolean }) => {
+      if (query !== 'flaky retry') return { results: [] }
+      if (options.others) await new Promise<void>((done) => { answerOthers = done })
+      return { results: [hit(options.others ? 'mac:r1' : 't2')] }
+    })
     ;(window as unknown as { mousse: { threads: Record<string, unknown> } }).mousse.threads = { search }
-    show()
+    show('threads', [...threads, remote])
     type('flaky retry')
-    // Nothing has the words in its title; the message match arrives once typing pauses.
+    // Nothing has the words in its title; this computer's match arrives once typing pauses, without waiting for the others.
     expect(listed()).toEqual([])
     await act(async () => { await new Promise((done) => setTimeout(done, 400)) })
-    expect(search).toHaveBeenLastCalledWith('flaky retry', expect.any(Number), { perThread: true })
     expect(listed()).toEqual(['t2'])
+    await act(async () => { answerOthers?.() })
+    expect(listed().sort()).toEqual(['mac:r1', 't2'])
     type('')
-    expect(listed()).toEqual(['t1', 't2'])
+    expect(listed().sort()).toEqual(['mac:r1', 't1', 't2'])
   })
 
   it('Show lists bot threads, hidden ones too, and its chip puts My threads back', async () => {
