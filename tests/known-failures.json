@@ -1,11 +1,11 @@
 [
   { "file": "tests/net/bridge/routed/routerReview.test.ts", "test": "keeps a claimed item out of the queue it is also in", "issue": 2036, "how": "intermittent: the queue still reads [] when the 1 s wait for ['i1'] gives up" },
   { "file": "tests/run/threadSettleNoticeDaemon.test.ts", "test": "waits behind the sender's running turn, and notices that meet there run as one turn", "issue": 2021, "how": "intermittent under load (several daemon files in one run): timed out waiting for both notices queued" },
+  { "file": "tests/net/bridge/routed/remoteSubagents.test.ts", "issue": 1967, "how": "intermittent: all tests pass, then the cleanup hook times out" },
   { "file": "tests/run/profileDatabase.test.ts", "test": "with owner-only permissions and migrates idempotently", "issue": 1964, "how": "Windows keeps no POSIX file modes: expected 438 to be 448", "platform": "win32" },
   { "file": "tests/run/profileDatabase.test.ts", "test": "refuses a symlinked run directory", "issue": 1964, "how": "creating the symlink fails with EPERM without Developer Mode", "platform": "win32" },
   { "file": "tests/net/bridge/routed/threadToolsRemote.test.ts", "test": "kept while that computer is offline, it is sent by the restarted daemon once that computer answers", "issue": 1965, "how": "intermittent: the archive is still pending, not sent" },
   { "file": "tests/docs/setupMatrix.test.ts", "issue": 1966, "how": "the file does not load: SyntaxError: Invalid or unexpected token" },
-  { "file": "tests/net/bridge/routed/remoteSubagents.test.ts", "issue": 1967, "how": "intermittent: all tests pass, then the cleanup hook times out" },
   { "file": "tests/net/bridge/routed/table.test.ts", "test": "classifies every protocol and domain method as a row or as local with a reason", "issue": 1970, "how": "orchestrator.correctSubagents is neither a row nor local with a reason" },
   { "file": "tests/threadSearchIndex.test.ts", "test": "thread search index", "issue": 1971, "how": "EPERM removing the index folder while the index database is open", "platform": "win32" },
   { "file": "tests/gitFoundationProtocol.test.ts", "test": "a public main-agent send writes into the task", "issue": 1973, "how": "EPERM removing its temp folder: a file in it is still held open", "platform": "win32" },
@@ -22,9 +22,10 @@
   { "file": "tests/threadPaging.test.ts", "test": "does not load a thread with nothing queued when the daemon starts", "issue": 1971, "how": "EPERM removing its temp folder: thread-index.db is still held by the shared thread database client", "platform": "win32" },
   { "file": "tests/secrets/secretRequestNoLeak.test.ts", "test": "gives a command the secret by name only, masks its output", "issue": 1987, "how": "the Windows shell does not expand $API_TOKEN, so there is no secret in the output to mask", "platform": "win32" },
   { "file": "tests/bots/botActions.test.ts", "test": "C4 bridge delivers a complete card or disables Send when oversized=true", "issue": 1982, "how": "writes to a hardcoded /tmp, which Windows does not have: ENOENT", "platform": "win32" },
-  { "file": "tests/bots/botAuthority.test.ts", "test": "compiles an exact allowlist, host approvals, the remaining budget and the bot authority", "issue": 2025, "how": "the compiled allowlist no longer equals the expected one" },
-  { "file": "tests/bots/botAuthority.test.ts", "test": "compiles the published revision held inside the grant: a narrower revision really narrows", "issue": 2025, "how": "the compiled allowlist no longer equals the expected one" },
   { "file": "tests/run/botComputerRequest.test.ts", "test": "the computer group of its catalogue says to ask once when the driver is not set up here, and to escalate without the permission", "issue": 2025, "how": "the catalogue text no longer matches /escalate/ (renamed permission_ask)" },
   { "file": "tests/bots/botSubagentDelegations.test.ts", "test": "an upgrade from Run DB v28 and bots.db v14 with work in flight: both migrate, the older subagent settles once, and new subagents run as delegations", "issue": 2025, "how": "table agent_chains already exists: the hand rollback to v28 leaves the v31 chain table" },
-  { "file": "tests/run/turnHandoff.test.ts", "test": "Undo restores the original checkout bytes after autocrlf changes", "issue": 2034, "how": "intermittent under load: after Undo, README.md holds LF instead of the original CRLF bytes" }
+  { "file": "tests/run/turnHandoff.test.ts", "test": "Undo restores the original checkout bytes after autocrlf changes", "issue": 2034, "how": "intermittent under load: after Undo, README.md holds LF instead of the original CRLF bytes" },
+  { "file": "tests/subagentProviderPolicy.test.ts", "test": "Claude tools for a shared child", "issue": 2040, "how": "a read-only child is refused mcp__mousse__continue_subagent: its new name is not in the read-only tool set" },
+  { "file": "tests/run/appToolListing.test.ts", "test": "child lists only reads and read-only-safe tools, never thread_fork", "issue": 2040, "how": "thread_stop is listed to a read-only child but is neither a read nor read-only-safe" },
+  { "file": "tests/run/appToolListing.test.ts", "test": "a read-only child lists only reads and read-only-safe tools, and the others are refused", "issue": 2040, "how": "the listing has one tool more than the reads and read-only-safe tools (thread_stop)" }
 ]

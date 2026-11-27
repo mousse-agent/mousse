@@ -584,7 +584,7 @@ export function AutomationDetail({
       <button type="button" className="scheduled-disclosure automation-form-more" aria-expanded={moreOpen} aria-controls={id('more')} onClick={() => setMoreOpen((open) => !open)} data-testid="automation-more">
         <ChevronRight size={13} aria-hidden="true" className="scheduled-disclosure-chevron" />
         More
-        <span className="automation-more-hint">{bot ? 'name · added by' : 'name · thread · mode · keys · request URL'}</span>
+        <span className="automation-more-hint">{bot ? 'name · added by' : 'name · thread · keys · request URL'}</span>
       </button>
 
       {moreOpen ? (

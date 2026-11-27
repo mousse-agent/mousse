@@ -103,7 +103,7 @@ export const PlanTool = memo(function PlanTool({
           {hasPlan ? (
             <Markdown content={markdown} className="text-sm" />
           ) : (
-            <div className="text-sm text-an-tool-color-muted">No plan provided.</div>
+            <div className="text-sm text-an-tool-color-muted">No to-dos yet.</div>
           )}
         </div>
       </div>
