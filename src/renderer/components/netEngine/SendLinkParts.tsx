@@ -16,6 +16,7 @@ import type {
 import type { AccessPresetFields } from '../../../shared/net/accessPresets'
 import { ROUTE_WORDS, unreachableDetail } from './engineRows'
 import { defaultLevel, LevelPicker } from './AllowPrompt'
+import { AlsoLet } from './pairingParts'
 import { CopyButton } from '../settings/IconButtons'
 import { errorText, useDaemonCall } from '../devices/useDaemonCall'
 
@@ -267,18 +268,15 @@ export function EnterLinkPanel({
     return (
       <div className="engine-confirm">
         <p>Use {preview.name || 'the computer in this link'} from here?</p>
-        <label className="engine-check-box" title="Without it, this computer only uses it.">
-          <input
-            type="checkbox"
-            checked={back}
-            disabled={busy}
-            onChange={(event) => {
-              setBack(event.target.checked)
-              if (!event.target.checked) setShare([])
-            }}
-          />
-          Also let {name} use this computer
-        </label>
+        <AlsoLet
+          name={name}
+          checked={back}
+          disabled={busy}
+          onChange={(next) => {
+            setBack(next)
+            if (!next) setShare([])
+          }}
+        />
         <JoinRoutes
           preview={back ? preview : { ...preview, shareable: [] }}
           share={share}

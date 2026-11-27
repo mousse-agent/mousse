@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import jsQR from 'jsqr'
 import type { NetEngineStatus } from '../../../shared/netEngine/local'
-import { CircleAlert, CircleCheck } from '../../lib/icons'
+import { ArrowLeft, CircleAlert, CircleCheck } from '../../lib/icons'
 import { qrSvgPath } from '../../lib/plusQr'
 import { DelayedLoader } from '../ui/DelayedLoader'
+import { Switch } from '../settings/SettingsRow'
 
 /** An expiry in seconds (the helper's) or milliseconds, as milliseconds. */
 export const toMs = (at: number): number => (at < 1e12 ? at * 1000 : at)
@@ -26,14 +27,50 @@ export function useNow(until: number | undefined): number {
   return now
 }
 
-/** A pasted link: Continue reads it; text that is not a Mousse link says so. */
-export function PasteField({
-  onText,
-  placeholder = 'Paste its link'
+/** Ends an invitation that is still open (a code or link nobody used), and forgets it. */
+export function endInvitation(ref: { current: string | undefined }): void {
+  const open = ref.current
+  ref.current = undefined
+  if (open)
+    void window.mousse.platformRequest.request('netEngine.invite.cancel', { invitation: open }).catch(() => undefined)
+}
+
+/** "Also let <name> use this computer": off, this computer only uses the other one. */
+export function AlsoLet({
+  name,
+  checked,
+  disabled,
+  onChange
 }: {
-  onText: (text: string) => boolean
-  placeholder?: string
+  name: string
+  checked: boolean
+  disabled?: boolean
+  onChange: (next: boolean) => void
 }) {
+  const labelId = useId()
+  return (
+    <div className="engine-switch-row" title="Without it, this computer only uses it.">
+      <span id={labelId}>Also let {name} use this computer</span>
+      <Switch checked={checked} disabled={disabled} labelledBy={labelId} onChange={onChange} />
+    </div>
+  )
+}
+
+/** Back, at the start of a dialog's title row. */
+export function BackButton({ onBack }: { onBack: () => void }) {
+  return (
+    <button type="button" className="settings-icon-btn engine-back" aria-label="Back" title="Back" onClick={onBack}>
+      <ArrowLeft size={16} aria-hidden="true" />
+    </button>
+  )
+}
+
+/**
+ * The other computer's link under its label, then what to do on the other computer and Continue at the bottom.
+ * Text that is not a Mousse link says so.
+ */
+export function LinkForm({ onText, hint }: { onText: (text: string) => boolean; hint?: ReactNode }) {
+  const fieldId = useId()
   const [pasted, setPasted] = useState('')
   const [notLink, setNotLink] = useState(false)
   const paste = (event: FormEvent) => {
@@ -41,28 +78,33 @@ export function PasteField({
     setNotLink(!onText(pasted))
   }
   return (
-    <>
-      <form className="engine-paste" onSubmit={paste}>
-        <input
-          className="settings-input"
-          value={pasted}
-          placeholder={placeholder}
-          aria-label="Pairing link"
-          onChange={(event) => {
-            setPasted(event.target.value)
-            setNotLink(false)
-          }}
-        />
-        <button type="submit" className="settings-btn ui-btn-primary" disabled={!pasted.trim()}>
-          Continue
-        </button>
-      </form>
+    <form className="engine-pair-form" onSubmit={paste}>
+      <label className="engine-field-label" htmlFor={fieldId}>
+        Link
+      </label>
+      <input
+        id={fieldId}
+        className="settings-input"
+        value={pasted}
+        placeholder="Paste its link"
+        aria-label="Pairing link"
+        onChange={(event) => {
+          setPasted(event.target.value)
+          setNotLink(false)
+        }}
+      />
       {notLink && (
         <p role="alert" className="chat-error">
           This isn’t a link from Mousse.
         </p>
       )}
-    </>
+      <div className="engine-pair-foot">
+        {hint && <span className="engine-hint">{hint}</span>}
+        <button type="submit" className="settings-btn ui-btn-primary" disabled={!pasted.trim()}>
+          Continue
+        </button>
+      </div>
+    </form>
   )
 }
 
@@ -251,7 +293,6 @@ export function Scanner({
       ) : (
         <video ref={video} className="engine-scan-video" muted playsInline aria-label="Camera" />
       )}
-      <PasteField onText={onText} placeholder="Or paste the link" />
     </div>
   )
 }
