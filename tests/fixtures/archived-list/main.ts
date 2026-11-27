@@ -33,7 +33,7 @@ async function main() {
     for (let index = 0; index < 250 && !(await execute<boolean>('Boolean(window.qa && qa.ready())')); index++) await delay(20)
     const evidence: Record<string, unknown> = {}
     // In this order: the menu closes on scroll, so it goes last.
-    for (const name of ['open', 'end', 'middle', 'focusAway', 'lastRowMenu']) evidence[name] = await execute(`qa.${name}()`)
+    for (const name of ['open', 'end', 'middle', 'focusAway', 'lastRowMenu', 'revealFar', 'revealAfterOpening']) evidence[name] = await execute(`qa.${name}()`)
     if (process.env.MOUSSE_ARCHIVED_LIST_CAPTURE) writeFileSync(join(directory, 'archived.png'), (await window.webContents.capturePage()).toPNG())
     writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ ...evidence, pageErrors: await execute('qa.errors()'), rendererErrors }))
   } finally {

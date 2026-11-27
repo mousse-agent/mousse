@@ -17,6 +17,7 @@ import { needsMeLabel, threadAttention, threadStatus, worstOf, type ThreadAttent
 import { needsMeThreads, useSupervisedWaits } from '../lib/needsMe'
 import { hasMoreBelow, revealDelta } from '../lib/sidebarScroll'
 import { SIDEBAR_REVEAL_TIMEOUT_MS, useSidebarRevealStore } from '../lib/sidebarReveal'
+import { useSidebarOpenStore } from '../lib/sidebarOpen'
 import { useSidebarShowMoreStore } from '../lib/sidebarShowMore'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
@@ -409,7 +410,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   }, [pendingRows, listedInStore, storeActivity])
   const approvalThreads = useThreadsAwaitingApproval()
 
-  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
+  // Open projects and Archived, like Show more below, survive the sidebar closing and the hover peek.
+  const expandedProjects = useSidebarOpenStore((s) => s.groups)
+  const setExpandedProjects = useSidebarOpenStore((s) => s.setGroups)
   // The project the user last opened or closed. Only that group animates; one revealed for the thread
   // being opened (or a project just added) appears at once.
   const toggledProjectRef = useRef<string | null>(null)
@@ -418,7 +421,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const expandedProjectThreadLists = useSidebarShowMoreStore((s) => s.groups)
   const setExpandedProjectThreadLists = useSidebarShowMoreStore((s) => s.setGroups)
 
-  const [archivedExpanded, setArchivedExpanded] = useState(false)
+  const archivedExpanded = useSidebarOpenStore((s) => s.archived)
+  const setArchivedExpanded = useSidebarOpenStore((s) => s.setArchived)
   // The archived threads waiting on a delete confirmation, and how that delete is going.
   const [deleteRequest, setDeleteRequest] = useState<DeleteRequest | null>(null)
   const [deleteState, setDeleteState] = useState<{ busy: boolean; error?: string }>({ busy: false })

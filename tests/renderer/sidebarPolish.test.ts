@@ -27,6 +27,7 @@ vi.mock('../../src/renderer/components/chats/ChatsSidebar', () => ({ ChatsSideba
 const { ThreadsSidebar } = await import('../../src/renderer/components/ThreadsSidebar')
 const { ToastHost, dismissToast } = await import('../../src/renderer/components/ui/Toast')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
+const { useSidebarOpenStore } = await import('../../src/renderer/lib/sidebarOpen')
 const { useEditorsStore } = await import('../../src/renderer/stores/editorsStore')
 
 const at = '2026-11-05T10:00:00.000Z'
@@ -67,6 +68,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  useSidebarOpenStore.setState({ groups: new Set(), archived: false })
   act(() => root.unmount())
   host.remove()
   act(() => dismissToast())

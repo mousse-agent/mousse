@@ -30,6 +30,7 @@ vi.mock('../../src/renderer/components/chats/ChatsSidebar', () => ({ ChatsSideba
 const { ThreadsSidebar } = await import('../../src/renderer/components/ThreadsSidebar')
 const { ToastHost, dismissToast } = await import('../../src/renderer/components/ui/Toast')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
+const { useSidebarOpenStore } = await import('../../src/renderer/lib/sidebarOpen')
 const { useSidebarShowMoreStore } = await import('../../src/renderer/lib/sidebarShowMore')
 const { hasMoreBelow, revealDelta } = await import('../../src/renderer/lib/sidebarScroll')
 const { startRenderCounts, stopRenderCounts } = await import('../../src/renderer/chat/components/agent-elements/render-counts')
@@ -76,6 +77,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  useSidebarOpenStore.setState({ groups: new Set(), archived: false })
   act(() => root.unmount())
   host.remove()
   act(() => dismissToast())
