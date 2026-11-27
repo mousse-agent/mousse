@@ -1635,6 +1635,8 @@ export class MmsProtocolServer {
   private clientAcceptsEvent(session: ClientSession, event: ProtocolEvent): boolean {
     // What happens in a thread of another computer is for windows: the CLI is not given its transcript or questions.
     if (session.clientType !== 'gui' && isQualifiedId(event.threadId)) return false
+    // So is a chat with a bot of another computer: the CLI and agents never reach it.
+    if (session.clientType !== 'gui' && event.type.startsWith('bots.') && isQualifiedId((event.data as { botId?: unknown } | null)?.botId)) return false
     if (!event.profileId || event.type === 'server.shutdown') return true
     const boundId = session.binding?.profileId ?? this.opts.mms.profileId
     return event.profileId === boundId
@@ -1643,7 +1645,7 @@ export class MmsProtocolServer {
   private deliverEventToClient(session: ClientSession, event: ProtocolEvent): void {
     if (event.type === 'bots.tell' && !session.capabilities.has(BOT_TELLING_CAPABILITY)) return
     if (!this.sendRaw(session, event)) return
-    if (event.type === 'bots.message' && session.clientType === 'gui' && !session.capabilities.has(BOT_TELLING_CAPABILITY)) {
+    if (event.type === 'bots.message' && session.clientType === 'gui' && !session.capabilities.has(BOT_TELLING_CAPABILITY) && !isQualifiedId((event.data as { botId?: unknown } | null)?.botId)) {
       const services = this.servicesByProfile.get(session.binding?.profileId ?? this.opts.mms.profileId)
       try { services?.personalBots?.noteLegacyTelling(event.data) } catch { /* A best-effort receipt cannot undo a sent frame. */ }
     }

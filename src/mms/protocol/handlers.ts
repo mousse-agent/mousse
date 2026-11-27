@@ -2184,11 +2184,18 @@ function requestFolders(ctx: HandlerContext, params: unknown, allowPath: boolean
 async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
   // A call that names a thread (or project) of another of the user's computers goes to that computer.
   // This runs inside the profile's request barrier, so such calls drain with the profile.
+  // A bot of another computer (a qualified `botId`, or a computer named by `node`) is that computer's: its call goes
+  // there through the bot router, never the thread router.
+  if (ctx.mms.botRouter && method !== 'bots.focus') {
+    const routed = await ctx.mms.botRouter.dispatch(ctx, method, params)
+    if (routed) return routed.result
+  }
   if (ctx.mms.threadRouter) {
     const routed = await ctx.mms.threadRouter.dispatch(ctx, method, params)
     if (routed) return routed.result
   } else if (
     method !== 'threads.focus' &&
+    method !== 'bots.focus' &&
     isObject(params) &&
     !((method === 'threads.reorder' || method === 'projects.reorder') && ctx.connection?.clientType === 'gui')
   ) {
@@ -2232,6 +2239,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         return { routed: false, focused: false }
       }
       return ctx.mms.threadRouter?.focus(ctx, threadId, focused) ?? { routed: false, focused: false }
+    }
+    case 'bots.focus': {
+      // A window shows the chat of a bot of another computer (its chat stream is open while one does), or lets go.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['botId', 'focused'])
+      const botId = asString(p.botId, 'botId', 256)
+      const focused = asOptionalBoolean(p.focused, 'focused') !== false
+      // A bot of this computer streams to its windows anyway.
+      if (!parseQualifiedId(botId)) return { routed: false, focused: false }
+      return ctx.mms.botRouter?.focus(ctx, botId, focused) ?? { routed: false, focused: false }
     }
     case 'threads.markSeen': {
       // A window opened the thread or showed it in focus: it is no longer Done (finished and unseen).

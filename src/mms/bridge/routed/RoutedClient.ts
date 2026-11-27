@@ -125,6 +125,25 @@ const timedOut = (computer: ComputerRef): DomainRpcError =>
 const sizeOf = (value: unknown): number => Buffer.byteLength(JSON.stringify(value) ?? '')
 
 /**
+ * How one call goes over the wire: the Net method it is sent as, whether it is a write (a retry finds the first
+ * execution by its request id, never runs it twice), its deadline, and whether its reply is a routed envelope
+ * (`{ ok, result }`, a routed row's) or the result itself (a bot's, which refuses with a Net error).
+ */
+interface Wire {
+  net: string
+  durable: boolean
+  deadlineMs: number
+  enveloped: boolean
+}
+
+export interface BotCallOptions extends RoutedCallOptions {
+  /** Whether the call changes something: sent once, and found again by its request id after a lost reply. */
+  write: boolean
+  /** The call's own deadline; a lost link adds its wait for the link to come back. Default one minute. */
+  deadlineMs?: number
+}
+
+/**
  * The calling side of the routed API: one call to one computer. It sends only the keys the owner's
  * version of the row knows, stages values that do not fit a request, follows a paged reply to the
  * end, and finds the outcome of a call whose reply was lost (the same request id, never a fresh one).
@@ -235,7 +254,8 @@ export class RoutedClient {
       : undefined
     try {
       const sent = await this.stageLarge(node, session, computer, method, row, params, signal)
-      const reply = await this.invoke(node, computer, method, row, sent, { ...options, signal })
+      const wire: Wire = { net: routedNetMethod(method), durable: !!row.durable, deadlineMs: deadlineOf(method), enveloped: true }
+      const reply = await this.invoke(node, computer, method, wire, sent, { ...options, signal })
       // The ids in a refusal's details are the owner's own; they are named as the results are.
       if (!reply.ok)
         throw refusalError(reply.error, (value) =>
@@ -245,6 +265,28 @@ export class RoutedClient {
     } finally {
       release?.()
     }
+  }
+
+  /**
+   * Runs one of the bot methods `node` offers other devices (`remoteBotMethods` there, named as they are) and returns
+   * its result, or throws what the person should see. A lost reply is found again as a routed write's is: the same
+   * request id, and the same idempotency key, so the bot's computer answers its saved result and never runs it twice.
+   * It takes none of the slots of large routed reads and asks no row versions: a bot call never waits behind a thread's.
+   */
+  async callBot(node: NodeId, method: string, params: Record<string, unknown>, options: BotCallOptions): Promise<unknown> {
+    const computer = this.deps.computer(node)
+    // A request over one message would be refused there anyway; the bot's own rows keep every value well below it.
+    if (sizeOf(params) > ROUTED_INLINE_MAX_BYTES)
+      throw new DomainRpcError('too_large', `This is too large to send to a bot on ${computer.name}.`, { node, name: computer.name, method })
+    const deadlineMs = options.deadlineMs ?? DEFAULT_DEADLINE_MS
+    const signal = AbortSignal.any([
+      this.deps.signal,
+      ...(options.signal ? [options.signal] : []),
+      AbortSignal.timeout(deadlineMs + RECONNECT_WINDOW_MS)
+    ])
+    const wire: Wire = { net: method, durable: options.write, deadlineMs, enveloped: false }
+    const reply = await this.invoke(node, computer, method, wire, params, { ...options, signal })
+    return reply.ok ? reply.result : undefined
   }
 
   /** Opens (or reopens) a stream only this computer reads, on `node`. */
@@ -392,13 +434,13 @@ export class RoutedClient {
     node: NodeId,
     computer: ComputerRef,
     method: string,
-    row: RoutedRow,
+    wire: Wire,
     params: Record<string, unknown>,
     options: RoutedCallOptions & { signal: AbortSignal }
   ): Promise<RoutedReply> {
     const id = newId('rpc') as RpcId
-    const idem = row.durable ? `${method}:${options.idem ?? id}`.slice(0, 256) : undefined
-    const deadlineMs = deadlineOf(method)
+    const idem = wire.durable ? `${method}:${options.idem ?? id}`.slice(0, 256) : undefined
+    const deadlineMs = wire.deadlineMs
     // A result asked for again waits at most what is left of the call's own time, and no less than the result-wait
     // floor (v1 owners answer at once anyway): an engine owner holds the answer while the handler still runs.
     const deadlineAt = Date.now() + deadlineMs
@@ -409,21 +451,21 @@ export class RoutedClient {
     for (;;) {
       try {
         let reply: unknown
-        if (afterLoss && row.durable) {
+        if (afterLoss && wire.durable) {
           // The owner may have run it already: its result is asked for before the request is repeated.
           try {
             reply = await session.rpcResult(id, { deadlineMs: remaining(), signal })
           } catch (error) {
             if (!(error instanceof NetError && error.code === 'outcome_uncertain')) throw error
-            reply = await this.send(session, method, params, id, idem, deadlineMs, signal, options)
+            reply = await this.send(session, wire.net, params, id, idem, deadlineMs, signal, options)
           }
-        } else reply = await this.send(session, method, params, id, idem, deadlineMs, signal, options)
-        return await this.settle(node, session, computer, method, id, reply, signal)
+        } else reply = await this.send(session, wire.net, params, id, idem, deadlineMs, signal, options)
+        return await this.settle(node, session, computer, method, wire, id, reply, signal)
       } catch (error) {
         if (this.deps.signal.aborted) throw new DomainRpcError('cancelled', 'Mousse is shutting down.')
         if (signal.aborted) {
           // The window gave up, or the call ran out of its total time. A write may have gone through.
-          if (row.durable) throw mayHaveHappened(computer, method)
+          if (wire.durable) throw mayHaveHappened(computer, method)
           throw (signal.reason as { name?: string } | undefined)?.name === 'TimeoutError'
             ? timedOut(computer)
             : new DomainRpcError('cancelled', 'The request was cancelled.')
@@ -431,10 +473,10 @@ export class RoutedClient {
         // A computer that is connected and did not answer in time is slow, not gone. A read that is still
         // running there is never sent again; a write is asked for its result once, then left as unknown.
         if (error instanceof NetError && error.code === 'deadline_exceeded' && session.state() === 'open') {
-          if (!row.durable) throw timedOut(computer)
+          if (!wire.durable) throw timedOut(computer)
           try {
             const late = await session.rpcResult(id, { deadlineMs: remaining(), signal })
-            return await this.settle(node, session, computer, method, id, late, signal)
+            return await this.settle(node, session, computer, method, wire, id, late, signal)
           } catch {
             throw mayHaveHappened(computer, method)
           }
@@ -447,8 +489,8 @@ export class RoutedClient {
         }
         // The link went away with the call in flight. A read is sent again once, a write is found again by
         // its request id; neither goes on without end, and each loss gets its own wait for the link.
-        if (afterLoss && !row.durable) throw computerOffline(computer)
-        session = await this.reopened(node, computer, Date.now() + RECONNECT_WINDOW_MS, signal, row.durable)
+        if (afterLoss && !wire.durable) throw computerOffline(computer)
+        session = await this.reopened(node, computer, Date.now() + RECONNECT_WINDOW_MS, signal, wire.durable)
         afterLoss = true
       }
     }
@@ -456,7 +498,7 @@ export class RoutedClient {
 
   private send(
     session: BridgeClient,
-    method: string,
+    net: string,
     params: Record<string, unknown>,
     id: RpcId,
     idem: string | undefined,
@@ -464,7 +506,7 @@ export class RoutedClient {
     signal: AbortSignal,
     options: RoutedCallOptions
   ): Promise<unknown> {
-    return session.rpc(routedNetMethod(method), params, {
+    return session.rpc(net, params, {
       id,
       ...(idem ? { idem } : {}),
       deadlineMs,
@@ -499,12 +541,16 @@ export class RoutedClient {
     }
   }
 
-  /** A reply, a durable result sent as an artifact, or a paged reply followed to its end. */
+  /**
+   * A reply, a durable result sent as an artifact, or a paged reply followed to its end. A call that is not a routed
+   * row (a bot's, `callBot`) answers its result as it is, and refuses with a Net error, not a routed envelope.
+   */
   private async settle(
     node: NodeId,
     session: BridgeClient,
     computer: ComputerRef,
     method: string,
+    wire: Wire,
     id: RpcId,
     reply: unknown,
     signal: AbortSignal
@@ -512,8 +558,9 @@ export class RoutedClient {
     if ((reply as { kind?: unknown } | null)?.kind === 'bridge.artifact.result.v1') {
       if (!this.deps.resolveArtifact)
         throw new DomainRpcError('bad_reply', 'The other computer sent an unreadable reply.')
-      reply = await this.deps.resolveArtifact(node, session, reply, id, routedNetMethod(method), signal)
+      reply = await this.deps.resolveArtifact(node, session, reply, id, wire.net, signal)
     }
+    if (!wire.enveloped) return { ok: true, result: reply }
     // A paged reply is also `{ ok: true }`, so it is told apart first.
     if (!isRoutedPagedReply(reply)) {
       if (isRoutedReply(reply)) return reply

@@ -147,7 +147,10 @@ export function translateNetError(
       })
     case 'cancelled':
       return new DomainRpcError('cancelled', 'The request was cancelled.')
-    default:
-      return new DomainRpcError(error.code, error.message, { node: computer.node, name: computer.name })
+    default: {
+      // What the computer said beyond the code (a bot action's refusal names its `reason`) reaches the window too.
+      const details = error.details && typeof error.details === 'object' && !Array.isArray(error.details) ? error.details : {}
+      return new DomainRpcError(error.code, error.message, { ...details, node: computer.node, name: computer.name })
+    }
   }
 }

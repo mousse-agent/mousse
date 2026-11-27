@@ -310,6 +310,7 @@ export const PROTOCOL_METHODS = [
   'threads.archive',
   'threads.settle',
   'threads.focus',
+  'bots.focus',
   'threads.markSeen',
   'threads.reorder',
   'threads.search',
