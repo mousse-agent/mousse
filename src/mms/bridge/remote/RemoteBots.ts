@@ -312,7 +312,7 @@ export function remoteBotSummary(bot: BotSummary): BotSummary {
  * computer (a qualified id) is that computer's to share, and it may block the device reading this bot; "Managing …",
  * which names threads, then names only the threads left.
  */
-function withoutOtherComputersThreads(bot: BotSummary): Pick<BotSummary, 'threads' | 'stateText'> {
+function withoutOtherComputersThreads(bot: BotSummary): Partial<Pick<BotSummary, 'threads' | 'stateText'>> {
   const threads = bot.threads ?? []
   const here = threads.filter((thread) => !isQualifiedId(thread.threadId))
   if (here.length === threads.length) return {}
