@@ -15,7 +15,8 @@ import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { ROUTED_AGENT_METHODS } from '../../../../src/shared/bridge/routed'
+import { ROUTED_AGENT_BOT_KEY, ROUTED_AGENT_BOT_SINCE, ROUTED_AGENT_METHODS } from '../../../../src/shared/bridge/routed'
+import type { BotAuthority } from '../../../../src/shared/bots/personal/authority'
 import { qualifyId } from '../../../../src/shared/threadRef'
 import { DomainRpcError } from '../../../../src/mms/protocol/domainRegistry'
 import type { RemoteComputersPort } from '../../../../src/mms/protocol/remoteComputersPort'
@@ -27,6 +28,10 @@ import { cleanups, cleanupAll, linked } from './routerFixture'
 import { launchedThreadsOf } from '../../../../src/renderer/components/sideCard/lineageLogic'
 import { threadInFilter } from '../../../../src/renderer/lib/threadFilter'
 import type { Thread } from '../../../../src/shared/types'
+import { computerUseAllowed } from '../../../../src/mms/run/mcp/appTools/computer'
+import { withHiddenBots } from '../../../../src/mms/bridge/remote/botReach'
+import { HIDDEN_BOT_NAME } from '../../../../src/shared/bots/personal/deviceAccess'
+import { NotificationThreadIndex } from '../../../../src/main/notifications/threadNotificationTarget'
 
 type Loose = Record<string, any>
 let t: Awaited<ReturnType<typeof linked>>
@@ -76,6 +81,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   allow()
   policy.set(t.callerNode, { maxPermissionMode: 'accept_edits', agentReach: 'launched' })
+  t.caller.orchestrator.setBotThreads(null)
 })
 
 /** What the owner's turns are handed is recorded; no turn runs. */
@@ -120,7 +126,7 @@ describe('thread_create on another computer (issue #1160)', () => {
   it('starts a thread there, in its copy of the repository, held to the narrowed mode, with the first message as the agent\'s', async () => {
     standInForTurns()
     const { thread, runId, create } = await caller({ mode: 'auto' })
-    // Named as list_computers names it.
+    // Named as computer_list names it.
     const name = portOf().computers()!.find((entry) => entry.node === t.node)!.name
     const out = await create({ computer: name, title: 'Run the Linux tests', firstMessage: 'Run the tests on Linux.', clientRequestId: 'launch-1' })
     expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
@@ -464,6 +470,156 @@ describe('thread_create on another computer (issue #1160)', () => {
       }
     }, 120_000)
   })
+})
+
+const PIP_LOOK = { colour: 'teal', accessory: 'crown' }
+
+/**
+ * The owner's bot "Pip" on the caller, in a chat turn its owner's message started: its chat thread (no project), a live
+ * run that holds the thread tools, and the tools it calls through the registry.
+ */
+async function botCaller() {
+  allow()
+  const chat = t.caller.threads.createThread(`Pip ${++seq}`, undefined, undefined, { permissionMode: 'auto' } as never)
+  const sent = await t.caller.runEngine.dispatch({ kind: 'send', threadId: chat.id, clientRequestId: `bot-send-${seq}`, source: 'gui' })
+  if (sent.status !== 'accepted') throw new Error('bot run not accepted')
+  t.caller.runEngine.markStarting(sent.runId)
+  t.caller.runEngine.markRunning(sent.runId)
+  // Its grant allows the calls; what each tool checks for a bot is what runs.
+  const bot = { activationId: `act-${seq}`, appTools: new Set(['thread_create', 'thread_send']), check: () => ({ ok: true }) } as unknown as BotAuthority
+  t.caller.orchestrator.setBotThreads({
+    roleOf: (threadId) => (threadId === chat.id ? 'activation' : undefined),
+    botOf: (threadId) => (threadId === chat.id ? { botId: 'bot-pip', name: 'Pip', look: PIP_LOOK } : undefined),
+    ownerTurn: () => ({})
+  })
+  t.caller.orchestrator.appToolTurns.register(appTurn({ threadId: chat.id, runId: sent.runId, bot }))
+  const host = (t.caller.orchestrator as unknown as { mcpToolHost(): AppToolHost }).mcpToolHost()
+  const { registry, turns, request } = appToolRegistry(t.caller.runEngine, host)
+  turns.register(appTurn({ threadId: chat.id, runId: sent.runId, bot }))
+  const tool = async (name: string, args: Record<string, unknown>): Promise<{ isError?: boolean; body: Loose }> => {
+    const out = await registry.call(name, args, request({ threadId: chat.id, runId: sent.runId }))
+    return { ...(out.isError ? { isError: true } : {}), body: JSON.parse(out.text) }
+  }
+  return { chat, tool, create: (args: Record<string, unknown>) => tool('thread_create', { computer: t.node, projectId: ownerProject, title: 'Build', firstMessage: 'Build it.', ...args }) }
+}
+
+/** Who the turns there were handed messages from (the sender each message there is stored with), for the bot's chat. */
+const sendersThere = async (chatId: string, count: number): Promise<Loose[]> => {
+  const senders = () => startTurn.mock.calls.map(([handed]) => (handed as Loose).agent).filter((agent: Loose | undefined) => agent?.from?.thread === chatId)
+  await vi.waitFor(() => expect(senders()).toHaveLength(count), { timeout: 20_000 })
+  return senders()
+}
+
+describe('a personal bot\'s thread on another computer (issue #2003)', () => {
+  it('hidden: true starts it out of that computer\'s sidebar', async () => {
+    standInForTurns()
+    const { chat, create } = await botCaller()
+    const out = await create({ hidden: true, clientRequestId: 'bot-hidden' })
+    expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
+    const [far] = launchedBy(chat.id)
+    expect(far).toMatchObject({ hidden: true, startedFrom: { node: t.callerNode, agent: { thread: chat.id } } })
+  }, 120_000)
+
+  it('a start that names no hidden keeps the key a bot stored before hidden: its retry is the same launch, shown there', async () => {
+    standInForTurns()
+    const { chat, create } = await botCaller()
+    const out = await create({ clientRequestId: 'bot-shown' })
+    expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
+    const [far] = launchedBy(chat.id)
+    expect(far!.hidden).toBeUndefined()
+    // The fingerprint a bot's start stored before hidden could be passed: the same arguments, nothing else.
+    const record = t.caller.runEngine.remoteLaunches.listForLauncher(chat.id)[0]!
+    const stored = t.caller.runEngine.store.getReceipt(record.creationKey)!.result as { fingerprint: string }
+    expect(stored.fingerprint).toBe(JSON.stringify(['remote', t.node.toLowerCase(), ownerProject, 'Build', 'project', null, null, null, 'Build it.', 'agent']))
+    const again = await create({ clientRequestId: 'bot-shown' })
+    expect(again.body).toMatchObject({ threadId: out.body.threadId, replayed: true })
+    expect(launchedBy(chat.id)).toHaveLength(1)
+  }, 120_000)
+
+  it('its first message and its later messages there carry its name and face', async () => {
+    standInForTurns()
+    const { chat, tool, create } = await botCaller()
+    const out = await create({ clientRequestId: 'bot-face' })
+    expect(out.body).toMatchObject({ firstMessage: 'sent' })
+    const [far] = launchedBy(chat.id)
+    // Named there by the bot's name, not by its chat's title.
+    expect(far!.startedFrom?.agent?.title).toBe('Pip')
+    const sent = await tool('thread_send', { threadId: out.body.threadId, content: 'Also run the linter.', clientRequestId: 'bot-face-2' })
+    expect(sent.isError, JSON.stringify(sent.body)).toBeUndefined()
+    for (const sender of await sendersThere(chat.id, 2))
+      expect(sender).toMatchObject({ kind: 'agent', from: { node: t.callerNode, thread: chat.id }, bot: { id: 'bot-pip', name: 'Pip', look: PIP_LOOK } })
+  }, 120_000)
+
+  it('there, its thread is the bot\'s: in Bot threads, named by it, yet it holds nothing there and goes on as "a bot"', async () => {
+    standInForTurns()
+    const { chat, create } = await botCaller()
+    const out = await create({ clientRequestId: 'bot-own-there' })
+    expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
+    const [far] = launchedBy(chat.id)
+    expect(far).toMatchObject({ startedByBot: { botId: 'bot-pip', name: 'Pip', node: t.callerNode } })
+    expect(threadInFilter(far!, { query: '', show: 'bots', projectId: null, botId: null, computerIds: [], archived: false }, { groupOf: (id) => id, projectName: () => undefined, botName: () => undefined })).toBe(true)
+    // No bot there has that id: what the thread's agents may do is any agent's.
+    expect(computerUseAllowed(far!.id, (id) => t.owner.threads.getThread(id) ?? undefined, () => false)).toBe(true)
+    // That computer can't tell who may know the bot: to a third it is "a bot".
+    expect(withHiddenBots(far, undefined)!.startedByBot).toEqual({ botId: '', name: HIDDEN_BOT_NAME })
+  }, 120_000)
+
+  it('there, its hidden thread is quiet, as a hidden bot thread is', async () => {
+    standInForTurns()
+    const { chat, create } = await botCaller()
+    const out = await create({ hidden: true, clientRequestId: 'bot-quiet-there' })
+    expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
+    const [far] = launchedBy(chat.id)
+    const index = new NotificationThreadIndex()
+    index.note('p', { threads: [far] })
+    expect(index.resolve('p', far!.id, 'completed')).toBeNull()
+    expect(index.resolve('p', far!.id, 'completed', true)).not.toBeNull()
+  }, 120_000)
+
+  it('a computer from before it gets neither, so its messages keep the agent label; a retry after it is updated sends the same', async () => {
+    standInForTurns()
+    const { chat, tool, create } = await botCaller()
+    // That computer runs the version of orchestrator.send before the bot's name and face.
+    const client = t.client()
+    const realVersions = client.versions.bind(client)
+    let older = true
+    vi.spyOn(client, 'versions').mockImplementation(async (node, session) => {
+      const versions = await realVersions(node, session)
+      return older ? { ...versions, 'orchestrator.send': ROUTED_AGENT_BOT_SINCE - 1 } : versions
+    })
+    const port = portOf()
+    const real = port.call.bind(port)
+    const sends: Array<Record<string, unknown>> = []
+    let lose = true
+    vi.spyOn(port, 'call').mockImplementation(async (node, method, params, options) => {
+      if (method === 'orchestrator.send') sends.push(params as Record<string, unknown>)
+      const result = await real(node, method, params, options)
+      // The first message goes through there, but its reply is lost; then that computer is updated.
+      if (method === 'orchestrator.send' && lose) {
+        lose = false
+        older = false
+        throw new DomainRpcError('computer_offline', 'The other computer is offline.')
+      }
+      return result
+    })
+    const out = await create({ clientRequestId: 'bot-older' })
+    expect(out.body).toMatchObject({ firstMessage: 'uncertain' })
+    expect(t.caller.runEngine.remoteLaunches.listForLauncher(chat.id)[0]!.senderBot).toBeUndefined()
+    // The retry repeats the first message as it went: no key conflict there, and still the agent label.
+    const again = await create({ clientRequestId: 'bot-older' })
+    expect(again.body).toMatchObject({ firstMessage: 'sent' })
+    for (const params of sends) expect(params).not.toHaveProperty(ROUTED_AGENT_BOT_KEY)
+    const [far] = launchedBy(chat.id)
+    expect(far!.startedByBot).toBeUndefined()
+    // A later message to a computer from before it reaches it without them too.
+    older = true
+    const later = await tool('thread_send', { threadId: out.body.threadId, content: 'Also run the linter.', clientRequestId: 'bot-older-2' })
+    expect(later.isError, JSON.stringify(later.body)).toBeUndefined()
+    for (const sender of await sendersThere(chat.id, 2)) {
+      expect(sender).toMatchObject({ kind: 'agent', from: { node: t.callerNode, thread: chat.id, title: 'Pip' } })
+      expect(sender).not.toHaveProperty('bot')
+    }
+  }, 120_000)
 })
 
 /** The words of a call refused as a conflict (a key used for other arguments). */

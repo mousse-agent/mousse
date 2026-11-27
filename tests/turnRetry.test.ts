@@ -11,7 +11,7 @@
 import { describe, expect, it } from 'vitest'
 import { codexHarnessError } from '../src/mms/harness/drivers/codex/adapter'
 import { CodexTurnFailure } from '../src/mms/harness/vendors/codex/CodexProviderService'
-import { providerErrors, providerStatusError, usageLimitError } from '../src/mms/orchestrator/providerErrors'
+import { appLimitError, providerErrors, providerStatusError, usageLimitError } from '../src/mms/orchestrator/providerErrors'
 import { TURN_RETRY, turnRetryCause, turnRetryPlan, withRetries, type TurnRetryFacts } from '../src/mms/orchestrator/turnRetry'
 import { AppError } from '../src/shared/errors'
 import { harnessAppError } from '../src/shared/harness/types'
@@ -24,9 +24,12 @@ const timedOut = new AppError({ code: 'provider_timeout', message: 'timed out', 
 /** Issue #1999: OpenAI's envelope with a bare "Bad Request", as Codex 0.162.1 reports it, mapped as a managed Codex maps it. */
 const envelope400 = JSON.stringify({ error: { message: 'Bad Request', type: null, code: null, param: null }, status: 400 }, null, 2)
 const opaque400 = codexHarnessError(new CodexTurnFailure(envelope400, { message: envelope400, codexErrorInfo: 'other' }), 'codex-2')
-/** Codex 0.162.1's own words for a ChatGPT plan limit, with no kind (`other`), as a managed Codex maps them. */
+/** OpenAI's app limit as Codex 0.162.1 sent it: a dropped stream with no kind (`other`). */
 const SHARING_LIMIT = 'stream disconnected before completion: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.'
-const sharingLimit = codexHarnessError(new CodexTurnFailure(SHARING_LIMIT, { message: SHARING_LIMIT, codexErrorInfo: 'other' }), 'codex-2')
+const sharingFailure = new CodexTurnFailure(SHARING_LIMIT, { message: SHARING_LIMIT, codexErrorInfo: 'other' })
+/** As the Codex service reports it (`provider_app_limit`), and as a runtime's protocol error that carries the wording. */
+const appLimit = codexHarnessError(appLimitError('codex', sharingFailure), 'codex-2')
+const appLimitAsProtocol = harnessAppError({ code: 'protocol', message: `Codex ended the turn with an error: ${SHARING_LIMIT}` })
 const half = () => 0.5
 const how = (error: unknown, over: Partial<TurnRetryFacts> = {}) => turnRetryPlan(error, facts(over), half)?.how
 
@@ -49,8 +52,10 @@ describe('which failures go on, and how', () => {
     ['a usage limit', usageLimitError({ provider: 'claude', estimated: true }), {}, undefined],
     ['a usage limit after a tool ran, session kept', usageLimitError({ provider: 'codex', estimated: true }), { progressed: true, sessionKept: true }, undefined],
     ['a managed Codex usage limit (rate_limited)', harnessAppError({ code: 'rate_limited', message: 'limit' }), {}, undefined],
-    ['a ChatGPT plan limit Codex reports as a disconnected stream, mid-turn with a kept session', sharingLimit, { progressed: true, sessionKept: true }, undefined],
-    ['the same, before anything happened', sharingLimit, {}, undefined],
+    ['an app limit (provider_app_limit), before anything happened', appLimit, {}, undefined],
+    ['an app limit, mid-turn with a kept session', appLimit, { progressed: true, sessionKept: true }, undefined],
+    ['an app limit under a protocol error, before anything happened', appLimitAsProtocol, {}, undefined],
+    ['an app limit under a protocol error, mid-turn with a kept session', appLimitAsProtocol, { progressed: true, sessionKept: true }, undefined],
     ['a quota or billing limit', providerErrors.create('provider_quota_exceeded'), {}, undefined],
     ['a sign-in the provider refused (401)', providerStatusError(401, 'unauthorized'), {}, undefined],
     ['an expired sign-in', harnessAppError({ code: 'auth_expired', message: 'sign in again' }), {}, undefined],
@@ -76,9 +81,9 @@ describe('which failures go on, and how', () => {
     expect(how(error, over)).toBe(expected)
   })
 
-  it("reads the #1999 failure as the provider's 400, and the plan limit as a usage limit", () => {
+  it("reads the #1999 failure as the provider's 400, and the app limit as its own failure", () => {
     expect(opaque400).toMatchObject({ code: 'provider_api_error', details: { status: 400 } })
-    expect(sharingLimit).toMatchObject({ code: 'rate_limited' })
+    expect(appLimit).toMatchObject({ code: 'provider_app_limit' })
   })
 
   it('doubles the wait up to its cap and spreads it over the upper half', () => {

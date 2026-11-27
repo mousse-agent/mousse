@@ -1,5 +1,5 @@
 /**
- * One piece of a bot's work on a model the owner named (#1067): `work_models` lists the owner's entries a bot's work
+ * One piece of a bot's work on a model the owner named (#1067): `model_list` lists the owner's entries a bot's work
  * can run on, with their models and reasoning levels, and the entries it can't, with why; `work_start` with a model runs
  * that work on it and keeps it across a restart, while the chat and later work stay on the bot's rows; a pick that is not
  * offered is refused and nothing starts; only a chat turn the owner's own message started may name one.
@@ -78,7 +78,7 @@ describe('work on a model the owner named', () => {
 
   it('lists what the owner has, and the entries work can\'t run on with why', async () => {
     const turn = await chat('What models do I have?', 'm1')
-    const listed = (await call(turn.activation.id, 'work_models', {})).value
+    const listed = (await call(turn.activation.id, 'model_list', {})).value
     expect(listed.entries).toEqual([
       { entry: 'Claude Code', instanceId: 'claude', models: [
         { model: 'sonnet', name: 'Sonnet 5', efforts: ['low', 'medium', 'high'] },
@@ -94,7 +94,7 @@ describe('work on a model the owner named', () => {
     // Work rows left unpicked run on Talk's model: the bot is told which, never "chosen by Mousse".
     f.bots.setOwnerSlots(botId, { talk: { instanceId: 'pi:openrouter', model: 'cheap/model' }, light: null, medium: null, hard: null })
     const cheap = 'Cheap Model on OpenRouter'
-    expect((await call(turn.activation.id, 'work_models', {})).value.usualWork).toEqual({ light: cheap, medium: cheap, hard: cheap })
+    expect((await call(turn.activation.id, 'model_list', {})).value.usualWork).toEqual({ light: cheap, medium: cheap, hard: cheap })
   })
 
   it('runs that work on the named model, keeps it across a restart, and leaves the chat and the next work on the rows', async () => {
@@ -177,7 +177,7 @@ describe('work on a model the owner named', () => {
     const started = await call(turn.activation.id, 'work_start', { title: 'Job', brief: 'Do it.' })
     await start(f, started.value.workId)
     expect((await call(started.value.workId, 'work_start', { title: 'More', brief: 'More.', model: pick })).isError).toBe(true)
-    expect((await call(started.value.workId, 'work_models', {})).isError).toBe(true)
+    expect((await call(started.value.workId, 'model_list', {})).isError).toBe(true)
     // A reminder's work has no model of its own: it runs on the rows, whatever its text says.
     f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: new Date(f.clock.now + 60_000).toISOString(), text: 'Checking.', work: { title: 'Later', brief: 'Do this one with Opus on Claude Code.' } })
     await finish(f, turn.payload, 'completed', { text: 'Set.' })

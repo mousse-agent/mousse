@@ -162,7 +162,7 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
     ])
     // The turn's end does not revoke, but with no active run on the thread the token acts for nothing.
     expect(credentials.listForThread(parent.id)[0].revokedAt).toBeNull()
-    const idle = await callTool({ url: server.url, token: seen.token! }, 'list_tasks', {})
+    const idle = await callTool({ url: server.url, token: seen.token! }, 'task_list', {})
     expect(idle.status).toBe(200)
     expect(idle.body.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_caller_not_live })
 
@@ -197,7 +197,7 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
 
     // Deleting the thread revokes it.
     orch.markThreadDeleted(parent.id)
-    expect((await callTool({ url: server.url, token: seen.token! }, 'list_tasks', {})).status).toBe(401)
+    expect((await callTool({ url: server.url, token: seen.token! }, 'task_list', {})).status).toBe(401)
     expect(credentials.listForThread(parent.id)[0].revokedAt).not.toBeNull()
   }, 30_000)
 

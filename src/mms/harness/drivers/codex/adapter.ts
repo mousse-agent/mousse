@@ -8,7 +8,6 @@ import {
   type CodexTurnUsage
 } from '../../vendors/codex/CodexProviderService'
 import { codexErrorKind } from '../../vendors/codex/protocol'
-import { isChatGptUsageLimitText } from '../../vendors/codex/rateLimits'
 import type { ChildPreflightContext, SubagentRefusal } from '../../../run/policy/featureGates'
 import type { ProviderRef } from '../../../run/types'
 import type {
@@ -21,7 +20,7 @@ import type {
   TurnResult,
   TurnSink
 } from '../../adapter'
-import { providerStatusError, readProviderStatus, readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
+import { providerStatusError, readProviderStatus, readUsageLimit } from '../../../orchestrator/providerErrors'
 import { isMousseServerTool } from '../../../run/mcp/attachment'
 import { createRuntimeToolMapper, promptStreams } from '../../../run/transcript/promptRuntime'
 import { retryContextOverflowOnce } from '../../../run/transcript/retryContextOverflow'
@@ -78,12 +77,6 @@ export function codexHarnessError(error: unknown, instanceId?: string): unknown 
   if (kind === 'unauthorized' || status === 401)
     return fail('auth_expired', 'ChatGPT did not accept this sign-in. Sign in again in Settings → Providers.')
   if (kind === 'usageLimitExceeded' || status === 429) return codexUsageLimitHarnessError(instanceId)
-  // ChatGPT's plan limit in its own words, on a stream Codex reports as failed with no kind (`other`): a usage limit
-  // whose reset is not known, so the run pauses on an estimate, never a protocol error.
-  if (kind === 'other' && isChatGptUsageLimitText(error.message)) {
-    const mapped = codexUsageLimitHarnessError(instanceId)
-    return new AppError({ code: mapped.code, message: mapped.message, details: mapped.details, errorInfo: mapped.errorInfo }, usageLimitError({ provider: 'codex', estimated: true }, error))
-  }
   // Any other refusal with a status (a plan that cannot use this, a bad request, an outage): the provider's status
   // and message. A busy server stays one to try again.
   const refused = codexProviderError(error)

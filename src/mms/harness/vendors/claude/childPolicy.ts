@@ -1,4 +1,5 @@
 import { claudeToolKey, PERMISSION_KEYS } from '../../../../shared/permissionKeys'
+import { canonicalToolName } from '../../../../shared/toolAliases'
 import { CLAUDE_MOUSSE_TOOL_PREFIX, READ_ONLY_MOUSSE_TOOLS } from '../../../run/mcp/attachment'
 import type { ChildTurnPolicy } from '../../adapter'
 
@@ -53,7 +54,8 @@ export function claudePermissionKey(toolName: string): string {
 export function claudeChildToolDenial(child: ChildTurnPolicy | undefined, toolName: string): string | undefined {
   if (!child?.readOnly) return undefined
   if (toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX))
-    return READ_ONLY_MOUSSE_TOOLS.has(toolName.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length)) ? undefined : 'This subagent is read-only; this Mousse tool can change threads or the workspace.'
+    // An old name is its new one (`canonicalToolName`), as the server reads it.
+    return READ_ONLY_MOUSSE_TOOLS.has(canonicalToolName(toolName.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length))) ? undefined : 'This subagent is read-only; this Mousse tool can change threads or the workspace.'
   if (CLAUDE_READ_ONLY_BUILTIN_TOOLS.includes(toolName)) return undefined
   return toolName.startsWith('mcp__')
     ? 'This subagent is read-only; tools from other MCP servers are not available to it.'

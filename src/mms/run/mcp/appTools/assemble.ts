@@ -30,8 +30,9 @@ export function settingsToolEnabled(tools: MousseIntegrationsSettings['tools'] |
   if (!Array.isArray(enabled)) return true
   // Empty explicit list means nothing selected; default list means all.
   if (enabled.length === 0) return false
+  // Either list may name a tool by an old name (`BUILTIN_TOOL_ALIASES`).
   const canonical = canonicalizeBuiltinToolName(toolName)
-  return enabled.includes(toolName) || enabled.includes(canonical)
+  return enabled.some((id) => id === toolName || canonicalizeBuiltinToolName(id) === canonical)
 }
 
 /** What `mode` allows, from its descriptor when the registry has one. */

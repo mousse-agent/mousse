@@ -4,6 +4,7 @@ import type { NodeId } from '../../shared/net'
 import type { NetStatus } from '../../shared/net/local'
 import type { NetEngineStatus } from '../../shared/netEngine/local'
 import type { Thread } from '../../shared/types'
+import { qualifyId } from '../../shared/threadRef'
 import { useAppStore } from '../stores/appStore'
 import { lastSeenLabel, type Device } from './netDevices'
 import { profileBound, readWhenIdleAfterBinding } from './readAfterBinding'
@@ -233,6 +234,23 @@ export function useComputers(enabled = true): ComputersState {
     }
   }, [active])
   return useComputersStore()
+}
+
+/**
+ * This computer's node, read while `enabled` (a view that shows something of another computer); undefined until the
+ * devices are read, and while threads of other computers are not routed.
+ */
+export function useSelfNode(enabled: boolean): string | undefined {
+  const { devices } = useComputers(enabled)
+  return devices.find((device) => device.self)?.node
+}
+
+/**
+ * A thread `id` of the computer `node`, named by its id there (`startedFrom.agent.thread`, `AgentOrigin.from.thread`), as
+ * this computer names it: its own id when `node` is this computer, else qualified with that computer.
+ */
+export function threadIdHere(node: string, id: string, self: string | undefined): string {
+  return node === self ? id : qualifyId(node, id)
 }
 
 /** One computer by the `node` of a row; undefined for this computer's own rows and for an unknown node. */

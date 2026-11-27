@@ -66,10 +66,10 @@ describe('a subagent on another entry is never held less tightly than its work',
   const subagentNs = (activationId: string) => subagentRuns(f, activationId)
   const attemptOf = (runId: string) => f.runs.getRun(runId)!.activeAttemptId!
 
-  it('on an entry that holds commands less tightly it runs without them: no command tool, refused at the call, it is told, the work is told, work_models and the work line say so', async () => {
+  it('on an entry that holds commands less tightly it runs without them: no command tool, refused at the call, it is told, the work is told, model_list and the work line say so', async () => {
     const job = await work('w1', { shell: true })
     const subagents = job.prepared.authority.subagents!
-    // work_models marks the entry before anything starts; the work's own runtime is left unmarked.
+    // model_list marks the entry before anything starts; the work's own runtime is left unmarked.
     expect(subagents.holdOn!(choices.map((option) => option.instanceId))).toEqual({ [PIONLY.instanceId]: { lacks: ['run commands'] } })
     const started = await subagents.start({ title: 'Reviews', brief: 'Find reviews.', model: cheap })
     expect(started).toMatchObject({ started: { subagent: 'Reviews', model: 'Cheap Model on Cheap Router' }, lacks: ['run commands'], note: expect.stringMatching(/It can't run commands there: Cheap Router would hold that less tightly than your own entry/) })
@@ -84,13 +84,13 @@ describe('a subagent on another entry is never held less tightly than its work',
     const priced = await startSubagent(f, subagentNs(job.id)[1])
     expect(priced.prepared.authority.check(command)).toEqual({ ok: true })
     expect(priced.prepared.policy.tools!.allow).toContain('second_bash')
-    // work_models, as the work's model reads it through the app tools.
+    // model_list, as the work's model reads it through the app tools.
     const fx = delegationFixture()
     try {
       const parentRun = await fx.runningRun(job.payload.threadId)
       const { registry, turns, request } = appToolRegistry(fx.engine, fakeAppToolHost().host, { bots: () => ({ host: f.bots.tools, models: { pickable: async () => choices } }) })
       turns.register(appTurn({ threadId: job.payload.threadId, runId: parentRun.runId, bot: job.prepared.authority }))
-      const listed = await registry.call('work_models', {}, request({ threadId: job.payload.threadId, runId: parentRun.runId }))
+      const listed = await registry.call('model_list', {}, request({ threadId: job.payload.threadId, runId: parentRun.runId }))
       expect(listed.isError, listed.text).toBeFalsy()
       const entries = JSON.parse(listed.text).entries as Array<{ instanceId: string; subagentLacks?: string[] }>
       expect(entries.find((entry) => entry.instanceId === PIONLY.instanceId)?.subagentLacks).toEqual(['run commands'])

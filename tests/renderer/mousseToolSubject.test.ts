@@ -8,7 +8,7 @@ describe('what a Mousse tool row names', () => {
     ['thread_create', { projectId: 'p1', title: 'Fix login', firstMessage: 'Please fix it' }, 'Fix login'],
     ['thread_create', { projectId: 'p1', firstMessage: 'Please fix the\nlogin page' }, 'Please fix the'],
     ['thread_send', { threadId: 't1', content: 'Any news?' }, 'Any news?'],
-    ['load_skill', { name: 'work' }, 'work'],
+    ['skill_load', { name: 'work' }, 'work'],
     ['use_tool', { tool: 'thread_list', arguments: { query: 'design review' } }, 'thread_list: design review'],
     // Only ids: nothing readable to name (the row shows its arguments as any tool's).
     ['thread_read', { threadId: 't1' }, undefined],

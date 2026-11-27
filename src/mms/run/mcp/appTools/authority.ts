@@ -38,13 +38,13 @@ import { McpToolError, type AppToolTurn, type FamilyRelation, type McpCaller, ty
  * (docs/plans/tool-api.md §1.2 "Retry"), and its effect is never `none`.
  */
 export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'task_status', 'list_subagents', 'list_computers', 'list_models', 'list_tasks',
+  'task_status', 'list_subagents', 'computer_list', 'model_list', 'task_list',
   'thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'schedule_list', 'terminal_read', 'read_applet',
-  'automation_list', 'list_skills', 'load_skill', 'tool_catalogue', 'mcp_servers', 'theme_read',
+  'automation_list', 'skill_list', 'skill_load', 'tool_catalogue', 'mcp_servers', 'theme_read',
   'git_status', 'git_diff',
   'web_search', 'web_fetch', 'browser_observe', 'browser_find', 'browser_wait', 'browser_extract', 'browser_screenshot',
   'mousse_gui_screenshot', 'mousse_gui_console', 'mousse_gui_status',
-  'bot_list', 'bot_schedule_list', 'work_models', 'work_list', 'watch_list', 'reminder_list', 'subagent_wait', 'subagent_result',
+  'bot_list', 'bot_schedule_list', 'model_list', 'work_list', 'watch_list', 'reminder_list', 'subagent_wait', 'subagent_result',
   'memory_search', 'memory_read', 'memory_list', 'item_list',
   'profiler_overview', 'profiler_service_breakdown', 'profiler_window_breakdown', 'profiler_gpu_hints', 'profiler_children',
   'profiler_sample_now', 'profiler_watch', 'profiler_heap_summary'
@@ -153,8 +153,9 @@ export interface ToolAccessPolicy {
   /**
    * Where a personal bot's thread tool ("use your threads") may reach: the scope for a thread (`botThreadReach`, the
    * rule its list and search follow too) or a project, or the refusal's words. Absent: a bot reaches nothing.
+   * `botWork`: a Stop or a message, which reaches the bot's own running work too (its handler forwards it to the bots).
    */
-  botReach?(caller: McpCaller, target: { threadId?: string; projectId?: string }, options?: { read?: boolean }): { scope: ToolScope } | { refused: string }
+  botReach?(caller: McpCaller, target: { threadId?: string; projectId?: string }, options?: { read?: boolean; botWork?: boolean }): { scope: ToolScope } | { refused: string }
 }
 
 /**
@@ -383,7 +384,7 @@ function botThreadScope(tool: MousseTool, needs: ToolNeeds, args: Record<string,
   let reach: { scope: ToolScope } | { refused: string }
   try {
     // A tool that changes nothing outside the caller's own state reaches the subagents below the owner's threads too (#1365).
-    reach = policy.botReach(caller, target, { read: needs.effect === 'none' || needs.effect === 'own' })
+    reach = policy.botReach(caller, target, { read: needs.effect === 'none' || needs.effect === 'own', botWork: tool.name === 'thread_send' || tool.name === 'thread_interrupt' })
   } catch {
     reach = { refused: target.threadId ? `Thread ${target.threadId} is not available to you.` : `${tool.name} is not available for this project.` }
   }

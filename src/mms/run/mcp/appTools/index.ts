@@ -30,6 +30,9 @@ import { shareWakeTools, threadWakeTools } from './threadWakes'
 import type { AppToolTurns } from './turns'
 import { webTools } from './web'
 
+/** The models a turn may name, a bot's or a thread's (`shareWakeTools`). */
+const MODEL_LIST_TOOL = 'model_list'
+
 export * from './types'
 export * from './refusal'
 export * from './registry'
@@ -76,6 +79,8 @@ function agentAccessPolicy(host: AppToolHost, engine: RunEngine): ToolAccessPoli
     family: (caller, threadId) => familyRelation(threadFamily(host, engine), caller.threadId, threadId),
     // A personal bot: its own rule for threads; it reaches every project.
     botReach: (caller, target, options) => {
+      // The bot's own running work, its child in the thread tree: a Stop or a message goes to the bots through the port.
+      if (options?.botWork && target.threadId && engine.runningBotWork(target.threadId)?.parentThreadId === caller.threadId) return { scope: 'manage' }
       if (target.threadId !== undefined) return botThreadReach(host, engine, caller.threadId, target.threadId, options)
       return { scope: 'manage' }
     }
@@ -123,7 +128,11 @@ export function createAppToolRegistry(input: {
     families[family] = tools.map((tool) => tool.name)
     for (const tool of tools) registry.register(tool)
   }
-  add('delegation', delegationTools(host))
+  // `model_list` serves a bot's turn (the models its work runs on) and any thread's (the picker's), one tool by one name.
+  const bots = botTools(input.bots)
+  const delegation = delegationTools(host)
+  const models = shareWakeTools(bots.filter((tool) => tool.name === MODEL_LIST_TOOL), delegation.filter((tool) => tool.name === MODEL_LIST_TOOL))
+  add('delegation', delegation.flatMap((tool) => (tool.name === MODEL_LIST_TOOL ? models : [tool])))
   add('questions', [...askUserTools(host), ...secretTools(host), ...bugReportTools(host)])
   add('tasks', [...taskTools(host), ...goalTools(host)])
   add('thread', engine ? threadTools(host, engine, input.bots) : [])
@@ -136,7 +145,7 @@ export function createAppToolRegistry(input: {
   add('computer', computerTools(host))
   add('applets', appletTools())
   // `wake`, `reminder_list` and `reminder_cancel` serve a bot's turn and any thread's (`shareWakeTools`).
-  add('bots', [...shareWakeTools(botTools(input.bots), threadWakeTools(host)), ...botCatalogueTools(() => registry), ...(input.botMemory ? [...botMemoryTools(input.botMemory), ...botItemTools(input.botMemory)] : [])])
+  add('bots', [...shareWakeTools(bots.filter((tool) => tool.name !== MODEL_LIST_TOOL), threadWakeTools(host)), ...botCatalogueTools(() => registry), ...(input.botMemory ? [...botMemoryTools(input.botMemory), ...botItemTools(input.botMemory)] : [])])
   add('projectGit', projectGitTools(host))
   add('profiler', profilerTools(host, engine))
   add('appearance', appearanceTools(host))

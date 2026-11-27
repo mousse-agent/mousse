@@ -65,12 +65,12 @@ describe('Pi extension → Mousse MCP registry', () => {
     let turn: PiTurnResponse = {
       attemptToken: first.turn.turnToken, sessionInstructions: '', activeBuiltins: [], catalogRevision: 1,
       mcp: { url: attachment.url, token: attachment.token },
-      tools: [{ name: 'create_task', description: 'task', parameters: { type: 'object' }, class: 'read' }]
+      tools: [{ name: 'task_create', description: 'task', parameters: { type: 'object' }, class: 'read' }]
     }
     const loaded = await extension(() => turn)
     await loaded.startTurn()
     const task = { description: 'P' }
-    const result = await loaded.tools.get('create_task')!.execute('call-1', task)
+    const result = await loaded.tools.get('task_create')!.execute('call-1', task)
     expect(result.content[0]?.text).not.toMatch(/earlier turn/)
     expect(fake.tasks.list()).toHaveLength(1)
 
@@ -83,14 +83,14 @@ describe('Pi extension → Mousse MCP registry', () => {
     const held = await fetch(attachment.url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${attachment.token}` },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'create_task', arguments: { ...task, [TURN_TOKEN_KEY]: first.turn.turnToken } } })
+      body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'task_create', arguments: { ...task, [TURN_TOKEN_KEY]: first.turn.turnToken } } })
     }).then((response) => response.json() as Promise<{ error?: { code: number } }>)
     expect(held.error?.code).toBe(MCP_ERROR_CODES.mousse_caller_not_live)
     expect(fake.tasks.list()).toHaveLength(1)
     // The extension's next turn stamps the new token, and its call runs.
     turn = { ...turn, attemptToken: second.turn.turnToken }
     await loaded.startTurn()
-    await loaded.tools.get('create_task')!.execute('call-2', task)
+    await loaded.tools.get('task_create')!.execute('call-2', task)
     expect(fake.tasks.list()).toHaveLength(2)
   })
 })

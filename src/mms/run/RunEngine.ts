@@ -9,6 +9,7 @@ import { inheritedAgentHops } from './agentHops'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
 import { deliverBotResults, withoutBotParentRows, type BotExecutionPort } from './delegation/botPort'
+import { botWorkActivationOf, botWorkInto } from './delegation/botWork'
 import { RemoteLaunchRecords } from './delegation/remoteLaunches'
 import { RemoteSubagentRecords } from './delegation/remoteSubagents'
 import { inheritRevisions } from './delegation/treeCorrection'
@@ -370,6 +371,18 @@ export interface ForkThreadRequest {
   seedFrom?: 'checkpoint' | 'current_head'
   /** A side chat (`ThreadLineage.relationship: 'side'`): the fork lives in the source's side panel, not in any list. */
   sideChat?: boolean
+  /** The thread whose agent or bot made the fork (`ForkStarter`); absent for a person's fork. */
+  startedBy?: ForkStarter
+}
+
+/**
+ * Who made a fork, as a `thread_create` thread records it: the calling thread becomes its launcher
+ * (`Thread.createdByThreadId`), and a bot's thread names the bot (`Thread.startedByBot`). `hidden` keeps it out of the
+ * person's sidebar; without it the fork shows there, as a person's does.
+ */
+export interface ForkStarter {
+  threadId: string
+  hidden?: boolean
 }
 
 /**
@@ -420,7 +433,7 @@ export function narrowestAccess(tasks: ReadonlyArray<Pick<DelegationRecord, 'acc
 /** A thread the engine asks its host to create: a delegated child or a fork. */
 export type ThreadCreation =
   | { kind: 'delegation'; request: DelegationRequest }
-  | { kind: 'fork'; threadId: string; sourceThreadId: string; sourceRunId: string; title?: string; sideChat?: boolean }
+  | { kind: 'fork'; threadId: string; sourceThreadId: string; sourceRunId: string; title?: string; sideChat?: boolean; startedBy?: ForkStarter }
 
 /** Source runs a fork may start after (SPEC §16.2): never `running` or `uncertain`. */
 export const FORKABLE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
@@ -1149,6 +1162,43 @@ un_time_limits). */
 
   get botPort(): BotExecutionPort | null {
     return this.botExecution
+  }
+
+  /**
+   * The running bot work projected into `threadId` (`delegation/botWork.ts`), or null for any other thread. Reads the
+   * run database only, so an ordinary thread never waits on bots.db.
+   */
+  runningBotWork(threadId: string): { activationId: string; parentThreadId: string } | null {
+    const work = botWorkInto(this.store, threadId)
+    const activationId = work?.status === 'running' ? botWorkActivationOf(work) : undefined
+    return activationId ? { activationId, parentThreadId: work!.parentThreadId } : null
+  }
+
+  /**
+   * A Stop of a bot work's row in the thread tree (`thread_stop`) goes to the bots through the port, which stop the work
+   * as `work_stop` does; never to the projection or the work's runs directly. Null when the thread is no running work's,
+   * and when `stopSubtree` would not stop anything for this request: a Stop it already answered (its receipt) or one
+   * naming a run that is not the thread's active run (an old turn of the work). The ordinary Stop then answers it.
+   */
+  async stopBotWork(threadId: string, request: { runId?: string; clientRequestId?: string } = {}): Promise<'stopped' | 'ended' | 'not_found' | 'no_port' | null> {
+    const work = this.runningBotWork(threadId)
+    if (!work) return null
+    const key = request.clientRequestId ? (request.runId ? request.clientRequestId : stopReceiptKey(threadId, request.clientRequestId)) : null
+    if (key && this.store.getReceipt(key)) return null
+    if (request.runId && this.staleStopTarget(request.runId, threadId)) return null
+    const port = this.botExecution
+    return port?.stopBotWork ? port.stopBotWork(work.activationId) : 'no_port'
+  }
+
+  /**
+   * A message to a bot work's row (`thread_send`) goes to the bots through the port as the owner's note (`work_note`),
+   * never into the work thread's inbox. Null when the thread is no running work's.
+   */
+  noteBotWork(threadId: string, text: string, options: { from?: string; requestKey?: string } = {}): string | null {
+    const work = this.runningBotWork(threadId)
+    if (!work) return null
+    const port = this.botExecution
+    return port?.noteBotWork ? port.noteBotWork(work.activationId, text, options) : 'no_port'
   }
 
   /**
@@ -1886,7 +1936,8 @@ un_time_limits). */
           sourceThreadId: input.sourceThreadId,
           sourceRunId: source.runId,
           title: input.title,
-          ...(input.sideChat ? { sideChat: true } : {})
+          ...(input.sideChat ? { sideChat: true } : {}),
+          ...(input.startedBy ? { startedBy: input.startedBy } : {})
         }).threadId
         created = true
         const pinned = seedFrom === 'checkpoint' && !input.sideChat && await host.pinForkCheckpoint?.(threadId, input.sourceThreadId, source.runId)

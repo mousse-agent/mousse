@@ -1,6 +1,6 @@
 /**
  * A bot's work starts subagents of its own (docs/bots.md, "Subagents of work"): each on the work's model or one the work
- * names from `work_models`, compiled from the same grant by the same code as the bot's turns, for its own runtime, and
+ * names from `model_list`, compiled from the same grant by the same code as the bot's turns, for its own runtime, and
  * holding nothing the work lacks and none of the bot's own tools. The engine counts them, ends them with the work's turn,
  * and shows them on the work's line; their threads are bot threads no list or tool reaches.
  */
@@ -100,8 +100,8 @@ describe('a subagent is compiled from its work\'s grant, and holds no more', () 
     }
   })
 
-  it('the work\'s main turn gets the subagent tools and work_models; the chat never does', () => {
-    expect(compile(starter, 'pi', work).permissions.appTools).toEqual(expect.arrayContaining([...BOT_SUBAGENT_TOOLS, 'work_models']))
+  it('the work\'s main turn gets the subagent tools and model_list; the chat never does', () => {
+    expect(compile(starter, 'pi', work).permissions.appTools).toEqual(expect.arrayContaining([...BOT_SUBAGENT_TOOLS, 'model_list']))
     const chat = compile(starter, 'pi', { ...work, frontDesk: true }).permissions.appTools
     for (const tool of BOT_SUBAGENT_TOOLS) expect(chat).not.toContain(tool)
     const consult = compile(starter, 'pi', { escalate: true, consult: false, memory: true }).permissions.appTools
@@ -202,7 +202,7 @@ describe('a bot\'s work and its subagents', () => {
     expect(chat.prepared.policy.tools!.allow).not.toContain('subagent_start')
     await finish(f, chat.payload, 'completed', { text: 'Hi.' })
     const job = await work('w1')
-    expect(job.prepared.policy.tools!.allow).toEqual(expect.arrayContaining(['subagent_start', 'work_models']))
+    expect(job.prepared.policy.tools!.allow).toEqual(expect.arrayContaining(['subagent_start', 'model_list']))
     await job.prepared.authority.subagents!.start({ title: 'One', brief: 'Do one thing.' })
     const child = await startSubagent(f, subagentNs(job.id)[0])
     expect(child.prepared.policy.tools!.allow).not.toContain('subagent_start')

@@ -37,7 +37,7 @@ export interface BotModelOption {
 }
 
 /**
- * What one piece of work may be asked to run on (`work_models`): the Runs on choices (`options`), and each of the
+ * What one piece of work may be asked to run on (`model_list`): the Runs on choices (`options`), and each of the
  * owner's other entries with why a bot's work can't run there (turned off, signed out, not ready, or a runtime that
  * can't hold a bot to its permissions).
  */

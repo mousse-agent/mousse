@@ -25,7 +25,7 @@ export function isTextPart(
 
 export function isErrorPart(
   part: unknown,
-): part is { type: "error"; title?: string; message: string } {
+): part is { type: "error"; title?: string; message: string; code?: string } {
   return (
     isRecord(part) && part.type === "error" && typeof part.message === "string"
   );

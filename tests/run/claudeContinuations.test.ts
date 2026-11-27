@@ -281,15 +281,15 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     const release = holdContinuationRun(s.d)
     s.cli.last.emit(notification('build-1'), textDelta('checking'))
     await waitFor(() => (s.d.orch as any).pendingContinuations.size === 1, 'the wake report to reach the host')
-    const call = s.callMousse('list_tasks')
+    const call = s.callMousse('task_list')
     await new Promise((resolve) => setTimeout(resolve, 100))
     release()
     const response = await call
     expect(response.error).toBeUndefined()
     const continuation = s.d.engine.listRuns(s.childThread).find((run) => run.source === 'provider-continuation')!
-    expect(s.d.engine.tools.listForRun(continuation.runId).map((invocation) => invocation.tool)).toContain('list_tasks')
+    expect(s.d.engine.tools.listForRun(continuation.runId).map((invocation) => invocation.tool)).toContain('task_list')
     const earlier = s.d.engine.listRuns(s.childThread).find((run) => run.source === 'delegation')!
-    expect(s.d.engine.tools.listForRun(earlier.runId).map((invocation) => invocation.tool)).not.toContain('list_tasks')
+    expect(s.d.engine.tools.listForRun(earlier.runId).map((invocation) => invocation.tool)).not.toContain('task_list')
     s.cli.last.emit(resultFrame({ text: 'checked', origin: 'task-notification' }))
     await waitFor(() => s.task().status !== 'running', 'the task to publish')
   })
@@ -424,9 +424,9 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     holdContinuationRun(s.d)
     s.cli.last.emit(notification('build-1'), textDelta('checking'))
     await waitFor(() => (s.d.orch as any).pendingContinuations.size === 1, 'the wake report to reach the host')
-    const response = await s.callMousse('list_tasks')
+    const response = await s.callMousse('task_list')
     expect(response.error?.message).toContain('did not become active')
-    for (const run of s.d.engine.listRuns(s.childThread)) expect(s.d.engine.tools.listForRun(run.runId).map((invocation) => invocation.tool)).not.toContain('list_tasks')
+    for (const run of s.d.engine.listRuns(s.childThread)) expect(s.d.engine.tools.listForRun(run.runId).map((invocation) => invocation.tool)).not.toContain('task_list')
   })
 
   /** The tools Mousse recorded under `runId`. */
@@ -440,13 +440,13 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     await s.d.worker.stop()
     s.cli.last.emit(notification('build-1'), textDelta('checking'))
     await waitFor(() => s.d.engine.listRuns(s.childThread).some((run) => run.source === 'provider-continuation'), 'the continuation run')
-    const call = s.callMousse('list_tasks')
+    const call = s.callMousse('task_list')
     await new Promise((resolve) => setTimeout(resolve, 400))
     s.d.worker.start()
     const response = await call
     expect(response.error).toBeUndefined()
     const continuation = s.d.engine.listRuns(s.childThread).find((run) => run.source === 'provider-continuation')!
-    expect(toolsOf(s, continuation.runId)).toContain('list_tasks')
+    expect(toolsOf(s, continuation.runId)).toContain('task_list')
     s.cli.last.emit(resultFrame({ text: 'checked', origin: 'task-notification' }))
     await waitFor(() => s.d.engine.getRun(continuation.runId)?.status === 'completed', 'the continuation run to complete')
   }, 40_000)
@@ -457,10 +457,10 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     s.cli.last.emit(notification('build-1'), textDelta('checking'))
     await waitFor(() => s.d.engine.getActiveRun(s.childThread)?.source === 'provider-continuation', 'the continuation run to be active')
     await new Promise((resolve) => setTimeout(resolve, 200))
-    const response = await s.callMousse('list_tasks')
+    const response = await s.callMousse('task_list')
     expect(response.error).toBeUndefined()
     const continuation = s.d.engine.getActiveRun(s.childThread)!
-    expect(toolsOf(s, continuation.runId)).toContain('list_tasks')
+    expect(toolsOf(s, continuation.runId)).toContain('task_list')
     s.cli.last.emit(resultFrame({ text: 'checked', origin: 'task-notification' }))
     await waitFor(() => s.d.engine.getRun(continuation.runId)?.status === 'completed', 'the continuation run to complete')
   }, 40_000)
@@ -475,7 +475,7 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     s.cli.last.emit(notification('build-1'), textDelta('first'), resultFrame({ text: 'first done', origin: 'task-notification' }))
     s.cli.last.emit(notification('build-2'), textDelta('second'))
     await waitFor(() => s.d.engine.listRuns(s.childThread).filter((run) => run.source === 'provider-continuation').length === 2, 'both continuation runs')
-    const call = s.callMousse('list_tasks')
+    const call = s.callMousse('task_list')
     await new Promise((resolve) => setTimeout(resolve, 400))
     s.d.worker.start()
     // Newest first.
@@ -483,8 +483,8 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     await waitFor(() => s.d.engine.getRun(first.runId)?.status === 'completed', 'the first continuation run to complete', 15_000)
     const response = await call
     expect(response.error).toBeUndefined()
-    expect(toolsOf(s, second.runId)).toContain('list_tasks')
-    expect(toolsOf(s, first.runId)).not.toContain('list_tasks')
+    expect(toolsOf(s, second.runId)).toContain('task_list')
+    expect(toolsOf(s, first.runId)).not.toContain('task_list')
     s.cli.last.emit(resultFrame({ text: 'second done', origin: 'task-notification' }))
     await waitFor(() => s.d.engine.getRun(second.runId)?.status === 'completed', 'the second continuation run to complete')
   }, 40_000)
@@ -496,12 +496,12 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     s.cli.last.emit(notification('build-1'), textDelta('checking'))
     await waitFor(() => s.d.engine.listRuns(s.childThread).some((run) => run.source === 'provider-continuation'), 'the continuation run')
     const continuation = s.d.engine.listRuns(s.childThread).find((run) => run.source === 'provider-continuation')!
-    const call = s.callMousse('list_tasks')
+    const call = s.callMousse('task_list')
     await new Promise((resolve) => setTimeout(resolve, 200))
     s.d.engine.markTerminal(continuation.runId, 'cancelled')
     const response = await call
     expect(response.error?.message).toContain('did not become active')
-    for (const run of s.d.engine.listRuns(s.childThread)) expect(toolsOf(s, run.runId)).not.toContain('list_tasks')
+    for (const run of s.d.engine.listRuns(s.childThread)) expect(toolsOf(s, run.runId)).not.toContain('task_list')
   }, 40_000)
 
   it('an admitted turn whose send holds the admission and waits behind a continuation in the lane is passed by it, and keeps its place', async () => {
@@ -591,10 +591,10 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     s.cli.last.emit(textDelta('looking', uuid))
     // The user turn's own tool call, long after the continuation's wait would have run out.
     await new Promise((resolve) => setTimeout(resolve, 300))
-    const response = await s.callMousse('list_tasks')
+    const response = await s.callMousse('task_list')
     expect(response.error).toBeUndefined()
     const active = s.d.engine.getActiveRun(s.childThread)!
-    expect(s.d.engine.tools.listForRun(active.runId).map((invocation) => invocation.tool)).toContain('list_tasks')
+    expect(s.d.engine.tools.listForRun(active.runId).map((invocation) => invocation.tool)).toContain('task_list')
     s.cli.last.emit(resultFrame({ uuids: [uuid], text: 'done' }))
   }, 40_000)
 

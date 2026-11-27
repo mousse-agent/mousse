@@ -2,6 +2,7 @@ import { AppError, type AppErrorShape } from '../../shared/errors'
 import { isPromptTaken, isRetriesExhausted } from '../../shared/harness/types'
 import { retriesOf, retryCause, type ProviderRetries } from '../../shared/providerRetry'
 import { usageLimitOf } from '../run/pausePolicy'
+import { isAppLimitText } from './providerErrors'
 
 /**
  * Mousse's own retries of a turn whose provider request failed and that its runtime did not retry itself. One count per
@@ -54,7 +55,7 @@ export interface TurnRetryPlan {
 /**
  * The provider's own failures: what it answered (any status but a sign-in's), a connection it dropped or refused, a
  * request that timed out, a runtime's protocol error about it. Everything else is not a provider failure and is never
- * retried here: a usage or plan limit (it pauses), a sign-in failure, a full context window (its own recovery runs), a
+ * retried here: a usage or plan limit (it pauses), an app limit (`provider_app_limit`), a sign-in failure, a full context window (its own recovery runs), a
  * Stop, an agent that took the prompt and went silent, and Mousse's own refusals and setup failures.
  */
 const PROVIDER_FAILURES: ReadonlySet<string> = new Set([
@@ -77,6 +78,9 @@ export function isProviderFailure(error: unknown): boolean {
   if (!PROVIDER_FAILURES.has(error.code)) return false
   if (error.errorInfo.category === 'cancelled') return false
   if (isRetriesExhausted(error) || isPromptTaken(error) || usageLimitOf(error)) return false
+  // An app limit in OpenAI's words under another code (a runtime's protocol error about a dropped stream) is still one.
+  const cause = error.cause instanceof Error ? error.cause.message : undefined
+  if (isAppLimitText(error.message, cause)) return false
   // A sign-in the provider refused stays a sign-in failure, whatever code carried it.
   if ((error.details as { status?: unknown } | undefined)?.status === 401) return false
   return true

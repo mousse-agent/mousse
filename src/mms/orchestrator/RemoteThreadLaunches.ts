@@ -179,7 +179,7 @@ export class RemoteThreadLaunches {
         remoteThreadId,
         modelPending: !setUp,
         mark,
-        ...(sending && record.firstMessage ? { message: { ...record.firstMessage, clientRequestId: key } } : {})
+        ...(sending && record.firstMessage ? { message: { ...record.firstMessage, clientRequestId: key, ...(record.senderBot ? { bot: record.senderBot } : {}) } } : {})
       }, {
         computerName: name,
         call: (method, params, idem) => {
