@@ -331,10 +331,13 @@ export class MmsListsSource {
     const own = this.options.private === true
     // A phone lists threads the way the CLI does: subagents sit under their parent, not beside it. Another
     // computer lists them all, with their lineage, and builds the tree itself like the desktop sidebar.
-    // A thread an agent or a bot keeps out of the sidebar (`Thread.hidden`) is listed on every device too, marked hidden,
-    // with the subagents below it: All and search find it there as here, and so do the side panel of the thread that
-    // started it and the bot's chat.
-    const threads = own ? inventory : visibleThreads(inventory)
+    // A thread an agent or a bot keeps out of the sidebar (`Thread.hidden`) reaches the person's other computers too,
+    // marked hidden, with the subagents below it: All and search find it there as here, and so do the side panel of the
+    // thread that started it and the bot's chat. A phone's list leaves it out, with the subagents below it: a phone may
+    // not read the mark, and would list it with the rest.
+    const hidden = new Set(own ? [] : inventory.filter((thread) => thread.hidden).map((thread) => thread.id))
+    const listed = (thread: Thread) => !hidden.has(thread.id) && !(thread.lineage && hidden.has(thread.lineage.rootThreadId))
+    const threads = own ? inventory : visibleThreads(inventory).filter(listed)
     const snapshot = this.build(s, inventory, threads, own, activity, turns, chats, bots)
     return own ? this.trimmed(snapshot, inventory) : snapshot
   }

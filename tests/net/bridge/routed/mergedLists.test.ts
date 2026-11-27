@@ -1566,7 +1566,7 @@ describe('threads A started, read on another computer C', () => {
     expect(row('secret-bot')).not.toHaveProperty('createdByThreadId')
   })
 
-  it('lists a thread kept out of the sidebar under All, not My threads, on C and on a phone, an agent\'s or a bot\'s', async () => {
+  it('lists a thread kept out of the sidebar under All, not My threads, on C, an agent\'s or a bot\'s; a phone leaves it out', async () => {
     const threads = [
       thread('launcher'),
       thread('agent-hidden', { createdByThreadId: 'launcher', hidden: true }),
@@ -1583,9 +1583,8 @@ describe('threads A started, read on another computer C', () => {
     }
     // The subagent below the hidden thread sits under it there as on A.
     expect(row('below')?.lineage?.parentThreadId).toBe(h.q('bot-hidden'))
-    // A phone gets them too, marked hidden; its subagents stay under their parent.
-    const phone = listsOfA(threads).threads
-    expect(phone.map((entry) => [entry.id, entry.hidden ?? false])).toEqual([['launcher', false], ['agent-hidden', true], ['bot-hidden', true]])
+    // A phone may not read the mark, so its list leaves them out, with the subagent below.
+    expect(listsOfA(threads).threads.map((entry) => entry.id)).toEqual(['launcher'])
   })
 
   it('lists in the launcher\'s Started threads what its agent started, on A itself and on a third computer B', async () => {
