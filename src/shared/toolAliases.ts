@@ -38,6 +38,11 @@ export const MOUSSE_TOOL_ALIASES: Readonly<Record<string, string>> = Object.free
   thread_merge_back: 'thread_return',
   thread_hide: 'thread_update',
   thread_steer: 'thread_send',
+  // `thread_create kind: subagent` (§2.1). `delegate_task` adds the kind (`MOUSSE_TOOL_ALIAS_ARGUMENTS`); `create_subagent`
+  // names its child its own way (`MOUSSE_TOOL_ALIAS_TRANSLATIONS`). `create_subagents` starts several children, so it is no
+  // one call of `thread_create`: it stays a hidden tool of its own that starts each one as `delegate_task` does.
+  delegate_task: 'thread_create',
+  create_subagent: 'thread_create',
   // The subagent family, a thread's side (S7d3, docs/plans/tool-api.md §2.1). Each is the variant of its new tool that
   // its arguments name, and runs as the old tool did, with its own authority (`toolVariant`).
   task_status: 'thread_wait',
@@ -55,6 +60,7 @@ export const MOUSSE_TOOL_ALIAS_ARGUMENTS: Readonly<Record<string, Readonly<Recor
   queue_remove: { op: 'remove' },
   queue_reorder: { op: 'move' },
   queue_promote_to_steer: { op: 'send_now' },
+  delegate_task: { kind: 'subagent' },
   // `request_answer` reads the kind from the request; a call that names another kind is refused (`requestAnswer.ts`).
   answer_subagent: { kind: 'subagent' },
   approval_respond: { kind: 'approval' },
@@ -79,6 +85,16 @@ const MOUSSE_TOOL_ALIAS_TRANSLATIONS: Readonly<Record<string, { args(old: ToolAr
   thread_steer: {
     args: ({ text, ...rest }: ToolArgs) => ({ ...rest, ...(text !== undefined ? { content: text } : {}), intent: 'note' }),
     holds: (args: ToolArgs) => args.intent === 'note'
+  },
+  // `create_subagent {name, task, workspace?, access?}` is a subagent titled `name`: a reader in the caller's folder unless
+  // it asked for `access: write`, which works in a worktree of its own (as the orchestrator's named subagents always did).
+  create_subagent: {
+    args: ({ name, task, workspace, access, ...rest }: ToolArgs) => {
+      const write = access === 'write'
+      const place = write ? 'isolated' : workspace ?? 'shared'
+      return { ...rest, kind: 'subagent', title: name, prompt: task, workspace: place, role: write ? 'implement' : 'research', ...(place === 'shared' ? { readOnly: true } : {}), wake: 'always' }
+    },
+    holds: (args: ToolArgs) => args.kind === 'subagent'
   },
   // S7d3. A subagent of yours named by `subagent` (title, childThreadId or delegationId) or `delegationId`, never
   // `threadId`: `task_status` reads its task now, `task_cancel` cancels it and what it delegated, `continue_subagent`

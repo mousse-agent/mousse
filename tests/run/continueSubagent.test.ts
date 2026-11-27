@@ -183,7 +183,7 @@ describe('continue_subagent and the title address (issue #142)', () => {
       }
       await say('go')
       await say('again')
-      expect(out.byId).toMatchObject({ started: false, code: 'subagent_trashed', message: expect.stringContaining('delegate_task') })
+      expect(out.byId).toMatchObject({ started: false, code: 'subagent_trashed', message: expect.stringContaining('thread_create (kind "subagent")') })
       expect(out.byTitle).toMatchObject({ started: false, code: 'unknown_subagent' })
     })
 

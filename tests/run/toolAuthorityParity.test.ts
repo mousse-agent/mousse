@@ -195,7 +195,10 @@ async function snapshotOf(kind: TurnKind) {
     const tokens = binding === 'per_call' ? (turn.attemptToken ? { _mousse_attempt: turn.attemptToken } : { _mousse_turn: turn.turnToken }) : {}
     const words = (text: string) => text.split(run.runId).join('<run>')
     const dispatch: Record<string, string> = {}
-    /** Each tool called with no arguments, and each that takes `threadId` (or `thread`) with another thread and a private one. */
+    /**
+     * Each tool called with no arguments, each kind of `thread_create`, and each that takes `threadId` (or `thread`) with
+     * another thread and a private one.
+     */
     const calls = registry.list().flatMap((tool) => {
       // `request_answer` is the kind of the request its id names: one call of each kind.
       if (tool.name === 'request_answer')
@@ -204,6 +207,7 @@ async function snapshotOf(kind: TurnKind) {
       const key = schema.includes('"threadId"') ? 'threadId' : schema.includes('"thread"') ? 'thread' : undefined
       return [
         { key: tool.name, name: tool.name, args: {} },
+        ...(tool.name === 'thread_create' ? ['subagent', 'thread'] : []).map((kind) => ({ key: `${tool.name} ${kind}`, name: tool.name, args: { kind } })),
         ...(key ? ['thread-b', 'thread-private'].map((threadId) => ({ key: `${tool.name} ${threadId}`, name: tool.name, args: { [key]: threadId } })) : [])
       ]
     })

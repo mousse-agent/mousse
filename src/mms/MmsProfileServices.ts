@@ -93,7 +93,7 @@ import { BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION } from '../shared/bots/
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { UsageLimitTracker } from './models/usageLimits'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
-import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
+import { BotScheduleBook, botJobWhenOf } from './scheduled/botJobs'
 import { migrateBotSchedules } from './scheduled/botScheduleMigration'
 import type { BotStore } from './bots/store/BotStore'
 import { botScheduleLabel } from '../shared/scheduleLabel'
@@ -1364,9 +1364,9 @@ export class MmsProfileServices {
       watch: (threadId) => this.syncThreadEventWatch(threadId),
       botExists: (botId) => this.personalBots?.list().some((bot) => bot.id === botId) ?? false,
       addBotSchedule: (botId, input) => {
-        const when = botWhenOf(input.schedule)
-        if (!when) throw new Error('A bot repeats: give it a time that repeats.')
-        const entry = this.botSchedules.add(botId, { when, prompt: input.prompt, name: input.name, tellMe: input.tellMe }, 'owner')
+        const when = botJobWhenOf(input.schedule)
+        if (!when) throw new Error('That time is not valid.')
+        const entry = this.botSchedules.add(botId, { when, prompt: input.prompt, name: input.name, tellMe: input.tellMe, ...(input.cliName ? { cliName: input.cliName } : {}) }, 'owner')
         return this.scheduled.getJob(entry.jobId)!
       },
       personCeiling: (threadId) => this.orchestrator.scheduledCreatorCeiling(threadId),

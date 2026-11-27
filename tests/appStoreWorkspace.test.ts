@@ -68,6 +68,53 @@ describe('profile activation with saved workspaces', () => {
   })
 })
 
+describe("each thread's side panel", () => {
+  beforeEach(() => {
+    useAppStore.setState({ activeThreadId: 'A', mainAreaOpen: true, mainView: 'git', panelByThread: {} })
+  })
+  const panel = () => {
+    const { mainAreaOpen, mainView } = useAppStore.getState()
+    return { open: mainAreaOpen, view: mainView }
+  }
+
+  it('comes back open or closed, on the tab it showed, when its thread is opened again', () => {
+    const { setActiveThreadId, setMainAreaOpen, setMainView } = useAppStore.getState()
+    // A thread never opened before keeps the panel as it is.
+    setActiveThreadId('B')
+    expect(panel()).toEqual({ open: true, view: 'git' })
+    setMainAreaOpen(false)
+    setActiveThreadId('C')
+    setMainView('terminal')
+
+    setActiveThreadId('A')
+    expect(panel()).toEqual({ open: true, view: 'git' })
+    setActiveThreadId('B')
+    expect(panel()).toEqual({ open: false, view: 'git' })
+    setActiveThreadId('C')
+    expect(panel()).toEqual({ open: false, view: 'terminal' })
+    // The new-thread screen keeps the panel as the thread left it, and the thread keeps its own.
+    setActiveThreadId(null)
+    expect(panel()).toEqual({ open: false, view: 'terminal' })
+    setMainAreaOpen(true)
+    setActiveThreadId('A')
+    setActiveThreadId('C')
+    expect(panel()).toEqual({ open: false, view: 'terminal' })
+  })
+
+  it('lets an update that opens a thread straight into a tab win over what the thread had', () => {
+    useAppStore.getState().setActiveThreadId('B')
+    useAppStore.getState().setMainAreaOpen(false)
+    useAppStore.getState().setActiveThreadId('A')
+    useAppStore.setState({ activeThreadId: 'B', mainAreaOpen: true, mainView: 'documents' })
+    expect(panel()).toEqual({ open: true, view: 'documents' })
+  })
+
+  it('leaves a restored workspace as it was saved', () => {
+    useAppStore.setState({ activeThreadId: 'B', mainAreaOpen: false, panelByThread: { B: { open: true, view: 'files' } } })
+    expect(panel()).toEqual({ open: false, view: 'git' })
+  })
+})
+
 describe('view fallbacks when a surface or document closes', () => {
   beforeEach(() => {
     useAppStore.setState({ agents: [], mainView: 'browser', openedSurfaceKinds: [], activeThreadId: null, documentTabs: [], activeDocumentTabByThread: {} })

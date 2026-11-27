@@ -414,14 +414,30 @@ describe('Edit details, from the inbox', () => {
     expect($('[data-testid="automation-detail"]')).not.toBeNull()
     expect(formRows()).toEqual([['When', 'Every 30 minutes'], ['Who', 'Pip'], ['Task', 'Tell me if it rains'], ['May', "Pip's grant View"], ['Tell me', 'Worth a look'], ['Next', expect.stringMatching(/Why\?$/)]])
     expect($('[aria-label="Where"]')).toBeNull()
-    expect([...document.querySelectorAll('button')].some((button) => button.textContent === 'Run now')).toBe(false)
+    // Run now starts one run in the bot's lane, as for any automation.
+    expect([...document.querySelectorAll('button')].some((button) => button.textContent === 'Run now')).toBe(true)
     expect($('[data-testid="automation-may-bot"]')?.textContent).toContain("Pip's grant")
     await click($('[data-testid="automation-when"]'))
+    // A schedule the bot added itself repeats.
     expect($$('[role="radiogroup"][aria-label="When"] [role="radio"]').map((entry) => entry.textContent)).toEqual(['Every…', 'Daily', 'Weekly', 'Cron'])
     await click($('[aria-labelledby$="tell-label"]'))
     await click(option('Needs you'))
     await click([...document.querySelectorAll('button')].find((button) => button.textContent === 'Save'))
     expect(mousse.scheduled.update).toHaveBeenCalledWith('b--s', { tellMe: 'needs_you' })
+  })
+
+  it('a bot\'s automation you added runs on any When: On demand saves, and it can get a request URL', async () => {
+    const stored = job({ id: 'b--s', name: 'Weather', prompt: 'Tell me if it rains', schedule: { kind: 'interval', minutes: 30 }, threadId: 'bot-schedule:b', bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' } })
+    const pip = { kind: 'bot' as const, name: 'Pip', look: { colour: 'teal', accessory: 'none' } as const }
+    const mousse = await mount([item({ key: 'job:b--s', name: 'Weather', who: pip, mayIsGrant: true, tellMe: 'look', link: { kind: 'job', jobId: 'b--s', botId: 'b' } })], [stored])
+    await openForm('job:b--s')
+    await click($('[data-testid="automation-when"]'))
+    expect($$('[role="radiogroup"][aria-label="When"] [role="radio"]').map((entry) => entry.textContent)).toEqual(['Every…', 'Daily', 'Weekly', 'Cron', 'Once', 'On demand'])
+    await click($$('[role="radiogroup"][aria-label="When"] [role="radio"]').find((entry) => entry.textContent === 'On demand'))
+    await click([...document.querySelectorAll('button')].find((button) => button.textContent === 'Save'))
+    expect(mousse.scheduled.update).toHaveBeenCalledWith('b--s', expect.objectContaining({ schedule: { kind: 'manual' } }))
+    await click($('[aria-controls$="more"]'))
+    expect($('[data-testid="request-row"]')).not.toBeNull()
   })
 
   it('a said line always tells and shows its end on the Automations page', async () => {

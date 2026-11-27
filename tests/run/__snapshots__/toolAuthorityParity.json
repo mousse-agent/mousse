@@ -1,7 +1,7 @@
 {
  "person, Ask": {
   "listed": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -21,7 +21,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -55,7 +54,7 @@
    "terminal_read"
   ],
   "pi": [
-   "delegate_task:delegation",
+   "thread_create:delegation",
    "computer_list:delegation",
    "model_list:delegation",
    "question_ask:read",
@@ -75,7 +74,6 @@
    "thread_stop:mutation",
    "thread_archive:mutation",
    "thread_update:mutation",
-   "thread_create:mutation",
    "queue_list:read",
    "queue_enqueue:mutation",
    "queue_update:mutation",
@@ -113,7 +111,7 @@
    "srv__write"
   ],
   "usable": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -132,7 +130,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -155,10 +152,13 @@
    "terminal_read"
   ],
   "dispatch": {
-   "delegate_task": "held",
+   "thread_create": "held",
+   "thread_create subagent": "held",
+   "thread_create thread": "held",
+   "thread_create thread-b": "held",
+   "thread_create thread-private": "held",
    "list_delegations": "fault: mousse_unknown_tool: No Mousse tool named list_delegations.",
    "integrate_delegation": "fault: mousse_unknown_tool: No Mousse tool named integrate_delegation.",
-   "create_subagent": "fault: mousse_unknown_tool: No Mousse tool named create_subagent.",
    "create_subagents": "fault: mousse_unknown_tool: No Mousse tool named create_subagents.",
    "integrate_subagent": "fault: mousse_unknown_tool: No Mousse tool named integrate_subagent.",
    "recall_subagent": "fault: mousse_unknown_tool: No Mousse tool named recall_subagent.",
@@ -199,7 +199,6 @@
    "thread_update": "held",
    "thread_update thread-b": "held",
    "thread_update thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
-   "thread_create": "held",
    "queue_list": "held",
    "queue_list thread-b": "held",
    "queue_list thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
@@ -323,7 +322,7 @@
  },
  "person, Full access": {
   "listed": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -343,7 +342,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -377,7 +375,7 @@
    "terminal_read"
   ],
   "pi": [
-   "delegate_task:delegation",
+   "thread_create:delegation",
    "computer_list:delegation",
    "model_list:delegation",
    "question_ask:read",
@@ -397,7 +395,6 @@
    "thread_stop:mutation",
    "thread_archive:mutation",
    "thread_update:mutation",
-   "thread_create:mutation",
    "queue_list:read",
    "queue_enqueue:mutation",
    "queue_update:mutation",
@@ -435,7 +432,7 @@
    "srv__write"
   ],
   "usable": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -454,7 +451,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -477,10 +473,13 @@
    "terminal_read"
   ],
   "dispatch": {
-   "delegate_task": "held",
+   "thread_create": "held",
+   "thread_create subagent": "held",
+   "thread_create thread": "held",
+   "thread_create thread-b": "held",
+   "thread_create thread-private": "held",
    "list_delegations": "fault: mousse_unknown_tool: No Mousse tool named list_delegations.",
    "integrate_delegation": "fault: mousse_unknown_tool: No Mousse tool named integrate_delegation.",
-   "create_subagent": "fault: mousse_unknown_tool: No Mousse tool named create_subagent.",
    "create_subagents": "fault: mousse_unknown_tool: No Mousse tool named create_subagents.",
    "integrate_subagent": "fault: mousse_unknown_tool: No Mousse tool named integrate_subagent.",
    "recall_subagent": "fault: mousse_unknown_tool: No Mousse tool named recall_subagent.",
@@ -521,7 +520,6 @@
    "thread_update": "held",
    "thread_update thread-b": "held",
    "thread_update thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
-   "thread_create": "held",
    "queue_list": "held",
    "queue_list thread-b": "held",
    "queue_list thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
@@ -645,7 +643,7 @@
  },
  "person, browser bound without vision": {
   "listed": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -665,7 +663,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -699,7 +696,7 @@
    "terminal_read"
   ],
   "pi": [
-   "delegate_task:delegation",
+   "thread_create:delegation",
    "computer_list:delegation",
    "model_list:delegation",
    "question_ask:read",
@@ -719,7 +716,6 @@
    "thread_stop:mutation",
    "thread_archive:mutation",
    "thread_update:mutation",
-   "thread_create:mutation",
    "queue_list:read",
    "queue_enqueue:mutation",
    "queue_update:mutation",
@@ -757,7 +753,7 @@
    "srv__write"
   ],
   "usable": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -776,7 +772,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -807,10 +802,13 @@
    "terminal_read"
   ],
   "dispatch": {
-   "delegate_task": "held",
+   "thread_create": "held",
+   "thread_create subagent": "held",
+   "thread_create thread": "held",
+   "thread_create thread-b": "held",
+   "thread_create thread-private": "held",
    "list_delegations": "fault: mousse_unknown_tool: No Mousse tool named list_delegations.",
    "integrate_delegation": "fault: mousse_unknown_tool: No Mousse tool named integrate_delegation.",
-   "create_subagent": "fault: mousse_unknown_tool: No Mousse tool named create_subagent.",
    "create_subagents": "fault: mousse_unknown_tool: No Mousse tool named create_subagents.",
    "integrate_subagent": "fault: mousse_unknown_tool: No Mousse tool named integrate_subagent.",
    "recall_subagent": "fault: mousse_unknown_tool: No Mousse tool named recall_subagent.",
@@ -851,7 +849,6 @@
    "thread_update": "held",
    "thread_update thread-b": "held",
    "thread_update thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
-   "thread_create": "held",
    "queue_list": "held",
    "queue_list thread-b": "held",
    "queue_list thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
@@ -975,7 +972,7 @@
  },
  "build-mode turn": {
   "listed": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -995,7 +992,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -1029,7 +1025,7 @@
    "terminal_read"
   ],
   "pi": [
-   "delegate_task:delegation",
+   "thread_create:delegation",
    "computer_list:delegation",
    "model_list:delegation",
    "question_ask:read",
@@ -1049,7 +1045,6 @@
    "thread_stop:mutation",
    "thread_archive:mutation",
    "thread_update:mutation",
-   "thread_create:mutation",
    "queue_list:read",
    "queue_enqueue:mutation",
    "queue_update:mutation",
@@ -1084,7 +1079,7 @@
   ],
   "userMcp": [],
   "usable": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -1103,7 +1098,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -1126,10 +1120,13 @@
    "terminal_read"
   ],
   "dispatch": {
-   "delegate_task": "held",
+   "thread_create": "held",
+   "thread_create subagent": "held",
+   "thread_create thread": "held",
+   "thread_create thread-b": "held",
+   "thread_create thread-private": "held",
    "list_delegations": "fault: mousse_unknown_tool: No Mousse tool named list_delegations.",
    "integrate_delegation": "fault: mousse_unknown_tool: No Mousse tool named integrate_delegation.",
-   "create_subagent": "fault: mousse_unknown_tool: No Mousse tool named create_subagent.",
    "create_subagents": "fault: mousse_unknown_tool: No Mousse tool named create_subagents.",
    "integrate_subagent": "fault: mousse_unknown_tool: No Mousse tool named integrate_subagent.",
    "recall_subagent": "fault: mousse_unknown_tool: No Mousse tool named recall_subagent.",
@@ -1170,7 +1167,6 @@
    "thread_update": "held",
    "thread_update thread-b": "held",
    "thread_update thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
-   "thread_create": "held",
    "queue_list": "held",
    "queue_list thread-b": "held",
    "queue_list thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
@@ -1294,7 +1290,7 @@
  },
  "delegated subagent": {
   "listed": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -1313,7 +1309,6 @@
    "thread_wait",
    "thread_stop",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -1342,7 +1337,7 @@
    "terminal_read"
   ],
   "pi": [
-   "delegate_task:delegation",
+   "thread_create:delegation",
    "computer_list:delegation",
    "model_list:delegation",
    "question_ask:read",
@@ -1361,7 +1356,6 @@
    "thread_wait:read",
    "thread_stop:mutation",
    "thread_update:mutation",
-   "thread_create:mutation",
    "queue_list:read",
    "queue_enqueue:mutation",
    "queue_update:mutation",
@@ -1394,7 +1388,7 @@
    "srv__write"
   ],
   "usable": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -1412,7 +1406,6 @@
    "thread_wait",
    "thread_stop",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -1430,10 +1423,13 @@
    "terminal_read"
   ],
   "dispatch": {
-   "delegate_task": "held",
+   "thread_create": "held",
+   "thread_create subagent": "held",
+   "thread_create thread": "held",
+   "thread_create thread-b": "held",
+   "thread_create thread-private": "held",
    "list_delegations": "fault: mousse_unknown_tool: No Mousse tool named list_delegations.",
    "integrate_delegation": "fault: mousse_unknown_tool: No Mousse tool named integrate_delegation.",
-   "create_subagent": "fault: mousse_unknown_tool: No Mousse tool named create_subagent.",
    "create_subagents": "fault: mousse_unknown_tool: No Mousse tool named create_subagents.",
    "integrate_subagent": "fault: mousse_unknown_tool: No Mousse tool named integrate_subagent.",
    "recall_subagent": "fault: mousse_unknown_tool: No Mousse tool named recall_subagent.",
@@ -1474,7 +1470,6 @@
    "thread_update": "held",
    "thread_update thread-b": "held",
    "thread_update thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
-   "thread_create": "held",
    "queue_list": "held",
    "queue_list thread-b": "held",
    "queue_list thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
@@ -1598,7 +1593,7 @@
  },
  "read-only subagent": {
   "listed": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -1620,7 +1615,7 @@
    "terminal_read"
   ],
   "pi": [
-   "delegate_task:delegation",
+   "thread_create:delegation",
    "computer_list:delegation",
    "model_list:delegation",
    "question_ask:read",
@@ -1643,7 +1638,7 @@
   ],
   "userMcp": [],
   "usable": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -1663,10 +1658,13 @@
    "terminal_read"
   ],
   "dispatch": {
-   "delegate_task": "held",
+   "thread_create": "lacks lacks_capability (mousse_read_only): thread_create can change threads or the workspace; a read-only subagent cannot call it.",
+   "thread_create subagent": "held",
+   "thread_create thread": "lacks lacks_capability (mousse_read_only): thread_create can change threads or the workspace; a read-only subagent cannot call it.",
+   "thread_create thread-b": "lacks lacks_capability (mousse_read_only): thread_create can change threads or the workspace; a read-only subagent cannot call it.",
+   "thread_create thread-private": "lacks lacks_capability (mousse_read_only): thread_create can change threads or the workspace; a read-only subagent cannot call it.",
    "list_delegations": "fault: mousse_unknown_tool: No Mousse tool named list_delegations.",
    "integrate_delegation": "fault: mousse_unknown_tool: No Mousse tool named integrate_delegation.",
-   "create_subagent": "fault: mousse_unknown_tool: No Mousse tool named create_subagent.",
    "create_subagents": "fault: mousse_unknown_tool: No Mousse tool named create_subagents.",
    "integrate_subagent": "fault: mousse_unknown_tool: No Mousse tool named integrate_subagent.",
    "recall_subagent": "fault: mousse_unknown_tool: No Mousse tool named recall_subagent.",
@@ -1707,7 +1705,6 @@
    "thread_update": "lacks lacks_capability (mousse_read_only): thread_update can change threads or the workspace; a read-only subagent cannot call it.",
    "thread_update thread-b": "lacks lacks_capability (mousse_read_only): thread_update can change threads or the workspace; a read-only subagent cannot call it.",
    "thread_update thread-private": "lacks lacks_capability (mousse_read_only): thread_update can change threads or the workspace; a read-only subagent cannot call it.",
-   "thread_create": "lacks lacks_capability (mousse_read_only): thread_create can change threads or the workspace; a read-only subagent cannot call it.",
    "queue_list": "held",
    "queue_list thread-b": "held",
    "queue_list thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
@@ -1831,6 +1828,7 @@
  },
  "bot chat": {
   "listed": [
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -1848,7 +1846,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -1903,6 +1900,7 @@
    "terminal_read"
   ],
   "pi": [
+   "thread_create:mutation",
    "computer_list:delegation",
    "model_list:read",
    "question_ask:mutation",
@@ -1920,7 +1918,6 @@
    "thread_stop:mutation",
    "thread_archive:mutation",
    "thread_update:mutation",
-   "thread_create:mutation",
    "queue_list:read",
    "queue_enqueue:mutation",
    "queue_update:mutation",
@@ -1976,6 +1973,7 @@
   ],
   "userMcp": [],
   "usable": [
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -1993,7 +1991,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -2035,10 +2032,13 @@
    "terminal_read"
   ],
   "dispatch": {
-   "delegate_task": "lacks not_granted: This bot is not allowed to use delegate_task.",
+   "thread_create": "held",
+   "thread_create subagent": "lacks not_granted: A bot starts its subagents with subagent_start, and its work with work_start: thread_create starts threads (kind \"thread\").",
+   "thread_create thread": "held",
+   "thread_create thread-b": "held",
+   "thread_create thread-private": "held",
    "list_delegations": "fault: mousse_unknown_tool: No Mousse tool named list_delegations.",
    "integrate_delegation": "fault: mousse_unknown_tool: No Mousse tool named integrate_delegation.",
-   "create_subagent": "fault: mousse_unknown_tool: No Mousse tool named create_subagent.",
    "create_subagents": "fault: mousse_unknown_tool: No Mousse tool named create_subagents.",
    "integrate_subagent": "fault: mousse_unknown_tool: No Mousse tool named integrate_subagent.",
    "recall_subagent": "fault: mousse_unknown_tool: No Mousse tool named recall_subagent.",
@@ -2079,7 +2079,6 @@
    "thread_update": "held",
    "thread_update thread-b": "lacks scope_denied (mousse_scope_denied): Thread thread-b is not available to you.",
    "thread_update thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to you.",
-   "thread_create": "held",
    "queue_list": "held",
    "queue_list thread-b": "lacks scope_denied (mousse_scope_denied): Thread thread-b is not available to you.",
    "queue_list thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to you.",
@@ -2203,12 +2202,12 @@
  },
  "bot chat, catalogue": {
   "listed": [
+   "thread_create",
    "question_ask",
    "thread_read",
    "thread_list",
    "thread_send",
    "thread_archive",
-   "thread_create",
    "web_search",
    "web_fetch",
    "permission_ask",
@@ -2227,12 +2226,12 @@
    "item_list"
   ],
   "pi": [
+   "thread_create:mutation",
    "question_ask:mutation",
    "thread_read:read",
    "thread_list:read",
    "thread_send:mutation",
    "thread_archive:mutation",
-   "thread_create:mutation",
    "web_search:read",
    "web_fetch:read",
    "permission_ask:read",
@@ -2252,12 +2251,12 @@
   ],
   "userMcp": [],
   "usable": [
+   "thread_create",
    "question_ask",
    "thread_read",
    "thread_list",
    "thread_send",
    "thread_archive",
-   "thread_create",
    "web_search",
    "web_fetch",
    "work_start",
@@ -2275,10 +2274,13 @@
    "item_list"
   ],
   "dispatch": {
-   "delegate_task": "lacks not_granted: This bot is not allowed to use delegate_task.",
+   "thread_create": "held",
+   "thread_create subagent": "lacks not_granted: A bot starts its subagents with subagent_start, and its work with work_start: thread_create starts threads (kind \"thread\").",
+   "thread_create thread": "held",
+   "thread_create thread-b": "held",
+   "thread_create thread-private": "held",
    "list_delegations": "fault: mousse_unknown_tool: No Mousse tool named list_delegations.",
    "integrate_delegation": "fault: mousse_unknown_tool: No Mousse tool named integrate_delegation.",
-   "create_subagent": "fault: mousse_unknown_tool: No Mousse tool named create_subagent.",
    "create_subagents": "fault: mousse_unknown_tool: No Mousse tool named create_subagents.",
    "integrate_subagent": "fault: mousse_unknown_tool: No Mousse tool named integrate_subagent.",
    "recall_subagent": "fault: mousse_unknown_tool: No Mousse tool named recall_subagent.",
@@ -2319,7 +2321,6 @@
    "thread_update": "held",
    "thread_update thread-b": "lacks scope_denied (mousse_scope_denied): Thread thread-b is not available to you.",
    "thread_update thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to you.",
-   "thread_create": "held",
    "queue_list": "held",
    "queue_list thread-b": "lacks scope_denied (mousse_scope_denied): Thread thread-b is not available to you.",
    "queue_list thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to you.",
@@ -2443,6 +2444,7 @@
  },
  "bot job or wake": {
   "listed": [
+   "thread_create",
    "computer_list",
    "model_list",
    "request_answer",
@@ -2459,7 +2461,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -2518,6 +2519,7 @@
    "terminal_read"
   ],
   "pi": [
+   "thread_create:mutation",
    "computer_list:delegation",
    "model_list:read",
    "request_answer:mutation",
@@ -2534,7 +2536,6 @@
    "thread_stop:mutation",
    "thread_archive:mutation",
    "thread_update:mutation",
-   "thread_create:mutation",
    "queue_list:read",
    "queue_enqueue:mutation",
    "queue_update:mutation",
@@ -2594,6 +2595,7 @@
   ],
   "userMcp": [],
   "usable": [
+   "thread_create",
    "computer_list",
    "model_list",
    "request_answer",
@@ -2610,7 +2612,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -2640,10 +2641,13 @@
    "terminal_read"
   ],
   "dispatch": {
-   "delegate_task": "lacks not_granted: This bot is not allowed to use delegate_task.",
+   "thread_create": "held",
+   "thread_create subagent": "lacks not_granted: A bot starts its subagents with subagent_start, and its work with work_start: thread_create starts threads (kind \"thread\").",
+   "thread_create thread": "held",
+   "thread_create thread-b": "held",
+   "thread_create thread-private": "held",
    "list_delegations": "fault: mousse_unknown_tool: No Mousse tool named list_delegations.",
    "integrate_delegation": "fault: mousse_unknown_tool: No Mousse tool named integrate_delegation.",
-   "create_subagent": "fault: mousse_unknown_tool: No Mousse tool named create_subagent.",
    "create_subagents": "fault: mousse_unknown_tool: No Mousse tool named create_subagents.",
    "integrate_subagent": "fault: mousse_unknown_tool: No Mousse tool named integrate_subagent.",
    "recall_subagent": "fault: mousse_unknown_tool: No Mousse tool named recall_subagent.",
@@ -2684,7 +2688,6 @@
    "thread_update": "held",
    "thread_update thread-b": "lacks scope_denied (mousse_scope_denied): Thread thread-b is not available to you.",
    "thread_update thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to you.",
-   "thread_create": "held",
    "queue_list": "held",
    "queue_list thread-b": "lacks scope_denied (mousse_scope_denied): Thread thread-b is not available to you.",
    "queue_list thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to you.",
@@ -2808,6 +2811,7 @@
  },
  "bot subagent": {
   "listed": [
+   "thread_create",
    "computer_list",
    "request_answer",
    "task_list",
@@ -2821,7 +2825,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -2842,6 +2845,7 @@
    "terminal_read"
   ],
   "pi": [
+   "thread_create:mutation",
    "computer_list:delegation",
    "request_answer:mutation",
    "task_list:read",
@@ -2855,7 +2859,6 @@
    "thread_stop:mutation",
    "thread_archive:mutation",
    "thread_update:mutation",
-   "thread_create:mutation",
    "queue_list:read",
    "queue_enqueue:mutation",
    "queue_update:mutation",
@@ -2877,6 +2880,7 @@
   ],
   "userMcp": [],
   "usable": [
+   "thread_create",
    "computer_list",
    "request_answer",
    "task_list",
@@ -2890,7 +2894,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -2901,10 +2904,13 @@
    "terminal_read"
   ],
   "dispatch": {
-   "delegate_task": "lacks not_granted: This bot is not allowed to use delegate_task.",
+   "thread_create": "held",
+   "thread_create subagent": "lacks not_granted: A bot starts its subagents with subagent_start, and its work with work_start: thread_create starts threads (kind \"thread\").",
+   "thread_create thread": "held",
+   "thread_create thread-b": "held",
+   "thread_create thread-private": "held",
    "list_delegations": "fault: mousse_unknown_tool: No Mousse tool named list_delegations.",
    "integrate_delegation": "fault: mousse_unknown_tool: No Mousse tool named integrate_delegation.",
-   "create_subagent": "fault: mousse_unknown_tool: No Mousse tool named create_subagent.",
    "create_subagents": "fault: mousse_unknown_tool: No Mousse tool named create_subagents.",
    "integrate_subagent": "fault: mousse_unknown_tool: No Mousse tool named integrate_subagent.",
    "recall_subagent": "fault: mousse_unknown_tool: No Mousse tool named recall_subagent.",
@@ -2945,7 +2951,6 @@
    "thread_update": "held",
    "thread_update thread-b": "lacks scope_denied (mousse_scope_denied): Thread thread-b is not available to you.",
    "thread_update thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to you.",
-   "thread_create": "held",
    "queue_list": "held",
    "queue_list thread-b": "lacks scope_denied (mousse_scope_denied): Thread thread-b is not available to you.",
    "queue_list thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to you.",
@@ -3069,7 +3074,7 @@
  },
  "definition run": {
   "listed": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -3089,7 +3094,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -3133,7 +3137,7 @@
    "srv__read"
   ],
   "usable": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -3151,7 +3155,6 @@
    "thread_wait",
    "thread_stop",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -3182,10 +3185,13 @@
    "terminal_read"
   ],
   "dispatch": {
-   "delegate_task": "lacks not_granted: Tool \"delegate_task\" is not granted to this agent definition.",
+   "thread_create": "lacks not_granted: Tool \"thread_create\" is not granted to this agent definition.",
+   "thread_create subagent": "lacks not_granted: Tool \"thread_create\" is not granted to this agent definition.",
+   "thread_create thread": "lacks not_granted: Tool \"thread_create\" is not granted to this agent definition.",
+   "thread_create thread-b": "lacks not_granted: Tool \"thread_create\" is not granted to this agent definition.",
+   "thread_create thread-private": "lacks not_granted: Tool \"thread_create\" is not granted to this agent definition.",
    "list_delegations": "fault: mousse_unknown_tool: No Mousse tool named list_delegations.",
    "integrate_delegation": "fault: mousse_unknown_tool: No Mousse tool named integrate_delegation.",
-   "create_subagent": "fault: mousse_unknown_tool: No Mousse tool named create_subagent.",
    "create_subagents": "fault: mousse_unknown_tool: No Mousse tool named create_subagents.",
    "integrate_subagent": "fault: mousse_unknown_tool: No Mousse tool named integrate_subagent.",
    "recall_subagent": "fault: mousse_unknown_tool: No Mousse tool named recall_subagent.",
@@ -3226,7 +3232,6 @@
    "thread_update": "lacks not_granted: Tool \"thread_update\" is not granted to this agent definition.",
    "thread_update thread-b": "lacks not_granted: Tool \"thread_update\" is not granted to this agent definition.",
    "thread_update thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
-   "thread_create": "lacks not_granted: Tool \"thread_create\" is not granted to this agent definition.",
    "queue_list": "lacks not_granted: Tool \"queue_list\" is not granted to this agent definition.",
    "queue_list thread-b": "lacks not_granted: Tool \"queue_list\" is not granted to this agent definition.",
    "queue_list thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
@@ -3350,7 +3355,7 @@
  },
  "scheduled or automation turn": {
   "listed": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -3370,7 +3375,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -3404,7 +3408,7 @@
    "terminal_read"
   ],
   "pi": [
-   "delegate_task:delegation",
+   "thread_create:delegation",
    "computer_list:delegation",
    "model_list:delegation",
    "question_ask:read",
@@ -3424,7 +3428,6 @@
    "thread_stop:mutation",
    "thread_archive:mutation",
    "thread_update:mutation",
-   "thread_create:mutation",
    "queue_list:read",
    "queue_enqueue:mutation",
    "queue_update:mutation",
@@ -3462,7 +3465,7 @@
    "srv__write"
   ],
   "usable": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_withdraw",
@@ -3478,7 +3481,6 @@
    "thread_wait",
    "thread_stop",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -3500,10 +3502,13 @@
    "terminal_read"
   ],
   "dispatch": {
-   "delegate_task": "held",
+   "thread_create": "held",
+   "thread_create subagent": "held",
+   "thread_create thread": "held",
+   "thread_create thread-b": "held",
+   "thread_create thread-private": "held",
    "list_delegations": "fault: mousse_unknown_tool: No Mousse tool named list_delegations.",
    "integrate_delegation": "fault: mousse_unknown_tool: No Mousse tool named integrate_delegation.",
-   "create_subagent": "fault: mousse_unknown_tool: No Mousse tool named create_subagent.",
    "create_subagents": "fault: mousse_unknown_tool: No Mousse tool named create_subagents.",
    "integrate_subagent": "fault: mousse_unknown_tool: No Mousse tool named integrate_subagent.",
    "recall_subagent": "fault: mousse_unknown_tool: No Mousse tool named recall_subagent.",
@@ -3544,7 +3549,6 @@
    "thread_update": "held",
    "thread_update thread-b": "held",
    "thread_update thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
-   "thread_create": "held",
    "queue_list": "held",
    "queue_list thread-b": "held",
    "queue_list thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
@@ -3668,7 +3672,7 @@
  },
  "remote-started turn": {
   "listed": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -3688,7 +3692,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -3722,7 +3725,7 @@
    "terminal_read"
   ],
   "pi": [
-   "delegate_task:delegation",
+   "thread_create:delegation",
    "computer_list:delegation",
    "model_list:delegation",
    "question_ask:read",
@@ -3742,7 +3745,6 @@
    "thread_stop:mutation",
    "thread_archive:mutation",
    "thread_update:mutation",
-   "thread_create:mutation",
    "queue_list:read",
    "queue_enqueue:mutation",
    "queue_update:mutation",
@@ -3780,7 +3782,7 @@
    "srv__write"
   ],
   "usable": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -3798,7 +3800,6 @@
    "thread_wait",
    "thread_stop",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -3821,10 +3822,13 @@
    "terminal_read"
   ],
   "dispatch": {
-   "delegate_task": "held",
+   "thread_create": "held",
+   "thread_create subagent": "held",
+   "thread_create thread": "held",
+   "thread_create thread-b": "held",
+   "thread_create thread-private": "held",
    "list_delegations": "fault: mousse_unknown_tool: No Mousse tool named list_delegations.",
    "integrate_delegation": "fault: mousse_unknown_tool: No Mousse tool named integrate_delegation.",
-   "create_subagent": "fault: mousse_unknown_tool: No Mousse tool named create_subagent.",
    "create_subagents": "fault: mousse_unknown_tool: No Mousse tool named create_subagents.",
    "integrate_subagent": "fault: mousse_unknown_tool: No Mousse tool named integrate_subagent.",
    "recall_subagent": "fault: mousse_unknown_tool: No Mousse tool named recall_subagent.",
@@ -3865,7 +3869,6 @@
    "thread_update": "held",
    "thread_update thread-b": "held",
    "thread_update thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
-   "thread_create": "held",
    "queue_list": "held",
    "queue_list thread-b": "held",
    "queue_list thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
@@ -3989,7 +3992,7 @@
  },
  "Pi turn": {
   "listed": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -4009,7 +4012,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -4043,7 +4045,7 @@
    "terminal_read"
   ],
   "pi": [
-   "delegate_task:delegation",
+   "thread_create:delegation",
    "computer_list:delegation",
    "model_list:delegation",
    "question_ask:read",
@@ -4063,7 +4065,6 @@
    "thread_stop:mutation",
    "thread_archive:mutation",
    "thread_update:mutation",
-   "thread_create:mutation",
    "queue_list:read",
    "queue_enqueue:mutation",
    "queue_update:mutation",
@@ -4101,7 +4102,7 @@
    "srv__write"
   ],
   "usable": [
-   "delegate_task",
+   "thread_create",
    "computer_list",
    "model_list",
    "question_ask",
@@ -4120,7 +4121,6 @@
    "thread_stop",
    "thread_archive",
    "thread_update",
-   "thread_create",
    "queue_list",
    "queue_enqueue",
    "queue_update",
@@ -4143,10 +4143,13 @@
    "terminal_read"
   ],
   "dispatch": {
-   "delegate_task": "held",
+   "thread_create": "held",
+   "thread_create subagent": "held",
+   "thread_create thread": "held",
+   "thread_create thread-b": "held",
+   "thread_create thread-private": "held",
    "list_delegations": "fault: mousse_unknown_tool: No Mousse tool named list_delegations.",
    "integrate_delegation": "fault: mousse_unknown_tool: No Mousse tool named integrate_delegation.",
-   "create_subagent": "fault: mousse_unknown_tool: No Mousse tool named create_subagent.",
    "create_subagents": "fault: mousse_unknown_tool: No Mousse tool named create_subagents.",
    "integrate_subagent": "fault: mousse_unknown_tool: No Mousse tool named integrate_subagent.",
    "recall_subagent": "fault: mousse_unknown_tool: No Mousse tool named recall_subagent.",
@@ -4187,7 +4190,6 @@
    "thread_update": "held",
    "thread_update thread-b": "held",
    "thread_update thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",
-   "thread_create": "held",
    "queue_list": "held",
    "queue_list thread-b": "held",
    "queue_list thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to this credential.",

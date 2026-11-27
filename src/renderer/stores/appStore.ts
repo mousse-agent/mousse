@@ -39,6 +39,7 @@ import { parseCursor } from '../../shared/pageCursor'
 import { isThreadStarted } from '../../shared/threadTitle'
 import { withHeldModelPicks } from '../lib/modelPicks'
 import { tabAgreement, type SidebarTab, type ThreadListTab, type WorkspaceMode } from './sidebarTabAgreement'
+import { threadPanels, type SavedThreadPanel } from './threadPanels'
 
 /** What the command palette leads with when it opens. */
 export type PaletteMode = 'all' | 'messages'
@@ -423,6 +424,8 @@ interface AppState {
   setSidebarMode: (sidebarMode: WorkspaceMode) => void
   threadsSidebarOpen: boolean
   mainAreaOpen: boolean
+  /** Each thread's side panel (open, and its tab in front), saved as the thread is left (`threadPanels`). */
+  panelByThread: Record<string, SavedThreadPanel>
   /** Thread side card preference. On at every launch; deliberately kept out of the per-profile workspace. */
   sideCardOn: boolean
   setSideCardOn: (sideCardOn: boolean) => void
@@ -799,7 +802,7 @@ export function shownDocumentTab(state: Pick<AppState, 'documentTabs' | 'activeD
 const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
-  'sidebarMode', 'mainAreaWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
+  'sidebarMode', 'mainAreaWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'panelByThread', 'chatMode',
   'openedSurfaceKinds', 'sideCardCollapsed', 'chatsSidebarCollapsed',
   'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView', 'lastThreadListView', 'threadFeedOrder',
   'reviewIgnoreWhitespace', 'queueEditDrafts', 'lastNewThreadProjectId', 'newProjectParent'
@@ -908,6 +911,7 @@ function personalWorkspaceOf(profileId: string) {
     threadsSidebarWidth: DEFAULT_THREADS_SIDEBAR_WIDTH,
     threadsSidebarOpen: true,
     mainAreaOpen: false,
+    panelByThread: {} as Record<string, SavedThreadPanel>,
     sideCardCollapsed: {} as Record<string, boolean>,
     chatsSidebarCollapsed: {} as Record<string, boolean>,
     chatMode: DEFAULT_CHAT_MODE
@@ -919,6 +923,7 @@ function personalWorkspaceOf(profileId: string) {
       if (!Array.isArray(next.threadFeedOrder)) next.threadFeedOrder = []
       if (typeof next.lastNewThreadProjectId !== 'string') next.lastNewThreadProjectId = null
       if (typeof next.newProjectParent !== 'string') next.newProjectParent = null
+      if (!next.panelByThread || typeof next.panelByThread !== 'object' || Array.isArray(next.panelByThread)) next.panelByThread = {}
       next.queueEditDrafts = queueEditDraftsFromStorage(next.queueEditDrafts)
     } catch { /* malformed profile-local state is discarded */ }
   }
@@ -931,7 +936,7 @@ function personalWorkspaceOf(profileId: string) {
  */
 export const browserTabsOpenedThisSession = new Set<string>()
 
-export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) => ({
+export const useAppStore = create<AppState>()(persist(tabAgreement(threadPanels((set, get) => ({
   profileId: 'default',
   profileReady: false,
   workspaceReady: false,
@@ -1052,6 +1057,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   setNewProjectParent: (newProjectParent) => set({ newProjectParent }),
   threadsSidebarOpen: true,
   mainAreaOpen: false,
+  panelByThread: {},
   sideCardOn: true,
   sideCardFits: null,
   sideCardOverlayOpen: false,
@@ -1771,7 +1777,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       delete composerReferences[key]
       return { composerReferences }
     })
-})), {
+}))), {
   name: 'mousse-workspace-state',
   version: 1,
   storage: workspaceStorage,

@@ -66,7 +66,7 @@ export type ToolClass = 'read' | 'mutation' | 'delegation'
  * child no wider than yourself) is every delegation tool's and every thread holds it, readers included;
  * `threads.start` (an independent thread or a fork) is not held by a read-only child.
  */
-export type ToolCapability = 'threads.start' | 'themes' | 'quick_actions'
+export type ToolCapability = 'threads.delegate' | 'threads.start' | 'themes' | 'quick_actions'
 
 export const TOOL_CLASSES: ReadonlySet<string> = new Set<ToolClass>(['read', 'mutation', 'delegation'])
 

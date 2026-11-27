@@ -278,20 +278,21 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     const result = (await dispatchMethod({ mms: this.services, globalSequence: this.revision }, 'threads.create', create)) as
       { thread: { id: string } } & Record<string, unknown>
     if (!caller) return result
-    // A thread an agent of the device started holds who started it and its mode from this same write on. It is out of the
-    // sidebar here when the caller asks (`hidden: true`, what a newer computer sends for an agent's thread); a computer
-    // from before it sends none and the thread shows, as it always did. A person's thread from a phone never is hidden.
+    // A thread an agent of the device started holds who started it and its mode from this same write on. It starts in the
+    // sidebar: an agent's thread is a handoff (#2004), whatever a computer from before that asks. Only a personal bot's is
+    // hidden here, and the bot is named by its first message (`remoteAgent.ts`), so `hidden: true` is kept with the
+    // agent until then. A person's thread from a phone never is hidden.
+    const agent = started ? { ...started.agent, ...(hidden === true ? { hidden: true as const } : {}) } : undefined
     const thread = this.services.threads.updateThreadMeta(
       result.thread.id,
       {
-        startedFrom: { node: caller.node, ...(typeof startedFromProjectId === 'string' ? { projectId: startedFromProjectId } : {}), ...(started ? { agent: started.agent } : {}) },
+        startedFrom: { node: caller.node, ...(typeof startedFromProjectId === 'string' ? { projectId: startedFromProjectId } : {}), ...(agent ? { agent } : {}) },
         ...(started ? { permissionMode: started.permissionMode } : {})
       },
       { touch: false }
     )
-    const shown = started && hidden === true ? this.services.threads.setThreadHidden(thread.id, true) : thread
     this.services.events.broadcast('threads:updated', { threads: this.services.threads.listAllThreads() })
-    return { ...result, thread: shown }
+    return { ...result, thread }
   }
   /**
    * Which of this machine's projects is the same Git repository as the one described: an id, or

@@ -37,7 +37,7 @@ describe('a vendor thread\'s tool list', () => {
     tools.enabledTools = tools.enabledTools!.filter((name) => name !== 'question_ask' && name !== 'task_create')
     await d.send('Hello')
     const note = usableNow(vendor.bridges[0].turnPreamble)
-    expect(note).toEqual(expect.arrayContaining(['delegate_task', 'task_list', 'thread_read', 'thread_fork', 'queue_enqueue']))
+    expect(note).toEqual(expect.arrayContaining(['thread_create', 'task_list', 'thread_read', 'thread_fork', 'queue_enqueue']))
     expect(note).not.toContain('question_ask')
     expect(note).not.toContain('task_create')
     expect(note.filter((name) => name.startsWith('browser_'))).toEqual([])

@@ -472,6 +472,17 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(host.createThread).not.toHaveBeenCalled()
   })
 
+  it('a bot\'s thread_create starts threads only: its subagents and work go through the bot\'s own tools, never an agent\'s subagent', async () => {
+    const { text, host } = await world({ threads: 'all' })
+    const refused = await text('thread_create', { kind: 'subagent', title: 'Reader', prompt: 'Read the logs' })
+    expect(refused.error).toBe(true)
+    expect(refused.text).toMatch(/subagent_start/)
+    expect(host.createThread).not.toHaveBeenCalled()
+    // Its kind thread keeps hidden (#2003): a bot\'s thread is its own.
+    expect(JSON.parse((await text('thread_create', { kind: 'thread', projectId: 'p1', title: 'Quick check', firstMessage: 'Check.', hidden: true })).text)).toMatchObject({ threadId: 'new-1' })
+    expect(host.createThread).toHaveBeenLastCalledWith(expect.objectContaining({ hidden: true }), expect.anything())
+  })
+
   it('a chat turn no person started reads threads but never starts, messages or stops one', async () => {
     const { text, host } = await world({ threads: 'read' })
     expect((await text('thread_list', {})).error).toBe(false)

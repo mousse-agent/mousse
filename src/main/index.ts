@@ -24,6 +24,8 @@ import {
   getWindowShortcuts,
   registerGuiIpc
 } from './ipc/registerGuiIpc'
+import { isAppletWebviewSource } from './applets/AppletRuntimeManager'
+import { adoptAppletWebview, attachAppletWebview } from './applets/registerAppletIpc'
 import { MOUSSE_MEDIA_SCHEME_PRIVILEGES } from './ipc/mediaStream'
 import { registerFontIpc } from './fonts/registerFontIpc'
 import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
@@ -351,6 +353,11 @@ function startGuiApp(): void {
     })
 
     mainWindow.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+      // An applet page goes to its applet's own session, or nowhere; never the browser's path.
+      if (isAppletWebviewSource(params.src)) {
+        if (!mainWindow || !attachAppletWebview(mainWindow.webContents, webPreferences, params)) event.preventDefault()
+        return
+      }
       // Enforce browser isolation regardless of attributes supplied by the renderer.
       delete webPreferences.preload
       const boundProfile = mainWindow
@@ -369,6 +376,7 @@ function startGuiApp(): void {
     })
     const browserOwner = mainWindow
     browserOwner.webContents.on('did-attach-webview', (_event, guest) => {
+      if (adoptAppletWebview(browserOwner.webContents, guest)) return
       configureBrowserPopupPolicy(guest, browserOwner)
       attachedBrowserHost?.observeGuest(browserOwner.webContents, guest)
       attachGuestShortcuts(guest, browserOwner.webContents)

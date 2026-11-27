@@ -38,6 +38,13 @@ describe('recordSubagentCall', () => {
     expect(recordSubagentCall('delegate_task', { title: 'A' }, { text: 'plain words' })!.response).toBeUndefined()
   })
 
+  it('records thread_create as a subagent call only for its subagent kind', () => {
+    const record = recordSubagentCall('mcp__mousse__thread_create', { kind: 'subagent', title: 'A', prompt: 'p' }, { text: JSON.stringify({ subagent: 'A' }) })!
+    expect(record.input).toMatchObject({ kind: 'subagent', title: 'A' })
+    expect(recordSubagentCall('mcp__mousse__thread_create', { kind: 'thread', projectId: 'p', title: 'A' }, { text: '{}' })).toBeNull()
+    expect(recordSubagentCall('mcp__mousse__thread_create', { projectId: 'p', title: 'A' }, { text: '{}' })).toBeNull()
+  })
+
   it('reads a result given as a string or as MCP content blocks', () => {
     expect(toolResultText('abc')).toBe('abc')
     expect(toolResultText([{ type: 'text', text: 'a' }, { type: 'image' }, { type: 'text', text: 'b' }])).toBe('ab')

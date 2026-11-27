@@ -35,9 +35,10 @@ const TOOLS: Readonly<Record<string, SubagentToolName>> = {
 /**
  * The subagent tool a name stands for, or null for any other tool. A name qualified with another
  * server (`mcp__other__delegate_task`) is not Mousse's tool. `create_subagents` (a batch of
- * several tasks) is not one task, so it is not a subagent tool here.
+ * several tasks) is not one task, so it is not a subagent tool here. `thread_create` is one when its `input` (the
+ * call's arguments, or the record kept of them) names `kind: subagent`: it starts a subagent as `delegate_task` did.
  */
-export function subagentToolName(raw: string | null | undefined): SubagentToolName | null {
+export function subagentToolName(raw: string | null | undefined, input?: unknown): SubagentToolName | null {
   if (!raw) return null
   const name = raw.trim().replace(/^(?:Called|Run)\s+/i, '').toLowerCase()
   let server: string | null = null
@@ -56,7 +57,21 @@ export function subagentToolName(raw: string | null | undefined): SubagentToolNa
     tool = name.slice(split + 1)
   }
   if (server !== null && server !== MOUSSE_SERVER) return null
+  if (tool === 'thread_create') return startsSubagent(input) ? 'delegate_task' : null
   return TOOLS[tool] ?? null
+}
+
+/** Whether `thread_create`'s arguments (an object, or JSON text) name `kind: subagent`. */
+function startsSubagent(input: unknown): boolean {
+  let args = input
+  if (typeof args === 'string') {
+    try {
+      args = JSON.parse(args)
+    } catch {
+      return false
+    }
+  }
+  return Boolean(args) && typeof args === 'object' && (args as { kind?: unknown }).kind === 'subagent'
 }
 
 /** The part of a tool row's record the name can come from. */
@@ -65,6 +80,8 @@ export interface SubagentToolRecord {
   title?: string
   summary?: string
   details?: readonly string[]
+  /** The call's arguments or their kept record: whether a `thread_create` starts a subagent. */
+  input?: unknown
 }
 
 /**
@@ -78,7 +95,7 @@ export function subagentToolOfRecord(record: SubagentToolRecord): SubagentToolNa
   if (server && server.toLowerCase() !== MOUSSE_SERVER) return null
   const detailTool = details.find((detail) => detail.startsWith('Tool:'))?.slice('Tool:'.length).trim().split(/\s+/)[0]
   for (const candidate of [record.toolName, detailTool, record.summary, record.title]) {
-    const tool = subagentToolName(candidate)
+    const tool = subagentToolName(candidate, record.input)
     if (tool) return tool
   }
   return null
@@ -152,10 +169,10 @@ export function recordSubagentCall(
   input: unknown,
   result: { text?: string; isError?: boolean }
 ): { input: Record<string, unknown>; response?: string; failed: boolean } | null {
-  if (!subagentToolName(rawName)) return null
+  if (!subagentToolName(rawName, input)) return null
   const args = input && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>) : {}
   const keptInput: Record<string, unknown> = { recordVersion: SUBAGENT_RECORD_VERSION }
-  for (const key of ['title', 'subagent', 'delegationId', 'computer'] as const) {
+  for (const key of ['kind', 'title', 'subagent', 'delegationId', 'computer'] as const) {
     const value = clip(args[key])
     if (value !== undefined) keptInput[key] = value
   }

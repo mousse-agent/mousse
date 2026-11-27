@@ -1,3 +1,4 @@
+import { isRunningVariant, isToolAlias } from '../../../../shared/toolAliases'
 import type { RunEngine } from '../../RunEngine'
 import { appearanceTools } from './appearance'
 import { appletTools } from './applets'
@@ -27,6 +28,7 @@ import { skillTools } from './skills'
 import { taskTools } from './tasks'
 import { terminalTools } from './terminals'
 import { botThreadReach, lineageRelation, threadTools } from './thread'
+import { threadCreateTool } from './threadCreate'
 import { shareWakeTools, threadWakeTools } from './threadWakes'
 import type { AppToolTurns } from './turns'
 import { webTools } from './web'
@@ -153,10 +155,14 @@ export function createAppToolRegistry(input: {
   })
   const [bots, delegation, threads] = [allBots, allDelegation, allThreads].map((tools) => tools.filter((tool) => !ANSWER_TOOLS.includes(tool.name)))
   const models = shareWakeTools(bots.filter((tool) => tool.name === MODEL_LIST_TOOL), delegation.filter((tool) => tool.name === MODEL_LIST_TOOL))
-  add('delegation', delegation.flatMap((tool) => (tool.name === MODEL_LIST_TOOL ? models : [tool])))
+  // `thread_create` starts a subagent (`delegate_task`'s declaration) or a thread (the thread family's): one tool, two
+  // kinds. It is listed where `delegate_task` was, first: a runtime with a tight schema budget (Antigravity) keeps it.
+  // `delegate_task` and `create_subagent` are old names of its subagent kind.
+  const threadCreate = threadCreateTool({ subagent: delegation.find((tool) => tool.name === 'delegate_task')!, thread: threads.find((tool) => tool.name === 'thread_create') })
+  add('delegation', delegation.flatMap((tool) => (tool.name === MODEL_LIST_TOOL ? models : tool.name === 'delegate_task' ? [threadCreate] : isToolAlias(tool.name) && !isRunningVariant(tool.name) ? [] : [tool])))
   add('questions', [...shareWakeTools(bots.filter((tool) => QUESTION_TOOLS.includes(tool.name)), askUserTools(host)), answers, ...secretTools(host), ...bugReportTools(host)])
   add('tasks', [...taskTools(host), ...goalTools(host)])
-  add('thread', threads)
+  add('thread', threads.filter((tool) => tool.name !== 'thread_create'))
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])
   add('skills', skillTools(host))
   add('quickActions', [...quickActionTools(host), ...runningTools(host), ...monitorTools(host)])

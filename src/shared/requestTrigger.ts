@@ -81,10 +81,12 @@ export function curlLine(input: { url: string; fields: readonly string[]; secret
 
 /**
  * Why a job cannot take requests, or null when it can. An automation an agent added takes them only after the person
- * keeps it (Keep removes its end); a bot runs on its schedule; a one-time automation runs once.
+ * keeps it (Keep removes its end); a one-time automation runs once. A bot's automation takes them too: each request
+ * starts the bot's run, in its lane and under its grant.
  */
-export function requestRefusal(job: Pick<ScheduledJob, 'createdBy' | 'expiresAt' | 'schedule' | 'bot'> & { trigger?: ScheduledJob['trigger'] }): string | null {
-  if (job.bot) return 'A bot runs on its schedule. Ask it in its chat for anything else.'
+export function requestRefusal(job: Pick<ScheduledJob, 'createdBy' | 'expiresAt' | 'schedule' | 'bot'> & { trigger?: ScheduledJob['trigger']; draft?: Pick<NonNullable<ScheduledJob['draft']>, 'who'> }): string | null {
+  // Turn on makes the bot's own schedule, a new automation: a draft's URL would not go with it.
+  if (job.draft?.who?.kind === 'bot') return 'Turn it on first. A bot\'s request URL is set up once it is on.'
   if (job.trigger?.threadEvent) return 'It wakes on its pull request, so it takes no request URL.'
   if (job.createdBy && job.expiresAt) return 'Keep it first. An automation an agent added takes requests only after you keep it.'
   if (job.schedule.kind === 'once') return 'A one-time automation runs once. Change When to On demand first.'

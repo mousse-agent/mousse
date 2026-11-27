@@ -22,15 +22,18 @@ export const APPLET_EVENT_PREFIX = '__MOUSSE_APPLET_EVENT__'
  * Height: the page reports the height of its own content (the root element's box, which host styles never stretch
  * to the frame), at once on first layout and then 100 ms after it settles, so the frame can shrink as well as grow.
  * A frame that only changed height, with nothing in the page changed since the last report, must not move the
- * report: such content is sized to the frame (`vh`, `height:100%`), and following it would grow the frame forever.
+ * report: such content is sized to the frame (`vh`, `height:100%`), and following it would grow the frame forever. A
+ * page with no width (its pane collapsed) reports nothing: its height at no width means nothing.
  *
  * Liveness: the host asks the page to run a no-op script and stops it when no answer comes, so a page whose timers
  * the browser throttles (covered, hidden) stays alive and a page stuck in a loop does not. The page runs no heartbeat.
  *
- * Wheel: a wheel turn that nothing in the page can scroll (no scroller under the pointer with room left that way, and
- * none that sets `overscroll-behavior` to stop it) is reported with the pointer position, and the host replays it as
- * real wheel input on the window's own page at that point, so the conversation scrolls as over any other part of a reply. Once an inner scroller reaches its end the rest of the turn goes on to the
- * conversation. Pinch and ctrl+wheel are left alone. Wheel reports have their own budget, so they never starve others.
+ * Wheel: the browser chains a wheel turn the page cannot use to the conversation around it, as for any nested
+ * scroller, but the conversation's page never sees the wheel event. So a turn that nothing in the page can scroll (no
+ * scroller under the pointer with room left that way, and none that sets `overscroll-behavior` to stop it) is reported,
+ * and the host tells the conversation the person scrolled (it stops following the end). The listener is passive, so it
+ * never holds up scrolling. Pinch and ctrl+wheel are left alone. Wheel reports have their own budget, so they never
+ * starve others.
  *
  * Backdrop: `transparent` (the app) leaves the page itself unpainted, so the chat or panel behind it shows through,
  * its theme surface or the acrylic window, as behind a reply. A standalone export keeps the opaque theme surface.
@@ -61,14 +64,13 @@ export function appletDocument(
  const scrolls=(node,vertical,delta)=>{const style=styleOf(node),overflow=vertical?style.overflowY:style.overflowX,root=node===document.scrollingElement;if(root?/hidden|clip/.test(overflow):!/auto|scroll|overlay/.test(overflow))return 0;const max=vertical?node.scrollHeight-node.clientHeight:node.scrollWidth-node.clientWidth;if(max<1)return 0;const at=vertical?node.scrollTop:Math.abs(node.scrollLeft);if(delta<0?at>.5:at<max-.5)return 1;return (vertical?style.overscrollBehaviorY:style.overscrollBehaviorX)==='auto'?0:2};
  let wheelCount=0,wheelEpoch=-1e9,wheelCarry=0;
  addEventListener('wheel',event=>{
-  if(!event.isTrusted||event.defaultPrevented||event.ctrlKey)return;
+  if(!event.isTrusted||event.ctrlKey)return;
   const scale=event.deltaMode===1?40:event.deltaMode===2?innerHeight:1,dy=event.deltaY*scale,dx=event.deltaX*scale;
   if(!dy||Math.abs(dx)>Math.abs(dy))return;
-  let sideways=false;for(const node of event.composedPath()){if(!(node instanceof Element))continue;const own=scrolls(node,true,dy);if(own)return;if(dx&&!sideways&&scrolls(node,false,dx)===1)sideways=true}
-  if(!sideways)event.preventDefault();
+  for(const node of event.composedPath())if(node instanceof Element&&scrolls(node,true,dy))return;
   wheelCarry=Math.max(-10000,Math.min(10000,wheelCarry+dy));const now=clock();if(now-wheelEpoch>=1000){wheelEpoch=now;wheelCount=0}if(++wheelCount>120)return;
-  post('wheel',{deltaY:Math.round(wheelCarry*100)/100,discrete:event.deltaMode!==0||event.wheelDeltaY!==0&&event.wheelDeltaY%120===0,x:Math.round(event.clientX),y:Math.round(event.clientY)});wheelCarry=0
- },{passive:false});
+  post('wheel',{deltaY:Math.round(wheelCarry*100)/100});wheelCarry=0
+ },{passive:true});
  const appearanceTokens=${json(APPLET_APPEARANCE_TOKENS)},defaultAppearance=${json(DEFAULT_APPLET_APPEARANCE)};let currentAppearance;
  const applyAppearance=value=>{
   if(!value||typeof value!=='object'||!['dark','light'].includes(value.colorScheme)||typeof value.theme!=='string'||!/^[a-z0-9-]{1,40}$/.test(value.theme)||typeof value.reducedMotion!=='boolean')return false;
@@ -96,15 +98,13 @@ export function appletDocument(
  addEventListener('unhandledrejection',event=>{event.preventDefault();send('error','An applet promise failed.')});
  addEventListener('DOMContentLoaded',()=>{
 
-  let visualTimer,visualPending=false;const visualChanged=()=>{visualPending=true;if(visualTimer)return;send('visual-changed',null);visualPending=false;visualTimer=setTimeout(()=>{visualTimer=undefined;if(visualPending)visualChanged()},80)};
-  for(const type of ['input','change','click'])document.addEventListener(type,visualChanged,true);
   let scrollTimer;const scrollReports=new Map();const flushScroll=()=>{scrollTimer=undefined;if(!scrollReports.size)return;send('scroll-changed',[...scrollReports.values()]);scrollReports.clear()};
-  const timers=new WeakMap();document.addEventListener('scroll',event=>{const node=event.target===document?document.documentElement:event.target;if(!(node instanceof Element))return;const path=[];let cursor=node;while(cursor&&cursor!==document.documentElement&&path.length<16){const parent=cursor.parentElement;if(!parent)break;path.unshift(Array.prototype.indexOf.call(parent.children,cursor));cursor=parent}if(cursor===document.documentElement){const key=JSON.stringify(path);if(scrollReports.size>=64&&!scrollReports.has(key))scrollReports.delete(scrollReports.keys().next().value);scrollReports.set(key,{path,top:node.scrollTop,left:node.scrollLeft});if(!scrollTimer){send('visual-changed',null);scrollTimer=setTimeout(flushScroll,100)}}node.classList.add('mousse-scrolling');clearTimeout(timers.get(node));timers.set(node,setTimeout(()=>{node.classList.remove('mousse-scrolling');timers.delete(node)},900))},true);
+  const timers=new WeakMap();document.addEventListener('scroll',event=>{const node=event.target===document?document.documentElement:event.target;if(!(node instanceof Element))return;const path=[];let cursor=node;while(cursor&&cursor!==document.documentElement&&path.length<16){const parent=cursor.parentElement;if(!parent)break;path.unshift(Array.prototype.indexOf.call(parent.children,cursor));cursor=parent}if(cursor===document.documentElement){const key=JSON.stringify(path);if(scrollReports.size>=64&&!scrollReports.has(key))scrollReports.delete(scrollReports.keys().next().value);scrollReports.set(key,{path,top:node.scrollTop,left:node.scrollLeft});if(!scrollTimer)scrollTimer=setTimeout(flushScroll,100)}node.classList.add('mousse-scrolling');clearTimeout(timers.get(node));timers.set(node,setTimeout(()=>{node.classList.remove('mousse-scrolling');timers.delete(node)},900))},true);
   const decorate=root=>{if(!(root instanceof Element))return;const nodes=[...(root.matches('[data-mousse-icon]')?[root]:[]),...root.querySelectorAll('[data-mousse-icon]')].slice(0,256);for(const node of nodes){const name=node.getAttribute('data-mousse-icon'),key=JSON.stringify([name,node.getAttribute('data-icon-size'),node.getAttribute('data-icon-label')]);if(node.dataset.mousseIconRendered===key)continue;try{node.replaceChildren(makeIcon(name,{size:Number(node.getAttribute('data-icon-size'))||16,label:node.getAttribute('data-icon-label')||''}));node.dataset.mousseIconRendered=key}catch{}}};decorate(document.body);new MutationObserver(records=>{for(const record of records){if(record.type==='attributes')decorate(record.target);else for(const node of record.addedNodes)decorate(node)}}).observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['data-mousse-icon','data-icon-size','data-icon-label']});
   setTimeout(()=>{
   const savedScroll=${json(scrollPositions??[])};for(const position of savedScroll){let node=document.documentElement;for(const index of position.path)node=node?.children[index];if(node){node.scrollTop=position.top;node.scrollLeft=position.left}};send('ready',null)},0);
   let sizeTimer,sized,changed=true;
-  const reportSize=()=>{sizeTimer=undefined;const height=Math.ceil(document.documentElement.getBoundingClientRect().height),width=innerWidth,viewport=innerHeight;if(sized&&height===sized.height)return;if(sized&&!changed&&width===sized.width&&viewport!==sized.viewport)return;changed=false;sized={height,width,viewport};send('resize',height)};
+  const reportSize=()=>{sizeTimer=undefined;if(!innerWidth)return;const height=Math.ceil(document.documentElement.getBoundingClientRect().height),width=innerWidth,viewport=innerHeight;if(sized&&height===sized.height)return;if(sized&&!changed&&width===sized.width&&viewport!==sized.viewport)return;changed=false;sized={height,width,viewport};send('resize',height)};
   const ownMark=record=>record.type==='attributes'&&(record.attributeName==='data-mousse-icon-rendered'||record.attributeName==='class'&&String(record.oldValue??'').split(/\\s+/).filter(name=>name&&name!=='mousse-scrolling').join(' ')===[...record.target.classList].filter(name=>name!=='mousse-scrolling').join(' '));
   new MutationObserver(records=>{if(records.some(record=>!ownMark(record)))changed=true}).observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeOldValue:true,characterData:true});
   for(const type of ['load','transitionend','animationend'])document.addEventListener(type,()=>{changed=true},true);

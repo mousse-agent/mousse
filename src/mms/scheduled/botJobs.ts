@@ -11,8 +11,9 @@ import { computeNextRun, cronProblem } from './computeNextRun'
  * Bots' schedules in the shared scheduled-job store (Path step 3, "One scheduler"). A bot's schedule is an automation
  * whose Who is the bot (`ScheduledJob.bot`): the one `ScheduledJobService` claims it, and the bot engine runs each
  * occurrence in the bot's run lane. What stays a bot's own: at most once a minute (and `MAX_BOT_SCHEDULES`, a ceiling
- * only a runaway reaches), only a repeating time (an interval or cron), and Who, Where and May are the bot's (its
- * grant), never the job's fields.
+ * only a runaway reaches), only a repeating time (an interval or cron) for a schedule the bot adds, and Who, Where and
+ * May are the bot's (its grant), never the job's fields. One the owner turns on from the Automations page may also run
+ * once, or only when started (Run now, `mousse automation run`, a request URL).
  */
 
 export { MAX_BOT_SCHEDULES }
@@ -37,7 +38,37 @@ export function jobScheduleOf(when: BotSchedule['when']): JobSchedule {
   return when.kind === 'interval' ? { kind: 'interval', minutes: when.minutes } : { kind: 'cron', expr: when.expr }
 }
 
-/** A job schedule as a bot's time; undefined for a time a bot cannot repeat on (once, on demand). */
+/**
+ * When a bot's automation runs: a repeating time (a bot's own schedules are only these), or, for one the owner turned on
+ * from the Automations page, once at a time or only when started (Run now, the CLI, a request URL).
+ */
+export type BotJobWhen = BotSchedule['when'] | { kind: 'once'; runAt: string } | { kind: 'manual' }
+
+/** A job schedule as a bot's automation time, any kind; undefined for a malformed one. */
+export function botJobWhenOf(schedule: JobSchedule): BotJobWhen | undefined {
+  if (schedule.kind === 'once' && typeof schedule.runAt === 'string') return { kind: 'once', runAt: schedule.runAt }
+  if (schedule.kind === 'manual') return { kind: 'manual' }
+  return botWhenOf(schedule)
+}
+
+function jobScheduleOfAny(when: BotJobWhen): JobSchedule {
+  if (when.kind === 'once') return { kind: 'once', runAt: when.runAt }
+  if (when.kind === 'manual') return { kind: 'manual' }
+  return jobScheduleOf(when)
+}
+
+/** Why the owner can't give a bot's automation this time and prompt, or undefined. A repeating time is checked as a bot schedule. */
+export function botJobWhenProblem(when: BotJobWhen, prompt: unknown, now: Date): string | undefined {
+  if (when.kind !== 'once' && when.kind !== 'manual') return botScheduleProblem(when, prompt)
+  if (typeof prompt !== 'string' || !prompt.trim()) return 'Each schedule needs something to do.'
+  if (when.kind === 'manual') return undefined
+  const at = Date.parse(when.runAt)
+  if (!Number.isFinite(at)) return 'The time to run once is invalid.'
+  if (at <= now.getTime()) return 'The time to run once is in the past.'
+  return undefined
+}
+
+/** A job schedule as a bot's repeating time; undefined for a time a bot cannot repeat on (once, on demand). */
 export function botWhenOf(schedule: JobSchedule): BotSchedule['when'] | undefined {
   if (schedule.kind === 'interval' && typeof schedule.minutes === 'number') return { kind: 'interval', minutes: schedule.minutes }
   if (schedule.kind === 'cron' && typeof schedule.expr === 'string') return { kind: 'cron', expr: schedule.expr }
@@ -90,7 +121,8 @@ export interface BotScheduleEntry {
   revision: string
   botId: string
   scheduleId: string
-  when: BotSchedule['when']
+  /** A bot's own schedules repeat; one the owner turned on may run once or only when started. */
+  when: BotJobWhen
   prompt: string
   name: string
   /** "every weekday · 09:00". */
@@ -180,7 +212,7 @@ export class BotScheduleBook {
   }
 
   private entryOf(job: ScheduledJob): BotScheduleEntry | undefined {
-    const when = job.bot ? botWhenOf(job.schedule) : undefined
+    const when = job.bot ? botJobWhenOf(job.schedule) : undefined
     if (!job.bot || !when) return undefined
     return {
       jobId: job.id,
@@ -190,7 +222,7 @@ export class BotScheduleBook {
       when,
       prompt: job.prompt,
       name: job.name,
-      label: `${job.bot.say !== undefined ? `Says “${job.bot.say}” · ` : ''}${this.labelOf(when)}${scheduleEndLabel(job.expiresAt)}`,
+      label: `${job.bot.say !== undefined ? `Says “${job.bot.say}” · ` : ''}${this.jobLabelOf(when, job)}${scheduleEndLabel(job.expiresAt)}`,
       createdBy: job.bot.createdBy,
       createdAt: job.createdAt,
       ...(job.bot.model ? { model: job.bot.model } : {}),
@@ -200,6 +232,13 @@ export class BotScheduleBook {
       tellMe: tellMeOf(job),
       ...(job.botSkip ? { skip: job.botSkip } : {})
     }
+  }
+
+  /** Any automation time in plain words: a repeating one as `labelOf`, "once · 21 Nov, 18:00", "when you run it". */
+  private jobLabelOf(when: BotJobWhen, job: ScheduledJob): string {
+    if (when.kind === 'once') return `once · ${new Date(when.runAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`
+    if (when.kind === 'manual') return job.trigger?.webhook ? 'on a request, or when you run it' : 'when you run it'
+    return this.labelOf(when)
   }
 
   labelOf(when: BotSchedule['when']): string {
@@ -218,10 +257,13 @@ export class BotScheduleBook {
     return this.options.jobs.listJobs().filter((job) => job.bot && (botId === undefined || job.bot.botId === botId) && job.state === 'completed' && Boolean(job.expiresAt)).map((job) => ({ botId: job.bot!.botId, jobId: job.id, scheduleId: job.bot!.scheduleId, name: job.name, tellMe: tellMeOf(job) }))
   }
 
-  /** Every bot's schedules, oldest first. */
+  /**
+   * Every bot's schedules, oldest first. One that ran its one time stays: its run, handed over as the job completed,
+   * still belongs to it (a schedule that is gone cancels its runs), and Run now can start it again.
+   */
   all(): BotScheduleEntry[] {
     return this.options.jobs.listJobs()
-      .flatMap((job) => job.state === 'completed' ? [] : this.entryOf(job) ?? [])
+      .flatMap((job) => job.state === 'completed' && job.schedule.kind !== 'once' ? [] : this.entryOf(job) ?? [])
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.scheduleId.localeCompare(b.scheduleId))
   }
 
@@ -247,28 +289,37 @@ export class BotScheduleBook {
    * Adds a schedule: at least a minute apart, and at most `MAX_BOT_SCHEDULES` per bot (only a runaway reaches it). It needs no approval (a schedule is not a permission)
    * and starts from now, so it never runs for times before it existed.
    */
-  add(botId: string, input: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string; model?: string; pick?: BotModelPick; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string; ownerAsked?: boolean } = {}): BotScheduleEntry {
+  add(botId: string, input: { when: BotJobWhen; prompt?: string; say?: string; until?: string; model?: string; pick?: BotModelPick; name?: string; tellMe?: TellMe; cliName?: string }, createdBy: 'owner' | 'bot', options: { scheduleId?: string; ownerAsked?: boolean } = {}): BotScheduleEntry {
     if (this.list(botId).length >= MAX_BOT_SCHEDULES) throw new BotScheduleError('schedule_limit', `A bot can have at most ${MAX_BOT_SCHEDULES} schedules, a ceiling only a runaway reaches. Remove some first.`)
     const ownerAsked = options.ownerAsked === true || (input.say !== undefined && createdBy === 'owner')
     if (input.say !== undefined && !ownerAsked) throw new BotScheduleError('schedule_invalid', 'Only the owner’s message or tap can set a fixed line. Use prompt instead of say.')
     const prompt = schedulePrompt(input)
-    const problem = botScheduleProblem(input.when, prompt)
+    // A bot's own schedules repeat; once or on demand is the owner's (the Automations page), and has no end.
+    const repeating = input.when.kind === 'interval' || input.when.kind === 'cron'
+    if (!repeating && createdBy !== 'owner') throw new BotScheduleError('schedule_invalid', 'A bot repeats: every few minutes or on a cron time. For one run, ask it in its chat.')
+    if (!repeating && input.until !== undefined) throw new BotScheduleError('schedule_invalid', 'Only a repeating time can have an end.')
+    const problem = botJobWhenProblem(input.when, prompt, this.now())
     if (problem) throw new BotScheduleError('schedule_invalid', problem)
     const expiresAt = input.until === undefined ? undefined : scheduleUntil(input.until, this.now())
     const scheduleId = options.scheduleId ?? `s-${randomUUID().slice(0, 8)}`
-    const when: BotSchedule['when'] = input.when.kind === 'interval' ? { kind: 'interval', minutes: input.when.minutes } : { kind: 'cron', expr: input.when.expr.trim() }
+    const when: BotJobWhen = input.when.kind === 'interval' ? { kind: 'interval', minutes: input.when.minutes }
+      : input.when.kind === 'cron' ? { kind: 'cron', expr: input.when.expr.trim() }
+        : input.when.kind === 'once' ? { kind: 'once', runAt: new Date(input.when.runAt).toISOString() }
+          : { kind: 'manual' }
     const job = this.options.jobs.createJob({
       // A draft turned on keeps its name and Tell me, in the same write.
       name: input.name?.trim() || botJobName(input.say ?? prompt),
       ...(input.tellMe ? { tellMe: input.tellMe } : {}),
       prompt,
       ...(expiresAt ? { expiresAt } : {}),
-      schedule: jobScheduleOf(when),
+      // A draft turned on with a CLI trigger keeps the name `mousse automation run` takes.
+      ...(input.cliName ? { cliName: input.cliName } : {}),
+      schedule: jobScheduleOfAny(when),
       threadId: botJobThreadGuard(botId),
       // Only the owner picks a model by hand; a bot's own schedule runs on its own rows. The name stays beside the pick,
       // for builds that read only the name.
       bot: { botId, scheduleId, createdBy, ...(ownerAsked ? { ownerAsked: true } : {}), ...(input.say !== undefined ? { say: input.say.trim() } : {}), ...(createdBy === 'owner' && input.model?.trim() ? { model: input.model.trim(), ...(isPinned(input.pick) ? { pick: { ...copyPick(input.pick), instanceId: input.pick.instanceId } } : {}) } : {}) }
-    }, { id: botJobId(botId, scheduleId), nextRunAt: computeNextRun(jobScheduleOf(when), null, this.now()) })
+    }, { id: botJobId(botId, scheduleId), nextRunAt: computeNextRun(jobScheduleOfAny(when), null, this.now()) })
     this.options.jobs.wake()
     return this.entryOf(job)!
   }
@@ -290,8 +341,9 @@ export class BotScheduleBook {
   }
 
   /**
-   * An edit from the Automations page. Only When, Do, the name and Tell me change; a bot repeats, at most once a minute.
-   * A new time starts from now, as a new schedule does.
+   * An edit from the Automations page. Only When, Do, the name and Tell me change. A bot's own schedule repeats, at most
+   * once a minute; one the owner added may also run once or only when started. A new time starts from now, as a new
+   * schedule does.
    */
   update(job: ScheduledJob, patch: ScheduledJobPatch & { enabled?: boolean }): ScheduledJob | null {
     if (!job.bot) throw new BotScheduleError('schedule_not_found', 'This is not a bot\'s automation.')
@@ -315,13 +367,18 @@ export class BotScheduleBook {
       }
     }
     if (patch.schedule !== undefined) {
-      const when = botWhenOf(patch.schedule)
-      if (!when) throw new BotScheduleError('schedule_invalid', 'A bot repeats: every few minutes or on a cron time. For one run, ask it in its chat.')
-      const problem = botScheduleProblem(when, changes.prompt ?? job.prompt)
+      const when = botJobWhenOf(patch.schedule)
+      const repeating = when?.kind === 'interval' || when?.kind === 'cron'
+      if (!when || (!repeating && job.bot.createdBy !== 'owner')) throw new BotScheduleError('schedule_invalid', 'A bot repeats: every few minutes or on a cron time. For one run, ask it in its chat.')
+      if (!repeating && job.expiresAt) throw new BotScheduleError('schedule_invalid', 'It has an end, so it repeats.')
+      if (when.kind === 'once' && job.trigger?.webhook) throw new BotScheduleError('schedule_invalid', 'A one-time automation runs once. Turn off its request URL first, or keep When on demand.')
+      const problem = botJobWhenProblem(when, changes.prompt ?? job.prompt, this.now())
       if (problem) throw new BotScheduleError('schedule_invalid', problem)
-      changes.schedule = jobScheduleOf(when)
+      changes.schedule = jobScheduleOfAny(when)
       changes.nextRunAt = computeNextRun(changes.schedule, null, this.now())
       changes.botSkip = undefined
+      // A spent one-time automation given a new time runs again.
+      if (job.state !== 'paused' && job.state !== 'running') changes.state = changes.nextRunAt || changes.schedule.kind === 'manual' ? 'scheduled' : 'completed'
     }
     if (patch.name !== undefined) {
       const name = patch.name.trim()

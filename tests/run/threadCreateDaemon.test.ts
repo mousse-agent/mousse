@@ -264,13 +264,16 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       for (const result of Object.values(seen)) expect(w.d.orch.requestedPermissionMode(result.threadId)).toBe('accept_edits')
     })
 
-    it('is out of the person\'s sidebar unless started as independent, and its agent shows or hides only the threads it started', async () => {
+    it('an agent\'s thread shows in the person\'s sidebar, its hidden is refused, and it shows or hides only the threads it started', async () => {
       const seen: Record<string, unknown> = {}
       const w = world(async (input, mcp) => {
         if (input.threadId !== w.parent.id) return 'ok'
-        seen.quiet = parse(await w.create(mcp!, { title: 'Background check', clientRequestId: 'quiet' }))
-        seen.independent = parse(await w.create(mcp!, { title: 'Release notes', hidden: false, clientRequestId: 'own' }))
-        seen.shown = parse(await call(mcp!, 'thread_update', { threadId: (seen.quiet as AgentCreatedThread).threadId, hidden: false }))
+        // #2004: a thread an agent starts is a handoff, whether the call names its kind or is an older caller's.
+        seen.older = parse(await w.create(mcp!, { title: 'Release notes', clientRequestId: 'older' }))
+        seen.kinded = parse(await w.create(mcp!, { kind: 'thread', title: 'Changelog', clientRequestId: 'kinded' }))
+        seen.olderHidden = parse(await w.create(mcp!, { title: 'Quiet notes', hidden: true, clientRequestId: 'older-hidden' }))
+        seen.hiddenRefused = refusal(await w.create(mcp!, { kind: 'thread', title: 'Background check', hidden: true, clientRequestId: 'quiet' }))
+        seen.hid = parse(await call(mcp!, 'thread_update', { threadId: (seen.older as AgentCreatedThread).threadId, hidden: true }))
         seen.notMine = refusal(await call(mcp!, 'thread_update', { threadId: w.other.id, hidden: true }))
         seen.notMineOldName = refusal(await call(mcp!, 'thread_hide', { threadId: w.other.id }))
         return 'ok'
@@ -278,15 +281,19 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       await w.attach()
       await w.run(w.parent.id, GO, 'go')
 
-      const quiet = seen.quiet as AgentCreatedThread & { hidden: boolean; note: string }
-      const independent = seen.independent as AgentCreatedThread & { hidden: boolean }
-      // Started hidden: the agent is told where the person finds it.
-      expect(quiet).toMatchObject({ hidden: true, note: expect.stringContaining('side panel of your thread lists it') })
-      expect(independent.hidden).toBe(false)
-      expect(w.d.store.getThread(independent.threadId)?.hidden).toBeUndefined()
-      // thread_update hidden: false put the first one in the sidebar.
-      expect(seen.shown).toMatchObject({ threadId: quiet.threadId, hidden: false, changed: true })
-      expect(w.d.store.getThread(quiet.threadId)?.hidden).toBeUndefined()
+      for (const made of [seen.older, seen.kinded] as Array<AgentCreatedThread & { hidden: boolean; note: string }>)
+        expect(made).toMatchObject({ hidden: false, note: expect.stringContaining('shows in the person\'s sidebar') })
+      expect(w.d.store.getThread((seen.kinded as AgentCreatedThread).threadId)?.hidden).toBeUndefined()
+      // An older caller's hidden thread is the thread it always got, shown, and it is told what hiding one means now.
+      expect(seen.olderHidden).toMatchObject({ hidden: false, note: expect.stringMatching(/shows in the person's sidebar.*kind "subagent"/) })
+      expect(w.d.store.getThread((seen.olderHidden as AgentCreatedThread).threadId)?.hidden).toBeUndefined()
+      // Hidden work of its own is a subagent: nothing was made.
+      expect(seen.hiddenRefused).toMatch(/hidden is for a personal bot's thread/)
+      expect(seen.hiddenRefused).toMatch(/kind "subagent"/)
+      expect(w.d.store.listAllThreads().some((thread) => thread.name === 'Background check')).toBe(false)
+      // It may still hide a thread it started (#2012).
+      expect(seen.hid).toMatchObject({ threadId: (seen.older as AgentCreatedThread).threadId, hidden: true, changed: true })
+      expect(w.d.store.getThread((seen.older as AgentCreatedThread).threadId)?.hidden).toBe(true)
       // A thread the agent did not start stays as the person left it.
       expect(seen.notMine).toMatch(/not one you started/)
       expect(seen.notMineOldName).toEqual(seen.notMine)

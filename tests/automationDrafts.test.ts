@@ -212,8 +212,10 @@ describe('automation drafts', () => {
     const pip = drafts.save(PR_CHECK, { managerThreadId: 'manager' })
     expect(pip.problems).toEqual([])
     expect(drafts.list().find((entry) => entry.id === pip.draftId)!.agent).toEqual({ kind: 'bot', botId: 'bot_1' })
-    // A bot repeats: a CLI trigger is a problem until When repeats.
-    expect(drafts.save({ draftId: pip.draftId, trigger: { kind: 'cli' } }, { managerThreadId: 'manager' }).problems).toEqual(['A bot repeats: give it a time that repeats, at most once a minute.'])
+    // A bot runs on any When but a pull request: once, when it is run, or on a request URL keep Turn on on.
+    for (const trigger of [{ kind: 'cli' }, { kind: 'http' }, { kind: 'time', schedule: { kind: 'once', runAt: '2099-01-01T09:00:00.000Z' } }])
+      expect(drafts.save({ draftId: pip.draftId, trigger }, { managerThreadId: 'manager' }).problems).toEqual([])
+    expect(drafts.save({ draftId: pip.draftId, trigger: { kind: 'thread_event', threadId: 't-pr', events: ['review'] } }, { managerThreadId: 'manager' }).problems).toContainEqual(expect.stringMatching(/does not wake on a pull request/))
     drafts.save({ draftId: pip.draftId, trigger: PR_CHECK.trigger }, { managerThreadId: 'manager' })
     const on = drafts.turnOn(pip.draftId)
     expect(botSchedules).toEqual([expect.objectContaining({ botId: 'bot_1', name: 'PR check', prompt: PR_CHECK.prompt })])
@@ -226,6 +228,17 @@ describe('automation drafts', () => {
     expect(service.getJob(plain.draftId)!.draft).toMatchObject({ who: { kind: 'bot', botId: 'bot_1' }, problems: [] })
     drafts.setWho(plain.draftId, { kind: 'default' })
     expect(service.getJob(plain.draftId)!.draft!.problems).toEqual(['Which project should it run in?'])
+  })
+
+  it('turns a bot\'s CLI draft on as the bot\'s on-demand automation, with the name `automation run` finds', () => {
+    const { drafts, service, botSchedules } = setup()
+    drafts.nextWho({}, { kind: 'bot', botId: 'bot_1' })
+    const pip = drafts.save({ ...PR_CHECK, name: 'Deploy preview', trigger: { kind: 'cli' } }, { managerThreadId: 'manager' })
+    expect(pip.problems).toEqual([])
+    const on = drafts.turnOn(pip.draftId)
+    expect(botSchedules).toEqual([expect.objectContaining({ botId: 'bot_1', schedule: { kind: 'manual' }, cliName: 'deploy-preview' })])
+    expect(on.bot).toMatchObject({ botId: 'bot_1' })
+    expect(service.getJob(pip.draftId)).toBeUndefined()
   })
 
   it('reads the rest of the contract: a pull request event and one reused thread', () => {
