@@ -16,7 +16,7 @@ import { helperCode } from './helper/appChannel'
 import type { EngineHelper } from './helper/connections'
 import { engineControl, engineLimits } from './limits'
 import { OWNER_ROLE } from './roles'
-import { approvedHints, pairbackRoutes, privateRoute, splitPairback } from './routes'
+import { approvedHints, loopbackClass, pairbackRoutes, privateRoute, splitPairback } from './routes'
 import type { EngineSessions } from './sessions'
 import {
   isServingState,
@@ -26,6 +26,13 @@ import {
   type EngineWays
 } from './store'
 import { LINK_KIND, pairingLink, readTicket, sendLink, type TicketFacts } from './ticket'
+import { parseRoute, routeClass } from '../../shared/netEngine/routes'
+
+/** A route to an address on a tailnet (Tailscale's 100.64.0.0/10), or a loopback route a check maps to one. */
+const tailnetRoute = (route: string): boolean => {
+  const parsed = parseRoute(route)
+  return !!parsed && (loopbackClass(route) ?? routeClass(parsed)) === 'tailnet'
+}
 
 /**
  * The points of the ceremony and of a removal where a test may stop this computer as a crash would (`crashAt`):
@@ -1019,14 +1026,30 @@ export class EnginePairing {
     const { peers } = this.port
     const known = row.addresses ?? []
     const fresh = offered.filter((route) => !known.includes(route))
-    if (engineControl('route-leak') && fresh.length) {
-      const addresses = [...fresh, ...known]
-      await this.helper().request('peer.addresses.set', { identity: row.endpoint, routes: addresses })
-      peers.setAddresses(row.localId, addresses)
+    // A tailnet address is inside the owner's own tailnet: it is used at once, as a LAN one is, so a computer that
+    // paired over Tailscale is reached back over Tailscale without a Use. Internet addresses and tunnels still wait,
+    // and so does every address on a 1.0 helper, which takes owner addresses in private ranges only.
+    const leak = engineControl('route-leak')
+    let now = leak ? fresh : this.helper().speaks(1) ? fresh.filter(tailnetRoute) : []
+    let waiting = fresh.filter((route) => !now.includes(route))
+    if (now.length) {
+      const addresses = [...now, ...known]
+      try {
+        await this.helper().request('peer.addresses.set', { identity: row.endpoint, routes: addresses })
+        peers.setAddresses(row.localId, addresses)
+      } catch (error) {
+        if (leak) throw error
+        // A helper that refuses them: they wait for Use like the others, and the pairback goes on.
+        waiting = fresh
+        now = []
+      }
+    }
+    if (leak && now.length) return
+    if (!waiting.length && !row.offered?.length) {
+      if (now.length) this.port.changed()
       return
     }
-    if (!fresh.length && !row.offered?.length) return
-    peers.update(row.localId, { offered: fresh })
+    peers.update(row.localId, { offered: waiting })
     this.port.changed()
   }
 

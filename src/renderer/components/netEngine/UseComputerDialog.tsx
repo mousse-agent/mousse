@@ -284,7 +284,9 @@ export function CheckStep({
       </label>
       {preview && (
         <JoinRoutes
-          preview={back ? preview : { ...preview, shareable: [] }}
+          preview={preview}
+          name={name}
+          back={back}
           share={share}
           onShare={(route, on) =>
             setShare((list) => (on ? [...list, route] : list.filter((item) => item !== route)))

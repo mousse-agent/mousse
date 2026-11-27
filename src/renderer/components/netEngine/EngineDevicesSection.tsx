@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowUp, Laptop, Monitor, MonitorSmartphone, Plus, RefreshCw, Smartphone } from '../../lib/icons'
+import { ArrowUp, ChevronDown, Laptop, Monitor, MonitorSmartphone, Plus, RefreshCw, Smartphone } from '../../lib/icons'
 import type {
   NetEngineDevice,
   NetEngineRemoval,
@@ -505,8 +505,24 @@ export function EngineDevicesSection() {
     }
   }
 
-  const row = (view: RowView, idTip?: string, update?: RowUpdate) => {
+  /**
+   * One device row. An `expandable` row opens its routes (Computers I use) or its Access panel (Can use this
+   * computer) from a click anywhere on it; the chevron is the control a keyboard reaches.
+   */
+  const row = (view: RowView, idTip?: string, update?: RowUpdate, expandable = false) => {
     const open = selected === view.key
+    const toggleButton = expandable ? (
+      <button
+        type="button"
+        className="settings-icon-btn devices-row-toggle"
+        aria-expanded={open}
+        aria-label={`${open ? 'Hide' : 'Show'} ${view.side === 'out' ? 'routes' : 'access'} for ${view.name}`}
+        title={view.side === 'out' ? (open ? 'Hide routes' : 'Routes') : open ? 'Hide access' : 'Access'}
+        onClick={() => toggle(view.key)}
+      >
+        <ChevronDown size={14} className={open ? 'devices-row-chevron open' : 'devices-row-chevron'} aria-hidden="true" />
+      </button>
+    ) : undefined
     return (
       <SettingsRow
         key={view.key}
@@ -550,10 +566,11 @@ export function EngineDevicesSection() {
           </span>
         }
         control={
-          update?.control || view.items.length ? (
+          update?.control || view.items.length || toggleButton ? (
             <span className="device-row-controls">
               {update?.control}
               {view.items.length > 0 && <RowMenu label={`Actions for ${view.name}`} items={view.items} disabled={busy} />}
+              {toggleButton}
             </span>
           ) : undefined
         }
@@ -651,7 +668,12 @@ export function EngineDevicesSection() {
     if (!engineSides(device).includes('out')) return []
     const view = engineView(device, 'out')
     return [
-      row(view, `Id ${device.shortId}`, updateView(device.name, nodes.find((item) => item.node === device.node), undefined, true)),
+      row(
+        view,
+        `Id ${device.shortId}`,
+        updateView(device.name, nodes.find((item) => item.node === device.node), undefined, true),
+        device.state !== 'removing'
+      ),
       device.olderApp && (
         <SettingsRow
           key={`${device.node}-older`}
@@ -739,7 +761,12 @@ export function EngineDevicesSection() {
     const node = nodes.find((item) => item.node === device.node)
     const asked = askedLine(device)
     return [
-      row(view, `Id ${device.shortId}`, engineSides(device).includes('out') ? undefined : updateView(device.name, node)),
+      row(
+        view,
+        `Id ${device.shortId}`,
+        engineSides(device).includes('out') ? undefined : updateView(device.name, node),
+        engineSideRow(device, 'in').actions.includes('access')
+      ),
       asked && (
         <SettingsRow
           key={`${device.node}-asked`}
@@ -795,7 +822,7 @@ export function EngineDevicesSection() {
       return [row(view, undefined, updateView(device.name, device, sshRecordFor(device, legacy.ssh), true))]
     })
   const oldInRows = oldDevices.flatMap((device) => [
-    row(legacyView(device, 'in')),
+    row(legacyView(device, 'in'), undefined, undefined, !!device.policy),
     selected === sideKey(device.node, 'in') && (
       <AccessPanel
         key={`${device.node}-access`}

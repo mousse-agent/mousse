@@ -446,7 +446,13 @@ export interface NetEngineJoinPreview {
   expired?: boolean
   /** Every hint this computer would dial, with its class; the non-automatic ones are what Connect approves. */
   destinations: TicketDestination[]
-  /** This computer's tailnet and public routes and tunnels: pairback sends one only when ticked. */
+  /**
+   * This computer's routes of the kinds the link reaches the other computer by (a tailnet address for a link over
+   * Tailscale): with "Also let" the other computer reaches this one the same way, so pairback sends them unticked.
+   * Absent from an older service.
+   */
+  sameWay?: Array<{ route: string; label: string; cls: RouteClass }>
+  /** This computer's other tailnet and public routes and tunnels: pairback sends one only when ticked. */
   shareable: Array<{ route: string; label: string; cls: RouteClass }>
 }
 

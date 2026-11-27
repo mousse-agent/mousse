@@ -33,7 +33,8 @@ import {
   relayText,
   routeClass,
   routeText,
-  ticketDestinations
+  ticketDestinations,
+  type RouteClass
 } from '../../shared/netEngine/routes'
 import type { BridgeProfileService } from '../bridge/BridgeProfileService'
 import type { EngineDirectoryPort, PeerRow } from '../bridge/peers'
@@ -733,10 +734,12 @@ export class NetEngineService implements EngineDirectoryPort {
       throw new NetError('bad_request', "That isn't one of this computer's addresses.", {
         details: { reason: 'bad_share' }
       })
+    // Both ways: the other computer reaches this one the way this one reaches it, without a tick.
+    const shared = back ? [...new Set([...this.sameWays(ticket), ...share])] : [...share]
     await this.tellName()
     routeSetupProbes()
     return started.pairing.join(ticket, {
-      share: [...share],
+      share: shared,
       ...(arrival ? { arrival } : {}),
       ...(back ? {} : { back: false })
     })
@@ -1120,12 +1123,38 @@ export class NetEngineService implements EngineDirectoryPort {
         const mapped = loopbackClass(item.route)
         return { ...item, ...(mapped ? { cls: mapped } : {}), automatic: automatic(item.route) }
       }),
-      shareable: this.shareable().flatMap((route) => {
-        const parsed = parseRoute(route)
-        const cls = loopbackClass(route) ?? (parsed ? routeClass(parsed) : 'forbidden')
-        return cls === 'forbidden' ? [] : [{ route, label: routeText(route), cls }]
-      })
+      sameWay: this.sameWays(ticket).flatMap((route) => this.shareEntry(route)),
+      shareable: this.shareable()
+        .filter((route) => !this.sameWays(ticket).includes(route))
+        .flatMap((route) => this.shareEntry(route))
     }
+  }
+
+  /** One of this computer's routes as the Connect dialog shows it, with its class; none for a forbidden one. */
+  private shareEntry(route: string): Array<{ route: string; label: string; cls: RouteClass }> {
+    const parsed = parseRoute(route)
+    const cls = loopbackClass(route) ?? (parsed ? routeClass(parsed) : 'forbidden')
+    return cls === 'forbidden' ? [] : [{ route, label: routeText(route), cls }]
+  }
+
+  /**
+   * This computer's routes of the kinds the ticket reaches the other computer by (§1.3): a computer reached over
+   * Tailscale reaches this one over Tailscale too. With "Also let" they go in pairback without a tick, beside the LAN
+   * routes that always go; the other kinds stay under "Also share".
+   */
+  private sameWays(ticket: string): string[] {
+    let hints: string[]
+    try {
+      hints = readTicket(ticket).routes
+    } catch {
+      return []
+    }
+    const kinds = new Set<string>(
+      ticketDestinations(hints, !packagedBuild())
+        .map((item) => loopbackClass(item.route) ?? item.cls)
+        .filter((cls) => cls !== 'relay' && cls !== 'lan')
+    )
+    return this.shareable().filter((route) => this.shareEntry(route).some((entry) => kinds.has(entry.cls)))
   }
 
   /** The other computer of a pairing: its endpoint id and name, for "Remove on all my hosts". */

@@ -398,7 +398,11 @@ const shown = (text: string): { address: string; full?: string } =>
 export function deviceRoutes(device: NetEngineDevice): DeviceRoute[] {
   const routes: DeviceRoute[] = []
   // This computer looks for it on the same network whenever it dials it, one way or both, added over SSH or not.
-  if (device.direction !== 'in')
+  // A same-network address it has already is that route: one row, not a second "Found automatically".
+  const lanListed = [...(device.addresses ?? []), ...(device.approvedAddresses ?? [])].some(
+    (address) => classOf(address) === 'lan'
+  )
+  if (device.direction !== 'in' && !lanListed)
     routes.push({ key: 'local', cls: 'lan', address: 'Found automatically', state: 'available' })
   for (const address of device.addresses ?? []) {
     routes.push({
