@@ -2911,8 +2911,11 @@ it('C4 authority compiler fences every registered Mousse tool for held work and 
     const threadId = `fence-${index}`
     const turns = new AppToolTurns()
     turns.register(appTurn({ threadId, runId: 'r1', turnToken: 'tt', bot }))
+    // The run store keeps only what addressed calls record (`recordAddress`): no thread here has a run.
+    const receipts = new Map<string, { commandKind: string; result: unknown }>()
+    const store = { getReceipt: (key: string) => receipts.get(key) ?? null, putReceipt: (row: { clientRequestId: string; commandKind: string; result: unknown }) => receipts.set(row.clientRequestId, row) }
     const { registry } = createAppToolRegistry({
-      host: fakeAppToolHost().host, engine: {} as never, turns, botMemory: {} as never,
+      host: fakeAppToolHost().host, engine: { store } as never, turns, botMemory: {} as never,
       options: { activeRunId: () => 'r1', botMcp: t.mcp,
         userMcp: { list: async () => [], allowed: async () => ({ allowed: true }), call: async () => { throw new Error('ordinary proxy must not run') } } as never,
         access: { botReach: () => ({ scope: 'manage' }), threadExists: () => true, relation: () => 'descendant' } }

@@ -106,7 +106,7 @@ describe('a bot uses what a thread\'s agent can', () => {
         return { error: true, text: error instanceof Error ? error.message : String(error) }
       }
     }
-    const listed = () => registry.listForThread('work', workRun.runId).map((tool) => tool.name)
+    const listed = () => registry.listForThread('work', workRun.runId)
     return { compiled, call, listed, asked, host: fake.host, queueCommands: fake.queueCommands, onAppResult, files, base: base!, registry }
   }
 
@@ -126,9 +126,14 @@ describe('a bot uses what a thread\'s agent can', () => {
     const { compiled, listed } = await world(options)
     for (const tool of has) expect(compiled.permissions.appTools, tool).toContain(tool)
     for (const tool of lacks) expect(compiled.permissions.appTools, tool).not.toContain(tool)
-    // The thread lists what its turn holds of the tools this registry has, and nothing it lacks.
-    const shown = listed()
-    for (const tool of lacks) expect(shown, tool).not.toContain(tool)
+    // The thread lists what its turn holds of the tools this registry has, and nothing it lacks. A thread tool's name may
+    // still carry the bot's own work tools (`work_start` is `thread_create` kind "subagent", S7d4a): then it says only
+    // what those do ("With …"), never the thread tool's own use.
+    const shown = new Map(listed().map((tool) => [tool.name, tool]))
+    for (const tool of lacks) {
+      const entry = shown.get(tool)
+      if (entry) expect(entry.description.split('\n\n').every((part) => part.startsWith('With ')), `${tool}: ${entry.description}`).toBe(true)
+    }
   })
 
   describe('the thread controls ("use your threads")', () => {
