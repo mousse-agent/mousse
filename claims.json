@@ -84,6 +84,21 @@
       "expiresAt": "2026-11-27T12:40:03.362Z"
     },
     {
+      "task": "mac-signed-own-keychain-item",
+      "session": "Avarnics-Mac-mini.local-c5a209",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "mac-signed-own-keychain-item",
+      "paths": [
+        "src/mms/providers",
+        "src/cli/electronContext.ts",
+        "src/main/cli.ts",
+        "src/mms/net/identity/FileKeyStore.ts",
+        "src/mms/harness"
+      ],
+      "claimedAt": "2026-11-27T18:00:35.287Z",
+      "expiresAt": "2026-11-27T20:00:35.287Z"
+    },
+    {
       "task": "one-shots-slice-2",
       "session": "Animatrix-10734d",
       "machine": "Animatrix",
