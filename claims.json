@@ -102,6 +102,20 @@
       "expiresAt": "2026-11-27T07:04:49.257Z"
     },
     {
+      "task": "t3/thread-starter-sync",
+      "session": "LAPTOP-HIEROJK7-86c598",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "t3/thread-starter-sync",
+      "paths": [
+        "src/mms/bridge/remote/MmsListsSource.ts",
+        "src/mms/bridge/routed/listRows.ts",
+        "src/mms/bridge/routed/mergedLists.ts",
+        "src/renderer/components/sideCard/lineageLogic.ts"
+      ],
+      "claimedAt": "2026-11-27T10:39:35.382Z",
+      "expiresAt": "2026-11-27T12:39:35.382Z"
+    },
+    {
       "task": "thread-blank-until-scroll",
       "session": "Animatrix-29e4c3",
       "machine": "Animatrix",
