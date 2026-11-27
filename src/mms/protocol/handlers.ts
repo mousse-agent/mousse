@@ -2708,6 +2708,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const pageOnly = !ctx.mms.orchestrator.hasSession(threadId) && ctx.mms.threads.usesThreadDb(threadId) &&
         (!withTranscript || (page !== undefined && !page.messages.some(isOpenActivityRow)))
       if (pageOnly) {
+        // Masked as a loaded thread's messages are: a value registered as a secret after a message was saved too.
+        if (page) ctx.mms.orchestrator.maskThreadMessages(threadId, page.messages)
         const items = ctx.mms.threads.loadMessageQueue(threadId)
         return {
           ...common,
@@ -2761,7 +2763,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (settle) ctx.mms.orchestrator.getOrCreateSession(threadId)
         const messages = ctx.mms.orchestrator.getMessages(threadId)
         page = before !== undefined ? messagesBefore(messages, before, limit, ROUTED_MESSAGES_PAGE_BYTES) : messagesAfter(messages, after!, limit, ROUTED_MESSAGES_PAGE_BYTES)
-      }
+      } else if (page) ctx.mms.orchestrator.maskThreadMessages(threadId, page.messages)
       if (!page) throw new DomainRpcError('message_not_found', 'That message is not in this thread.', { threadId, ...(before !== undefined ? { before } : { after: cursor }) })
       // Images are loaded one at a time when they are shown (`thread.messageImage`).
       return {
@@ -2781,6 +2783,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       if (!ctx.mms.threads.usesThreadDb(threadId)) return { reset: true, messages: [], removed: [] }
       const changes = await ctx.mms.threads.readMessageChanges(threadId, seq, epoch)
+      ctx.mms.orchestrator.maskThreadMessages(threadId, changes.messages)
       return { ...changes, messages: changes.messages.map(withoutImageBytes) }
     }
     case 'thread.messageImage': {

@@ -259,6 +259,26 @@ describe('opening a thread kept in thread.db', () => {
     expect(mms.orchestrator.hasSession(thread.id)).toBe(false)
   })
 
+  it('masks a value registered as the thread secret after the messages holding it were saved, in every page', async () => {
+    const thread = mms.threads.createThread('Secret', undefined, undefined, { started: true })
+    const all = transcript(30).map((row) => (row.id === 'm3' || row.id === 'm28' ? { ...row, content: `token hunter2 in ${row.id}` } : row))
+    mms.threads.mutateThreadData(thread.id, () => ({ messages: all }))
+    mms.orchestrator.setSecrets({
+      tools: {} as never,
+      masker: (threadId) => (threadId === thread.id ? (text) => text.replaceAll('hunter2', '[secret]') : undefined)
+    })
+    expect(mms.orchestrator.hasSession(thread.id)).toBe(false)
+    const snapshot = await dispatchMethod(ctx(), 'thread.snapshot', { threadId: thread.id, newest: 5 }) as { messages: ChatMessage[]; earlier?: { before: string }; seq: number; epoch: number }
+    expect(snapshot.messages.find((row) => row.id === 'm28')?.content).toBe('token [secret] in m28')
+    const page = await dispatchMethod(ctx(), 'thread.messages', { threadId: thread.id, before: snapshot.earlier!.before, limit: 25 }) as { messages: ChatMessage[] }
+    expect(page.messages.find((row) => row.id === 'm3')?.content).toBe('token [secret] in m3')
+    mms.threads.mutateThreadData(thread.id, (current) => ({ messages: [...current.messages, message('m900', 'and hunter2 again')] }))
+    const changes = await dispatchMethod(ctx(), 'thread.changesSince', { threadId: thread.id, seq: snapshot.seq, epoch: snapshot.epoch }) as { messages: ChatMessage[] }
+    expect(changes.messages.map((row) => row.content)).toEqual(['and [secret] again'])
+    // Still read from the database: the thread was never loaded, which masks on its own.
+    expect(mms.orchestrator.hasSession(thread.id)).toBe(false)
+  })
+
   it('answers a snapshot without newest with the whole visible transcript', async () => {
     const thread = mms.threads.createThread('Whole', undefined, undefined, { started: true })
     mms.threads.mutateThreadData(thread.id, () => ({ messages: transcript(30) }))
