@@ -531,6 +531,28 @@ describe('a bot\'s work subagents as delegations', () => {
     expect(steer.peek()).toBeUndefined()
   })
 
+  it('the owner\'s correction of the work reaches its running subagents through the port, as the work\'s message, recorded as a revision', async () => {
+    const job = await work('w1')
+    const subagents = job.prepared.authority.subagents!
+    await subagents.start({ title: 'Prices', brief: 'Find the prices.' })
+    await subagents.start({ title: 'Stock', brief: 'Find the stock.' })
+    const [prices, stock] = subagentRuns(f, job.id)
+    const child = await startSubagent(f, prices!)
+    child.prepared.steer!.attached()
+    // "Stock"'s turn has not started here: its runtime can take nothing yet, and the record says so.
+    const sent = f.bots.tools.work.noteSubagents!(botId, job.id, 'Only ones under 300.')
+    expect(sent).toEqual([{ subagent: 'Prices', sent: true }, { subagent: 'Stock', sent: false, why: expect.stringMatching(/can't take a message/) }])
+    const text = child.prepared.steer!.peek()!
+    expect(text).toContain('The person told your parent')
+    expect(text).toContain('Only ones under 300.')
+    expect(text).toContain('do not take on work it gives your parent')
+    // Never directly: no run inbox row is posted to a bot subagent's thread.
+    for (const runId of [prices!, stock!]) expect(f.runs.inbox.listForThread(f.runs.getRun(runId)!.threadId)).toEqual([])
+    const [revision] = f.runs.store.db.statement('SELECT text, deliveries FROM tree_revisions').all()
+    expect(revision!.text).toBe('Only ones under 300.')
+    expect(JSON.parse(String(revision!.deliveries))).toMatchObject([{ title: 'Prices', state: 'pending', how: 'next_step' }, { title: 'Stock', state: 'not_sent', how: 'refused' }])
+  })
+
   it('a grant narrowed after a subagent\'s turn was prepared and before it binds: refused at the bind; one not narrowed binds to the policy compiled then', async () => {
     const job = await work('w1')
     const subagents = job.prepared.authority.subagents!

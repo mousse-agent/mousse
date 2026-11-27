@@ -173,4 +173,28 @@ describe('delegation bridge (SPEC §14)', () => {
     expect(second.engine.inbox.listForThread(parent.id).map((row) => row.status)).toEqual(['acknowledged'])
   }, 30_000)
 
+  it('a subagent its parent\'s run starts after the person corrected that thread starts with the correction (§2.5)', async () => {
+    const dir = setupHome()
+    const state: { delegationId?: string; parentThreadId?: string } = {}
+    let parent: Daemon | undefined
+    const correcting: Script = async (input, delegation) => {
+      // The person corrects the parent while its run works and has no subagent yet.
+      if (input.threadId === state.parentThreadId && input.prompt === 'Count the modules') await parent!.orch.correctSubagents(state.parentThreadId!, 'Only count src/mms.', 'correct-1')
+      return script(state)(input, delegation)
+    }
+    parent = daemon(dir, correcting, 1)
+    stops.push(parent.stop)
+    const thread = parent.store.createThread('Parent')
+    state.parentThreadId = thread.id
+    await parent.orch.send('Count the modules', false, { threadId: thread.id, clientRequestId: 'parent-send' })
+    const delegation = parent.engine.delegations.get(state.delegationId!)!
+    await waitFor(() => parent.engine.getRun(delegation.childRunId)?.status === 'completed', 'the child run')
+    expect(parent.adapter.turns.find((turn) => turn.threadId === delegation.childThreadId)?.prompt)
+      .toBe(`${subagentPreamble('Parent', thread.id)}\n\nList the modules\n\nThe person told your parent "Parent": Only count src/mms.\n\nApply it where it changes your task; do not take on work it gives your parent. It answers no question or approval of yours.`)
+    // Its run read it: the row is done with, and nothing else delivers it again.
+    expect(parent.engine.inbox.listForThread(delegation.childThreadId).map((row) => row.status)).toEqual(['acknowledged'])
+  }, 30_000)
+
 })
+
+type Daemon = ReturnType<typeof daemon>
