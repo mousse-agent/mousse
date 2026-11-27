@@ -100,15 +100,23 @@ describe('a routed call marked as an agent\'s (issue #1160)', () => {
     expect(audit.recent(5, t.callerNode).find((row) => row.method === 'threads.create' && row.actor === 'agent')).toBeDefined()
   }, 120_000)
 
-  it('keeps an agent\'s thread out of the sidebar only when the create asks: a computer from before hidden sends none and it shows', async () => {
+  it('shows an agent\'s thread whatever its create asks, and keeps a hidden ask only for a bot\'s first message (#2004)', async () => {
+    standInForTurns()
     // A computer that runs an older Mousse sends a marked create with no hidden: the thread shows here, as it did then.
     const older = await launched('From an older computer')
     expect(t.owner.threads.getThread(older)!.hidden).toBeUndefined()
+    expect(t.owner.threads.getThread(older)!.startedFrom?.agent).not.toHaveProperty('hidden')
+    // An agent's thread is a handoff and shows; the ask is kept with the agent, for a personal bot's first message to hide it.
     const asked = await call('threads.create', { name: 'Hidden', hidden: true, agent: mark() })
-    expect(t.owner.threads.getThread(asked.thread.id)!.hidden).toBe(true)
-    expect(asked.thread.hidden).toBe(true)
+    expect(t.owner.threads.getThread(asked.thread.id)!.hidden).toBeUndefined()
+    expect(asked.thread.hidden).toBeUndefined()
+    expect(t.owner.threads.getThread(asked.thread.id)!.startedFrom?.agent).toMatchObject({ hidden: true })
+    // The agent's first message, not a bot's, leaves it shown.
+    await call('orchestrator.send', { threadId: asked.thread.id, content: 'Run the tests', mode: 'agent', clientRequestId: 'hidden-ask-1', agent: mark() })
+    expect(t.owner.threads.getThread(asked.thread.id)!.hidden).toBeUndefined()
     const independent = await call('threads.create', { name: 'Independent', hidden: false, agent: mark() })
     expect(t.owner.threads.getThread(independent.thread.id)!.hidden).toBeUndefined()
+    expect(t.owner.threads.getThread(independent.thread.id)!.startedFrom?.agent).not.toHaveProperty('hidden')
   }, 120_000)
 
   it('records the thread as the agent\'s subagent only when its create says so, and never from a person\'s create', async () => {
