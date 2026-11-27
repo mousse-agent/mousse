@@ -9,7 +9,7 @@ import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, definitionToolGranted, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
 import { botMayBeOffered } from '../../../../shared/bots/personal/manifest'
 import { BOT_USE_TOOL } from '../../../../shared/bots/personal/catalogue'
-import { canonicalToolCall, canonicalToolName, isToolAlias } from '../../../../shared/toolAliases'
+import { canonicalToolCall, canonicalToolName, isRunningVariant, isToolAlias, toolVariant } from '../../../../shared/toolAliases'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
@@ -334,6 +334,8 @@ function useToolCall(args: Record<string, unknown>): { name: string; args: Recor
  */
 export class ToolRegistry {
   private readonly tools = new Map<string, MousseTool>()
+  /** Old tools that run as a variant of their new one (`toolVariant`), by old name: never listed, called only as that. */
+  private readonly variants = new Map<string, MousseTool>()
   /**
    * The user MCP tools each run's turn was offered, by the name it was offered them under: a call
    * resolves from here and never lists again (a new listing may name a tool differently).
@@ -353,7 +355,11 @@ export class ToolRegistry {
       throw new Error(
         `Mousse tool ${tool.name} takes a thread id (${uncovered.join(', ')}) that the access check does not cover: make it readsOthers, managesOthers, writesThreads or editsWorkspace (for threadId), or say where it is checked with authorize: checkedInHandler(...)`
       )
-    if (this.tools.has(tool.name)) throw new Error(`Mousse tool ${tool.name} is already registered`)
+    if (this.tools.has(tool.name) || this.variants.has(tool.name)) throw new Error(`Mousse tool ${tool.name} is already registered`)
+    if (isRunningVariant(tool.name)) {
+      this.variants.set(tool.name, declaringRetryKey(tool))
+      return this
+    }
     if (isToolAlias(tool.name)) throw new Error(`Mousse tool ${tool.name} is an old name of ${canonicalToolName(tool.name)}; register it under that name`)
     this.tools.set(tool.name, declaringRetryKey(tool))
     return this
@@ -367,6 +373,11 @@ export class ToolRegistry {
   /** Every registered tool, unlisted ones included. */
   list(): MousseTool[] {
     return [...this.tools.values()]
+  }
+
+  /** The old tools that run as a variant of their new one (`toolVariant`): never listed, each still callable. */
+  variantTools(): MousseTool[] {
+    return [...this.variants.values()]
   }
 
   /**
@@ -579,15 +590,25 @@ export class ToolRegistry {
           return await this.callUserMcp(inner.name, inner.args, { ...site, request: innerRequest })
         if (!named || !toolNeeds(named).callable || inner.name === BOT_USE_TOOL || !botMayBeOffered(inner.name))
           return refused('unknown_tool', `You have no tool named ${inner.name}. tool_catalogue lists each group's tools.`)
-        return this.inOwnerZone(turn, await this.callAdmitted(inner.name, named, inner.args, caller, { ...site, request: innerRequest }))
+        return this.inOwnerZone(turn, await this.callAdmitted(inner.name, this.variantOf(inner.name, named, inner.args, turn), inner.args, caller, { ...site, request: innerRequest }))
       }
       if (!tool) return await this.callUserMcp(name, args, site)
-      return this.inOwnerZone(turn, await this.callAdmitted(name, tool, args, caller, site))
+      return this.inOwnerZone(turn, await this.callAdmitted(name, this.variantOf(name, tool, args, turn), args, caller, site))
     } catch (error) {
       const outcome = refusalOutcome(error)
       if (outcome) return outcome
       throw error
     }
+  }
+
+  /**
+   * The declaration that runs a call of `name`: the old tool's own when the call is the variant it became (`toolVariant`),
+   * so it is checked and run as that tool always was, whichever name it came under; else `tool`. A definition's turn
+   * runs none: a definition delegates nothing.
+   */
+  private variantOf(name: string, tool: MousseTool, args: Record<string, unknown>, turn: AppToolTurn): MousseTool {
+    const old = toolVariant(name, args, turn.bot ? 'bot' : turn.definition ? undefined : 'thread')
+    return (old && this.variants.get(old)) || tool
   }
 
   /**

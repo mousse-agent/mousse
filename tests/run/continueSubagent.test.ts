@@ -25,7 +25,7 @@ describe('continue_subagent and the title address (issue #142)', () => {
       expect(out.first.delegationId).toBeTruthy()
       expect(out.first.title).toBe('API reviewer')
       expect(out.again).toMatchObject({ started: false, code: 'title_taken', title: 'api   REVIEWER', existing: [{ childThreadId: out.first.childThreadId, title: 'API reviewer', latestDelegationId: out.first.delegationId }] })
-      expect(out.again.message).toContain('continue_subagent')
+      expect(out.again.message).toContain('thread_send')
       expect(out.other.started).not.toBe(false)
       expect(d.engine.delegations.listForParentThread(parent.id)).toHaveLength(2)
       expect(d.store.listAllThreads().filter((thread) => thread.lineage?.parentThreadId === parent.id)).toHaveLength(2)

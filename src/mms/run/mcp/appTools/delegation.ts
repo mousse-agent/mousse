@@ -1,5 +1,6 @@
 import { Type, type JsonObject, type Tool, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai'
 import { recordSubagentCall } from '../../../../shared/subagentTools'
+import { isRunningVariant } from '../../../../shared/toolAliases'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import { hostingTurn } from '../../nativeHelpers'
 import {
@@ -110,7 +111,7 @@ export interface DelegationToolHost {
 
 /** Delegation tool schemas (SPEC §14.2) plus the named-agent compatibility wrappers. */
 const DELEGATION_TOOLS: Tool[] = [
-  { name: 'delegate_task', description: 'Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. A subagent has everything you have: your shell, your tools, your MCP servers, your skills and your permission mode, never more. workspace isolated gives it a worktree of its own; shared runs it in your own folder, where its edits land in your files as it makes them. readOnly true starts the narrow kind instead (an explorer, a read-only reviewer or researcher): it works in your folder and can only read files and the web and use Mousse\'s read-only tools, with no shell, no edits and no other MCP servers. role is a label and changes nothing. Mousse never merges a subagent\'s files into yours: the notice gives the base and result snapshots (pinned under refs/mousse/), where it worked and the Git state it left, and you bring the work in with git. instanceId (the agent to run, such as "claude" or "pi:openai"), model and effort (its reasoning level) default to yours; take them from model_list, and pass effort only with model. A model or agent that is not offered, or is signed out, is refused with the reason and nothing starts: tell the user, never pick another yourself. provider is the older name form of instanceId. computer runs the subagent on another of the user\'s computers (a name from computer_list), in its copy of this repository and under its own agents; there instanceId and model default to that computer\'s. It runs there until it ends or is stopped; maxMinutes, when you give it, stops it after that many minutes of running time (time it waits for a person\'s answer does not count). It expires with your thread. Its result names the branch its work is on there.',
+  { name: 'delegate_task', description: 'Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (subagent in thread_send, thread_wait and thread_stop); when it is taken the call returns title_taken and starts nothing. A subagent has everything you have: your shell, your tools, your MCP servers, your skills and your permission mode, never more. workspace isolated gives it a worktree of its own; shared runs it in your own folder, where its edits land in your files as it makes them. readOnly true starts the narrow kind instead (an explorer, a read-only reviewer or researcher): it works in your folder and can only read files and the web and use Mousse\'s read-only tools, with no shell, no edits and no other MCP servers. role is a label and changes nothing. Mousse never merges a subagent\'s files into yours: the notice gives the base and result snapshots (pinned under refs/mousse/), where it worked and the Git state it left, and you bring the work in with git. instanceId (the agent to run, such as "claude" or "pi:openai"), model and effort (its reasoning level) default to yours; take them from model_list, and pass effort only with model. A model or agent that is not offered, or is signed out, is refused with the reason and nothing starts: tell the user, never pick another yourself. provider is the older name form of instanceId. computer runs the subagent on another of the user\'s computers (a name from computer_list), in its copy of this repository and under its own agents; there instanceId and model default to that computer\'s. It runs there until it ends or is stopped; maxMinutes, when you give it, stops it after that many minutes of running time (time it waits for a person\'s answer does not count). It expires with your thread. Its result names the branch its work is on there.',
     parameters: Type.Object({ prompt: Type.String(), title: Type.String(), instanceId: Type.Optional(Type.String()), provider: Type.Optional(Type.String()), model: Type.Optional(Type.String()), effort: Type.Optional(Type.String()), role: Type.Optional(Type.String()),
       workspace: Type.Union([Type.Literal('isolated'), Type.Literal('shared')]), readOnly: Type.Optional(Type.Boolean()),
       wake: Type.Optional(Type.Union([Type.Literal('always'), Type.Literal('settled_only')])),
@@ -146,9 +147,11 @@ export const DELEGATION_TOOL_NAMES: ReadonlySet<string> = new Set(DELEGATION_TOO
 /**
  * The tools both the pi loop and the Mousse MCP server offer, in one list. The older names
  * (`create_subagent(s)`, `recall_subagent`, `integrate_delegation`, `integrate_subagent`, `list_delegations`)
- * stay dispatchable for replayed transcripts and older agents but are not listed.
+ * stay dispatchable for replayed transcripts and older agents but are not listed. `task_status`, `task_cancel`,
+ * `list_subagents` and `continue_subagent` are variants of the thread tools now (`toolVariant`): `thread_wait`,
+ * `thread_stop`, `thread_list` and `thread_send` with `subagent`, `delegationId` or `scope: family`.
  */
-export const LISTED_DELEGATION_TOOL_NAMES = ['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'computer_list', 'model_list'] as const
+export const LISTED_DELEGATION_TOOL_NAMES = ['delegate_task', 'answer_subagent', 'computer_list', 'model_list'] as const
 
 /** Definitions shared by the pi loop and the Mousse MCP server, so both offer identical schemas. */
 export function delegationToolDefinitions(names: readonly string[] = LISTED_DELEGATION_TOOL_NAMES): Tool[] {
@@ -328,8 +331,9 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
     // No delegation tool writes the caller's workspace: the retired merge tools only report a result.
     access: 'actsAsCaller',
     class: 'delegation',
-    // The older names are neither listed nor callable over MCP; they still run in process.
-    ...(listed.has(definition.name) ? {} : { listed: () => false, callable: 'in_process' as const }),
+    // The older names are neither listed nor callable over MCP; they still run in process. A variant of a thread tool
+    // is registered as that (`ToolRegistry.register`), never listed, and called under either name.
+    ...(listed.has(definition.name) || isRunningVariant(definition.name) ? {} : { listed: () => false, callable: 'in_process' as const }),
     // A read-only subagent may start (read-only) subagents and follow them; `delegateTask` checks the
     // workspace of each one.
     readOnlySafe: true,
@@ -343,8 +347,10 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
       if (!own) throw new Error(`Unknown tool: ${definition.name}`)
       // A native helper's call is not the thread's own turn: what it reads never acknowledges the thread's notices (§2.7).
       const delegation = hostingTurn(ctx.turn) === ctx.turn ? own : Object.assign(Object.create(own) as DelegationToolHost, { taskStatus: (ref: SubagentRef) => own.taskStatus(ref, { acknowledge: false }) })
-      // Tool arguments arrive as parsed JSON (MCP or Pi), so they are JSON values.
-      const call: ToolCall = { type: 'toolCall', id: ctx.toolCallId, name: definition.name, arguments: args as JsonObject }
+      // Tool arguments arrive as parsed JSON (MCP or Pi), so they are JSON values. `thread_send` names a follow-up's
+      // text content, which `continue_subagent` called prompt.
+      const named = definition.name === 'continue_subagent' && args.prompt === undefined ? { ...args, prompt: args.content } : args
+      const call: ToolCall = { type: 'toolCall', id: ctx.toolCallId, name: definition.name, arguments: named as JsonObject }
       return { text: await dispatchWithTimeline(delegation, call, ctx) }
     }
   })
@@ -361,6 +367,7 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
       })
     // Both act on the caller's own subagent, which the host's handler checks; they stay `actsAsCaller`
     // like `delegate_task` rather than loosening the thread-writing scope check for other tools.
+    // `continue_subagent` is `thread_send`'s variant: the same clientRequestId starts one follow-up under either name.
     if (definition.name === 'continue_subagent' || definition.name === 'answer_subagent')
       return tool(definition, { clientRequestId: CLIENT_REQUEST_ID_SCHEMA })
     return tool(definition, {})

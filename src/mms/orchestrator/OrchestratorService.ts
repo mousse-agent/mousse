@@ -3894,7 +3894,7 @@ export class OrchestratorService extends EventEmitter {
       const title = delegation ? this.titleOf(delegation.childThreadId) : undefined
       const session = this.getOrCreateSession(event.threadId)
       this.sessionAls.run(session, () => this.addSystemMessage(
-        `The result of ${title ? `subagent "${title}"` : 'a subagent'} could not be delivered after ${attempts ?? 'several'} attempts. Read it with task_status${delegationId ? ` (${delegationId})` : ''}.`
+        `The result of ${title ? `subagent "${title}"` : 'a subagent'} could not be delivered after ${attempts ?? 'several'} attempts. Read it with thread_wait${delegationId ? ` (delegationId ${delegationId})` : ''}.`
       ))
     } catch (error) {
       console.warn('undelivered result notice could not be written', { threadId: event.threadId, error: error instanceof Error ? error.message : String(error) })
@@ -9575,7 +9575,7 @@ export class OrchestratorService extends EventEmitter {
       code: 'title_taken' as const,
       title: taken.title,
       existing,
-      message: `You already have a subagent titled "${taken.title}" (${existing[0]?.state ?? 'unknown'}). Use continue_subagent with that title to give it more work, or start a new subagent under a different title.`
+      message: `You already have a subagent titled "${taken.title}" (${existing[0]?.state ?? 'unknown'}). Use thread_send with that title as subagent to give it more work, or start a new subagent under a different title.`
     }
   }
 
