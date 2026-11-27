@@ -1,5 +1,9 @@
 import { isRunningVariant, isToolAlias } from '../../../../shared/toolAliases'
+import { isNativeHelperThread, ownBotOf } from '../../../../shared/threadLineage'
 import type { RunEngine } from '../../RunEngine'
+import { recordAddress, recordedAddress, resolveAddress, type AddressSources } from '../../addressing'
+import { visibleSubagents } from '../../delegation/subagentAddress'
+import type { ThreadAddresses } from './addressedCall'
 import { appearanceTools } from './appearance'
 import { appletTools } from './applets'
 import { askUserTools } from './askUser'
@@ -95,6 +99,38 @@ function agentAccessPolicy(host: AppToolHost, engine: RunEngine): ToolAccessPoli
 }
 
 /**
+ * What resolves the thread tools' `thread` addresses (`addressing.ts`), read at call time: the lineage and titles the
+ * family reads, the helpers' mirror threads, the bots the caller may reach, and the run store's receipts, which keep what
+ * a retry key resolved to across a restart.
+ */
+function threadAddresses(host: AppToolHost, engine: RunEngine, bots: (() => BotAppToolDeps | undefined) | undefined): ThreadAddresses {
+  const titleOf = (threadId: string): string | undefined => {
+    const thread = host.threadMeta?.(threadId)
+    return thread ? thread.name ?? '' : undefined
+  }
+  const sources: AddressSources = {
+    parentOf: (threadId) => threadFamily(host, engine).parentOf(threadId),
+    childrenOf: (threadId) => visibleSubagents({ delegations: engine.delegations, titleOf }, threadId),
+    helpersOf: (threadId) => (host.listThreads?.() ?? []).filter((thread) => isNativeHelperThread(thread) && thread.lineage?.parentThreadId === threadId).map((thread) => ({ threadId: thread.id, title: thread.name ?? '' })),
+    titleOf,
+    exists: (threadId) => host.threadMeta?.(threadId) !== undefined,
+    // A bot's chat or work reaches its owner's other bots; a thread a bot started, that bot. A bot's subagent, none.
+    botsFor: (callerThreadId) => {
+      const deps = bots?.()
+      const activation = deps?.host.activationOf(callerThreadId)
+      if (activation) return activation.role === 'subagent' ? [] : deps?.host.bots?.list(activation.botId).map(({ botId, name }) => ({ botId, name })) ?? []
+      const own = ownBotOf(host.threadMeta?.(callerThreadId))
+      return own ? [{ botId: own.botId, name: own.name }] : []
+    }
+  }
+  return {
+    resolve: (callerThreadId, address, options) => resolveAddress(sources, callerThreadId, address, options),
+    recorded: (key) => recordedAddress(engine.store, key),
+    record: (key, callerThreadId, resolved) => recordAddress(engine.store, key, callerThreadId, resolved)
+  }
+}
+
+/**
  * One registry over every app-tool module (PR 2 §2). The Mousse MCP server's is built over the
  * thread owner with the run engine (which adds the thread tools); an in-process loop builds its
  * own over its dependencies. Both register the same definitions and handlers.
@@ -125,6 +161,7 @@ export function createAppToolRegistry(input: {
     askApproval: host.askApproval ? (threadId, questions, options) => host.askApproval!(threadId, questions, options) : undefined,
     turns: input.turns,
     access: engine ? agentAccessPolicy(host, engine) : undefined,
+    addresses: engine ? threadAddresses(host, engine, input.bots) : undefined,
     botTimeZone: () => botMemory()?.memory?.zone(),
     ...input.options
   })

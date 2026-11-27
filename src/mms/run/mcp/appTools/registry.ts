@@ -36,6 +36,8 @@ import {
   type ToolTimeline
 } from './types'
 import { asRefusal, readRefusal, refused, refusalText } from './refusal'
+import { addressedArgs, fanOutCalls, fanOutRow, withAddress, type ThreadAddresses } from './addressedCall'
+import { ADDRESSED_TOOLS } from '../../addressing'
 import { delegableTurn, hostingTurn, type CallAttribution } from '../../nativeHelpers'
 import {
   compileTool,
@@ -150,6 +152,8 @@ export interface ToolRegistryOptions {
   botMcp?: Pick<BotMcp, 'call'>
   /** The zone a bot's times are told in (its memory's, as its "Now" line); absent or undefined: times stay in UTC. */
   botTimeZone?(): string | undefined
+  /** Resolves the thread tools' `thread` addresses and keeps what each retry key resolved to; absent: `thread` takes ids only. */
+  addresses?: ThreadAddresses
 }
 
 /** What `ToolRegistryOptions.reportLacks` is told. */
@@ -257,11 +261,14 @@ function withRetryKey<T extends JsonSchema | undefined>(schema: T): T {
  * limits) stays current.
  */
 function declaringRetryKey(tool: MousseTool): MousseTool {
-  if (READ_ONLY_TOOL_NAMES.has(tool.name)) return tool
+  if (READ_ONLY_TOOL_NAMES.has(tool.name) && !ADDRESSED_TOOLS[tool.name]) return tool
   return new Proxy(tool, {
     get(target, key, receiver) {
       const value = Reflect.get(target, key, receiver)
-      return key === 'inputSchema' || key === 'botInputSchema' ? withRetryKey(value as JsonSchema | undefined) : value
+      if (key !== 'inputSchema' && key !== 'botInputSchema') return value
+      // A thread tool also takes its thread by address (`addressedCall.ts`).
+      const schema = withAddress(target.name, value as JsonSchema | undefined)
+      return READ_ONLY_TOOL_NAMES.has(target.name) ? schema : withRetryKey(schema)
     }
   })
 }
@@ -585,15 +592,47 @@ export class ToolRegistry {
           return await this.callUserMcp(inner.name, inner.args, { ...site, request: innerRequest })
         if (!named || !toolNeeds(named).callable || inner.name === BOT_USE_TOOL || !(named.variants ?? [named]).some((tool) => botMayBeOffered(tool.name)))
           return refused('unknown_tool', `You have no tool named ${inner.name}. tool_catalogue lists each group's tools.`)
-        return this.inOwnerZone(turn, await this.callAdmitted(inner.name, this.variantOf(inner.name, named, inner.args, turn), inner.args, caller, { ...site, request: innerRequest }))
+        return this.inOwnerZone(turn, await this.callAddressed(inner.name, named, inner.args, caller, { ...site, request: innerRequest }))
       }
       if (!tool) return await this.callUserMcp(name, args, site)
-      return this.inOwnerZone(turn, await this.callAdmitted(name, this.variantOf(name, tool, args, turn), args, caller, site))
+      return this.inOwnerZone(turn, await this.callAddressed(name, tool, args, caller, site))
     } catch (error) {
       const outcome = refusalOutcome(error)
       if (outcome) return outcome
       throw error
     }
+  }
+
+  /**
+   * A call of the app tool `tool` once its `thread` address names ids (`addressedArgs`): one target runs as a call that
+   * named its id; several (`children`, `descendants`) run as one call per target, each under a retry key of its own and
+   * through every check, and the result has one row per target.
+   */
+  private async callAddressed(name: string, tool: MousseTool, given: Record<string, unknown>, caller: McpCaller, site: CallSite): Promise<ToolOutcome> {
+    const { turn, request } = site
+    const addressed = addressedArgs(this.options.addresses, name, given, caller.threadId, request.toolCallId, !READ_ONLY_TOOL_NAMES.has(name))
+    if ('refused' in addressed) return addressed.refused
+    const { args, resolved } = addressed
+    if (!resolved?.many) return this.callAdmitted(name, this.variantOf(name, tool, args, turn), args, caller, site)
+    if (args.runId !== undefined) return refused('invalid_arguments', `runId names one run; leave it out with thread "${resolved.address}".`)
+    const one = async ({ target, args: targetArgs }: ReturnType<typeof fanOutCalls>[number]) => {
+      const each = { ...site, request: { ...request, toolCallId: `${request.toolCallId}:${target.threadId}` } }
+      let outcome: ToolOutcome
+      try {
+        outcome = await this.callAdmitted(name, this.variantOf(name, tool, targetArgs, turn), targetArgs, caller, each)
+      } catch (error) {
+        const refusedNow = refusalOutcome(error)
+        if (!refusedNow) throw error
+        outcome = refusedNow
+      }
+      return fanOutRow(target, outcome)
+    }
+    const calls = fanOutCalls(name, args, resolved)
+    // Waits run side by side; a send or a Stop runs one target at a time, in the order the address recorded.
+    const results = name === 'thread_wait' ? await Promise.all(calls.map(one)) : []
+    if (name !== 'thread_wait') for (const call of calls) results.push(await one(call))
+    const note = !results.length ? `"${resolved.address}" names no thread now.` : name === 'thread_stop' ? 'Stopping each of your subagents also stops what it delegated, deepest first.' : undefined
+    return { text: JSON.stringify({ address: resolved.address, results, ...(note ? { note } : {}) }) }
   }
 
   /**
@@ -637,12 +676,16 @@ export class ToolRegistry {
    */
   resolveCall(calledAs: string, rawArgs: Record<string, unknown>, at: { threadId: string; runId: string }): { name: string; variant: string; args: Record<string, unknown> } | { refused: ToolOutcome } {
     const { clientRequestId, ...given } = rawArgs
-    const { name, args } = canonicalToolCall(calledAs, given)
+    const { name, args: named } = canonicalToolCall(calledAs, given)
+    // The call's id as the MCP server will key it (`mcp:<clientRequestId>`), so a retry resolves as its receipt says.
+    const key = typeof clientRequestId === 'string' && clientRequestId.trim() ? { toolCallId: `mcp:${clientRequestId.trim()}` } : {}
+    // Its `thread` address as the call will resolve it (a gate records nothing), so a gate judges the ids it names.
+    const addressed = addressedArgs(this.options.addresses, name, named, at.threadId, key.toolCallId, false)
+    if ('refused' in addressed) return { refused: addressed.refused }
+    const { args } = addressed
     const tool = this.tools.get(name)
     const turn = this.options.turns?.get(at.runId)
     if (!tool?.variantOf || !turn) return { name, variant: name, args }
-    // The call's id as the MCP server will key it (`mcp:<clientRequestId>`), so a retry resolves as its receipt says.
-    const key = typeof clientRequestId === 'string' && clientRequestId.trim() ? { toolCallId: `mcp:${clientRequestId.trim()}` } : {}
     const variant = tool.variantOf(args, { threadId: at.threadId, turn, ...key })
     return 'refused' in variant ? variant : { name, variant: variant.tool.name, args: variant.args }
   }
