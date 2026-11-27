@@ -1151,8 +1151,11 @@ const api = {
       ipcRenderer.invoke('threads:setExpiry', threadId, expiresAt, stopsRun),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>
       ipcRenderer.invoke('threads:reorder', projectId, threadIds),
-    /** `perThread`: which threads match, one message hit each, from this computer only (the sidebar's filter). */
-    search: (query: string, limit?: number, options?: { perThread?: boolean }): Promise<ThreadSearchResponse> =>
+    /**
+     * `perThread`: which threads match, one message hit each, from this computer only (the sidebar's filter); with
+     * `others`, from the user's other computers only.
+     */
+    search: (query: string, limit?: number, options?: { perThread?: boolean; others?: boolean }): Promise<ThreadSearchResponse> =>
       ipcRenderer.invoke('threads:search', query, limit, options),
     /** Saves that moved only these threads' `updatedAt` (`threads.touched`), throttled by the service. */
     onTouched: (cb: (touches: Array<{ id: string; updatedAt: string }>) => void): (() => void) => {

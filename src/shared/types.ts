@@ -887,6 +887,8 @@ export interface ThreadMessagesSnapshot {
   threadId: string
   messages: ChatMessage[]
   replace?: boolean
+  /** With `replace`: a long thread of another computer was sent as its newest part; the rest loads from `before`. */
+  earlier?: { before: string; count: number }
 }
 
 /** A model as a message records it: the provider, the model as listed, its level and its name. */

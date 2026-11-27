@@ -44,7 +44,7 @@ export function isGuardedCall(call: CuaCall): call is Extract<CuaCall, { kind: '
 
 /**
  * The Mousse tool a call's name names, in any runtime's spelling (`mousseServerToolOf`: `mcp__mousse__x`,
- * Antigravity's `mcp_mousse_x`, `mousse.x`, `x (mousse MCP Server)`...) or as a bare snake-case name (Pi, Cursor
+ * Antigravity's `mcp_mousse_x`, OpenCode's `mousse_<12 hex>_x`, `mousse.x`, `x (mousse MCP Server)`...) or as a bare snake-case name (Pi, Cursor
  * without a server); undefined for a relayed tool or any other name.
  */
 export function mousseToolOfName(name: unknown): string | undefined {

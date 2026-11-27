@@ -211,6 +211,113 @@ export function mousseToolLabels(tool: string): MousseToolLabels {
   return { running: capitalize(`${ing} ${rest}`), done: capitalize(`${past} ${rest}`), failed: `Couldn't ${verb} ${rest}` };
 }
 
+/** Which argument says what a call works on, by tool; any other tool tries `SUBJECT_KEYS` in order. */
+const SUBJECTS: Record<string, readonly string[]> = {
+  web_fetch: ["url"],
+  browser_open: ["url"],
+  thread_create: ["title", "firstMessage"],
+  thread_send: ["content"],
+  thread_steer: ["content"],
+  queue_enqueue: ["content"],
+  schedule_create: ["name", "prompt"],
+  monitor_start: ["description", "command", "url"],
+  background_run: ["description", "command"],
+};
+
+const SUBJECT_KEYS = ["query", "url", "title", "name", "question", "description", "content", "message", "text", "brief", "prompt", "command", "skill", "path"];
+
+const SUBJECT_CHARS = 120;
+
+/**
+ * What a Mousse tool call works on, in a few words: a search's query, a fetch's URL, a new thread's title. Its first
+ * line, cut to fit; undefined when its arguments say nothing readable (only ids) or were cut when saved.
+ */
+export function mousseToolSubject(tool: string, input: unknown): string | undefined {
+  const args = record(input);
+  if (!args || isCutInput(args)) return undefined;
+  // A bot's use_tool names the tool it ran, and what that call works on.
+  if (tool === "use_tool" && typeof args.tool === "string" && args.tool.trim()) {
+    const inner = mousseToolSubject(args.tool, args.arguments);
+    return inner ? `${args.tool.trim()}: ${inner}` : args.tool.trim();
+  }
+  for (const key of SUBJECTS[tool] ?? SUBJECT_KEYS) {
+    const value = args[key];
+    if (typeof value !== "string" || !value.trim()) continue;
+    const line = value.trim().split("\n")[0]!.trim();
+    return line.length > SUBJECT_CHARS ? `${line.slice(0, SUBJECT_CHARS - 1)}…` : line;
+  }
+  return undefined;
+}
+
+/** A site a web search returned. */
+export type WebSite = { title: string; url: string; host: string };
+
+const MAX_SITES = 10;
+
+function siteOf(url: string, title: string | undefined): WebSite | undefined {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+    const host = parsed.hostname.replace(/^www\./, "");
+    return { url: parsed.href, host, title: title?.trim() || host };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Sites in a parsed result: objects with a `url` (and maybe a `title`), a few levels deep. */
+function sitesInValue(value: unknown, out: WebSite[], depth = 0): void {
+  if (out.length >= MAX_SITES || depth > 4 || !value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (const entry of value) sitesInValue(entry, out, depth + 1);
+    return;
+  }
+  const item = value as Record<string, unknown>;
+  const url = typeof item.url === "string" ? item.url : typeof item.link === "string" ? item.link : undefined;
+  const site = url ? siteOf(url, typeof item.title === "string" ? item.title : undefined) : undefined;
+  if (site) out.push(site);
+  else for (const child of Object.values(item)) sitesInValue(child, out, depth + 1);
+}
+
+/**
+ * The sites a web search's result text lists, in its order, at most ten: the `url`s of a JSON result, the `URL:` lines
+ * of a text one (each with the `Title:` line before it), else any web address in it. Empty when it lists none.
+ */
+export function webSearchSites(output: unknown): WebSite[] {
+  const text = outputText(output);
+  if (!text?.trim()) return [];
+  const found: WebSite[] = [];
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      sitesInValue(JSON.parse(trimmed), found);
+    } catch {
+      // Not JSON: read it as text.
+    }
+  }
+  if (found.length === 0) {
+    let title: string | undefined;
+    for (const line of text.split("\n")) {
+      const titled = /^\s*(?:#+\s*)?Title:\s*(.+)$/i.exec(line);
+      if (titled) title = titled[1];
+      const addressed = /^\s*(?:URL|Link|Source):\s*(\S+)/i.exec(line);
+      if (!addressed) continue;
+      const site = siteOf(addressed[1]!, title);
+      if (site) found.push(site);
+      title = undefined;
+    }
+  }
+  if (found.length === 0) {
+    for (const match of text.matchAll(/https?:\/\/[^\s<>"'`)\]]+/g)) {
+      const site = siteOf(match[0].replace(/[.,;:]+$/, ""), undefined);
+      if (site) found.push(site);
+      if (found.length >= MAX_SITES * 2) break;
+    }
+  }
+  const seen = new Set<string>();
+  return found.filter((site) => !seen.has(site.url) && seen.add(site.url)).slice(0, MAX_SITES);
+}
+
 /**
  * The Mousse tool a part names however its runtime spelled the call: `tool-mcp__mousse__<tool>`, or on a row with no
  * server (`tool-mcp__custom__…`) a bare name (Pi), `mousse_<tool>` (`mousse.<tool>`) or `<tool>_mousse_mcp_server_`

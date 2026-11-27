@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { methods, RequestError, type NewSessionResponse } from '@agentclientprotocol/sdk'
-import { ACTIVITY_DESCRIPTION_CHARS, isAcpSubagentTool, type ActivityPatch, type ProviderToolEvent } from '../../../shared/agentActivity'
+import { ACTIVITY_DESCRIPTION_CHARS, capRecord, isAcpSubagentTool, type ActivityPatch, type ProviderToolEvent } from '../../../shared/agentActivity'
 import { recordSubagentCall, subagentToolName, toolResultText } from '../../../shared/subagentTools'
 import { classifyCuaCall, guardedInput, guardedOutput, guardedTitle, isGuardedCall, mousseToolOfName, USE_TOOL, useToolTargetOf } from '../../../shared/cuaActivity'
 import type { PermissionMode } from '../../../shared/permissionMode'
@@ -88,6 +88,15 @@ function acpCuaFields(
   const output = ended ? guardedOutput(call, ended.output, ended.failed) : undefined
   const activity: ActivityPatch = { ...(input ? { input } : {}), ...(output !== undefined ? { output } : {}) }
   return { title: guardedTitle(call, input), ...(Object.keys(activity).length ? { activity } : {}) }
+}
+
+/**
+ * A call's arguments as its row keeps them, bounded the way Claude's rows are (`capRecord`); undefined while there are
+ * none (an agent may open a call with `{}` and send its arguments in a later update).
+ */
+function acpArgs(rawInput: unknown): Record<string, unknown> | undefined {
+  if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput) || Object.keys(rawInput).length === 0) return undefined
+  return capRecord(rawInput as Record<string, unknown>)
 }
 
 function isDaemonCommand(rawInput: unknown): boolean {
@@ -1714,6 +1723,10 @@ export class AcpSessions {
       isDaemon: boolean
       isInvokeSubagent: boolean
       description: string
+      /** Any call but a subagent, a command or a computer use call: its row shows its bounded arguments and result. */
+      plain: boolean
+      /** The row has its arguments. */
+      argsShown: boolean
     }
     interface LaunchedSubagent {
       callId: string
@@ -1857,6 +1870,9 @@ export class AcpSessions {
           : isCommand && activity?.kind === 'command'
             ? activity.command
             : title
+        // Any other call's row shows what it was called with (a search's query, a fetch's URL), as Claude's rows do.
+        const plain = !subagent && !isCommand && !subagentToolName(name)
+        const args = plain && !cua ? acpArgs(event.rawInput) : undefined
         openTools.set(event.toolCallId, {
           title,
           name,
@@ -1865,7 +1881,9 @@ export class AcpSessions {
           startedAt: Date.now(),
           isDaemon: isCommand && isDaemonCommand(event.rawInput),
           isInvokeSubagent,
-          description
+          description,
+          plain,
+          argsShown: args !== undefined
         })
         const startActivity = cua ? cua.activity : activity
         // A subagent call is never waited on by a held steer; any other call of an agent counts as foreground.
@@ -1876,24 +1894,30 @@ export class AcpSessions {
           toolName: name,
           ...(useToolTarget ? { useToolTarget } : {}),
           ...(startActivity ? { activity: startActivity } : {}),
+          ...(args ? { input: args } : {}),
           ...(record ? { record } : {})
         })
       }
       // A running call's own progress (its output, a new status) is a tool event: it restarts the release window.
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && openTools.has(event.toolCallId) && event.status !== 'completed' && event.status !== 'failed') {
         const tracked = openTools.get(event.toolCallId)!
-        if (event.rawInput !== undefined && tracked.rawInput === undefined) tracked.rawInput = event.rawInput
+        // A call opened with no arguments (or `{}`) gets them from its first update that has some.
+        if (event.rawInput !== undefined && acpArgs(tracked.rawInput) === undefined) tracked.rawInput = event.rawInput
         // Arguments that arrive late say which tool a use_tool runs, and what a computer use call keeps of them.
         tracked.useToolTarget ??= acpUseToolTarget(tracked.name, tracked.rawInput)
         const cua = acpCuaFields(tracked.name, tracked.rawInput, tracked.useToolTarget)
         if (cua) tracked.title = cua.title
+        // Any other call's row gets its late arguments once.
+        const lateArgs = !cua && tracked.plain && !tracked.argsShown ? acpArgs(tracked.rawInput) : undefined
+        if (lateArgs) tracked.argsShown = true
+        const updateActivity: ActivityPatch | undefined = cua?.activity ?? (lateArgs ? { input: lateArgs } : undefined)
         input.onTool?.({
           phase: 'update',
           callId: event.toolCallId,
           title: tracked.title,
           ...(tracked.name ? { toolName: tracked.name } : {}),
           ...(tracked.useToolTarget ? { useToolTarget: tracked.useToolTarget } : {}),
-          ...(cua?.activity ? { activity: cua.activity } : {})
+          ...(updateActivity ? { activity: updateActivity } : {})
         })
       }
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && (event.status === 'completed' || event.status === 'failed')) {
@@ -1929,10 +1953,9 @@ export class AcpSessions {
           const record = subagentToolName(toolName)
             ? (recordSubagentCall(toolName, rawInput, { text: outputText, isError: event.status === 'failed' }) ?? undefined)
             : undefined
-          const served = toolName ? mousseServerToolOf(toolName) : undefined
-          const followUpOutput = !record && outputText && served?.server === 'mousse' && (served.tool === 'thread_send' || served.tool === 'thread_update')
-            ? { output: outputText }
-            : undefined
+          // Any other call's row keeps its result text (bounded where the row is kept), as Claude's rows do: a web
+          // search's row lists the sites it found from it.
+          const resultOutput = !record && outputText && (tracked?.plain ?? true) ? { output: outputText } : undefined
           // A computer use call (directly or through a bot's use_tool) keeps only its allowlisted arguments and a bounded
           // outcome: computer_use_request's outcome line, a fixed label for a failure, never the text it returned.
           const cuaName = toolName ?? (event.title !== undefined && mousseServerToolOf(event.title)?.server === 'mousse' ? event.title : undefined)
@@ -1946,7 +1969,7 @@ export class AcpSessions {
             ...(useToolTarget ? { useToolTarget } : {}),
             status: isBackgroundLaunch ? 'background' : event.status,
             ...(record ? { record } : {}),
-            ...(cua ? (cua.activity ? { activity: cua.activity } : {}) : followUpOutput ? { activity: followUpOutput } : {})
+            ...(cua ? (cua.activity ? { activity: cua.activity } : {}) : resultOutput ? { activity: resultOutput } : {})
           })
         }
       }

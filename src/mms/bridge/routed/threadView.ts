@@ -78,8 +78,12 @@ export class RemoteThreadView {
       }
       case 'thread.messages': {
         if (!Array.isArray(data.messages)) return undefined
-        if (data.replace === true) state.messages = [...(data.messages as Json[])]
-        else
+        if (data.replace === true) {
+          state.messages = [...(data.messages as Json[])]
+          // A replacement is the whole transcript unless it says what is left before it.
+          if (data.earlier !== undefined) state.earlier = data.earlier
+          else delete state.earlier
+        } else
           for (const message of data.messages as Json[]) {
             const at = state.messages.findIndex((row) => row.id === message.id)
             if (at >= 0) state.messages[at] = message
