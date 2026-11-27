@@ -88,18 +88,6 @@
       "expiresAt": "2026-11-27T12:40:03.362Z"
     },
     {
-      "task": "panel-state-per-thread",
-      "session": "Animatrix-364c09",
-      "machine": "Animatrix",
-      "branch": "panel-state-per-thread",
-      "paths": [
-        "src/renderer/stores/appStore.ts",
-        "src/renderer/lib/panelByThread.ts"
-      ],
-      "claimedAt": "2026-11-27T16:48:19.310Z",
-      "expiresAt": "2026-11-27T18:48:19.310Z"
-    },
-    {
       "task": "s7d1-thread-tool-renames",
       "session": "LAPTOP-HIEROJK7-003c84",
       "machine": "LAPTOP-HIEROJK7",
