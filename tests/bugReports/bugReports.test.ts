@@ -74,17 +74,26 @@ describe('the bug report service', () => {
   afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 
   /** A GitHub that holds issues in memory. */
-  function github(existing: Array<{ number: number; state: string; body: string }> = [], timelines: Record<number, unknown[]> = {}) {
+  type Issue = { number: number; state: string; body: string; author?: string; createdAt?: string; title?: string }
+  function github(existing: Issue[] = [], timelines: Record<number, unknown[]> = {}) {
     const issues = [...existing]
     const calls: string[] = []
+    const searches: string[] = []
+    let down = false
     const fetch = (async (url: string, init?: RequestInit) => {
       const path = String(url).replace('https://api.github.com', '')
       const method = init?.method ?? 'GET'
       calls.push(`${method} ${path.split('?')[0]}`)
       const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
       if (path.startsWith('/search/issues')) {
+        if (down) return json({}, 403)
         const q = decodeURIComponent(path)
-        return json({ items: issues.filter((issue) => q.includes(issue.body)).map((issue) => ({ number: issue.number, html_url: `https://gh/${issue.number}`, state: issue.state })) })
+        searches.push(q)
+        const token = new Headers(init?.headers).get('authorization')
+        const hits = q.includes('author:@me')
+          ? issues.filter((issue) => token === 'Bearer gh-token' && issue.author === 'me' && issue.body.includes('mousse-sig-'))
+          : issues.filter((issue) => q.includes(issue.body.match(/mousse-sig-[0-9a-f]+/)?.[0] ?? '\0'))
+        return json({ items: hits.map((issue) => ({ number: issue.number, html_url: `https://gh/${issue.number}`, state: issue.state, title: issue.title ?? 'An issue', body: issue.body, created_at: issue.createdAt ?? '2026-11-01T00:00:00Z' })) })
       }
       if (method === 'POST' && path === '/repos/mousse-agent/mousse/issues') {
         const body = JSON.parse(String(init?.body)) as { body: string }
@@ -99,7 +108,7 @@ describe('the bug report service', () => {
       if (issue) { const found = issues.find((entry) => entry.number === Number(issue[1])); return found ? json({ state: found.state }) : json({}, 404) }
       return json({})
     }) as typeof globalThis.fetch
-    return { fetch, calls, issues }
+    return { fetch, calls, searches, issues, setDown: (value: boolean) => { down = value } }
   }
 
   const service = (fetch: typeof globalThis.fetch, settings = { enabled: true, anonymous: true }) => {
@@ -160,6 +169,78 @@ describe('the bug report service', () => {
     const outcome = await reports.file(reports.draft({ kind: 'button', title: 'Save failed', message: 'disk full' }))
     expect(outcome).toMatchObject({ status: 'browser' })
     expect(outcome.status === 'browser' && outcome.url).toContain('/issues/new?title=Save%20failed')
+  })
+
+  describe('reports sent through the prefilled page', () => {
+    // No relay and no Mousse token: filing gives the prefilled page, and the person submits it on GitHub.
+    const browserService = (fetch: typeof globalThis.fetch, clock: { now: number }, ghToken?: string, home = mkdtempSync(join(tmpdir(), 'bug-reports-'))) => {
+      dirs.push(home)
+      return {
+        home,
+        reports: new BugReportService({ installationHome: home, profileHome: home, settings: () => ({ enabled: true, anonymous: true }), fetch, env: {}, now: () => clock.now, ghToken: async () => ghToken })
+      }
+    }
+    const sent = Date.parse('2026-11-20T10:00:00Z')
+    const after = (minutes: number) => new Date(sent + minutes * 60_000).toISOString()
+
+    it('are listed as not on GitHub yet, then found by one search for all their signatures and kept with their number', async () => {
+      const gh = github()
+      const clock = { now: sent }
+      const { home, reports } = browserService(gh.fetch, clock)
+      const save = reports.draft({ kind: 'button', title: 'Save failed', message: 'disk full' })
+      const open = reports.draft({ kind: 'button', title: 'Open failed', message: 'no such file' })
+      expect(await reports.file(save)).toMatchObject({ status: 'browser' })
+      expect(await reports.file(open)).toMatchObject({ status: 'browser' })
+      expect((await reports.list()).map((report) => [report.title, report.number, report.state])).toEqual([['Save failed', undefined, 'pending'], ['Open failed', undefined, 'pending']])
+      expect(gh.searches).toHaveLength(1)
+      expect(gh.searches[0]).toContain(save.signature)
+      expect(gh.searches[0]).toContain(open.signature)
+
+      // Someone else's older issue with the same bug is not this report; the one submitted after it was sent is.
+      gh.issues.push({ number: 1500, state: 'open', body: `x <!-- ${save.signature} -->`, createdAt: after(-60 * 24) })
+      gh.issues.push({ number: 1901, state: 'open', body: `y <!-- ${save.signature} -->`, createdAt: after(2) })
+      gh.setDown(true)
+      expect((await reports.list()).every((report) => report.state === 'pending')).toBe(true)
+      gh.setDown(false)
+      const listed = await reports.list()
+      expect(listed.find((report) => report.title === 'Save failed')).toMatchObject({ number: 1901, url: 'https://gh/1901', state: 'open' })
+      expect(listed.find((report) => report.title === 'Open failed')).toMatchObject({ state: 'pending' })
+
+      // Stored: another start reads the number without searching for it, and revoking needs the person's gh sign-in.
+      const later = browserService(gh.fetch, clock, 'gh-token', home).reports
+      const searchesBefore = gh.searches.length
+      await later.revoke(1901)
+      expect(gh.issues.find((issue) => issue.number === 1901)!.state).toBe('closed')
+      expect(gh.searches.length).toBe(searchesBefore)
+
+      // One never found is dropped after a few days.
+      clock.now = sent + 4 * 24 * 60 * 60_000
+      expect((await reports.list()).map((report) => report.number)).toEqual([1901])
+    })
+
+    it('from before this computer remembered them are added from the person’s own issues when signed in with gh, and stay', async () => {
+      const gh = github([
+        { number: 1901, state: 'open', body: 'Mousse froze\n\n<!-- mousse-sig-0123456789ab -->', author: 'me', title: 'Mousse froze', createdAt: '2026-11-10T09:00:00Z' },
+        { number: 1999, state: 'closed', body: 'Pane blank\n\n<!-- mousse-sig-ba9876543210 -->', author: 'me', title: 'Pane blank', createdAt: '2026-11-15T09:00:00Z' },
+        { number: 2001, state: 'open', body: 'Not mine <!-- mousse-sig-ffffffffffff -->', author: 'someone', createdAt: '2026-11-16T09:00:00Z' },
+        { number: 2002, state: 'open', body: 'Mine, but no signature', author: 'me', createdAt: '2026-11-17T09:00:00Z' }
+      ])
+      const clock = { now: sent }
+      const signedIn = browserService(gh.fetch, clock, 'gh-token')
+      expect((await signedIn.reports.list()).map((report) => [report.number, report.title, report.signature, report.state])).toEqual([
+        [1999, 'Pane blank', 'mousse-sig-ba9876543210', 'closed'],
+        [1901, 'Mousse froze', 'mousse-sig-0123456789ab', 'open']
+      ])
+      const signedOut = browserService(gh.fetch, clock, undefined, signedIn.home).reports
+      expect((await signedOut.list()).map((report) => report.number)).toEqual([1999, 1901])
+    })
+
+    it('without gh, nothing searches for the person’s own issues', async () => {
+      const gh = github([{ number: 1901, state: 'open', body: '<!-- mousse-sig-0123456789ab -->', author: 'me' }])
+      const { reports } = browserService(gh.fetch, { now: sent })
+      expect(await reports.list()).toEqual([])
+      expect(gh.searches).toEqual([])
+    })
   })
 
   it('holds an agent’s draft until the person answers, and refuses one while reports are off', async () => {

@@ -30,6 +30,7 @@ const shortDate = (iso: string): string => {
 /** A report's state in one word. */
 export function reportState(report: FiledBugReportView): { label: string; key: string } {
   if (report.revokedAt) return { label: 'Revoked', key: 'revoked' }
+  if (report.state === 'pending') return { label: 'Not on GitHub yet', key: 'pending' }
   if (report.state === 'open') return { label: 'Open', key: 'open' }
   if (report.state === 'closed') return report.stateReason === 'not_planned' ? { label: 'Closed', key: 'closed' } : { label: 'Fixed', key: 'fixed' }
   return { label: 'Unknown', key: 'unknown' }
@@ -72,7 +73,7 @@ export function FiledReportsList() {
   const [revokeError, setRevokeError] = useState<string | null>(null)
 
   const revoke = async () => {
-    if (!confirm) return
+    if (confirm?.number === undefined) return
     setBusy(true)
     setRevokeError(null)
     try {
@@ -96,13 +97,15 @@ export function FiledReportsList() {
           <ul className="bug-report-rows" aria-label="Your reports">
             {reports.map((report) => {
               const state = reportState(report)
+              const found = report.number !== undefined
+              const open = found ? `Open #${report.number} on GitHub` : 'Search for it on GitHub'
               return (
-                <li key={report.number} className="bug-report-row">
-                  <a className="bug-report-row-title" href={report.url} target="_blank" rel="noopener noreferrer" title={`${report.title} · #${report.number}`}>{report.title}</a>
-                  <span className="bug-report-state" data-state={state.key}>{state.label}</span>
+                <li key={found ? report.number : `${report.signature}-${report.filedAt}`} className="bug-report-row">
+                  <a className="bug-report-row-title" href={report.url} target="_blank" rel="noopener noreferrer" title={found ? `${report.title} · #${report.number}` : report.title}>{report.title}</a>
+                  <span className="bug-report-state" data-state={state.key} title={found ? undefined : 'Sent from GitHub’s page. It shows here once GitHub has the issue.'}>{state.label}</span>
                   <span className="bug-report-row-meta" title={new Date(report.filedAt).toLocaleString()}>{shortDate(report.filedAt)}</span>
-                  <a className="settings-icon-btn" href={report.url} target="_blank" rel="noopener noreferrer" title={`Open #${report.number} on GitHub`} aria-label={`Open #${report.number} on GitHub`}><ArrowUpRight size={14} /></a>
-                  {!report.revokedAt && (
+                  <a className="settings-icon-btn" href={report.url} target="_blank" rel="noopener noreferrer" title={open} aria-label={open}><ArrowUpRight size={14} /></a>
+                  {found && !report.revokedAt && (
                     <button type="button" className="bug-report-action" onClick={() => { setRevokeError(null); setConfirm(report) }}>Revoke</button>
                   )}
                 </li>
