@@ -9,6 +9,7 @@ import { useBotsStore } from '../stores/botsStore'
 import { useChatsStore } from '../stores/chatsStore'
 import '../styles/computers.css'
 import { HIDDEN_BOT_NAME } from '../../shared/bots/personal/deviceAccess'
+import { remoteSubagentParentId } from '../../shared/threadLineage'
 
 /**
  * Top of a thread one of the owner's bots started ("use your threads"): one short line, "Started by <bot>", whose name
@@ -90,6 +91,10 @@ export function ThreadStartedByBar() {
   useEffect(() => {
     if (unlisted && !useBotsStore.getState().loaded) void useBotsStore.getState().refresh()
   }, [unlisted])
+  // A subagent an agent on another computer started is shown below that agent's thread, which the title bar's path names,
+  // as a subagent of this computer is: no bar, while that thread is listed here.
+  const belowParent = useAppStore((state) =>
+    Boolean(thread && remoteSubagentParentId(thread, (id) => state.threads.some((entry) => entry.id === id)) !== undefined))
   // The computer an agent that started this thread runs on, when it is another one.
   const launcherComputer = useComputer(thread?.node ? undefined : thread?.startedFrom?.agent ? thread.startedFrom.node : undefined)
   // Showing a hidden thread is asked of the computer that runs it (`threads.setHidden` is not routed).
@@ -103,7 +108,7 @@ export function ThreadStartedByBar() {
   if (bot) return <ThreadStartedByBarView name={bot.name} onOpenBot={() => void useChatsStore.getState().openBot(bot.id)} onShow={onShow} />
   if (!started) {
     // An agent on another computer started this thread of this computer (`startedFrom.agent`): its thread is there.
-    if (launcher === undefined && thread?.startedFrom?.agent && !thread.node)
+    if (launcher === undefined && thread?.startedFrom?.agent && !thread.node && !belowParent)
       return <ThreadStartedByAgentBarView title={thread.startedFrom.agent.title.trim() || 'Untitled thread'} computer={launcherComputer?.name ?? 'another computer'} onShow={onShow} />
     if (launcher === undefined) return null
     if (launcherTitle !== undefined) return <ThreadStartedByAgentBarView title={launcherTitle.trim() || 'Untitled thread'} onOpen={() => void openThread(launcher)} onShow={onShow} />

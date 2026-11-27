@@ -100,6 +100,23 @@ describe('a thread an agent keeps out of the sidebar', () => {
   })
 })
 
+describe('above a subagent an agent on another computer started here', () => {
+  const pc = 'nod_' + 'a'.repeat(26)
+  const subagent = { node: pc, agent: { thread: 'x', title: 'Yo', mode: 'auto' as const, subagent: true as const } }
+
+  it('shows no bar while its parent there is listed: the title bar\'s path names it, as for a subagent of this computer', () => {
+    useAppStore.setState({ threads: [thread(`${pc}:x`, 'Yo', { node: pc }), thread('far', 'Linux tests', { hidden: true, startedFrom: subagent })], activeThreadId: 'far' })
+    act(() => root.render(createElement(ThreadStartedByBar)))
+    expect(text()).toBe('')
+  })
+
+  it('still names the agent\'s thread and computer while that thread is not listed here', () => {
+    useAppStore.setState({ threads: [thread('far', 'Linux tests', { startedFrom: subagent })], activeThreadId: 'far' })
+    act(() => root.render(createElement(ThreadStartedByBar)))
+    expect(text()).toBe('Started by an agent in «Yo» on another computer')
+  })
+})
+
 describe('the launching thread\'s side panel', () => {
   it('lists the threads its agent started, here and on another computer, newest first, marking the hidden ones; its remote subagents stay in Nest', () => {
     const later = '2026-11-15T11:00:00.000Z'
