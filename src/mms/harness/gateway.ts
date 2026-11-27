@@ -48,6 +48,7 @@ import { acceptsMove, foldedInto, foldedTarget, type MoveResult } from '../../sh
 import { harnessAppError, onRetiredBareRoute, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
 import type { ProviderLoginEvent, ProviderUsage, UseLimitResetResponse } from '../../shared/providerAuth'
 import {
+  currentDefaultName,
   legacyProviderForInstance,
   nextEntryName,
   piProviderIdOf,
@@ -2945,7 +2946,7 @@ export class Harness implements HarnessGateway {
   private configView(record: InstanceRecord): InstanceConfigView {
     const source = record.config
     return {
-      ...(record.config.displayName ? { displayName: record.config.displayName } : {}),
+      ...(record.config.displayName ? { displayName: currentDefaultName(record.entry.driver, record.config.displayName) } : {}),
       home: record.env.home ? 'private' : 'default',
       ...(record.env.home ? { homePath: record.env.home } : {}),
       ...(source.binaryPath ? { binaryPath: source.binaryPath } : {}),
@@ -2987,7 +2988,7 @@ export class Harness implements HarnessGateway {
   /** The name an entry shows (`displayName`), read from its stored config without building its runtime. */
   private storedName(instanceId: string, entry: ProviderInstanceConfig): string {
     const name = entry.config?.displayName
-    if (typeof name === 'string' && name.trim()) return name.trim()
+    if (typeof name === 'string' && name.trim()) return currentDefaultName(entry.driver, name.trim())
     const driver = this.drivers.get(entry.driver)
     if (!driver || entry.driver === 'pi') return instanceId
     if (isBuiltInInstance(instanceId, entry.driver)) return driver.label
@@ -2995,7 +2996,7 @@ export class Harness implements HarnessGateway {
   }
 
   private displayName(record: InstanceRecord): string {
-    if (record.config.displayName) return record.config.displayName
+    if (record.config.displayName) return currentDefaultName(record.entry.driver, record.config.displayName)
     if (record.entry.driver === 'pi') {
       const providerId = piProviderIdOf(record.instanceId) ?? record.instanceId
       return this.options.piDisplayName?.(providerId) ?? providerId

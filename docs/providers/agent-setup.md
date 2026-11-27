@@ -226,7 +226,7 @@ with it, see [Claude's client name](claude-native-proxy.md).
 
 ## Codex, a second account
 
-- Add provider → ChatGPT subscription → Use my Codex CLI, once the user's own Codex is added, adds
+- Add provider → Codex → Use my Codex CLI, once the user's own Codex is added, adds
   another account on the same `codex` with a home of its own. (A managed entry, which downloads its
   own Codex and signs in with ChatGPT inside Mousse, is a separate setup and is unchanged.) An
   added entry may also be put on the user's own home; it then runs as the built-in does, with the

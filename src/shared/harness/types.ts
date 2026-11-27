@@ -529,7 +529,7 @@ export interface InstanceConfigPatch {
 export const RESERVED_AGENT_IDS: ReadonlySet<string> = new Set(['codex'])
 
 export function reservedAgentMessage(agentId: string): string {
-  return `The registry agent "${agentId}" cannot be added: Mousse runs it as its own entry. Add the ChatGPT subscription provider instead.`
+  return `The registry agent "${agentId}" cannot be added: Mousse runs it as its own entry. Add the Codex provider instead.`
 }
 
 /**
