@@ -41,6 +41,23 @@ const STATUS_FORMS = [
 /** What Codex adds after the provider's message: the URL it called and the request id. */
 const TRAILING_CONTEXT = /(?:,\s*(?:url|request id|cf-ray):\s*\S+)+\s*$/i
 
+/**
+ * OpenAI's error envelope with the status inside it, `{"error": {…}, "status": 400}`: how Codex reports a refusal of
+ * `/v1/responses` it names no status for (`codexErrorInfo: "other"`). The body is the envelope, whose `error.message`
+ * the transcript shows.
+ */
+function readStatusEnvelope(text: string): { status: number; body: string } | undefined {
+  if (!text.startsWith('{')) return undefined
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown; status?: unknown }
+    const status = parsed?.status
+    if (parsed?.error === undefined || typeof status !== 'number' || !Number.isInteger(status) || status < 400 || status > 599) return undefined
+    return { status, body: text }
+  } catch {
+    return undefined
+  }
+}
+
 /** The status a runtime's or SDK's error text starts with, and the provider's text after it. */
 export function readProviderStatus(text: string): { status: number; body: string } | undefined {
   const trimmed = text.trim()
@@ -48,6 +65,8 @@ export function readProviderStatus(text: string): { status: number; body: string
     const match = form.exec(trimmed)
     if (match) return { status: Number(match[1]), body: match[2]!.replace(TRAILING_CONTEXT, '').trim() }
   }
+  const envelope = readStatusEnvelope(trimmed)
+  if (envelope) return envelope
   return undefined
 }
 
