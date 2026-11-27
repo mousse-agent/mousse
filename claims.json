@@ -102,20 +102,6 @@
       "expiresAt": "2026-11-27T12:40:03.362Z"
     },
     {
-      "task": "remove-plan-mode",
-      "session": "Avarnics-Mac-mini.local-397193",
-      "machine": "Avarnics-Mac-mini.local",
-      "branch": "remove-plan-mode",
-      "paths": [
-        "src/mms/harness",
-        "src/mms/run/mcp",
-        "src/mms/orchestrator",
-        "src/shared"
-      ],
-      "claimedAt": "2026-11-27T13:19:30.426Z",
-      "expiresAt": "2026-11-27T15:19:30.426Z"
-    },
-    {
       "task": "s7d1-thread-tool-renames",
       "session": "LAPTOP-HIEROJK7-003c84",
       "machine": "LAPTOP-HIEROJK7",
