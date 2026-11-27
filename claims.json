@@ -88,6 +88,17 @@
       "expiresAt": "2026-11-26T10:08:22.887Z"
     },
     {
+      "task": "remote-open-off-event-loop",
+      "session": "Animatrix-8d6292",
+      "machine": "Animatrix",
+      "branch": "remote-open-off-event-loop",
+      "paths": [
+        "src/mms/bridge/remote/ThreadStreamAdapter.ts"
+      ],
+      "claimedAt": "2026-11-27T05:26:59.387Z",
+      "expiresAt": "2026-11-27T07:26:59.387Z"
+    },
+    {
       "task": "remote-provisional-titles-and-own-drafts",
       "session": "Avarnics-Mac-mini.local-ae51d2",
       "machine": "Avarnics-Mac-mini.local",
