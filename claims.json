@@ -87,6 +87,20 @@
       "expiresAt": "2026-11-27T12:11:45.533Z"
     },
     {
+      "task": "devices-list-detail",
+      "session": "Animatrix-deaf31",
+      "machine": "Animatrix",
+      "branch": "devices-list-detail",
+      "paths": [
+        "src/renderer/components/netEngine/EngineDevicesSection.tsx",
+        "src/renderer/components/netEngine/engine.css",
+        "src/renderer/components/netEngine/engineRows.ts",
+        "tests/renderer/engineDevicesSection.test.ts"
+      ],
+      "claimedAt": "2026-11-27T17:09:25.265Z",
+      "expiresAt": "2026-11-27T19:09:25.265Z"
+    },
+    {
       "task": "issue-2004-thread-starter-sync",
       "session": "LAPTOP-HIEROJK7-ae6a89",
       "machine": "LAPTOP-HIEROJK7",
