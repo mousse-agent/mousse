@@ -1,4 +1,4 @@
-import { memo, useRef, useState, type ReactNode } from 'react'
+import { memo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import type { AppletReference } from '../../../shared/applets'
 import { useAppStore } from '../../stores/appStore'
 import './applets.css'
@@ -64,8 +64,17 @@ export function AppletConversationInput({ text, onAdd, onDismiss }: { text: stri
 }
 
 /**
+ * The applet's page, drawn in the preview by a `<webview>`. The address is minted by the main process for this mount
+ * and loads once; main gives the page its own sandboxed process and session, so no generated code enters this DOM.
+ * Keyed by address: a new page is a new webview, never a navigation of the old one.
+ */
+export function AppletFrame({ src, webview }: { src: string | null; webview: RefObject<HTMLWebViewElement | null> }) {
+  return src ? <webview key={src} ref={webview} src={src} className="mousse-applet-webview" /> : null
+}
+
+/**
  * An applet in the transcript: only its content at its own height, under a quiet name that opens it in the side
- * panel. Native guest content is mounted only over the measured preview; no generated code enters this DOM.
+ * panel.
  * `conversation`: it shows outside the open thread (a bot's chat), from that thread and with that composer, and `onOpen`
  * opens it in that place's own view.
  */
@@ -78,16 +87,7 @@ export const AppletCard = memo(function AppletCard({ reference, conversation, on
   const threadId = conversation ? conversation.threadId : hostThreadId === activeThreadId ? activeThreadId : null
   const preview = useRef<HTMLDivElement>(null)
   const applet = useAppletRuntime(preview, { host: 'transcript', threadId, profileId, reference, enabled: true, restart: 0 })
-  const { error, scrollImage, liveArea, conversationInput, setConversationInput } = applet
-  // The cached frame shows only where the live view is not drawn (while scrolling, or a strip cut away for a hover
-  // label): under the see-through live view its old pixels would show through as a second, outdated copy.
-  const frameClip = liveArea
-    ? (() => {
-        const { x, y, width, height } = liveArea
-        const right = x + width, bottom = y + height
-        return `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${x}px ${y}px, ${right}px ${y}px, ${right}px ${bottom}px, ${x}px ${bottom}px, ${x}px ${y}px)`
-      })()
-    : undefined
+  const { error, conversationInput, setConversationInput } = applet
 
   const openInPanel = conversation ? onOpen : threadId ? () => useAppStore.getState().openAppletDocument(threadId, reference) : undefined
   return (
@@ -103,9 +103,7 @@ export const AppletCard = memo(function AppletCard({ reference, conversation, on
         style={{ height: error && !applet.ready ? 0 : applet.height ?? INITIAL_HEIGHT }}
         aria-label="Applet preview"
       >
-        {scrollImage && (
-          <img className="mousse-applet-scroll-frame" src={scrollImage} alt="" aria-hidden="true" style={frameClip ? { clipPath: frameClip } : undefined} />
-        )}
+        <AppletFrame src={applet.src} webview={applet.webview} />
       </div>
       {conversationInput && threadId && (
         <AppletConversationInput

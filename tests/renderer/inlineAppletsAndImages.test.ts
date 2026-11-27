@@ -34,13 +34,11 @@ beforeEach(() => {
   vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} })
   ;(window as unknown as { mousse: unknown }).mousse = {
     applets: {
-      // The native guest never mounts here: these tests cover the DOM around it.
+      // The applet's page never mounts here: these tests cover the DOM around it.
       mount: vi.fn(() => new Promise(() => {})),
       unmount: vi.fn(async () => {}),
-      update: vi.fn(async () => {}),
+      visible: vi.fn(async () => {}),
       appearance: vi.fn(async () => {}),
-      snapshot: vi.fn(async () => ({})),
-      suspend: vi.fn(async () => {}),
       onEvent: vi.fn(() => () => {}),
       get: vi.fn(async () => ({ source: { html: '<p>hi</p>', css: '', js: '' } })),
       export: vi.fn(async () => {})

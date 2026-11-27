@@ -1,24 +1,37 @@
 import { exportAppletHtml } from '../../shared/appletExport'
-import { BrowserWindow, dialog, type IpcMainInvokeEvent } from 'electron'
+import { BrowserWindow, dialog, type IpcMainInvokeEvent, type WebContents, type WebPreferences } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { writeFile } from 'node:fs/promises'
 import type { GuiMmsController } from '../mms/GuiMmsController'
 import type { AppletBundle } from '../../shared/applets'
-import type { AppletIdentity, AppletBounds, AppletUiEvent } from '../../shared/appletRuntime'
+import type { AppletIdentity, AppletUiEvent } from '../../shared/appletRuntime'
 import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { AppletRuntimeManager } from './AppletRuntimeManager'
 import { logWarn } from '../../mms/log/diag'
 
 type Register = (channel:string, handler:(event:IpcMainInvokeEvent, input:unknown)=>unknown)=>void
 interface Owner {manager:AppletRuntimeManager;window:BrowserWindow;profileId:string;epoch:number;entries:Map<string,AppletIdentity>}
+/** Each window's applets, by the window's web contents id. */
+const owners=new Map<number,Owner>()
+
+/**
+ * `will-attach-webview` for a webview that asks for an applet page: false refuses it. Only the address the window's
+ * current applet manager minted attaches, once, into that applet's own session (see AppletRuntimeManager.attach).
+ */
+export function attachAppletWebview(embedder:WebContents, webPreferences:WebPreferences, params:Record<string,string>):boolean {
+  return owners.get(embedder.id)?.manager.attach(webPreferences,params)??false
+}
+/** `did-attach-webview`: true when the guest is an applet page, which the browser must then leave alone. */
+export function adoptAppletWebview(embedder:WebContents, guest:WebContents):boolean {
+  return owners.get(embedder.id)?.manager.adopt(guest)??false
+}
+
 export function registerAppletIpc(register:Register, gui:GuiMmsController, allowedWindows:()=>Array<BrowserWindow|null>):void {
-  const owners=new Map<number,Owner>()
   const watchedWindows=new WeakSet<BrowserWindow>()
   gui.on('window-profile-changing', ({senderId}:{senderId:number})=>{const own=owners.get(senderId);own?.manager.destroy();owners.delete(senderId)})
   const object=(value:unknown):Record<string,unknown>=>{if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('Invalid applet request.');return value as Record<string,unknown>}
   const string=(value:unknown):string=>{if(typeof value!=='string'||!value||value.length>160)throw new Error('Invalid applet identifier.');return value}
   const identity=(raw:Record<string,unknown>):AppletIdentity=>({threadId:string(raw.threadId),appletId:string(raw.appletId),revisionId:string(raw.revisionId)})
-  const rect=(value:unknown):AppletBounds=>{const r=object(value);if(['x','y','width','height'].some(key=>typeof r[key]!=='number'||!Number.isFinite(r[key])||Math.abs(r[key] as number)>8192)||Number(r.width)<0||Number(r.height)<0)throw new Error('Invalid applet bounds.');return{x:Number(r.x),y:Number(r.y),width:Number(r.width),height:Number(r.height)}}
   function owner(event:IpcMainInvokeEvent):Owner {
     const win=allowedWindows().find(candidate=>candidate&&!candidate.isDestroyed()&&candidate.webContents===event.sender)
     if(!win||event.senderFrame!==event.sender.mainFrame)throw new Error('Applet access requires the owning Mousse window.')
@@ -40,8 +53,8 @@ export function registerAppletIpc(register:Register, gui:GuiMmsController, allow
         void gui.runWithSender(win.webContents,()=>gui.request('applets.state.save',{...entry,profileId:ownProfile(value),state:eventData.payload})).catch(error=>logWarn('applets','saving applet state failed',error,{appletId:entry.appletId}))
         return
       }
-      const result:AppletUiEvent={runtimeId:eventData.runtimeId,type:eventData.type==='conversation-input'?'conversation-input':eventData.type,
-        ...(eventData.type==='resize'?{height:Number(eventData.payload)}:{}),...(eventData.type==='error'?{message:String(eventData.payload)}:{}),...(eventData.type==='conversation-input'?{text:String(eventData.payload)}:{})}
+      const result:AppletUiEvent={runtimeId:eventData.runtimeId,type:eventData.type,
+        ...(eventData.type==='resize'?{height:Number(eventData.payload)}:{}),...(eventData.type==='error'?{message:String(eventData.payload)}:{}),...(eventData.type==='conversation-input'?{text:String(eventData.payload)}:{}),...(eventData.type==='wheel'?{deltaY:Number(eventData.payload)}:{})}
       win.webContents.send('applets:event',result)
     })
     owners.set(event.sender.id,value)
@@ -49,7 +62,7 @@ export function registerAppletIpc(register:Register, gui:GuiMmsController, allow
       watchedWindows.add(win)
       const senderId=event.sender.id
       win.once('closed',()=>{owners.get(senderId)?.manager.destroy();owners.delete(senderId)})
-      // Backstop: a reload, navigation or crashed page has no hosts left, so no applet view may stay drawn over it.
+      // Backstop: a reload, navigation or crashed page has no applet webviews left, so none of their pages may run on.
       // The next applet request from the new page starts a fresh manager.
       const pageGone=()=>{owners.get(senderId)?.manager.destroy();owners.delete(senderId)}
       win.webContents.on('did-start-navigation',(details:{isMainFrame:boolean;isSameDocument:boolean})=>{if(details.isMainFrame&&!details.isSameDocument)pageGone()})
@@ -60,15 +73,14 @@ export function registerAppletIpc(register:Register, gui:GuiMmsController, allow
   const ownProfile = (own:Owner) => own.profileId
   register('applets:get',async(event,input)=>{const own=owner(event);const result=await gui.request('applets.get',{...identity(object(input)),profileId:own.profileId});if(owners.get(event.sender.id)!==own)throw new Error('Profile changed.');return result})
   register('applets:mount',async(event,input)=>{
-    const own=owner(event),raw=object(input),id=identity(raw),bounds=rect(raw.bounds),clip=rect(raw.clip),appearance=raw.appearance===undefined?undefined:validateAppletAppearance(raw.appearance)
+    const own=owner(event),raw=object(input),id=identity(raw),appearance=raw.appearance===undefined?undefined:validateAppletAppearance(raw.appearance)
     const bundle=await gui.request<AppletBundle>('applets.get',{...id,profileId:own.profileId})
     if(bundle.sourceHash!==raw.sourceHash)throw new Error('Applet source changed. Reload the thread.')
     const saved=await gui.request<{state:unknown}>('applets.state.get',{...id,profileId:own.profileId})
     if(owners.get(event.sender.id)!==own||gui.getWindowBindingForSender(event.sender.id)?.profileId!==own.profileId||gui.getWindowBindingForSender(event.sender.id)?.epoch!==own.epoch)throw new Error('Profile changed while opening applet.')
     const runtimeId=randomUUID();own.entries.set(runtimeId,id)
-    try{await own.manager.mount({runtimeId,threadId:id.threadId,revisionId:id.revisionId,source:bundle.source,state:saved.state,bounds,clip,appearance})}
+    try{return{runtimeId,src:own.manager.mount({runtimeId,threadId:id.threadId,revisionId:id.revisionId,source:bundle.source,state:saved.state,appearance})}}
     catch(error){own.entries.delete(runtimeId);throw error}
-    return{runtimeId}
   })
   register('applets:appearance',async(event,input)=>{
     const own=owner(event),raw=object(input),runtimeId=string(raw.runtimeId)
@@ -76,23 +88,11 @@ export function registerAppletIpc(register:Register, gui:GuiMmsController, allow
     await own.manager.appearance(runtimeId,validateAppletAppearance(raw.appearance))
     if(owners.get(event.sender.id)!==own)throw new Error('Profile changed while updating appearance.')
   })
-  register('applets:snapshot',async(event,input)=>{
-    const own=owner(event),runtimeId=string(object(input).runtimeId)
-    if(!own.entries.has(runtimeId))throw new Error('Applet runtime is not owned by this window.')
-    const image=await own.manager.snapshot(runtimeId)
-    if(owners.get(event.sender.id)!==own)throw new Error('Profile changed while scrolling applet.')
-    return {image}
-  })
-  register('applets:suspend',(event,input)=>{
-    const own=owner(event),runtimeId=string(object(input).runtimeId)
-    if(!own.entries.has(runtimeId))throw new Error('Applet runtime is not owned by this window.')
-    own.manager.suspend(runtimeId)
-  })
-  register('applets:update',(event,input)=>{
+  register('applets:visible',(event,input)=>{
     const own=owner(event),raw=object(input),runtimeId=string(raw.runtimeId)
     if(!own.entries.has(runtimeId))throw new Error('Applet runtime is not owned by this window.')
-    if(raw.visible===false){own.manager.park(runtimeId);return}
-    own.manager.layout(runtimeId,rect(raw.bounds),rect(raw.clip))
+    if(typeof raw.visible!=='boolean')throw new Error('Invalid applet request.')
+    own.manager.setVisible(runtimeId,raw.visible)
   })
   register('applets:unmount',(event,input)=>{
     const own=owner(event),runtimeId=string(object(input).runtimeId)

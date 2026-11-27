@@ -4,15 +4,16 @@ import { exitWithParent, keepWindowsOffScreen } from '../fullShellWindow.mjs'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { AppletRuntimeManager, type AppletRuntimeEvent } from '../../../src/main/applets/AppletRuntimeManager'
+import { hostAppletWebviews } from '../appletWebviews'
 
 /**
- * Real applet pages in real native views. The fixture plays the host: whenever a page reports a height, its frame is
+ * Real applet pages in real webviews. The fixture plays the host: whenever a page reports a height, its webview is
  * resized to that height, as the transcript card does. Each case records every height its page reported.
  */
 const directory = process.env.MOUSSE_APPLET_HEIGHT_DIRECTORY!
 app.setPath('userData', join(directory, 'electron-user-data'))
 runWithoutGpu({ app, BrowserWindow })
-// A native view lays out only in a shown window: shown off-screen, transparent and unfocusable.
+// A page lays out only in a shown window: shown off-screen, transparent and unfocusable.
 keepWindowsOffScreen()
 exitWithParent()
 app.on('window-all-closed', () => {})
@@ -41,33 +42,30 @@ const CASES: Record<string, { html: string; css?: string; js?: string }> = {
 async function main() {
   await app.whenReady()
   app.dock?.hide()
-  const window = new BrowserWindow({ show: false, width: 900, height: 700, useContentSize: true, webPreferences: { backgroundThrottling: false, contextIsolation: true, nodeIntegration: false, sandbox: true } })
+  const window = new BrowserWindow({ show: false, width: 900, height: 700, useContentSize: true, webPreferences: { backgroundThrottling: false, contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: true } })
   await window.loadURL('data:text/html,<!doctype html><title>host</title>')
   window.show()
   const reports = new Map<string, number[]>()
   const errors: string[] = []
-  const clip = { x: 0, y: 0, width: 900, height: 8000 }
   const frame = (height: number) => ({ x: 0, y: 0, width: 600, height })
-  let manager: AppletRuntimeManager
   const onEvent = (event: AppletRuntimeEvent) => {
     if (event.type === 'error') errors.push(`${event.runtimeId}: ${String(event.payload)}`)
     if (event.type !== 'resize') return
     reports.get(event.runtimeId)!.push(event.payload as number)
-    manager.layout(event.runtimeId, frame(event.payload as number), clip)
+    void host.resize(event.runtimeId, event.payload as number)
   }
-  manager = new AppletRuntimeManager(window, onEvent)
+  const manager = new AppletRuntimeManager(window, onEvent)
+  const host = hostAppletWebviews(window, () => manager)
   const result: Record<string, number[]> = {}
   try {
     for (const [name, page] of Object.entries(CASES)) {
       reports.set(name, [])
-      await manager.mount({
+      await host.place(name, manager.mount({
         runtimeId: name,
         threadId: 'thread',
         revisionId: `rev-${name}`,
-        source: { html: page.html, css: page.css ?? '', js: page.js ?? '' },
-        bounds: frame(320),
-        clip
-      })
+        source: { html: page.html, css: page.css ?? '', js: page.js ?? '' }
+      }), frame(320))
       // Wait until the page has gone quiet: nothing reported for a second, and its scripted changes are done.
       let seen = -1
       for (let quiet = 0, waited = 0; quiet < 10 && waited < 60; waited++) {
@@ -79,16 +77,18 @@ async function main() {
       if (name === 'changes') await delay(1500)
       result[name] = reports.get(name)!
       manager.unmount(name)
+      await host.remove(name)
     }
     // The page itself is unpainted in the app, so the chat behind it shows through; what the applet paints stays.
     const backdrop: Record<string, number[]> = {}
     for (const [name, html] of Object.entries({ plain: '<p>Plain</p>', painted: '<div style="height:200px;background:#123456">Painted</div>' })) {
-      await manager.mount({ runtimeId: name, threadId: 'thread', revisionId: `rev-${name}`, source: { html, css: '', js: '' }, bounds: frame(200), clip })
+      await host.place(name, manager.mount({ runtimeId: name, threadId: 'thread', revisionId: `rev-${name}`, source: { html, css: '', js: '' } }), frame(200))
       let image = await manager.capture(name)
       for (let tries = 0; tries < 20 && (image.isEmpty() || image.getSize().height < 150); tries++) { await delay(100); image = await manager.capture(name) }
       const size = image.getSize(), bitmap = image.toBitmap()
       backdrop[name] = Array.from(bitmap.subarray(((size.height - 20) * size.width + size.width - 20) * 4, ((size.height - 20) * size.width + size.width - 20) * 4 + 4))
       manager.unmount(name)
+      await host.remove(name)
     }
     writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ reports: result, errors, backdrop }))
   } finally {

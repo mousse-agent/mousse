@@ -1,11 +1,4 @@
-import {
-  session,
-  View,
-  WebContentsView,
-  type BrowserWindow,
-  type Rectangle,
-  type Session
-} from 'electron'
+import { session, type BrowserWindow, type Session, type WebContents, type WebPreferences } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { markWebContentsRole } from '../diagnostics/webContentsRoles'
 import type { AppletAppearance } from '../../shared/appletAppearance'
@@ -14,7 +7,14 @@ import { APPLET_EVENT_PREFIX, APPLET_APPLY_APPEARANCE, appletDocument, type Appl
 
 /** How long a shown applet may leave a liveness probe unanswered before it is stopped. */
 export const APPLET_UNRESPONSIVE_MS = 5000
+/** Every applet page address; the rest of the address is minted per mount and is valid for one page only. */
+export const APPLET_DOCUMENT_PREFIX = 'mousse-applet://runtime/'
 const WHEEL_PREFIX = `${APPLET_EVENT_PREFIX}{"type":"wheel"`
+
+/** A `<webview>` that asks for an applet page; such a webview never takes the browser's path. */
+export function isAppletWebviewSource(src: unknown): boolean {
+  return typeof src === 'string' && /^mousse-applet:/i.test(src.trim())
+}
 
 // Fail closed between profile managers without retaining a former owner.
 const denyRequests: Parameters<Session['webRequest']['onBeforeRequest']>[0] = (
@@ -35,20 +35,20 @@ export interface AppletMount {
   source: AppletSource
   state?: unknown
   appearance?: AppletAppearance
-  bounds: Rectangle
-  clip: Rectangle
 }
 export interface AppletRuntimeEvent {
   runtimeId: string
   threadId: string
   revisionId: string
-  type: 'ready' | 'resize' | 'state' | 'error' | 'conversation-input' | 'visual-changed' | 'released'
+  type: 'ready' | 'resize' | 'state' | 'error' | 'conversation-input' | 'wheel' | 'escape' | 'released'
   payload: unknown
 }
 interface Runtime {
   mount: AppletMount
-  container: View
-  guest: WebContentsView
+  /** The page, once the window's `<webview>` for this address attached. */
+  guest: WebContents | null
+  /** The address was claimed by a `<webview>`; it is never valid for a second one. */
+  claimed: boolean
   messages: number
   epoch: number
   slot: number
@@ -59,13 +59,17 @@ interface Runtime {
   probing: boolean
   wheels: number
   wheelEpoch: number
+  /** False while the applet's card is out of sight; such an applet is not watched and may be released for a new one. */
   visible: boolean
-  /** The part of the owner window the applet shows in, in device-independent pixels. */
-  shown: Rectangle
   parkedAt?: number
 }
 
-/** All callers must authenticate the owner renderer and retrieve source from durable storage. */
+/**
+ * The applets of one window. Each runs in a `<webview>` the window's page draws, so the page's own scrolling, clipping
+ * and layering place it; this class owns everything else about the page: its isolated session, its one document, what
+ * it may do, its liveness and its end. All callers must authenticate the owner renderer and retrieve source from
+ * durable storage.
+ */
 export class AppletRuntimeManager {
   private readonly runtimes = new Map<string, Runtime>()
   private readonly documents = new Map<string, string>()
@@ -89,7 +93,7 @@ export class AppletRuntimeManager {
     this.watchdog = setInterval(() => {
       const now = Date.now()
       for (const runtime of [...this.runtimes.values()]) {
-        if (!runtime.visible || owner.isDestroyed() || !owner.isVisible() || owner.isMinimized()) {
+        if (!runtime.guest || !runtime.visible || owner.isDestroyed() || !owner.isVisible() || owner.isMinimized()) {
           runtime.heartbeat = now
           continue
         }
@@ -99,14 +103,15 @@ export class AppletRuntimeManager {
             'error',
             'The applet stopped responding and was stopped. Restart it to try again.'
           )
-          this.unmount(runtime.mount.runtimeId)
+          this.unmount(runtime.mount.runtimeId, { crash: true })
         } else this.probe(runtime)
       }
     }, 500)
     this.watchdog.unref()
   }
 
-  async mount(input: AppletMount): Promise<void> {
+  /** Prepares an applet's page and returns the one address its `<webview>` may load. */
+  mount(input: AppletMount): string {
     if (this.destroyed) throw new Error('Applet manager is closed')
     this.unmount(input.runtimeId)
     if (this.owner.isDestroyed()) throw new Error('Applet owner is closed')
@@ -120,56 +125,8 @@ export class AppletRuntimeManager {
     const slot = [0, 1, 2].find(
       (index) => ![...this.runtimes.values()].some((runtime) => runtime.slot === index)
     )!
-    // Electron retains partition sessions. Reuse three isolated slots instead of
-    // allocating an unbounded number as the user scrolls through a transcript.
-    let isolated = this.sessions.get(slot)
-    if (!isolated) {
-      const ownsDocument = (url: string) =>
-        [...this.runtimes.values()].some(
-          (runtime) => runtime.slot === slot && runtime.documentUrl === url
-        )
-      isolated = session.fromPartition(`${this.partitionPrefix}-${slot}`, { cache: false })
-      // A new profile manager reuses the owner's bounded ephemeral partitions.
-      // The previous manager detached its handlers when it was destroyed.
-      isolated.setPermissionRequestHandler((_wc, _permission, callback) => callback(false))
-      isolated.setPermissionCheckHandler(() => false)
-      isolated.setDevicePermissionHandler(() => false)
-      isolated.webRequest.onBeforeRequest((details, callback) =>
-        callback({ cancel: !details.url.startsWith('data:') && !ownsDocument(details.url) })
-      )
-      isolated.protocol.handle(
-        'mousse-applet',
-        (request) =>
-          new Response(ownsDocument(request.url) ? this.documents.get(request.url) : '', {
-            status: ownsDocument(request.url) ? 200 : 403,
-            headers: {
-              'Content-Type': 'text/html; charset=utf-8',
-              'X-DNS-Prefetch-Control': 'off',
-              'Content-Security-Policy': 'sandbox allow-scripts'
-            }
-          })
-      )
-      isolated.on('will-download', (event) => event.preventDefault())
-      this.sessions.set(slot, isolated)
-    }
-    const guest = new WebContentsView({
-      webPreferences: {
-        session: isolated,
-        sandbox: true,
-        contextIsolation: true,
-        nodeIntegration: false,
-        nodeIntegrationInSubFrames: false,
-        webSecurity: true,
-        spellcheck: false,
-        backgroundThrottling: true
-      }
-    })
-    guest.setBackgroundColor('#00000000')
-    markWebContentsRole(guest.webContents, 'applet', () => guest.getBounds(), () => guest.getVisible())
-    const container = new View()
-    container.addChildView(guest)
-    this.owner.contentView.addChildView(container)
-    const documentUrl = `mousse-applet://runtime/${randomUUID()}`
+    this.isolatedSession(slot)
+    const documentUrl = `${APPLET_DOCUMENT_PREFIX}${randomUUID()}`
     this.documents.set(
       documentUrl,
       appletDocument(input.source, input.state, input.appearance, [
@@ -178,10 +135,10 @@ export class AppletRuntimeManager {
           ?.values() ?? [])
       ], { transparent: true })
     )
-    const runtime: Runtime = {
+    this.runtimes.set(input.runtimeId, {
       mount: input,
-      container,
-      guest,
+      guest: null,
+      claimed: false,
       messages: 0,
       epoch: Date.now(),
       slot,
@@ -190,164 +147,131 @@ export class AppletRuntimeManager {
       probing: false,
       wheels: 0,
       wheelEpoch: 0,
-      visible: false,
-      shown: { x: 0, y: 0, width: 0, height: 0 }
-    }
-    this.runtimes.set(input.runtimeId, runtime)
-    const wc = guest.webContents
-    wc.setWindowOpenHandler(() => ({ action: 'deny' }))
-    wc.on('will-navigate', (event) => event.preventDefault())
-    wc.on('will-frame-navigate', (event) => event.preventDefault())
-    wc.on('will-attach-webview', (event) => event.preventDefault())
-    wc.on('before-input-event', (event, input) => {
+      visible: true
+    })
+    return documentUrl
+  }
+
+  /**
+   * Decides a `<webview>` that asks for an applet page (`will-attach-webview`). Only an address this manager minted
+   * and no webview has claimed attaches, into that applet's own session with fixed preferences; the page supplies no
+   * partition or preload of its own. Returns false to refuse the attach.
+   */
+  attach(webPreferences: WebPreferences, params: Record<string, string>): boolean {
+    if (this.destroyed || this.owner.isDestroyed()) return false
+    const runtime = [...this.runtimes.values()].find((item) => item.documentUrl === params.src)
+    if (!runtime || runtime.claimed) return false
+    if (webPreferences.partition || webPreferences.preload || params.partition || params.preload) return false
+    runtime.claimed = true
+    for (const key of Object.keys(webPreferences) as Array<keyof WebPreferences>)
+      if (!SAFE_INHERITED.has(key)) delete webPreferences[key]
+    Object.assign(webPreferences, {
+      partition: this.partition(runtime.slot),
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      nodeIntegrationInSubFrames: false,
+      nodeIntegrationInWorker: false,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      webviewTag: false,
+      plugins: false,
+      experimentalFeatures: false,
+      javascript: true,
+      images: true,
+      webgl: true,
+      spellcheck: false,
+      navigateOnDragDrop: false,
+      autoplayPolicy: 'user-gesture-required',
+      disableDialogs: true,
+      backgroundThrottling: true,
+      transparent: true,
+      disablePopups: true
+    } as WebPreferences)
+    return true
+  }
+
+  /** Takes the page a claimed `<webview>` attached (`did-attach-webview`). False when it is not an applet's. */
+  adopt(guest: WebContents): boolean {
+    const runtime = [...this.runtimes.values()].find(
+      (item) => item.claimed && !item.guest && this.sessions.get(item.slot) === guest.session
+    )
+    if (!runtime) return false
+    runtime.guest = guest
+    runtime.heartbeat = Date.now()
+    const { runtimeId } = runtime.mount
+    markWebContentsRole(guest, 'applet')
+    guest.setWindowOpenHandler(() => ({ action: 'deny' }))
+    guest.on('will-navigate', (event) => event.preventDefault())
+    guest.on('will-frame-navigate', (event) => event.preventDefault())
+    guest.on('will-redirect', (event) => event.preventDefault())
+    guest.on('will-attach-webview', (event) => event.preventDefault())
+    guest.on('before-input-event', (event, input) => {
       if (input.type === 'keyDown' && input.key === 'Escape' && !this.owner.isDestroyed()) {
         event.preventDefault()
         this.owner.webContents.focus()
+        this.notify(runtime, 'escape', null)
       }
     })
-    wc.on('console-message', (event) => this.receive(runtime, event.message))
-    wc.on('render-process-gone', () => {
+    guest.on('console-message', (event) => this.receive(runtime, event.message))
+    guest.on('render-process-gone', () => {
       this.notify(runtime, 'error', 'The applet stopped. Restart it to try again.')
-      if (this.runtimes.get(input.runtimeId) === runtime) this.unmount(input.runtimeId)
+      if (this.runtimes.get(runtimeId) === runtime) this.unmount(runtimeId)
     })
-    wc.on('unresponsive', () =>
+    guest.on('unresponsive', () =>
       this.notify(runtime, 'error', 'The applet is not responding. Restart it to try again.')
     )
-    try {
-      this.layout(input.runtimeId, input.bounds, input.clip)
-      await wc.loadURL(documentUrl)
-    } catch (error) {
-      if (this.runtimes.get(input.runtimeId) === runtime) this.unmount(input.runtimeId)
-      throw error
-    }
+    // The page removed or moved the webview: this page is gone for good, and a new one needs a new address.
+    guest.once('destroyed', () => {
+      if (this.runtimes.get(runtimeId) !== runtime) return
+      this.notify(runtime, 'released', null)
+      this.unmount(runtimeId)
+    })
+    return true
   }
 
-  layout(runtimeId: string, bounds: Rectangle, clip: Rectangle): void {
+  /** The applet's card left the screen (it may be released for a newer one) or came back. */
+  setVisible(runtimeId: string, visible: boolean): void {
     const runtime = this.runtimes.get(runtimeId)
-    if (!runtime || this.owner.isDestroyed()) return
-    for (const rect of [bounds, clip]) {
-      if (
-        ![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) ||
-        rect.width < 0 ||
-        rect.height < 0 ||
-        rect.width > 8192 ||
-        rect.height > 8192
-      )
-        throw new Error('Invalid applet bounds')
+    if (!runtime) return
+    runtime.visible = visible
+    runtime.heartbeat = Date.now()
+    if (visible) runtime.parkedAt = undefined
+    else {
+      runtime.parkedAt ??= Date.now()
+      this.refreshScroll(runtime)
     }
-    const [width, height] = this.owner.getContentSize()
-    const zoom = this.owner.webContents.getZoomFactor()
-    runtime.guest.webContents.setZoomFactor(zoom)
-    // Renderer rectangles are CSS pixels; native Views use device-independent
-    // pixels. OS display scaling is handled by Electron, host page zoom is not.
-    const scaled = (rect: Rectangle): Rectangle => ({
-      x: rect.x * zoom,
-      y: rect.y * zoom,
-      width: rect.width * zoom,
-      height: rect.height * zoom
-    })
-    const nativeBounds = scaled(bounds),
-      nativeClip = scaled(clip)
-    const left = Math.max(0, nativeBounds.x, nativeClip.x),
-      top = Math.max(0, nativeBounds.y, nativeClip.y)
-    const right = Math.min(
-        width,
-        nativeBounds.x + nativeBounds.width,
-        nativeClip.x + nativeClip.width
-      ),
-      bottom = Math.min(
-        height,
-        nativeBounds.y + nativeBounds.height,
-        nativeClip.y + nativeClip.height
-      )
-    runtime.parkedAt = undefined
-    runtime.visible = right > left && bottom > top
-    runtime.shown = { x: left, y: top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) }
-    runtime.container.setBounds({
-      x: Math.round(left),
-      y: Math.round(top),
-      width: Math.max(0, Math.round(right) - Math.round(left)),
-      height: Math.max(0, Math.round(bottom) - Math.round(top))
-    })
-    runtime.guest.setBounds({
-      x: Math.round(nativeBounds.x) - Math.round(left),
-      y: Math.round(nativeBounds.y) - Math.round(top),
-      width: Math.round(nativeBounds.width),
-      height: Math.round(nativeBounds.height)
-    })
-    // Move the hidden surface before revealing it at the settled DOM position.
-    runtime.container.setVisible(runtime.visible)
-    runtime.mount.bounds = bounds
-    runtime.mount.clip = clip
   }
 
   async appearance(runtimeId: string, appearance: AppletAppearance): Promise<void> {
     const runtime = this.runtimes.get(runtimeId)
     if (!runtime) throw new Error('Applet is not running')
-    const argument = JSON.stringify(appearance).replace(/</g, '\\u003c')
-    await runtime.guest.webContents.executeJavaScript(`window[${JSON.stringify(APPLET_APPLY_APPEARANCE)}](${argument})`)
-    if (this.runtimes.get(runtimeId) !== runtime) throw new Error('Applet is no longer running')
     runtime.mount.appearance = appearance
-  }
-
-  async snapshot(runtimeId: string): Promise<string | null> {
-    const runtime = this.runtimes.get(runtimeId)
-    if (!runtime) throw new Error('Applet is not running')
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-      const image = await Promise.race([
-        runtime.guest.webContents.capturePage(undefined, {stayHidden:true}),
-        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 150) })
-      ])
-      if (!image || image.isEmpty()) return null
-      const png = image.toPNG()
-      return png.length <= 8 * 1024 * 1024 ? `data:image/png;base64,${png.toString('base64')}` : null
-    } finally {
-      clearTimeout(timer)
+    // Before the page exists the next document would carry it; the page reads its first appearance from the document.
+    if (!runtime.guest) {
+      if (!runtime.claimed)
+        this.documents.set(runtime.documentUrl, appletDocument(runtime.mount.source, runtime.mount.state, appearance, [
+          ...(this.scrollPositions.get(JSON.stringify([runtime.mount.threadId, runtime.mount.revisionId]))?.values() ?? [])
+        ], { transparent: true }))
+      return
     }
+    const argument = JSON.stringify(appearance).replace(/</g, '\\u003c')
+    await runtime.guest.executeJavaScript(`window[${JSON.stringify(APPLET_APPLY_APPEARANCE)}](${argument})`)
+    if (this.runtimes.get(runtimeId) !== runtime) throw new Error('Applet is no longer running')
   }
 
-  suspend(runtimeId: string): void {
-    const runtime = this.runtimes.get(runtimeId)
-    if (!runtime) throw new Error('Applet is not running')
-    runtime.visible = false
-    runtime.container.setVisible(false)
-    // Refresh already reported targets without delaying host scrolling. This
-    // catches the final offset even if high-frequency guest reports were capped.
-    const positions = [
-      ...(this.scrollPositions
-        .get(JSON.stringify([runtime.mount.threadId, runtime.mount.revisionId]))
-        ?.values() ?? [])
-    ]
-    if (positions.length)
-      void runtime.guest.webContents
-        .executeJavaScript(
-          `(${JSON.stringify(positions)}).map(position=>{let node=document.documentElement;for(const index of position.path)node=node?.children[index];return node?{path:position.path,top:node.scrollTop,left:node.scrollLeft}:null})`
-        )
-        .then((values) => {
-          if (this.runtimes.get(runtimeId) !== runtime || !Array.isArray(values)) return
-          for (const value of values.slice(0, 64)) this.rememberScroll(runtime, value)
-        })
-        .catch(() => {})
-  }
-
-  park(runtimeId: string): void {
-    const runtime = this.runtimes.get(runtimeId)
-    if (!runtime) return
-    this.suspend(runtimeId)
-    runtime.parkedAt ??= Date.now()
-  }
-
-  unmount(runtimeId: string): void {
+  unmount(runtimeId: string, options: { crash?: boolean } = {}): void {
     const runtime = this.runtimes.get(runtimeId)
     if (!runtime) return
     this.runtimes.delete(runtimeId)
     this.documents.delete(runtime.documentUrl)
-    if (!this.owner.isDestroyed()) this.owner.contentView.removeChildView(runtime.container)
-    runtime.container.removeChildView(runtime.guest)
-    // close() avoids an untrusted beforeunload handler and terminates a busy renderer.
-    if (!runtime.guest.webContents.isDestroyed())
-      runtime.guest.webContents.close({ waitForBeforeUnload: false })
+    const guest = runtime.guest
+    if (guest && !guest.isDestroyed()) {
+      // A page stuck in a loop never runs unload; ending its process is immediate. Otherwise close() skips any
+      // untrusted beforeunload handler.
+      if (options.crash) guest.forcefullyCrashRenderer()
+      guest.close({ waitForBeforeUnload: false })
+    }
   }
   destroy(): void {
     if (this.destroyed) return
@@ -355,7 +279,7 @@ export class AppletRuntimeManager {
     this.scrollPositions.clear()
     this.owner.removeListener('closed', this.onOwnerClosed)
     clearInterval(this.watchdog)
-    for (const id of this.runtimes.keys()) this.unmount(id)
+    for (const id of [...this.runtimes.keys()]) this.unmount(id)
     for (const isolated of this.sessions.values()) {
       isolated.protocol.unhandle('mousse-applet')
       isolated.webRequest.onBeforeRequest(denyRequests)
@@ -369,15 +293,73 @@ export class AppletRuntimeManager {
   }
   capture(runtimeId: string) {
     const runtime = this.runtimes.get(runtimeId)
-    if (!runtime) throw new Error('Applet is not running')
-    return runtime.guest.webContents.capturePage()
+    if (!runtime?.guest) throw new Error('Applet is not running')
+    return runtime.guest.capturePage()
+  }
+
+  private partition(slot: number): string {
+    return `${this.partitionPrefix}-${slot}`
+  }
+
+  /**
+   * Electron retains partition sessions. Three isolated slots are reused instead of allocating an unbounded number as
+   * the user scrolls through a transcript; a new profile manager reuses the owner's slots, the previous one having
+   * detached its handlers when it was destroyed.
+   */
+  private isolatedSession(slot: number): Session {
+    const existing = this.sessions.get(slot)
+    if (existing) return existing
+    const ownsDocument = (url: string) =>
+      [...this.runtimes.values()].some((runtime) => runtime.slot === slot && runtime.documentUrl === url)
+    const isolated = session.fromPartition(this.partition(slot), { cache: false })
+    isolated.setPermissionRequestHandler((_wc, _permission, callback) => callback(false))
+    isolated.setPermissionCheckHandler(() => false)
+    isolated.setDevicePermissionHandler(() => false)
+    isolated.webRequest.onBeforeRequest((details, callback) =>
+      callback({ cancel: !details.url.startsWith('data:') && !ownsDocument(details.url) })
+    )
+    isolated.protocol.handle(
+      'mousse-applet',
+      (request) =>
+        new Response(ownsDocument(request.url) ? this.documents.get(request.url) : '', {
+          status: ownsDocument(request.url) ? 200 : 403,
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'X-DNS-Prefetch-Control': 'off',
+            'Content-Security-Policy': 'sandbox allow-scripts'
+          }
+        })
+    )
+    isolated.on('will-download', (event) => event.preventDefault())
+    this.sessions.set(slot, isolated)
+    return isolated
+  }
+
+  /** Reads back the page's already reported scroll offsets, so a page released later restores where it was. */
+  private refreshScroll(runtime: Runtime): void {
+    const positions = [
+      ...(this.scrollPositions
+        .get(JSON.stringify([runtime.mount.threadId, runtime.mount.revisionId]))
+        ?.values() ?? [])
+    ]
+    if (!positions.length || !runtime.guest || runtime.guest.isDestroyed()) return
+    void runtime.guest
+      .executeJavaScript(
+        `(${JSON.stringify(positions)}).map(position=>{let node=document.documentElement;for(const index of position.path)node=node?.children[index];return node?{path:position.path,top:node.scrollTop,left:node.scrollLeft}:null})`
+      )
+      .then((values) => {
+        if (this.runtimes.get(runtime.mount.runtimeId) !== runtime || !Array.isArray(values)) return
+        for (const value of values.slice(0, 64)) this.rememberScroll(runtime, value)
+      })
+      .catch(() => {})
   }
 
   /** One probe at a time; its answer, however late, counts as the page being alive at that moment. */
   private probe(runtime: Runtime): void {
-    if (runtime.probing || runtime.guest.webContents.isDestroyed()) return
+    const guest = runtime.guest
+    if (runtime.probing || !guest || guest.isDestroyed()) return
     runtime.probing = true
-    runtime.guest.webContents
+    guest
       .executeJavaScript('0')
       .then(
         () => {
@@ -389,28 +371,7 @@ export class AppletRuntimeManager {
         runtime.probing = false
       })
   }
-  /**
-   * Replays a wheel turn the applet could not use as real wheel input on the owner's page, at the pointer's place over
-   * the applet and never outside the part of the window the applet shows in. The page then scrolls exactly as it would
-   * over any other part of a reply: the browser's own wheel animation, latching and chaining, and the conversation's own
-   * wheel listeners. Never with modifiers, so it cannot zoom.
-   */
-  private replayWheel(runtime: Runtime, deltaY: number, discrete: boolean, x: number, y: number): void {
-    if (this.runtimes.get(runtime.mount.runtimeId) !== runtime || !runtime.visible || this.owner.isDestroyed()) return
-    const zoom = this.owner.webContents.getZoomFactor()
-    const { shown } = runtime
-    const at = (value: number, from: number, size: number) => Math.round(Math.min(from + size - 1, Math.max(from, value)))
-    this.owner.webContents.sendInputEvent({
-      type: 'mouseWheel',
-      x: at((runtime.mount.bounds.x + x) * zoom, shown.x, shown.width),
-      y: at((runtime.mount.bounds.y + y) * zoom, shown.y, shown.height),
-      deltaX: 0,
-      // The page reports CSS pixels in the DOM's sign; native input is device-independent and in the legacy wheel sign.
-      deltaY: -deltaY * zoom,
-      hasPreciseScrollingDeltas: !discrete,
-      canScroll: true
-    })
-  }
+
   private notify(runtime: Runtime, type: AppletRuntimeEvent['type'], payload: unknown): void {
     if (this.runtimes.get(runtime.mount.runtimeId) !== runtime) return
     const { runtimeId, threadId, revisionId } = runtime.mount
@@ -449,13 +410,9 @@ export class AppletRuntimeManager {
       }
       if (message.length > 256 || ++runtime.wheels > 120) return
       try {
-        const payload = (JSON.parse(message.slice(APPLET_EVENT_PREFIX.length)) as { payload?: { deltaY?: unknown; discrete?: unknown; x?: unknown; y?: unknown } }).payload
-        const { deltaY, x, y } = payload ?? {}
-        if (
-          typeof deltaY === 'number' && Number.isFinite(deltaY) && deltaY !== 0 && Math.abs(deltaY) <= 10000 &&
-          typeof x === 'number' && Number.isFinite(x) && typeof y === 'number' && Number.isFinite(y)
-        )
-          this.replayWheel(runtime, deltaY, payload?.discrete === true, x, y)
+        const deltaY = (JSON.parse(message.slice(APPLET_EVENT_PREFIX.length)) as { payload?: { deltaY?: unknown } }).payload?.deltaY
+        if (typeof deltaY === 'number' && Number.isFinite(deltaY) && deltaY !== 0 && Math.abs(deltaY) <= 10000)
+          this.notify(runtime, 'wheel', deltaY)
       } catch {
         /* Untrusted. */
       }
@@ -472,10 +429,8 @@ export class AppletRuntimeManager {
         payload: unknown
       }
       if (event.type === 'ready') this.notify(runtime, 'ready', null)
-      else if (event.type === 'visual-changed') this.notify(runtime, 'visual-changed', null)
       else if (event.type === 'scroll-changed' && Array.isArray(event.payload)) {
         for (const position of event.payload.slice(0, 64)) this.rememberScroll(runtime, position)
-        this.notify(runtime, 'visual-changed', null)
       } else if (event.type === 'scroll-position') {
         this.rememberScroll(runtime, event.payload)
       } else if (event.type === 'resize' && appletFrameHeight(event.payload) !== null)
@@ -495,3 +450,6 @@ export class AppletRuntimeManager {
     }
   }
 }
+
+/** Preferences Electron derives for every webview that may stay as they are; everything else is set here. */
+const SAFE_INHERITED = new Set<keyof WebPreferences>(['zoomFactor', 'defaultFontFamily', 'defaultFontSize', 'defaultMonospaceFontSize', 'minimumFontSize', 'defaultEncoding'])
