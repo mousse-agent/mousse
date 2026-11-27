@@ -147,6 +147,8 @@ export function startDesktopUpdates(hooks: {
   prepareInstall: () => Promise<void>
   recoverInstall: () => Promise<void>
   onInstallStarted?: () => void
+  /** The turns running now in every profile of the background service. */
+  runningTurns?: () => Promise<number>
 }): DesktopUpdater {
   // Every start of an installed AppImage keeps its launcher and icon current, updates or not.
   if (process.platform === 'linux' && app.isPackaged && process.env.APPIMAGE) syncLauncher(process.env.APPIMAGE)
@@ -185,6 +187,7 @@ export function startDesktopUpdates(hooks: {
   handle(UPDATE_IPC.check, () => updater.check(true))
   handle(UPDATE_IPC.download, () => updater.download())
   handle(UPDATE_IPC.install, () => updater.install())
+  handle(UPDATE_IPC.runningTurns, async () => (hooks.runningTurns ? await hooks.runningTurns().catch(() => null) : null))
   handle(UPDATE_IPC.setChannel, (channel) => {
     if (!isChannel(channel)) throw new Error(`Unknown update channel: ${String(channel)}`)
     return updater.setChannel(channel)

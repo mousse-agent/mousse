@@ -307,9 +307,6 @@ html[data-theme='high-contrast'] .downloads-ring-fill { stroke: var(--text-prima
   color: var(--ui-faint);
 }
 
-/* Update everywhere above "This computer only": both fit the list's width at any count. */
-.downloads-footer.stacked { flex-direction: column; align-items: stretch; gap: 4px; }
-
 /* The one primary action of the list: Update everywhere. */
 .downloads-btn.primary {
   border-color: transparent;
@@ -348,3 +345,7 @@ html[data-theme='high-contrast'] .downloads-icon-btn.accent { color: var(--text-
   .downloads-popover { animation: none; }
   .downloads-ring-fill { transition: none; }
 }
+
+/* The update list's computers: a reason it can't update is quieter than a way it does. */
+.downloads-row-skip { color: var(--ui-faint); }
+.downloads-everywhere { flex: 1; }

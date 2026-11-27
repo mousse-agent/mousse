@@ -33,6 +33,7 @@ import { surfaceToWindowBackground } from '../shared/accentPalette'
 import { appearanceSurfaceBase } from '../shared/themeSurfaces'
 import { startupAppearanceArgument } from '../shared/startupAppearance'
 import { homeFolderArgument } from '../shared/homeFolderArgument'
+import { REMOTE_UPDATE_APP_METHODS } from '../shared/remoteUpdates'
 import { readStartupAppearance } from './startupAppearance'
 import { refreshWindowChrome } from './windowsChrome'
 import { MAC_VIBRANCY } from './windowMaterial'
@@ -521,6 +522,12 @@ function startGuiApp(): void {
           // The installer is running: quit even when a window would hold the quit back.
           onInstallStarted: () => {
             setTimeout(() => app.exit(0), INSTALL_QUIT_DEADLINE_MS).unref()
+          },
+          runningTurns: async () => {
+            if (!guiMms) throw new Error('No service')
+            const answer = await guiMms.request<{ runningTurns?: unknown }>(REMOTE_UPDATE_APP_METHODS.turns, {}, 5_000)
+            if (!Number.isSafeInteger(answer?.runningTurns) || (answer.runningTurns as number) < 0) throw new Error('No count')
+            return answer.runningTurns as number
           },
           recoverInstall: async () => {
             // The tray's quit began: nothing starts again.

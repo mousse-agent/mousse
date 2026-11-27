@@ -46,3 +46,18 @@
 .rollout-row[data-tone='warn'] .rollout-row-status { color: var(--warning); }
 .rollout-row[data-tone='muted'] { opacity: 0.6; }
 .rollout-error { color: var(--danger); }
+
+/* The restart prompt and Update everywhere's confirmation: one line or a few rows, buttons at the control height. */
+.update-prompt:not(.update-everywhere) .modal { width: 420px; }
+.update-prompt-line { margin: 0; color: var(--text-secondary); }
+.update-prompt .rollout-rows:last-child { margin-bottom: 0; }
+.update-prompt .rollout-row-status { min-width: 0; }
+.update-prompt .modal-footer .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--ui-control-radius);
+  font-size: 12.5px;
+}

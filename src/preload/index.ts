@@ -1615,6 +1615,8 @@ const api = {
     check: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.check),
     download: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.download),
     install: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.install),
+    /** The turns a restart of this computer stops, in every profile; null when the service can't say. */
+    runningTurns: (): Promise<number | null> => ipcRenderer.invoke(UPDATE_IPC.runningTurns),
     setChannel: (channel: UpdateChannel): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.setChannel, channel),
     onState: (cb: (state: UpdateState) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, state: UpdateState) => cb(state)
