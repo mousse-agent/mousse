@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { WindowsProviderTree } from '../../windowsProviderProcess'
-import { idleCloseFromEnv } from '../../idleCloseFromEnv'
+import { DELEGATE_IDLE_CLOSE_MS, idleCloseFromEnv } from '../../idleCloseFromEnv'
 import type { Query, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { observeRateLimit, RejectedWindows } from './usageLimit'
 import type { SpawnedRoot } from '../../stopProcesses'
@@ -59,6 +59,8 @@ export const LATE_STEER_STAND_IN_MS = 10 * 60_000
 
 export interface LiveTimings {
   idleCloseMs: number
+  /** How long an idle delegated child's process stays open with no background work (`DELEGATE_IDLE_CLOSE_MS`). */
+  delegateIdleCloseMs: number
   idleReleaseMs: number
   maxPinMs: number
   /**
@@ -82,6 +84,7 @@ export interface LiveTimings {
 
 export const DEFAULT_LIVE_TIMINGS: LiveTimings = {
   idleCloseMs: LIVE_IDLE_CLOSE_MS,
+  delegateIdleCloseMs: DELEGATE_IDLE_CLOSE_MS,
   idleReleaseMs: LIVE_IDLE_RELEASE_MS,
   maxPinMs: LIVE_MAX_PIN_MS,
   maxSessions: Number.POSITIVE_INFINITY,

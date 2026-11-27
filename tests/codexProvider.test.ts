@@ -1951,6 +1951,41 @@ describe('CodexProviderService options (managed Codex)', () => {
       await vi.advanceTimersByTimeAsync(CODEX_IDLE_CLOSE_MS + 1)
       expect(server.processes[0].signalCode).toBe('SIGTERM')
     })
+
+    it('unloads a completed delegated child thread via thread/unsubscribe after its grace while keeping the shared server warm and saved history resumable', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+      const server = turnServer({ provider: () => MANAGED })
+      const service = managed(server, undefined, { idleCloseMs: 15 * 60_000, delegateUnloadMs: 2 * 60_000 })
+      await chat(service, { threadId: 'parent' })
+      service.commitConversation('parent', 'hp')
+      const child = await chat(service, { threadId: 'child', child: { readOnly: false } })
+      service.commitConversation('child', 'hc')
+      expect(server.requests('thread/unsubscribe')).toHaveLength(0)
+
+      // After the delegate grace, only the child thread unloads; the shared app-server stays alive for the parent.
+      await vi.advanceTimersByTimeAsync(2 * 60_000 + 1)
+      expect(server.requests('thread/unsubscribe').map((request) => request.params)).toEqual([{ threadId: child.codexThreadId }])
+      expect(server.processes[0].signalCode).toBeNull()
+
+      // A follow-up on the unloaded child resumes the saved Codex thread cleanly on the same warm server.
+      server.processes[0]!.stdout.write(JSON.stringify({ method: 'thread/closed', params: { threadId: child.codexThreadId } }) + '\n')
+      await Promise.resolve()
+      await chat(service, { threadId: 'child', child: { readOnly: false }, history: 'hc' })
+      expect(server.launches).toHaveLength(1)
+      expect(server.requests('thread/resume').map((request) => request.params)).toContainEqual(expect.objectContaining({ threadId: child.codexThreadId }))
+    })
+
+    it('evicts an idle delegated thread before an older interactive thread at the loaded-thread cap', async () => {
+      const server = turnServer({ provider: () => MANAGED })
+      const service = managed(server, undefined, { delegateUnloadMs: 60 * 60_000 })
+      // t0 is interactive (oldest); t1 is delegated; t2..t7 are interactive.
+      await chat(service, { threadId: 't0' })
+      const child = await chat(service, { threadId: 't1', child: { readOnly: false } })
+      for (let index = 2; index < CODEX_MAX_LOADED_THREADS; index++) await chat(service, { threadId: 't' + index })
+      // Admitting one more thread evicts the delegated thread first, not the older interactive t0.
+      await chat(service, { threadId: 'overflow' })
+      expect(server.requests('thread/unsubscribe').map((request) => request.params)[0]).toEqual({ threadId: child.codexThreadId })
+    })
   })
 })
 

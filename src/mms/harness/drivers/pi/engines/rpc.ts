@@ -161,7 +161,7 @@ export interface PiRpcDriverOptions {
   platform?: NodeJS.Platform
   evidence?: readonly ContainmentEvidence[]
   /** Test seams passed through to the engine. */
-  engine?: Partial<Pick<PiRpcEngineOptions, 'warmMs' | 'readyDeadlineMs' | 'commandDeadlineMs' | 'settings' | 'host' | 'adjustLaunch' | 'onCommand' | 'testEnv'>>
+  engine?: Partial<Pick<PiRpcEngineOptions, 'warmMs' | 'delegateWarmMs' | 'maxIdleSessions' | 'readyDeadlineMs' | 'commandDeadlineMs' | 'settings' | 'host' | 'adjustLaunch' | 'onCommand' | 'testEnv'>>
 }
 
 /** The evidence inputs of a profile's RPC options. */

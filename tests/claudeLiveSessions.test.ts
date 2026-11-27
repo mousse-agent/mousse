@@ -1559,6 +1559,33 @@ describe('idle release and the cap on live processes', () => {
     busy.answer(busy.uuid(0), 'busy done')
     expect(await running).toBe('busy done')
   })
+
+  it('evicts idle delegated children before older interactive threads and closes idle delegates after the shorter grace (unless background work is pending)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const f = fixture({ idleCloseMs: 15 * 60_000, delegateIdleCloseMs: 2 * 60_000, idleReleaseMs: 30 * 60_000, maxIdleSessions: 2 })
+    await f.turn({ threadId: 'interactive-old' })
+    vi.advanceTimersByTime(1000)
+    await f.turn({ threadId: 'child-evict', child: { readOnly: false } })
+    vi.advanceTimersByTime(1000)
+    await f.turn({ threadId: 'interactive-new' })
+    await Promise.resolve()
+    // Cap is 2: the newer delegated child is evicted before the older interactive thread.
+    expect(f.service.liveThreadIds().sort()).toEqual(['interactive-new', 'interactive-old'])
+
+    // A delegated child with no background work closes after delegateIdleCloseMs, while interactive stays warm;
+    // a delegated child holding background work is NOT closed early.
+    const g = fixture({ idleCloseMs: 15 * 60_000, delegateIdleCloseMs: 2 * 60_000, idleReleaseMs: 30 * 60_000, maxIdleSessions: 4 })
+    await g.turn({ threadId: 'interactive' })
+    await g.turn({ threadId: 'child-idle', child: { readOnly: false } })
+    g.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'running bg')
+    }
+    await g.turn({ threadId: 'child-bg', child: { readOnly: false } })
+
+    await vi.advanceTimersByTimeAsync(2 * 60_000 + 1)
+    expect(g.service.liveThreadIds().sort()).toEqual(['child-bg', 'interactive'])
+  })
 })
 
 describe('result routing and steering edge cases', () => {
