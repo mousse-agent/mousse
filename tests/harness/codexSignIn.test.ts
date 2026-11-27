@@ -214,6 +214,8 @@ function appServers() {
   const launches: Array<{ env: NodeJS.ProcessEnv; cwd: string | undefined; args: string[] }> = []
   const processes: Array<EventEmitter & CodexProcess> = []
   const control = { hold: false, held: [] as Array<() => void> }
+  /** Browser sign-ins started with ccount/login/start, in order. */
+  const logins: Array<{ loginId: string; complete: (account: string) => void }> = []
   const launch = (spec: CodexLaunch): CodexProcess => {
     launches.push({ env: spec.env, cwd: spec.cwd, args: spec.args })
     const startupAccount = accountOf(spec.env.CODEX_HOME)
@@ -251,6 +253,18 @@ function appServers() {
         } else if (message.method === 'getAuthStatus') reply = { result: { authMethod: 'chatgpt', authToken: startupAccount ? codexFixtureAccessToken(startupAccount) : null } }
         else if (message.method === 'config/read') reply = { result: { config: {} } }
         else if (message.method === 'model/list') reply = { result: { data: [{ id: 'gpt-test', displayName: 'GPT Test', hidden: false, supportedReasoningEfforts: [] }], nextCursor: null } }
+        else if (message.method === 'account/login/start') {
+          // Codex's browser sign-in (hand-authored from the 0.172 v2 schema): `complete` is the browser finishing it.
+          const loginId = `login-${logins.length + 1}`
+          logins.push({
+            loginId,
+            complete: (account) => {
+              writeSignIn(spec.env.CODEX_HOME!, account)
+              stdout.write(JSON.stringify({ method: 'account/login/completed', params: { loginId, success: true, error: null } }) + '\n')
+            }
+          })
+          reply = { result: { type: 'chatgpt', loginId, authUrl: `https://auth.openai.com/oauth/authorize?state=${loginId}` } }
+        } else if (message.method === 'account/login/cancel') reply = { result: { status: 'canceled' } }
         else reply = { error: { code: -32000, message: 'replay ends here' } }
         stdout.write(JSON.stringify({ id: message.id, ...(reply as object) }) + '\n')
       }
@@ -265,7 +279,7 @@ function appServers() {
     control.hold = false
     for (const exit of control.held.splice(0)) exit()
   }
-  return { launch, launches, processes, running, hold, release }
+  return { launch, launches, processes, running, hold, release, logins }
 }
 
 const WORK = 'codex:work'
@@ -1094,6 +1108,42 @@ describe('two Codex accounts', () => {
   })
 })
 
+describe('the user\'s own Codex signs in from the app', () => {
+  it('offers Sign in on the card, shows Codex\'s link, and counts the sign-in once Codex finishes it: no terminal', async () => {
+    rmSync(join(userHome, 'auth.json'))
+    const w = world()
+    const before = await w.harness.instances.recheck('codex')
+    expect(before.auth).toMatchObject({ state: 'signed_out', canSignIn: true })
+    expect(before.auth.message).not.toMatch(/in a terminal/i)
+    // The command to copy stays beside the button as the fallback.
+    expect(before.nextStep).toMatchObject({ action: 'sign_in', command: 'codex login' })
+
+    const signIn = await startSignIn(w, 'codex')
+    await vi.waitFor(() => expect(signIn.prompts().some((prompt) => prompt.type === 'auth_url')).toBe(true), { timeout: 5_000 })
+    expect(signIn.prompts().find((prompt) => prompt.type === 'auth_url')).toMatchObject({ url: expect.stringContaining('state=login-1') })
+    expect(signIn.prompts().some((prompt) => prompt.type === 'select')).toBe(false)
+    // The browser finishes the sign-in Codex started, in the user's own home.
+    w.builtInServers.logins[0]!.complete('acct-own')
+    expect((await signIn.settled()).phase).toBe('completed')
+    expect(accountOf(userHome)).toBe('acct-own')
+    expect((await w.harness.instances.recheck('codex')).auth).toMatchObject({ state: 'signed_in' })
+    expect(w.terminals).toHaveLength(0)
+    for (const launched of w.builtInServers.launches) expect(launched.env.CODEX_HOME).toBe(userHome)
+  })
+
+  it('an added entry on the user\'s own home signs in the same way', async () => {
+    rmSync(join(userHome, 'auth.json'))
+    const w = world({ stored: (binary) => ({ codex: { driver: 'codex', enabled: true }, [OWN_HOME]: { driver: 'codex', enabled: true, config: { home: 'default', setup: 'existing', displayName: 'Mine too', binaryPath: binary } } }) })
+    expect((await w.harness.instances.recheck(OWN_HOME)).auth).toMatchObject({ state: 'signed_out', canSignIn: true })
+    const signIn = await startSignIn(w, OWN_HOME)
+    await vi.waitFor(() => expect(w.servers.logins).toHaveLength(1), { timeout: 5_000 })
+    w.servers.logins[0]!.complete('acct-own')
+    expect((await signIn.settled()).phase).toBe('completed')
+    expect(accountOf(userHome)).toBe('acct-own')
+    expect(w.terminals).toHaveLength(0)
+  })
+})
+
 describe('an added entry on the user\'s own home', () => {
   const ownHomeWorld = () => world({ stored: (binary) => ({ codex: { driver: 'codex', enabled: true }, [OWN_HOME]: { driver: 'codex', enabled: true, config: { home: 'default', setup: 'existing', displayName: 'Mine too', binaryPath: binary } } }) })
 
@@ -1383,10 +1433,10 @@ describe('what a signed-out private entry tells the user', () => {
     expect(flaggedStatus.message).toBe(`Signed out in Mousse. ${own}`)
     for (const text of [status.message ?? '', keyStatus.message ?? '', notSignedInChat, keyChat, flaggedStatus.message ?? '']) expect(text).not.toMatch(NEVER)
 
-    // The user's own entry runs on the terminal sign-in and says so, as before.
+    // The user's own entry signs in from Mousse too, and says so.
     const builtIn = make(undefined)
-    expect((await builtIn.service.status({ force: true })).message).toBe('Codex in your terminal is not signed in. Run `codex login` in a terminal, then recheck.')
-    expect(await chatError(builtIn.service, builtIn.dir)).toContain('Run `codex login` in a terminal')
+    expect((await builtIn.service.status({ force: true })).message).toBe('Codex is not signed in. Sign in from Settings → Providers.')
+    expect(await chatError(builtIn.service, builtIn.dir)).toContain('Sign in from Settings → Providers.')
     expect((await make(undefined, true).service.status()).message).toBe('Disconnected in Mousse. The Codex sign-in in your terminal is unchanged.')
   })
 })

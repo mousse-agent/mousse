@@ -129,11 +129,11 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true })
 })
 
-function create(server: Pick<ReturnType<typeof scriptedServer>, 'launch'>, settings: Record<string, unknown> = {}, options: CodexServiceOptions = {}): CodexProviderService {
+function create(server: Pick<ReturnType<typeof scriptedServer>, 'launch'>, settings: Record<string, unknown> = {}, options: CodexServiceOptions = {}, dependencies: Omit<CodexServiceDependencies, 'launch'> = {}): CodexProviderService {
   mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
   writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, ...settings }))
   // The instance config's launch settings and sign-out flag, as the gateway hands them over.
-  const service = new CodexProviderService(home, questions, { launch: server.launch }, {
+  const service = new CodexProviderService(home, questions, { launch: server.launch, ...dependencies }, {
     launch: () => ({ binaryPath: binary }),
     signedOut: () => signedOut,
     ...options
@@ -319,7 +319,7 @@ describe('CodexProviderService', () => {
     expect(server.methods().filter((method) => method === 'account/read')).toHaveLength(1)
 
     account = { result: { account: null, requiresOpenaiAuth: true } }
-    expect(await service.status({ force: true })).toMatchObject({ state: 'signed_out', message: expect.stringContaining('codex login') })
+    expect(await service.status({ force: true })).toMatchObject({ state: 'signed_out', message: expect.stringContaining('Sign in from Settings') })
     expect(service.configured()).toBe(false)
     expect(server.methods().filter((method) => method === 'account/read')).toHaveLength(2)
 
@@ -502,28 +502,112 @@ describe('CodexProviderService', () => {
     expect(server.launches).toHaveLength(1)
   })
 
-  it('connects through the terminal sign-in: Recheck until signed in, without running a login', async () => {
-    let signedIn = false
-    const server = scriptedServer((message) => {
-      if (message.method === 'account/read') return signedIn ? chatgpt : { result: { account: null, requiresOpenaiAuth: true } }
-      if (message.method === 'model/list') return { error: { code: -32600, message: 'unavailable' } }
-      return { result: {} }
+  /**
+   * Codex's browser sign-in (`account/login/start`, `account/login/completed`, `account/login/cancel`).
+   * Hand-authored from the codex-cli 0.172 v2 app-server schema: it proves Mousse's side only.
+   */
+  describe('browser sign-in on the user\'s own home', () => {
+    const AUTH_URL = 'https://auth.openai.com/oauth/authorize?state=test'
+    /** A server that is signed out until `signedIn()` says otherwise, and answers the sign-in start with `start`. */
+    function signInServer(signedIn: () => boolean, start: Reply = { result: { type: 'chatgpt', loginId: 'login-a', authUrl: AUTH_URL } }) {
+      const starts: number[] = []
+      const server = scriptedServer((message, launchIndex) => {
+        if (message.method === 'account/read') return signedIn() ? chatgpt : { result: { account: null, requiresOpenaiAuth: true } }
+        if (message.method === 'account/login/start') {
+          starts.push(launchIndex)
+          return start
+        }
+        if (message.method === 'account/login/cancel') return { result: { status: 'canceled' } }
+        if (message.method === 'model/list') return { result: { data: [], nextCursor: null } }
+        return { result: {} }
+      })
+      /** Codex's end-of-sign-in notification, on the process the sign-in started on. */
+      const complete = (params: object) => server.processes[starts.at(-1)!].stdout.write(JSON.stringify({ method: 'account/login/completed', params }) + '\n')
+      return { server, starts, complete }
+    }
+
+    it('shows Codex\'s link, waits for its completion, and counts the sign-in only once a fresh check reads signed in', async () => {
+      let signedIn = false
+      const { server, starts, complete } = signInServer(() => signedIn)
+      const service = create(server)
+      const session = new LoginSession('login-1')
+      const events: Array<{ type: string; url?: string; usesCallbackServer?: boolean }> = []
+      session.on('event', (event: { type: string; url?: string; usesCallbackServer?: boolean }) => {
+        events.push(event)
+        if (event.type !== 'auth_url') return
+        // Another sign-in's completion is not this one's.
+        complete({ loginId: 'someone-else', success: true, error: null })
+        signedIn = true
+        complete({ loginId: 'login-a', success: true, error: null })
+      })
+      expect(await service.login(session, home)).toEqual({ success: true, sessionId: 'login-1' })
+      expect(events.filter((event) => event.type === 'auth_url')).toEqual([expect.objectContaining({ url: AUTH_URL, usesCallbackServer: true })])
+      expect(events.some((event) => event.type === 'select')).toBe(false)
+      const startMessage = server.messages.find((message) => message.method === 'account/login/start')
+      expect(startMessage?.params).toEqual({ type: 'chatgpt' })
+      // The process that started the sign-in ran until Codex finished it, then ended; it was never cancelled.
+      expect(server.processes[starts[0]].signalCode).toBe('SIGTERM')
+      expect(server.methods()).not.toContain('account/login/cancel')
+      expect(service.configured()).toBe(true)
+      // The confirming check ran on a process started after the sign-in.
+      expect(server.launches.length).toBeGreaterThan(starts[0] + 1)
     })
-    const service = create(server)
-    const session = new LoginSession('login-1')
-    const prompts: string[] = []
-    session.on('event', (event: { type: string; message?: string }) => {
-      if (event.type !== 'select') return
-      prompts.push(event.message ?? '')
-      signedIn = true
-      session.respond({ sessionId: session.sessionId, kind: 'select', value: 'check' })
+
+    it('fails when Codex reports the sign-in failed, without a check loop', async () => {
+      const { server, complete } = signInServer(() => false)
+      const service = create(server)
+      const session = new LoginSession('login-2')
+      session.on('event', (event: { type: string }) => {
+        if (event.type === 'auth_url') complete({ loginId: 'login-a', success: false, error: 'access denied' })
+        if (event.type === 'select') session.respond({ sessionId: session.sessionId, kind: 'cancel' })
+      })
+      expect(await service.login(session, home)).toMatchObject({ success: false, error: expect.stringContaining('access denied') })
+      expect(service.configured()).toBe(false)
     })
-    expect(await service.login(session, home)).toEqual({ success: true, sessionId: 'login-1' })
-    expect(prompts).toHaveLength(1)
-    expect(prompts[0]).toContain('codex login')
-    expect(service.configured()).toBe(true)
-    expect(server.methods()).not.toContain('account/logout')
-    expect(server.methods().filter((method) => method?.startsWith('account/login'))).toEqual([])
+
+    it('sends account/login/cancel for the started sign-in when the person cancels or it times out', async () => {
+      for (const ending of ['cancel', 'timeout'] as const) {
+        const { server, starts } = signInServer(() => false)
+        const service = create(server, {}, {}, ending === 'timeout' ? { signInTimeoutMs: 20 } : {})
+        const session = new LoginSession(`login-${ending}`)
+        session.on('event', (event: { type: string }) => {
+          if (event.type === 'auth_url' && ending === 'cancel') session.respond({ sessionId: session.sessionId, kind: 'cancel' })
+        })
+        const result = await service.login(session, home)
+        expect(result).toMatchObject({ success: false, error: ending === 'cancel' ? expect.stringMatching(/cancel/i) : expect.stringMatching(/timed out/i) })
+        const cancel = server.messages.find((message) => message.method === 'account/login/cancel')
+        expect(cancel?.params).toEqual({ loginId: 'login-a' })
+        expect(server.processes[starts[0]].signalCode).toBe('SIGTERM')
+        expect(service.configured()).toBe(false)
+      }
+    })
+
+    it('falls back to the terminal sign-in and Check sign-in when this Codex has no account/login/start', async () => {
+      let signedIn = false
+      const { server } = signInServer(() => signedIn, { error: { code: -32601, message: 'method not found' } })
+      const service = create(server)
+      const session = new LoginSession('login-3')
+      const prompts: string[] = []
+      session.on('event', (event: { type: string; message?: string }) => {
+        if (event.type === 'auth_url') throw new Error('no link without a browser sign-in')
+        if (event.type !== 'select') return
+        prompts.push(event.message ?? '')
+        signedIn = true
+        session.respond({ sessionId: session.sessionId, kind: 'select', value: 'check' })
+      })
+      expect(await service.login(session, home)).toEqual({ success: true, sessionId: 'login-3' })
+      expect(prompts).toHaveLength(1)
+      expect(prompts[0]).toContain('codex login')
+      expect(service.configured()).toBe(true)
+      expect(server.methods()).not.toContain('account/logout')
+    })
+
+    it('starts no sign-in when Codex already reads signed in', async () => {
+      const { server } = signInServer(() => true)
+      const service = create(server)
+      expect(await service.login(new LoginSession('login-4'), home)).toEqual({ success: true, sessionId: 'login-4' })
+      expect(server.methods()).not.toContain('account/login/start')
+    })
   })
 
   it('closes the idle process, keeps Codex listed, and starts a new one on the next use', async () => {

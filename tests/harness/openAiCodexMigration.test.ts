@@ -165,7 +165,7 @@ async function signManagedIn(made: Awaited<ReturnType<typeof profile>>) {
   })
 }
 
-const RETIRED = { action: 'move', label: 'Move', title: 'Retired by this update', detail: 'Move to ChatGPT subscription to keep chatting. Your chats stay.' }
+const RETIRED = { action: 'move', label: 'Move', title: 'Retired by this update', detail: 'Move to Codex to keep chatting. Your chats stay.' }
 
 /** What `resolveStored` throws for the pinned selection, if anything. */
 function pinnedRefusal(harness: Harness): unknown {
@@ -277,7 +277,7 @@ describe('openai-codex after the PR 3 release', () => {
     expect(deviceDefault()).toEqual(read('defaults.json').provider)
     expect(new HarnessScopeStore(made.profileHome).project('project-1')?.defaultSelection).toMatchObject({ instanceId: 'pi:openai-codex' })
     // The pinned thread is still on the old entry, which runs nothing.
-    expect(pinnedRefusal(harness)).toMatchObject({ code: 'provider_retired', message: 'ChatGPT was retired by a Mousse update. Move it to ChatGPT subscription in Settings → Providers to keep chatting. Your chats stay.' })
+    expect(pinnedRefusal(harness)).toMatchObject({ code: 'provider_retired', message: 'ChatGPT was retired by a Mousse update. Move it to Codex in Settings → Providers to keep chatting. Your chats stay.' })
   })
 
   it('a move onto a turned-off Codex is refused too', async () => {
