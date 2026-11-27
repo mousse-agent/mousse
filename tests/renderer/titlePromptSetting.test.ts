@@ -265,3 +265,44 @@ describe('the Thread titles row with Antigravity connected', () => {
     expect(note([CLAUDE, ANTIGRAVITY], { mode: 'off' })).toBeUndefined()
   })
 })
+
+describe('the Thread titles row reads the per-model listing', () => {
+  const AGENT = {
+    id: 'acp:scripted', instanceId: 'acp:scripted', label: 'Scripted agent', oneShot: true,
+    models: [{ id: 'default', label: 'Agent default', title: { state: 'best_effort', route: 'acp:generic', facts: ['The agent has tools of its own.'] } }]
+  } as LlmProviderOption
+  const UNABLE = { ...AGENT, id: 'acp:other', instanceId: 'acp:other', label: 'Other agent', models: [{ id: 'default', label: 'Agent default', title: { state: 'unavailable', reason: 'Other agent has not been checked yet.' } }] } as LlmProviderOption
+  let root: Root
+  let host: HTMLElement
+  beforeEach(() => {
+    host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+  })
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+  })
+  const show = (providers: LlmProviderOption[], title: Partial<ReturnType<typeof getDefaultSettings>['title']> = {}, titleListing?: SettingsOptions['titleListing']) => {
+    const settings = getDefaultSettings()
+    act(() => root.render(createElement(AgentsSettings, {
+      settings: { ...settings, title: { ...settings.title, ...title } },
+      options: { ...OPTIONS, llmProviders: providers, ...(titleListing ? { titleListing } : {}) },
+      updateSettings: async () => {}
+    })))
+    const row = host.querySelector<HTMLElement>('[data-settings-anchor="agents-title-model"]')!
+    return { row, spans: [...row.querySelectorAll<HTMLElement>('span[title]')] }
+  }
+
+  it('a best-effort model says so, with the facts behind it in its tooltip', () => {
+    const { spans } = show([CLAUDE, AGENT], { llmProvider: 'acp:scripted', instanceId: 'acp:scripted', model: 'default' })
+    expect(spans.find((span) => span.textContent?.includes('best-effort'))?.title).toBe('The agent has tools of its own.')
+  })
+
+  it('a saved choice that cannot name threads shows as its own row with the exact reason, even when nothing live matches it', () => {
+    const saved = { instanceId: 'acp:other', model: 'default', label: 'Other default', state: 'unavailable' as const, reason: 'Other agent has not been checked yet.' }
+    const { row, spans } = show([CLAUDE, UNABLE], { llmProvider: 'acp:other', instanceId: 'acp:other', model: 'default' }, { entries: [], saved })
+    expect(row.textContent).toContain("Other default can't name threads here")
+    expect(spans.some((span) => span.title === 'Other agent has not been checked yet.')).toBe(true)
+  })
+})

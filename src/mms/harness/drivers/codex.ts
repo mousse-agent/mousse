@@ -23,6 +23,7 @@ import { compatibilityFields } from '../compatibility'
 import { CODEX_NATIVE_TOOLS } from '../vendors/codex/botApprovals'
 import { CODEX_BOT_CHECKED_VERSIONS } from '../vendors/codex/childPolicy'
 import { codexBotRunsOnNote } from '../../../shared/harness/codexBotVersion'
+import { legacyOneShotRoute } from '../oneShot/routes'
 
 export const CODEX_CAPS: HarnessCaps = Object.freeze({
   ...CODEX_CAPABILITIES,
@@ -292,7 +293,8 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     canInstall: true,
     customModels: true,
     // Chat titles, pull request drafts and commit messages: one turn on an ephemeral thread (`service.oneShot`).
-    oneShot: true,
+    // Until its own slice, on its own one-shot code (`DriverRuntime.oneShot`), admitted with no facts claimed.
+    oneShotRoute: legacyOneShotRoute('codex'),
     methodLabel: 'ChatGPT sign-in',
     // Codex forks a loaded thread when its bearer changes, so the bearer is kept after turns proven drained.
     mcpTurnBinding: 'drained_turn',

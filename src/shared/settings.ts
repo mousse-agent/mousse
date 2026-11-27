@@ -658,6 +658,8 @@ export interface LlmModelOption {
   speeds?: Array<'fast' | 'slow'>
   /** `false`: this model cannot run a single request (chat titles) even though its provider can. */
   oneShot?: false
+  /** Whether and how it can name threads (`HarnessGateway.titleListing`); set on device listings. */
+  title?: TitleModelListing
   /**
    * The model an alias runs, when it differs from `id` (Claude Code's `haiku` → `claude-haiku-5-5`): what Mousse's
    * model catalog knows it by, for Automatic naming's ranking.
@@ -683,18 +685,46 @@ export interface LlmProviderOption {
   label: string
   models: LlmModelOption[]
   /**
-   * The instance runs a single request with no tools (chat titles, pull request drafts, commit
-   * messages). Set by the gateway on every listing; runtimes that only run turns are `false`.
+   * At least one of its models is admitted for a single request with no tools (chat titles, pull request drafts,
+   * commit messages): derived from the per-model `title` listing, for computers that read only this flag.
    */
   oneShot?: boolean
 }
 
-/** The title model choices: instances that run one-shots, without the models that cannot. */
-export function oneShotProviderOptions(providers: readonly LlmProviderOption[]): LlmProviderOption[] {
-  return providers
-    .filter((provider) => provider.oneShot === true)
-    .map((provider) => ({ ...provider, models: provider.models.filter((model) => model.oneShot !== false) }))
-    .filter((provider) => provider.models.length > 0)
+/**
+ * One model in thread titles' listing (`HarnessGateway.titleListing`): admitted (`held`, `best_effort`, or `legacy` for
+ * a provider still on its own one-shot code) or `unavailable` with its reason.
+ */
+export interface TitleModelListing {
+  state: 'held' | 'best_effort' | 'legacy' | 'unavailable'
+  /** Why it cannot name threads now (`unavailable`). */
+  reason?: string
+  /** The route it runs on, when admitted (`pi:direct`, `acp:generic`, `legacy:<driver>`). */
+  route?: string
+  /** What a best-effort route does not hold, in words for its tooltip. */
+  facts?: string[]
+}
+
+export interface TitleListingEntry {
+  instanceId: string
+  driver: string
+  label: string
+  models: Array<{ id: string; label: string } & TitleModelListing>
+  /** Why none of its models can name threads, when it lists none (turned off, signed out, no route). */
+  reason?: string
+}
+
+/** The saved title choice, shown as a row of its own with its exact reason, even when nothing live matches it. */
+export interface TitleListingSaved extends TitleModelListing {
+  instanceId: string
+  model: string
+  label: string
+}
+
+/** Thread titles' listing: every entry, from cached state only. */
+export interface TitleListing {
+  entries: TitleListingEntry[]
+  saved?: TitleListingSaved
 }
 
 export interface AgentTypeOption {
@@ -707,6 +737,8 @@ export interface SettingsOptions {
   themes: ThemeOption[]
   accentColors: AccentColorOption[]
   llmProviders: LlmProviderOption[]
+  /** Thread titles' listing per model, from cached state; absent from a computer that does not send it. */
+  titleListing?: TitleListing
   agentTypes: AgentTypeOption[]
   /**
    * The bot model choices (`botModel`): the listing narrowed to the ready instances and models that

@@ -17,6 +17,7 @@ import { LATEST_TTL_MS } from '../latest'
 import { OpencodeServer, type OpencodeLaunch, type StartedServer } from '../opencode/server'
 import { OpencodeSessions, type SavedOpencodeSession } from '../opencode/sessions'
 import { AcpAdapter, type AcpTurnClient } from './acp/adapter'
+import { legacyOneShotRoute } from '../oneShot/routes'
 
 /**
  * OpenCode on its own server API (`opencode serve`, `../opencode/`). It runs an executable the user sets, else the copy
@@ -233,7 +234,8 @@ export function opencodeDriver(options: OpencodeDriverOptions = {}): HarnessDriv
     canInstall: true,
     customModels: false,
     // Chat titles, branch names, pull request drafts and commit messages: a session that denies every tool.
-    oneShot: true,
+    // Until its own slice, on its own one-shot code (`DriverRuntime.oneShot`), admitted with no facts claimed.
+    oneShotRoute: legacyOneShotRoute('opencode'),
     methodLabel: 'OpenCode’s own sign-in',
     // OpenCode's sign-in is this computer's, whichever executable runs: never Mousse's own.
     sharedSignIn: true,

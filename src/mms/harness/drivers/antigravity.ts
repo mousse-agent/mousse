@@ -10,6 +10,7 @@ import { cliNames } from '../env'
 import { LAUNCH_MIRROR_FIELDS } from '../vendorMirror'
 import { compatibilityFields } from '../compatibility'
 import { ACP_NATIVE_TOOLS } from '../acp/botApprovals'
+import { legacyOneShotRoute } from '../oneShot/routes'
 
 /**
  * The account a recorded sign-in stands for. Mousse never reads the Google account itself, so a
@@ -94,7 +95,8 @@ export function antigravityDriver(options: {
     // Sign-in and sign-out run in Mousse, whichever executable runs.
     ownsSignIn: true,
     // Chat titles, pull request drafts and commit messages: one prompt in a session of its own (`service.oneShot`).
-    oneShot: true,
+    // Until its own slice, on its own one-shot code (`DriverRuntime.oneShot`), admitted with no facts claimed.
+    oneShotRoute: legacyOneShotRoute('antigravity'),
     // Only the native agy launch can switch off the user's customizations on a bot turn.
     botAuthority: () => options.builtIn().supportsBotTurns(),
     botApprovals: () => true,

@@ -105,7 +105,12 @@ function setup(options: {
     ? {
         oneShot,
         cachedSnapshots: () => current,
-        canOneShot: () => true,
+        // Admission as the gateway runs it for these models: no hidden, unable or local server's model.
+        admitsOneShot: (instanceId: string, id: string) => {
+          const listed = (options.providers!.models?.[instanceId] ?? MODELS[instanceId] ?? []).find((each) => each.id === id)
+          return Boolean(listed) && !listed!.hidden && listed!.oneShot !== false && !listed!.local
+        },
+        hasOneShotRoute: () => true,
         isEnabledInScope: (instanceId: string, scope: ProviderScope) => options.providers!.enabledIn?.(instanceId, scope) ?? true,
         catalog: { models: (instanceId: string) => options.providers!.models?.[instanceId] ?? MODELS[instanceId] ?? [] },
         instances: {
@@ -390,16 +395,35 @@ describe('Automatic naming', () => {
     expect(h.limits.isLimited('claude')).toBe(false)
   })
 
-  it.each(['one_shot_tool_refused', 'wont_run'] as const)('an entry whose single request is refused (%s) gives way to another entry', async (code) => {
-    const refused = harnessAppError({ code, message: 'Refused.' })
-    const h = setup({ providers: connected(), answer: (request) => request.selection.instanceId === 'claude' ? refused : 'OAuth callback loop' })
+  it("a tool the agent tried moves to the next candidate, and the entry's other models stay eligible", async () => {
+    const refused = harnessAppError({ code: 'one_shot_tool_refused', message: 'Refused.' })
+    const h = setup({ providers: connected(), answer: (request) => request.selection.model === 'haiku' ? refused : 'OAuth callback loop' })
     h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
     await h.settle()
     expect(h.thread()).toMatchObject({ name: 'OAuth callback loop', titleSource: 'auto' })
-    expect(picked(h).slice(0, 2)).toEqual(['claude/haiku', 'codex/gpt-6-luna'])
+    expect(picked(h).slice(0, 2)).toEqual(['claude/haiku', 'claude/sonnet'])
   })
 
-  it.each(['provider_timeout', 'timeout', 'provider_cancelled', 'aborted', 'policy_unenforceable'])('%s ends the naming with no other model asked', async (code) => {
+  it.each(['provider_timeout', 'timeout'])('%s moves on to the next candidate while the pass has time', async (code) => {
+    const error = Object.assign(new Error(code), { code })
+    const h = setup({ providers: connected(), answer: (request) => request.selection.instanceId === 'claude' ? error : 'OAuth callback loop' })
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await h.settle()
+    expect(picked(h).slice(0, 2)).toEqual(['claude/haiku', 'codex/gpt-6-luna'])
+    expect(h.thread()).toMatchObject({ name: 'OAuth callback loop', titleSource: 'auto' })
+  })
+
+  it.each(['policy_unenforceable', 'wont_run', 'unsupported'])('a request not admitted (%s) was never sent: it does not count as one of the three', async (code) => {
+    const refused = harnessAppError({ code, message: 'Not admitted.' })
+    const h = setup({ providers: connected(), answer: (request) => request.selection.model === 'gpt-6-luna' ? 'OAuth callback loop' : refused })
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await h.settle()
+    // Two refusals before it would have used two of the three attempts; the third candidate still names the thread.
+    expect(picked(h).slice(0, 3)).toEqual(['claude/haiku', 'claude/sonnet', 'codex/gpt-6-luna'])
+    expect(h.thread()).toMatchObject({ name: 'OAuth callback loop', titleSource: 'auto' })
+  })
+
+  it.each(['provider_cancelled', 'aborted'])('%s ends the naming with no other model asked', async (code) => {
     const error = Object.assign(new Error(code), { code })
     const h = setup({ providers: connected(), answer: () => error })
     h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)

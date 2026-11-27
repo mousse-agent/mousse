@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { methods } from '@agentclientprotocol/sdk'
-import { RESERVED_AGENT_IDS, type HarnessCaps, type HarnessDriverKind, type RuntimeFacts } from '../../../shared/harness/types'
+import { harnessAppError, RESERVED_AGENT_IDS, type HarnessCaps, type HarnessDriverKind, type RuntimeFacts } from '../../../shared/harness/types'
 import type { ProviderLoginResult } from '../../../shared/providerAuth'
 import type { LlmModelOption } from '../../../shared/settings'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
@@ -24,6 +24,10 @@ import { resolveCommand } from '../env'
 import { ptyAvailable, runInPty, signInPrompts, type PtySpawn } from '../pty'
 import { spawnHarness } from '../spawn'
 import { fingerprintOf } from '../status'
+import { GENERIC_ACP_ARGUMENTS, sealedEnv } from '../oneShot/launch'
+import { releasePlace, reservePlace, spawnInPlace, type Place, type PlaceProcess } from '../oneShot/places'
+import type { OneShotRouteDecision } from '../oneShot/route'
+import { GENERIC_ACP_FACTS } from '../oneShot/routes'
 
 /**
  * Any agent that speaks the Agent Client Protocol, run from a command the user chose
@@ -36,6 +40,12 @@ import { fingerprintOf } from '../status'
  */
 
 const LABEL = 'ACP agent'
+
+/** `acp:generic`: best-effort, from its facts. */
+const GENERIC_ACP_ROUTE: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: 'acp:generic' as const, facts: GENERIC_ACP_FACTS }) })
+/** In a single request's place: the folder the agent works in (checked afterwards) and the one its roots point into. */
+const ONE_SHOT_WORK = 'work'
+const ONE_SHOT_ROOT = 'root'
 
 /** What `<stateDir>/acp.json` keeps. */
 interface AcpState {
@@ -196,6 +206,9 @@ export function acpDriver(options: AcpDriverOptions = {}): HarnessDriver {
       return facts && preset.capsFromFacts ? preset.capsFromFacts(caps, facts) : caps
     },
     updateCommand: () => undefined,
+    // Any agent known only by its command names threads on `acpOneShot`, best-effort (`GENERIC_ACP_FACTS`). Other
+    // presets keep their own drivers' routes.
+    ...(preset === GENERIC_ACP_PRESET ? { oneShotRoute: () => GENERIC_ACP_ROUTE } : {}),
     create: (context) => createAcpRuntime(context, preset, options, ptyRuns)
   }
 }
@@ -207,6 +220,8 @@ export interface AcpRuntime extends DriverRuntime {
 }
 
 export function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: AcpDriverOptions, ptyRuns: () => boolean, hooks: AcpRuntimeHooks = {}): AcpRuntime {
+  // Only an agent known by its command runs single requests here; a driver built on this runtime keeps its own.
+  const oneShotRoute = preset === GENERIC_ACP_PRESET && !hooks.driver
   const statePath = join(context.stateDir, 'acp.json')
   let state: AcpState = {}
   try {
@@ -311,7 +326,42 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     verified = { hash: installed.hash, atMs: Date.now() }
   }
 
+  /** The places of the single requests running now, by the folder each runs in (`oneShotTransport`). */
+  const oneShotPlaces = new Map<string, { place: Place; proc?: PlaceProcess }>()
+
+  /**
+   * A single request's agent (`acpOneShot`): in its place only, on the sealed launch (`oneShot/launch.ts`): the
+   * allowlisted environment, the entry's own variables, its enforced ones, and every config and temporary root pointed
+   * into the place. Its whole tree ends with the request (`PlaceProcess.stop`).
+   */
+  const spawnOneShot = (request: AcpLaunchRequest): AcpConnection => {
+    const held = request.cwd ? oneShotPlaces.get(request.cwd) : undefined
+    if (!held) throw new Error(`${label} runs a single request only in a place of its own.`)
+    const { resolved, launch, root, track } = launchOf(request.purpose)
+    if (root && (!verified || verified.hash !== installedNow()?.hash || Date.now() - verified.atMs > 60_000))
+      throw new Error(`Mousse did not check the files of ${label} before starting it.`)
+    const env = sealedEnv({ base: context.env.env, entry: launch.env, ...(context.env.enforced ? { preset: context.env.enforced } : {}), root: join(held.place.dir, ONE_SHOT_ROOT) })
+    const proc = spawnInPlace(held.place, { command: resolved.command, args: [...resolved.args, ...GENERIC_ACP_ARGUMENTS(launch.args)], env, purpose: 'acp-one_shot', instanceId: context.instanceId, cwd: request.cwd! })
+    held.proc = proc
+    const untrack = root && agents ? agents.track(root) : track?.()
+    const connection = connectAcpProcess(proc.child, request.handlers, {
+      onExit: () => {
+        untrack?.()
+        request.onExit?.()
+      }
+    })
+    // Ending the connection ends the whole tree, with proof (`PlaceProcess.stop`).
+    const child = proc.child
+    child.kill = () => {
+      void proc.stop().catch(() => undefined)
+      return true
+    }
+    connection.child = child
+    return connection
+  }
+
   const spawnAgent = (request: AcpLaunchRequest): AcpConnection => {
+    if (request.purpose === 'one_shot') return spawnOneShot(request)
     const { resolved, launch, root, track } = launchOf(request.purpose)
     hooks.launching?.(request.purpose, resolved.path)
     // Every registry launch follows a file check (`beforeLaunch`); none starts without one.
@@ -664,6 +714,49 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
       state.sessions = {}
       save()
     },
+    /**
+     * `acp:generic` (`acpOneShot`): the runner's request on a fresh agent process and session in a place of its own
+     * (`oneShot/places.ts`): its record first, then its folder; the session's workspace and the process's folder are
+     * its `work` folder, with no MCP server; every permission, file, terminal, question or unknown request and every
+     * tool the agent reports ends the request (`AcpSessions.oneShot`). Once the tree has gone, with proof, anything
+     * written in `work` fails the request, and the place is removed; without proof it is left to the sweep.
+     */
+    ...(oneShotRoute ? {
+      oneShotTransport: (spec) => ({
+        send: async (wire, events, signal) => {
+          signal.throwIfAborted()
+          if (state.signedOut) throw harnessAppError({ code: 'signed_out', message: `Sign in to ${label} in Settings → Providers.`, instanceId: context.instanceId })
+          const place = reservePlace(context.profileHome, { route: 'acp:generic', instanceId: context.instanceId })
+          const work = join(place.dir, ONE_SHOT_WORK)
+          const held: { place: Place; proc?: PlaceProcess } = { place }
+          let text = ''
+          let failure: unknown
+          try {
+            mkdirSync(work, { recursive: true, mode: 0o700 })
+            oneShotPlaces.set(work, held)
+            text = await sessions.oneShot({
+              cwd: work,
+              model: spec.model,
+              system: wire.system,
+              prompt: wire.prompt,
+              signal,
+              onActivity: () => events.activity(),
+              onText: (chunk) => events.text(chunk)
+            })
+          } catch (error) {
+            failure = error
+          } finally {
+            oneShotPlaces.delete(work)
+          }
+          const released = await releasePlace(place, held.proc, [], { written: ONE_SHOT_WORK })
+          if (failure) throw failure
+          if (!released.reaped) throw harnessAppError({ code: 'protocol', message: `The ${label} process did not end after its request.`, instanceId: context.instanceId })
+          if (released.written)
+            throw harnessAppError({ code: 'one_shot_tool_refused', reason: 'tool_detected', message: `${label} left ${released.written} in the empty folder of a request that runs no tools, so Mousse did not use its answer.`, instanceId: context.instanceId })
+          return text
+        }
+      })
+    } satisfies Pick<DriverRuntime, 'oneShotTransport'> : {}),
     forgetConversation: (threadId) => sessions.forgetConversation(threadId),
     terminate: (ref) => sessions.terminate(ref.sessionId),
     setLiveHost: (host) => {

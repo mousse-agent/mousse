@@ -38,6 +38,7 @@ import { ptyAvailable, redactSignIn, runInPty, terminalText, transcriptLinks, ty
 import { runHarness } from '../spawn'
 import { InstanceVault } from '../vault'
 import { ALL_MIRROR_FIELDS, SIGN_OUT_MIRROR_FIELDS } from '../vendorMirror'
+import { legacyOneShotRoute } from '../oneShot/routes'
 
 export const CLAUDE_CODE_CAPS: HarnessCaps = Object.freeze({
   ...CLAUDE_SUBSCRIPTION_CAPABILITIES,
@@ -272,7 +273,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     canInstall: false,
     customModels: true,
     // Chat titles, pull request drafts and commit messages: one turn with no tools (`service.oneShot`).
-    oneShot: true,
+    // Until its own slice, on its own one-shot code (`DriverRuntime.oneShot`), admitted with no facts claimed.
+    oneShotRoute: legacyOneShotRoute('claude'),
     methodLabel: 'Claude Code sign-in',
     // Mousse's own PreToolUse hook stamps each Mousse call with the turn's token (`updatedInput`).
     mcpTurnBinding: 'per_call',

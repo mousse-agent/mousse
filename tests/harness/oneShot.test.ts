@@ -202,8 +202,8 @@ describe('gateway.oneShot refusals', () => {
   })
 
   it('Claude Code and Codex declare one-shots, so their models are offered for titles', () => {
-    expect(claudeCodeDriver().oneShot).toBe(true)
-    expect(codexDriver({ builtIn: () => { throw new Error('unused') } }).oneShot).toBe(true)
+    expect(claudeCodeDriver().oneShotRoute).toBeDefined()
+    expect(codexDriver({ builtIn: () => { throw new Error('unused') } }).oneShotRoute).toBeDefined()
   })
 
   it('refuses an agent runtime without one-shots (`oneShot` absent) with `unsupported`', async () => {

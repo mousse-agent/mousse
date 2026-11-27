@@ -4188,6 +4188,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           themes: THEME_OPTIONS,
           accentColors: ACCENT_COLORS,
           llmProviders,
+          // Read from cached state only (`HarnessGateway.titleListing`): it never waits for a check.
+          ...(ctx.mms.harness?.titleListing ? { titleListing: ctx.mms.harness.titleListing(ctx.mms.settings.get().title) } : {}),
           agentTypes,
           botProviders: botProviderOptions(llmProviders, holdable)
         }

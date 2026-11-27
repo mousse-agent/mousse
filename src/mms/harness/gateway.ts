@@ -28,7 +28,7 @@ import type { NeutralTool } from '../../shared/harness/tools'
 import type { CliProviderConfigPatch } from '../../shared/providerAuth'
 import type { ModelOverride } from '../../shared/providerInstances'
 import type { McpRelayRuntime, SkillsRegistrySnapshot } from '../../shared/integrations'
-import type { AgentAccessLevel, LlmProviderOption } from '../../shared/settings'
+import type { AgentAccessLevel, LlmProviderOption, TitleListing, TitleListingEntry, TitleListingSaved, TitleModelListing } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
 import { findListedModel, modelChoiceOf } from '../../shared/modelChoice'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
@@ -67,6 +67,9 @@ import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceState
 import { LatestVersionCache, type LatestVersionSource } from './latest'
 import { RuntimeFactsStore } from './facts'
 import { questionsPrompter, refusingPrompter } from './acp/permissions'
+import { admit, isPlan, opOfTask, routeFactsText, type AdmissionEntry, type AdmissionView, type NotAdmitted, type OneShotBinding, type OneShotIdentity, type OneShotPlan } from './oneShot/admission'
+import { ONE_SHOT_INACTIVITY_MS, runPlan } from './oneShot/runner'
+import type { OneShotOp, OneShotTransport } from './oneShot/route'
 import { checkPermissionMode, checkPolicy, type CheckPolicyOptions, freezePolicy, hasSpendLimit, mapNeutralTools, permissionModeRefusal, policyDigest, purposeAllowed, toolControlLevel } from './policy'
 import { budgetLimitsOf, RunCounterBook, type CounterScope, type SpendScope } from './budget'
 import { definitionAuthorityDigest, type DefinitionAuthority } from '../agentDefinitions/definitionGate'
@@ -145,12 +148,17 @@ export interface HarnessGateway {
    */
   runSettled?(runId: string): void
   /**
-   * One model request with no tools (a chat title), on an instance whose driver runs one-shots
-   * (`HarnessDriver.oneShot`). Resolves the selection like a turn for `purpose` (scope, hidden models,
-   * disabled instances); a driver without one-shots is refused with `unsupported`. Ends with `timeout` after
-   * `ONE_SHOT_INACTIVITY_MS` without a provider event, and is never retried: the caller falls back.
+   * One model request with no tools (a chat title, a draft): the selection is resolved like a turn's (moved and
+   * retired entries), admitted from cached state (`oneShot/admission.ts`), and sent once by the runner
+   * (`oneShot/runner.ts`) within its bounds. Never retried: the caller falls back or moves on.
    */
   oneShot(request: OneShotRequest): Promise<{ text: string }>
+  /**
+   * Thread titles' listing per model, from cached state only (no check is started or awaited): every entry, turned
+   * off and signed out ones included, each model admitted (held or best-effort) or unavailable with its reason, and
+   * the saved choice with its own reason.
+   */
+  titleListing?(saved?: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'>): TitleListing
   /** The driver's runtime masks secret values in its tool results before keeping them (`HarnessDriver.masksToolResults`). */
   masksToolResults(driver: HarnessDriverKind | undefined): boolean
   /**
@@ -320,8 +328,17 @@ export interface HarnessGateway {
    * Automatic naming's index). An instance never checked has no `checkedAt`.
    */
   cachedSnapshots?(scope: ProviderScope): InstanceSnapshot[]
-  /** Whether the instance's driver runs single requests (`oneShot`); false for an unknown instance. */
+  /**
+   * Whether at least one of the instance's models is admitted for single requests now (`titleListing`); false for an
+   * unknown instance. Kept for computers that read only the per-instance flag.
+   */
   canOneShot?(instanceId: string): boolean
+  /** Whether `model` of the instance is admitted for an Automatic title now (`oneShot/admission.ts`). */
+  admitsOneShot?(instanceId: string, model: string): boolean
+  /** `admitsOneShot` for many models of one instance, reading the instance once. */
+  titleAdmitter?(instanceId: string): (model: string) => boolean
+  /** Whether the instance's driver has a single-request route at all, admitted or not yet (its check may admit it). */
+  hasOneShotRoute?(instanceId: string): boolean
   /** Whether the instance is on in `scope` (the device setting, narrowed by the project's); false for an unknown instance. */
   isEnabledInScope?(instanceId: string, scope: ProviderScope): boolean
   /** Stops the instances' runtimes and running operations. */
@@ -403,6 +420,15 @@ export interface OneShotRequest {
   sessionKey?: string
   /** What the request is for (a refusal names it); absent reads as `title`. */
   task?: OneShotTask
+  /** The operation, when the task does not say it (a bot's name). Absent: from `task`. */
+  op?: OneShotOp
+  /**
+   * The thread runs on a local server's model (`OrchestratorService.localTitleModel`): only that model, and only while
+   * it is loaded. Admission refuses a binding that is stale or not local, so it never becomes a cloud request.
+   */
+  localThread?: { resident: boolean }
+  /** This request's longest wait (an Automatic candidate's share of its pass). */
+  deadlineMs?: number
   namingOrigin?: NamingOrigin
   signal?: AbortSignal
 }
@@ -668,7 +694,7 @@ const DESKTOP_MODEL_REFRESH_INTERVAL_MS = 5 * 60_000
 /** Test-only: replaces `MODEL_REFRESH_INTERVAL_MS`, in milliseconds. */
 const MODEL_REFRESH_INTERVAL_ENV = 'MOUSSE_MODEL_REFRESH_INTERVAL_MS'
 /** A one-shot request ends with `timeout` after this long without a provider event. */
-export const ONE_SHOT_INACTIVITY_MS = 60_000
+export { ONE_SHOT_INACTIVITY_MS }
 /** A usage read gives up after this long (the usage page shows the instance as unreadable). */
 export const USAGE_READ_MS = 15_000
 /** How long turn admission waits for the account check; past it the account counts as unknown. */
@@ -1129,21 +1155,19 @@ export class Harness implements HarnessGateway {
     if (!driver) fail('bad_request', `No provider adapter for driver ${resolved.entry.driver} (instance ${resolved.instanceId}).`)
     const config = driver.decodeConfig(resolved.entry.config, resolved.instanceId)
     const version = this.probes.get(resolved.instanceId)?.lastGood?.binary?.version
-    // Chat titles are a one-shot request; a driver without one-shots runs turns only.
-    if (options.purpose === 'title' && !driver.oneShot)
+    // Chat titles are a single request: a driver with no route for one runs turns only. Whether this model may run one
+    // now is admission's to say (`oneShot`).
+    if (options.purpose === 'title' && !driver.oneShotRoute)
       harnessFail('unsupported', `${driver.label} cannot name chats. Choose another model for chat titles, or Automatic.`, resolved.instanceId)
-    const oneShotRefused = options.purpose === 'title' && !options.allowDisabled ? driver.oneShotRefusal?.(config, version, resolved.instanceId) : undefined
-    if (oneShotRefused) harnessFail('unsupported', `${oneShotRefused} Choose another model for chat titles, or Automatic.`, resolved.instanceId)
     if (!options.allowDisabled) {
       if (selection.model && hidesModel(this.prefs.get(resolved.instanceId), selection.model))
         harnessFail('model_hidden', `${this.modelName(resolved.instanceId, selection.model)} is hidden. Show it in Settings → Providers or choose another model.`, resolved.instanceId)
     }
     const caps = driver.caps(config, version, this.currentFacts(resolved.instanceId), resolved.instanceId)
-    // A driver that proves its one-shot route itself (`oneShotRefusal`) names chats whatever its turns hold.
-    const provenOneShot = options.purpose === 'title' && driver.oneShotRefusal !== undefined
     // An instance that approves tools itself runs only turns a person drives; reading or stopping
-    // work already running (`allowDisabled`) is never refused.
-    if (!options.allowDisabled && !provenOneShot && !purposeAllowed(caps, options.purpose))
+    // work already running (`allowDisabled`) is never refused. A single request runs no tools: its route's facts and
+    // label say what it holds (`oneShot/admission.ts`), not the entry's turns.
+    if (!options.allowDisabled && options.purpose !== 'title' && !purposeAllowed(caps, options.purpose))
       throw harnessAppError({
         code: 'policy_unenforceable',
         message: `${driver.toolControlReason?.(config, version, resolved.instanceId) ?? `${this.labelOf(resolved.instanceId, driver)} approves tools itself.`} It runs only chats you drive. Choose another provider for this.`,
@@ -1642,14 +1666,200 @@ export class Harness implements HarnessGateway {
     return Boolean(driver && this.drivers.get(driver)?.masksToolResults)
   }
 
-  /** Whether the instance's driver runs one-shots (`HarnessDriver.oneShot`); read for picker listings. */
-  private oneShotAvailable(instanceId: string): boolean {
+  // -- Single requests (`oneShot/`) ------------------------------------------------------------
+
+  /**
+   * The cache's view of an entry for admission (`oneShot/admission.ts`): nothing here starts or awaits a check, and no
+   * runtime is built for an entry that has none yet.
+   */
+  private admissionEntry(instanceId: string): AdmissionEntry | undefined {
     const entry = this.instanceMap.get(instanceId)
     const driver = entry ? this.drivers.get(entry.driver) : undefined
-    if (!entry || !driver?.oneShot) return false
-    if (!driver.oneShotRefusal) return true
-    const record = this.recordOrUndefined(instanceId)
-    return Boolean(record) && !driver.oneShotRefusal(record!.config, this.probes.get(instanceId)?.lastGood?.binary?.version, instanceId)
+    if (!entry || !driver) return undefined
+    const record = this.records.get(instanceId)
+    let config: InstanceConfig
+    try {
+      config = record?.config ?? driver.decodeConfig(entry.config, instanceId)
+    } catch {
+      return undefined
+    }
+    const probe = this.probes.get(instanceId)
+    const version = probe?.lastGood?.binary?.version
+    // The entry's models, read once for every model admitted on this view.
+    let byId: Map<string, InstanceModel> | undefined
+    const listed = (model: string): InstanceModel | undefined => {
+      if (!byId) {
+        try {
+          byId = new Map(this.catalog.models(instanceId, { kind: 'device' }).map((each) => [each.id, each]))
+        } catch {
+          byId = new Map()
+        }
+      }
+      return byId.get(model)
+    }
+    const label = this.labelOf(instanceId, driver)
+    return {
+      instanceId,
+      label,
+      enabled: entry.enabled,
+      retired: Boolean(driver.retired?.(instanceId)),
+      stopped: Boolean(record?.stopped),
+      signedOut: config.signedOutInMousse === true,
+      locked: config.profile === 'locked',
+      checked: Boolean(probe?.lastGood),
+      route: (model) => {
+        if (!driver.oneShotRoute) return undefined
+        const known = listed(model)
+        // A model the entry lists as unable to run one (a Bedrock model, a Codex model on another route).
+        if (known?.oneShot === false) return { refused: `${label} cannot run a single request on ${known.label || model}.` }
+        return driver.oneShotRoute({ config, installedVersion: version, instanceId, model, ...(known ? { listed: known } : {}) })
+      },
+      model: (model) => ({ hidden: hidesModel(this.prefs.get(instanceId), model), local: Boolean(listed(model)?.local) }),
+      identity: () => this.oneShotIdentity(instanceId, false)
+    }
+  }
+
+  /**
+   * What a single request is bound to: the runtime's build key, the executable and sign-in the last check saw, and when
+   * its facts were read. `live` stats the executable now, so a program replaced since its check no longer matches.
+   */
+  private oneShotIdentity(instanceId: string, live: boolean): OneShotIdentity {
+    const probe = this.probes.get(instanceId)
+    const probed = probe?.lastGood?.fingerprint
+    const binary = live && probed ? fingerprintOf(probed.path) : probed
+    return {
+      instanceId,
+      runtime: this.records.get(instanceId)?.key ?? '',
+      ...(binary ? { executable: `${binary.path}|${binary.size}|${binary.mtimeMs}` } : probed ? { executable: 'gone' } : {}),
+      ...(probe?.fingerprint ? { credential: probe.fingerprint } : {}),
+      ...(probe?.lastGood && probe.checkedAtMs !== undefined ? { facts: String(probe.checkedAtMs) } : {})
+    }
+  }
+
+  private readonly admissionView: AdmissionView = { entry: (instanceId) => this.admissionEntry(instanceId) }
+
+  /** `admit` on the cache, for any caller (`oneShot/admission.ts`). */
+  admitOneShot(op: OneShotOp, binding: OneShotBinding): OneShotPlan | NotAdmitted {
+    return admit(op, binding, this.admissionView)
+  }
+
+  admitsOneShot(instanceId: string, model: string): boolean {
+    return isPlan(this.admitOneShot('thread_title', { kind: 'model', instanceId, model }))
+  }
+
+  /** A view that reads one entry once, for admitting many of its models in one pass (a listing, Automatic's index). */
+  private entryView(instanceId: string): AdmissionView {
+    const entry = this.admissionEntry(instanceId)
+    return { entry: (id) => (id === instanceId ? entry : this.admissionEntry(id)) }
+  }
+
+  titleAdmitter(instanceId: string): (model: string) => boolean {
+    const view = this.entryView(instanceId)
+    return (model) => isPlan(admit('thread_title', { kind: 'model', instanceId, model }, view))
+  }
+
+  hasOneShotRoute(instanceId: string): boolean {
+    const entry = this.instanceMap.get(instanceId)
+    return Boolean(entry && this.drivers.get(entry.driver)?.oneShotRoute)
+  }
+
+  /** At least one of the instance's models is admitted for a thread title now: the flag older computers read. */
+  private oneShotAvailable(instanceId: string): boolean {
+    if (!this.hasOneShotRoute(instanceId)) return false
+    let models: InstanceModel[]
+    try {
+      models = this.catalog.models(instanceId, { kind: 'device' })
+    } catch {
+      return false
+    }
+    // An agent that lists no model runs its own default.
+    const admits = this.titleAdmitter(instanceId)
+    return models.length ? models.some((model) => admits(model.id)) : admits('default')
+  }
+
+  /** One model's title listing: held, best-effort or legacy when admitted, else unavailable with its reason. */
+  private titleListingOf(instanceId: string, model: string, view: AdmissionView = this.admissionView): TitleModelListing {
+    const admitted = admit('thread_title', { kind: 'model', instanceId, model }, view)
+    if (!isPlan(admitted)) return { state: 'unavailable', reason: admitted.reason }
+    const facts = routeFactsText(admitted.route.facts)
+    return { state: admitted.label, route: admitted.route.id, ...(facts.length ? { facts } : {}) }
+  }
+
+  titleListing(saved?: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'>): TitleListing {
+    const entries: TitleListingEntry[] = []
+    for (const [instanceId, entry] of Object.entries(this.instanceMap.list())) {
+      const driver = this.drivers.get(entry.driver)
+      if (!driver) continue
+      let models: InstanceModel[] = []
+      try {
+        // A turned-off entry is listed with its reason alone: its runtime is not built for this.
+        if (entry.enabled) models = this.catalog.models(instanceId, { kind: 'device' })
+      } catch {
+        // An entry whose models cannot be read is listed with its reason alone.
+      }
+      const label = this.listingLabel(instanceId, entry)
+      const view = this.entryView(instanceId)
+      const listing = models.filter((model) => !model.hidden).map((model) => ({ id: model.id, label: model.label, ...this.titleListingOf(instanceId, model.id, view) }))
+      const whole = listing.length ? undefined : admit('thread_title', { kind: 'model', instanceId, model: 'default' }, view)
+      const reason = !driver.oneShotRoute ? `${label} cannot run a single request.` : whole && !isPlan(whole) ? whole.reason : undefined
+      entries.push({ instanceId, driver: entry.driver, label, models: listing, ...(reason ? { reason } : {}) })
+    }
+    return { entries, ...(saved ? { saved: this.savedTitleChoice(saved) } : {}) }
+  }
+
+  /** The saved title choice as a row of its own, with its exact reason, whatever the live listing has. */
+  private savedTitleChoice(saved: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'>): TitleListingSaved | undefined {
+    if (!saved.model?.trim() || (!saved.instanceId?.trim() && !saved.llmProvider?.trim())) return undefined
+    let instanceId = saved.instanceId?.trim() || saved.llmProvider
+    let model = saved.model
+    try {
+      const resolved = this.resolveStored(saved, { purpose: 'title' })
+      instanceId = resolved.instanceId
+      model = resolved.model
+    } catch (error) {
+      return { instanceId, model, label: model, state: 'unavailable', reason: error instanceof Error ? error.message : String(error) }
+    }
+    let label = model
+    try {
+      label = this.catalog.models(instanceId, { kind: 'device' }).find((each) => each.id === model)?.label || model
+    } catch {
+      // The model's id stands for its name.
+    }
+    return { instanceId, model, label, ...this.titleListingOf(instanceId, model) }
+  }
+
+  /** An entry's name in a listing, from its config, without building its runtime. */
+  private listingLabel(instanceId: string, entry: ProviderInstanceConfig): string {
+    const record = this.records.get(instanceId)
+    if (record) return this.displayName(record)
+    const name = (entry.config as { displayName?: unknown } | undefined)?.displayName
+    if (typeof name === 'string' && name.trim()) return name.trim()
+    return this.drivers.get(entry.driver)?.label ?? instanceId
+  }
+
+  /**
+   * The transport a plan runs on: the runtime's own for a route with facts, else its legacy one-shot, wrapped so it
+   * reports only activity.
+   */
+  private oneShotTransportOf(record: InstanceRecord, plan: OneShotPlan, request: OneShotRequest): OneShotTransport {
+    const runtime = record.runtime
+    const customModel = this.catalog.customModel(record.instanceId, plan.model)
+    const spec = {
+      model: agentModelId(plan.model, plan.effort),
+      ...(customModel ? { customModel } : {}),
+      ...(request.sessionKey ? { sessionKey: request.sessionKey } : {}),
+      ...(request.task ? { task: request.task } : {}),
+      ...(request.namingOrigin ? { namingOrigin: request.namingOrigin } : {})
+    }
+    if (plan.route.facts) {
+      if (!runtime.oneShotTransport) harnessFail('unsupported', `${this.displayName(record)} cannot run a single request.`, record.instanceId)
+      return runtime.oneShotTransport(spec)
+    }
+    const legacy = runtime.oneShot?.bind(runtime)
+    if (!legacy) harnessFail('unsupported', `${this.displayName(record)} cannot run a single request.`, record.instanceId)
+    return {
+      send: async (wire, events, signal) => (await legacy({ ...spec, system: wire.system, prompt: wire.prompt, onActivity: () => events.activity() }, signal)).text
+    }
   }
 
   async oneShot(request: OneShotRequest): Promise<{ text: string }> {
@@ -1659,40 +1869,32 @@ export class Harness implements HarnessGateway {
     } catch (error) {
       throw asHarnessError(error, request.selection.instanceId ?? '')
     }
+    const op = request.op ?? opOfTask(request.task)
+    const binding: OneShotBinding = request.localThread
+      ? { kind: 'local_thread', instanceId: resolved.instanceId, model: resolved.model, resident: request.localThread.resident }
+      : { kind: 'model', instanceId: resolved.instanceId, model: resolved.model, ...(resolved.effort ? { effort: resolved.effort } : {}) }
+    const admitted = this.admitOneShot(op, binding)
+    if (!isPlan(admitted)) {
+      const code: HarnessErrorCode = admitted.notAdmitted === 'signed_out' ? 'signed_out' : admitted.notAdmitted === 'disabled' ? 'instance_disabled' : 'unsupported'
+      throw harnessAppError({ code, reason: 'not_admitted', message: admitted.reason, instanceId: admitted.instanceId })
+    }
+    // A local thread's binding keeps the reasoning level the thread chose.
+    const plan: OneShotPlan = binding.kind === 'local_thread' && resolved.effort ? Object.freeze({ ...admitted, effort: resolved.effort }) : admitted
     const record = this.record(resolved.instanceId)
-    const runtime = record.runtime
-    if (!runtime.oneShot) harnessFail('unsupported', `${this.displayName(record)} cannot run a single request.`, record.instanceId)
     if (record.stopped) throw this.stopError(record, record.stopped.reason)
     this.admissionGate(record)
-    // The gateway's inactivity bound: every provider event restarts it; past it the request is aborted.
-    const idle = new AbortController()
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const restart = () => {
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => idle.abort(), ONE_SHOT_INACTIVITY_MS)
-    }
-    const signal = request.signal ? AbortSignal.any([request.signal, idle.signal]) : idle.signal
-    const customModel = this.catalog.customModel(record.instanceId, resolved.model)
-    restart()
-    try {
-      const { text } = await runtime.oneShot({
-        model: agentModelId(resolved.model, resolved.effort),
-        ...(customModel ? { customModel } : {}),
-        system: request.system,
-        prompt: request.prompt,
-        ...(request.sessionKey ? { sessionKey: request.sessionKey } : {}),
-        ...(request.task ? { task: request.task } : {}),
-        ...(request.namingOrigin ? { namingOrigin: request.namingOrigin } : {}),
-        onActivity: restart
-      }, signal)
-      return { text: text.slice(0, Math.max(0, request.maxChars)) }
-    } catch (error) {
-      if (idle.signal.aborted && !request.signal?.aborted)
-        harnessFail('timeout', `${this.displayName(record)} sent nothing for ${ONE_SHOT_INACTIVITY_MS / 1000} seconds.`, record.instanceId)
-      throw error
-    } finally {
-      if (timer) clearTimeout(timer)
-    }
+    const text = await runPlan({
+      plan,
+      transport: this.oneShotTransportOf(record, plan, request),
+      live: () => (this.instanceMap.get(plan.instanceId) ? this.oneShotIdentity(plan.instanceId, true) : undefined),
+      label: this.displayName(record),
+      system: request.system,
+      prompt: request.prompt,
+      maxChars: request.maxChars,
+      ...(request.deadlineMs !== undefined ? { deadlineMs: request.deadlineMs } : {}),
+      ...(request.signal ? { signal: request.signal } : {})
+    })
+    return { text }
   }
 
   imageModels(instanceId: string): readonly ImageModelFacts[] {
@@ -2484,7 +2686,11 @@ export class Harness implements HarnessGateway {
       // A runtime lists nothing while it cannot run (a model API without its credential).
       const option = record && this.named(record, record.runtime.llmProvider?.())
       if (!option) continue
-      const listed = { ...visibleProviderOption({ ...option, instanceId }, this.prefs.get(instanceId)), instanceId, oneShot: this.oneShotAvailable(instanceId) }
+      const visible = visibleProviderOption({ ...option, instanceId }, this.prefs.get(instanceId))
+      // Each model says whether and how it names threads; the instance flag is derived from them for older computers.
+      const view = this.entryView(instanceId)
+      const models = visible.models.map((model) => ({ ...model, title: this.titleListingOf(instanceId, model.id, view) }))
+      const listed = { ...visible, models, instanceId, oneShot: models.some((model) => model.title.state !== 'unavailable') }
       // In the order the pickers have always shown: model APIs (fixed-id entries) by name, then agents.
       ;(record.driver.instanceIdFor ? apis : agents).push(listed)
     }

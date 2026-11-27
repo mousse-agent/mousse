@@ -39,6 +39,7 @@ import { answerBotPermission, checkBotFileRequest } from './botApprovals'
 import type { BotAuthority } from '../../../shared/bots/personal/authority'
 import { acpAgentError, acpQuotaReply, agentCancelledError, promptStopOutcome } from './stopReason'
 import { xaiHandlers, xaiStopFailure } from './xai'
+import { ONE_SHOT_INSTRUCTION } from '../oneShot/runner'
 
 /** The title is generic on agy: its launch arguments name the role and describe the work. */
 function subagentActivity(rawInput: unknown, title: string | undefined, background = false) {
@@ -343,8 +344,8 @@ function refuseFile(refuse: (what: string) => void, what: string): Promise<never
   return Promise.reject(new Error('This request runs no tools.'))
 }
 
-/** The first line of every one-shot prompt (`AcpSessions.oneShot`). */
-export const ONE_SHOT_INSTRUCTION = 'Use only the input below. Do not use tools, read or write files, run commands, or ask questions. Reply with only the requested text.'
+/** The first line of every one-shot prompt (`AcpSessions.oneShot`): the runner's (`oneShot/runner.ts`). */
+export { ONE_SHOT_INSTRUCTION }
 /** A one-shot ends past this, whatever the agent still sends (the gateway's inactivity bound comes first when it goes quiet). */
 export const ONE_SHOT_DEADLINE_MS = 180_000
 /** A one-shot's answer ends once it is longer than this many characters. */
@@ -363,6 +364,8 @@ export interface OneShotInput {
   prompt: string
   signal: AbortSignal
   onActivity(): void
+  /** Each part of the answer as it streams (the runner's cap). */
+  onText?(chunk: string): void
   /** The session the agent opened, once it has: its files are this request's (`AntigravityProviderService.oneShot`). */
   onSession?(sessionId: string): void
   /** The agent process started, with its id when it has one. */
@@ -2602,6 +2605,7 @@ export class AcpSessions {
       input.onActivity()
       if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') {
         text += event.content.text ?? ''
+        if (event.content.text) input.onText?.(event.content.text)
         if (text.length > cap) fail(harnessAppError({ code: 'protocol', message: `${label} wrote more than ${cap.toLocaleString('en-US')} characters, so Mousse stopped it.` }))
       }
     }

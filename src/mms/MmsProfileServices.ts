@@ -201,6 +201,7 @@ import { LimitPoller } from './usageHistory/limitPoller'
 import { forEachYielding, startupBackgroundTimed, startupPhase } from './startup/startupTiming'
 import { logInfo } from './log/diag'
 import { onThreadBranchChanged } from './workspace/threadHeads'
+import { schedulePlaceSweep } from './harness/oneShot/sweep'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.delete'
@@ -468,6 +469,8 @@ export class MmsProfileServices {
   private finishStartupLifecycle: () => void = () => undefined
   private deferredStartupWork?: Promise<void>
   private startupWorkStopped = false
+  /** Cancels the post-ready sweep of single requests' places, while it waits. */
+  private cancelPlaceSweep?: () => void
   private readonly requests = new OwnedWorkBarrier()
   private stopOperation?: Promise<void>
   private readonly ownerHandle: MmsOwnerHandle | null
@@ -913,6 +916,7 @@ export class MmsProfileServices {
         selection: { instanceId: selection.instanceId, llmProvider: selection.instanceId.split(':')[0] ?? '', model: selection.model, ...(selection.effort ? { effort: selection.effort } : {}) },
         signal,
         purpose: 'title',
+        op: 'bot_name',
         system: 'Name a helper in 2–3 words.',
         prompt,
         maxChars: 60
@@ -2591,6 +2595,7 @@ export class MmsProfileServices {
   beginShutdown(): void {
     // The start's deferred passes stop at their next step; what waits for the lifecycle pass goes on (and is refused).
     this.startupWorkStopped = true
+    this.cancelPlaceSweep?.()
     this.finishStartupLifecycle()
     void this.undoRetention.stop()
     void this.threadExpiry.stop()
@@ -2794,6 +2799,8 @@ export class MmsProfileServices {
     void startupBackgroundTimed('queueRecovery', () => this.orchestrator.recoverStartupQueues(), log)
     // The storage service is the only scheduler; it runs the trash sweep inside its own run.
     this.storageCleanup.start()
+    // What ended single requests left (thread titles and the like, `oneShot/places.ts`), a minute after ready.
+    this.cancelPlaceSweep = schedulePlaceSweep(this.homeDir, { stopped: stopping })
     await startupBackgroundTimed('threadRuntimes', () => this.threadRuntimes.settleRestartedThreads(stopping), log)
   }
 
