@@ -72,8 +72,17 @@ import Edit02Icon from '@hugeicons/core-free-icons/Edit02Icon'
 import File01Icon from '@hugeicons/core-free-icons/File01Icon'
 import File02Icon from '@hugeicons/core-free-icons/File02Icon'
 import FileAddIcon from '@hugeicons/core-free-icons/FileAddIcon'
+import FileArchiveIcon from '@hugeicons/core-free-icons/FileArchiveIcon'
+import FileBracesIcon from '@hugeicons/core-free-icons/FileBracesIcon'
+import FileCodeIcon from '@hugeicons/core-free-icons/FileCodeIcon'
+import FileCogIcon from '@hugeicons/core-free-icons/FileCogIcon'
+import FileDatabaseIcon from '@hugeicons/core-free-icons/FileDatabaseIcon'
+import FileEmpty02Icon from '@hugeicons/core-free-icons/FileEmpty02Icon'
 import FileExportIcon from '@hugeicons/core-free-icons/FileExportIcon'
+import FileImageIcon from '@hugeicons/core-free-icons/FileImageIcon'
 import FileScriptIcon from '@hugeicons/core-free-icons/FileScriptIcon'
+import FileSpreadsheetIcon from '@hugeicons/core-free-icons/FileSpreadsheetIcon'
+import FileTerminalIcon from '@hugeicons/core-free-icons/FileTerminalIcon'
 import FileVerifiedIcon from '@hugeicons/core-free-icons/FileVerifiedIcon'
 import Flag01Icon from '@hugeicons/core-free-icons/Flag01Icon'
 import FlashIcon from '@hugeicons/core-free-icons/FlashIcon'
@@ -252,7 +261,16 @@ export const ExternalLink = /* @__PURE__ */ createIcon('ExternalLink', LinkSquar
 export const Eye = /* @__PURE__ */ createIcon('Eye', ViewIcon)
 export const EyeOff = /* @__PURE__ */ createIcon('EyeOff', ViewOffSlashIcon)
 export const File = /* @__PURE__ */ createIcon('File', File01Icon)
+export const FileArchive = /* @__PURE__ */ createIcon('FileArchive', FileArchiveIcon)
+export const FileBlank = /* @__PURE__ */ createIcon('FileBlank', FileEmpty02Icon)
+export const FileBraces = /* @__PURE__ */ createIcon('FileBraces', FileBracesIcon)
+export const FileCodePage = /* @__PURE__ */ createIcon('FileCodePage', FileCodeIcon)
+export const FileCog = /* @__PURE__ */ createIcon('FileCog', FileCogIcon)
+export const FileDatabase = /* @__PURE__ */ createIcon('FileDatabase', FileDatabaseIcon)
+export const FileImage = /* @__PURE__ */ createIcon('FileImage', FileImageIcon)
 export const FileOutput = /* @__PURE__ */ createIcon('FileOutput', FileExportIcon)
+export const FileSpreadsheet = /* @__PURE__ */ createIcon('FileSpreadsheet', FileSpreadsheetIcon)
+export const FileTerminal = /* @__PURE__ */ createIcon('FileTerminal', FileTerminalIcon)
 export const FileText = /* @__PURE__ */ createIcon('FileText', File02Icon)
 export const Folder = /* @__PURE__ */ createIcon('Folder', Folder01Icon)
 export const FolderKanban = /* @__PURE__ */ createIcon('FolderKanban', FolderLibraryIcon)

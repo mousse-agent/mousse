@@ -3,6 +3,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { UIMessage } from 'ai'
 import { TurnEditSummary } from '../src/renderer/chat/components/agent-elements/turn-edit-summary'
+import { fileIconKind } from '../src/renderer/chat/components/agent-elements/icons/file-ext-icon'
 import { mousseToUIMessages } from '../src/renderer/chat/adapters/mousseToUI'
 import { openTurnInChanges } from '../src/renderer/components/changes/openChanges'
 import { useAppStore } from '../src/renderer/stores/appStore'
@@ -34,6 +35,56 @@ describe('turn edit summary', () => {
     // A file at the top level has no folder.
     expect(markup).toContain('<span class="turn-edits-file-name">README.md</span><span class="turn-edits-stat">')
     expect(markup).not.toContain('Project root')
+  })
+
+  it('renders a Hugeicons icon for every changed file, including yml, md, plist, svg and extensionless files', () => {
+    setTurnChangedFiles('list')
+    const paths = [
+      'src/main.ts',
+      '.github/workflows/nightly.yml',
+      'build/entitlements.mac.plist',
+      'docs/CONFIGURATION.md',
+      'docs/providers/setup-matrix.json',
+      'native/net-helper/ENGINE_COMMIT',
+      'scripts/package-mac.mjs',
+      'src/renderer/assets/providers/antigravity-color.svg'
+    ]
+    const markup = renderToStaticMarkup(createElement(TurnEditSummary, {
+      messages: [{ id: 'a-icons', role: 'assistant', parts: paths.map((path) => editOf(path)) } as unknown as UIMessage]
+    }))
+    const icons = [...markup.matchAll(/<svg[^>]*class="[^"]*turn-edits-file-icon[^"]*"[^>]*>/g)]
+    expect(icons).toHaveLength(paths.length)
+    for (const [tag] of icons) {
+      expect(tag).toContain('data-icon-library="hugeicons"')
+    }
+  })
+
+  it.each([
+    ['main.ts', 'code'],
+    ['message-list.tsx', 'code'],
+    ['package-mac.mjs', 'code'],
+    ['styles/app.css', 'code'],
+    ['package.json', 'data'],
+    ['tsconfig.jsonc', 'data'],
+    ['.github/workflows/nightly.yml', 'config'],
+    ['build/entitlements.mac.plist', 'config'],
+    ['.gitignore', 'config'],
+    ['.env.local', 'config'],
+    ['Dockerfile.prod', 'config'],
+    ['docs/CONFIGURATION.md', 'text'],
+    ['LICENSE', 'text'],
+    ['antigravity-color.svg', 'image'],
+    ['assets/logo.png', 'image'],
+    ['scripts/release.sh', 'shell'],
+    ['scripts/shot.ps1', 'shell'],
+    ['schema.sql', 'database'],
+    ['metrics.csv', 'table'],
+    ['release.zip', 'archive'],
+    ['native/net-helper/ENGINE_COMMIT', 'file'],
+    ['notes.unknownext', 'file'],
+    ['', 'file']
+  ] as const)('classifies %s as %s', (filename, expected) => {
+    expect(fileIconKind(filename)).toBe(expected)
   })
 
   it('counts every file of typed and raw edits once, sums their lines and leaves out failed edits', () => {
