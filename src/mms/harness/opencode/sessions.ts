@@ -492,17 +492,22 @@ export class OpencodeSessions {
       }
     }
 
-    const closeTool = (callId: string, status: 'completed' | 'failed' | 'unfinished', summary?: string) => {
+    const closeTool = (callId: string, status: 'completed' | 'failed' | 'unfinished', result?: string) => {
       const tool = openTools.get(callId)
       if (!tool) return
       openTools.delete(callId)
+      const activity = toolActivity(tool.name, tool.input, input.cwd)
+      // The result text is a command's, search's or other call's output, as other runtimes' rows keep it (the transcript
+      // bounds it; a computer use call's is held to its allowlist by the turn's tool mapper). A file change or web search
+      // has no output: its result stays the row's summary.
+      const kept = !result ? {} : activity.kind === 'command' || activity.kind === 'search' || activity.kind === 'generic' ? { output: result } : { summary: result.slice(0, 2_000) }
       input.onTool?.({
         phase: 'complete',
         callId,
         title: toolTitle(tool.name, tool.input),
         toolName: tool.name,
         status,
-        activity: { ...toolActivity(tool.name, tool.input, input.cwd), ...(summary ? { summary: summary.slice(0, 2_000) } : {}) }
+        activity: { ...activity, ...kept }
       })
     }
 
