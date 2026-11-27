@@ -26,6 +26,12 @@ import { zoomKey } from './watchedBrowserZoom'
  * types and moves to where they last clicked, so an IME's candidates show there.
  */
 
+/** A press read when it was made: its point on the page (and on the picture) and the picture it was made on. */
+export interface PinnedPress {
+  at: { x: number; y: number; left: number; top: number; scale: number }
+  picture?: number
+}
+
 export interface InputMark {
   seq: number
   /** Where, in percent of the picture. */
@@ -103,6 +109,19 @@ export function useBrowserInput(options: {
     return { x: Math.round(fx * viewport.width * 100) / 100, y: Math.round(fy * viewport.height * 100) / 100, left: fx * 100, top: fy * 100, scale: viewport.width / rect.width }
   }
 
+  /**
+   * A press pinned to the picture it was made on: its page point and that picture's number, read now. Sent later (once
+   * the browser is taken over), it still names that picture, so the host refuses it if the page changed meanwhile.
+   */
+  const pin = (event: { clientX: number; clientY: number }): PinnedPress | undefined => {
+    const at = point(event)
+    return at ? { at, picture: viewRef.current.frame?.id } : undefined
+  }
+  /** Sends on a pinned press's picture, or on the latest one. */
+  const sender = (pinned: PinnedPress | undefined) => pinned
+    ? (input: WatchedBrowserInput) => optionsRef.current.send(input, pinned.picture)
+    : send
+
   /** A small mark where the person pressed, that settles when the host answers. */
   const mark = (sent: { seq: number; done: Promise<WatchedBrowserAck> }, at: { left: number; top: number }) => {
     setMarks((list) => [...list.filter((entry) => entry.seq !== sent.seq), { seq: sent.seq, left: at.left, top: at.top, state: 'pending' }])
@@ -133,13 +152,14 @@ export function useBrowserInput(options: {
   }
 
   /** A click as a mouse makes one, at a touch's point (a tap, or a long press as a right click). */
-  const clickAt = (event: { clientX: number; clientY: number }, button: BrowserMouseButton) => {
-    const at = point(event)
+  const clickAt = (event: { clientX: number; clientY: number }, button: BrowserMouseButton, pinned?: PinnedPress) => {
+    const at = pinned?.at ?? point(event)
     if (!at) return
+    const out = sender(pinned)
     const clicks = clickCount(button, at.x, at.y)
-    send({ kind: 'pointer', type: 'move', x: at.x, y: at.y, button: 'none', buttons: 0 })
-    const down = send({ kind: 'pointer', type: 'down', x: at.x, y: at.y, button, buttons: BUTTON_BITS[button], clicks })
-    send({ kind: 'pointer', type: 'up', x: at.x, y: at.y, button, buttons: 0, clicks })
+    out({ kind: 'pointer', type: 'move', x: at.x, y: at.y, button: 'none', buttons: 0 })
+    const down = out({ kind: 'pointer', type: 'down', x: at.x, y: at.y, button, buttons: BUTTON_BITS[button], clicks })
+    out({ kind: 'pointer', type: 'up', x: at.x, y: at.y, button, buttons: 0, clicks })
     mark(down, at)
     placeKeys(at)
   }
@@ -237,8 +257,8 @@ export function useBrowserInput(options: {
   }
 
   /** A mouse button going down at a point of the picture: it stays down (a drag, a selection) until it goes up here. */
-  const pressAt = (event: { clientX: number; clientY: number; button: number; altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) => {
-    const at = point(event)
+  const pressAt = (event: { clientX: number; clientY: number; button: number; altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }, pinned?: PinnedPress) => {
+    const at = pinned?.at ?? point(event)
     let button = BUTTONS[event.button]
     if (!at || !button) return
     // Control-click on a Mac is a right click, as everywhere there.
@@ -246,7 +266,7 @@ export function useBrowserInput(options: {
     pressed.current.set(event.button, button)
     lastPoint.current = { x: at.x, y: at.y }
     const clicks = clickCount(button, at.x, at.y)
-    const down = send({ kind: 'pointer', type: 'down', x: at.x, y: at.y, button, buttons: buttonsHeld(), clicks, modifiers: modifiersOf(event) & ~(mac && button === 'right' && event.ctrlKey ? BROWSER_MODIFIERS.ctrl : 0) })
+    const down = sender(pinned)({ kind: 'pointer', type: 'down', x: at.x, y: at.y, button, buttons: buttonsHeld(), clicks, modifiers: modifiersOf(event) & ~(mac && button === 'right' && event.ctrlKey ? BROWSER_MODIFIERS.ctrl : 0) })
     mark(down, at)
     placeKeys(at)
   }
@@ -385,5 +405,5 @@ export function useBrowserInput(options: {
     }
   }
 
-  return { marks, frameHandlers, keyHandlers, send, clickAt, pressAt }
+  return { marks, frameHandlers, keyHandlers, send, clickAt, pressAt, pin }
 }

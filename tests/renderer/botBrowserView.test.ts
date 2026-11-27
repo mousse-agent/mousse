@@ -847,6 +847,22 @@ describe('the split view used as the thread browser is', () => {
     expect(document.activeElement).toBe(keys())
   })
 
+  it('the first press names the picture it was made on, even when a newer one arrives while the browser is taken over', async () => {
+    browser = { ...browser, frame: { ...FRAME, id: 5 } }
+    await expanded()
+    // The bot's page moved on: taking the browser over answers with a new picture of another size.
+    browser = { ...browser, frame: { ...FRAME, id: 9, viewport: { width: 640, height: 360 } } }
+    await act(async () => {
+      frameOf().dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 420, clientY: 140, button: 0, buttons: 1 }))
+      frameOf().dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 420, clientY: 140, button: 0, buttons: 0 }))
+    })
+    await settle()
+    expect(useBotBrowserStore.getState().views.noobesh!.frame!.id).toBe(9)
+    // At picture 5's point, on picture 5: the host refuses it if that picture is out of date.
+    expect(sentInputs().filter((sent) => 'input' in sent && sent.input.kind === 'pointer').map((sent) => [sent.picture, (sent as { input: { x: number; y: number } }).input.x, (sent as { input: { x: number; y: number } }).input.y]))
+      .toEqual([[5, 640, 180], [5, 640, 180], [5, 640, 180]])
+  })
+
   it('a press still held once the browser is taken over stays down, so dragging selects text', async () => {
     await expanded()
     await act(async () => { frameOf().dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 420, clientY: 140, button: 0, buttons: 1 })) })

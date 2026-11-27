@@ -363,12 +363,15 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
     event.preventDefault()
     frame.current?.setPointerCapture?.(event.pointerId)
     const press = { clientX: event.clientX, clientY: event.clientY, button: event.button, altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey, shiftKey: event.shiftKey }
+    // Read now, on the picture the person saw: a newer picture that arrives before the browser is theirs places nothing.
+    const pinned = input.pin(press)
+    if (!pinned) return
     const pointer = event.pointerId
     let up = false
     const release = (next: PointerEvent) => { if (next.pointerId === pointer) up = true }
     window.addEventListener('pointerup', release, true)
     window.addEventListener('pointercancel', release, true)
-    void using(() => { if (up) input.clickAt(press, 'left'); else input.pressAt(press) }).finally(() => {
+    void using(() => { if (up) input.clickAt(press, 'left', pinned); else input.pressAt(press, pinned) }).finally(() => {
       window.removeEventListener('pointerup', release, true)
       window.removeEventListener('pointercancel', release, true)
     })
