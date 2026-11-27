@@ -1,3 +1,7 @@
+// The production applet card, preload and IPC in a window that routes applet webviews as the app's main process does.
+// Checks the whole path a user sees: the page starts, takes real mouse and wheel input, draws under the window's own
+// menus and composer, keeps its live state while scrolled away, and follows a theme change.
+//   node scripts/check-in-thread-applets.mjs
 import { build } from 'esbuild'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -6,10 +10,6 @@ import { spawn } from 'node:child_process'
 import electron from 'electron'
 
 const directory = await mkdtemp(join(tmpdir(), 'mousse-in-thread-applets-'))
-const screenshot = '/tmp/mousse-in-thread-applets-native.png'
-const scrollOnly = process.argv.includes('--scroll-only')
-const documentScrollOnly = process.argv.includes('--document-scroll-only')
-const appearanceOnly = process.argv.includes('--appearance-only')
 try {
   await build({
     stdin: {
@@ -21,7 +21,7 @@ try {
     import {useAppStore} from './src/renderer/stores/appStore';
     useAppStore.setState({activeThreadId:'thread',profileId:'profile'});
     const ref={appletId:'applet',revisionId:'revision',sourceHash:'hash',title:'Interactive costs',description:'Saved counter illustration'};
-    function Fixture(){const[menu,setMenu]=React.useState(false);return <div className="mousse-chat-shell"><nav style={{height:40}}><button id="menu" onClick={()=>setMenu(!menu)}>Menu</button></nav>{menu&&<div role="menu" style={{position:'absolute',top:60,left:100,zIndex:99,background:'#333',padding:30}}>Host menu</div>}<div className="an-message-list" style={{position:'absolute',top:40,left:0,right:0,height:390,overflowY:'auto'}}><AppletCard reference={ref}/><div style={{height:400}}>Transcript after applet</div></div><div className="chat-composer-stack" style={{position:'absolute',top:430,left:0,right:0,bottom:0,background:'rgb(0,255,0)'}}>Composer remains accessible</div></div>}
+    function Fixture(){const[menu,setMenu]=React.useState(false);return <div className="mousse-chat-shell"><nav style={{height:40}}><button id="menu" onClick={()=>setMenu(!menu)}>Menu</button></nav>{menu&&<div role="menu" style={{position:'absolute',top:120,left:100,width:200,height:80,zIndex:99,background:'rgb(51,51,51)'}}>Host menu</div>}<div className="an-message-list" style={{position:'absolute',top:40,left:0,right:0,height:400,overflowY:'auto'}}><AppletCard reference={ref}/><div style={{height:1600}}>Transcript after applet</div></div><div className="chat-composer-stack" style={{position:'absolute',top:300,left:0,right:0,bottom:0,background:'rgb(0,255,0)'}}>Composer</div></div>}
     createRoot(document.getElementById('root')).render(<Fixture/>);
   `
     },
@@ -47,143 +47,88 @@ try {
     stdin: {
       resolveDir: process.cwd(),
       contents: `
-    import {app,BrowserWindow,ipcMain,webContents,nativeImage} from 'electron';
-    import {execFileSync} from 'node:child_process';import {writeFileSync} from 'node:fs';import assert from 'node:assert/strict';
-    import {AppletRuntimeManager} from './src/main/applets/AppletRuntimeManager';
-    import {registerAppletIpc} from './src/main/applets/registerAppletIpc';
+    import {app,BrowserWindow,ipcMain,webContents} from 'electron';
+    import assert from 'node:assert/strict';
+    import {isAppletWebviewSource} from './src/main/applets/AppletRuntimeManager';
+    import {registerAppletIpc,attachAppletWebview,adoptAppletWebview} from './src/main/applets/registerAppletIpc';
+    app.setPath('userData',${JSON.stringify(join(directory, 'user-data'))});
     const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-    let snapshotCalls=0;
-    if (${scrollOnly}) {
-      const snapshot=AppletRuntimeManager.prototype.snapshot;
-      AppletRuntimeManager.prototype.snapshot=async function(id){snapshotCalls++;await pause(600);return snapshot.call(this,id)};
-    }
     app.whenReady().then(async()=>{
-      const owner=new BrowserWindow({width:800,height:600,frame:false,webPreferences:{preload:${JSON.stringify(join(directory, 'preload.cjs'))},sandbox:true,contextIsolation:true,nodeIntegration:false}});
+      const owner=new BrowserWindow({width:800,height:600,frame:false,webPreferences:{preload:${JSON.stringify(join(directory, 'preload.cjs'))},sandbox:true,contextIsolation:true,nodeIntegration:false,webviewTag:true}});
+      // As src/main/index.ts routes them: only a minted applet address attaches, into its applet's own session.
+      owner.webContents.on('will-attach-webview',(event,webPreferences,params)=>{if(!isAppletWebviewSource(params.src)||!attachAppletWebview(owner.webContents,webPreferences,params))event.preventDefault()});
+      owner.webContents.on('did-attach-webview',(_event,guest)=>{adoptAppletWebview(owner.webContents,guest)});
       let saved={count:0};
-      const bundle={schemaVersion:1,appletId:'applet',revisionId:'revision',sourceHash:'hash',title:'Interactive costs',description:'Saved counter illustration',threadId:'thread',messageId:'message',turnId:'turn',createdAt:new Date().toISOString(),runtimePolicyVersion:1,source:{schemaVersion:1,title:'Interactive costs',description:'Saved counter illustration',stateVersion:1,html:'<main class="applet-canvas"><button id="increment">Add one</button><output id="count"></output><div id="nested" style="height:80px;overflow:auto"><div style="height:200px;background:rgb(255,0,0)">Top</div><div style="height:400px;background:rgb(0,255,255)">Scrolled content</div></div></main>',css:'.applet-canvas{background:rgb(255,0,0);min-height:100vh}button{margin:20px;padding:15px}',js:'let count=mousseApplet.state?.count??0;document.querySelector("output").textContent=count;document.querySelector("button").onclick=()=>{count++;document.querySelector("output").textContent=count;mousseApplet.saveState({count})}'} };
-      if (${documentScrollOnly}) bundle.source.css += '.applet-canvas{min-height:1400px;background:linear-gradient(to bottom,rgb(255,0,0) 0 400px,rgb(255,255,0) 400px 1400px)}';
+      const bundle={schemaVersion:1,appletId:'applet',revisionId:'revision',sourceHash:'hash',title:'Interactive costs',description:'Saved counter illustration',threadId:'thread',messageId:'message',turnId:'turn',createdAt:new Date().toISOString(),runtimePolicyVersion:1,source:{schemaVersion:1,title:'Interactive costs',description:'Saved counter illustration',stateVersion:1,html:'<main class="applet-canvas"><button id="increment">Add one</button><output id="count"></output><div id="nested" style="height:80px;overflow:auto"><div style="height:200px;background:rgb(255,255,0)">Top</div><div style="height:400px;background:rgb(0,255,255)">Scrolled content</div></div><div style="height:120px"></div></main>',css:'.applet-canvas{background:rgb(255,0,0)}button{margin:20px;padding:15px}',js:'let count=mousseApplet.state?.count??0;document.querySelector("output").textContent=count;document.querySelector("button").onclick=()=>{count++;document.querySelector("output").textContent=count;mousseApplet.saveState({count})}'} };
       const gui={on:()=>{},getWindowBindingForSender:()=>({profileId:'profile',epoch:1}),runWithSender:(_sender,callback)=>callback(),request:async(method,input)=>{assert.equal(input.threadId,'thread');if(method==='applets.get')return bundle;if(method==='applets.state.get')return{state:saved};if(method==='applets.state.save'){saved=input.state;return{ok:true}}throw new Error('Unexpected request '+method)}};
       registerAppletIpc((channel,handler)=>ipcMain.handle(channel,handler),gui,()=>[owner]);
-      const guests=()=>webContents.getAllWebContents().filter(value=>value.id!==owner.webContents.id&&value.getURL().startsWith('mousse-applet:'));
-      const wait=async(predicate,label)=>{for(let n=0;n<60;n++){if(await predicate())return;await pause(50)}throw new Error('Timed out: '+label)};
-      const click=async(text)=>{const point=await owner.webContents.executeJavaScript('(()=>{const button=Array.from(document.querySelectorAll("button")).find(b=>(b.getAttribute("aria-label")||b.textContent.trim())==='+JSON.stringify(text)+');if(!button)throw new Error("Missing button");const r=button.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()');owner.webContents.sendInputEvent({type:'mouseMove',x:Math.round(point.x),y:Math.round(point.y)});await pause(50);owner.webContents.sendInputEvent({type:'mouseDown',x:Math.round(point.x),y:Math.round(point.y),button:'left',clickCount:1});await pause(50);owner.webContents.sendInputEvent({type:'mouseUp',x:Math.round(point.x),y:Math.round(point.y),button:'left',clickCount:1});await pause(160)};
+      const guests=()=>webContents.getAllWebContents().filter(value=>value.getType()==='webview'&&!value.isDestroyed()&&value.getURL().startsWith('mousse-applet:'));
+      const host=code=>owner.webContents.executeJavaScript(code).catch(error=>{throw new Error('In the window: '+code.slice(0,120)+': '+error.message)});
+      const wait=async(predicate,label)=>{for(let n=0;n<100;n++){if(await predicate())return;await pause(50)}throw new Error('Timed out: '+label)};
+      const press=async(point,target=owner.webContents)=>{const x=Math.round(point.x),y=Math.round(point.y);target.sendInputEvent({type:'mouseMove',x,y});await pause(50);target.sendInputEvent({type:'mouseDown',x,y,button:'left',clickCount:1});await pause(50);target.sendInputEvent({type:'mouseUp',x,y,button:'left',clickCount:1});await pause(160)};
+      const click=async(text)=>press(await host('(()=>{const button=Array.from(document.querySelectorAll("button")).find(b=>b.textContent.trim()==='+JSON.stringify(text)+');const r=button.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()'));
+      const pixels=async()=>{const image=await owner.webContents.capturePage(),size=image.getSize(),bitmap=image.toBitmap(),scale=size.width/owner.getContentSize()[0];return(x,y)=>{const offset=(Math.round(y*scale)*size.width+Math.round(x*scale))*4;const [b,g,r]=bitmap.subarray(offset,offset+3);return[r,g,b]}};
+      const near=(actual,expected,label)=>assert(actual.every((value,index)=>Math.abs(value-expected[index])<=8),label+': '+JSON.stringify(actual));
+      const scrollTop=()=>host('document.querySelector(".an-message-list").scrollTop');
+      const preview=()=>host('(()=>{const r=document.querySelector(".mousse-applet-preview").getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height}})()');
       try{
         await owner.loadFile(${JSON.stringify(join(directory, 'index.html'))});owner.show();
-        await wait(()=>guests().length===1,'initial production card mount');
-        assert.equal(await owner.webContents.executeJavaScript('getComputedStyle(document.querySelector(".mousse-applet-actions button")).color'),'rgb(232, 232, 236)','Dark toolbar inherits readable foreground');
-        const headerLayout=await owner.webContents.executeJavaScript('(()=>{const header=document.querySelector(".mousse-applet-header"),r=header.getBoundingClientRect(),buttons=Array.from(header.querySelectorAll("button"));return{height:r.height,count:buttons.length,iconOnly:buttons.every(b=>!b.textContent.trim()&&b.querySelector("svg")&&b.getAttribute("aria-label")&&b.title),oneRow:buttons.every(b=>{const v=b.getBoundingClientRect();return v.top>=r.top&&v.bottom<=r.bottom}),descriptionRows:header.querySelectorAll("p").length}})()');
-        assert(headerLayout.height<=42&&headerLayout.count===6&&headerLayout.iconOnly&&headerLayout.oneRow&&headerLayout.descriptionRows===0,'Slim single-row header with accessible icon-only controls');
-        const first=guests()[0];await wait(()=>first.executeJavaScript('document.querySelector("output").textContent==="0"'),'initial applet counter');
-        await pause(350);
-        execFileSync('import',['-window',String(owner.getNativeWindowHandle().readUInt32LE()),'/tmp/mousse-in-thread-applets-initial.png']);
-        const point=await first.executeJavaScript('(()=>{const r=document.querySelector("button").getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()');
-        first.sendInputEvent({type:'mouseMove',x:Math.round(point.x),y:Math.round(point.y)});await pause(50);first.sendInputEvent({type:'mouseDown',x:Math.round(point.x),y:Math.round(point.y),button:'left',clickCount:1});await pause(50);first.sendInputEvent({type:'mouseUp',x:Math.round(point.x),y:Math.round(point.y),button:'left',clickCount:1});
-        await wait(()=>saved.count===1,'real pointer interaction persisted through production IPC');
-        if (${appearanceOnly}) {
-          const id=first.id;
-          await owner.webContents.executeJavaScript('(()=>{const r=document.documentElement;r.dataset.theme="light";r.setAttribute("data-acrylic","true");for(const[k,v]of Object.entries({"--surface-base":"#fafafa","--surface-strong":"#eeeeee","--surface-soft":"#dddddd","--accent":"#6251aa","--accent-rgb":"98,81,170","--text-primary":"#222222","--text-secondary":"#555555","--theme-btn-radius":"11px"}))r.style.setProperty(k,v);r.style.setProperty("--bg-primary","rgba(255,255,255,.4)");r.style.setProperty("--glass-blur","blur(20px)");document.body.style.fontFamily="Arial, sans-serif";document.body.style.fontSize="18px"})()');
-          await wait(()=>first.executeJavaScript('mousseApplet.appearance.theme==="light" && getComputedStyle(document.documentElement).getPropertyValue("--surface-base").trim()==="#fafafa" && getComputedStyle(document.body).backgroundColor==="rgba(0, 0, 0, 0)"'),'theme change updates mounted guest');
-          const values=await first.executeJavaScript('(()=>{const s=getComputedStyle(document.body),b=getComputedStyle(document.querySelector("button"));return {font:s.fontFamily,size:s.fontSize,color:s.color,blur:s.backdropFilter,radius:b.borderRadius,acrylicToken:document.documentElement.style.getPropertyValue("--glass-blur"),opaque:mousseApplet.appearance.tokens["--bg-primary"],count:document.querySelector("output").textContent}})()');
-          assert(values.font.includes('Arial'));assert.equal(values.size,'18px');assert.equal(values.color,'rgb(34, 34, 34)');assert.equal(values.blur,'none');assert.equal(values.acrylicToken,'');assert.equal(values.radius,'11px');assert.equal(values.opaque,'#fafafa');assert.equal(values.count,'1');assert.equal(guests()[0].id,id);
-          assert(await first.executeJavaScript('(()=>{const icon=mousseApplet.icon("plus",{label:"Add"});document.querySelector("button").prepend(icon);return icon.tagName==="svg"&&icon.getAttribute("data-icon-library")==="hugeicons"&&icon.querySelector("path")!==null})()'));
-          await pause(150);execFileSync('import',['-window',String(owner.getNativeWindowHandle().readUInt32LE()),'/tmp/mousse-applet-appearance-card.png']);
-          console.log('Production card appearance passed: live light-theme/accent/font/radius update, same guest/state, opaque surfaces without acrylic, real Mousse icon geometry.');
-          owner.destroy();app.quit();return;
-        }
-        if (${documentScrollOnly}) {
-          await first.executeJavaScript('window.unsavedMarker="preserve";new Promise(resolve=>{let n=0;const step=()=>{window.scrollTo(0,200+n*6);if(++n<40)requestAnimationFrame(step);else resolve()};step()})');
-          await wait(()=>owner.webContents.executeJavaScript('!!document.querySelector(".mousse-applet-scroll-frame")'),'root scroll final snapshot');
-          const currentFrame=nativeImage.createFromDataURL(await owner.webContents.executeJavaScript('document.querySelector(".mousse-applet-scroll-frame").src'));
-          const frameSize=currentFrame.getSize(),framePixels=currentFrame.toBitmap(),frameScale=frameSize.width/(await first.executeJavaScript('innerWidth'));
-          const sample=(Math.round(20*frameScale)*frameSize.width+Math.round(600*frameScale))*4;
-          assert.deepEqual(Array.from(framePixels.subarray(sample,sample+3)),[0,255,255],'Final root scroll refresh is not dropped during sustained scrolling');
-          assert.equal(Math.round(await first.executeJavaScript('scrollY')),434);
-          await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=250');
-          await pause(800);
-          assert.equal(Math.round(await first.executeJavaScript('scrollY')),434,'Document scroll remains fixed after partial clipping');
-          await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=700');
-          await pause(800);
-          await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=0');
-          await wait(()=>guests().length===1,'document applet returns');await pause(500);
-          assert.equal(guests()[0].id,first.id,'Offscreen thread scrolling retains guest DOM and scroll state');
-          assert.equal(Math.round(await guests()[0].executeJavaScript('scrollY')),434,'Document scroll survives return');
-          assert.equal(await guests()[0].executeJavaScript('window.unsavedMarker'),'preserve','Unserialized applet state survives thread scroll');
-          console.log('Document scrolling check passed');owner.destroy();app.quit();return;
-        }
-        if (${scrollOnly}) {
-          await wait(()=>owner.webContents.executeJavaScript('!!document.querySelector(".mousse-applet-scroll-frame")'),'cached frame prepared before scrolling');
-          await pause(800);
-          await first.executeJavaScript('document.querySelector("#nested").scrollTop=200');
-          await wait(()=>owner.webContents.executeJavaScript('document.querySelector(".mousse-applet-scroll-frame")===null'),'inner scroll invalidates stale snapshot');
-          await wait(()=>owner.webContents.executeJavaScript('!!document.querySelector(".mousse-applet-scroll-frame")'),'inner scroll refreshes snapshot');
-          await pause(1000);const cached=await owner.webContents.executeJavaScript('document.querySelector(".mousse-applet-scroll-frame").src');
-          const nested=await first.executeJavaScript('(()=>{const r=document.querySelector("#nested").getBoundingClientRect();return{x:Math.round(r.x+120),y:Math.round(r.y+40)}})()');
-          const cachedImage=nativeImage.createFromDataURL(cached),cachedSize=cachedImage.getSize(),cachedPixels=cachedImage.toBitmap();
-          const guestWidth=await first.executeJavaScript("innerWidth");const cacheScale=cachedSize.width/guestWidth;const cachedOffset=(Math.round(nested.y*cacheScale)*cachedSize.width+Math.round(nested.x*cacheScale))*4;
-          assert.deepEqual(Array.from(cachedPixels.subarray(cachedOffset,cachedOffset+3)),[255,255,0],'Cached frame depicts inner scroll position, not previous red content');
-          assert.equal(await first.executeJavaScript('document.querySelector("#nested").scrollTop'),200);
-          await pause(800);
-          const capturesBefore=snapshotCalls;
-          const firstId = first.id;
-          const before = await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop');
-          const header = await owner.webContents.executeJavaScript('(()=>{const r=document.querySelector(".mousse-applet-header").getBoundingClientRect();return{x:Math.round(r.x+100),y:Math.round(r.y+r.height/2)}})()');
-          owner.webContents.sendInputEvent({type:'mouseMove',...header});
-          const wheelAt=Date.now();
-          owner.webContents.sendInputEvent({type:'mouseWheel',...header,deltaX:0,deltaY:-24,canScroll:true});
-          await wait(()=>owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop>'+before),'header wheel scrolls transcript');
-          assert(Date.now()-wheelAt<400,'Header scroll responds without waiting for the 600ms snapshot');
-          await wait(()=>owner.webContents.executeJavaScript('!!document.querySelector(".mousse-applet-scroll-frame")'),'host DOM snapshot replaces native guest during scroll');
-          assert.equal(guests()[0].id,firstId,'Scrolling preserves the guest renderer');
-          assert.equal(owner.contentView.children[0].getVisible(),false,'Native surface is hidden while host scrolls');
-          for(let n=0;n<12;n++){
-            owner.webContents.sendInputEvent({type:'mouseWheel',...header,deltaX:0,deltaY:n<6?-3:3,canScroll:true});
-            await pause(16);
-            assert.equal(owner.contentView.children[0].getVisible(),false,'Native guest cannot overlap scrolling header');
-            assert.equal(await first.executeJavaScript('document.querySelector("#nested").scrollTop'),200,'Inner scroll stays fixed during transcript gesture');
-          }
-          assert.equal(snapshotCalls,capturesBefore,'Scrolling never starts an expensive snapshot capture');
-          await wait(()=>owner.contentView.children[0].getVisible(),'live guest resumes after gesture');
-          assert.equal(guests()[0].id,firstId,'Resume does not reload guest');
-          assert.equal(await first.executeJavaScript('document.querySelector("#nested").scrollTop'),200,'Inner scroll survives native resume');
-          assert.equal(await first.executeJavaScript('document.querySelector("output").textContent'),'1','Interaction survives header scrolling');
-          const rect=await owner.webContents.executeJavaScript('(()=>{const r=document.querySelector(".mousse-applet-preview").getBoundingClientRect();return{top:r.top,bottom:r.bottom}})()');
-          const image=nativeImage.createFromBuffer(execFileSync('import',['-window',String(owner.getNativeWindowHandle().readUInt32LE()),'png:-']));
-          const size=image.getSize(),bitmap=image.toBitmap(),scale=size.width/owner.getContentSize()[0];
-          const pixel=(x,y)=>{const offset=(Math.round(y*scale)*size.width+Math.round(x*scale))*4;return Array.from(bitmap.subarray(offset,offset+3))};
-          assert.notDeepEqual(pixel(600,Math.round(rect.top)-5),[0,0,255],'Native preview does not cover toolbar');
-          assert.deepEqual(pixel(600,Math.round(rect.top)+25),[0,0,255],'Live preview returns at current DOM position');
-          assert.deepEqual(pixel(600,500),[0,255,0],'Composer stays clear after gesture');
-          await first.executeJavaScript('document.querySelector("#nested").scrollTop=250');
-          await wait(()=>owner.webContents.executeJavaScript('document.querySelector(".mousse-applet-scroll-frame")===null'),'second inner scroll invalidates old cache');
-          await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop+=5');
-          await pause(50);
-          assert.equal(await owner.webContents.executeJavaScript('document.querySelector(".mousse-applet-scroll-frame")===null'),true,'Immediate transcript gesture cannot show stale inner scroll position');
-          assert.equal(await first.executeJavaScript('document.querySelector("#nested").scrollTop'),250,'Immediate gesture preserves inner scroll state');
-          await wait(()=>owner.contentView.children[0].getVisible(),'immediate gesture resumes live guest');
-          assert.equal(await first.executeJavaScript('document.querySelector("#nested").scrollTop'),250,'Immediate gesture resume preserves inner scroll state');
-          for(const payload of [{path:Array(17).fill(0),top:0,left:0},{path:[-1],top:0,left:0},{path:[2049],top:0,left:0},{path:[],top:Infinity,left:0},{path:[],top:'250',left:0}])first.emit('console-message',{message:'__MOUSSE_APPLET_EVENT__'+JSON.stringify({type:'scroll-position',payload})});
-          await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=700');
-          await wait(()=>guests().length===1&&!owner.contentView.children[0].getVisible(),'offscreen guest is parked during gesture');
-          await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=0');
-          await pause(50);
-          assert.equal(owner.contentView.children[0].getVisible(),false,'Parked preview stays hidden until scroll settles');
-          await wait(()=>guests().length===1,'newly visible preview mounts after gesture');
-          await wait(()=>guests()[0].executeJavaScript('document.querySelector("output").textContent==="1"'),'offscreen return restores saved state');
-          assert.equal(await guests()[0].executeJavaScript('document.querySelector("#nested").scrollTop'),250,'Offscreen return restores nested scroll position');
-          console.log('Header wheel regression passed: passive scrolling with 600ms snapshot latency, no captures during gesture, cached DOM frame, no native header overlap, same guest/state after resume, current nested-scroll snapshot, immediate-gesture fallback, bounded validated offscreen scroll preservation, composer clipping.');
-          owner.destroy();app.quit();return;
-        }
-        await pause(100);const image=nativeImage.createFromBuffer(execFileSync('import',['-window',String(owner.getNativeWindowHandle().readUInt32LE()),'png:-']));writeFileSync(${JSON.stringify(screenshot)},image.toPNG());
-        const bitmap=image.toBitmap(),size=image.getSize();const pixel=(x,y)=>{const scale=size.width/owner.getContentSize()[0];const offset=(Math.round(y*scale)*size.width+Math.round(x*scale))*4;return Array.from(bitmap.subarray(offset,offset+3))};
-        assert.deepEqual(pixel(600,400),[0,0,255],'Native guest paints inside preview');assert.deepEqual(pixel(600,500),[0,255,0],'Native guest is clipped above composer');
-        await click('Menu');await wait(()=>guests().length===0,'host menu hides guest');await click('Menu');await wait(()=>guests().length===1,'closing menu restores guest');
-        await wait(()=>guests()[0].executeJavaScript('document.querySelector("output").textContent==="1"'),'menu remount restores saved state');
-        await click('Source');await wait(()=>guests().length===0,'source button remains reachable and hides guest');
-        assert(await owner.webContents.executeJavaScript('document.querySelector(".mousse-applet-source pre").textContent.includes("increment")'));
-        await click('Preview');await wait(()=>guests().length===1,'source returns to preview');await click('Restart');await wait(()=>guests().length===1,'restart remounts guest');
-        await wait(()=>guests()[0].executeJavaScript('document.querySelector("output").textContent==="1"'),'restart restores persisted state');
-        await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=700');await wait(()=>guests().length===1&&!owner.contentView.children[0].getVisible(),'offscreen guest is parked');
-        console.log('Production applet card passed: Electron mouse input controls, source/restart, menu suspension, saved state, composer clipping, bounded offscreen parking. Screenshot: '+${JSON.stringify(screenshot)});
+        await wait(()=>guests().length===1,'the card starts its page');
+        assert(isAppletWebviewSource(await host('document.querySelector("webview").getAttribute("src")')),'The webview draws the minted address');
+        assert.equal(await host('document.querySelector("webview").hasAttribute("partition")'),false,'The card asks for no session');
+        const first=guests()[0];
+        await wait(()=>first.executeJavaScript('document.querySelector("output").textContent==="0"'),'initial applet counter');
+        await wait(async()=>(await preview()).height>200,'the card takes the height its page reports');
+
+        // A click in the page is saved through IPC. (Input sent to the window does not reach a webview's page; real
+        // pointer input does, which scripts/check-applet-runtime.mjs and a hands-on pass cover. Here it goes to the page.)
+        const box=await preview();
+        const button=await first.executeJavaScript('(()=>{const r=document.querySelector("button").getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()');
+        await press(button,first);
+        await wait(()=>saved.count===1,'a click in the page saves its state');
+
+        // The page paints in the card, under the composer and under a menu the window opens over it.
+        await pause(200);
+        let pixel=await pixels();
+        near(pixel(700,box.y+30),[255,0,0],'The page paints inside its card');
+        near(pixel(700,340),[0,255,0],'The composer draws over the page');
+        await click('Menu');await pause(200);
+        pixel=await pixels();
+        near(pixel(200,160),[51,51,51],'A window menu draws over the page');
+        near(pixel(700,box.y+30),[255,0,0],'The page stays drawn while the menu is open');
+        assert.equal(guests()[0].id,first.id,'Opening a menu leaves the page running');
+        await click('Menu');
+
+        // Wheel over the page: an inner scroller takes it, a page with nothing left to scroll passes it to the thread.
+        const nested=await first.executeJavaScript('(()=>{const r=document.querySelector("#nested").getBoundingClientRect();return{x:r.x+60,y:r.y+40}})()');
+        const nestedPoint={x:Math.round(nested.x),y:Math.round(nested.y)};
+        first.sendInputEvent({type:'mouseMove',...nestedPoint});
+        first.sendInputEvent({type:'mouseWheel',...nestedPoint,deltaX:0,deltaY:-200,canScroll:true});
+        await wait(async()=>(await first.executeJavaScript('document.querySelector("#nested").scrollTop'))>0,'an inner scroller takes the wheel');
+        assert.equal(await scrollTop(),0,'The thread stays put while the inner scroller has room');
+        await pause(400);
+        const body={x:Math.round(box.width-40),y:30};
+        first.sendInputEvent({type:'mouseMove',...body});
+        first.sendInputEvent({type:'mouseWheel',...body,deltaX:0,deltaY:-120,canScroll:true});
+        await wait(async()=>(await scrollTop())>0,'a wheel the page cannot use scrolls the thread');
+
+        // Scrolled far away and back: the same page, with its unsaved state and its inner scroll.
+        await first.executeJavaScript('window.unsavedMarker="kept";document.querySelector("#nested").scrollTop=200');
+        await host('document.querySelector(".an-message-list").scrollTop=1500');await pause(600);
+        assert.equal(guests().length,1,'A page out of sight keeps running');
+        await host('document.querySelector(".an-message-list").scrollTop=0');await pause(400);
+        assert.equal(guests()[0].id,first.id,'Scrolling back finds the same page');
+        assert.equal(await first.executeJavaScript('window.unsavedMarker'),'kept','Unsaved page state survives scrolling away');
+        assert.equal(await first.executeJavaScript('document.querySelector("#nested").scrollTop'),200,'Inner scroll survives scrolling away');
+
+        // A theme change reaches the running page.
+        await host('(()=>{const r=document.documentElement;r.dataset.theme="light";r.setAttribute("data-acrylic","true");for(const[k,v]of Object.entries({"--surface-base":"#fafafa","--surface-strong":"#eeeeee","--surface-soft":"#dddddd","--accent":"#6251aa","--accent-rgb":"98,81,170","--text-primary":"#222222","--text-secondary":"#555555","--theme-btn-radius":"11px"}))r.style.setProperty(k,v);r.style.setProperty("--bg-primary","rgba(255,255,255,.4)");r.style.setProperty("--glass-blur","blur(20px)");document.body.style.fontFamily="Arial, sans-serif";document.body.style.fontSize="18px"})()');
+        await wait(()=>first.executeJavaScript('mousseApplet.appearance.theme==="light" && getComputedStyle(document.documentElement).getPropertyValue("--surface-base").trim()==="#fafafa" && getComputedStyle(document.body).backgroundColor==="rgba(0, 0, 0, 0)"'),'theme change updates the running page');
+        const values=await first.executeJavaScript('(()=>{const s=getComputedStyle(document.body),b=getComputedStyle(document.querySelector("button"));return {font:s.fontFamily,size:s.fontSize,color:s.color,blur:s.backdropFilter,radius:b.borderRadius,acrylicToken:document.documentElement.style.getPropertyValue("--glass-blur"),opaque:mousseApplet.appearance.tokens["--bg-primary"],count:document.querySelector("output").textContent}})()');
+        assert(values.font.includes('Arial'));assert.equal(values.size,'18px');assert.equal(values.color,'rgb(34, 34, 34)');assert.equal(values.blur,'none');assert.equal(values.acrylicToken,'');assert.equal(values.radius,'11px');assert.equal(values.opaque,'#fafafa');assert.equal(values.count,'1');
+        assert.equal(guests()[0].id,first.id,'A theme change keeps the same page');
+
+        console.log('In-thread applet check passed: minted webview address with no renderer session, click and saved state, page under composer and menu, inner-scroll then chained wheel, same page and unsaved state after scrolling away, live theme.');
         owner.destroy();app.quit();
       }catch(error){console.error(error);owner.destroy();app.exit(1)}
     });
@@ -198,21 +143,21 @@ try {
   const env = { ...process.env }
   delete env.ELECTRON_RUN_AS_NODE
   await new Promise((resolve, reject) => {
-    const child = spawn(electron, [join(directory, 'main.cjs'), '--ozone-platform=x11'], {
+    const child = spawn(electron, [join(directory, 'main.cjs'), ...(process.platform === 'linux' ? ['--ozone-platform=x11'] : [])], {
       env,
       stdio: 'inherit'
     })
     const timer = setTimeout(() => {
       child.kill()
-      reject(new Error('Production applet UI probe timed out'))
-    }, 25_000)
+      reject(new Error('In-thread applet check timed out'))
+    }, 45_000)
     child.once('error', (error) => {
       clearTimeout(timer)
       reject(error)
     })
     child.once('exit', (code) => {
       clearTimeout(timer)
-      code === 0 ? resolve() : reject(new Error('Production applet UI probe failed: ' + code))
+      code === 0 ? resolve() : reject(new Error('In-thread applet check failed: ' + code))
     })
   })
 } finally {

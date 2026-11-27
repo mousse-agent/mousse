@@ -105,13 +105,14 @@ button.mousse-applet-name:focus-visible {
   font-family: inherit;
 }
 
-.mousse-applet-scroll-frame {
+/* The page fills its preview; the webview is see-through where the page paints nothing. */
+.mousse-applet-webview {
+  display: flex;
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: fill;
-  pointer-events: none;
+  border: 0;
 }
 
 .mousse-applet-source,

@@ -6,7 +6,7 @@ import { useAppStore } from '../../stores/appStore'
 import './applets.css'
 import { useAppletRuntime } from './useAppletRuntime'
 import { addAppletInputToDraft, exportApplet, requestAppletRepair, type AppletConversation } from './appletActions'
-import { AppletConversationInput, AppletError } from './AppletCard'
+import { AppletConversationInput, AppletError, AppletFrame } from './AppletCard'
 
 type AppletTab = DocumentTab & { applet: NonNullable<DocumentTab['applet']> }
 
@@ -124,7 +124,9 @@ export function AppletPanelView({ tab, tabs, conversation }: { tab: AppletTab; t
         </div>
       ) : (
         <div className="mousse-applet-stage">
-          <div ref={preview} className="mousse-applet-preview mousse-applet-preview-fill" aria-label="Applet preview" />
+          <div ref={preview} className="mousse-applet-preview mousse-applet-preview-fill" aria-label="Applet preview">
+            <AppletFrame src={applet.src} webview={applet.webview} />
+          </div>
         </div>
       )}
       {conversationInput && (

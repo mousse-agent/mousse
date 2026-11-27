@@ -65,12 +65,10 @@ beforeEach(() => {
     return !this.closest('[hidden]')
   }
   api = {
-    mount: vi.fn(async () => ({ runtimeId: 'runtime-1' })),
+    mount: vi.fn(async () => ({ runtimeId: 'runtime-1', src: 'mousse-applet://runtime/one' })),
     unmount: vi.fn(async () => {}),
-    update: vi.fn(async () => {}),
+    visible: vi.fn(async () => {}),
     appearance: vi.fn(async () => {}),
-    snapshot: vi.fn(async () => ({})),
-    suspend: vi.fn(async () => {}),
     onEvent: vi.fn((listener: (event: AppletUiEvent) => void) => {
       listeners.push(listener)
       return () => { listeners = listeners.filter((item) => item !== listener) }
@@ -136,38 +134,5 @@ describe('an inline applet card height', () => {
     // Another revision has not measured yet, and keeps the default.
     await act(async () => root.render(createElement(AppletCard, { reference: reference() })))
     expect(previewHeight()).toBe('320px')
-  })
-})
-
-describe('what an applet page reports while it loads, before mount returns', () => {
-  const duringMount = (event: Omit<AppletUiEvent, 'runtimeId'>) =>
-    api.mount.mockImplementationOnce(async () => {
-      for (const listener of listeners) listener({ runtimeId: 'runtime-1', ...event })
-      return { runtimeId: 'runtime-1' }
-    })
-
-  it('shows a script error the page hit while loading, with the way to ask for a fix', async () => {
-    duringMount({ type: 'error', message: 'Uncaught TypeError: row is null' })
-    await act(async () => root.render(createElement(AppletCard, { reference: reference() })))
-    await settle()
-    expect(app.querySelector('[role="alert"]')?.textContent).toContain('Uncaught TypeError: row is null')
-    expect(api.unmount).toHaveBeenCalledWith({ runtimeId: 'runtime-1' })
-  })
-
-  it('takes the height the page reported while loading', async () => {
-    duringMount({ type: 'resize', height: 140 })
-    await act(async () => root.render(createElement(AppletCard, { reference: reference() })))
-    await settle()
-    expect(previewHeight()).toBe('140px')
-  })
-
-  it('ignores what another applet reported meanwhile', async () => {
-    api.mount.mockImplementationOnce(async () => {
-      for (const listener of listeners) listener({ runtimeId: 'runtime-other', type: 'error', message: 'not mine' })
-      return { runtimeId: 'runtime-1' }
-    })
-    await act(async () => root.render(createElement(AppletCard, { reference: reference() })))
-    await settle()
-    expect(app.querySelector('[role="alert"]')).toBeNull()
   })
 })
