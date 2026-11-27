@@ -206,7 +206,7 @@ describe('asks in the chat', () => {
     // The same activation goes on: the owner's request is in the thread's own history, not asked again.
     expect(next.prepared).toMatchObject({ history: 'thread', lane: 'chat' })
     expect(next.prepared.prompt).toContain('The owner allowed: use your threads.')
-    expect(next.prepared.prompt).toContain('The owner allowed: run commands. Your work has it now: hand the job to work_start.')
+    expect(next.prepared.prompt).toContain('The owner allowed: run commands. Your work has it now: hand the job to your work (thread_create, kind "subagent").')
     expect(next.prepared.authority.check(app('thread_create'))).toEqual({ ok: true })
     await finish(f, next.payload, 'completed', { text: 'Here are your repos.' })
     expect(f.store.activation(activation.id)!.status).toBe('done')

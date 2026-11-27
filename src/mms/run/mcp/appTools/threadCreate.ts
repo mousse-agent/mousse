@@ -14,8 +14,8 @@ import type { JsonSchema, MousseTool, ToolOutcome, ToolVariant, VariantSite } fr
  *   for) and always shows in the person's sidebar; `hidden` is a personal bot's (#2004, #2003).
  *
  * The tool is listed and held where either kind is. A call that names no kind (an older caller) is a thread, as it was.
- * A bot's turn starts threads only: its subagents and its work start through the bot port (`subagent_start`,
- * `work_start`).
+ * A bot's `kind: subagent` is its own: the work its chat starts (`work_start`) or its work's subagent
+ * (`subagent_start`), which the registry runs through the bot port (`toolVariant`), never `delegate_task`.
  */
 export type ThreadCreateKind = 'subagent' | 'thread'
 
@@ -57,7 +57,7 @@ function kindOf(args: Record<string, unknown>, site: VariantSite, variants: Part
   if (args.kind !== undefined && args.kind !== 'subagent' && args.kind !== 'thread') return { refused: refused('invalid_arguments', 'kind must be "subagent" or "thread".') }
   const kind: ThreadCreateKind = args.kind ?? 'thread'
   if (site.turn.bot && kind === 'subagent')
-    return { refused: refused('not_granted', 'A bot starts its subagents with subagent_start, and its work with work_start: thread_create starts threads (kind "thread").', { variant: 'delegate_task' }) }
+    return { refused: refused('not_granted', 'Your work and its subagents start here only on a turn that has them: thread_create starts threads (kind "thread").', { variant: 'delegate_task' }) }
   const tool = variants[kind]
   if (!tool) return { refused: refused('unavailable', `kind "${kind}" is not available here.`) }
   // An argument of the other kind only is a mistake about the kind, never one to drop.

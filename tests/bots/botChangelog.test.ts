@@ -183,12 +183,26 @@ it('C6 support rollback shows entries 29 and 30 while E1 entry 28 stays pending,
   }
 })
 
+/**
+ * The changelog as it was up to entry `id`, until the returned undo: a case about an older entry reads the pack a bot
+ * got then, before newer entries pushed that entry out of the pack's window (`BOT_CHANGELOG_PACK_ENTRIES`).
+ */
+function changelogUpTo(id: number): () => void {
+  const changes = BOT_CHANGELOG as import('../../src/mms/bots/changelog').BotChangelogEntry[]
+  const later = changes.filter((entry) => entry.id > id)
+  changes.splice(changes.length - later.length, later.length)
+  return () => void changes.push(...later)
+}
+
 it('tells existing bots that a pasted secret arrives by name', async () => {
   existingBot()
   memory.write(() => memory.setState('ada', 'changelog_seen', 25))
-  const text = await packs().chatPreamble({ botId: 'ada', activationId: 'pasted-secret' })
-  expect(text).toContain('Your owner can keep a pasted key as a secret')
-  expect(text).toContain('secret_run')
+  const undo = changelogUpTo(37)
+  try {
+    const text = await packs().chatPreamble({ botId: 'ada', activationId: 'pasted-secret' })
+    expect(text).toContain('Your owner can keep a pasted key as a secret')
+    expect(text).toContain('secret_run')
+  } finally { undo() }
 })
 
 it('rollback delivers later independent advice without marking hidden advice seen', async () => {
@@ -197,6 +211,7 @@ it('rollback delivers later independent advice without marking hidden advice see
   // E1's entry 28 is gated too. Model a later independent entry without publishing a new changelog id.
   const changes = BOT_CHANGELOG as import('../../src/mms/bots/changelog').BotChangelogEntry[]
   const later = { id: BOT_CHANGELOG_LATEST + 1, date: '2026-11-19', text: 'Later independent advice.' }
+  const undo = changelogUpTo(37)
   changes.push(later)
   try {
     const off = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => false })
@@ -206,7 +221,10 @@ it('rollback delivers later independent advice without marking hidden advice see
     const text = await restarted.chatPreamble({ botId: 'ada', activationId: 'later-on' })
     expect(text).toContain(BOT_CHANGELOG.find(e => e.id === 27)!.text)
     expect(text).toContain(BOT_CHANGELOG.find(e => e.id === 28)!.text)
-  } finally { changes.pop() }
+  } finally {
+    changes.pop()
+    undo()
+  }
 })
 
 it('C6 support rollback stops before the next unseen hidden entry when there are two', async () => {

@@ -56,7 +56,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
    * owner started), `read` (another bot's message), or none (a consult). `disabled` is the
    * owner's switch as the engine reads it at each call (`BotEngine.permissionOff`).
    */
-  const world = async (options: { person?: boolean; granted?: boolean; threads?: 'read' | 'all'; disabled?: (call: NormalisedCall) => string | undefined; messages?: ChatMessage[]; role?: 'activation' | 'context'; catalogue?: 'search' | 'use_tool'; stillHolds?: () => string | undefined; wakes?: { add: (...args: unknown[]) => Promise<unknown> }; jobs?: { open: (...args: unknown[]) => { jobId: string } } } = {}) => {
+  const world = async (options: { person?: boolean; granted?: boolean; threads?: 'read' | 'all'; disabled?: (call: NormalisedCall) => string | undefined; messages?: ChatMessage[]; role?: 'activation' | 'context'; catalogue?: 'search' | 'use_tool'; stillHolds?: () => string | undefined; wakes?: { add: (...args: unknown[]) => Promise<unknown> }; jobs?: { open: (...args: unknown[]) => { jobId: string } }; port?: false } = {}) => {
     fx = delegationFixture()
     base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-threads-')))
     const profile = join(base, 'profile')
@@ -121,7 +121,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
         mask: (text) => text
       })
     })
-    const { registry, turns, request } = appToolRegistry(fx.engine, fake.host, { bots: () => deps })
+    const { registry, turns, request } = appToolRegistry(fx.engine, fake.host, options.port === false ? {} : { bots: () => deps })
     turns.register(appTurn({ threadId: 'home', runId: homeRun.runId, bot: authority }))
     const call = (name: string, args: Record<string, unknown>) => registry.call(name, args, request({ threadId: 'home', runId: homeRun.runId }))
     const text = async (name: string, args: Record<string, unknown>) => {
@@ -159,14 +159,17 @@ describe('a bot\'s thread tools ("use your threads")', () => {
   it.each(listings)('the thread tools listed to %s', async (_name, options, shown) => {
     const { registry, runId } = await world(options)
     const thread = (names: string[]) => names.filter(isBotThreadTool).sort()
+    // The chat's own work tools are variants of four thread tools (S7d4a): listed with or without the permission, never
+    // to a consult.
+    const work = options.role === 'context' ? [] : ['thread_create', 'thread_list', 'thread_send', 'thread_stop']
     // Of the tools this registry has (the git tools need a host that reads repositories).
     // Answering a thread's approvals (\`approval_respond\`) is a kind of \`request_answer\`: listed with it.
-    const expected = shown.filter((name) => registry.get(name)?.name === name).sort()
+    const expected = [...new Set([...shown.filter((name) => registry.get(name)?.name === name), ...work])].sort()
     expect(thread(registry.listForThread('home', runId).map((tool) => tool.name))).toEqual(expected)
     expect(thread(registry.listForTurn('home', runId).map((tool) => tool.name))).toEqual(expected)
     expect(registry.listForThread('home', runId).some((tool) => tool.name === 'request_answer')).toBe(shown.includes('approval_respond'))
-    // With no turn of its own running, none; and never what no bot can hold.
-    expect(thread(registry.listForThread('home').map((tool) => tool.name))).toEqual([])
+    // With no turn of its own running, only its work's; and never what no bot can hold.
+    expect(thread(registry.listForThread('home').map((tool) => tool.name))).toEqual(work)
     expect(registry.listForThread('home', runId).map((tool) => tool.name).filter((name) => name === 'delegate_task' || name === 'continue_subagent')).toEqual([])
     // An ordinary thread lists it as an agent's: its own thread when the turn ends, or another by id.
     const own = registry.listForThread('mine').find((tool) => tool.name === 'thread_archive')
@@ -472,15 +475,36 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(host.createThread).not.toHaveBeenCalled()
   })
 
-  it('a bot\'s thread_create starts threads only: its subagents and work go through the bot\'s own tools, never an agent\'s subagent', async () => {
-    const { text, host } = await world({ threads: 'all' })
-    const refused = await text('thread_create', { kind: 'subagent', title: 'Reader', prompt: 'Read the logs' })
+  it('a bot\'s thread_create kind subagent is its own work, through its own tool (S7d4a), never an agent\'s subagent', async () => {
+    const { text, host, registry, runId } = await world({ threads: 'all' })
+    // Listed once, with what its kind "subagent" does here and that kind's arguments.
+    const listed = registry.listForThread('home', runId).find((tool) => tool.name === 'thread_create')!
+    expect(listed.description).toMatch(/With kind "subagent": /)
+    expect(Object.keys((listed.inputSchema as { properties: object }).properties)).toEqual(expect.arrayContaining(['kind', 'title', 'brief', 'projectId']))
+    // This chat turn's grant holds no work_start: the bot's own tool refuses it, and nothing falls back to a subagent.
+    const refused = await text('thread_create', { kind: 'subagent', title: 'Reader', brief: 'Read the logs' })
     expect(refused.error).toBe(true)
-    expect(refused.text).toMatch(/subagent_start/)
+    expect(refused.text).toMatch(/work_start/)
     expect(host.createThread).not.toHaveBeenCalled()
     // Its kind thread keeps hidden (#2003): a bot\'s thread is its own.
     expect(JSON.parse((await text('thread_create', { kind: 'thread', projectId: 'p1', title: 'Quick check', firstMessage: 'Check.', hidden: true })).text)).toMatchObject({ threadId: 'new-1' })
     expect(host.createThread).toHaveBeenLastCalledWith(expect.objectContaining({ hidden: true }), expect.anything())
+  })
+
+  it("a bot's work_stop, or thread_stop with a runId, runs only through the bot port: without it, refused, and no run stops; an agent has no work_stop", async () => {
+    const { text, host } = await world({ threads: 'all', port: false })
+    for (const [name, args] of [['work_stop', { runId: 'w1' }], ['work_stop', { workId: 'w1' }], ['thread_stop', { runId: 'w1' }]] as const) {
+      const refused = await text(name, args)
+      expect(refused, name).toEqual({ error: true, text: 'Only a bot can use this.' })
+    }
+    expect(host.stopRun).not.toHaveBeenCalled()
+    // An agent's thread: the bot's old name is no tool of its own.
+    const mine = await fx!.runningRun('mine')
+    const { registry: agents, turns, request } = appToolRegistry(fx!.engine, fakeAppToolHost({ threadMeta: (id) => thread(id) }).host, {})
+    turns.register(appTurn({ threadId: 'mine', runId: mine.runId }))
+    const agent = await agents.call('work_stop', { runId: 'w1' }, request({ threadId: 'mine', runId: mine.runId }))
+    expect(refusalOf(agent)).toMatchObject({ code: 'unknown_tool', message: "work_stop is a personal bot's tool; you have no tool by that name." })
+    expect(agents.resolveCall('work_stop', { runId: 'w1' }, { threadId: 'mine', runId: mine.runId })).toMatchObject({ refused: { isError: true } })
   })
 
   it('a chat turn no person started reads threads but never starts, messages or stops one', async () => {
@@ -714,7 +738,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(entry).toContain(botCatalogueGroup('threads')!.guidance)
     expect(entry).toMatch(/ToolSearch \("select:[^"]*mcp__mousse__thread_search/)
     // A read-only turn is told which of the group's tools it does not hold.
-    expect(entry).toMatch(/Not yours on this turn: .*thread_stop/)
+    expect(entry).toMatch(/Not yours on this turn: .*thread_update/)
   })
 
   it('on Codex and Pi, tool_catalogue gives each held tool with its arguments; with no group or an unknown one, the list of groups', async () => {

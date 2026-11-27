@@ -316,8 +316,8 @@ const SSD_SEARCH = { now: [{ workId: 'w1', title: 'SSD search', status: 'running
 describe('the bot speaks of its work as its own', () => {
   it('a note to running work: the answer says what the bot now does there, and the chip reads "noted" with the job on hover', async () => {
     const bots = fakeBots('chat', { work: { list: () => SSD_SEARCH, reach: () => 'now' } })
-    bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'work_note', input: { workId: 'w1', note: 'Use the browser tab that is already open.' } })
-    const noted = await bots.call('work_note', { workId: 'w1', note: 'Use the browser tab that is already open.' })
+    bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'work_note', input: { runId: 'w1', content: 'Use the browser tab that is already open.' } })
+    const noted = await bots.call('work_note', { runId: 'w1', content: 'Use the browser tab that is already open.' })
     expect(noted.value).toMatchObject({ result: 'noted', reaches: 'now' })
     expect(noted.value.note).toContain('"SSD search"')
     expect(noted.value.note).toContain('"Use the browser tab that is already open."')
@@ -327,8 +327,8 @@ describe('the bot speaks of its work as its own', () => {
 
   it('a note that came after the job ended: the answer says it was already finished and offers to do it again, with no chip', async () => {
     const bots = fakeBots('chat', { work: { list: () => ({ now: [], recent: [{ workId: 'w1', title: 'SSD search', status: 'done' as const, endedAt: '2026-11-13T10:05:00.000Z' }] }), note: () => 'ended' as const } })
-    bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'work_note', input: { workId: 'w1', note: 'Use the open tab.' } })
-    const late = await bots.call('work_note', { workId: 'w1', note: 'Use the open tab.' })
+    bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'work_note', input: { runId: 'w1', content: 'Use the open tab.' } })
+    const late = await bots.call('work_note', { runId: 'w1', content: 'Use the open tab.' })
     expect(late.value).toMatchObject({ result: 'ended', note: expect.stringContaining('already finished "SSD search"') })
     expect(late.value.note).toContain('offer to do it again')
     expect(late.value).not.toHaveProperty('reaches')
@@ -338,7 +338,7 @@ describe('the bot speaks of its work as its own', () => {
   it('a note passed on from a turn the owner did not start: no promise to the owner, and silence unless they need to know now', async () => {
     const asked: string[] = []
     const bots = fakeBots('chat', { work: { list: () => SSD_SEARCH, reach: () => 'now', fromOwner: (_botId, from) => { asked.push(from); return false } } })
-    const noted = await bots.call('work_note', { workId: 'w1', note: 'Prices changed since you started.' })
+    const noted = await bots.call('work_note', { runId: 'w1', content: 'Prices changed since you started.' })
     // Asked about the turn the tool runs in.
     expect(asked).toEqual(['a1'])
     expect(noted.value).toMatchObject({ result: 'noted', reaches: 'now' })
@@ -356,7 +356,7 @@ describe('the bot speaks of its work as its own', () => {
     // The owner's own turn: the bot still says, as itself, what it does from now on.
     for (const fromOwner of [() => true, undefined]) {
       const owner = fakeBots('chat', { work: { list: () => SSD_SEARCH, reach: () => 'now', ...(fromOwner ? { fromOwner } : {}) } })
-      const answer = (await owner.call('work_note', { workId: 'w1', note: 'Use the open tab.' })).value.note
+      const answer = (await owner.call('work_note', { runId: 'w1', content: 'Use the open tab.' })).value.note
       expect(answer).toContain('I\'ll … from here on')
       expect(answer).not.toContain(SILENT_REPLY)
     }
@@ -365,7 +365,7 @@ describe('the bot speaks of its work as its own', () => {
   it('a note passed on from a turn the owner did not start, to work that ended or cannot take it: never the owner\'s words, never a rerun offer', async () => {
     // The race: a wake passes an update on just as the work finishes.
     const ended = fakeBots('chat', { work: { list: () => ({ now: [], recent: [{ workId: 'w1', title: 'SSD search', status: 'done' as const, endedAt: '2026-11-13T10:05:00.000Z' }] }), note: () => 'ended' as const, fromOwner: () => false } })
-    const late = await ended.call('work_note', { workId: 'w1', note: 'Prices changed since you started.' })
+    const late = await ended.call('work_note', { runId: 'w1', content: 'Prices changed since you started.' })
     expect(late.value).toMatchObject({ result: 'ended' })
     expect(late.value.note).toContain('"SSD search" had already finished')
     expect(late.value.note).toContain(SILENT_REPLY)
@@ -373,7 +373,7 @@ describe('the bot speaks of its work as its own', () => {
     // Every other refusal: the same, and a question's is never passed on as the owner's answer.
     for (const outcome of ['held', 'approval', 'question', 'waiting'] as const) {
       const bots = fakeBots('chat', { work: { list: () => SSD_SEARCH, note: () => outcome, fromOwner: () => false } })
-      const answer = (await bots.call('work_note', { workId: 'w1', note: 'Prices changed since you started.' })).value.note
+      const answer = (await bots.call('work_note', { runId: 'w1', content: 'Prices changed since you started.' })).value.note
       expect(answer, outcome).toContain(SILENT_REPLY)
       expect(answer, outcome).toMatch(/don't tell them they did/)
       expect(answer, outcome).not.toMatch(/Tell (the owner|them) (so|their)|offer to stop it|pass them on with question_answer/)
@@ -382,8 +382,8 @@ describe('the bot speaks of its work as its own', () => {
 
   it('stopping a job: the chip names it, as "started" does', async () => {
     const bots = fakeBots('chat', { work: { list: () => SSD_SEARCH } })
-    bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'work_stop', input: { workId: 'w1' } })
-    expect((await bots.call('work_stop', { workId: 'w1' })).value).toMatchObject({ result: 'stopped', note: expect.stringContaining('You stopped "SSD search"') })
+    bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'work_stop', input: { runId: 'w1' } })
+    expect((await bots.call('work_stop', { runId: 'w1' })).value).toMatchObject({ result: 'stopped', note: expect.stringContaining('You stopped "SSD search"') })
     expect(bots.activity.drain('d1')).toEqual([{ icon: 'think', text: 'stopped', highlight: 'SSD search' }])
   })
 })

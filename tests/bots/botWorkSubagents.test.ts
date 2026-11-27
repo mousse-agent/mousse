@@ -19,7 +19,7 @@ import type { BotManifest } from '../../src/shared/bots/personal/definition'
 import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_OWN_APP_TOOLS, BOT_SUBAGENT_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_TOOLS, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
-import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
+import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from '../run/appToolsFixture'
 import { delegationFixture } from '../run/delegationFixture'
 import { botFixture, createBot, finish, flush, PI, start, startSubagent, subagentRuns, type BotFixture } from './botFixture'
 
@@ -323,6 +323,39 @@ describe('a bot\'s work and its subagents', () => {
       expect(read.text.match(/\[End of subagent data\]/g)).toHaveLength(1)
       // The chat's turn reaches no subagent tool.
       expect(botTools().find((tool) => tool.name === 'subagent_start')!.available!(appTurn({ threadId: 'x', runId: 'r', bot: { ...job.prepared.authority, subagents: undefined } }) as never)).toMatch(/Only your work starts subagents/)
+    } finally {
+      fx.dispose()
+    }
+  })
+
+  it('its subagent tools under the thread family\'s names (S7d4a): a retry under the other name starts nothing new, and a wait for a thread by id is no subagent_wait', async () => {
+    const job = await work('w1')
+    const fx = delegationFixture()
+    try {
+      const parentRun = await fx.runningRun('bot-work')
+      const { registry, turns, request } = appToolRegistry(fx.engine, fakeAppToolHost({ threadMeta: (id) => ({ id, name: 'Fix the login page', projectId: 'p1' }) as never }).host, { bots: () => ({ host: f.bots.tools, models: { pickable: async () => choices } }) })
+      turns.register(appTurn({ threadId: 'bot-work', runId: parentRun.runId, bot: job.prepared.authority }))
+      const at = (toolCallId: string) => request({ threadId: 'bot-work', runId: parentRun.runId, toolCallId })
+      // One tool call, sent first under the old name and retried under the new one: one subagent.
+      const first = await registry.call('subagent_start', { title: 'Prices', brief: 'Find the prices.' }, at('call-1'))
+      const retry = await registry.call('thread_create', { kind: 'subagent', title: 'Prices', brief: 'Find the prices.' }, at('call-1'))
+      expect(first.isError, first.text).toBeFalsy()
+      expect(retry.text).toBe(first.text)
+      expect(subagentNs(job.id)).toHaveLength(1)
+      // The new name runs as the work's own tool, and a new call starts a new one.
+      expect(registry.resolveCall('thread_create', { kind: 'subagent', title: 'Notes', brief: 'x' }, { threadId: 'bot-work', runId: parentRun.runId })).toMatchObject({ name: 'thread_create', variant: 'subagent_start' })
+      expect((await registry.call('thread_create', { kind: 'subagent', title: 'Notes', brief: 'Summarise.' }, at('call-2'))).isError).toBeFalsy()
+      expect(subagentNs(job.id)).toHaveLength(2)
+      // Its own subagents through thread_wait, as through subagent_wait.
+      expect(registry.resolveCall('thread_wait', { subagent: 'Prices' }, { threadId: 'bot-work', runId: parentRun.runId })).toMatchObject({ variant: 'subagent_wait' })
+      // A thread by id is the owner's thread, not one of its subagents: subagent_wait, which the work holds, never answers it,
+      // and the work holds no "use your threads".
+      for (const name of ['thread_wait', 'subagent_wait']) {
+        expect(registry.resolveCall(name, { threadId: 'mine' }, { threadId: 'bot-work', runId: parentRun.runId }), name).toMatchObject({ name: 'thread_wait', variant: 'thread_wait' })
+        const refused = await registry.call(name, { threadId: 'mine' }, at(`wait-${name}`))
+        expect(refused.isError, name).toBe(true)
+        expect(refusalOf(refused)?.code, name).toBe('not_granted')
+      }
     } finally {
       fx.dispose()
     }
