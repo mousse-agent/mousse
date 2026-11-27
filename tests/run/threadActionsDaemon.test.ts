@@ -1250,7 +1250,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
         status: 'needs_input',
         needsInput: true,
         pendingRequests: [{ questions: [expect.objectContaining({ id: 'which', prompt: 'A or B?' })] }],
-        hint: expect.stringContaining('answer_subagent')
+        hint: expect.stringContaining('request_answer')
       })
       expect(seen.status).toMatchObject({ needsInput: true, pendingQuestion: expect.anything() })
       expect(seen.done).toMatchObject({ status: 'finished', resultText: 'picked b' })

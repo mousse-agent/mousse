@@ -7,7 +7,7 @@ import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 import { BOT_MEMORY_TOOLS } from './memory'
 import { BOT_ITEM_TOOLS } from './items'
 import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from './catalogue'
-import { canonicalGrantName } from '../../toolAliases'
+import { canonicalGrantName, canonicalToolName, isRunningVariant } from '../../toolAliases'
 
 /**
  * A bot manifest's canonical form, the subset rule of approval, and the plain words the approval
@@ -408,8 +408,11 @@ export function isBotTurnHeldTool(name: string): boolean {
  * holds).
  */
 export function botGrantTool(name: string): string {
-  // An old name asks for, and is granted as, the tool it was renamed to; one that became a variant, as that variant.
-  const tool = canonicalGrantName(name)
+  // An old name asks for, and is granted as, the tool it was renamed to. A variant a bot holds by its old name
+  // (`approval_respond`) stays that variant; any other variant (`thread_steer`, `queue_edit`) falls under its new tool's
+  // permission, as before. A variant only a thread's own turn runs (`task_cancel`) is no bot's tool, so it keeps its name.
+  const variant = canonicalGrantName(name)
+  const tool = isRunningVariant(name) || BOT_APP_TOOLS.has(variant) || isBotTurnHeldTool(variant) || BROWSER_TOOLS.has(variant) ? variant : canonicalToolName(name)
   if (BROWSER_TOOLS.has(tool)) return BOT_BROWSER_PERMISSION
   if (PROFILER_TOOL_SET.has(tool)) return BOT_PROFILER_PERMISSION
   if (THEME_TOOL_SET.has(tool)) return BOT_THEMES_PERMISSION

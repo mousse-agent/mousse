@@ -484,6 +484,8 @@ export function knownToolName(rawName: string | undefined): string | undefined {
     case 'webfetch':
       return 'WebFetch'
     case 'skill':
+    case 'skillload':
+    case 'skilllist':
     case 'loadskill':
     case 'listskills':
     case 'skillload':

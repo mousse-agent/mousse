@@ -253,7 +253,10 @@ describe("a bot's thread lists only tools a bot can hold", () => {
     for (const name of [...BOT_APP_TOOLS].filter((name) => !BOT_GROUP_PERMISSIONS.has(name))) expect(botMayBeOffered(name), name).toBe(true)
     for (const name of [...BOT_BROWSER_TOOLS, ...BOT_THREAD_TOOLS, ...BOT_PROFILER_TOOLS, ...BOT_THEME_TOOLS, ...BOT_SCHEDULE_READ_TOOLS, ...BOT_SCHEDULE_ACT_TOOLS, ...BOT_SECRET_TOOLS, ...BOT_QUICK_ACTION_TOOLS, ...BOT_TASK_TOOLS, ...BOT_WORK_TOOLS, 'consult', 'skill_list', 'skill_load']) expect(botMayBeOffered(name), name).toBe(true)
     // What a thread's agent steers, queues, forks and answers with is a bot's too, under "use your threads".
-    for (const name of ['thread_stop', 'thread_steer', 'approval_respond', 'queue_enqueue', 'thread_fork', 'thread_return', 'thread_merge_back', 'git_status', 'computer_list']) expect(botGrantTool(name), name).toBe('threads')
+    // An old name that became a variant (thread_steer, thread_hide, queue_edit) asks for its new tool's permission too.
+    for (const name of ['thread_stop', 'thread_steer', 'thread_hide', 'queue_edit', 'approval_respond', 'queue_enqueue', 'thread_fork', 'thread_return', 'thread_merge_back', 'git_status', 'computer_list']) expect(botGrantTool(name), name).toBe('threads')
+    // A variant only a thread's own turn runs is no bot's: it keeps its name, and no permission holds it.
+    expect(botGrantTool('task_cancel')).toBe('task_cancel')
     // A permission's name is no tool; delegation is the work's own subagents; the heap summary pauses the service; a bot has no goal.
     for (const name of ['delegate_task', 'continue_subagent', 'browser_request_human', ...BOT_GROUP_PERMISSIONS, 'profiler_heap_summary', 'goal_update']) expect(botMayBeOffered(name), name).toBe(false)
   })

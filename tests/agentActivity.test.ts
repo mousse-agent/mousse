@@ -285,6 +285,9 @@ describe('normalizeToolName', () => {
     ['web_search', 'WebSearch'],
     ['WebFetch', 'WebFetch'],
     ['skill_load', 'Skill'],
+    ['skill_list', 'Skill'],
+    // Rows written before the S7 rename keep their card.
+    ['load_skill', 'Skill'],
     ['Agent', 'Agent'],
     ['task', 'Task'],
     ['question', 'Question'],
