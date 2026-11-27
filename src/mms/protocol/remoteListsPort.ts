@@ -25,12 +25,14 @@ export interface RemoteListsPort {
   activity(): ThreadActivitySnapshot
   /**
    * The matches on other computers for a search, each computer asked with a short deadline. A newer search
-   * from the same connection ends the older one's calls.
+   * from the same connection ends the older one's calls. `perThread` (the sidebar's filter) names one message hit per
+   * thread and is a search of its own: it neither ends nor is ended by the window's other search.
    */
   search(
     connection: string | undefined,
     query: string,
-    limit: number
+    limit: number,
+    options?: { perThread?: boolean }
   ): Promise<{ results: ThreadSearchResult[]; skipped: ThreadSearchSkipped[] }>
   /**
    * A drag in the sidebar: the rows of other computers among `orderedIds` (qualified ids of the group, in the

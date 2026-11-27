@@ -1153,10 +1153,11 @@ export class MergedLists implements RemoteListsPort {
 
   /**
    * Calls `work` on every computer that is listed, each with its own short deadline. A call of a kind
-   * (`search`) from a window ends the call of the same kind the window still has running, and nothing else.
+   * (`search`, or the sidebar's `filter`) from a window ends the call of the same kind the window still has running,
+   * and nothing else.
    */
   private async fanOut<T>(
-    kind: 'search',
+    kind: 'search' | 'filter',
     connection: string | undefined,
     work: (c: Computer, signal: AbortSignal) => Promise<T>
   ): Promise<{
@@ -1225,20 +1226,26 @@ export class MergedLists implements RemoteListsPort {
     )
   }
 
+  /**
+   * Searches the other computers. `perThread` is the sidebar's filter: one message hit per thread, run apart from the
+   * window's other search, so neither replaces the other.
+   */
   async search(
     connection: string | undefined,
     query: string,
-    limit: number
+    limit: number,
+    options: { perThread?: boolean } = {}
   ): Promise<{ results: ThreadSearchResult[]; skipped: ThreadSearchSkipped[] }> {
     if (!this.options.enabled()) return { results: [], skipped: [] }
+    const perThread = options.perThread === true
     const { answers, skipped, superseded } = await this.fanOut(
-      'search',
+      perThread ? 'filter' : 'search',
       connection,
       async (c, signal) => {
         const raw = await this.options.client.call(
           c.node,
           'threads.search',
-          { query, limit },
+          { query, limit, ...(perThread ? { perThread } : {}) },
           { signal }
         )
         const found = qualifyRoutedResult('threads.search', raw, {

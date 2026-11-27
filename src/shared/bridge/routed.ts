@@ -137,6 +137,8 @@ export const ROUTED_DROPPABLE_KEYS: Readonly<Record<string, readonly string[]>> 
   // An owner from before it shows every thread; it never had a way to hide one. One from before `subagent` records the
   // thread as one an agent started, without saying it is that agent's subagent.
   'threads.create': ['hidden', 'subagent'],
+  // An owner from before it answers with every message hit, which still names the threads that match.
+  'threads.search': ['perThread'],
   'git.status': GIT_READ,
   'git.diff': GIT_READ,
   'git.log': GIT_READ,
@@ -731,7 +733,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'composer.options': read('computer', ['threadId'], { via: 'backend' }),
   'projects.list': read('computer', []),
   'threads.list': read('computer', ['projectId']),
-  'threads.search': read('computer', ['query', 'limit'], { required: ['query'] }),
+  // Version 2: `perThread`, one message hit per thread (the sidebar's filter on another computer).
+  'threads.search': read('computer', ['query', 'limit', 'perThread'], { required: ['query'], version: 2, since: { perThread: 2 } }),
   'threads.inventory': read('computer', ['threadId']),
   'activity.snapshot': read('computer', []),
   'chatReferences.resolve': read('computer', ['reference'], { required: ['reference'] }),
