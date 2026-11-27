@@ -113,6 +113,19 @@
       "expiresAt": "2026-11-27T18:58:27.324Z"
     },
     {
+      "task": "s6a-thread-addressing",
+      "session": "LAPTOP-HIEROJK7-34b8fe",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "s6a-thread-addressing",
+      "paths": [
+        "src/mms/run/addressing.ts",
+        "src/mms/run/mcp/appTools/registry.ts",
+        "src/mms/run/mcp/appTools/index.ts"
+      ],
+      "claimedAt": "2026-11-27T17:00:51.284Z",
+      "expiresAt": "2026-11-27T19:00:51.284Z"
+    },
+    {
       "task": "s7d1-thread-tool-renames",
       "session": "LAPTOP-HIEROJK7-003c84",
       "machine": "LAPTOP-HIEROJK7",
