@@ -341,10 +341,6 @@ function isRecordValue(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * The name of a further entry of a provider: `<base> 2`, `<base> 3`, ..., the first number no entry is called yet
- * (names compared without case or surrounding spaces).
- */
-/**
  * Default names a Mousse version gave new entries and later replaced. An entry still saved under
  * one shows the current default ("ChatGPT subscription 2" reads "Codex 2"); a name the person
  * typed is kept as it is.
@@ -361,6 +357,10 @@ export function currentDefaultName(driver: string, name: string): string {
   return match ? `${retired.now}${match[1] ?? ''}` : name
 }
 
+/**
+ * The name of a further entry of a provider: `<base> 2`, `<base> 3`, ..., the first number no entry is called yet
+ * (names compared without case or surrounding spaces).
+ */
 export function nextEntryName(base: string, taken: Iterable<string>): string {
   const names = new Set([...taken].map((name) => name.trim().toLowerCase()))
   for (let n = 2; ; n += 1) {
