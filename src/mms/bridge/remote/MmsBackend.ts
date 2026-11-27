@@ -281,9 +281,10 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     // A thread an agent of the device started holds who started it and its mode from this same write on. It starts in the
     // sidebar: an agent's thread is a handoff (#2004), whatever a computer from before that asks. Only a personal bot's is
     // hidden here, and the bot is named by its first message (`remoteAgent.ts`), so `hidden: true` is kept with the
-    // agent until then. A person's thread from a phone never is hidden.
+    // agent until then. A subagent is the other exception: it is reached through its parent, so one its create asks to
+    // hide stays out of the sidebar here from the start. A person's thread from a phone never is hidden.
     const agent = started ? { ...started.agent, ...(hidden === true ? { hidden: true as const } : {}) } : undefined
-    const thread = this.services.threads.updateThreadMeta(
+    const updated = this.services.threads.updateThreadMeta(
       result.thread.id,
       {
         startedFrom: { node: caller.node, ...(typeof startedFromProjectId === 'string' ? { projectId: startedFromProjectId } : {}), ...(agent ? { agent } : {}) },
@@ -291,6 +292,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       },
       { touch: false }
     )
+    const thread = agent?.subagent && agent.hidden ? this.services.threads.setThreadHidden(updated.id, true) : updated
     this.services.events.broadcast('threads:updated', { threads: this.services.threads.listAllThreads() })
     return { ...result, thread }
   }

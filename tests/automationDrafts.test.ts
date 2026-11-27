@@ -150,7 +150,9 @@ describe('automation drafts', () => {
   it('keeps the trigger it was given, through the tool, the list and the page', async () => {
     const { drafts, service } = setup()
     const tools: AutomationToolHost = { drafts, isManagerThread: (id) => id === 'manager', botOf: () => undefined }
-    const [save, , , update] = automationTools({ automations: () => tools } as unknown as AppToolHost)
+    const all = automationTools({ automations: () => tools } as unknown as AppToolHost)
+    const save = all.find((tool) => tool.name === 'automation_draft_save')
+    const update = all.find((tool) => tool.name === 'automation_update')
     const ctx = { caller: { threadId: 'manager', runId: 'r1' }, turn: { threadId: 'manager' }, toolCallId: 'c1' } as unknown as ToolCallContext
     const index = () => buildAutomationIndex({ jobs: () => service.listJobs(), thread: () => undefined, threads: () => [], projectName: () => 'mousse', threadMode: () => 'ask', computerName: 'Desk', timeZone: 'UTC' })
     const rows: Array<{ trigger: Record<string, unknown>; contract: Record<string, unknown>; page: string; urlProblem: boolean }> = [
