@@ -173,7 +173,7 @@ describe('runtime facts', () => {
       if (event.type === 'operation' && event.data.phase === 'completed') atCompletion = { autoPermissionMode: caps('claude:one').autoPermissionMode, refreshes: refreshes.length }
     })
     const started = await harness.instances.signIn('claude:one')
-    await vi.waitFor(() => expect(atCompletion).toEqual({ refreshes: 0 }))
+    await vi.waitFor(() => expect(atCompletion).toEqual({ autoPermissionMode: true, refreshes: 0 }))
     // The models listed after the sign-in come from the same account: its Auto mode stays.
     await vi.waitFor(() => expect(refreshes).toEqual(['claude:one']))
     expect(caps('claude:one').autoPermissionMode).toBe(true)

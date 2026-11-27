@@ -113,9 +113,10 @@ describe('protocol nested validators', () => {
       .toEqual({ instanceId: 'codex', llmProvider: '', model: 'gpt-x' })
   })
 
-  it('lets a patch clear the model, mode and workspace with null', () => {
+  it('lets a patch clear the model and workspace with null', () => {
     expect(asScheduledJobPatch({ selection: null, workspace: null })).toMatchObject({ selection: null, workspace: null })
-    expect(asScheduledJobPatch({ mode: 'agent', workspace: { kind: 'project' } })).toMatchObject({ mode: 'agent', workspace: { kind: 'project' } })
+    // Agent was the only mode left, so an older client's mode 'agent' is accepted and dropped.
+    expect(asScheduledJobPatch({ mode: 'agent', workspace: { kind: 'project' } })).toEqual({ workspace: { kind: 'project' } })
   })
 
   it('bounds settings partials and env maps', () => {
