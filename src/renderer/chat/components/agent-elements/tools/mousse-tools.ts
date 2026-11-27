@@ -24,8 +24,8 @@ export function mousseToolOf(partType: string | undefined): string | null {
   return name ? name : null;
 }
 
-/** Each verb's forms: going on, and done. */
-const VERBS: Record<string, readonly [ing: string, past: string]> = {
+/** Each verb's forms: going on, and done. Every verb a tool below names must be here; the type checks it. */
+const VERBS = {
   add: ["adding", "added"],
   answer: ["answering", "answered"],
   archive: ["archiving", "archived"],
@@ -65,7 +65,8 @@ const VERBS: Record<string, readonly [ing: string, past: string]> = {
   use: ["using", "used"],
   wait: ["waiting", "waited"],
   watch: ["watching", "watched"],
-};
+  withdraw: ["withdrawing", "withdrew"],
+} as const satisfies Record<string, readonly [ing: string, past: string]>;
 
 type Verb = keyof typeof VERBS;
 
