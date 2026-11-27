@@ -98,6 +98,22 @@
       "expiresAt": "2026-11-27T18:58:27.324Z"
     },
     {
+      "task": "remote-bots-method-table",
+      "session": "Avarnics-Mac-mini.local-f3dadc",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "remote-bots-method-table",
+      "paths": [
+        "src/shared/bots/personal/methodTable.ts",
+        "src/mms/bots/registerMethods.ts",
+        "src/mms/bots/deviceMethods.ts",
+        "src/mms/bots/browser/registerBotBrowserMethods.ts",
+        "src/mms/bridge/remote/RemoteBots.ts",
+        "src/shared/net/accessClasses.ts"
+      ],
+      "claimedAt": "2026-11-27T18:14:24.172Z",
+      "expiresAt": "2026-11-27T20:14:24.172Z"
+    },
+    {
       "task": "s6a-thread-addressing",
       "session": "LAPTOP-HIEROJK7-34b8fe",
       "machine": "LAPTOP-HIEROJK7",
