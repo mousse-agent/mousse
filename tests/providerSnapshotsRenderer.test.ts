@@ -58,7 +58,7 @@ describe('composer picker from snapshots', () => {
       models: [{ id: 'claude-opus-4', label: 'Claude Opus 4', speed: 'fast' }],
       status: { headline: 'Signed in · Max plan', tone: 'ready' }
     })
-    expect(providers[0].caps?.planMode).toBe(true)
+    expect(providers[0].caps?.childPolicy).toBe('enforced')
   })
 
   it('leaves out a default agent that is signed out, but keeps a model API that needs attention', () => {

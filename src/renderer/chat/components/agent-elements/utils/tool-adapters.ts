@@ -133,7 +133,7 @@ export function mapToolInvocationToStep(
   const { toolName, args = {}, result } = toolInvocation;
   const displayToolName =
     toolName === "PlanWrite"
-      ? "Plan"
+      ? "To-dos"
       : toolName === "TodoWrite"
         ? "Todo"
         : toolName;

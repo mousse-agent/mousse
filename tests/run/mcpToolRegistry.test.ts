@@ -18,32 +18,23 @@ import { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessage } from '../../src
 
 /** The tools a credential lists before the app tools joined (still listed, still these classes). */
 const PHASE5_TOOLS: Record<string, string> = {
-  delegate_task: 'actsAsCaller',
-  continue_subagent: 'actsAsCaller',
-  answer_subagent: 'actsAsCaller',
-  task_status: 'actsAsCaller',
-  task_cancel: 'actsAsCaller',
-  list_subagents: 'actsAsCaller',
-  ask_user: 'actsAsCaller',
+  request_answer: 'actsAsCaller',
+  question_ask: 'actsAsCaller',
   task_create: 'actsAsCaller',
   task_update: 'actsAsCaller',
   task_list: 'actsAsCaller',
   thread_read: 'readsOthers',
   thread_wait: 'readsOthers',
   thread_send: 'managesOthers',
-  thread_create: 'managesOthers',
-  thread_interrupt: 'managesOthers',
-  thread_steer: 'managesOthers',
-  approval_respond: 'managesOthers',
+  // Listed as its widest kind, the subagent (`delegate_task`'s): a call of kind thread is held to `managesOthers`.
+  thread_create: 'actsAsCaller',
+  thread_stop: 'managesOthers',
   queue_list: 'readsOthers',
   queue_enqueue: 'managesOthers',
-  queue_edit: 'managesOthers',
-  queue_remove: 'managesOthers',
-  queue_reorder: 'managesOthers',
-  queue_promote_to_steer: 'managesOthers',
+  queue_update: 'managesOthers',
   // Phase 6 (SPEC §16.2).
   thread_fork: 'startsThreads',
-  thread_merge_back: 'editsWorkspace'
+  thread_return: 'editsWorkspace'
 }
 
 describe('Mousse tool registry (SPEC §15.1)', () => {
@@ -53,14 +44,14 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     fx = undefined
   })
 
-  const setup = async (modeCeiling: 'plan' | 'default' = 'default', hostOverrides: Parameters<typeof fakeAppToolHost>[0] = {}) => {
+  const setup = async (hostOverrides: Parameters<typeof fakeAppToolHost>[0] = {}) => {
     fx = delegationFixture()
     const run = await fx.runningRun('parent')
     const fake = fakeAppToolHost(hostOverrides)
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
-    const registered = turns.register(appTurn({ threadId: 'parent', runId: run.runId, modeCeiling }))
+    const registered = turns.register(appTurn({ threadId: 'parent', runId: run.runId }))
     const ctx = (overrides: Partial<Parameters<typeof request>[0]> = {}): McpCallRequest =>
-      request({ threadId: 'parent', runId: run.runId, modeCeiling, ...overrides })
+      request({ threadId: 'parent', runId: run.runId, ...overrides })
     return { fx, run, registry, turns, registered, ctx, request, ...fake }
   }
 
@@ -76,14 +67,14 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
 
   it('lists every Phase 5 tool with its access class and a plain JSON schema', async () => {
     const { registry } = await setup()
-    const listed = registry.listFor({ readOnly: false, modeCeiling: 'default' })
+    const listed = registry.listFor({ readOnly: false })
     const byName = Object.fromEntries(listed.map((tool) => [tool.name, tool.access]))
     for (const [name, access] of Object.entries(PHASE5_TOOLS)) expect(byName[name], name).toBe(access)
     for (const tool of listed) {
       expect(tool.inputSchema.type).toBe('object')
       expect(Object.getOwnPropertySymbols(tool.inputSchema)).toEqual([])
     }
-    expect((registry.get('delegate_task')!.inputSchema.properties as Record<string, unknown>).modeCeiling).toBeTruthy()
+    expect((registry.get('delegate_task')!.inputSchema.properties as Record<string, unknown>).modeCeiling).toBeUndefined()
     // The older delegation names stay dispatchable in process but are never listed.
     for (const hidden of ['create_subagent', 'create_subagents', 'recall_subagent', 'integrate_delegation', 'integrate_subagent', 'list_delegations'])
       expect(listed.some((tool) => tool.name === hidden), hidden).toBe(false)
@@ -97,7 +88,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     expect(enqueued).toEqual([])
     const ok = await registry.call('queue_enqueue', { content: 'hi' }, ctx())
     expect(ok.isError).toBeUndefined()
-    expect(enqueued).toEqual([{ threadId: 'parent', input: { content: 'hi', mode: 'agent' } }])
+    expect(enqueued).toEqual([{ threadId: 'parent', input: { content: 'hi' } }])
   })
 
   it('thread_read reaches the caller and its lineage, and refuses a thread the host does not know', async () => {
@@ -181,7 +172,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
       fake.host.awaitLiveRun = () => gate
       const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
       const previous = turns.register(appTurn({ threadId: 'parent', runId: first.runId }))
-      const call = registry.call('ask_user', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], [TURN_TOKEN_KEY]: previous.turn.turnToken },
+      const call = registry.call('question_ask', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], [TURN_TOKEN_KEY]: previous.turn.turnToken },
         request({ threadId: 'parent', runId: first.runId, binding: 'per_call', provider: 'claude' }))
       const continuation = await fx.runningRun('parent')
       // The continuation keeps the token of the turn it continues.
@@ -222,7 +213,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
         resolveTarget: () => ({ backend: 'managed-chromium' as const }),
         requestAccess: async () => 'allowed' as const
       }
-      const s = await setup('default', { browserRuntime: () => port as never })
+      const s = await setup({ browserRuntime: () => port as never })
       const browser = { mode: 'structured', execution: { source: 'gui', threadId: 'parent' }, policy: { allowedTools: ['browser_open'] } } as never
       s.turns.register(appTurn({ threadId: 'parent', runId: s.run.runId, browser }))
       return { ...s, dispatched, binding }
@@ -265,45 +256,38 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     })
   })
 
-  it('children inherit the caller ceiling and cannot exceed it; the retired integrate_delegation only reports, even under plan', async () => {
-    const { registry, ctx, delegation } = await setup('plan')
-    await registry.call('delegate_task', { prompt: 'Look', title: 'Looker', workspace: 'shared', role: 'research' }, ctx({ toolCallId: 'mcp:a' }))
-    expect(delegation.delegateTask).toHaveBeenCalledWith(expect.objectContaining({ modeCeiling: 'plan' }), { toolCallId: 'mcp:a' })
-    const broader = await refusalIn(registry.call('delegate_task', { prompt: 'Edit', title: 'Editor', workspace: 'isolated', modeCeiling: 'default' }, ctx()))
-    expect(broader?.code).toBe('mousse_ceiling_exceeded')
-    // The retired merge tool is not offered over MCP any more.
+  it('the retired integrate_delegation is not offered over MCP', async () => {
+    const { registry, ctx, delegation } = await setup()
     await expect(registry.call('integrate_delegation', { delegationId: 'd1' }, ctx())).rejects.toMatchObject({ code: 'mousse_unknown_tool' })
     expect(delegation.reportResult).not.toHaveBeenCalled()
-    const agentTurn = await refusalIn(registry.call('queue_enqueue', { content: 'go', mode: 'agent' }, ctx()))
-    expect(agentTurn?.code).toBe('mousse_ceiling_exceeded')
   })
 
   it('a read-only child calls only reads and readOnlySafe tools', async () => {
-    const { registry, ctx, enqueued } = await setup('default', { readOnlyThread: () => true })
+    const { registry, ctx, enqueued } = await setup({ readOnlyThread: () => true })
     const refused = await refusalIn(registry.call('queue_enqueue', { content: 'x' }, ctx()))
     expect(refused?.code).toBe('mousse_read_only')
     expect(enqueued).toEqual([])
     expect(await refusalIn(registry.call('create_quick_action', { label: 'x', kind: 'bash', payload: 'ls' }, ctx()))).toMatchObject({ code: 'mousse_read_only' })
     expect((await registry.call('queue_list', {}, ctx())).isError).toBeUndefined()
-    const listed = registry.listForThread('parent', 'default').map((tool) => tool.name)
-    expect(listed).toContain('ask_user')
+    const listed = registry.listForThread('parent').map((tool) => tool.name)
+    expect(listed).toContain('question_ask')
     expect(listed).not.toContain('queue_enqueue')
     expect(listed).not.toContain('integrate_delegation')
   })
 
   it('a tool Settings turned off is refused at call time with the reason, and writes no ledger row', async () => {
     const ledger = { start: vi.fn(() => 'inv'), commit: vi.fn(), failed: vi.fn() }
-    const { registry, ctx, turns, run, host } = await setup('default', { toolLedger: () => ledger })
-    turns.register(appTurn({ threadId: 'parent', runId: run.runId, settingsEnabled: (name) => name !== 'ask_user' }))
-    const outcome = await registry.call('ask_user', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
-    expect(outcome).toEqual(refused('unavailable', 'Tool "ask_user" is disabled in Settings → Skills & MCP.'))
+    const { registry, ctx, turns, run, host } = await setup({ toolLedger: () => ledger })
+    turns.register(appTurn({ threadId: 'parent', runId: run.runId, settingsEnabled: (name) => name !== 'question_ask' }))
+    const outcome = await registry.call('question_ask', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
+    expect(outcome).toEqual(refused('unavailable', 'Tool "question_ask" is disabled in Settings → Skills & MCP.'))
     expect(host.askUser).not.toHaveBeenCalled()
     expect(ledger.start).not.toHaveBeenCalled()
   })
 
-  it('runs ask_user and the task tools through the shared handlers for the caller thread, and no plan tool exists', async () => {
+  it('runs question_ask and the task tools through the shared handlers for the caller thread, and no plan tool exists', async () => {
     const { registry, ctx, host, tasks } = await setup()
-    const asked = await registry.call('ask_user', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
+    const asked = await registry.call('question_ask', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
     expect(JSON.parse(asked.text)).toEqual({ q1: 'a' })
     expect(host.askUser).toHaveBeenCalledWith('parent', expect.any(Array), expect.objectContaining({ timeoutMs: 60 * 60 * 1000 }))
     for (const removed of ['present_plan', 'show_document']) expect(registry.get(removed), removed).toBeUndefined()
@@ -362,8 +346,6 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
       rows.length = 0
       await expect(call(registry, request, 'missing')).rejects.toMatchObject({ code: 'mousse_unknown_tool' })
       expect(await refusalIn(call(registry, request, 'write', { threadId: 'other' }))).toMatchObject({ code: 'mousse_scope_denied' })
-      const plan = request('run:active')
-      expect(await refusalIn(registry.call('spawn', {}, { ...plan, credential: { ...plan.credential, modeCeiling: 'plan' } }))).toMatchObject({ code: 'mousse_ceiling_exceeded' })
       await expect(call(registry, request, 'write', {}, 'call-1', 'run:stale')).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
       active = null
       await expect(call(registry, request, 'write')).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
@@ -373,18 +355,14 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
 
   describe('thread_fork and thread_merge_back (SPEC §16.2)', () => {
     /** A finished child run on `child-1`, so `parent` has a lineage thread to fork. */
-    const withFinishedChild = async (modeCeiling: 'plan' | 'default' = 'default') => {
-      const s = await setup(modeCeiling)
+    const withFinishedChild = async () => {
+      const s = await setup()
       const child = await s.fx.delegate(s.run.runId, 'call-child')
       s.fx.finish(child.childRunId, 'child answer')
       return { ...s, child }
     }
 
-    it('thread_fork refuses a plan ceiling and a thread outside the caller lineage, creating nothing', async () => {
-      const plan = await withFinishedChild('plan')
-      expect(await refusalIn(plan.registry.call('thread_fork', { sourceThreadId: 'child-1' }, plan.ctx()))).toMatchObject({ code: 'mousse_ceiling_exceeded' })
-      expect([...plan.fx.threads]).toEqual(['child-1'])
-      fx?.dispose()
+    it('thread_fork refuses a thread outside the caller lineage, creating nothing', async () => {
       const open = await withFinishedChild()
       await open.fx.runningRun('stranger')
       expect(await refusalIn(open.registry.call('thread_fork', { sourceThreadId: 'stranger' }, open.ctx()))).toMatchObject({ code: 'mousse_scope_denied' })
@@ -419,7 +397,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
 
     it('thread_merge_back acts for the caller\'s own fork only, and derives its clientRequestId from the run and call', async () => {
       // Accept edits, so the call reaches the tool without asking (the asking is covered below).
-      const { fx, registry, ctx, run } = await setup('default', { permissionModeFor: () => 'accept_edits' })
+      const { fx, registry, ctx, run } = await setup({ permissionModeFor: () => 'accept_edits' })
       const mergeBack = vi.spyOn(fx.engine, 'mergeBack')
       expect(await refusalIn(registry.call('thread_merge_back', { forkThreadId: 'someone-else' }, ctx()))).toMatchObject({ code: 'mousse_scope_denied' })
       expect(await refusalIn(registry.call('thread_merge_back', { threadId: 'someone-else' }, ctx()))).toMatchObject({ code: 'mousse_scope_denied' })
@@ -490,7 +468,7 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
   it('lists the tools that read and manage other threads for every caller', async () => {
     const { registry } = await world()
     expect(registry.listForThread('parent').map((tool) => tool.name)).toEqual(
-      expect.arrayContaining(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'thread_send', 'thread_steer', 'thread_interrupt', 'thread_create', 'approval_respond'])
+      expect.arrayContaining(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'thread_send', 'thread_stop', 'thread_create', 'request_answer'])
     )
   })
 
@@ -723,6 +701,51 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     expect(result.payload).toMatchObject({ runId: child.childRunId, text: `${'w'.repeat(THREAD_RESULT_MAX_CHARS)}…`, truncated: true, totalChars: long.length, hint: expect.stringContaining('view "messages"') })
   })
 
+  it('thread_list pages with a cursor bound to the thread and the query, and each page lists only what that thread may read', async () => {
+    const { call, threads, denied } = await world()
+    for (let at = 1; at <= 5; at += 1) threads.set(`t${at}`, thread(`t${at}`, { updatedAt: `2026-10-0${6 - at}T00:00:00.000Z` }))
+    const list = async (args: Record<string, unknown>) => JSON.parse((await call('parent', 'thread_list', args)).text) as { threads: Array<{ id: string }>; nextCursor: string | null; complete: boolean }
+    const whole = await list({})
+    expect(whole).toMatchObject({ nextCursor: null, complete: true })
+    const pages: string[][] = []
+    let page = await list({ limit: 3 })
+    for (;;) {
+      pages.push(page.threads.map((row) => row.id))
+      if (page.complete) break
+      expect(page.nextCursor).toEqual(expect.any(String))
+      page = await list({ limit: 3, cursor: page.nextCursor })
+    }
+    expect(page.nextCursor).toBeNull()
+    expect(pages.map((ids) => ids.length)).toEqual([3, 3, 3])
+    expect(pages.flat()).toEqual(whole.threads.map((row) => row.id))
+    // Another thread, or the same thread with other filters, can't continue it; a made-up cursor is refused too.
+    const first = await list({ limit: 3 })
+    expect(await denied(call('stranger', 'thread_list', { limit: 3, cursor: first.nextCursor }))).toMatchObject({ code: 'cursor_mismatch' })
+    expect(await denied(call('parent', 'thread_list', { limit: 3, projectId: 'p1', cursor: first.nextCursor }))).toMatchObject({ code: 'cursor_mismatch' })
+    expect(await denied(call('parent', 'thread_list', { cursor: 'not-a-cursor' }))).toMatchObject({ code: 'invalid_cursor' })
+    // The next page is built for the thread that presents the cursor: a thread made private since is not on it.
+    const next = pages[1]![0]!
+    threads.set(next, { ...threads.get(next)!, localOnly: true })
+    expect((await list({ limit: 3, cursor: first.nextCursor })).threads.map((row) => row.id)).toEqual([...pages[1]!.slice(1), pages[2]![0]])
+    threads.set(next, { ...threads.get(next)!, localOnly: undefined })
+    // The last row of a page updated before the next page is read: the next page goes on from where it was, and
+    // repeats none of the page before.
+    const last = pages[0]!.at(-1)!
+    threads.set(last, { ...threads.get(last)!, updatedAt: '2026-12-01T00:00:00.000Z' })
+    expect((await list({ limit: 3, cursor: first.nextCursor })).threads.map((row) => row.id)).toEqual(pages[1])
+  })
+
+  it('thread_read messages: a message cut short carries readMore, the call that reads that message on', async () => {
+    const { read, messages } = await world()
+    messages.set('stranger', [message(0, 'x'.repeat(THREAD_MESSAGE_MAX_CHARS + 10), 'assistant'), message(1, 'short')])
+    const page = await read('parent', { threadId: 'stranger', view: 'messages' })
+    expect(page.messages[0]).toMatchObject({ truncated: true, totalChars: THREAD_MESSAGE_MAX_CHARS + 10 })
+    expect(page.messages[0].readMore).toEqual({ tool: 'thread_read', args: { threadId: 'stranger', view: 'messages', afterIndex: 0, textOffset: THREAD_MESSAGE_MAX_CHARS, limit: 1 } })
+    expect(page.messages[1]).not.toHaveProperty('readMore')
+    const more = await read('parent', page.messages[0].readMore.args)
+    expect(more.messages).toEqual([expect.objectContaining({ index: 0, text: 'x'.repeat(10) })])
+  })
+
   it('thread_list: every project, started and unarchived by default, filters and limits, with the pending questions', async () => {
     const { call, fx, threads, activity, strangerRun } = await world()
     threads.set('draft', thread('draft', { startedAt: undefined }))
@@ -738,7 +761,8 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     const ids = (value: { threads: Array<Record<string, unknown>> }) => value.threads.map((row) => row.id)
 
     const base = await list()
-    expect(ids(base)).toEqual(['parent', 'stranger', 'elsewhere', 'loose', 'quiet'])
+    // Newest first; threads updated at the same moment by id.
+    expect(ids(base)).toEqual(['elsewhere', 'loose', 'parent', 'stranger', 'quiet'])
     expect(base.projects).toEqual([{ id: 'p1', name: 'One' }, { id: 'p2', name: 'Two' }])
     expect(base.threads.find((row) => row.id === 'stranger')).toMatchObject({
       projectId: 'p1', projectName: 'One', queuedCount: 2, pendingQuestionCount: 1, status: 'awaiting_input', activeRunId: strangerRun.runId,
@@ -886,7 +910,7 @@ function appToolRegistryWithoutEngine(forRun: (runId: string) => { start: (call:
     turns: { get: (runId: string) => turns.get(runId) ?? { ...appTurn({ threadId: 't', runId }), turnToken: 'tok' } } as never
   })
   const request = (runId: string, id = 'call-1'): McpCallRequest => ({
-    credential: { threadId: 't', runId, provider: 'p', modeCeiling: 'default', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
+    credential: { threadId: 't', runId, provider: 'p', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
     toolCallId: id,
     signal: new AbortController().signal
   })

@@ -121,6 +121,12 @@ export interface ScheduledOccurrenceSettled {
   permissionMode?: ScheduledRunDetails['permissionMode']
 }
 
+/**
+ * Skips that only mean the bot's previous run of this automation still goes (`BotEngine.runScheduledOccurrence`): a
+ * timed occurrence is skipped, but a request delivery waits until the bot can take it.
+ */
+const BOT_BUSY_SKIPS: ReadonlySet<string> = new Set(['previous_run_still_queued', 'previous_run_still_running', 'previous_run_waiting', 'bot_waiting_for_owner', 'waiting_for_internet'])
+
 /** Why a bot's schedule is paused when every occurrence would be skipped the same way: no bots here, or its bot is deleted. */
 const LASTING_BOT_SKIPS: Record<string, string | undefined> = {
   bots_unavailable: 'Bots could not be opened in this profile. Resume it once they are back.',
@@ -883,7 +889,8 @@ export class ScheduledJobService extends EventEmitter {
     const claim = job.runClaim
     if (!claim) return
     const now = this.clock()
-    let occurrenceAt = claim.occurrenceKey
+    // A request delivery's key is its id, not a time: it happens now, and fills the prompt's placeholders from its body.
+    let occurrenceAt = claim.webhookOccurrenceId ? now.toISOString() : claim.occurrenceKey
     let outcome: ReturnType<ScheduledBotRunner['runOccurrence']>
     try {
       const existing = this.botRunner?.findOccurrence({ botId: job.bot.botId, scheduleId: job.bot.scheduleId, occurrenceKey: claim.occurrenceKey })
@@ -927,15 +934,19 @@ export class ScheduledJobService extends EventEmitter {
         }
         const expired = next && now.getTime() - Date.parse(occurrenceAt) >= Date.parse(next) - now.getTime()
         const missedReason = `Missed ${new Date(occurrenceAt).toLocaleDateString('en-US', { weekday: 'short' })} ${clockTime(occurrenceAt)} (computer off)`
-        outcome = expired ? { kind: 'skipped', reason: missedReason } : this.botRunner
-          ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, ...(job.bot.say !== undefined ? { say: job.bot.say, ownerAsked: job.bot.ownerAsked } : {}), occurrenceAt, occurrenceKey: claim.occurrenceKey, ...(claim.missed ? { missed: claim.missed } : {}), now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
+        const rendered = this.promptFor(job, claim)
+        outcome = expired ? { kind: 'skipped', reason: missedReason } : rendered.error !== undefined ? { kind: 'skipped', reason: rendered.error } : this.botRunner
+          ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: rendered.prompt, ...(job.bot.say !== undefined ? { say: job.bot.say, ownerAsked: job.bot.ownerAsked } : {}), occurrenceAt, occurrenceKey: claim.occurrenceKey, ...(claim.missed ? { missed: claim.missed } : {}), now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
           : { kind: 'skipped', reason: 'bots_unavailable' }
       }
     } catch (error) {
       outcome = { kind: 'skipped', reason: 'bot_unavailable' }
       console.warn('a bot occurrence could not start', { jobId: job.id, error: error instanceof Error ? error.message : String(error) })
     }
-    if (outcome.kind === 'not_ready') {
+    // A request the bot can't take yet (its previous run of this automation still goes) waits in its pending slot, as a
+    // request does while any automation's run goes on; meanwhile further requests are answered busy, not dropped.
+    const busyDelivery = Boolean(claim.webhookOccurrenceId) && outcome.kind === 'skipped' && BOT_BUSY_SKIPS.has(outcome.reason)
+    if (outcome.kind === 'not_ready' || busyDelivery) {
       if (this.store.releaseClaim(job.id, claim.token)) this.ownedRunClaims.delete(job.id)
       return
     }
@@ -1015,7 +1026,6 @@ export class ScheduledJobService extends EventEmitter {
         jobName: job.name,
         selection: job.selection,
         ...(job.agent ? { agent: job.agent } : {}),
-        mode: job.mode,
         workspace: job.workspace,
         permissionMode: job.permissionMode,
         permissionCeiling: job.permissionCeiling,
@@ -1068,7 +1078,6 @@ export class ScheduledJobService extends EventEmitter {
             ...(result.runId ? { runId: result.runId } : {}),
             ...(result.queueItemId ? { queueItemId: result.queueItemId } : {}),
             ...(result.selection ? { selection: result.selection } : {}),
-            mode: job.mode ?? 'agent',
             ...(result.permissionMode ? { permissionMode: result.permissionMode } : {}),
             ...(job.workspace ? { workspace: job.workspace } : {}),
             ...(result.agent ? { agent: ranAgent(job, result.agent) } : {}),

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { normalizeSubagentTitle, resolveSubagent, subagentsTitled, visibleSubagents } from '../../src/mms/run/delegation/subagentAddress'
-import { narrowCeiling, delegationRequestKey, followUpRequestKey } from '../../src/mms/run/delegation/policy'
+import { delegationRequestKey, followUpRequestKey } from '../../src/mms/run/delegation/policy'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 describe('addressing a subagent by title (issue #142)', () => {
@@ -52,7 +52,7 @@ describe('addressing a subagent by title (issue #142)', () => {
   it('a subagent whose thread is gone is trashed when addressed by id, unknown by title', async () => {
     const { sources, titles, reviewer } = await world()
     titles.delete(reviewer.childThreadId)
-    expect(resolveSubagent(sources, 'parent-a', reviewer.childThreadId)).toMatchObject({ ok: false, code: 'subagent_trashed', message: expect.stringContaining('delegate_task') })
+    expect(resolveSubagent(sources, 'parent-a', reviewer.childThreadId)).toMatchObject({ ok: false, code: 'subagent_trashed', message: expect.stringContaining('thread_create (kind "subagent")') })
     expect(resolveSubagent(sources, 'parent-a', reviewer.delegationId)).toMatchObject({ ok: false, code: 'subagent_trashed' })
     expect(resolveSubagent(sources, 'parent-a', 'API reviewer')).toMatchObject({ ok: false, code: 'unknown_subagent' })
     expect(visibleSubagents(sources, 'parent-a').map((child) => child.title)).toEqual(['Docs writer'])
@@ -66,22 +66,6 @@ describe('addressing a subagent by title (issue #142)', () => {
     // A thread id still singles one out.
     expect(resolveSubagent(sources, 'parent-a', writer.childThreadId)).toMatchObject({ ok: true, childThreadId: writer.childThreadId })
     expect(subagentsTitled(sources, 'parent-a', 'api REVIEWER')).toEqual([reviewer.childThreadId, writer.childThreadId])
-  })
-})
-
-describe('ceilings only narrow', () => {
-  it.each([
-    [[undefined, undefined], undefined],
-    [['default', undefined], 'default'],
-    [[undefined, 'default'], 'default'],
-    [['default', 'default'], 'default'],
-    [['plan', 'default'], 'plan'],
-    [['default', 'plan'], 'plan'],
-    [['plan', undefined], 'plan'],
-    [[null, 'plan'], 'plan'],
-    [['plan', 'plan'], 'plan']
-  ] as const)('%j gives %s', (ceilings, expected) => {
-    expect(narrowCeiling(...ceilings)).toBe(expected)
   })
 })
 

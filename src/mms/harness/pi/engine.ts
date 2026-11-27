@@ -1393,8 +1393,12 @@ export class PiRpcEngine implements ProviderAdapter {
     const definition = turn.host.definition
     let input = request.input
     let rewritten: Record<string, unknown> | undefined
+    // An app tool is judged as the registry will run it (`resolveAppCall`): its variant, with the arguments the variant
+    // takes (Pi's extension sends Pi's call id as the clientRequestId, which the registry keys a retry by).
+    const app = builtin ? undefined : turn.host.tools.resolveAppCall?.(request.toolName, { ...request.input, clientRequestId: request.toolCallId })
+    if (app && 'refused' in app) return { allow: false, reason: app.refused.text }
     // An app or MCP tool is approved as the registry will run it: without transport fields.
-    if (definition && !builtin) input = withoutTransportFields(request.input)
+    if (definition && !builtin) input = withoutTransportFields(app?.args ?? request.input)
     if (access || ((definition || turn.host.bot) && builtin)) {
       input = { ...request.input }
       const argument = PI_PATH_ARGUMENTS[request.toolName]
@@ -1432,7 +1436,7 @@ export class PiRpcEngine implements ProviderAdapter {
         const decided = bot.check({ kind: 'mcp', server: mcp.server, tool: mcp.tool, serverName: mcp.serverName, args })
         if (!decided.ok) return refuse('not_granted', checkMessage(decided))
       } else {
-        const refusal = botAppToolRefusal(bot, request.toolName, args)
+        const refusal = botAppToolRefusal(bot, app?.variant ?? request.toolName, app ? withoutTransportFields(app.args) : args)
         if (refusal) return refuse('not_granted', refusal)
       }
     }
@@ -1723,7 +1727,7 @@ export class PiRpcEngine implements ProviderAdapter {
   ): Promise<TurnResult> {
     const ref: ProviderRef = { ...baseRef, ...(thread.sessionId ? { sessionId: thread.sessionId } : {}) }
     if (thread.sessionId) sink.providerRef(ref)
-    let builtins = !input.cwd ? [] : input.mode === 'plan' || input.child?.readOnly ? PI_READ_ONLY_BUILTINS : PI_ALL_BUILTINS
+    let builtins = !input.cwd ? [] : input.child?.readOnly ? PI_READ_ONLY_BUILTINS : PI_ALL_BUILTINS
     let tools = host.bridge?.mcp ? this.options.mousseTools?.(input.threadId, input.runId) ?? [] : []
     // The user's own MCP servers reach Pi's agent through Mousse's MCP server, like the app tools.
     if (host.bridge?.mcp && host.bridge.userMcp === 'proxy' && this.options.userMcpTools) {
@@ -1738,7 +1742,7 @@ export class PiRpcEngine implements ProviderAdapter {
       builtins = builtins.filter((name) => allowed.has(name))
     }
     // A bot's turn offers only its granted built-ins: an ungranted one does not exist for the model,
-    // as on the locked Claude turn (`escalate` is how it asks). `bash` comes with "run commands",
+    // as on the locked Claude turn (`permission_ask` is how it asks). `bash` comes with "run commands",
     // granted as a whole; it runs in the locked environment, from the bot's files folder.
     if (host.bot) {
       const granted = new Set([...host.bot.tools].flatMap((tool) => PI_NATIVE_TOOLS[tool] ?? []))
@@ -2772,7 +2776,7 @@ export class PiRpcEngine implements ProviderAdapter {
    * steer answers the questions the turn asks them, as the person (docs/design/steer-and-interruptions.md §2.1).
    */
   private releaseGate(turn: PiTurn, answer: boolean): void {
-    // Every question pending on the thread, Mousse's own (`ask_user`, a quick action's approval) as well as Pi's, as
+    // Every question pending on the thread, Mousse's own (`question_ask`, a quick action's approval) as well as Pi's, as
     // a steer on the other agents does (§2.1).
     if (answer) {
       try {

@@ -1,5 +1,5 @@
 /**
- * `ask_user`'s `wait` argument and `withdraw_question` at the tool (issue #1372): a call that does not wait hands the
+ * `question_ask`'s `wait` argument and `question_withdraw` at the tool (issue #1372): a call that does not wait hands the
  * question to the host's open-question call and returns its id at once; one that waits keeps the blocking call. The
  * path from the host into the Run Engine is covered end to end in `openQuestions.test.ts`.
  */
@@ -17,11 +17,11 @@ function tools() {
     withdrawQuestion: vi.fn((threadId: string, id: string) => threadId === 'thread-1' && id === 'q_1')
   }
   const [ask, withdraw] = askUserTools(host as unknown as AppToolHost)
-  const ctx = { transport: 'mcp', caller: { threadId: 'thread-1', runId: 'run-1', provider: 'test', modeCeiling: 'default', accessLevel: 'manage' }, signal: new AbortController().signal } as unknown as ToolCallContext
+  const ctx = { transport: 'mcp', caller: { threadId: 'thread-1', runId: 'run-1', provider: 'test', accessLevel: 'manage' }, signal: new AbortController().signal } as unknown as ToolCallContext
   return { host, ask: (args: Record<string, unknown>) => ask!.handler(args, ctx), withdraw: (args: Record<string, unknown>) => withdraw!.handler(args, ctx), names: [ask!.name, withdraw!.name] }
 }
 
-describe('ask_user without waiting', () => {
+describe('question_ask without waiting', () => {
   it('returns the open question\'s id at once and never waits for the answer', async () => {
     const t = tools()
     const result = await t.ask({ questions: QUESTIONS, wait: false })
@@ -38,9 +38,9 @@ describe('ask_user without waiting', () => {
     expect(t.host.askWithoutWaiting).not.toHaveBeenCalled()
   })
 
-  it('withdraw_question takes back an open question of the caller\'s thread, and says when there is none', async () => {
+  it('question_withdraw takes back an open question of the caller\'s thread, and says when there is none', async () => {
     const t = tools()
-    expect(t.names).toEqual(['ask_user', 'withdraw_question'])
+    expect(t.names).toEqual(['question_ask', 'question_withdraw'])
     expect(await t.withdraw({ questionId: 'q_1' })).toMatchObject({ isError: false })
     expect(await t.withdraw({ questionId: 'q_2' })).toMatchObject({ isError: true, text: expect.stringContaining('not open in this thread') })
     expect(await t.withdraw({})).toMatchObject({ isError: true })

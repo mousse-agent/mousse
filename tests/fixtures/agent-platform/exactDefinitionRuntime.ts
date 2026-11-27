@@ -86,7 +86,7 @@ export function installExactDefinitionRuntime(options: ExactRuntimeOptions): Exa
     recordAuthorizedCall(definition, { turnToken: bridge.turnToken, toolName: call.name, callId: call.id, args: call.arguments })
     const turn = options.orchestrator.appToolTurns.get(input.runId)
     return options.orchestrator.mcpToolRegistry().call(call.name, { ...call.arguments, [TURN_TOKEN_KEY]: bridge.turnToken }, {
-      credential: { threadId: input.threadId, runId: input.runId, provider: 'pi', modeCeiling: turn?.modeCeiling ?? 'default', accessLevel: turn?.accessLevel ?? 'lineage', binding: 'per_call', current: () => true },
+      credential: { threadId: input.threadId, runId: input.runId, provider: 'pi', accessLevel: turn?.accessLevel ?? 'lineage', binding: 'per_call', current: () => true },
       toolCallId: call.id,
       signal: input.signal
     })

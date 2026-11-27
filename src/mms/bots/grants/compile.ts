@@ -3,14 +3,14 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_RETIRED_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_QUESTION_WITHDRAW_TOOL, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_COMPUTER_REQUEST_TOOL, BOT_COMPUTER_TOOLS, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SECRET_TOOLS, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_CHAT_NATIVE_OFF, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_AUTOMATION_ENABLE_TOOL, BOT_RETIRED_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_QUESTION_WITHDRAW_TOOL, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_COMPUTER_REQUEST_TOOL, BOT_COMPUTER_TOOLS, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_PROFILE_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SECRET_TOOLS, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_CHAT_NATIVE_OFF, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
 import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from '../../../shared/bots/personal/catalogue'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import { BOT_ITEM_TOOLS } from '../../../shared/bots/personal/items'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
 import { stableStringify } from '../../run/json'
-import { canonicalToolName } from '../../../shared/toolAliases'
+import { canonicalGrantName } from '../../../shared/toolAliases'
 
 /**
  * A bot thread's grant, compiled for one dispatch (PR 6 §4). Pure: the caller supplies the native
@@ -97,7 +97,7 @@ export interface CompileInput {
    */
   allSkills?: boolean
   /**
-   * The bot tools the thread gets beside its grant (6c-2): `escalate` on every bot thread, and
+   * The bot tools the thread gets beside its grant (6c-2): `permission_ask` on every bot thread, and
    * `consult` on the activation thread of a bot with context threads. `memory`: the five
    * `memory_*` tools (Bot Phase 1 §5.10) and the listing of the owner's MCP servers (`mcp_servers`), always on and
    * never grantable, so a bot whose stored grant predates them has them too. `frontDesk`: a chat turn
@@ -144,8 +144,8 @@ export interface CompileInput {
     /** `publish_applet` (`BOT_APPLET_TOOL`): a main turn, chat or work, publishes applets; they need no permission. Never a consult. */
     applets?: boolean
     /**
-     * A run's main turn: it may split its job among subagents (`BOT_SUBAGENT_TOOLS`), and lists the models they may run on
-     * (`model_list`). Never the chat, a consult or a subagent.
+     * A run's turn, its main turn or one of its subagents' at any depth: it may split its job among subagents
+     * (`BOT_SUBAGENT_TOOLS`), and lists the models they may run on (`model_list`). Never the chat or a consult.
      */
     subagents?: boolean
     /** Work (including a reminder's work) and a scheduled run may park on time or events (`BOT_TURN_KINDS`). */
@@ -163,13 +163,13 @@ export interface CompileInput {
     /**
      * This turn is one of a run's subagents: it holds what its work holds of the built-ins, files, MCP tools and skills,
      * and of the app tools what a thread's subagent may use (`subagentManifest`): the web, the browser, and, as `threads`,
-     * `profiler` and `tasks` here say, the owner's threads, the profiler and its task list. Every other bot tool is left
-     * out whatever the rest of `botTools` says: no asks, memory, schedules, reminders, pictures, work, secrets or subagents
-     * of its own.
+     * `profiler`, `tasks` and `subagents` here say, the owner's threads, the profiler, its task list and subagents of its
+     * own. Every other bot tool is left out whatever the rest of `botTools` says: no asks, memory, schedules, reminders,
+     * pictures, work or secrets.
      */
     subagent?: true
     /**
-     * `ask_owner` (`BOT_QUESTION_TOOL`) and `question_withdraw`: questions with answers to tap; they grant nothing. Every chat turn, work and a
+     * `question_ask` (`BOT_QUESTION_TOOL`) and `question_withdraw`: questions with answers to tap; they grant nothing. Every chat turn, work and a
      * scheduled run (`BOT_TURN_KINDS`); a front desk (a chat turn) also gets `question_answer`, to pass on to work an
      * answer given in the chat.
      */
@@ -216,12 +216,12 @@ export function compileBotThread(input: CompileInput): CompileResult {
   const narrowed = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
   // A tool bots no longer have, still listed by a grant an older build approved, gives nothing. One it names by an old
   // name gives the tool it was renamed to; the stored grant and its digest stay as approved.
-  const held = { ...narrowed, appTools: narrowed.appTools.filter((tool) => !BOT_RETIRED_APP_TOOLS.has(tool)).map(canonicalToolName) }
+  const held = { ...narrowed, appTools: narrowed.appTools.filter((tool) => !BOT_RETIRED_APP_TOOLS.has(tool)).map(canonicalGrantName) }
   // A subagent is the work, never more: what the work holds, less what is the bot's alone, and none of the bot's tools
-  // but what a thread's subagent may use (the owner's threads, the profiler, its task list).
+  // but what a thread's subagent may use (the owner's threads, the profiler, its task list, subagents of its own).
   const subagent = input.botTools?.subagent === true
   const own = subagent ? undefined : input.botTools
-  const shared = subagent ? { threads: input.botTools?.threads, profiler: input.botTools?.profiler, tasks: input.botTools?.tasks } : own
+  const shared = subagent ? { threads: input.botTools?.threads, profiler: input.botTools?.profiler, tasks: input.botTools?.tasks, subagents: input.botTools?.subagents } : own
   const manifest = subagent ? subagentManifest(held) : own?.frontDesk ? frontDeskManifest(held) : held
   // Checked again here, so a grant stored before a tool was refused can never widen later.
   const refusedApp = manifest.appTools.find((tool) => !BOT_APP_TOOLS.has(tool))
@@ -265,8 +265,11 @@ export function compileBotThread(input: CompileInput): CompileResult {
   const narrowSkills = input.thread.narrow?.skills
   const allSkills = input.allSkills === true && !narrowSkills
   const skills = [...new Set([...manifest.skills, ...(input.allSkills === true && narrowSkills ? narrowSkills : [])])].sort()
+  // Turning automations on (`automation_enable`): only a main turn that may act for the owner (`threads: 'all'`, its start
+  // then checked at the call, `turnRefusals`), never a consult, whose words the owner never sees.
+  const enablesAutomations = own?.threads === 'all'
   const appTools = [...new Set([
-    ...manifest.appTools.filter((tool) => !BOT_GROUP_PERMISSIONS.has(tool)),
+    ...manifest.appTools.filter((tool) => !BOT_GROUP_PERMISSIONS.has(tool) && (tool !== BOT_AUTOMATION_ENABLE_TOOL || enablesAutomations)),
     ...(themes ? BOT_THEME_TOOLS : []),
     ...(profiler ? (own?.frontDesk ? BOT_PROFILER_CHAT_TOOLS : BOT_PROFILER_TOOLS) : []),
     ...(browser ? BOT_BROWSER_TOOLS : []),
@@ -284,12 +287,13 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(quickActions ? BOT_QUICK_ACTION_TOOLS : []),
     ...(shared?.tasks ? BOT_TASK_TOOLS : []),
     ...(skills.length || allSkills ? ['skill_list', 'skill_load'] : []),
-    ...(own?.escalate ? ['escalate'] : []),
+    ...(own?.escalate ? ['permission_ask'] : []),
     ...(own?.consult ? ['consult'] : []),
     ...(own?.workWaiting ? ['work_wait'] : []),
     ...(own?.scheduled ? ['schedule_done'] : []),
-    // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one.
-    ...(own?.memory ? [...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, BOT_MCP_LIST_TOOL] : []),
+    // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one, and its own
+    // profile, so it can say who it is and what it holds.
+    ...(own?.memory ? [...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, BOT_MCP_LIST_TOOL, BOT_PROFILE_TOOL] : []),
     // What runs in its folders, on every turn (chat, work, consults and subagents alike), so it reuses a running server
     // instead of starting another: it only reads.
     BOT_RUNNING_TOOL,
@@ -300,8 +304,8 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(own?.questions ? [BOT_QUESTION_TOOL, BOT_QUESTION_WITHDRAW_TOOL, ...(own.frontDesk ? [BOT_QUESTION_ANSWER_TOOL] : [])] : []),
     ...(own?.cards ? [BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL] : []),
     ...(own?.bots ? BOT_MESSAGE_TOOLS : []),
-    // A run's main turn splits its job among subagents, on models from the same list the chat picks work's from.
-    ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'model_list'] : []),
+    // A run's turn splits its job among subagents, at any depth, on models from the same list the chat picks work's from.
+    ...(shared?.subagents && !own?.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'model_list'] : []),
     // The catalogue's own tools: they reach nothing themselves, and every tool called through them is held to this list.
     ...(own?.catalogue ? [BOT_CATALOGUE_TOOL, ...(own.catalogue === 'use_tool' ? [BOT_USE_TOOL] : [])] : [])
   ])].sort()

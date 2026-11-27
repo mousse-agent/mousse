@@ -6,10 +6,20 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 
-vi.mock('../../src/shared/toolAliases', () => {
+vi.mock('../../src/shared/toolAliases', async (importActual) => {
   const MOUSSE_TOOL_ALIASES: Record<string, string> = { web_lookup: 'web_search' }
   const isToolAlias = (name: string) => Object.prototype.hasOwnProperty.call(MOUSSE_TOOL_ALIASES, name)
-  return { MOUSSE_TOOL_ALIASES, isToolAlias, canonicalToolName: (name: string) => (isToolAlias(name) ? MOUSSE_TOOL_ALIASES[name] : name) }
+  const canonicalToolName = (name: string) => (isToolAlias(name) ? MOUSSE_TOOL_ALIASES[name] : name)
+  // A plain rename, never a variant: a grant of the old name is the new tool's (`canonicalGrantName`).
+  return {
+    ...(await importActual<object>()),
+    MOUSSE_TOOL_ALIASES,
+    isToolAlias,
+    canonicalToolName,
+    canonicalGrantName: canonicalToolName,
+    isVariantAlias: () => false,
+    isRunningVariant: () => false
+  }
 })
 
 import { botManifestDigest, compileBotThread } from '../../src/mms/bots/grants/compile'

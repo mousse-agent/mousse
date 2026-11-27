@@ -80,7 +80,7 @@ describe('the gateway mints the bridge from the binding\'s approvals', () => {
         sink: sink(),
         control: { drainSteer: () => undefined, heartbeat: noop },
         host: host(),
-        ...(options.app === false ? {} : { app: { turnToken: 'tt', modeCeiling: 'default' as const, mcpEligible: false, instructions: () => ({ sessionInstructions: '', turnPreamble: '' }) } })
+        ...(options.app === false ? {} : { app: { turnToken: 'tt', mcpEligible: false, instructions: () => ({ sessionInstructions: '', turnPreamble: '' }) } })
       }
       await harness.startTurn(spec).result
       return { binding, bridge: hosts.at(-1)!.bridge! }
@@ -309,7 +309,7 @@ describe('Mousse tools that wait for the user', () => {
 
   it('are refused before they ask under `never`', async () => {
     const r = await registry()
-    expect(await r.call('ask_user', question, 'never')).toEqual(refused('needs_person', QUESTIONS_REFUSED_MESSAGE))
+    expect(await r.call('question_ask', question, 'never')).toEqual(refused('needs_person', QUESTIONS_REFUSED_MESSAGE))
     expect(await r.call('create_quick_action', action, 'never')).toEqual(refused('needs_person', APPROVALS_REFUSED_MESSAGE))
     expect(r.askUser).not.toHaveBeenCalled()
     expect(r.approve).not.toHaveBeenCalled()
@@ -319,7 +319,7 @@ describe('Mousse tools that wait for the user', () => {
 
   it('still ask under `ask`', async () => {
     const r = await registry()
-    expect(await r.call('ask_user', question)).toMatchObject({ isError: false })
+    expect(await r.call('question_ask', question)).toMatchObject({ isError: false })
     expect(await r.call('create_quick_action', action)).toMatchObject({ isError: false })
     expect(r.askUser).toHaveBeenCalledOnce()
     expect(r.approve).toHaveBeenCalledOnce()
@@ -380,8 +380,8 @@ describe('Mousse tools that wait for the user are not usable under `never`', () 
     const quickActions = new QuickActionTools(async () => true, () => {})
     const { registry: tools } = createAppToolRegistry({ host: { ...fixture.host, quickActions } })
     const offered = (approvals?: 'never') => tools.usableNow({ ...appTurn({ threadId: 'thread-1', runId: 'run-1', ...(approvals ? { approvals } : {}) }), turnToken: '' } as AppToolTurn)
-    expect(offered()).toEqual(expect.arrayContaining(['ask_user', 'create_quick_action']))
-    expect(offered('never')).not.toContain('ask_user')
+    expect(offered()).toEqual(expect.arrayContaining(['question_ask', 'create_quick_action']))
+    expect(offered('never')).not.toContain('question_ask')
     expect(offered('never')).not.toContain('create_quick_action')
     expect(offered('never')).toContain('task_create')
   })

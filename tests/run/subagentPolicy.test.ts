@@ -66,7 +66,7 @@ describe('subagent target preflight table', () => {
     ['claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, false, null],
     ['codex', CODEX_CAPABILITIES, true, null],
     ['codex', CODEX_CAPABILITIES, false, null],
-    // Antigravity rejects plan mode, so it cannot be read-only; any other child is fine.
+    // Antigravity cannot hold a child read-only; any other child can be.
     ['antigravity', ANTIGRAVITY_CAPABILITIES, true, 'shared_unsupported_for_provider'],
     ['antigravity', ANTIGRAVITY_CAPABILITIES, false, null]
   ] as const)('%s, read-only %s', (driver, capabilities, readOnly, code) => {
@@ -186,7 +186,8 @@ describe('delegated child policy', () => {
   it('the read-only Mousse tool list runtimes use matches what the registry lets a read-only child call', () => {
     const { d } = daemon(async () => undefined)
     const registry = d.orch.mcpToolRegistry()
-    const callable = registry.list().filter((tool) => tool.callable !== 'in_process' && (tool.access === 'reads' || tool.access === 'readsOthers' || tool.readOnlySafe)).map((tool) => tool.name)
+    // The old tools a thread tool runs as its variant (`toolVariant`) are callable as they always were.
+    const callable = [...registry.list(), ...registry.variantTools()].filter((tool) => tool.callable !== 'in_process' && (tool.access === 'reads' || tool.access === 'readsOthers' || tool.readOnlySafe)).map((tool) => tool.name)
     expect(new Set(callable)).toEqual(READ_ONLY_MOUSSE_TOOLS)
   })
 
@@ -537,7 +538,7 @@ describe('delegated child policy', () => {
       if (!name || probed.has(name)) return 'Looked.'
       probed.add(name)
       const tools = await registry
-      const credential = { threadId: input.threadId, runId: input.runId, provider: 'codex', modeCeiling: 'default' as const, accessLevel: 'lineage' as const, binding: 'drained_turn' as const, current: () => true }
+      const credential = { threadId: input.threadId, runId: input.runId, provider: 'codex', accessLevel: 'lineage' as const, binding: 'drained_turn' as const, current: () => true }
       for (const [tool, args] of [
         ['thread_read', {}],
         ['queue_list', {}],
@@ -597,7 +598,7 @@ describe('ToolRegistry read-only gate', () => {
     .register(tool('starts', 'startsThreads'))
   const call = (name: string, threadId: string) =>
     registry.call(name, {}, {
-      credential: { threadId, runId: `run-${threadId}`, provider: 'codex', modeCeiling: 'default', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
+      credential: { threadId, runId: `run-${threadId}`, provider: 'codex', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
       toolCallId: 'c',
       signal: new AbortController().signal
     })

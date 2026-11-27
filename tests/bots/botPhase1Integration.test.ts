@@ -205,7 +205,7 @@ async function dispatch(activationId: string, work: (turn: { prepared: PreparedB
   w.alive.add(pid)
   w.registry.attachThread(payload.threadId, pid)
   const ctx: ToolCallContext = {
-    caller: { threadId: payload.threadId, runId: payload.runId, provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+    caller: { threadId: payload.threadId, runId: payload.runId, provider: 'pi', accessLevel: 'lineage' },
     turn: { turnToken: 't', ...appTurn({ threadId: payload.threadId, runId: payload.runId, bot: prepared.authority }) },
     toolCallId: 'call',
     signal: new AbortController().signal,
@@ -260,7 +260,7 @@ describe('Bot Phase 1, composed', () => {
     const second = chatActivation(botId)
     expect(said.activationId).toBe(second.id)
     // The memory and schedule tools are listed on the home thread: it runs the chat lane as bot turns.
-    expect(w.tools.get('memory_save')!.listed!({ readOnly: false, modeCeiling: 'default', botRole: w.engine.roleOf(home) })).toBe(true)
+    expect(w.tools.get('memory_save')!.listed!({ readOnly: false, botRole: w.engine.roleOf(home) })).toBe(true)
     const turn2 = await dispatch(second.id, async ({ call }) => {
       expect(await call('memory_save', { text: 'The owner is vegetarian.', kind: 'owner' })).not.toHaveProperty('isError', true)
       expect(JSON.parse((await call('bot_schedule_add', { when: { kind: 'interval', minutes: 60 }, prompt: 'Plan tonight\'s dinner.' })).text)).toMatchObject({ label: 'every hour' })
@@ -354,14 +354,14 @@ describe('the owner\'s fresh starts: /clear, /forget history, /reset', () => {
     await w.engine.service.chatSend({ botId, text: 'Find a risotto recipe.', clientRequestId: 'fresh-2' })
     let first = ''
     await dispatch(chatActivation(botId).id, async ({ call }) => {
-      first = JSON.parse((await call('work_start', { title: 'Risotto', brief: 'Find a risotto recipe.' })).text).workId
+      first = JSON.parse((await call('work_start', { title: 'Risotto', brief: 'Find a risotto recipe.' })).text).runId
     }, 'On it.')
     await dispatch(first, async ({ call }) => { await call('memory_save', { text: 'The recipe site needs a login.' }) }, 'Mushroom risotto, 40 minutes.')
     w.clock.now += 60_000
     await w.engine.service.chatSend({ botId, text: 'And a soup?', clientRequestId: 'fresh-3' })
     let work = ''
     await dispatch(chatActivation(botId).id, async ({ call }) => {
-      work = JSON.parse((await call('work_start', { title: 'Soup', brief: 'Find a soup recipe.' })).text).workId
+      work = JSON.parse((await call('work_start', { title: 'Soup', brief: 'Find a soup recipe.' })).text).runId
     }, 'Looking.')
     w.engine.tools.reminders.add(botId, chatActivation(botId)?.id ?? work, { dueAt: new Date(w.clock.now + HOUR).toISOString(), text: 'Soak the beans.' })
     await w.engine.service.chatSend({ botId, text: 'Thanks!', clientRequestId: 'fresh-4' })

@@ -48,7 +48,7 @@ export function resolveSubagent(sources: SubagentAddressSources, parentThreadId:
   const byId = (childThreadId: string, delegation?: DelegationRecord): SubagentResolution => {
     const title = sources.titleOf(childThreadId)
     return title === undefined
-      ? { ok: false, code: 'subagent_trashed', message: 'That subagent was deleted, and a deleted subagent cannot be continued. Start a new one with delegate_task.' }
+      ? { ok: false, code: 'subagent_trashed', message: 'That subagent was deleted, and a deleted subagent cannot be continued. Start a new one with thread_create (kind "subagent").' }
       : { ok: true, childThreadId, title, ...(delegation ? { delegation } : {}) }
   }
   const delegation = sources.delegations.get(name)
@@ -69,6 +69,6 @@ export function resolveSubagent(sources: SubagentAddressSources, parentThreadId:
     code: 'unknown_subagent',
     message: titles.length
       ? `You have no subagent titled "${name}". Your subagents: ${titles.slice(0, LISTED_TITLES).map((title) => `"${title}"`).join(', ')}${titles.length > LISTED_TITLES ? ', ...' : ''}.`
-      : `You have no subagent titled "${name}"; you have not started any. Start one with delegate_task.`
+      : `You have no subagent titled "${name}"; you have not started any. Start one with thread_create (kind "subagent").`
   }
 }

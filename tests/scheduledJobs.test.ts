@@ -822,14 +822,14 @@ describe('scheduled job fields, manual jobs and occurrences', () => {
     return { job, due, token: due.runClaim!.token }
   }
 
-  it('keeps the model, mode, workspace and creator across a reload', () => {
+  it('keeps the model, workspace and creator across a reload', () => {
     const selection = { instanceId: 'codex', llmProvider: 'codex', model: 'gpt-x' }
     const job = store.createJob({
-      name: 'Fields', prompt: 'p', schedule: { kind: 'manual' }, projectId: 'p1', selection, mode: 'plan',
+      name: 'Fields', prompt: 'p', schedule: { kind: 'manual' }, projectId: 'p1', selection,
       workspace: { kind: 'worktree', path: '/repo/wt' }, createdBy: { threadId: 't1', runId: 'r1' }
     })
     const reloaded = new ScheduledJobStore(MousseConfigStore.load(tempHome)).getJob(job.id)
-    expect(reloaded).toMatchObject({ selection, mode: 'plan', workspace: { kind: 'worktree', path: '/repo/wt' }, createdBy: { threadId: 't1', runId: 'r1' } })
+    expect(reloaded).toMatchObject({ selection, workspace: { kind: 'worktree', path: '/repo/wt' }, createdBy: { threadId: 't1', runId: 'r1' } })
   })
 
   it('never completes a manual job and runs it only when started', () => {
@@ -887,7 +887,7 @@ describe('scheduled job fields, manual jobs and occurrences', () => {
     const { job, token } = claimed({ repeat: { times: 3 } })
     store.markClaimThread(job.id, token, 'thread-1')
     store.markOccurrenceAdmitted(job.id, token, 'run-1')
-    const held = store.markQueuedOccurrence(job.id, token, 'item-1', { threadId: 'thread-1', runId: 'run-1', mode: 'agent' })!
+    const held = store.markQueuedOccurrence(job.id, token, 'item-1', { threadId: 'thread-1', runId: 'run-1' })!
     expect(held).toMatchObject({ state: 'scheduled', runClaim: undefined, repeat: { times: 3, completed: 0 } })
     expect(held.pendingOccurrence).toEqual({ occurrenceKey: PAST, threadId: 'thread-1', runId: 'run-1', queueItemId: 'item-1', state: 'queued' })
     expect(held.runHistory).toEqual([expect.objectContaining({ status: 'queued', occurrenceKey: PAST, threadId: 'thread-1', runId: 'run-1', queueItemId: 'item-1' })])
@@ -1456,7 +1456,7 @@ describe('ScheduledJobService concurrency and occurrences', () => {
     })
     service.start()
     await vi.waitFor(() => expect(store.getJob(job.id)?.pendingOccurrence).toMatchObject({ runId: 'run-1', queueItemId: 'item-1', state: 'queued' }))
-    expect(store.getJob(job.id)?.runHistory?.[0]).toMatchObject({ status: 'queued', threadId: 'thread-1', mode: 'agent' })
+    expect(store.getJob(job.id)?.runHistory?.[0]).toMatchObject({ status: 'queued', threadId: 'thread-1' })
     // The tick after the claim finds the job held and does not run it again.
     service.wake()
     await new Promise((resolve) => setTimeout(resolve, 30))
@@ -1472,15 +1472,15 @@ describe('ScheduledJobService concurrency and occurrences', () => {
 
   it('records the model, thread and run of a finished turn on its run record', async () => {
     const selection = { instanceId: 'codex', llmProvider: 'codex', model: 'gpt-x' }
-    const job = due('Finished', { selection, mode: 'plan' })
+    const job = due('Finished', { selection })
     serviceOf({
       runIsolated: async (_prompt, ingress) => {
-        expect(ingress).toMatchObject({ selection, mode: 'plan', occurrenceKey: PAST })
+        expect(ingress).toMatchObject({ selection, occurrenceKey: PAST })
         return { text: 'done', silent: false, threadId: 'thread-1', runId: 'run-1', selection, transcriptWritten: true }
       }
     }).start()
     await vi.waitFor(() => expect(store.getJob(job.id)?.lastStatus).toBe('ok'))
-    expect(store.getJob(job.id)?.runHistory?.[0]).toMatchObject({ status: 'ok', threadId: 'thread-1', runId: 'run-1', selection, mode: 'plan', occurrenceKey: PAST })
+    expect(store.getJob(job.id)?.runHistory?.[0]).toMatchObject({ status: 'ok', threadId: 'thread-1', runId: 'run-1', selection, occurrenceKey: PAST })
   })
 })
 

@@ -1,5 +1,6 @@
 import { heldCalls } from '../actions/lifecycle'
 import type { ActionRow } from '../actions/BotActions'
+import { randomUUID } from 'node:crypto'
 import { readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { ProfileDatabase, type Migration, type ProfileDatabaseFault } from '../../run/db/ProfileDatabase'
@@ -530,6 +531,25 @@ CREATE TABLE bot_subagent_runs(
 ) STRICT;
 CREATE INDEX bot_subagent_runs_by_run ON bot_subagent_runs(child_run_id);
 `
+  },
+  {
+    // A bot's message to another bot, or a wake it set again, held past its chain's limit for the owner's Continue or
+    // Stop (issue #1443). `bot_id` is the bot whose chat shows the card: the sender. It leaves `held` only in the
+    // transaction that sends it, so after a crash Continue finds what was not sent yet, and nothing goes twice.
+    version: 16,
+    sql: `
+CREATE TABLE bot_chain_holds(
+  hold_id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('message','wake')),
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('held','continued','stopped','failed')),
+  reason TEXT,
+  created_at TEXT NOT NULL,
+  settled_at TEXT
+) STRICT;
+CREATE INDEX bot_chain_holds_held ON bot_chain_holds(bot_id, status);
+`
   }
 ]
 
@@ -544,7 +564,7 @@ export const BOT_OFFLINE_REASON = 'waiting_for_internet'
  * run lane) with one of these end reasons, like the internet wait, so an older build still reads `bots.db`:
  * `budget_exhausted` waits for the owner's answer to its limit ask, `room_allowed` was allowed more and goes on when
  * the run lane is free, `usage_limit` goes on when the bot's usage pause ends, `question` waits for the owner's answer
- * to the question it asked (`ask_owner`), and `question_answered` was answered and goes on when the run lane is free.
+ * to the question it asked (`question_ask`), and `question_answered` was answered and goes on when the run lane is free.
  */
 export { BOT_WORK_WAIT_REASONS, workWaits } from '../activation/workWaiting'
 
@@ -552,6 +572,22 @@ export { BOT_WORK_WAIT_REASONS, workWaits } from '../activation/workWaiting'
 export const BOTS_DB_VERSION = BOTS_MIGRATIONS.at(-1)!.version
 /** How many `bots.db.pre-v<n>` copies are kept beside the database. */
 const KEPT_MIGRATION_COPIES = 2
+
+export type BotChainHoldKind = 'message' | 'wake'
+export type BotChainHoldStatus = 'held' | 'continued' | 'stopped' | 'failed'
+/** A row of `bot_chain_holds`. */
+export interface BotChainHold {
+  holdId: string
+  botId: string
+  kind: BotChainHoldKind
+  payload: unknown
+  status: BotChainHoldStatus
+  createdAt: string
+}
+
+function chainHoldOf(row: Row): BotChainHold {
+  return { holdId: String(row.hold_id), botId: String(row.bot_id), kind: row.kind === 'wake' ? 'wake' : 'message', payload: JSON.parse(String(row.payload_json)), status: String(row.status) as BotChainHoldStatus, createdAt: String(row.created_at) }
+}
 
 /** Why a bot's schedules are paused: the owner's Pause, three failed runs, or a usage limit until `pausedUntil`. */
 export type BotPauseReason = 'owner' | 'failures' | 'usage_limit'
@@ -1239,6 +1275,11 @@ export interface BotSubagentSpec {
   at?: number
   /** What it runs without, in the owner's words, because its entry holds that less tightly than the work's (`subagentHold`). */
   lacks?: string[]
+  /**
+   * The work's Stop calls that reached this turn, by tool call, with the state they answered: a retry of one (under
+   * either name, `subagent_stop` or `thread_stop`) answers the same and never stops a later turn.
+   */
+  stops?: Array<{ call: string; state: string }>
 }
 
 /** A work subagent's turn (`bot_subagent_runs`): its lifecycle and result are the run database's delegation. */
@@ -1753,6 +1794,14 @@ export class BotStore {
   /** A work's subagent turns, oldest first. */
   subagentRuns(activationId: string): BotSubagentRunRow[] {
     return this.all('SELECT * FROM bot_subagent_runs WHERE activation_id = ? ORDER BY reserved_at, rowid', activationId).map(subagentRunOf)
+  }
+
+  /** A Stop call that reached this turn (`BotSubagentSpec.stops`): written once per call. */
+  noteSubagentStop(activationId: string, childRunId: string, call: string, state: string): void {
+    const row = this.subagentRun(activationId, childRunId)
+    if (!row || row.spec.stops?.some((stop) => stop.call === call)) return
+    const spec: BotSubagentSpec = { ...row.spec, stops: [...(row.spec.stops ?? []), { call, state }] }
+    this.run('UPDATE bot_subagent_runs SET spec_json = ? WHERE activation_id = ? AND child_run_id = ?', JSON.stringify(spec), activationId, childRunId)
   }
 
   /** Its turn began (wall-clock milliseconds): only the first start counts. */
@@ -2428,6 +2477,7 @@ export class BotStore {
     this.run('DELETE FROM bot_questions WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_actions WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_jobs WHERE bot_id = ?', botId)
+    this.dropChainHolds(botId)
     this.run('UPDATE bot_registry SET model_json = NULL, error_json = NULL WHERE bot_id = ?', botId)
   }
 
@@ -2759,6 +2809,60 @@ export class BotStore {
     return this.all(`SELECT id, text, at, from_message FROM bot_work_notes WHERE activation_id = ?
       AND (applied_at IS NULL OR (${unconfirmedDelivery('bot_work_notes', 'notes')})) ORDER BY id`, activationId)
       .map(row => ({ id: num(row.id)!, text: row.text as string, at: row.at as string, fromMessage: str(row.from_message) }))
+  }
+
+  /** A message or wake the bot sent past its chain's limit, kept for the owner's answer (`bot_chain_holds`). */
+  holdChainStep(botId: string, kind: BotChainHoldKind, payload: unknown): BotChainHold {
+    const hold: BotChainHold = { holdId: `bhold_${randomUUID()}`, botId, kind, payload, status: 'held', createdAt: this.now() }
+    this.run("INSERT INTO bot_chain_holds(hold_id, bot_id, kind, payload_json, status, created_at) VALUES(?, ?, ?, ?, 'held', ?)", hold.holdId, botId, kind, JSON.stringify(payload), hold.createdAt)
+    return hold
+  }
+
+  /** One held step by id, whatever became of it. */
+  chainHold(holdId: string): BotChainHold | undefined {
+    const row = this.get('SELECT * FROM bot_chain_holds WHERE hold_id = ?', holdId)
+    return row ? chainHoldOf(row) : undefined
+  }
+
+  /** What the bot holds for its owner now, oldest first. */
+  heldChainSteps(botId: string): BotChainHold[] {
+    return this.all("SELECT * FROM bot_chain_holds WHERE bot_id = ? AND status = 'held' ORDER BY created_at, rowid", botId).map(chainHoldOf)
+  }
+
+  /** Moves a held step to its end; false when it had already left `held` (sent, stopped or failed before). */
+  settleChainHold(holdId: string, status: Exclude<BotChainHoldStatus, 'held'>, reason?: string): boolean {
+    return this.run("UPDATE bot_chain_holds SET status = ?, reason = ?, settled_at = ? WHERE hold_id = ? AND status = 'held'", status, reason ?? null, this.now(), holdId) > 0
+  }
+
+  /** Removes everything the bot held for its owner, and its latest Continue (a reset, a delete, the purge). */
+  dropChainHolds(botId: string): void {
+    this.run('DELETE FROM bot_chain_holds WHERE bot_id = ?', botId)
+    this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, 'chain-renewed')
+  }
+
+  /** The owner's Continue gives the bot's chain a new budget from here, as their own message would (`chainBudgetFrom`). */
+  renewChainBudget(botId: string): void {
+    const seq = num(this.get('SELECT MAX(seq) AS seq FROM bot_messages')?.seq) ?? 0
+    this.run('INSERT OR REPLACE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, 'chain-renewed', JSON.stringify({ seq, at: this.now() }))
+  }
+
+  /**
+   * Where the bot's chain limits count from: the owner's newest message, or the owner's latest Continue when that came
+   * later (`seq` orders chat rows; `at` is a time, for the wakes it compares).
+   */
+  chainBudgetFrom(botId: string): { seq: number; at: string } {
+    const owner = { seq: this.ownerLastWroteSeq(botId), at: this.ownerLastWroteAt(botId) }
+    const value = this.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, 'chain-renewed')?.value
+    if (typeof value !== 'string') return owner
+    try {
+      const renewed = JSON.parse(value) as { seq?: unknown; at?: unknown }
+      return {
+        seq: typeof renewed.seq === 'number' && renewed.seq > owner.seq ? renewed.seq : owner.seq,
+        at: typeof renewed.at === 'string' && renewed.at > owner.at ? renewed.at : owner.at
+      }
+    } catch {
+      return owner
+    }
   }
 
   /** When the owner last wrote to a bot (their newest message in its chat), or '' when they never have. */

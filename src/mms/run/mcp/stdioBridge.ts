@@ -7,7 +7,7 @@ type JsonRpcMessage = { jsonrpc?: string; id?: string | number | null; method?: 
  * stdio ↔ Streamable HTTP relay for runtimes that only start stdio MCP servers
  * (`mousse-cli engine mcp-stdio`, SPEC §15.1). Each newline-delimited JSON-RPC message read from
  * `input` is POSTed to the Mousse MCP server with the bearer token; each JSON-RPC response is
- * written to `output` as one line. Requests run concurrently (an `ask_user` call may block for a
+ * written to `output` as one line. Requests run concurrently (an `question_ask` call may block for a
  * long time). Resolves once `input` ends and every relayed request has settled.
  */
 export async function runStdioBridge(options: {

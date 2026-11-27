@@ -1,5 +1,5 @@
 import { claudeToolKey, PERMISSION_KEYS } from '../../../../shared/permissionKeys'
-import { canonicalToolName } from '../../../../shared/toolAliases'
+import { canonicalToolCall, toolVariant } from '../../../../shared/toolAliases'
 import { CLAUDE_MOUSSE_TOOL_PREFIX, READ_ONLY_MOUSSE_TOOLS } from '../../../run/mcp/attachment'
 import type { ChildTurnPolicy } from '../../adapter'
 
@@ -51,11 +51,14 @@ export function claudePermissionKey(toolName: string): string {
  * thread-writing tools on its own (`ToolRegistry`, keyed by the caller's thread), since the callback
  * lets Mousse's tools through, and `delegate_task` limits its subagents to read-only ones.
  */
-export function claudeChildToolDenial(child: ChildTurnPolicy | undefined, toolName: string): string | undefined {
+export function claudeChildToolDenial(child: ChildTurnPolicy | undefined, toolName: string, args: Record<string, unknown> = {}): string | undefined {
   if (!child?.readOnly) return undefined
-  if (toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX))
-    // An old name is its new one (`canonicalToolName`), as the server reads it.
-    return READ_ONLY_MOUSSE_TOOLS.has(canonicalToolName(toolName.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length))) ? undefined : 'This subagent is read-only; this Mousse tool can change threads or the workspace.'
+  if (toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)) {
+    // An old name is its new one with that variant's arguments, as the server reads it; a variant an old tool still runs
+    // (`toolVariant`: `thread_stop` with subagent is `task_cancel`) is allowed as that tool was.
+    const call = canonicalToolCall(toolName.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length), args)
+    return READ_ONLY_MOUSSE_TOOLS.has(toolVariant(call.name, call.args, 'thread') ?? call.name) ? undefined : 'This subagent is read-only; this Mousse tool can change threads or the workspace.'
+  }
   if (CLAUDE_READ_ONLY_BUILTIN_TOOLS.includes(toolName)) return undefined
   return toolName.startsWith('mcp__')
     ? 'This subagent is read-only; tools from other MCP servers are not available to it.'

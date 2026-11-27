@@ -90,7 +90,7 @@ describe('compileBotThread', () => {
     if (!compiled.ok) throw new Error(compiled.error.message)
     expect(compiled.policy).toEqual({
       // Granted skills bring the skill tools.
-      tools: { allow: ['edit', 'find', 'grep', 'skill_list', 'skill_load', 'ls', 'read', 'running_list', 'web_search', 'write'] },
+      tools: { allow: ['edit', 'find', 'grep', 'ls', 'read', 'running_list', 'skill_list', 'skill_load', 'web_search', 'write'] },
       approvals: 'grants',
       approve: 'host',
       budget: { maxWallMs: 600_000, maxTurns: 40 },
@@ -120,7 +120,7 @@ describe('compileBotThread', () => {
   })
 
   it('refuses delegation and thread tools, even in a stored grant', () => {
-    for (const tool of ['delegate_task', 'thread_fork', 'queue_enqueue', 'create_subagent', 'ask_user'])
+    for (const tool of ['delegate_task', 'thread_fork', 'queue_enqueue', 'create_subagent', 'question_ask'])
       expect(compile({ grant: manifest({ appTools: [tool] }) }), tool).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', reason: expect.stringContaining(tool) } })
   })
 
@@ -165,8 +165,8 @@ describe('compileBotThread', () => {
     const revision = manifest({ tools: ['read'], appTools: [], budget: { maxTurns: 10 } })
     const compiled = compile({ grant, revision })
     if (!compiled.ok) throw new Error(compiled.error.message)
-    expect(compiled.policy.tools).toEqual({ allow: ['skill_list', 'skill_load', 'read', 'running_list'] })
-    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: ['skill_list', 'skill_load', 'running_list'] })
+    expect(compiled.policy.tools).toEqual({ allow: ['read', 'running_list', 'skill_list', 'skill_load'] })
+    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: ['running_list', 'skill_list', 'skill_load'] })
     // A revision can never name more than the grant: what the grant lacks is dropped.
     const wider = compile({ grant: manifest({ tools: ['read'], appTools: [] }), revision: manifest({ tools: ['read', 'edit'] }) })
     if (!wider.ok) throw new Error(wider.error.message)
@@ -183,11 +183,11 @@ describe('compileBotThread', () => {
 })
 
 describe('host approvals in checkPolicy', () => {
-  const exact = { toolControl: 'exact', budgets: 'hard', spendLimits: 'reserved', planMode: false } as unknown as HarnessCaps
+  const exact = { toolControl: 'exact', budgets: 'hard', spendLimits: 'reserved' } as unknown as HarnessCaps
   const policy = (): RunPolicy => {
     const compiled = compile()
     if (!compiled.ok) throw new Error('compile')
-    return { mode: 'default', origin: 'bot', ...compiled.policy }
+    return { origin: 'bot', ...compiled.policy }
   }
 
   it('holds only where the runtime holds every call to the bot authority', () => {
@@ -222,7 +222,7 @@ describe('host approvals in checkPolicy', () => {
   it('a shell grant holds wherever a bot holds: Pi exactly, Claude Code and Codex through their approvals', () => {
     const compiled = compile({ grant: manifest({ tools: ['read', 'shell'] }) })
     if (!compiled.ok) throw new Error(compiled.error.message)
-    const shell: RunPolicy = { mode: 'default', origin: 'bot', ...compiled.policy }
+    const shell: RunPolicy = { origin: 'bot', ...compiled.policy }
     expect(checkPolicy(exact, shell, 'pi:x', undefined, { hostApprovals: true })).toEqual({ ok: true })
     const approvalOnly = { ...exact, toolControl: 'approval_only' } as HarnessCaps
     for (const instance of ['claude', 'codex']) expect(checkPolicy(approvalOnly, { ...shell, permissionMode: 'ask' }, instance, undefined, { hostApprovals: true, botApprovals: true }), instance).toEqual({ ok: true })
@@ -241,7 +241,7 @@ describe('host approvals in checkPolicy', () => {
     const refused = checkPolicy(exact, policy(), 'pi:x', undefined, { hostApprovals: true, botRuntimeGaps: gaps })
     expect(refused).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['containment'], reason: botRuntimeGapReason(gaps) } })
     // Policies without a bot authority are untouched.
-    expect(checkPolicy(exact, { mode: 'default', approvals: 'grants' })).toEqual({ ok: true })
+    expect(checkPolicy(exact, { approvals: 'grants' })).toEqual({ ok: true })
   })
 })
 

@@ -39,6 +39,7 @@ import { parseCursor } from '../../shared/pageCursor'
 import { isThreadStarted } from '../../shared/threadTitle'
 import { withHeldModelPicks } from '../lib/modelPicks'
 import { tabAgreement, type SidebarTab, type ThreadListTab, type WorkspaceMode } from './sidebarTabAgreement'
+import { threadPanels, type SavedThreadPanel } from './threadPanels'
 
 /** What the command palette leads with when it opens. */
 export type PaletteMode = 'all' | 'messages'
@@ -423,6 +424,8 @@ interface AppState {
   setSidebarMode: (sidebarMode: WorkspaceMode) => void
   threadsSidebarOpen: boolean
   mainAreaOpen: boolean
+  /** Each thread's side panel (open, and its tab in front), saved as the thread is left (`threadPanels`). */
+  panelByThread: Record<string, SavedThreadPanel>
   /** Thread side card preference. On at every launch; deliberately kept out of the per-profile workspace. */
   sideCardOn: boolean
   setSideCardOn: (sideCardOn: boolean) => void
@@ -461,9 +464,10 @@ interface AppState {
   closeSurfaceKind: (kind: MainView) => void
   projectTerminalTabs: ProjectTerminalTab[]
   activeProjectTerminalTabByThread: Record<string, string>
+  /** Every thread's Documents tabs; a thread's panel shows only its own (`documentTabsForThread`). Not persisted. */
   documentTabs: DocumentTab[]
-  activeDocumentTabId: string | null
-  documentsTabVisible: boolean
+  /** The Documents tab last selected in each thread (`'__standalone__'` without one). */
+  activeDocumentTabByThread: Record<string, string>
   chatMode: ChatMode
   browserTabs: BrowserTabState[]
   browserActiveTabByThread: Record<string, string>
@@ -617,7 +621,8 @@ interface AppState {
   /** Shows a file a thread's agent wrote as a diff in the Documents tab, reusing its tab when it is already open. */
   openTurnFileDiff: (threadId: string, path: string, title: string) => string
   closeDocumentTab: (tabId: string) => void
-  setActiveDocumentTab: (tabId: string | null) => void
+  /** Selects a Documents tab in the active thread. */
+  setActiveDocumentTab: (tabId: string) => void
   setChatMode: (mode: ChatMode) => void
   activateProfile: (profileId: string) => void
   addBrowserTab: (ownerThreadId: string | null) => string
@@ -772,10 +777,32 @@ const workspaceStorage = createJSONStorage(() =>
       }
 )
 
+const STANDALONE_KEY = '__standalone__'
+
+/** The thread a Documents tab belongs to: the thread of its applet or changed file, or none for plain Markdown. */
+export function documentTabThread(tab: DocumentTab): string | null {
+  return tab.applet?.threadId ?? tab.turnFile?.threadId ?? null
+}
+
+/** The Documents tabs a thread's panel shows: its own, and those of no thread. */
+export function documentTabsForThread(tabs: DocumentTab[], threadId: string | null): DocumentTab[] {
+  return tabs.filter((tab) => {
+    const owner = documentTabThread(tab)
+    return owner === null || owner === threadId
+  })
+}
+
+/** The Documents tab a thread's panel shows in front: the one it last selected, else its first. */
+export function shownDocumentTab(state: Pick<AppState, 'documentTabs' | 'activeDocumentTabByThread' | 'activeThreadId'>): DocumentTab | undefined {
+  const tabs = documentTabsForThread(state.documentTabs, state.activeThreadId)
+  const selected = state.activeDocumentTabByThread[state.activeThreadId ?? STANDALONE_KEY]
+  return tabs.find((tab) => tab.id === selected) ?? tabs[0]
+}
+
 const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
-  'sidebarMode', 'mainAreaWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
+  'sidebarMode', 'mainAreaWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'panelByThread', 'chatMode',
   'openedSurfaceKinds', 'sideCardCollapsed', 'chatsSidebarCollapsed',
   'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView', 'lastThreadListView', 'threadFeedOrder',
   'reviewIgnoreWhitespace', 'queueEditDrafts', 'lastNewThreadProjectId', 'newProjectParent'
@@ -884,6 +911,7 @@ function personalWorkspaceOf(profileId: string) {
     threadsSidebarWidth: DEFAULT_THREADS_SIDEBAR_WIDTH,
     threadsSidebarOpen: true,
     mainAreaOpen: false,
+    panelByThread: {} as Record<string, SavedThreadPanel>,
     sideCardCollapsed: {} as Record<string, boolean>,
     chatsSidebarCollapsed: {} as Record<string, boolean>,
     chatMode: DEFAULT_CHAT_MODE
@@ -895,6 +923,7 @@ function personalWorkspaceOf(profileId: string) {
       if (!Array.isArray(next.threadFeedOrder)) next.threadFeedOrder = []
       if (typeof next.lastNewThreadProjectId !== 'string') next.lastNewThreadProjectId = null
       if (typeof next.newProjectParent !== 'string') next.newProjectParent = null
+      if (!next.panelByThread || typeof next.panelByThread !== 'object' || Array.isArray(next.panelByThread)) next.panelByThread = {}
       next.queueEditDrafts = queueEditDraftsFromStorage(next.queueEditDrafts)
     } catch { /* malformed profile-local state is discarded */ }
   }
@@ -907,7 +936,7 @@ function personalWorkspaceOf(profileId: string) {
  */
 export const browserTabsOpenedThisSession = new Set<string>()
 
-export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) => ({
+export const useAppStore = create<AppState>()(persist(tabAgreement(threadPanels((set, get) => ({
   profileId: 'default',
   profileReady: false,
   workspaceReady: false,
@@ -1028,6 +1057,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   setNewProjectParent: (newProjectParent) => set({ newProjectParent }),
   threadsSidebarOpen: true,
   mainAreaOpen: false,
+  panelByThread: {},
   sideCardOn: true,
   sideCardFits: null,
   sideCardOverlayOpen: false,
@@ -1090,8 +1120,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   projectTerminalTabs: [],
   activeProjectTerminalTabByThread: {},
   documentTabs: [],
-  activeDocumentTabId: null,
-  documentsTabVisible: false,
+  activeDocumentTabByThread: {},
   chatMode: DEFAULT_CHAT_MODE,
   browserTabs: [],
   browserActiveTabByThread: {},
@@ -1450,8 +1479,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
     const id = crypto.randomUUID()
     set((s) => ({
       documentTabs: [...s.documentTabs, { id, title, markdown }],
-      activeDocumentTabId: id,
-      documentsTabVisible: true,
+      activeDocumentTabByThread: { ...s.activeDocumentTabByThread, [s.activeThreadId ?? STANDALONE_KEY]: id },
       mainView: 'documents'
     }))
     return id
@@ -1467,8 +1495,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       documentTabs: open
         ? s.documentTabs
         : [...s.documentTabs, { id, title: reference.title, markdown: '', applet: { threadId, profileId: s.profileId, reference } }],
-      activeDocumentTabId: id,
-      documentsTabVisible: true,
+      activeDocumentTabByThread: { ...s.activeDocumentTabByThread, [threadId]: id },
       mainView: 'documents',
       mainAreaOpen: true
     }))
@@ -1483,8 +1510,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       documentTabs: open
         ? s.documentTabs
         : [...s.documentTabs, { id, title, markdown: '', turnFile: { threadId, profileId: s.profileId, path } }],
-      activeDocumentTabId: id,
-      documentsTabVisible: true,
+      activeDocumentTabByThread: { ...s.activeDocumentTabByThread, [threadId]: id },
       mainView: 'documents',
       mainAreaOpen: true
     }))
@@ -1492,23 +1518,31 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   },
   closeDocumentTab: (tabId) =>
     set((s) => {
-      const index = s.documentTabs.findIndex((tab) => tab.id === tabId)
-      if (index === -1) return s
+      if (!s.documentTabs.some((tab) => tab.id === tabId)) return s
+      // The next tab comes from the same thread's tabs, as the panel shows them.
+      const shown = documentTabsForThread(s.documentTabs, s.activeThreadId)
+      const index = shown.findIndex((tab) => tab.id === tabId)
       const documentTabs = s.documentTabs.filter((tab) => tab.id !== tabId)
-      let activeDocumentTabId = s.activeDocumentTabId
-      if (s.activeDocumentTabId === tabId) {
-        activeDocumentTabId = documentTabs[Math.min(index, documentTabs.length - 1)]?.id ?? null
+      const remaining = shown.filter((tab) => tab.id !== tabId)
+      const key = s.activeThreadId ?? STANDALONE_KEY
+      const activeDocumentTabByThread = Object.fromEntries(
+        Object.entries(s.activeDocumentTabByThread).filter(([, id]) => id !== tabId)
+      )
+      if (s.activeDocumentTabByThread[key] === tabId && index !== -1) {
+        const next = remaining[Math.min(index, remaining.length - 1)]
+        if (next) activeDocumentTabByThread[key] = next.id
       }
       return {
         documentTabs,
-        activeDocumentTabId,
-        documentsTabVisible: documentTabs.length > 0,
-        mainView: documentTabs.length === 0 && s.mainView === 'documents'
+        activeDocumentTabByThread,
+        mainView: remaining.length === 0 && s.mainView === 'documents'
           ? s.openedSurfaceKinds[0] ?? DEFAULT_MAIN_VIEW
           : s.mainView
       }
     }),
-  setActiveDocumentTab: (activeDocumentTabId) => set({ activeDocumentTabId }),
+  setActiveDocumentTab: (tabId) => set((s) => ({
+    activeDocumentTabByThread: { ...s.activeDocumentTabByThread, [s.activeThreadId ?? STANDALONE_KEY]: tabId }
+  })),
   setChatMode: (chatMode) => set({ chatMode }),
   activateProfile: (profileId) => set((state) => {
     if (!profileId) return state
@@ -1567,8 +1601,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       turnStates: {},
       stopRequests: {},
       documentTabs: [],
-      activeDocumentTabId: null,
-      documentsTabVisible: false,
+      activeDocumentTabByThread: {},
       loading: false
     }
   }),
@@ -1744,7 +1777,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       delete composerReferences[key]
       return { composerReferences }
     })
-})), {
+}))), {
   name: 'mousse-workspace-state',
   version: 1,
   storage: workspaceStorage,

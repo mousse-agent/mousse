@@ -98,7 +98,7 @@ function recordingPort(
 function browserSnapshot() {
   const snapshot = resolvedDefinition()
   snapshot.settings.browser.mode = 'structured'
-  grantTools(snapshot, ['browser_open', 'browser_observe', 'browser_act', 'ask_user', 'read'])
+  grantTools(snapshot, ['browser_open', 'browser_observe', 'browser_act', 'question_ask', 'read'])
   return snapshot
 }
 
@@ -158,7 +158,8 @@ describe('definition browser runtime binding', () => {
       } } }) },
       threads: { getThread: (id: string) => id === 'thread-main' ? { id, projectId: undefined } : undefined },
       projects: { getProject: () => undefined },
-      modeRegistry: { getModeSync: () => undefined },
+      // A custom mode that denies edits, as a reviewer's would.
+      modeRegistry: { getModeSync: (mode: string) => (mode === 'reviewer' ? { permission: { edit: 'deny' } } : undefined) },
       platform: { browser: { selectedTarget: () => selected ? { backend: 'electron-attached', uiTabId: 'tab-main' } : undefined } }
     } as unknown as MmsProfileServices
 
@@ -172,10 +173,10 @@ describe('definition browser runtime binding', () => {
     expect(Object.isFrozen(gui)).toBe(true)
     expect(Object.isFrozen(gui?.execution)).toBe(true)
 
-    const plan = mainBrowserBinding(services, {
-      threadId: 'thread-main', turnId: 'turn-plan', source: 'gui', mode: 'plan'
+    const reviewer = mainBrowserBinding(services, {
+      threadId: 'thread-main', turnId: 'turn-reviewer', source: 'gui', mode: 'reviewer'
     })
-    expect(plan?.policy.allowedTools).toEqual(['browser_observe'])
+    expect(reviewer?.policy.allowedTools).toEqual(['browser_observe'])
     selected = false
     expect(mainBrowserBinding(services, {
       threadId: 'thread-main', turnId: 'turn-missing', source: 'gui', mode: 'agent'
@@ -258,7 +259,7 @@ describe('definition browser runtime binding', () => {
       'browser_open',
       'browser_observe',
       'browser_act',
-      'ask_user'
+      'question_ask'
     ]))
     const openResult = JSON.stringify(captured[1]!.messages)
     expect(openResult).toContain('obs-1')
@@ -289,7 +290,7 @@ describe('definition browser runtime binding', () => {
   it('does not advertise or dispatch browser tools when settings keep browser disabled', async () => {
     const snapshot = resolvedDefinition()
     snapshot.settings.browser.mode = 'disabled'
-    grantTools(snapshot, ['browser_open', 'ask_user', 'read'])
+    grantTools(snapshot, ['browser_open', 'question_ask', 'read'])
     const recorded = recordingPort([{ observation: observation() }])
     const { captured, pending } = runDefinition(snapshot, [
       providerResponse([{ type: 'text', text: 'no browser' }], 'stop')
@@ -305,7 +306,7 @@ describe('definition browser runtime binding', () => {
   it('advertises only the browser tools granted by the admitted definition', async () => {
     const snapshot = resolvedDefinition()
     snapshot.settings.browser.mode = 'structured'
-    grantTools(snapshot, ['browser_open', 'ask_user'])
+    grantTools(snapshot, ['browser_open', 'question_ask'])
     const { result, captured } = await runBrowserNative({
       snapshot,
       outputs: [providerResponse([{ type: 'text', text: 'ready' }], 'stop')]

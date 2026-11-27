@@ -96,7 +96,7 @@ describe('browser tools over MCP', () => {
 
     server = new MousseMcpServer({ credentials: new McpCredentials(fx!.store), registry })
     await server.start()
-    const bearer = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!
+    const bearer = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, binding: 'drained_turn', generation: 'g' })!
     const result = await callTool(bearer, 'browser_screenshot', { sessionId: 'session-1' })
     expect(result.error).toBeUndefined()
     expect(result.isError).toBeUndefined()

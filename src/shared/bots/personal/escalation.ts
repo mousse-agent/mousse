@@ -1,11 +1,11 @@
 import { isNeutralTool } from '../../harness/tools'
 import { stableStringify } from '../../workflows/canonical'
 import type { BotManifest } from './definition'
-import { BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from './manifest'
+import { BOT_AUTOMATION_ENABLE_TOOL, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from './manifest'
 
 /**
  * Walls and escalations of personal bots (PR 6 §5). A wall ends the dispatch and asks the owner:
- * the bot called `escalate`, a gate refused a call, or a limit ran out. Types and pure helpers,
+ * the bot called `permission_ask`, a gate refused a call, or a limit ran out. Types and pure helpers,
  * browser-safe.
  */
 
@@ -61,7 +61,7 @@ export interface BotMcpAsk {
  */
 export type BotSpecialAsk = { ask: 'export_memory' } | { ask: 'let_alone'; scheduleId: string; serverId: string; tool: string }
 
-/** What the bot may ask its owner for with `escalate`: a permission, or a special ask. */
+/** What the bot may ask its owner for with `permission_ask`: a permission, or a special ask. */
 export type BotAskRequest = BotPermissionRequest | BotSpecialAsk
 
 export function isSpecialAsk(request: BotAskRequest): request is BotSpecialAsk {
@@ -93,7 +93,7 @@ export type BotAskMode = 'wall' | 'ask'
 /** After Not now on a run ask, no new ask for the same permission for this long. */
 export const BOT_ASK_DENY_COOLDOWN_MS = 24 * 60 * 60_000
 
-/** How the wall was reached: the bot asked (`escalate`), a gate refused a call, or a limit ran out. */
+/** How the wall was reached: the bot asked (`permission_ask`), a gate refused a call, or a limit ran out. */
 export type BotWallKind = 'escalate' | 'gate' | 'budget'
 
 /** `withdrawn`: the v4 migration closed it (Bot Phase 1 §5.2), or the bot's grant moved past it. */
@@ -116,7 +116,7 @@ export interface BotEscalationSummary {
   permission: BotAskRequest
   /** The permission in plain words ("Read files in ~/proj/site"). */
   permissionText: string
-  /** Why the bot needs it (its own words for `escalate`; Mousse's for a gate or a limit). */
+  /** Why the bot needs it (its own words for `permission_ask`; Mousse's for a gate or a limit). */
   reason: string
   status: BotEscalationStatus
   createdAt: string
@@ -164,6 +164,7 @@ export function permissionText(permission: BotPermissionRequest): string {
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_BROWSER_PERMISSION) return 'Use the browser'
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_COMPUTER_PERMISSION) return 'Use the computer'
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_THREADS_PERMISSION) return 'Use your threads'
+  if ('tool' in permission && permission.tool === BOT_AUTOMATION_ENABLE_TOOL) return 'Create and turn on automations'
   if ('tool' in permission) return `Use the tool \`${permission.tool}\``
   if ('path' in permission) return 'Use files on this computer'
   if ('skill' in permission) return `Use the skill *${permission.skill}*`
@@ -218,7 +219,7 @@ export function permissionProblem(value: unknown): string | undefined {
 export const WHAT_TO_ASK_TEXT = "Ask for a tool, a limit, or to export your memory: your owner's MCP servers and skills need no asking."
 export const WHAT_TO_ASK_ALONE_TEXT = " To let one automation act without asking, use permission: {ask:'let_alone', scheduleId, serverId, tool}."
 
-/** Why a value is not something `escalate` may ask for, or undefined when it is one. */
+/** Why a value is not something `permission_ask` may ask for, or undefined when it is one. */
 export function askProblem(value: unknown): string | undefined {
   if (value && typeof value === 'object' && 'ask' in value && value.ask === 'let_alone') {
     const request = value as Record<string, unknown>

@@ -1,25 +1,30 @@
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
 import type { StoreApi, UseBoundStore } from 'zustand'
-import { ArrowLeft, ArrowRight, ArrowShrink, Bot, Maximize, RefreshCw, User, X } from '../../lib/icons'
+import { ArrowLeft, ArrowRight, ArrowShrink, Bot, Maximize, Minus, MoreVertical, Plus, RefreshCw, User, X } from '../../lib/icons'
 import { WATCHED_BROWSER_PANE, watchedBrowserPageSize, type WatchedBrowserDialog, type WatchedBrowserInput, type WatchedBrowserPageSize, type WatchedBrowserView } from '../../../shared/browser/watched'
 import { browserProblemForPerson } from '../../../shared/browser/navigation'
 import { BROWSER_WINDOW_LINE } from '../../../shared/browser/window'
+import { BROWSER_MODIFIERS, MAX_BROWSER_PASTE_CHARS } from '../../../shared/browser/types'
+import { FloatingPortal, FLOATING_LAYER_Z_INDEX, useFloatingPosition } from '../../lib/floatingLayer'
+import { viewerPlatform } from '../../stores/browserInputChannel'
 import type { WatchedBrowserNeed, WatchedBrowserState, WatchedBrowserStream } from '../../stores/watchedBrowserStore'
 import type { ChannelHealth } from '../../stores/browserInputChannel'
 import { useAppStore } from '../../stores/appStore'
 import { localDeviceName } from '../sideCard/deviceMenu'
 import { WatchedBrowserFrame } from './WatchedBrowserFrame'
 import { useBrowserInput } from './useBrowserInput'
+import { pageAtZoom, useWatchedBrowserZoom, zoomRange } from './watchedBrowserZoom'
 import './watchedBrowser.css'
 
 /**
  * A browser without a window, large, where the person watches it and can take it over: a bot's split
  * view beside its chat, or a thread agent's in that thread's Browser panel. It shows the tab its user
  * follows, as pictures the service pushes while it is on screen, with the agent cursor over them. Its bar is
- * the thread browser's: Back, Forward, Reload, the address, and who has it (the agent's or the person's
- * icon), which is also the switch: from the agent's, it takes the browser over for this window (the agent's
- * actions wait), and everything the person does then reaches the page in order, each input answered; from
- * the person's, it gives it back. Another window that holds it is named, and can be taken over from here.
+ * the thread browser's: Back, Forward, Reload, the address, who has it (the agent's or the person's icon), and its
+ * menu (zoom). Who has it is also the switch: from the agent's, it takes the browser over for this window (the
+ * agent's actions wait), and everything the person does then reaches the page in order, each input answered; from
+ * the person's, it gives it back. As in the thread browser, using it takes it over too: a click on the page, Back,
+ * Forward, Reload or an address. Another window that holds it is named, and can be taken over from here.
  */
 
 /** How long, in a few characters: "8 s", "3 min", "2 h". */
@@ -129,6 +134,15 @@ export function useStagePageSize(element: RefObject<HTMLElement | null>): Watche
   return page
 }
 
+/** Tells the app the page has the keyboard (its zoom keys are the page's), or no longer. An app without the call keeps its own. */
+function pageKeyboard(on: boolean): void {
+  try {
+    void window.mousse?.zoom?.pageKeyboard(on)?.catch(() => undefined)
+  } catch {
+    // An older app's bridge: the app keeps its zoom keys.
+  }
+}
+
 /** How long a refusal of the person's input stays said. */
 const NOTE_MS = 4_000
 
@@ -203,6 +217,59 @@ export interface WatchedBrowserFullScreen {
 }
 
 /**
+ * The view's menu, in the thread browser's look: under its More button (`bar`), or at the pointer for a right click on
+ * the page. It takes the keyboard when it opens (the page's keys stop reaching the page): the arrow keys, Home and End
+ * move between its items, Tab or Escape closes it and gives the keyboard back to where it came from. A press anywhere
+ * else closes it too.
+ */
+function BrowserMenu({ at, anchor, onClose, children }: { at: { x: number; y: number } | 'bar'; anchor: RefObject<HTMLButtonElement | null>; onClose(refocus: boolean): void; children: ReactNode }) {
+  const panel = useRef<HTMLDivElement>(null)
+  const below = useFloatingPosition({ open: at === 'bar', anchorRef: anchor, contentRef: panel, placement: 'below-end', gap: 5 })
+  const items = () => [...(panel.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])]
+  useEffect(() => { items()[0]?.focus({ preventScroll: true }) }, [])
+  const move = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Tab') {
+      event.preventDefault()
+      onClose(true)
+      return
+    }
+    const list = items()
+    if (!list.length || !['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+    event.preventDefault()
+    const index = list.indexOf(document.activeElement as HTMLButtonElement)
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? list.length - 1
+      : event.key === 'ArrowDown' || event.key === 'ArrowRight' ? (index + 1) % list.length : (index - 1 + list.length) % list.length
+    list[next]?.focus({ preventScroll: true })
+  }
+  useEffect(() => {
+    const away = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (panel.current?.contains(target) || (at === 'bar' && anchor.current?.contains(target))) return
+      onClose(false)
+    }
+    const keys = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      onClose(true)
+    }
+    document.addEventListener('pointerdown', away, true)
+    document.addEventListener('keydown', keys, true)
+    return () => { document.removeEventListener('pointerdown', away, true); document.removeEventListener('keydown', keys, true) }
+  }, [at, anchor, onClose])
+  // At the pointer, kept inside the window: the menu is 230 wide and about 200 tall.
+  const style = at === 'bar' ? below : {
+    position: 'fixed' as const, zIndex: FLOATING_LAYER_Z_INDEX,
+    left: Math.max(8, Math.min(at.x + 2, window.innerWidth - 238)), top: Math.max(8, Math.min(at.y + 2, window.innerHeight - 208))
+  }
+  return <FloatingPortal>
+    <div ref={panel} className="browser-menu browser-menu-floating watched-browser-menu" role="menu" aria-label={at === 'bar' ? 'Browser menu' : 'Page menu'} style={style} onKeyDown={move}>
+      {children}
+    </div>
+  </FloatingPortal>
+}
+
+/**
  * Who has the browser, beside the address (`BrowserAgentStatus`'s look): the agent's icon, or the person's once
  * this window holds it. Pressed, it takes the browser over, or gives it back.
  */
@@ -216,7 +283,7 @@ function ControlToggle({ user, held, elsewhere, busy, take, giveBack }: { user: 
   </button>
 }
 
-export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { percent?: number } }>({ kit, browserKey, label, user, view, line, lineDetail, closed, open, fullScreen, className }: {
+export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { percent?: number } }>({ kit, browserKey, label, user, view: given, line, lineDetail, closed, open, fullScreen, className }: {
   kit: WatchedBrowserKit<V>
   /** The browser's key in its store (a bot's id, a thread's id). */
   browserKey: string
@@ -237,6 +304,8 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   fullScreen?: WatchedBrowserFullScreen
   className?: string
 }) {
+  // The picture and cursor as they are now: whoever passed `view` may keep it still between pictures.
+  const view = (kit.useStore((state) => state.views[browserKey]) as V | undefined) ?? given
   const busy = kit.useStore((state) => state.busy)
   const error = kit.useStore((state) => state.error)
   const errorDetail = kit.useStore((state) => state.errorDetail)
@@ -256,12 +325,25 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   const frame = useRef<HTMLDivElement>(null)
   const stage = useRef<HTMLDivElement>(null)
   const keys = useRef<HTMLTextAreaElement>(null)
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | 'bar' | null>(null)
+  const menuButton = useRef<HTMLButtonElement>(null)
   useEffect(() => { if (!editing.current) setAddress(url) }, [url])
+  // Taken over here: the page has the keyboard at once, so typing, copy and paste work without a click first.
+  useEffect(() => { if (drives) keys.current?.focus({ preventScroll: true }) }, [drives])
+  // The page's field goes with the hold (taken in another window, given back) or the view: a field removed while it had
+  // the keyboard may never hear its blur, so the app gets its zoom keys back here too.
+  useEffect(() => {
+    if (!drives) return
+    return () => pageKeyboard(false)
+  }, [drives])
   // Watched while on screen, faster while the person holds the browser. The page is laid out at the
   // view's own size, so its picture fills it; the picture is that size at the screen's pixel ratio.
   // Watched once it is measured; where it cannot be, the page keeps its size and the picture is 960 px wide.
-  const page = useStagePageSize(stage)
-  const width = page ? Math.min(WATCHED_BROWSER_PANE.maxWidth, Math.round(page.width * page.scale)) : UNMEASURED_WIDTH
+  // At the view's zoom: the page is laid out larger (zoomed out) or smaller, and the picture stays the stage's size.
+  const measured = useStagePageSize(stage)
+  const { zoom, change: changeZoom, canIn, canOut } = useWatchedBrowserZoom(zoomRange(measured))
+  const page = measured ? pageAtZoom(measured, zoom) : measured
+  const width = measured ? Math.min(WATCHED_BROWSER_PANE.maxWidth, Math.round(measured.width * measured.scale)) : UNMEASURED_WIDTH
   const fps = owner ? WATCHED_BROWSER_PANE.heldFps : WATCHED_BROWSER_PANE.fps
   kit.useWatch(browserKey, stage, view.open && !windowed && page !== undefined ? { width, fps, ...(page ? { page } : {}) } : undefined)
   const stream = kit.useStream(browserKey)
@@ -272,12 +354,58 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   const input = useBrowserInput({
     owner: drives, view, frame, keys,
     send: (entry, picture) => store().send(browserKey, entry, picture),
-    note: (text) => kit.useStore.setState((state) => ({ inputNote: { ...state.inputNote, [browserKey]: { text, at: Date.now() } } }))
+    note: (text) => say(text),
+    zoom: changeZoom,
+    menu: (at) => setMenuAt(at)
   })
+  function say(text: string) {
+    kit.useStore.setState((state) => ({ inputNote: { ...state.inputNote, [browserKey]: { text, at: Date.now() } } }))
+  }
   // The browser runs on this computer: it is named as the app names this computer everywhere.
   const computer = useAppStore((state) => localDeviceName(state.appInfo?.deviceName))
   const said = drives ? inputLine(health, note, computer, now) : undefined
   const send = (entry: WatchedBrowserInput) => { input.send(entry) }
+  // The agent has it (not another window): using the page takes it over first, as in the thread browser.
+  const takes = view.open && !windowed && !owner && !elsewhere
+  const usable = drives || takes
+  /** Takes the browser over when this window does not hold it yet; then `then`, once it does. */
+  const using = async (then: () => void) => {
+    if (!drives) {
+      if (!takes) return
+      await store().takeOver(browserKey)
+      if (!store().holds[browserKey]) return
+    }
+    then()
+  }
+  const act = (entry: WatchedBrowserInput) => void using(() => send(entry))
+  /**
+   * A press on the page while the agent has it: taken over, and the press lands where it was made. Still held once the
+   * browser is this window's, it stays down (a drag selects text); let go of before, it is a click; cancelled before
+   * (the system took the pointer), nothing reaches the page.
+   */
+  const takeOnPress = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (busy || event.button !== 0 || event.pointerType === 'touch' || (event.target instanceof Element && event.target.closest('.watched-browser-dialog, .watched-browser-closed'))) return
+    event.preventDefault()
+    frame.current?.setPointerCapture?.(event.pointerId)
+    const press = { clientX: event.clientX, clientY: event.clientY, button: event.button, altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey, shiftKey: event.shiftKey }
+    // Read now, on the picture the person saw: a newer picture that arrives before the browser is theirs places nothing.
+    const pinned = input.pin(press)
+    if (!pinned) return
+    const pointer = event.pointerId
+    let ended: 'up' | 'cancelled' | undefined
+    const release = (next: PointerEvent) => { if (next.pointerId === pointer) ended ??= 'up' }
+    const cancel = (next: PointerEvent) => { if (next.pointerId === pointer) ended ??= 'cancelled' }
+    window.addEventListener('pointerup', release, true)
+    window.addEventListener('pointercancel', cancel, true)
+    void using(() => {
+      if (ended === 'cancelled') return
+      if (ended === 'up') input.clickAt(press, 'left', pinned)
+      else input.pressAt(press, pinned)
+    }).finally(() => {
+      window.removeEventListener('pointerup', release, true)
+      window.removeEventListener('pointercancel', cancel, true)
+    })
+  }
   const holding: WatchedBrowserHolding = owner ? (windowed ? 'window' : 'this-window') : elsewhere ? 'another-window' : view.open ? 'agent' : 'closed'
 
   // The line under the picture: an error, the page's problem, a quiet status, else the view's own line, if any.
@@ -290,32 +418,72 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
     const text = address.trim()
     if (!text) return
     const target = /^https?:\/\//i.test(text) ? text : `https://${text}`
-    if (drives) send({ kind: 'navigate', url: target })
+    if (usable) act({ kind: 'navigate', url: target })
     else if (!view.open) open?.(target)
+  }
+
+  // The page's edit menu: what a right click opens, as a browser's own menu would.
+  const mac = viewerPlatform() === 'mac'
+  const primary = mac ? BROWSER_MODIFIERS.meta : BROWSER_MODIFIERS.ctrl
+  const shortcut = (letter: string) => `${mac ? '⌘' : 'Ctrl+'}${letter}`
+  // Closed, the keyboard goes back where the menu came from: the More button, or the page.
+  const menuFrom = useRef<'bar' | 'page'>('page')
+  menuFrom.current = menuAt === 'bar' ? 'bar' : menuAt ? 'page' : menuFrom.current
+  const closeMenu = useCallback((refocus: boolean) => {
+    setMenuAt(null)
+    if (refocus) (menuFrom.current === 'bar' ? menuButton.current : keys.current)?.focus({ preventScroll: true })
+  }, [])
+  const paste = async () => {
+    // Bound now: the clipboard answers later, and by then the view may show another browser or the hold may have ended.
+    const key = browserKey
+    const holdId = store().holds[key]?.id
+    const picture = view.frame?.id
+    if (!holdId) return
+    let text = ''
+    try {
+      text = await navigator.clipboard.readText()
+    } catch {
+      say(`Press ${shortcut('V')} to paste`)
+      return
+    }
+    if (!text) return
+    if (store().holds[key]?.id !== holdId) return
+    if (text.length > MAX_BROWSER_PASTE_CHARS) say(`Too long to paste (over ${MAX_BROWSER_PASTE_CHARS.toLocaleString()} characters)`)
+    else store().send(key, { kind: 'paste', text }, picture)
+  }
+  const selectAll = () => {
+    send({ kind: 'keys', type: 'down', key: 'a', code: 'KeyA', keyCode: 65, modifiers: primary })
+    send({ kind: 'keys', type: 'up', key: 'a', code: 'KeyA', keyCode: 65, modifiers: primary })
   }
 
   return <aside className={`watched-browser-pane${className ? ` ${className}` : ''}`} aria-label={label}>
     <header className="browser-toolbar watched-browser-bar">
-      <button type="button" className="browser-toolbar-btn" aria-label="Back" title="Back" disabled={!drives || busy} onClick={() => send({ kind: 'back' })}><ArrowLeft size={16} /></button>
-      <button type="button" className="browser-toolbar-btn" aria-label="Forward" title="Forward" disabled={!drives || busy} onClick={() => send({ kind: 'forward' })}><ArrowRight size={16} /></button>
-      <button type="button" className="browser-toolbar-btn" aria-label="Reload" title="Reload" disabled={!drives || busy} onClick={() => send({ kind: 'reload' })}><RefreshCw size={16} /></button>
+      <button type="button" className="browser-toolbar-btn" aria-label="Back" title="Back" disabled={!usable || busy} onClick={() => act({ kind: 'back' })}><ArrowLeft size={16} /></button>
+      <button type="button" className="browser-toolbar-btn" aria-label="Forward" title="Forward" disabled={!usable || busy} onClick={() => act({ kind: 'forward' })}><ArrowRight size={16} /></button>
+      <button type="button" className="browser-toolbar-btn" aria-label="Reload" title="Reload" disabled={!usable || busy} onClick={() => act({ kind: 'reload' })}><RefreshCw size={16} className={view.open && view.loading ? 'spin' : undefined} /></button>
       <form className={`browser-url-form watched-browser-address${view.open && view.loading ? ' is-loading' : ''}`} onSubmit={(event) => { event.preventDefault(); go() }}
         aria-busy={view.open && view.loading ? true : undefined}>
-        <input className="browser-url-input" aria-label={`${label} address`} value={address} readOnly={view.open ? !drives : !open} placeholder="Search or enter URL"
+        <input className="browser-url-input" aria-label={`${label} address`} value={address} readOnly={view.open ? !usable : !open} placeholder="Search or enter URL"
           onFocus={() => { editing.current = true }} onBlur={() => { editing.current = false }} onChange={(event) => setAddress(event.target.value)} spellCheck={false} />
       </form>
       {/* Give back also closes a window an older app opened it in. */}
       {view.open && <ControlToggle user={user} held={owner} elsewhere={elsewhere} busy={busy}
         take={() => void store().takeOver(browserKey, elsewhere)} giveBack={() => void store().giveBack(browserKey)} />}
+      <button ref={menuButton} type="button" className={`browser-toolbar-btn${menuAt === 'bar' ? ' active' : ''}`} aria-label="Browser menu" title="More"
+        aria-haspopup="menu" aria-expanded={menuAt === 'bar'} onClick={() => setMenuAt(menuAt === 'bar' ? null : 'bar')}><MoreVertical size={16} /></button>
       {fullScreen && <button type="button" className="browser-toolbar-btn" aria-label={fullScreen.on ? 'Exit full screen' : 'Full screen'} title={fullScreen.on ? 'Exit full screen' : 'Full screen'}
         aria-pressed={fullScreen.on} onClick={fullScreen.toggle}>{fullScreen.on ? <ArrowShrink size={16} /> : <Maximize size={16} />}</button>}
       <button type="button" className="browser-toolbar-btn" aria-label="Close the browser view" title="Close" onClick={() => store().closePane()}><X size={16} /></button>
     </header>
     <div className="watched-browser-stage" ref={stage}>
-      <WatchedBrowserFrame label={label} view={view} frameRef={frame} className={drives ? 'is-held' : undefined} {...(windowed ? {} : input.frameHandlers)}>
+      <WatchedBrowserFrame label={label} view={view} frameRef={frame} className={drives ? 'is-held' : takes ? 'is-takeable' : undefined}
+        title={takes && !busy ? 'Click to take over' : undefined} {...(windowed ? {} : drives ? input.frameHandlers : takes ? { onPointerDown: takeOnPress } : {})}>
         {input.marks.map((mark) => <span key={mark.seq} className={`watched-browser-mark is-${mark.state}`} style={{ left: `${mark.left}%`, top: `${mark.top}%` }} aria-hidden />)}
         {drives && <textarea ref={keys} className="watched-browser-keys" aria-label={`Type into ${label}`} autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
-          {...input.keyHandlers} />}
+          {...input.keyHandlers}
+          // While the page has the keyboard, the zoom keys are its (this view's zoom), not the app's.
+          onFocus={() => pageKeyboard(true)}
+          onBlur={() => { pageKeyboard(false); input.keyHandlers.onBlur() }} />}
         {view.open && !windowed && view.dialog && <PageDialog key={`${view.dialog.type}:${view.dialog.message}`} dialog={view.dialog} canAnswer={owner}
           answer={(accept, text) => send({ kind: 'dialog', accept, ...(text !== undefined ? { text } : {}) })} />}
         {drives && !view.dialog && view.chooser && <FileRequest chooser={view.chooser}
@@ -330,5 +498,20 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
         {said.retry && <button type="button" className="watched-browser-retry" onClick={() => store().retry(browserKey)}>Retry</button>}
       </p>
       : noteText && <p className={`watched-browser-note${quiet ? ' is-quiet' : ''}`} role="status" title={noteTitle}>{noteText}</p>}
+    {menuAt && <BrowserMenu at={menuAt} anchor={menuButton} onClose={closeMenu}>
+      {menuAt !== 'bar' && <>
+        <button type="button" role="menuitem" disabled={!drives} onClick={() => { closeMenu(true); send({ kind: 'copy', cut: true }) }}><span>Cut</span><kbd>{shortcut('X')}</kbd></button>
+        <button type="button" role="menuitem" disabled={!drives} onClick={() => { closeMenu(true); send({ kind: 'copy' }) }}><span>Copy</span><kbd>{shortcut('C')}</kbd></button>
+        <button type="button" role="menuitem" disabled={!drives} onClick={() => { closeMenu(true); void paste() }}><span>Paste</span><kbd>{shortcut('V')}</kbd></button>
+        <button type="button" role="menuitem" disabled={!drives} onClick={() => { closeMenu(true); selectAll() }}><span>Select all</span><kbd>{shortcut('A')}</kbd></button>
+        <div className="browser-menu-separator" />
+      </>}
+      <div className="browser-menu-zoom" role="group" aria-label="Zoom">
+        <span>Zoom</span>
+        <button type="button" aria-label="Zoom out" title="Zoom out" disabled={!canOut} onClick={() => changeZoom('out')}><Minus size={14} aria-hidden="true" /></button>
+        <button type="button" className="watched-browser-zoom-value" aria-label="Reset zoom" title="Reset zoom" onClick={() => changeZoom('reset')}>{Math.round(zoom * 100)}%</button>
+        <button type="button" aria-label="Zoom in" title="Zoom in" disabled={!canIn} onClick={() => changeZoom('in')}><Plus size={14} aria-hidden="true" /></button>
+      </div>
+    </BrowserMenu>}
   </aside>
 }

@@ -93,12 +93,15 @@ export function piInstanceRuntime(instanceId: string, providerId: string, creden
       await auth.refreshDynamicModels?.().catch(() => undefined)
     },
     exportApiKey: async () => credentials()?.storedApiKey?.(providerId),
-    // Chat titles: one pi-ai request in Mousse's process (`runPiOneShot`).
-    oneShot: (spec, signal) => {
-      const models = credentials()?.models
-      if (!models) throw harnessAppError({ code: 'signed_out', message: 'Mousse has no provider credentials loaded yet.', instanceId })
-      return runPiOneShot(models, providerId, spec, signal)
-    },
+    // `pi:direct`: one pi-ai request in Mousse's process (`runPiOneShot`), carrying the runner's request once.
+    oneShotTransport: (spec) => ({
+      send: async (wire, events, signal) => {
+        const models = credentials()?.models
+        if (!models) throw harnessAppError({ code: 'signed_out', message: 'Mousse has no provider credentials loaded yet.', instanceId })
+        const { text } = await runPiOneShot(models, providerId, { ...spec, system: wire.system, prompt: wire.prompt, onActivity: () => events.activity(), onText: (chunk) => events.text(chunk), beforeSend: () => events.sending() }, signal)
+        return text
+      }
+    }),
     // A bot's pictures (#1088): the provider's image models in pi-ai's catalogue, one request in Mousse's process.
     imageModels: () => {
       const models = credentials()?.models

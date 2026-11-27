@@ -10,6 +10,10 @@ import { cliNames } from '../env'
 import { LAUNCH_MIRROR_FIELDS } from '../vendorMirror'
 import { compatibilityFields } from '../compatibility'
 import { ACP_NATIVE_TOOLS } from '../acp/botApprovals'
+import { ANTIGRAVITY_FACTS } from '../oneShot/routes'
+import type { OneShotRouteDecision } from '../oneShot/route'
+
+const ANTIGRAVITY_ROUTE: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: 'acp:antigravity' as const, facts: ANTIGRAVITY_FACTS }) })
 
 /**
  * The account a recorded sign-in stands for. Mousse never reads the Google account itself, so a
@@ -18,10 +22,9 @@ import { ACP_NATIVE_TOOLS } from '../acp/botApprovals'
  */
 const SIGN_IN_SUBJECT = 'mousse-google-sign-in'
 
-/** Antigravity publishes no context window, and Mousse offers no Plan mode for it. */
+/** Antigravity publishes no context window. */
 export const ANTIGRAVITY_CAPS: HarnessCaps = Object.freeze({
   ...ANTIGRAVITY_CAPABILITIES,
-  planMode: false,
   contextUsage: 'none',
   // The agent asks Mousse for every tool permission and file write.
   toolControl: 'approval_only',
@@ -93,8 +96,9 @@ export function antigravityDriver(options: {
     mirrorsVendorFile: true,
     // Sign-in and sign-out run in Mousse, whichever executable runs.
     ownsSignIn: true,
-    // Chat titles, pull request drafts and commit messages: one prompt in a session of its own (`service.oneShot`).
-    oneShot: true,
+    // Thread titles, branch names, pull request drafts, commit messages: `acpOneShot` with this preset's launch
+    // (`service.oneShotTransport`), best-effort as any ACP agent (`ANTIGRAVITY_FACTS`).
+    oneShotRoute: () => ANTIGRAVITY_ROUTE,
     // Only the native agy launch can switch off the user's customizations on a bot turn.
     botAuthority: () => options.builtIn().supportsBotTurns(),
     botApprovals: () => true,
@@ -154,7 +158,7 @@ export function antigravityDriver(options: {
         managed: () => service.managedRuntime(),
         validateOverride: (path) => void manualAntigravityRuntime(path),
         forgetConversation: (threadId) => service.forgetConversation(threadId),
-        oneShot: (spec, signal) => service.oneShot(spec, signal),
+        oneShotTransport: (spec) => service.oneShotTransport(spec),
         setLiveHost: (host) => service.setLiveHost(host),
         inFlightContinuation: (threadId) => service.inFlightContinuation(threadId),
         hasContinuation: (threadId, id) => service.hasContinuation(threadId, id),

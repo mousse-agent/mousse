@@ -143,7 +143,7 @@ export interface ScheduledRunProbe {
 
 /** Fields of a run record the runner knows once the occurrence has a thread and a run. */
 export type ScheduledRunDetails = Partial<
-  Pick<ScheduledJobRunRecord, 'threadId' | 'runId' | 'queueItemId' | 'selection' | 'mode' | 'permissionMode' | 'workspace' | 'missingPlaceholders' | 'agent' | 'missingKey'>
+  Pick<ScheduledJobRunRecord, 'threadId' | 'runId' | 'queueItemId' | 'selection' | 'permissionMode' | 'workspace' | 'missingPlaceholders' | 'agent' | 'missingKey'>
 >
 
 export function scheduledReceiptId(jobId: string, occurrenceKey: string): string {
@@ -259,10 +259,18 @@ function keptFieldsOf(job: ScheduledJob): KeptJobFields {
  * The fields that pause a job. A running job keeps its running state and claim: the run in flight must be able to
  * finish. It settles as paused when it ends (`saveJobs`), and no further occurrence is claimed meanwhile.
  */
+/**
+ * A bot's one-time automation that has run (at its time, or earlier with Run now) is spent: Pause and Resume keep it
+ * ended, so its original time never runs it a second time. Run now or a new time starts it again.
+ */
+function spentBotOnce(job: ScheduledJob): boolean {
+  return Boolean(job.bot) && job.schedule.kind === 'once' && job.state === 'completed'
+}
+
 function pauseFields(job: ScheduledJob, reason?: string, resumeAt?: string): Partial<ScheduledJob> {
   return {
     enabled: false,
-    ...(job.state === 'running' ? {} : { state: 'paused' as const }),
+    ...(job.state === 'running' || spentBotOnce(job) ? {} : { state: 'paused' as const }),
     pausedAt: new Date().toISOString(),
     pausedReason: reason,
     // A pause with an end resumes on its own then; a pause without one clears an earlier end.
@@ -273,6 +281,7 @@ function pauseFields(job: ScheduledJob, reason?: string, resumeAt?: string): Par
 /** The fields that resume a job from its schedule. A running job stays running until its claim is finalized. */
 function resumeFields(job: ScheduledJob): Partial<ScheduledJob> {
   if (job.state === 'running') return { enabled: true, pausedAt: undefined, pausedReason: undefined, resumeAt: undefined }
+  if (spentBotOnce(job)) return { enabled: true, pausedAt: undefined, pausedReason: undefined, resumeAt: undefined, nextRunAt: null }
   const nextRunAt = computeNextRun(job.schedule)
   return {
     enabled: true,
@@ -623,7 +632,6 @@ export class ScheduledJobStore {
       selection: input.selection,
       ...(input.agent && !isWorkflowPrompt(input.prompt) ? { agent: { definitionId: input.agent.definitionId } } : {}),
       ...(input.bot ? { bot: { botId: input.bot.botId, scheduleId: input.bot.scheduleId, createdBy: input.bot.createdBy, ...(input.bot.ownerAsked !== undefined ? { ownerAsked: input.bot.ownerAsked } : {}), ...(input.bot.say !== undefined ? { say: input.bot.say } : {}), ...(input.bot.model ? { model: input.bot.model } : {}), ...(input.bot.model && input.bot.pick ? { pick: input.bot.pick } : {}) } } : {}),
-      mode: input.mode,
       workspace: input.workspace,
       permissionMode,
       permissionCeiling,
@@ -1442,7 +1450,9 @@ export class ScheduledJobStore {
   /**
    * A bot's occurrence was handed to the bot, whose run lane runs it, or was skipped (`skipped` says why). The claim
    * ends without a run record (the bot's activations are its runs) and the schedule moves on; occurrences missed while
-   * Mousse was closed collapse into this one, so a backlog never runs.
+   * Mousse was closed collapse into this one, so a backlog never runs. A request URL's delivery never moves the timer and
+   * its log row ends with the hand-over; an on-demand job waits for its next start; a one-time job has run its time (Run
+   * now starts it again).
    */
   finishBotClaim(id: string, claimToken: string, outcome: { skipped?: string; occurrenceAt?: string; checked?: boolean }, now: Date = new Date()): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
@@ -1450,7 +1460,8 @@ export class ScheduledJobStore {
       const job = jobs.find((entry) => entry.id === id)
       const claim = job?.runClaim
       if (!job?.bot || !claim || job.state !== 'running' || claim.token !== claimToken) return null
-      const occurrenceAt = outcome.occurrenceAt ?? claim.occurrenceKey
+      const delivery = webhookIdOfOccurrence(claim.occurrenceKey) !== undefined
+      const occurrenceAt = outcome.occurrenceAt ?? (delivery ? now.toISOString() : claim.occurrenceKey)
       job.runClaim = undefined
       job.botSkip = outcome.skipped ? { at: occurrenceAt, reason: outcome.skipped } : undefined
       if (!outcome.skipped && !outcome.checked) {
@@ -1458,21 +1469,35 @@ export class ScheduledJobStore {
         job.lastStatus = 'ok'
         job.lastError = undefined
       }
-      job.nextRunAt = nextOccurrenceAfter(job.schedule, occurrenceAt, now)
-      job.state = job.nextRunAt ? 'scheduled' : 'error'
-      if (!job.nextRunAt) job.lastError = 'Failed to compute next run'
+      if (delivery) {
+        job.state = 'scheduled'
+      } else if (job.schedule.kind === 'manual' || job.schedule.kind === 'once') {
+        job.nextRunAt = null
+        job.state = stateWithoutNextRun(job)
+      } else {
+        job.nextRunAt = nextOccurrenceAfter(job.schedule, occurrenceAt, now)
+        job.state = job.nextRunAt ? 'scheduled' : 'error'
+        if (!job.nextRunAt) job.lastError = 'Failed to compute next run'
+      }
       job.updatedAt = now.toISOString()
       this.saveJobs(jobs)
+      if (delivery) this.settleWebhookDelivery(job.id, claim.occurrenceKey, outcome.skipped ? { outcome: 'dispatch_failed', error: `Skipped: ${outcome.skipped}` } : { outcome: 'completed' })
       return job
     })
   }
 
-  /** A claim that could not be handled yet (the bots are still starting) goes back as it was: the same occurrence stays due. */
+  /**
+   * A claim that could not be handled yet (the bots are still starting, a page is being fetched, the bot's previous run
+   * of it is still going) goes back as it was: the same occurrence stays due. A request delivery goes back to its
+   * pending slot, so the same delivery is taken again.
+   */
   releaseClaim(id: string, claimToken: string): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const job = jobs.find((entry) => entry.id === id)
       if (!job || job.state !== 'running' || job.runClaim?.token !== claimToken || job.runClaim.runId) return null
+      const delivery = job.runClaim.webhookOccurrenceId
+      if (delivery) job.pendingTrigger = { occurrenceId: delivery, receivedAt: new Date().toISOString() }
       job.runClaim = undefined
       job.state = 'scheduled'
       job.updatedAt = new Date().toISOString()
@@ -1682,6 +1707,17 @@ export class ScheduledJobStore {
         job.runClaim = undefined
         job.state = 'scheduled'
         job.nextRunAt = claim.occurrenceKey
+        job.updatedAt = nowIso
+        interrupted.push({ ...job })
+        dirty = true
+        continue
+      }
+      // A bot's request delivery is replayed the same way: the same occurrence id, so the same activation is found.
+      const botDelivery = job.bot ? webhookIdOfOccurrence(claim?.occurrenceKey) : undefined
+      if (botDelivery) {
+        job.runClaim = undefined
+        job.state = 'scheduled'
+        job.pendingTrigger = { occurrenceId: botDelivery, receivedAt: nowIso }
         job.updatedAt = nowIso
         interrupted.push({ ...job })
         dirty = true

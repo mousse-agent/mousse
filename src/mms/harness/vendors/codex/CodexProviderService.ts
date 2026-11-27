@@ -50,12 +50,15 @@ import {
   type CodexProcess
 } from './CodexAppServerClient'
 import {
+  RPC_INVALID_REQUEST,
   RPC_METHOD_NOT_FOUND,
   codexHttpStatus,
   notificationParams,
   type AccountReadResponse,
   type CodexNotification,
+  type CodexNotificationMap,
   type CodexRequestMap,
+  type LoginAccountResponse,
   type CodexServerRequest,
   type CodexServerRequestMap,
   type CodexModel,
@@ -72,7 +75,7 @@ import {
   type UserInput
 } from './protocol'
 import { isUsageLimitFailure, resetFromSnapshot, trimResetCredits } from './rateLimits'
-import { appLimitError, isAppLimitText, readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
+import { appLimitError, isAppLimitText, usageLimitError } from '../../../orchestrator/providerErrors'
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_REFUSED, type CodexBotSandbox, codexBotSandbox, codexBotSandboxConfig, codexBotWebOff, codexPackageOf, codexTurnPolicy } from './childPolicy'
@@ -378,6 +381,24 @@ export type CodexServiceDependencies = {
   compactSettleMs?: number
   /** The transport of a direct one-shot (`runCodexDirectOneShot`; tests substitute it). */
   directStream?: CodexDirectStream
+  /** How long the browser sign-in may take before it is cancelled (default `CODEX_BROWSER_SIGN_IN_TIMEOUT_MS`; tests). */
+  signInTimeoutMs?: number
+}
+
+/** Where the user's own Codex is signed in now: from Mousse (its browser sign-in), never a terminal first. */
+const CODEX_SIGN_IN_HINT = 'Sign in from Settings → Providers.'
+
+/** How long Codex's browser sign-in (`account/login/start`) may take before Mousse cancels it. */
+export const CODEX_BROWSER_SIGN_IN_TIMEOUT_MS = 15 * 60_000
+
+/**
+ * Whether a refused `account/login/start` means this Codex has no such method (an older app-server):
+ * a JSON-RPC method-not-found, or the invalid request serde reports for an unknown method name.
+ */
+function loginMethodMissing(error: unknown): boolean {
+  if (!(error instanceof CodexRpcError)) return false
+  if (error.code === RPC_METHOD_NOT_FOUND) return true
+  return error.code === RPC_INVALID_REQUEST && /unknown (?:variant|method)|not (?:found|supported)|unsupported/i.test(error.message)
 }
 
 /** `stopAll`: a closed process gets this long before its tree is killed. */
@@ -540,7 +561,6 @@ export type CodexChatInput = {
   history?: string
   images?: ChatImageAttachment[]
   signal?: AbortSignal
-  mode?: 'plan' | 'default'
   /**
    * The thread's permission mode for this turn; absent reads as the default (`accept_edits`). It
    * sets Codex's approval policy and sandbox (`codexTurnPolicy`) and decides which approvals Mousse
@@ -704,11 +724,11 @@ function classifyAccount(response: AccountReadResponse, ownSignIn?: string): Acc
       kind: 'signed_out',
       message: ownSignIn
         ? `This account's Codex is signed in without a ChatGPT account. Mousse only uses a ChatGPT sign-in, so turns never bill an API key. ${ownSignIn}`
-        : 'Codex in your terminal is signed in without a ChatGPT account. Mousse only uses a ChatGPT sign-in, so turns never bill an API key. Run `codex login` in a terminal, then recheck.'
+        : `Codex is signed in without a ChatGPT account. Mousse only uses a ChatGPT sign-in, so turns never bill an API key. ${CODEX_SIGN_IN_HINT}`
     }
   return {
     kind: 'signed_out',
-    message: ownSignIn ? `This account is not signed in. ${ownSignIn}` : 'Codex in your terminal is not signed in. Run `codex login` in a terminal, then recheck.'
+    message: ownSignIn ? `This account is not signed in. ${ownSignIn}` : `Codex is not signed in. ${CODEX_SIGN_IN_HINT}`
   }
 }
 
@@ -827,7 +847,6 @@ class TurnRun {
   constructor(
     readonly codexThreadId: string,
     readonly mousseThreadId: string,
-    readonly mode: 'plan' | 'default',
     readonly signal: AbortSignal,
     private readonly input: CodexChatInput,
     stray?: (threadId: string) => StrayThread | undefined
@@ -1370,7 +1389,7 @@ export class CodexProviderService {
   private readonly oneShots = new Map<string, (notification: CodexNotification) => void>()
   private readonly controllers = new Set<AbortController>()
   private readonly readyToCommit = new Set<string>()
-  /** Threads whose last turn was stopped or ended on a usage limit after its Codex thread was opened, by that Codex thread id (`commitInterrupted`). */
+  /** Threads whose last turn ended unfinished (stopped, a usage limit, a failure) after its Codex thread was opened, by that Codex thread id (`commitInterrupted`). */
   private readonly interruptedThreads = new Map<string, string>()
   /** Mousse MCP tokens handed to Codex; never echoed into errors or status messages. */
   private readonly secrets = new Set<string>()
@@ -1752,8 +1771,11 @@ export class CodexProviderService {
   }
 
   /**
-   * Connects Codex for this profile. Codex is signed in from the terminal (`codex login`); Mousse
-   * never runs a login or logout itself, it only checks and offers a Recheck.
+   * Signs Codex in on its own home from Mousse: Codex's app-server browser sign-in
+   * (`account/login/start`), its link shown in the dialog while Codex's own callback server waits for
+   * the browser. It counts only once Codex in that home then reads signed in. A Codex without that
+   * method falls back to the check loop (sign in with `codex login` in a terminal, then Check
+   * sign-in). Mousse never runs a logout itself.
    */
   async login(session: LoginSession, _cwd: string): Promise<ProviderLoginResult> {
     const checkpoint = (): void => {
@@ -1778,13 +1800,25 @@ export class CodexProviderService {
         checkpoint()
         if (!this.binary()) throw new Error('Codex executable is unavailable')
       }
-      for (;;) {
+      let signedIn = false
+      /** Set when this Codex has no browser sign-in: the check loop then says how to sign in instead. */
+      let terminalOnly = false
+      // Only on a home Mousse starts Codex in directly: never through a prepared launch or another account source.
+      if (!this.options.account && !this.options.prepareLaunch) {
+        const status = await this.status({ force: true })
+        checkpoint()
+        signedIn = status.state === 'connected' || (await this.browserLogin(session, checkpoint))
+        terminalOnly = !signedIn
+      }
+      while (!signedIn) {
         const status = await this.status({ force: true })
         checkpoint()
         if (status.state === 'connected') break
         const answer = await interaction.prompt({
           type: 'select',
-          message: `${status.message ?? 'Codex is not signed in.'} Mousse shares that sign-in and its ChatGPT usage limits.`,
+          message: terminalOnly
+            ? 'Codex is not signed in, and this Codex cannot sign in from Mousse. Run `codex login` in a terminal, then choose Check sign-in. Mousse shares that sign-in and its ChatGPT usage limits.'
+            : `${status.message ?? 'Codex is not signed in.'} Mousse shares that sign-in and its ChatGPT usage limits.`,
           options: [
             { id: 'check', label: 'Check sign-in' },
             { id: 'cancel', label: 'Cancel' }
@@ -1803,6 +1837,137 @@ export class CodexProviderService {
     } catch (error) {
       return { success: false, sessionId: session.sessionId, error: this.redact(error instanceof Error ? error.message : String(error)) }
     }
+  }
+
+  /**
+   * Codex's browser sign-in on a process of its own, kept running until Codex reports the end of
+   * that sign-in (`account/login/completed` for its `loginId`): the shared process closes when idle
+   * and retires on an account change, either of which would end Codex's callback server early. A
+   * cancel, a stop of the session or the timeout sends `account/login/cancel`. True once Codex in
+   * this home reads signed in on a fresh process; false when this Codex has no such method (an
+   * older app-server), so the caller falls back to the check loop. Rejects when the sign-in fails.
+   */
+  private async browserLogin(session: LoginSession, checkpoint: () => void): Promise<boolean> {
+    const target = this.launchTarget()
+    if (!target) throw new Error('Codex CLI not found. Install the Codex CLI first.')
+    const signal = session.abort.signal
+    mkdirSync(this.dir, { recursive: true, mode: 0o700 })
+    const process = (this.dependencies.launch ?? spawnCodexAppServer)({
+      binary: target.command,
+      ...(target.args.length ? { entryArgs: target.args } : {}),
+      args: [...storedCliArgs(this.launchSettings()), ...(this.options.telemetry?.()?.args ?? [])],
+      env: withEnforced(this.environment(), this.options.telemetry?.()?.env),
+      cwd: this.dir
+    })
+    const conn = new CodexAppServerClient(process, { defaultTimeoutMs: this.dependencies.requestTimeoutMs, secrets: () => this.secrets })
+    // Tracked with the service's other processes: stopping the service ends it too.
+    const live = this.trackProcess(process, conn)
+    let loginId: string | undefined
+    let ended = false
+    const completions: Array<CodexNotificationMap['account/login/completed']> = []
+    let wake: (() => void) | undefined
+    const stopListening = conn.onNotification((notification) => {
+      const completed = notificationParams(notification, 'account/login/completed')
+      if (!completed) return
+      completions.push(completed)
+      wake?.()
+    })
+    const cancelLogin = async () => {
+      if (!loginId || ended || conn.signal.aborted) return
+      ended = true
+      await conn.request('account/login/cancel', { loginId }, { timeoutMs: 5_000 }).catch(() => undefined)
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await abortable(conn.request('initialize', {
+        clientInfo: { ...(this.options.clientInfo ?? { name: 'mousse', title: 'Mousse' }), version: mousseVersion() },
+        capabilities: { experimentalApi: true, requestAttestation: false }
+      }), signal)
+      conn.notify('initialized')
+      checkpoint()
+      let started: LoginAccountResponse
+      try {
+        started = await abortable(conn.request('account/login/start', { type: 'chatgpt' }, { timeoutMs: 30_000 }), signal)
+      } catch (error) {
+        if (loginMethodMissing(error)) return false
+        throw error
+      }
+      // Any other answer is not the browser sign-in Mousse asked for: the check loop stands in.
+      if (started.type !== 'chatgpt' || typeof started.loginId !== 'string' || !('authUrl' in started) || typeof started.authUrl !== 'string' || !started.authUrl) return false
+      loginId = started.loginId
+      session.createAuthCallbacks({ usesCallbackServer: true }).notify({
+        type: 'auth_url',
+        url: started.authUrl,
+        instructions: 'Sign in with your ChatGPT account in the browser. Codex finishes the sign-in on its own.'
+      })
+      const outcome = await new Promise<CodexNotificationMap['account/login/completed'] | 'cancelled' | 'timed_out' | 'exited'>((done) => {
+        const check = () => {
+          // A completion without an id is this process's only sign-in.
+          const mine = completions.find((completed) => completed.loginId == null || completed.loginId === loginId)
+          if (mine) done(mine)
+        }
+        wake = check
+        check()
+        if (signal.aborted) done('cancelled')
+        if (conn.signal.aborted) done('exited')
+        timer = setTimeout(() => done('timed_out'), this.dependencies.signInTimeoutMs ?? CODEX_BROWSER_SIGN_IN_TIMEOUT_MS)
+        timer.unref?.()
+        signal.addEventListener('abort', () => done('cancelled'), { once: true })
+        conn.signal.addEventListener('abort', () => done('exited'), { once: true })
+      })
+      clearTimeout(timer)
+      if (outcome === 'cancelled' || outcome === 'timed_out') {
+        await cancelLogin()
+        if (outcome === 'cancelled') throw new Error('Login cancelled')
+        throw new Error('Sign-in timed out. Start it again.')
+      }
+      if (outcome === 'exited') throw new Error('Codex stopped before the sign-in finished. Try again.')
+      ended = true
+      if (!outcome.success) throw new Error(outcome.error ? `Codex did not sign in: ${outcome.error}` : 'Codex did not sign in. Try again.')
+    } finally {
+      clearTimeout(timer)
+      wake = undefined
+      stopListening()
+      await cancelLogin()
+      await this.stopProcesses([live]).catch(() => undefined)
+    }
+    checkpoint()
+    // Only Codex's own check counts, on a fresh process: one started before the sign-in knows nothing of it.
+    if (!(await this.reconnect())) throw new Error('Codex said the sign-in finished, but it does not read signed in. If Codex keeps its sign-in in the operating system\'s credential store, set `cli_auth_credentials_store = "file"` in its config.toml, then sign in again.')
+    checkpoint()
+    // Recorded as this entry's sign-in (the plan, the account), as a check would.
+    await this.status({ force: true })
+    checkpoint()
+    return true
+  }
+
+  /** Tracks a started app-server process until it exits, so `stopAll` and `stop` end it with the rest. */
+  private trackProcess(process: CodexProcess, conn: CodexConnection, onExit?: () => void): LiveProcess {
+    // A spawn `error` with no pid means the process never started; otherwise only `exit` counts.
+    const exited = process.windowsTree?.exited ?? new Promise<void>((done) => {
+      if (process.exitCode !== null || process.signalCode !== null) return done()
+      process.once('exit', () => done())
+      process.once('error', () => {
+        if (!process.pid) done()
+      })
+    })
+    const live: LiveProcess = { process, conn, exited, done: false }
+    this.processes.add(live)
+    const finish = () => {
+      live.done = true
+      this.processes.delete(live)
+      onExit?.()
+    }
+    void exited.then(finish, (error: unknown) => {
+      console.warn('[codex] server drain failed', this.redact(String(error)))
+      finish()
+    })
+    // A connection that ended on its own (output closed) leaves a process nobody can use: it is
+    // closed too, and still tracked until it exits.
+    conn.signal.addEventListener('abort', () => {
+      if (!live.done) conn.close()
+    }, { once: true })
+    return live
   }
 
   /**
@@ -2512,30 +2677,7 @@ export class CodexProviderService {
     const conn = new CodexAppServerClient(process, { defaultTimeoutMs: this.dependencies.requestTimeoutMs, secrets: () => this.secrets })
     // The Codex package this process runs: a bot's commands must be able to read it (`codexPackageOf`).
     this.packages.set(conn, codexPackageOf(target.path))
-    // A spawn `error` with no pid means the process never started; otherwise only `exit` counts.
-    const exited = process.windowsTree?.exited ?? new Promise<void>((done) => {
-      if (process.exitCode !== null || process.signalCode !== null) return done()
-      process.once('exit', () => done())
-      process.once('error', () => {
-        if (!process.pid) done()
-      })
-    })
-    const live: LiveProcess = { process, conn, exited, done: false }
-    this.processes.add(live)
-    const onExit = () => {
-      live.done = true
-      this.processes.delete(live)
-      extras?.onExit()
-    }
-    void exited.then(onExit, (error: unknown) => {
-      console.warn('[codex] server drain failed', this.redact(String(error)))
-      onExit()
-    })
-    // A connection that ended on its own (output closed) leaves a process nobody can use: it is
-    // closed too, and still tracked until it exits.
-    conn.signal.addEventListener('abort', () => {
-      if (!live.done) conn.close()
-    }, { once: true })
+    this.trackProcess(process, conn, () => extras?.onExit())
     const statuses = new ThreadStatuses()
     conn.onNotification((notification) => this.route(conn, notification, statuses))
     conn.setServerRequestHandler(async (request) => {
@@ -2732,7 +2874,7 @@ export class CodexProviderService {
   private async serve(request: CodexServerRequest): Promise<unknown> {
     const params = (request.params ?? {}) as { threadId?: string; itemId?: string }
     // A native helper's request is the run that started it's own (docs/plans/tool-api.md §2.7): it is asked in that run's
-    // thread, under that run's policy (bot, reader, Plan, approvals), and its item is read from the helper's own thread.
+    // thread, under that run's policy (bot, reader, approvals), and its item is read from the helper's own thread.
     const own = params.threadId ? this.turns.get(params.threadId) : undefined
     // Only the command and file-change approvals are a helper's that Mousse asks about; anything else a helper asks is
     // refused as before.
@@ -2755,7 +2897,7 @@ export class CodexProviderService {
           const answer = codexBotCommand(run.bot, { command: typeof asked === 'string' ? asked : undefined, cwd: approval.cwd ? resolve(run.cwd, approval.cwd) : run.cwd, reason: approval.reason ?? null })
           return { decision: run.questionSignal.aborted ? 'cancel' : answer.decision } satisfies Result<'item/commandExecution/requestApproval'>
         }
-        if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
+        if (run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
         // Full access never asks (Codex's own profile does not either; this is the backstop).
         if (permissionModeAllows(run.permissionMode, 'command')) return { decision: 'accept' } satisfies Result<'item/commandExecution/requestApproval'>
         const known = approval.command ?? (itemOf(approval.itemId) as { command?: string } | undefined)?.command
@@ -2794,7 +2936,7 @@ export class CodexProviderService {
           })
           return { decision: run.questionSignal.aborted ? 'cancel' : answer.decision } satisfies Result<'item/fileChange/requestApproval'>
         }
-        if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
+        if (run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
         // Edits go ahead under Auto-accept edits and Full access.
         if (permissionModeAllows(run.permissionMode, 'edit')) return { decision: 'accept' } satisfies Result<'item/fileChange/requestApproval'>
         const changes = (itemOf(approval.itemId) as { changes?: Array<{ path: string; diff?: string; kind?: unknown }> } | undefined)?.changes ?? []
@@ -2933,6 +3075,15 @@ export class CodexProviderService {
     if (!codexThreadId || !saved || saved.codexThreadId !== codexThreadId) return
     saved.historyKey = historyKey(history)
     this.save()
+  }
+
+  /**
+   * Whether the thread's last turn failed after its Codex thread was opened, and that thread is still the one the thread
+   * keeps: a turn that continues the failed one resumes it once the adapter fingerprints it (`commitInterrupted`).
+   */
+  failedThreadKept(threadId: string): boolean {
+    const codexThreadId = this.interruptedThreads.get(threadId)
+    return codexThreadId !== undefined && this.settings.threads?.[threadId]?.codexThreadId === codexThreadId
   }
 
   /** Interrupts the running turn on `codexThreadId`, if any. */
@@ -3478,7 +3629,7 @@ export class CodexProviderService {
     if (webOff) overrides.web_search = 'disabled'
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
     const permissionMode = input.bot ? 'ask' : normalizePermissionMode(input.permissionMode)
-    const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, permissionMode, botSandbox)
+    const policy = codexTurnPolicy(input.bot ? undefined : input.child, permissionMode, botSandbox)
     // Mousse's short-lived folders in the temporary folder are left out of it: one that comes and goes doesn't reopen the
     // thread, and one made after the thread opened stays open to its commands until it reopens (docs/bots.md).
     // The policy a loaded thread was opened with: a change of child policy, permission mode, compaction
@@ -3640,7 +3791,7 @@ export class CodexProviderService {
       this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, account, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID, ...botInstructionsKey(input) } }
       this.save()
       input.onSession?.({ codexThreadId })
-      const current = new TurnRun(codexThreadId, input.threadId, input.mode ?? 'default', signal, input, (id) => this.strays.get(id))
+      const current = new TurnRun(codexThreadId, input.threadId, signal, input, (id) => this.strays.get(id))
       run = current
       current.conn = conn
       this.turns.set(codexThreadId, current)
@@ -3648,7 +3799,7 @@ export class CodexProviderService {
       const { baseId } = parseThinkingSuffixFromModelId(input.model)
       // A level the model does not offer (saved for another model) runs at the model's default.
       const effort = supportedEffortOf(input.model, this.settings.models ?? [], EFFORTS)
-      const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, current.permissionMode, thread.botSandbox)
+      const policy = codexTurnPolicy(input.bot ? undefined : input.child, current.permissionMode, thread.botSandbox)
       const turnParams = {
         cwd: resolve(input.cwd),
         approvalPolicy: policy.approvalPolicy,
@@ -3952,8 +4103,10 @@ export class CodexProviderService {
       if (run) void this.startSweep(run)
       run?.closeTools('stop')
       const stopped = signal.aborted && input.signal?.aborted
-      // The thread exists on the server: the adapter may fingerprint it (`commitInterrupted`).
-      if ((stopped || readUsageLimit(error)) && run && scope === this.scope) this.interruptedThreads.set(input.threadId, run.codexThreadId)
+      // The thread exists on the server and holds the turn up to where it ended: the adapter may fingerprint it
+      // (`commitInterrupted`): after a stop or a usage limit, or for a turn that continues a failed one
+      // (`failedThreadKept`).
+      if (run && scope === this.scope) this.interruptedThreads.set(input.threadId, run.codexThreadId)
       if (stopped) throw input.signal?.reason ?? error
       throw error
     } finally {
@@ -4158,7 +4311,7 @@ export class CodexProviderService {
       ? probe.message
       : this.options.ownSignIn
         ? `This account is not signed in. ${this.options.ownSignIn}`
-        : 'Codex in your terminal is not signed in. Run `codex login` in a terminal, then try again.'
+        : `Codex is not signed in. ${CODEX_SIGN_IN_HINT}`
   }
 }
 

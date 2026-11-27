@@ -246,6 +246,8 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
     'threads.clearApprovalRules': 'work',
     'runs.resumeNow': 'work',
     'runs.cancelPause': 'work',
+    // Continue sends what an agents' chain held; Stop drops it.
+    'threads.chainHold': 'work',
     'subagents.stopAll': 'work',
     'threads.stopBackground': 'work',
     'agents.stop': 'work',

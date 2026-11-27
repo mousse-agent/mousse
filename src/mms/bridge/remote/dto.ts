@@ -20,7 +20,7 @@ export {
 const COMMIT_HASH = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
 const UPLOAD_ID = /^[A-Za-z0-9_-]{8,64}$/
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
-const BUILT_IN_MODES = new Set(['agent', 'plan', 'build'])
+const BUILT_IN_MODES = new Set(['agent', 'build'])
 /** Most messages a phone may ask for in one page of older messages. */
 export const PHONE_MESSAGES_PAGE_MAX = 500
 

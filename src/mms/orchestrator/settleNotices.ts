@@ -2,6 +2,7 @@ import { SETTLE_NOTICE_RESULT_CHARS, SETTLE_WATCH_TTL_MS, type SettleNoticeItem 
 import { notice, quoted, type NoticePart } from '../../shared/mousseContext'
 import { threadLink } from '../../shared/threadLink'
 import { qualifyId } from '../../shared/threadRef'
+import { chainIdOf } from '../run/AgentChains'
 import type { RunEngine } from '../run/RunEngine'
 import { followMessage, type WatchTarget } from '../run/settle/follow'
 import { ThreadWatches, type ThreadWatchRecord } from '../run/settle/ThreadWatches'
@@ -18,6 +19,8 @@ export interface PlannedSettleNotice {
   text: string
   /** The count of agent messages in a row of the run the notice is about; the turn it starts carries it. */
   hops: number
+  /** The chain of the message sent with notify (its sender's run); the turn it starts stays in it (issue #1442). */
+  chain?: string
 }
 
 export interface SettleNoticeHost {
@@ -33,8 +36,6 @@ export interface SettleNoticeHost {
   resultText(threadId: string, runId: string): string | undefined
   stopGeneration(threadId: string): number
   isSubagent(threadId: string): boolean
-  /** The thread's person works in Plan (its latest message is a plan turn). */
-  inPlan(threadId: string): boolean
   /** Puts the notice in the sender's queue; `held`: it must not start a turn by itself. Throws when it cannot. */
   deliver(watcherThreadId: string, notice: PlannedSettleNotice, held: boolean): void
   /** The sender's queue already carries this notice (a delivery repeated after a restart). */
@@ -217,7 +218,7 @@ export class SettleNotices {
         this.remoteDetails.delete(`${watch.watchId}:${which}`)
         return
       }
-      const notice = this.plan(watch, event)
+      const notice = { ...this.plan(watch, event), ...(this.host.engine.store.getRun(watch.watcherRunId) ? { chain: chainIdOf(this.host.engine.store, watch.watcherRunId) } : {}) }
       this.host.deliver(watch.watcherThreadId, notice, this.held(watch, event))
       this.watches.markSent(watch.watchId, which)
       this.remoteDetails.delete(`${watch.watchId}:${which}`)
@@ -228,13 +229,12 @@ export class SettleNotices {
 
   /**
    * A notice never starts a turn (it waits in the queue) in a subagent's thread, whose result is its parent's; in a
-   * sender a person stopped after it subscribed; in a sender kept in Plan; and when it only says Mousse stopped watching.
+   * sender a person stopped after it subscribed; and when it only says Mousse stopped watching.
    */
   private held(watch: ThreadWatchRecord, event: SettleNoticeItem['event']): boolean {
     if (event === 'expired') return true
     if (this.host.isSubagent(watch.watcherThreadId)) return true
-    if (this.host.stopGeneration(watch.watcherThreadId) > watch.watcherStopGeneration) return true
-    return this.host.inPlan(watch.watcherThreadId)
+    return this.host.stopGeneration(watch.watcherThreadId) > watch.watcherStopGeneration
   }
 
   private plan(watch: ThreadWatchRecord, event: SettleNoticeItem['event']): PlannedSettleNotice {

@@ -1,5 +1,5 @@
 import type { BotChip, BotChipIcon } from './chat'
-import { canonicalToolName } from '../../toolAliases'
+import { canonicalToolName, isBotVariant } from '../../toolAliases'
 
 /**
  * Activity chips (Bot Phase 1 §5.8, bot-ui C3). Mousse makes them from the calls the authority
@@ -162,8 +162,9 @@ function classifyFile(tool: string, input: unknown, ctx: BotChipContext): Classi
 const DEPTH_WORDS: Record<string, string> = { deep: 'taking more time', quick: 'going quicker', normal: 'back to the usual pace' }
 
 function classify(name: string, input: unknown, ctx: BotChipContext): Classified | null {
-  // A call an older activation recorded under a tool's old name reads as the tool it was renamed to.
-  const tool = canonicalToolName(name)
+  // A call an older activation recorded under a tool's old name reads as the tool it was renamed to; a bot's own tool
+  // that became a variant of a thread tool (`work_start`) keeps its own words.
+  const tool = chipToolName(name)
   const args = record(input)
   if (READ_TOOLS.has(tool) || WRITE_TOOLS.has(tool)) return classifyFile(tool, input, ctx)
   if (LOOK_BACK_TOOLS.has(tool)) {
@@ -259,17 +260,15 @@ function classify(name: string, input: unknown, ctx: BotChipContext): Classified
     case 'computer_list': return { kind: 'threads_look', icon: 'read', live: 'reading your threads' }
     case 'terminal_read': return { kind: 'threads_look', icon: 'read', live: 'reading a terminal' }
     case 'thread_wait': return { kind: 'thread_wait', icon: 'think', live: 'waiting on a thread' }
-    // Steering, forking, handing a fork back and answering an approval: each its own chip, with the thread to open.
-    case 'thread_steer': return { kind: 'thread_steer', icon: 'think', live: 'steering a thread' }
+    // Forking, handing a fork back and answering an approval: each its own chip, with the thread to open. A steer is a
+    // note now (`thread_send`), and reads as a message.
     case 'thread_fork': return { kind: 'thread_fork', icon: 'think', live: 'forking a thread' }
-    case 'thread_merge_back': return { kind: 'thread_merge', icon: 'think', live: 'handing a fork back' }
-    case 'approval_respond': return { kind: 'approval', icon: 'think', live: 'answering an approval' }
+    case 'thread_return': return { kind: 'thread_merge', icon: 'think', live: 'handing a fork back' }
+    // Passing on its owner's answer to its work (`answer`) has no chip of its own.
+    case 'request_answer': return typeof args.answer === 'string' || typeof args.questionId === 'string' ? null : { kind: 'approval', icon: 'think', live: 'answering an approval' }
     // A thread's queue: every change rolls up into one chip.
     case 'queue_enqueue':
-    case 'queue_edit':
-    case 'queue_remove':
-    case 'queue_reorder':
-    case 'queue_promote_to_steer': return { kind: 'queue', icon: 'think', live: "changing a thread's queue" }
+    case 'queue_update': return { kind: 'queue', icon: 'think', live: "changing a thread's queue" }
     // The owner's scheduled jobs ("schedule work in your threads"): the list is a look, every change one chip.
     case 'schedule_list': return { kind: 'schedules', icon: 'schedule', live: 'checking your scheduled jobs' }
     case 'schedule_create':
@@ -299,9 +298,10 @@ function classify(name: string, input: unknown, ctx: BotChipContext): Classified
       return { kind: 'thread_start', icon: 'think', live: 'starting a thread', ...(title ? { detail: shortChipText(title, 40) } : {}) }
     }
     case 'thread_send': return { kind: 'thread_send', icon: 'think', live: 'messaging a thread' }
-    case 'thread_interrupt': return { kind: 'thread_stop', icon: 'think', live: 'stopping a thread' }
+    case 'thread_stop': return { kind: 'thread_stop', icon: 'think', live: 'stopping a thread' }
     case 'thread_archive': return { kind: 'thread_archive', icon: 'think', live: args.archived === false ? 'unarchiving a thread' : 'archiving a thread' }
-    case 'thread_hide': return { kind: 'thread_hide', icon: 'think', live: args.hidden === false ? 'showing a thread' : 'hiding a thread' }
+    // A bot's `thread_update` hides or shows a thread it started; nothing else of it is a bot's.
+    case 'thread_update': return { kind: 'thread_hide', icon: 'think', live: args.hidden === false ? 'showing a thread' : 'hiding a thread' }
     // Its work's subagents: each one it starts or sends more work by its title; waiting on them is one chip.
     case 'subagent_start':
     case 'subagent_send': {
@@ -311,15 +311,20 @@ function classify(name: string, input: unknown, ctx: BotChipContext): Classified
     case 'subagent_wait': return { kind: 'subagent_wait', icon: 'think', live: 'waiting on its subagents' }
     case 'subagent_result':
     case 'subagent_stop': return { kind: 'subagent_look', icon: 'think', live: 'checking on its subagents' }
-    // `escalate`: its card is the chip. `ask_owner`: its question's bubble is.
+    // `permission_ask`: its card is the chip. `question_ask`: its question's bubble is.
     default: return null
   }
 }
 
 /**
  * The live chip for a call the authority just allowed, or null when the call shows none
- * (`escalate`: its card is the chip).
+ * (`permission_ask`: its card is the chip).
  */
+/** The tool a chip names: an old name's new one, except a bot's own tool, which the gate names as that (`isBotVariant`). */
+function chipToolName(name: string): string {
+  return isBotVariant(name) ? name : canonicalToolName(name)
+}
+
 export function chipForCall(tool: string, input: unknown, ctx: BotChipContext = {}): BotChip | null {
   const classified = classify(tool, input, ctx)
   if (!classified) return null
@@ -448,7 +453,8 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
     case 'profile': {
       const name = str(input.name)
       if (name) return { icon: 'name', text: 'renamed itself', highlight: shortChipText(name) }
-      return str(input.description) ? { icon: 'name', text: 'updated its description' } : null
+      if (str(input.description)) return { icon: 'name', text: 'updated its description' }
+      return input.look && typeof input.look === 'object' ? { icon: 'name', text: 'changed its look' } : null
     }
     default:
       return null
@@ -531,8 +537,9 @@ const QUIET_KINDS: ReadonlySet<ChipKind> = new Set(['schedules', 'work_look', 'b
  * shows it at once, before the turn ends and its message carries every chip. Null for any other call.
  */
 export function actedChip(tool: string, input: unknown, result: unknown): BotChip | null {
-  const kind = tool === 'thread_create' ? 'thread_start' : tool === 'thread_send' ? 'thread_send' : tool === 'thread_interrupt' ? 'thread_stop'
-    : tool === 'thread_archive' ? 'thread_archive' : tool === 'thread_hide' ? 'thread_hide' : undefined
+  const name = chipToolName(tool)
+  const kind = name === 'thread_create' ? 'thread_start' : name === 'thread_send' ? 'thread_send' : name === 'thread_stop' ? 'thread_stop'
+    : name === 'thread_archive' ? 'thread_archive' : name === 'thread_update' ? 'thread_hide' : undefined
   return kind ? outcomeChip(kind, { tool, input, result }) : null
 }
 

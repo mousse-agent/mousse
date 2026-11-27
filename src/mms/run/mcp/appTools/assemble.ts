@@ -39,7 +39,7 @@ export function settingsToolEnabled(tools: MousseIntegrationsSettings['tools'] |
 export function modeFactsFor(modeRegistry: ModeRegistry, mode: ChatMode, projectPath: string | undefined): ModeFacts {
   const descriptor = typeof mode === 'string' ? modeRegistry.getModeSync(mode, { projectPath }) : undefined
   return {
-    readOnly: descriptor ? (descriptor.permission?.['edit'] === 'deny' || descriptor.permission?.['bash'] === 'deny') : mode === 'plan',
+    readOnly: descriptor ? (descriptor.permission?.['edit'] === 'deny' || descriptor.permission?.['bash'] === 'deny') : false,
     agent: descriptor ? descriptor.id === 'agent' : mode === 'agent',
     build: descriptor ? descriptor.id === 'build' : mode === 'build'
   }
@@ -202,12 +202,6 @@ export function sessionInstructions(input: { mcp: boolean; relay?: boolean; appl
 export function instructionsHash(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 32)
 }
-
-/**
- * What a person's Plan-mode turn is told. The turn is read-only in every runtime (its tools and permissions say so);
- * the plan is the reply itself, with no tool to submit it.
- */
-export const PLAN_TURN_NOTE = 'Plan mode: this turn is read-only. Inspect what you need with read-only tools; do not edit files or run commands that change anything. Reply with the plan itself as your message, in markdown: steps, file paths and how to check the result. Use ask_user first when the request is ambiguous.'
 
 /**
  * What a runtime with its own loop is told at the start of each prompt (PR 2 §2 "Instructions"):

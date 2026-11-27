@@ -285,7 +285,3 @@ export function agentModes(session: unknown): { current?: string; modes: Array<{
   return { ...(state && typeof state.currentModeId === 'string' ? { current: state.currentModeId } : {}), modes }
 }
 
-/** A mode that plans without acting: named `plan` or `architect`. */
-export function planModeId(modes: ReadonlyArray<{ id: string; name: string }>): string | undefined {
-  return modes.find((mode) => /^(plan|architect)$/i.test(mode.id) || /^(plan|architect)$/i.test(mode.name))?.id
-}

@@ -159,8 +159,8 @@ describe('Pi RPC sessions with the real Pi child', () => {
     const { engine, recorder, project, stateDir, notices, scratch } = await setup()
     recorder.respond(replies(['First answer', 'Planned answer', 'Fork of first']))
     const first = await run(engine, harness(project))
-    // Plan mode offers no write tool, so the second turn's tool set differs from the first's.
-    const second = await run(engine, harness(project, { runId: 'r2', prompt: 'Plan it', mode: 'plan' as TurnInput['mode'], nativeHistory: `
+    // A read-only turn offers no write tool, so the second turn's tool set differs from the first's.
+    const second = await run(engine, harness(project, { runId: 'r2', prompt: 'Plan it', child: { readOnly: true }, nativeHistory: `
 user: Say hello
 assistant: First answer` }))
     const source = second.providerRef as ProviderRef

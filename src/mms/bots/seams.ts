@@ -83,7 +83,10 @@ export interface BotToolHost {
     done?(threadId: string, why: string): void
     list(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; leftOff?: string }>
   }
-  setProfile(botId: string, p: { name?: string; description?: string }): void
+  /** `look`: the fields given replace the bot's own, the rest stay. */
+  setProfile(botId: string, p: { name?: string; description?: string; look?: Partial<import('../../shared/bots/personal/look').BotLook> }): void
+  /** `get_profile`: the bot's own profile, read where each part is kept. Absent: no profile here. */
+  profile?(botId: string): import('./profile').BotProfileFacts
   /**
    * `set_depth` and `use_model` (#673). `now`: this activation only, by a reload; `always`: saved as a revision with no
    * re-approval. A depth is the activation's level (`now`) or the bot's standing level (`always`); a pick is one of the
@@ -129,7 +132,7 @@ export interface BotToolHost {
   /** `mcp_servers`: the owner's MCP servers the bot may ask for, and whether it holds their tools. Absent: none here. */
   mcpServers?(botId: string, lane: BotLane): Promise<BotMcpListing>
   /**
-   * `ask_owner` (issue #1123): a question to the owner with answers to tap, shown under a chat turn's reply, or at once
+   * `question_ask` (issue #1123): a question to the owner with answers to tap, shown under a chat turn's reply, or at once
    * from work, which then waits for the answers. `asked` is false, with why, when it was not kept (a repeat, a permission
    * asked first, a turn never offered it). Absent: no questions here.
    */
@@ -145,7 +148,9 @@ export interface BotToolHost {
      * `question_answer`: a chat turn the owner's own message started passes on to work the answer they gave in the chat
      * to the question it waits on; `title` is the work's.
      */
-    relay(botId: string, activationId: string, questionId: string, answer: string): { ok: true; title: string } | { ok: false; text: string }
+    relay(botId: string, activationId: string, questionId: string, answer: string, requestKey?: string): { ok: true; title: string; replayed?: true } | { ok: false; text: string }
+    /** Whether `questionId` is a question this bot's work asked its owner, in any state (`request_answer`'s kind). */
+    asked?(botId: string, questionId: string): boolean
   }
   /**
    * `show_card` (issue #1123): a small card, already checked for shape (`cardOf`), kept for the turn's next message. A
@@ -160,8 +165,10 @@ export interface BotToolHost {
    * owner asked for. `send` throws, with why in words for the bot, when the message can't go. Absent: none here.
    */
   bots?: {
-    list(botId: string): Array<{ name: string; does: string; paused?: true }>
-    send(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string }>
+    /** `botId`: what an address (`bot:<name>`) records, so a retry reaches the same bot after a rename; never shown to a bot. */
+    list(botId: string): Array<{ botId: string; name: string; does: string; paused?: true }>
+    /** `held`: past its chain's limit, it waits for the owner's Continue or Stop (issue #1443). */
+    send(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string; held?: { holdId: string } }>
   }
   /** One-off reminders: said at a time, or work started then. Wakes are listed and cancelled with them. */
   reminders: {
@@ -177,7 +184,8 @@ export interface BotToolHost {
    */
   wakes?: {
     wait?(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }>
-    add(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }>
+    /** A chat's same wake set again and again is held for the owner instead (`BotChainHeld`). */
+    add(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string } | BotChainHeld>
   }
   /**
    * The ledger (docs/plans/bot-context.md §16): a job the turn `from` handed to one of the owner's threads, by sending it
@@ -326,6 +334,9 @@ export interface BotContextProvider {
 }
 
 /** One journal row to write. `kind` follows bot-context.md §3. */
+/** A step held for the owner past its chain's limit (issue #1443): it waits for their Continue or Stop. */
+export interface BotChainHeld { held: { holdId: string } }
+
 export interface BotJournalInput {
   botId: string
   kind: BotJournalKind

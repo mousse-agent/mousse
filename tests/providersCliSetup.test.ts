@@ -238,14 +238,14 @@ describe('Model list freshness', () => {
 })
 
 describe('Providers page toolbar', () => {
-  it('heads the list with Add provider, then Refresh provider status and Refresh models; no computer choice without another computer', () => {
+  it('heads the list with Add provider, then one refresh for providers and models; no computer choice without another computer', () => {
     const html = renderToStaticMarkup(createElement(ProvidersSettings, {
       settings: {} as never, refreshProviderData: async () => ({ opts: {} as never }), updateSettings: async () => undefined, ensureValidProviderSelection: async (next) => next
     }))
-    expect(buttons(html)).toEqual(['Add provider', 'Refresh models'])
-    expect(labels(html)).toContain('Refresh provider status')
-    expect(html.indexOf('Add provider')).toBeLessThan(html.indexOf('aria-label="Refresh provider status"'))
-    expect(html.indexOf('aria-label="Refresh provider status"')).toBeLessThan(html.indexOf('Refresh models'))
+    expect(buttons(html)).toEqual(['Add provider'])
+    expect(labels(html)).toContain('Refresh providers and models')
+    expect(html.indexOf('Add provider')).toBeLessThan(html.indexOf('aria-label="Refresh providers and models"'))
+    expect(html).not.toContain('Refresh models')
     // With no other computer to choose, this one is implied.
     expect(html).not.toContain('Applying settings for')
     // Usage stays on its own page.
@@ -352,7 +352,7 @@ describe('Add provider choices', () => {
     const choices = addChoices([claude, codex, antigravity, opencode], [])
     expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([
       ['new', 'Claude Code 2'],
-      ['new', 'ChatGPT subscription 2'],
+      ['new', 'Codex 2'],
       ['new', 'Antigravity 2'],
       ['new', 'Cursor'],
       ['new', 'Grok'],
@@ -374,18 +374,18 @@ describe('Add provider choices', () => {
     expect(label(named('Work'))).toBe('Antigravity 2')
   })
 
-  it('offers ChatGPT subscription managed or on the user’s Codex CLI, and the CLI again as another account once theirs is added', () => {
+  it('offers Codex managed or on the user’s Codex CLI, and the CLI again as another account once theirs is added', () => {
     const managed = snapshot({ instanceId: 'codex:work', driver: 'codex', displayName: 'Work', config: { home: 'private', args: [], env: {}, setup: 'managed' } })
     const another = snapshot({ instanceId: 'codex:work', driver: 'codex', displayName: 'Work', config: { home: 'private', args: [], env: {}, setup: 'existing' } })
     const pick = (snapshots: Parameters<typeof addChoices>[0]) => addChoices(snapshots, []).find((choice) => choice.key === 'new:codex')
     // The first entry on the CLI is the user's own setup; any further one is another account.
-    expect(pick([claude])).toMatchObject({ label: 'ChatGPT subscription', setups: ['managed', 'existing'] })
+    expect(pick([claude])).toMatchObject({ label: 'Codex', setups: ['managed', 'existing'] })
     expect(pick([claude])).not.toHaveProperty('ownSetup')
     expect(pick([claude])).not.toHaveProperty('another')
-    expect(pick([claude, codex])).toMatchObject({ label: 'ChatGPT subscription 2', setups: ['managed', 'existing'], ownSetup: true, another: true })
-    expect(pick([claude, managed])).toMatchObject({ label: 'ChatGPT subscription 2', setups: ['managed', 'existing'], another: true })
+    expect(pick([claude, codex])).toMatchObject({ label: 'Codex 2', setups: ['managed', 'existing'], ownSetup: true, another: true })
+    expect(pick([claude, managed])).toMatchObject({ label: 'Codex 2', setups: ['managed', 'existing'], another: true })
     expect(pick([claude, managed])).not.toHaveProperty('ownSetup')
-    expect(pick([claude, codex, managed])).toMatchObject({ label: 'ChatGPT subscription 2', setups: ['managed', 'existing'], ownSetup: true })
+    expect(pick([claude, codex, managed])).toMatchObject({ label: 'Codex 2', setups: ['managed', 'existing'], ownSetup: true })
     expect(pick([claude, codex, another])).toMatchObject({ setups: ['managed', 'existing'], ownSetup: true })
   })
 
@@ -400,7 +400,7 @@ describe('Add provider choices', () => {
     const choices = addChoices([codex], [])
     expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([
       ['new', 'Claude Code'],
-      ['new', 'ChatGPT subscription 2'],
+      ['new', 'Codex 2'],
       ['new', 'Antigravity'],
       ['new', 'Cursor'],
       ['new', 'Grok'],

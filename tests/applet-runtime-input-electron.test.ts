@@ -6,8 +6,8 @@ import { build } from 'esbuild'
 import electron from 'electron'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-/** `forwarded`: the deltas of the real wheel events the window's own page received; `inside`: all at the pointer, none with ctrl. */
-interface Turn { forwarded: number[]; inside: boolean; hostTop: number; scrolled: { box: number; contain: number; root: number } }
+/** `reported`: the deltas the applet reported for the conversation; `hostTop`: how far the page around it scrolled. */
+interface Turn { reported: number[]; hostTop: number; scrolled: { box: number; contain: number; root: number }; zoom: number }
 interface Evidence {
   layout: {
     row: { left: number; width: number; padding: string; justify: string; background: string; radius: string; border: string }
@@ -20,7 +20,7 @@ interface Evidence {
   watchdog: { timersPaused: boolean; pausedErrors: string[]; pausedAlive: boolean; loopStoppedAfterMs: number | null; loopError: string | null }
 }
 
-/** Real applet pages in real native views (tests/fixtures/applet-runtime-input), one run shared by the cases below. */
+/** Real applet pages in real webviews (tests/fixtures/applet-runtime-input), one run shared by the cases below. */
 let evidence: Evidence
 let directory: string
 beforeAll(async () => {
@@ -76,31 +76,34 @@ describe('buttons in an applet', () => {
 })
 
 describe('a wheel turn over an applet', () => {
-  it('that nothing in the applet can scroll reaches the page under it as real wheel input, which scrolls', () => {
+  it('that nothing in the applet can scroll goes on to the page around it, which scrolls, and is reported', () => {
     const { body } = evidence.wheel
-    expect(body.forwarded.length).toBe(1)
-    expect(body.forwarded[0]).toBeGreaterThan(0)
-    expect(body.inside).toBe(true)
     expect(body.hostTop).toBeGreaterThan(0)
     expect(body.scrolled.root).toBe(0)
+    expect(body.reported.length).toBe(1)
+    expect(body.reported[0]).toBeGreaterThan(0)
   })
 
-  it('scrolls an inner scroller that still has room, and is not handed on', () => {
+  it('scrolls an inner scroller that still has room, and is neither handed on nor reported', () => {
     const { innerWithRoom } = evidence.wheel
-    expect(innerWithRoom.forwarded).toEqual([])
     expect(innerWithRoom.scrolled.box).toBeGreaterThan(0)
+    expect(innerWithRoom.hostTop).toBe(0)
+    expect(innerWithRoom.reported).toEqual([])
   })
 
   it('goes on to the conversation once the inner scroller is at its end, either way', () => {
-    expect(evidence.wheel.innerAtEnd.forwarded.length).toBe(1)
-    expect(evidence.wheel.innerAtEnd.forwarded[0]).toBeGreaterThan(0)
-    expect(evidence.wheel.innerAtTopGoingUp.forwarded.length).toBe(1)
-    expect(evidence.wheel.innerAtTopGoingUp.forwarded[0]).toBeLessThan(0)
+    expect(evidence.wheel.innerAtEnd.hostTop).toBeGreaterThan(0)
+    expect(evidence.wheel.innerAtEnd.reported.length).toBe(1)
+    expect(evidence.wheel.innerAtEnd.reported[0]).toBeGreaterThan(0)
+    expect(evidence.wheel.innerAtTopGoingUp.reported.length).toBe(1)
+    expect(evidence.wheel.innerAtTopGoingUp.reported[0]).toBeLessThan(0)
   })
 
   it('stays in a scroller whose author stopped scroll chaining, and leaves ctrl+wheel (zoom) alone', () => {
-    expect(evidence.wheel.containAtEnd.forwarded).toEqual([])
-    expect(evidence.wheel.control.forwarded).toEqual([])
+    expect(evidence.wheel.containAtEnd.hostTop).toBe(0)
+    expect(evidence.wheel.containAtEnd.reported).toEqual([])
+    expect(evidence.wheel.control.reported).toEqual([])
+    expect(evidence.wheel.control.zoom).toBe(1)
   })
 })
 

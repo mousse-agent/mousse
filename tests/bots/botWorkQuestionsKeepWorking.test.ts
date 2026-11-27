@@ -1,5 +1,5 @@
 /**
- * Work that asks its owner a question without waiting (`ask_owner` with `wait: false`, issue #1372), over a real engine
+ * Work that asks its owner a question without waiting (`question_ask` with `wait: false`, issue #1372), over a real engine
  * and a real `bots.db`: the bubble is posted at once, the turn goes on (nothing is refused), and the answer reaches the
  * work wherever it is when it comes.
  *
@@ -47,7 +47,7 @@ const call = <T = unknown>(method: string, params: Record<string, unknown>): Pro
 const tools = new Map(botTools(() => ({ host: f.bots.tools })).map((tool) => [tool.name, tool]))
 async function tool(name: string, prepared: PreparedBotTurn, threadId: string, args: Record<string, unknown>): Promise<{ text: string; isError?: boolean }> {
   const ctx = {
-    caller: { threadId, runId: 'r', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+    caller: { threadId, runId: 'r', provider: 'pi', accessLevel: 'lineage' },
     turn: { threadId, bot: prepared.authority },
     toolCallId: `call-${Math.random()}`,
     signal: new AbortController().signal,
@@ -77,7 +77,7 @@ async function workThatAsks(steers: boolean) {
   const { workId, asked } = await handOff('Flat hunt', 'w1')
   const work = await start(f, workId)
   if (steers) work.prepared.steer!.attached()
-  const answer = await tool('ask_owner', work.prepared, work.payload.threadId, FLATS)
+  const answer = await tool('question_ask', work.prepared, work.payload.threadId, FLATS)
   const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === workId)!
   const questionId = bubble.question!.questionId
   expect(JSON.parse(answer.text)).toEqual({ asked: true, questionId, note: questionWorkKeepsWorkingText(questionId) })
@@ -166,7 +166,7 @@ describe('work that asks without waiting', () => {
 
   it('in a chat turn, wait false changes nothing: the question is shown under the reply and the turn ends', async () => {
     const turn = await chat('Find me a flat', 'c1')
-    expect(JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, FLATS)).text)).toEqual({ asked: true, questionId: expect.stringMatching(/^q_/), note: QUESTION_ASKED_TEXT })
+    expect(JSON.parse((await tool('question_ask', turn.prepared, turn.payload.threadId, FLATS)).text)).toEqual({ asked: true, questionId: expect.stringMatching(/^q_/), note: QUESTION_ASKED_TEXT })
     const asked = f.store.activationQuestions(turn.activation.id)[0]!
     expect(asked.spec.wait).toBeUndefined()
   })

@@ -57,10 +57,11 @@ export function ThreadBrowserPane({ threadId, view, label, fullScreen }: { threa
   const line = (holding: WatchedBrowserHolding): string => {
     if (holding === 'this-window') return 'You have the agent\'s browser. Give it back when you\'re done.'
     if (holding === 'another-window') return view.asks !== undefined ? 'The agent asks for you. Take over to help.' : 'Held in another window. Take over to use it here.'
-    if (holding === 'agent') return 'The agent\'s browser, without a window. Take over to click or type.'
+    if (holding === 'agent') return 'The agent\'s browser, without a window. Click it to take over.'
     return 'No browser is open for this thread.'
   }
-  return <WatchedBrowserPane kit={threadBrowserKit} browserKey={threadId} label={label} user="The agent" view={view}
+  // One view per browser: switching to another thread's never carries this one's pending input, menu or zoom state over.
+  return <WatchedBrowserPane key={threadId} kit={threadBrowserKit} browserKey={threadId} label={label} user="The agent" view={view}
     {...(fullScreen ? { fullScreen } : {})}
     closed={() => <p>No browser open</p>}
     line={line}

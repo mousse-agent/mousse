@@ -111,22 +111,19 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
   describe('which threads they reach', () => {
     it('a call reaches the host with the caller as the actor, the call id, and a key scoped to the caller thread', async () => {
       const { call, host, runs } = await world()
-      await call('thread_send', { threadId: 'target', content: 'hello', mode: 'plan' }, { toolCallId: 'mcp:send-1' })
-      expect(host.sendToThread).toHaveBeenLastCalledWith('target', { content: 'hello', mode: 'plan' }, {
+      await call('thread_send', { threadId: 'target', content: 'hello' }, { toolCallId: 'mcp:send-1' })
+      expect(host.sendToThread).toHaveBeenLastCalledWith('target', { content: 'hello' }, {
         clientRequestId: 'thread_send:caller:mcp:send-1',
         actor: { kind: 'agent', threadId: 'caller', runId: runs.caller, toolCallId: 'mcp:send-1' }
       })
+      // A note that joins a run keeps the key the old thread_steer used, so a steer retried across the rename, under
+      // either name, is the request it was and joins the run once.
       await call('thread_steer', { threadId: 'target', runId: runs.target, text: 'also this' }, { toolCallId: 'mcp:steer-1' })
+      expect(host.steerRun).toHaveBeenLastCalledWith('target', runs.target, 'also this', expect.objectContaining({ clientRequestId: 'thread_steer:caller:mcp:steer-1' }))
+      await call('thread_send', { threadId: 'target', runId: runs.target, content: 'also this', intent: 'note' }, { toolCallId: 'mcp:steer-1' })
       expect(host.steerRun).toHaveBeenLastCalledWith('target', runs.target, 'also this', expect.objectContaining({ clientRequestId: 'thread_steer:caller:mcp:steer-1' }))
       await call('thread_interrupt', { threadId: 'target', runId: runs.target }, { toolCallId: 'mcp:stop-1' })
       expect(host.stopRun).toHaveBeenLastCalledWith('target', runs.target, expect.objectContaining({ clientRequestId: 'thread_interrupt:caller:mcp:stop-1' }))
-    })
-
-    it('a plan-ceiling caller cannot send an agent turn, only a plan turn', async () => {
-      const { call, denied, host } = await world()
-      expect((await denied(call('thread_send', { threadId: 'target', content: 'x' }, { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
-      expect((await call('thread_send', { threadId: 'target', content: 'x', mode: 'plan' }, { modeCeiling: 'plan' })).isError).toBeUndefined()
-      expect(host.sendToThread).toHaveBeenCalledTimes(1)
     })
 
     it('reaches a thread of any project and one without a project, for all four tools', async () => {
@@ -161,8 +158,8 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       threads.set(child.childThreadId, thread(child.childThreadId))
       const delegation = (host.delegation as unknown as () => { continueSubagent: ReturnType<typeof vi.fn> })()
       delegation.continueSubagent.mockResolvedValueOnce({ delegationId: 'd2', childThreadId: child.childThreadId, childRunId: 'run:child:2', title: 'Helper', status: 'queued', note: 'busy' })
-      const sent = JSON.parse((await call('thread_send', { threadId: child.childThreadId, content: 'next step', mode: 'plan' }, { toolCallId: 'mcp:follow-1' })).text)
-      expect(delegation.continueSubagent).toHaveBeenCalledWith({ subagent: child.childThreadId, prompt: 'next step', mode: 'plan' }, { toolCallId: 'mcp:follow-1' })
+      const sent = JSON.parse((await call('thread_send', { threadId: child.childThreadId, content: 'next step' }, { toolCallId: 'mcp:follow-1' })).text)
+      expect(delegation.continueSubagent).toHaveBeenCalledWith({ subagent: child.childThreadId, prompt: 'next step' }, { toolCallId: 'mcp:follow-1' })
       expect(sent).toMatchObject({ threadId: child.childThreadId, runId: 'run:child:2', delivery: 'queued', queued: true, delegationId: 'd2', subagent: true })
       // A refusal (the subagent waits for an answer) comes back as continue_subagent gives it.
       delegation.continueSubagent.mockResolvedValueOnce({ started: false, code: 'needs_answer', message: 'answer it first' })
@@ -198,7 +195,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
 
     it.each([
       ['questions_pending', /waiting for the user to answer a question or an approval/],
-      ['thread_paused', /paused by a usage limit.*thread_interrupt/],
+      ['thread_paused', /paused by a usage limit.*thread_stop/],
       ['merge_back_pending', /merge-back/]
     ])('a thread the engine refuses because of its state (%s) is a mousse_conflict that says why', async (code, message) => {
       const { call, denied, answers } = await world()
@@ -249,7 +246,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
 
     it('validates its input before it reaches the host', async () => {
       const { call, host } = await world()
-      for (const args of [{ threadId: 'target' }, { threadId: 'target', content: '   ' }, { threadId: 'target', content: 'x', mode: 'build' }, { content: 'x' }] as Array<Record<string, unknown>>)
+      for (const args of [{ threadId: 'target' }, { threadId: 'target', content: '   ' }, { content: 'x' }] as Array<Record<string, unknown>>)
         expect((await call('thread_send', args).catch((error) => ({ isError: true, error }))).isError, JSON.stringify(args)).toBe(true)
       expect(host.sendToThread).not.toHaveBeenCalled()
     })
@@ -285,7 +282,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       answers.steer = async () => ({ status: 'ignored', reason: 'run_not_active', runId: targetRun.runId, activeRunId: null, runStatus: 'paused' })
       const error = await denied(call('thread_steer', { threadId: 'target', runId: targetRun.runId, text: 'x' }))
       expect(error).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'run_paused', expectedRunId: targetRun.runId } })
-      expect(error!.message).toMatch(/paused by a usage limit.*thread_interrupt/)
+      expect(error!.message).toMatch(/paused by a usage limit.*thread_stop/)
     })
 
     it('a steer into a run under a looser permission mode than the caller\'s is a conflict with both modes', async () => {
@@ -308,11 +305,11 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       answers.steer = async () => ({ status: 'accepted', runId: targetRun.runId, sequence: 12, replayed: false, followUp: true })
       expect(await result(call('thread_steer', { threadId: 'target', runId: targetRun.runId, text: 'x' }))).toMatchObject({ runId: targetRun.runId, followUp: true, delivery: 'queued' })
       expect(host.showAgentAction).toHaveBeenLastCalledWith({ threadId: 'target' }, expect.anything(), expect.stringMatching(/runs after run .* had just finished/))
-      // A steer the turn takes says neither.
+      // A steer the turn takes is a note presented to it.
       answers.steer = async () => ({ status: 'accepted', runId: targetRun.runId, sequence: 13, replayed: false })
       const joined = await result(call('thread_steer', { threadId: 'target', runId: targetRun.runId, text: 'y' }))
       expect(joined).not.toHaveProperty('followUp')
-      expect(joined).not.toHaveProperty('delivery')
+      expect(joined).toMatchObject({ intent: 'note', delivery: 'presented' })
       expect(host.showAgentAction).toHaveBeenLastCalledWith({ threadId: 'target' }, expect.anything(), `steered run ${targetRun.runId}`)
     })
 
@@ -377,10 +374,51 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       }
       expect(host.stopRun).not.toHaveBeenCalled()
       expect(host.steerRun).not.toHaveBeenCalled()
-      // Its own subagent is the caller's to stop or steer.
+      // Its own subagent is the caller's to stop or steer, once its run has started.
+      fx.engine.markStarting(own.childRunId)
+      fx.engine.markRunning(own.childRunId)
       expect((await call('thread_interrupt', { threadId: own.childThreadId, runId: own.childRunId })).isError).toBeUndefined()
       expect((await call('thread_steer', { threadId: own.childThreadId, runId: own.childRunId, text: 'x' })).isError).toBeUndefined()
       expect(runs.caller).toBe(callerRun.runId)
+    })
+
+    it('a steer, or a note that names a run, to its own subagent is refused once that run is no longer active, and nothing is posted for a later turn', async () => {
+      const { call, denied, fx, threads, host, callerRun } = await world()
+      const own = await fx.delegate(callerRun.runId, 'call-own')
+      threads.set(own.childThreadId, thread(own.childThreadId))
+      // Not started yet: nothing to steer, as before.
+      expect(await denied(call('thread_steer', { threadId: own.childThreadId, runId: own.childRunId, text: 'x' }))).toMatchObject({ details: { conflict: 'steer_target_not_ready' } })
+      const pending = () => fx.engine.inbox.listPending(own.childThreadId).filter((row) => row.kind === 'agent_note')
+      const stale = () => [
+        call('thread_steer', { threadId: own.childThreadId, runId: own.childRunId, text: 'Also check the tests' }),
+        call('thread_send', { threadId: own.childThreadId, runId: own.childRunId, content: 'Also check the tests', intent: 'note' })
+      ]
+      // The run ended: the thread is idle, and a note would start a turn there.
+      fx.finish(own.childRunId)
+      for (const sent of stale()) expect(await denied(sent)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'run_not_active', expectedRunId: own.childRunId } })
+      // Another run started since: it is named, and it is not joined.
+      const later = await fx.runningRun(own.childThreadId)
+      for (const sent of stale()) expect(await denied(sent)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'run_not_active', expectedRunId: own.childRunId, activeRunId: later.runId } })
+      expect(pending()).toEqual([])
+      expect(host.steerRun).not.toHaveBeenCalled()
+      // The active run takes it.
+      expect((await call('thread_steer', { threadId: own.childThreadId, runId: later.runId, text: 'Also check the tests' })).isError).toBeUndefined()
+    })
+
+    it('a steer to its own subagent that an older build accepted is replayed on retry, under either name, and posts nothing', async () => {
+      const { call, result, fx, threads, host, callerRun } = await world()
+      const own = await fx.delegate(callerRun.runId, 'call-own')
+      threads.set(own.childThreadId, thread(own.childThreadId))
+      fx.finish(own.childRunId)
+      // What the old thread_steer left: a steer receipt under its own key.
+      fx.engine.store.putReceipt({ clientRequestId: 'thread_steer:caller:mcp:steer-old', threadId: own.childThreadId, commandKind: 'steer', status: 'accepted', result: { runId: own.childRunId, sequence: 5 }, createdAt: new Date(0).toISOString() })
+      for (const [name, args] of [
+        ['thread_steer', { threadId: own.childThreadId, runId: own.childRunId, text: 'Also check the tests' }],
+        ['thread_send', { threadId: own.childThreadId, runId: own.childRunId, content: 'Also check the tests', intent: 'note' }]
+      ] as const)
+        expect(await result(call(name, { ...args }, { toolCallId: 'mcp:steer-old' })), name).toMatchObject({ intent: 'note', delivery: 'presented', runId: own.childRunId, sequence: 5, replayed: true })
+      expect(fx.engine.inbox.listPending(own.childThreadId)).toEqual([])
+      expect(host.steerRun).not.toHaveBeenCalled()
     })
 
   })
@@ -441,7 +479,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
     it('a bot\'s own turn is held to its walls: a send, steer or Stop is refused', async () => {
       const { fx, registry, turns, request, host, callerRun } = await world()
       const wall = (tool: string) => ({ kind: 'tool', tool })
-      turns.register(appTurn({ threadId: 'caller', runId: callerRun.runId, bot: { check: (what: { tool: string }) => ({ ok: false, wall: wall(what.tool) }), skills: new Set() } as never }))
+      turns.register(appTurn({ threadId: 'caller', runId: callerRun.runId, bot: { check: (what: { tool: string }) => ({ ok: false, wall: wall(what.tool) }), skills: new Set(), appTools: new Set() } as never }))
       for (const [name, args] of [
         ['thread_send', { threadId: 'target', content: 'x' }],
         ['thread_steer', { threadId: 'target', runId: 'any', text: 'x' }],
@@ -640,7 +678,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(Date.now() - started).toBeGreaterThanOrEqual(50)
       expect(waited).toMatchObject({ status: 'paused', run: { runId: targetRun.runId, status: 'paused' }, pause: { reason: 'usage_limit', until: PAUSE.until }, retryAfterMs: expect.any(Number) })
       expect(waited.retryAfterMs).toBeGreaterThanOrEqual(1_000)
-      expect(waited.hint).toMatch(/not sooner.*thread_interrupt/)
+      expect(waited.hint).toMatch(/not sooner.*thread_stop/)
       // Without a run id the paused run is the one waited on.
       const again = await result(call('thread_wait', { threadId: 'target', timeoutMs: 40 }))
       expect(again).toMatchObject({ status: 'paused', run: { runId: targetRun.runId } })

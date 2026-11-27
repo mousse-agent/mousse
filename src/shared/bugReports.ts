@@ -81,7 +81,9 @@ export type BugReportOutcome =
 
 /** A report this person filed, kept on this computer so they can find and revoke it, anonymous or not. */
 export interface FiledBugReport {
-  number: number
+  /** Missing while a report sent through the prefilled page is not found on GitHub yet. */
+  number?: number
+  /** The issue; for one not found yet, a GitHub search for its signature. */
   url: string
   title: string
   signature: string
@@ -89,13 +91,16 @@ export interface FiledBugReport {
   anonymous: boolean
   /** Added a 👍 to an issue that was already open rather than opening one. */
   existing?: boolean
+  /** Submitted by the person on GitHub's prefilled page, from their own account. */
+  browser?: boolean
   /** Closed by the person in Settings. */
   revokedAt?: string
 }
 
 /** A filed report with its issue's state now. */
 export interface FiledBugReportView extends FiledBugReport {
-  state: 'open' | 'closed' | 'unknown'
+  /** `pending`: sent through the prefilled page, and GitHub does not show its issue yet. */
+  state: 'open' | 'closed' | 'unknown' | 'pending'
   /** `completed` when it was fixed; `not_planned` when closed otherwise. */
   stateReason?: string
   /** Merged pull requests of this repository whose description closes the issue (`Closes #N`), from its timeline. */

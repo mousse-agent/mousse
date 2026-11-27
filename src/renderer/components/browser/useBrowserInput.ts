@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ClipboardEvent, type CompositionEvent
 import type { WatchedBrowserAck, WatchedBrowserInput, WatchedBrowserView } from '../../../shared/browser/watched'
 import { BROWSER_MODIFIERS, MAX_BROWSER_PASTE_CHARS, type BrowserMouseButton } from '../../../shared/browser/types'
 import { viewerPlatform } from '../../stores/browserInputChannel'
+import { zoomKey } from './watchedBrowserZoom'
 
 /**
  * The person's input in a browser view, while this window holds the browser: everything a
@@ -11,16 +12,25 @@ import { viewerPlatform } from '../../stores/browserInputChannel'
  * - **Pointer**: a button going down and up (with how many presses in a row, so a double click is one)
  *   and the moves between, so hover, drag, text selection and a right click work. Control-click on a Mac
  *   is a right click.
- * - **Wheel**: every turn counts (the channel adds them up); a pinch (Control and the wheel) is not sent.
+ * - **Wheel**: every turn counts (the channel adds them up); a pinch (Control and the wheel) zooms the view (`zoom`),
+ *   as in a browser, and is not sent.
  * - **Keys**: down and up with their modifiers and code. Command (Mac) or Control (elsewhere) with V
  *   pastes the person's clipboard text, with C or X copies (or cuts) the page's selection to their
- *   clipboard: only then is the clipboard read or written.
+ *   clipboard: only then is the clipboard read or written. Command or Control with +, - or 0 zooms the view (`zoom`).
+ * - **Right click** goes to the page, and opens the view's own menu there (`menu`): Cut, Copy, Paste and Select all,
+ *   which a browser without a window cannot show itself.
  * - **IME and dead keys**: composition text as it stands, committed as text.
  * - **Touch**: a tap clicks, a long press is a right click, one or two fingers moving scroll.
  *
  * Keys land in a hidden text field over the page (`keys`), which holds the focus while the person
  * types and moves to where they last clicked, so an IME's candidates show there.
  */
+
+/** A press read when it was made: its point on the page (and on the picture) and the picture it was made on. */
+export interface PinnedPress {
+  at: { x: number; y: number; left: number; top: number; scale: number }
+  picture?: number
+}
 
 export interface InputMark {
   seq: number
@@ -40,6 +50,8 @@ const MODIFIER_KEYS = new Set(['Meta', 'Control', 'Alt', 'Shift', 'CapsLock', 'F
 const LONG_PRESS_MS = 550
 /** A touch that moves more than this scrolls rather than taps. */
 const TOUCH_SLOP_PX = 8
+/** How far a pinch (or Control and the wheel) turns for one step of zoom: a mouse wheel's notch. */
+const PINCH_STEP = 100
 
 function modifiersOf(event: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }): number {
   return (event.altKey ? BROWSER_MODIFIERS.alt : 0) | (event.ctrlKey ? BROWSER_MODIFIERS.ctrl : 0) | (event.metaKey ? BROWSER_MODIFIERS.meta : 0) | (event.shiftKey ? BROWSER_MODIFIERS.shift : 0)
@@ -60,11 +72,19 @@ export function useBrowserInput(options: {
   send(input: WatchedBrowserInput, picture?: number): { seq: number; done: Promise<WatchedBrowserAck> }
   /** Says a short line about the person's input (a paste too long to send). */
   note(text: string): void
+  /** Zooms the view in, out, or back (the zoom keys, a pinch). */
+  zoom?(change: 'in' | 'out' | 'reset'): void
+  /** Opens the view's menu at a point of the window (a right click on the page). */
+  menu?(at: { x: number; y: number }): void
 }) {
   const { owner, frame, keys } = options
   const [marks, setMarks] = useState<InputMark[]>([])
   const viewRef = useRef(options.view)
   viewRef.current = options.view
+  const optionsRef = useRef(options)
+  optionsRef.current = options
+  /** A pinch's turns add up to a step of zoom. */
+  const pinch = useRef(0)
   const ownerRef = useRef(owner)
   ownerRef.current = owner
   const pressed = useRef(new Map<number, BrowserMouseButton>())
@@ -77,7 +97,7 @@ export function useBrowserInput(options: {
   const mac = viewerPlatform() === 'mac'
 
   const send = (input: WatchedBrowserInput): { seq: number; done: Promise<WatchedBrowserAck> } =>
-    options.send(input, viewRef.current.frame?.id)
+    optionsRef.current.send(input, viewRef.current.frame?.id)
 
   /** A client point at the page's CSS pixels, and in percent of the picture (for a mark). */
   const point = (event: { clientX: number; clientY: number }) => {
@@ -88,6 +108,19 @@ export function useBrowserInput(options: {
     const fy = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height))
     return { x: Math.round(fx * viewport.width * 100) / 100, y: Math.round(fy * viewport.height * 100) / 100, left: fx * 100, top: fy * 100, scale: viewport.width / rect.width }
   }
+
+  /**
+   * A press pinned to the picture it was made on: its page point and that picture's number, read now. Sent later (once
+   * the browser is taken over), it still names that picture, so the host refuses it if the page changed meanwhile.
+   */
+  const pin = (event: { clientX: number; clientY: number }): PinnedPress | undefined => {
+    const at = point(event)
+    return at ? { at, picture: viewRef.current.frame?.id } : undefined
+  }
+  /** Sends on a pinned press's picture, or on the latest one. */
+  const sender = (pinned: PinnedPress | undefined) => pinned
+    ? (input: WatchedBrowserInput) => optionsRef.current.send(input, pinned.picture)
+    : send
 
   /** A small mark where the person pressed, that settles when the host answers. */
   const mark = (sent: { seq: number; done: Promise<WatchedBrowserAck> }, at: { left: number; top: number }) => {
@@ -119,13 +152,14 @@ export function useBrowserInput(options: {
   }
 
   /** A click as a mouse makes one, at a touch's point (a tap, or a long press as a right click). */
-  const clickAt = (event: { clientX: number; clientY: number }, button: BrowserMouseButton) => {
-    const at = point(event)
+  const clickAt = (event: { clientX: number; clientY: number }, button: BrowserMouseButton, pinned?: PinnedPress) => {
+    const at = pinned?.at ?? point(event)
     if (!at) return
+    const out = sender(pinned)
     const clicks = clickCount(button, at.x, at.y)
-    send({ kind: 'pointer', type: 'move', x: at.x, y: at.y, button: 'none', buttons: 0 })
-    const down = send({ kind: 'pointer', type: 'down', x: at.x, y: at.y, button, buttons: BUTTON_BITS[button], clicks })
-    send({ kind: 'pointer', type: 'up', x: at.x, y: at.y, button, buttons: 0, clicks })
+    out({ kind: 'pointer', type: 'move', x: at.x, y: at.y, button: 'none', buttons: 0 })
+    const down = out({ kind: 'pointer', type: 'down', x: at.x, y: at.y, button, buttons: BUTTON_BITS[button], clicks })
+    out({ kind: 'pointer', type: 'up', x: at.x, y: at.y, button, buttons: 0, clicks })
     mark(down, at)
     placeKeys(at)
   }
@@ -143,14 +177,24 @@ export function useBrowserInput(options: {
     const onWheel = (event: WheelEvent) => {
       if (!ownerRef.current) return
       event.preventDefault()
-      // A pinch (or Control with the wheel) would zoom the page: not sent.
-      if (event.ctrlKey) return
+      // A pinch (or Control with the wheel) zooms the view, a step for each notch's worth: not sent.
+      if (event.ctrlKey) {
+        const zoom = optionsRef.current.zoom
+        pinch.current += event.deltaY * (event.deltaMode ? 40 : 1)
+        if (zoom && Math.abs(pinch.current) >= PINCH_STEP) {
+          zoom(pinch.current < 0 ? 'in' : 'out')
+          pinch.current = 0
+        }
+        return
+      }
       const unit = event.deltaMode === 1 ? 40 : event.deltaMode === 2 ? (viewRef.current.frame?.viewport.height ?? 720) / (frame.current?.getBoundingClientRect().height || 1) : 1
       scrollBy(event, event.deltaX * unit, event.deltaY * unit, modifiersOf(event) & ~BROWSER_MODIFIERS.ctrl)
     }
     target.addEventListener('wheel', onWheel, { passive: false })
     return () => target.removeEventListener('wheel', onWheel)
-  })
+    // Bound once: what it reads is in refs, so it is not bound again with each picture.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frame])
 
   /** Lets go of what is still down here (the window lost focus, the hold ended): the page never keeps a key or button stuck. */
   const releaseAll = () => {
@@ -212,6 +256,21 @@ export function useBrowserInput(options: {
     if (touch && !touches.current.size && !gesture.moved && !gesture.long) clickAt(event, 'left')
   }
 
+  /** A mouse button going down at a point of the picture: it stays down (a drag, a selection) until it goes up here. */
+  const pressAt = (event: { clientX: number; clientY: number; button: number; altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }, pinned?: PinnedPress) => {
+    const at = pinned?.at ?? point(event)
+    let button = BUTTONS[event.button]
+    if (!at || !button) return
+    // Control-click on a Mac is a right click, as everywhere there.
+    if (mac && event.ctrlKey && button === 'left') button = 'right'
+    pressed.current.set(event.button, button)
+    lastPoint.current = { x: at.x, y: at.y }
+    const clicks = clickCount(button, at.x, at.y)
+    const down = sender(pinned)({ kind: 'pointer', type: 'down', x: at.x, y: at.y, button, buttons: buttonsHeld(), clicks, modifiers: modifiersOf(event) & ~(mac && button === 'right' && event.ctrlKey ? BROWSER_MODIFIERS.ctrl : 0) })
+    mark(down, at)
+    placeKeys(at)
+  }
+
   /** A press on the view's own panels over the picture (the page's dialog, its file request) is theirs, not the page's. */
   const onPanel = (event: { target: EventTarget | null }) => event.target instanceof Element && Boolean(event.target.closest('.watched-browser-dialog, .watched-browser-closed'))
 
@@ -221,17 +280,7 @@ export function useBrowserInput(options: {
       event.preventDefault()
       frame.current?.setPointerCapture?.(event.pointerId)
       if (event.pointerType === 'touch') return touchDown(event)
-      const at = point(event)
-      let button = BUTTONS[event.button]
-      if (!at || !button) return
-      // Control-click on a Mac is a right click, as everywhere there.
-      if (mac && event.ctrlKey && button === 'left') button = 'right'
-      pressed.current.set(event.button, button)
-      lastPoint.current = { x: at.x, y: at.y }
-      const clicks = clickCount(button, at.x, at.y)
-      const down = send({ kind: 'pointer', type: 'down', x: at.x, y: at.y, button, buttons: buttonsHeld(), clicks, modifiers: modifiersOf(event) & ~(mac && button === 'right' && event.ctrlKey ? BROWSER_MODIFIERS.ctrl : 0) })
-      mark(down, at)
-      placeKeys(at)
+      pressAt(event)
     },
     onPointerMove(event: PointerEvent<HTMLDivElement>) {
       if (!owner || (onPanel(event) && !pressed.current.size)) return
@@ -258,9 +307,11 @@ export function useBrowserInput(options: {
       }
       if (owner) releaseAll()
     },
-    onContextMenu(event: { preventDefault(): void; target: EventTarget | null }) {
-      // The page has its own menu, if any: the app's never opens over it.
-      if (!onPanel(event)) event.preventDefault()
+    onContextMenu(event: { preventDefault(): void; target: EventTarget | null; clientX: number; clientY: number }) {
+      if (onPanel(event)) return
+      // The right click went to the page; the window's own menu never opens over it, the view's does.
+      event.preventDefault()
+      if (owner) optionsRef.current.menu?.({ x: event.clientX, y: event.clientY })
     }
   }
 
@@ -269,6 +320,12 @@ export function useBrowserInput(options: {
       if (!owner) return
       // An IME or a dead key is composing: its text comes as composition.
       if (event.nativeEvent.isComposing || event.keyCode === 229 || composing.current || event.key === 'Dead') return
+      const zoom = zoomKey(event, mac)
+      if (zoom && optionsRef.current.zoom) {
+        event.preventDefault()
+        optionsRef.current.zoom(zoom)
+        return
+      }
       const primary = mac ? event.metaKey : event.ctrlKey
       // Paste: the field gets the person's clipboard text (a paste event), only now.
       if (primary && !event.altKey && event.code === 'KeyV') return
@@ -348,5 +405,5 @@ export function useBrowserInput(options: {
     }
   }
 
-  return { marks, frameHandlers, keyHandlers, send }
+  return { marks, frameHandlers, keyHandlers, send, clickAt, pressAt, pin }
 }

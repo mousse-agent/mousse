@@ -45,10 +45,10 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     server = new MousseMcpServer({ credentials, registry, ...(options.boundary ? { boundary: options.boundary } : {}), ...(options.attribute ? { attribute: options.attribute } : {}) })
     await server.start()
     const registered = turns.register(appTurn({ threadId: 'thread-a', runId: run.runId }))
-    const bearer = (input: { runId?: string; instanceId?: string; modeCeiling?: 'plan' | 'default'; binding?: McpTurnBinding; generation?: string } = {}) =>
+    const bearer = (input: { runId?: string; instanceId?: string; binding?: McpTurnBinding; generation?: string } = {}) =>
       server!.bearerForTurn({
         threadId: 'thread-a', instanceId: input.instanceId ?? 'codex', runId: input.runId ?? run.runId,
-        modeCeiling: input.modeCeiling ?? 'default', binding: input.binding ?? 'drained_turn', generation: input.generation ?? 'codex|default|0|0'
+        binding: input.binding ?? 'drained_turn', generation: input.generation ?? 'codex|default|0|0'
       })!
     const attachment = bearer()
     return { fx, run, credentials, server, attachment, bearer, turns, registered, ...fake }
@@ -66,7 +66,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     expect(init.status).toBe(200)
     expect(init.body.result.serverInfo.name).toBe('mousse')
     expect(init.body.result.capabilities.tools).toBeTruthy()
-    expect(init.body.result.instructions).toMatch(/delegate_task/)
+    expect(init.body.result.instructions).toMatch(/thread_create with kind "subagent"/)
 
     const initialized = await rpc(server.url, attachment.token, { jsonrpc: '2.0', method: 'notifications/initialized' })
     expect(initialized.status).toBe(202)
@@ -76,9 +76,9 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     const list = await rpc(server.url, attachment.token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} })
     const names = list.body.result.tools.map((tool: { name: string }) => tool.name).sort()
     // The fake host offers no browser, skills, quick actions, web or dev GUI: only the tools it can serve are listed.
-    expect(names).toEqual(['answer_subagent', 'approval_respond', 'ask_user', 'computer_list', 'continue_subagent', 'delegate_task', 'list_subagents', 'model_list', 'publish_applet', 'queue_edit', 'queue_enqueue', 'queue_list',
-      'queue_promote_to_steer', 'queue_remove', 'queue_reorder', 'read_applet', 'task_cancel', 'task_create', 'task_list', 'task_status', 'task_update', 'thread_archive', 'thread_create', 'thread_fork',
-      'thread_interrupt', 'thread_list', 'thread_merge_back', 'thread_read', 'thread_search', 'thread_send', 'thread_steer', 'thread_update', 'thread_wait', 'withdraw_question'])
+    expect(names).toEqual(['computer_list', 'model_list', 'publish_applet', 'question_ask', 'question_withdraw', 'queue_enqueue',
+      'queue_list', 'queue_update', 'read_applet', 'request_answer', 'task_create', 'task_list', 'task_update', 'thread_archive', 'thread_create', 'thread_fork',
+      'thread_list', 'thread_read', 'thread_return', 'thread_search', 'thread_send', 'thread_stop', 'thread_update', 'thread_wait'])
 
     const read = await rpc(server.url, attachment.token, call(4, 'thread_read'))
     expect(read.body.result.isError).toBeUndefined()
@@ -141,7 +141,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
         expect(JSON.parse(read.body.result.content[0].text).threadId).toBe('thread-a')
         expect(read.body.result.content).toHaveLength(1)
         // Asking the person is the run's own: refused to a helper as to a subagent.
-        const ask = await rpc(server.url, attachment.token, withMeta(id + 10, 'ask_user', { 'claudecode/toolUseId': toolUseId }, { questions: [{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], wait: false }))
+        const ask = await rpc(server.url, attachment.token, withMeta(id + 10, 'question_ask', { 'claudecode/toolUseId': toolUseId }, { questions: [{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], wait: false }))
         expect(refusalOfResponse(ask.body)).toMatchObject({ refused: { code: 'unavailable', message: expect.stringContaining('a helper cannot use it') } })
       }
       expect(boundary.deliver).not.toHaveBeenCalled()
@@ -165,7 +165,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     it('an attribution that fails holds delegable authority only', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
       const { server, attachment } = await setup({}, { attribute: async () => { throw new Error('lost') } })
-      const ask = await rpc(server.url, attachment.token, call(1, 'ask_user', { questions: [{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], wait: false }))
+      const ask = await rpc(server.url, attachment.token, call(1, 'question_ask', { questions: [{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], wait: false }))
       expect(refusalOfResponse(ask.body)).toMatchObject({ refused: { code: 'unavailable', message: expect.stringContaining('a helper cannot use it') } })
       warn.mockRestore()
     })
@@ -260,7 +260,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     registry.register({ name: 'look', description: '', inputSchema: { type: 'object' }, access: 'reads', class: 'read', handler: () => ({ text: 'see', images: [{ data: 'AAAA', mimeType: 'image/png' }] }) })
     server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
     await server.start()
-    const { token } = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!
+    const { token } = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, binding: 'drained_turn', generation: 'g' })!
     const result = await rpc(server.url, token, call(1, 'look'))
     expect(result.body.result.content).toEqual([{ type: 'text', text: 'see' }, { type: 'image', data: 'AAAA', mimeType: 'image/png' }])
   })
@@ -285,7 +285,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     })
     server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
     await server.start()
-    const { token } = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!
+    const { token } = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, binding: 'drained_turn', generation: 'g' })!
     const result = await rpc(server.url, token, call(1, 'stale'))
     expect(result.body.error).toBeUndefined()
     expect(JSON.parse(result.body.result.content[0].text)).toEqual({
@@ -341,17 +341,12 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     // The codes are the wire contract provider runtimes see, so they are pinned literally (-32601 is JSON-RPC's method-not-found).
     expect(unknown.body.error).toMatchObject({ code: -32601, data: { reason: 'mousse_unknown_tool' } })
     // A hidden (in-process only) tool is unknown over MCP.
-    expect((await rpc(server.url, attachment.token, call(3, 'create_subagent', { name: 'a', task: 'b' }))).body.error).toMatchObject({ code: -32601 })
+    expect((await rpc(server.url, attachment.token, call(3, 'recall_subagent', { agent: 'a', task: 'b' }))).body.error).toMatchObject({ code: -32601 })
     // A tool that fails on its own input is a tool result the model can read, not a protocol error.
     const invalid = await rpc(server.url, attachment.token, call(4, 'task_update', { id: '' }))
     expect(invalid.body.error).toBeUndefined()
     expect(invalid.body.result.isError).toBe(true)
 
-    server.revokeThread('thread-a')
-    const plan = bearer({ instanceId: 'p', modeCeiling: 'plan' })
-    const ceiling = await rpc(server.url, plan.token, call(5, 'thread_fork'))
-    expect(ceiling.body.error).toBeUndefined()
-    expect(refusalOfResponse(ceiling.body)).toMatchObject({ code: 'mousse_ceiling_exceeded', refused: { code: 'lacks_capability', retry: 'after_change', lacks: 'threads.start' } })
   })
 
   describe('in-flight tool calls', () => {
@@ -375,7 +370,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
       const attach = (threadId: string) => {
         const runId = fx!.store.getActiveRun(threadId)!.runId
         turns.register(appTurn({ threadId, runId }))
-        return { runId, ...server!.bearerForTurn({ threadId, instanceId: 'p', runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })! }
+        return { runId, ...server!.bearerForTurn({ threadId, instanceId: 'p', runId, binding: 'drained_turn', generation: 'g' })! }
       }
       const callHang = (token: string, signal?: AbortSignal) => fetch(server!.url, {
         method: 'POST', signal,
@@ -425,7 +420,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
       await surviving
       expect(reasons.get('thread-b')).toBe('The Mousse MCP server stopped')
     })
-    it('compacts tools/list schemas for Antigravity bearers so delegate_task stays well inside its eager tool budget, while keeping full schemas for other providers', async () => {
+    it('compacts tools/list schemas for Antigravity bearers so thread_create (and its subagents) stays well inside its eager tool budget, while keeping full schemas for other providers', async () => {
       const { server, bearer } = await setup()
       const codex = bearer({ instanceId: 'codex', generation: 'codex|default|0|0' })
       const codexList = await rpc(server.url, codex.token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
@@ -438,20 +433,24 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
       const agyTools = agyList.body.result.tools as Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>
       expect(agyTools.map((t) => t.name)).toEqual(codexTools.map((t) => t.name))
 
-      const codexDelegate = codexTools.find((t) => t.name === 'delegate_task')!
-      const agyDelegate = agyTools.find((t) => t.name === 'delegate_task')!
+      const codexDelegate = codexTools.find((t) => t.name === 'thread_create')!
+      const agyDelegate = agyTools.find((t) => t.name === 'thread_create')!
+      // Listed first, where delegate_task was: a budget that runs out drops the tools after it, never this one.
+      expect(agyTools[0]!.name).toBe('thread_create')
       // Full schema stays untouched on non-Antigravity providers.
       expect(codexDelegate.description.length).toBeGreaterThan(1000)
       // Antigravity gets a compact schema that keeps every parameter, enum and required field intact.
       expect(agyDelegate.description.length).toBeLessThanOrEqual(120)
-      expect(JSON.stringify(agyDelegate).length).toBeLessThan(1000)
+      // Both kinds' arguments, each said once.
+      expect(JSON.stringify(agyDelegate).length).toBeLessThan(1600)
       expect(JSON.stringify(agyTools).length).toBeLessThan(JSON.stringify(codexTools).length * 0.5)
       const agyProps = (agyDelegate.inputSchema as { properties: Record<string, Record<string, unknown>>; required: string[] }).properties
       const codexProps = (codexDelegate.inputSchema as { properties: Record<string, Record<string, unknown>>; required: string[] }).properties
       expect(Object.keys(agyProps).sort()).toEqual(Object.keys(codexProps).sort())
       expect((agyDelegate.inputSchema as { required: string[] }).required).toEqual((codexDelegate.inputSchema as { required: string[] }).required)
-      expect(agyProps.workspace).toEqual({ type: 'string', enum: ['isolated', 'shared'] })
-      expect(agyProps.wake).toEqual({ type: 'string', enum: ['always', 'settled_only'] })
+      expect(agyProps.kind).toEqual({ type: 'string', enum: ['subagent', 'thread'] })
+      expect(agyProps.workspace).toMatchObject({ type: 'string', enum: expect.arrayContaining(['isolated', 'shared']) })
+      expect(agyProps.wake).toEqual({ type: 'string', enum: ['always', 'settled_only'], description: 'kind subagent only.' })
     })
   })
 })

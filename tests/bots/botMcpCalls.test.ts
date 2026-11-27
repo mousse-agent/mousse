@@ -325,14 +325,14 @@ describe('the relay on a bot\'s turn (Claude Code, Codex)', () => {
         resolve: vi.fn((_project: string | undefined, name: string) => (name === deleteRepo.name ? deleteRepo : undefined))
       } as unknown as RelayCatalog,
       manager: { isToolCallAllowed: vi.fn(), callTool: vi.fn() } as unknown as RelayHost['manager'],
-      registry: { admit: async (rawArgs) => ({ threadId: 'bot-thread', active: 'r1', turn, args: rawArgs, caller: { threadId: 'bot-thread', runId: 'r1', provider: 'claude', modeCeiling: 'default', accessLevel: 'lineage' as const }, boundToken: 'tt' }) },
+      registry: { admit: async (rawArgs) => ({ threadId: 'bot-thread', active: 'r1', turn, args: rawArgs, caller: { threadId: 'bot-thread', runId: 'r1', provider: 'claude', accessLevel: 'lineage' as const }, boundToken: 'tt' }) },
       projectPathFor: () => undefined,
       toolLedger: () => ledger as never,
       botOf: () => authority,
       // The owner's catalogue knows delete_repo, as the grant would name it: a relayed name the turn was not offered.
       botMcp: { call: (tool, args, signal, options) => mcpOver(manager).call(tool, args, signal, options), known: (name) => (name === deleteRepo.name ? { server: 'srv-github', tool: 'delete_repo', serverName: 'GitHub' } : undefined) }
     })
-    const request: McpCallRequest = { credential: { threadId: 'bot-thread', runId: 'r1', provider: 'claude', modeCeiling: 'default', accessLevel: 'lineage', binding: 'rotate', relay: { approvals: 'runtime' }, current: () => true }, toolCallId: 'mcp:c1', signal: new AbortController().signal }
+    const request: McpCallRequest = { credential: { threadId: 'bot-thread', runId: 'r1', provider: 'claude', accessLevel: 'lineage', binding: 'rotate', relay: { approvals: 'runtime' }, current: () => true }, toolCallId: 'mcp:c1', signal: new AbortController().signal }
     return { handler, request, manager, ledger, credential: { threadId: 'bot-thread', relay: { approvals: 'runtime' } } as CredentialRecord }
   }
 
@@ -390,7 +390,7 @@ describe('Pi: the user MCP proxy on a bot\'s turn (real McpManager, catalogue an
     const registry = new ToolRegistry({ activeRunId: () => 'r1', turns, userMcp: userMcpProxy(manager), botMcp: mcp })
     turns.register(appTurn({ threadId: 'bot-thread', runId: 'r1', turnToken: 'tt', bot: authority }))
     const call = (name: string) => registry.call(name, { [TURN_TOKEN_KEY]: 'tt' }, {
-      credential: { threadId: 'bot-thread', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true },
+      credential: { threadId: 'bot-thread', runId: 'r1', provider: 'pi', accessLevel: 'lineage', binding: 'per_call', current: () => true },
       toolCallId: 'mcp:c1', signal: new AbortController().signal
     })
     return { registry, call, ran, checks, servers0, offered, catalog, mcp, manager }

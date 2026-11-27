@@ -118,7 +118,7 @@ describe('reopening a saved session', () => {
         .onRequest(methods.agent.session.load, async (c) => {
           const sessionId = c.params.sessionId
           if (replaysOptions) await c.client.notify(methods.client.session.update, { sessionId, update: { sessionUpdate: 'config_option_update', configOptions: [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'fast', options: [{ value: 'fast', name: 'Fast' }, { value: 'deep', name: 'Deep' }] }] } as never })
-          await c.client.notify(methods.client.session.update, { sessionId, update: { sessionUpdate: 'current_mode_update', currentModeId: 'code' } as never })
+          await c.client.notify(methods.client.session.update, { sessionId, update: { sessionUpdate: 'current_mode_update', currentModeId: 'plan' } as never })
           await c.client.notify(methods.client.session.update, { sessionId, update: message('replayed answer') as never })
           // Never answers: the replay going quiet opens the gate.
           return new Promise(() => {})
@@ -139,10 +139,11 @@ describe('reopening a saved session', () => {
       launchGeneration: () => 0, signInGeneration: () => 0, markSignedOut: () => {}, signInRequiredMessage: 'Sign in'
     })
     try {
-      await sessions.chat({ threadId: 't', instanceId: 'acp:fake', cwd: process.cwd(), model: 'deep', mode: 'plan', prompt: 'next', onText: () => {} })
+      // An older build left the session in the agent's own plan mode: the turn puts it back in the default mode.
+      await sessions.chat({ threadId: 't', instanceId: 'acp:fake', cwd: process.cwd(), model: 'deep', prompt: 'next', onText: () => {} })
       expect(calls).toEqual([
         ['set_config_option', { sessionId: 'old-session', configId: 'model', value: 'deep' }],
-        ['set_mode', { sessionId: 'old-session', modeId: 'plan' }],
+        ['set_mode', { sessionId: 'old-session', modeId: 'code' }],
         ['prompt', 'old-session']
       ])
       // What the session said when it opened is kept for the next reopen.

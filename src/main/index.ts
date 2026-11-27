@@ -24,6 +24,8 @@ import {
   getWindowShortcuts,
   registerGuiIpc
 } from './ipc/registerGuiIpc'
+import { isAppletWebviewSource } from './applets/AppletRuntimeManager'
+import { adoptAppletWebview, attachAppletWebview } from './applets/registerAppletIpc'
 import { MOUSSE_MEDIA_SCHEME_PRIVILEGES } from './ipc/mediaStream'
 import { registerFontIpc } from './fonts/registerFontIpc'
 import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
@@ -31,6 +33,7 @@ import { surfaceToWindowBackground } from '../shared/accentPalette'
 import { appearanceSurfaceBase } from '../shared/themeSurfaces'
 import { startupAppearanceArgument } from '../shared/startupAppearance'
 import { homeFolderArgument } from '../shared/homeFolderArgument'
+import { REMOTE_UPDATE_APP_METHODS } from '../shared/remoteUpdates'
 import { readStartupAppearance } from './startupAppearance'
 import { refreshWindowChrome } from './windowsChrome'
 import { MAC_VIBRANCY } from './windowMaterial'
@@ -114,16 +117,14 @@ const isChatgptTokenCommand = isCliMode && isChatgptTokenArgv(electronCliArgv())
 // they cannot.
 const isSshProxyCommand = isCliMode && isSshProxyArgv(electronCliArgv())
 if (!isChatgptTokenCommand && !isSshProxyCommand) configureElectronContext(app, isCliMode ? electronCliArgv() : [])
-// A CLI command or the daemon opens no window: no GPU or network service process for it.
+// A CLI command or the daemon opens no window: no GPU or network service process, and no Dock icon, for it.
 if (isCliMode) configureWindowlessElectron(app)
 
 if (isChatgptTokenCommand) {
-  app.dock?.hide()
   void import('../cli/fastpath/chatgptToken')
     .then(({ runChatgptToken }) => runChatgptToken(electronCliArgv()))
     .then((code) => app.exit(code), () => app.exit(1))
 } else if (isSshProxyCommand) {
-  app.dock?.hide()
   void import('../cli/fastpath/sshProxy')
     .then(({ runSshProxy }) => runSshProxy(electronCliArgv()))
     .then((code) => app.exit(code), () => app.exit(1))
@@ -351,6 +352,11 @@ function startGuiApp(): void {
     })
 
     mainWindow.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+      // An applet page goes to its applet's own session, or nowhere; never the browser's path.
+      if (isAppletWebviewSource(params.src)) {
+        if (!mainWindow || !attachAppletWebview(mainWindow.webContents, webPreferences, params)) event.preventDefault()
+        return
+      }
       // Enforce browser isolation regardless of attributes supplied by the renderer.
       delete webPreferences.preload
       const boundProfile = mainWindow
@@ -369,6 +375,7 @@ function startGuiApp(): void {
     })
     const browserOwner = mainWindow
     browserOwner.webContents.on('did-attach-webview', (_event, guest) => {
+      if (adoptAppletWebview(browserOwner.webContents, guest)) return
       configureBrowserPopupPolicy(guest, browserOwner)
       attachedBrowserHost?.observeGuest(browserOwner.webContents, guest)
       attachGuestShortcuts(guest, browserOwner.webContents)
@@ -513,6 +520,12 @@ function startGuiApp(): void {
           // The installer is running: quit even when a window would hold the quit back.
           onInstallStarted: () => {
             setTimeout(() => app.exit(0), INSTALL_QUIT_DEADLINE_MS).unref()
+          },
+          runningTurns: async () => {
+            if (!guiMms) throw new Error('No service')
+            const answer = await guiMms.request<{ runningTurns?: unknown }>(REMOTE_UPDATE_APP_METHODS.turns, {}, 5_000)
+            if (!Number.isSafeInteger(answer?.runningTurns) || (answer.runningTurns as number) < 0) throw new Error('No count')
+            return answer.runningTurns as number
           },
           recoverInstall: async () => {
             // The tray's quit began: nothing starts again.

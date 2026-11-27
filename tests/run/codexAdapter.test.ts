@@ -12,7 +12,7 @@ import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { CodexAppServerExitedError } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
-import { CodexTurnFailure, createCodexProviderService, type CodexProviderService, type CodexServiceDependencies } from '../../src/mms/harness/vendors/codex/CodexProviderService'
+import { CodexTurnFailure, createCodexProviderService, type CodexChatInput, type CodexProviderService, type CodexServiceDependencies } from '../../src/mms/harness/vendors/codex/CodexProviderService'
 import { STOP_GRACE_MS } from '../../src/mms/harness/stopProcesses'
 import { decideUsageLimit } from '../../src/mms/run/pausePolicy'
 import { CodexAdapter } from '../../src/mms/harness/drivers/codex/adapter'
@@ -857,19 +857,19 @@ describe('CodexAdapter', () => {
     })
   })
 
-  it('runs plan turns read-only and declines approvals without asking', async () => {
+  it('runs a read-only child read-only and declines approvals without asking', async () => {
     const replay = transport([
       ...handshake(),
       ...threadStart(4, threadParams({ approvalPolicy: 'on-request', sandbox: 'read-only' })),
-      ...turnStart(5, 'plan it', 'turn-1', { approvalPolicy: 'on-request', sandboxPolicy: { type: 'readOnly', networkAccess: false } }),
+      ...turnStart(5, 'check it', 'turn-1', { approvalPolicy: 'on-request', sandboxPolicy: { type: 'readOnly', networkAccess: false } }),
       inn({ id: 'srv-1', method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: 'cmd-1', startedAtMs: 0, environmentId: null, command: 'touch x' } }),
       out({ id: 'srv-1', result: { decision: 'decline' } }),
-      ...message('msg-1', ['Plan']),
+      ...message('msg-1', ['Checked']),
       completed('completed')
     ])
     const codex = service(replay)
     const asked = answerQuestions(() => ({ permission: 'allow' }))
-    await new CodexAdapter(() => codex).startTurn(input({ prompt: 'plan it', mode: 'plan' }), recordingSink(), control(), host())
+    await new CodexAdapter(() => codex).startTurn(input({ prompt: 'check it', child: { readOnly: true } }), recordingSink(), control(), host())
     replay.assertDone()
     expect(asked).toEqual([])
   })
@@ -1314,6 +1314,46 @@ describe('CodexAdapter', () => {
       expect(decide(refused)).toBeUndefined()
       const limited = await turn(failing(usageLimitError({ provider: 'codex', resetsAt, estimated: false }, new CodexTurnFailure('Too many requests', { message: 'Too many requests', codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 429 } } }))), false)
       expect(decide(limited)).toMatchObject({ action: 'pause' })
+    })
+
+    it('a failure after the Codex thread opened says the session is kept; a turn that continues it resumes that thread first', async () => {
+      const envelope = JSON.stringify({ error: { message: 'Bad Request', type: null, code: null, param: null }, status: 400 }, null, 2)
+      const order: string[] = []
+      const client = {
+        configured: () => true,
+        failedThreadKept: () => true,
+        commitInterrupted: (_threadId: string, history: string) => void order.push(`commit:${history}`),
+        chat: async (chatInput: CodexChatInput) => {
+          order.push(`chat:${chatInput.history}`)
+          throw new CodexTurnFailure(envelope, { message: envelope, codexErrorInfo: 'other' })
+        }
+      } as unknown as CodexProviderService
+      const sink = recordingSink()
+      const kept = vi.fn()
+      const context = { ...host().context, prepareNativeContext: () => ({ messages: [], nativeHistory: 'compacted' }), nativeHistoryNow: () => 'H1 + request' }
+      const failed = await new CodexAdapter(() => client, { managed: true }).startTurn(input({ nativeHistory: 'H1' }), { ...sink, sessionKept: kept }, control(), { ...host(), context }).catch((caught: unknown) => caught)
+      expect(failed).toMatchObject({ code: 'provider_api_error', message: '400 · Bad Request' })
+      expect(kept).toHaveBeenCalledTimes(1)
+      // A failed turn is not fingerprinted by itself: the thread's next ordinary turn starts fresh, as before.
+      expect(order).toEqual(['chat:compacted'])
+
+      order.length = 0
+      await new CodexAdapter(() => client, { managed: true }).startTurn(input({ nativeHistory: 'H1 + request', continuesFailedRequest: true, prompt: 'continue' }), recordingSink(), control(), { ...host(), context }).catch(() => undefined)
+      // The continuation resumes at the history it carries, never a compacted one.
+      expect(order).toEqual(['commit:H1 + request', 'chat:H1 + request'])
+    })
+
+    it('a stopped turn does not say its session is kept for a continuation', async () => {
+      const controller = new AbortController()
+      const client = {
+        configured: () => true,
+        failedThreadKept: () => true,
+        commitInterrupted: () => {},
+        chat: async () => { controller.abort(); throw new Error('stopped') }
+      } as unknown as CodexProviderService
+      const kept = vi.fn()
+      await new CodexAdapter(() => client, { managed: true }).startTurn(input({ signal: controller.signal }), { ...recordingSink(), sessionKept: kept }, control(), host()).catch(() => undefined)
+      expect(kept).not.toHaveBeenCalled()
     })
 
     it('a managed Codex failure that is not a usage limit does not pause', async () => {
@@ -1814,7 +1854,7 @@ describe('CodexAdapter', () => {
     ]
 
     /** Cue actions: `steer` (a person's message arrives), `drained` (wait until the adapter drained it), `ask`. */
-    /** Mousse's own questions asked in the thread (`ask` cue), as its MCP server's `ask_user` asks them. */
+    /** Mousse's own questions asked in the thread (`ask` cue), as its MCP server's `question_ask` asks them. */
     const asked: Array<Promise<unknown>> = []
     const cues = (hold: HoldControl) => async (frame: unknown) => {
       const action = frame as { action: string; text?: string }
@@ -1914,7 +1954,7 @@ describe('CodexAdapter', () => {
     })
 
     describe('a question for the person: the steer cuts and answers it', () => {
-      const mousseAsk = (status: string, extra: Record<string, unknown> = {}) => ({ type: 'mcpToolCall', id: 'mcp-ask', server: 'mousse', tool: 'ask_user', arguments: { questions: [] }, status, result: null, error: null, durationMs: null, ...extra })
+      const mousseAsk = (status: string, extra: Record<string, unknown> = {}) => ({ type: 'mcpToolCall', id: 'mcp-ask', server: 'mousse', tool: 'question_ask', arguments: { questions: [] }, status, result: null, error: null, durationMs: null, ...extra })
 
       it('a steer during Codex\'s own question (requestUserInput) cuts and answers it as the person', async () => {
         const { events } = await run([
@@ -1935,7 +1975,7 @@ describe('CodexAdapter', () => {
         expect(questions.listPendingForThread('thread-1')).toEqual([])
       })
 
-      it('a steer during Mousse\'s ask_user goes in at once, with no wait for the window', async () => {
+      it('a steer during Mousse\'s question_ask goes in at once, with no wait for the window', async () => {
         asked.length = 0
         const { hold, events } = await run([
           ...head(),

@@ -23,10 +23,10 @@ import { compatibilityFields } from '../compatibility'
 import { CODEX_NATIVE_TOOLS } from '../vendors/codex/botApprovals'
 import { CODEX_BOT_CHECKED_VERSIONS } from '../vendors/codex/childPolicy'
 import { codexBotRunsOnNote } from '../../../shared/harness/codexBotVersion'
+import { legacyOneShotRoute } from '../oneShot/routes'
 
 export const CODEX_CAPS: HarnessCaps = Object.freeze({
   ...CODEX_CAPABILITIES,
-  planMode: true,
   contextUsage: 'reported',
   // Codex asks Mousse before each tool under the approval policy Mousse sets.
   toolControl: 'approval_only',
@@ -156,7 +156,15 @@ function readAuth(service: CodexProviderService, status: Awaited<ReturnType<Code
           ...(owned.command ? { signInCommand: owned.command } : {}),
           ...(owned.inApp ? { canSignIn: true } : {})
         }
-      return { state: 'signed_out', methodLabel, message: status.message, signInCommand: SIGN_IN_COMMAND }
+      // The user's own home: Codex's browser sign-in from Mousse (`service.login`), with `codex login` kept as the fallback.
+      // A Codex signed in with an API key keeps saying so: signing in replaces that sign-in with ChatGPT.
+      return {
+        state: 'signed_out',
+        methodLabel,
+        message: status.state === 'signed_out' && status.message && /without a ChatGPT account/.test(status.message) ? status.message : 'Not signed in. Choose Sign in to sign in.',
+        signInCommand: SIGN_IN_COMMAND,
+        canSignIn: true
+      }
     default:
       return { state: 'unknown', methodLabel, ...(status.message ? { message: status.message } : {}) }
   }
@@ -219,7 +227,8 @@ interface OwnedService {
 }
 
 /**
- * Codex through `codex app-server`. The built-in entry reuses the terminal `codex login`; a managed
+ * Codex through `codex app-server`. The built-in entry signs in on the user's own home with Codex's
+ * app-server browser sign-in (an older Codex: the terminal `codex login`, then a check); a managed
  * entry (`setup: managed`) runs Mousse's pinned Codex in its own home and signs in with ChatGPT in
  * Mousse (`codex/managedRuntime.ts`). Any other added entry runs the user's own Codex CLI: with a
  * home of its own (another account) it signs in and out there from Mousse with Codex's own device
@@ -292,7 +301,8 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     canInstall: true,
     customModels: true,
     // Chat titles, pull request drafts and commit messages: one turn on an ephemeral thread (`service.oneShot`).
-    oneShot: true,
+    // Until its own slice, on its own one-shot code (`DriverRuntime.oneShot`), admitted with no facts claimed.
+    oneShotRoute: legacyOneShotRoute('codex'),
     methodLabel: 'ChatGPT sign-in',
     // Codex forks a loaded thread when its bearer changes, so the bearer is kept after turns proven drained.
     mcpTurnBinding: 'drained_turn',
@@ -377,7 +387,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
    * process of it (status checks, turns, the sign-in and the sign-out) runs with its own
    * `CODEX_HOME` and without any credential from Mousse's environment or its own settings
    * (`ownedLaunchEnv`), and Mousse signs it in with `codex login --device-auth` and out with
-   * `codex logout` there. On the user's home it runs as the built-in does, with the terminal sign-in.
+   * `codex logout` there. On the user's home it runs as the built-in does, with Codex's browser sign-in.
    */
   function ownedRuntime(context: DriverContext): DriverRuntime {
     const privateHome = context.env.home

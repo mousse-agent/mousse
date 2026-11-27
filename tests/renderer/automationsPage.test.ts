@@ -17,7 +17,7 @@ import { ownedWhenText, skippedDates, whenText, zonedDayOffset } from '../../src
 import { botComputerOptions } from '../../src/renderer/components/bots/BotRunsOn'
 import { whenSentence } from '../../src/renderer/components/automations/AutomationDetail'
 import { openEdit, setInboxClient, useInboxStore } from '../../src/renderer/components/automations/inbox/inboxStore'
-import { cronFormOf, cronOfForm, draftFromJob, heldPermissionMode, modelGroups, newDraft, patchOf, validateDraft, type ScheduledCatalog } from '../../src/renderer/components/scheduled/jobDraft'
+import { cronFormOf, cronOfForm, draftFromJob, heldPermissionMode, newDraft, patchOf, validateDraft, type ScheduledCatalog } from '../../src/renderer/components/scheduled/jobDraft'
 import { clockText, describeSchedule, humanCron, nameFromPrompt } from '../../src/renderer/components/scheduled/scheduledLabels'
 
 const openThread = vi.hoisted(() => vi.fn(async (_threadId: string) => undefined))
@@ -99,7 +99,7 @@ describe('labels', () => {
   })
 
   it('words the detail\'s When', () => {
-    const draft = (patch: Partial<ReturnType<typeof draftFromJob>>) => ({ ...draftFromJob(job(), catalog, providers), ...patch })
+    const draft = (patch: Partial<ReturnType<typeof draftFromJob>>) => ({ ...draftFromJob(job()), ...patch })
     expect(whenSentence(draft({ scheduleKind: 'cron', expr: '0 9 * * 1-5' }))).toBe(`Every weekday at ${clockText(9, 0)}`)
     expect(whenSentence(draft({ scheduleKind: 'interval', minutes: '30' }))).toBe('Every 30 minutes')
     expect(whenSentence(draft({ scheduleKind: 'manual' }))).toBe('When you run it')
@@ -108,11 +108,11 @@ describe('labels', () => {
 
 // ── The page ──────────────────────────────────────────────────────────────────────────────────
 
-const providers = [{ id: 'anthropic', instanceId: 'claude:main', label: 'Claude', models: [{ id: 'sonnet', label: 'Sonnet' }] }] as unknown as LlmProviderOption[]
+const providers = [{ id: 'anthropic', instanceId: 'claude:main', label: 'Claude', models: [{ id: 'sonnet', label: 'Sonnet', efforts: ['low', 'high'], defaultEffort: 'high', thinkingOff: false }] }] as unknown as LlmProviderOption[]
 const projects = [{ id: 'p1', name: 'mousse', path: '/work/mousse', createdAt: '', order: 0 }] as Project[]
 /** The threads the pickers list (a test that needs a thread with a pull request puts one here). */
 let catalogThreads: Thread[] = []
-const catalog: ScheduledCatalog = { models: modelGroups(providers), projects, threads: [], defaultPermissionMode: 'accept_edits' }
+const catalog: ScheduledCatalog = { providers, projects, threads: [], defaultPermissionMode: 'accept_edits' }
 
 function job(patch: Partial<ScheduledJob> = {}): ScheduledJob {
   return { id: 'j1', name: 'Nightly', prompt: 'Check CI', schedule: { kind: 'interval', minutes: 30 }, enabled: true, state: 'scheduled', nextRunAt: new Date(Date.now() + 3_600_000).toISOString(), createdAt: '', updatedAt: '', ...patch }
@@ -120,11 +120,11 @@ function job(patch: Partial<ScheduledJob> = {}): ScheduledJob {
 
 describe('job draft', () => {
   it('round-trips a job to an empty patch, and sends a Tell me change alone', () => {
-    const initial = draftFromJob(job({ projectId: 'p1', tellMe: 'every' }), catalog, providers)
+    const initial = draftFromJob(job({ projectId: 'p1', tellMe: 'every' }))
     expect(initial.tellMe).toBe('every')
-    expect(patchOf(initial, initial, catalog)).toEqual({})
-    expect(patchOf(initial, { ...initial, tellMe: 'needs_you' }, catalog)).toEqual({ tellMe: 'needs_you' })
-    expect(draftFromJob(job(), catalog, providers).tellMe).toBe('look')
+    expect(patchOf(initial, initial)).toEqual({})
+    expect(patchOf(initial, { ...initial, tellMe: 'needs_you' })).toEqual({ tellMe: 'needs_you' })
+    expect(draftFromJob(job()).tellMe).toBe('look')
   })
 
   it('reads the plain forms of the When builder from cron and writes them back', () => {
@@ -146,10 +146,10 @@ describe('job draft', () => {
   })
 
   it('sends a mode in a patch, and null to clear it', () => {
-    const initial = draftFromJob(job({ permissionMode: 'ask', permissionCeiling: 'full' }), catalog, providers)
-    expect(patchOf(initial, { ...initial, permissionMode: 'accept_edits' }, catalog)).toEqual({ permissionMode: 'accept_edits' })
-    expect(patchOf(initial, { ...initial, permissionMode: '' }, catalog)).toEqual({ permissionMode: null })
-    expect(patchOf(initial, { ...initial, name: 'Renamed' }, catalog)).toEqual({ name: 'Renamed' })
+    const initial = draftFromJob(job({ permissionMode: 'ask', permissionCeiling: 'full' }))
+    expect(patchOf(initial, { ...initial, permissionMode: 'accept_edits' })).toEqual({ permissionMode: 'accept_edits' })
+    expect(patchOf(initial, { ...initial, permissionMode: '' })).toEqual({ permissionMode: null })
+    expect(patchOf(initial, { ...initial, name: 'Renamed' })).toEqual({ name: 'Renamed' })
   })
 })
 
@@ -311,6 +311,8 @@ describe('Edit details, from the inbox', () => {
       throw new Error(method)
     })
     await openForm('job:j1')
+    // A request starts it: When says so, not "When you run it".
+    expect($('[data-testid="automation-when"]')?.textContent).toBe('On request')
     expect($$('[data-testid="request-field"]').map((entry) => entry.textContent)).toEqual(['ref'])
     const prompt = $<HTMLTextAreaElement>('textarea.scheduled-prompt')!
     prompt.setSelectionRange(prompt.value.length, prompt.value.length)
@@ -375,6 +377,23 @@ describe('Edit details, from the inbox', () => {
     expect($('[data-testid="request-refusal"]')?.textContent).toMatch(/^Keep it first/)
   })
 
+  it('says what starts an automation with no clock: a request draft opens on its URL setup, a CLI one names its command', async () => {
+    const draftState = { draft: true as const, draftId: 'd1', problems: ['Set up its request URL in Edit details › Request URL.'], request: true as const }
+    const draft = job({ id: 'd1', name: 'Triage', prompt: 'Triage {{body.issue}}', schedule: { kind: 'manual' }, nextRunAt: null, enabled: false, draft: draftState })
+    const cli = job({ id: 'c1', name: 'Ship', schedule: { kind: 'manual' }, nextRunAt: null, cliName: 'ship' })
+    const mousse = await mount([item({ key: 'job:d1', name: 'Triage', trigger: 'request' }), item({ key: 'job:c1', name: 'Ship', trigger: 'on_demand', cliName: 'ship' })], [draft, cli])
+    mousse.scheduled.webhook.enable.mockResolvedValue({ job: draft, secret: 'whsec_shown_once', url: 'http://127.0.0.1:18790/hooks/d1', listening: true })
+    await openForm('job:d1')
+    expect($('[data-testid="automation-when"]')?.textContent).toBe('On request')
+    expect($$('[data-testid="request-field"]').map((entry) => entry.textContent)).toEqual(['issue'])
+    // More is open on what keeps Turn on off.
+    await click($('[data-testid="request-enable"]'))
+    expect(mousse.scheduled.webhook.enable).toHaveBeenCalledWith('d1')
+    expect($('[data-testid="request-secret"]')?.textContent).toBe('whsec_shown_once')
+    await openForm('job:c1')
+    expect($('[data-testid="automation-when"]')?.textContent).toBe('From the CLI · ship')
+  })
+
   it('shows the secret once after Set up, and the curl line signed with it', async () => {
     const stored = job({ id: 'j1', name: 'Deploy preview', prompt: 'Deploy {{body.ref}}', schedule: { kind: 'manual' }, nextRunAt: null })
     const mousse = await mount([item({ key: 'job:j1', name: 'Deploy preview', trigger: 'on_demand' })], [stored])
@@ -395,14 +414,30 @@ describe('Edit details, from the inbox', () => {
     expect($('[data-testid="automation-detail"]')).not.toBeNull()
     expect(formRows()).toEqual([['When', 'Every 30 minutes'], ['Who', 'Pip'], ['Task', 'Tell me if it rains'], ['May', "Pip's grant View"], ['Tell me', 'Worth a look'], ['Next', expect.stringMatching(/Why\?$/)]])
     expect($('[aria-label="Where"]')).toBeNull()
-    expect([...document.querySelectorAll('button')].some((button) => button.textContent === 'Run now')).toBe(false)
+    // Run now starts one run in the bot's lane, as for any automation.
+    expect([...document.querySelectorAll('button')].some((button) => button.textContent === 'Run now')).toBe(true)
     expect($('[data-testid="automation-may-bot"]')?.textContent).toContain("Pip's grant")
     await click($('[data-testid="automation-when"]'))
+    // A schedule the bot added itself repeats.
     expect($$('[role="radiogroup"][aria-label="When"] [role="radio"]').map((entry) => entry.textContent)).toEqual(['Every…', 'Daily', 'Weekly', 'Cron'])
     await click($('[aria-labelledby$="tell-label"]'))
     await click(option('Needs you'))
     await click([...document.querySelectorAll('button')].find((button) => button.textContent === 'Save'))
     expect(mousse.scheduled.update).toHaveBeenCalledWith('b--s', { tellMe: 'needs_you' })
+  })
+
+  it('a bot\'s automation you added runs on any When: On demand saves, and it can get a request URL', async () => {
+    const stored = job({ id: 'b--s', name: 'Weather', prompt: 'Tell me if it rains', schedule: { kind: 'interval', minutes: 30 }, threadId: 'bot-schedule:b', bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' } })
+    const pip = { kind: 'bot' as const, name: 'Pip', look: { colour: 'teal', accessory: 'none' } as const }
+    const mousse = await mount([item({ key: 'job:b--s', name: 'Weather', who: pip, mayIsGrant: true, tellMe: 'look', link: { kind: 'job', jobId: 'b--s', botId: 'b' } })], [stored])
+    await openForm('job:b--s')
+    await click($('[data-testid="automation-when"]'))
+    expect($$('[role="radiogroup"][aria-label="When"] [role="radio"]').map((entry) => entry.textContent)).toEqual(['Every…', 'Daily', 'Weekly', 'Cron', 'Once', 'On demand'])
+    await click($$('[role="radiogroup"][aria-label="When"] [role="radio"]').find((entry) => entry.textContent === 'On demand'))
+    await click([...document.querySelectorAll('button')].find((button) => button.textContent === 'Save'))
+    expect(mousse.scheduled.update).toHaveBeenCalledWith('b--s', expect.objectContaining({ schedule: { kind: 'manual' } }))
+    await click($('[aria-controls$="more"]'))
+    expect($('[data-testid="request-row"]')).not.toBeNull()
   })
 
   it('a said line always tells and shows its end on the Automations page', async () => {
@@ -412,6 +447,34 @@ describe('Edit details, from the inbox', () => {
     expect(document.body.textContent).toContain('Always, like a reminder')
     expect($('[aria-labelledby$="tell-label"]')).toBeNull()
     expect($('[data-testid="automation-bot-end"]')?.textContent).toContain('Ends')
+  })
+
+  const whoPicker = () => $<HTMLButtonElement>('[data-testid="automation-who"] .settings-model-btn')!
+  const save = () => click([...document.querySelectorAll('button')].find((button) => button.textContent === 'Save'))
+
+  it('picks Who in the app\'s model picker: a model at a level saves on its entry', async () => {
+    const mousse = await mount([item({ key: 'job:j1', name: 'Nightly' })], [job({ id: 'j1', name: 'Nightly', projectId: 'p1' })])
+    await openForm('job:j1')
+    const picker = whoPicker
+    expect(picker().getAttribute('aria-label')).toBe('Who: Claude')
+    await click(picker())
+    await click([...document.querySelectorAll<HTMLElement>('[role="option"]')].find((entry) => entry.textContent!.includes('Sonnet')))
+    await click([...document.querySelectorAll<HTMLElement>('.model-picker-run-settings [role="menuitemradio"]')].find((entry) => entry.textContent!.startsWith('Low')))
+    expect(picker().getAttribute('aria-label')).toBe('Who: Sonnet · Low')
+    await save()
+    expect(mousse.scheduled.update).toHaveBeenLastCalledWith('j1', { selection: { instanceId: 'claude:main', llmProvider: 'anthropic', model: 'sonnet', effort: 'low', name: 'Sonnet' } })
+  })
+
+  it('opens a job on its model at its level, and the menu\'s default-agent choice clears it', async () => {
+    const picker = whoPicker
+    const onModel = await mount([item({ key: 'job:j2', name: 'Weekly' })], [job({ id: 'j2', name: 'Weekly', projectId: 'p1', selection: { instanceId: 'claude:main', llmProvider: 'anthropic', model: 'sonnet', effort: 'high' } })])
+    await openForm('job:j2')
+    expect(picker().getAttribute('aria-label')).toBe('Who: Sonnet · High')
+    await click(picker())
+    await click([...document.querySelectorAll('.model-picker-clear')].find((button) => button.textContent === 'Claude'))
+    expect(picker().getAttribute('aria-label')).toBe('Who: Claude')
+    await save()
+    expect(onModel.scheduled.update).toHaveBeenLastCalledWith('j2', { selection: null })
   })
 
   it('shows who actually ran each run, and when its saved agent changed since the run before', async () => {

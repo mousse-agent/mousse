@@ -1389,7 +1389,7 @@ describe('Pi cuts in (stub Pi)', () => {
       const pending = run(engine, t)
       await vi.waitFor(() => expect(promptsIn(cwd)).toEqual(['hi']), { timeout: 10_000 })
       await sleep(200)
-      // A Mousse tool's question (an `ask_user`) is pending on the thread; Pi asks nothing.
+      // A Mousse tool's question (an `question_ask`) is pending on the thread; Pi asks nothing.
       h.steer('use pnpm')
       const result = await pending
       expect(result.aborted).toBeFalsy()

@@ -3,7 +3,6 @@ import { isAgentAccessLevel, type AgentAccessLevel } from '../../../shared/setti
 import { str, type Row } from '../db/rows'
 import { fail } from '../db/RunStoreError'
 import type { RunStore } from '../RunStore'
-import type { ModeCeiling } from '../types'
 import type { McpTurnBinding } from './appTools/registry'
 import type { RelayGrant } from './relay/types'
 
@@ -21,10 +20,8 @@ export interface CredentialRecord {
   /** The run the credential acts for: re-bound only by `bearerForTurn`, never by a call. */
   runId: string
   provider: string
-  modeCeiling: ModeCeiling
   /**
-   * The agent access level the run's turn was granted (SPEC §15.1), re-pointed with the run like the
-   * ceiling. The call-time check narrows it by the profile's setting as it is then.
+   * The agent access level the run's turn was granted (SPEC §15.1), re-pointed with the run. The call-time check narrows it by the profile's setting as it is then.
    */
   accessLevel: AgentAccessLevel
   /**
@@ -55,7 +52,6 @@ export interface BearerTurn {
   /** The provider instance the turn runs on. */
   instanceId: string
   runId: string
-  modeCeiling: ModeCeiling
   /** The level the turn was granted; absent, or anything but a known level, is `lineage`. */
   accessLevel?: AgentAccessLevel
   binding: McpTurnBinding
@@ -127,13 +123,12 @@ export class McpCredentials {
   constructor(private readonly store: RunStore) {}
 
   /**
-   * The turn's bearer: the epoch's live credential re-bound to `runId` and the turn's ceiling when the
+   * The turn's bearer: the epoch's live credential re-bound to `runId` and the turn's access level when the
    * binding allows reuse, else a fresh one in a new epoch when the runtime changed or the binding
    * rotates. Live credentials of the thread for another instance are revoked (instance switch), as is
    * one this process cannot hand out again.
    */
   bearerForTurn(input: BearerTurn): { token: string; tokenHash: string; reused: boolean; epoch: number } {
-    if (input.modeCeiling !== 'plan' && input.modeCeiling !== 'default') fail('bad_request', 'modeCeiling must be plan or default.')
     if (!TURN_BINDINGS.has(input.binding)) fail('bad_request', 'binding must be per_call, drained_turn or rotate.')
     return this.db.transaction(() => {
       const key = epochKey(input.threadId, input.instanceId)
@@ -159,8 +154,8 @@ export class McpCredentials {
       for (const tokenHash of stale) this.revokeHash(tokenHash)
       if (!reusable) return { ...this.mint({ ...input, epoch }), reused: false, epoch }
       this.db
-        .statement('UPDATE credentials SET run_id = ?, mode_ceiling = ?, access_level = ?, last_seen_at = ? WHERE token_hash = ?')
-        .run(input.runId, input.modeCeiling, grantedLevel(input.accessLevel), new Date(now).toISOString(), reusable.record.tokenHash)
+        .statement('UPDATE credentials SET run_id = ?, access_level = ?, last_seen_at = ? WHERE token_hash = ?')
+        .run(input.runId, grantedLevel(input.accessLevel), new Date(now).toISOString(), reusable.record.tokenHash)
       this.calls.set(reusable.record.tokenHash, { runId: input.runId, received: 0, running: 0 })
       const meta = this.meta.get(reusable.record.tokenHash)
       if (meta) this.meta.set(reusable.record.tokenHash, withRelay({ epoch: meta.epoch, binding: meta.binding }, input.relay))
@@ -172,12 +167,10 @@ export class McpCredentials {
    * A fresh credential for a run in the given epoch (default: the current one of thread and
    * instance). Tests and `bearerForTurn` use it; a turn takes its bearer from `bearerForTurn`.
    */
-  mint(input: { threadId: string; runId: string; provider?: string; instanceId?: string; modeCeiling: ModeCeiling; accessLevel?: AgentAccessLevel; binding?: McpTurnBinding; epoch?: number; relay?: RelayGrant }): {
+  mint(input: { threadId: string; runId: string; provider?: string; instanceId?: string; accessLevel?: AgentAccessLevel; binding?: McpTurnBinding; epoch?: number; relay?: RelayGrant }): {
     token: string
     tokenHash: string
   } {
-    if (input.modeCeiling !== 'plan' && input.modeCeiling !== 'default')
-      fail('bad_request', 'modeCeiling must be plan or default.')
     const provider = input.instanceId ?? input.provider
     if (!provider) fail('bad_request', 'A credential needs the provider instance it runs on.')
     const binding = input.binding ?? 'rotate'
@@ -188,11 +181,12 @@ export class McpCredentials {
     const now = this.now()
     this.db
       .statement(
+        // mode_ceiling is a retired column (Plan mode is gone): every row says default, and nothing reads it.
         `INSERT INTO credentials(token_hash, thread_id, run_id, provider, mode_ceiling, access_level,
            created_at, revoked_at, last_seen_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, NULL, ?)`
+         VALUES(?, ?, ?, ?, 'default', ?, ?, NULL, ?)`
       )
-      .run(tokenHash, input.threadId, input.runId, provider, input.modeCeiling, grantedLevel(input.accessLevel), now, now)
+      .run(tokenHash, input.threadId, input.runId, provider, grantedLevel(input.accessLevel), now, now)
     this.tokens.set(tokenHash, token)
     this.meta.set(tokenHash, withRelay({ epoch, binding }, input.relay))
     this.calls.set(tokenHash, { runId: input.runId, received: 0, running: 0 })
@@ -408,7 +402,6 @@ function rowRecord(row: Row, meta: CredentialMeta | undefined): CredentialRecord
     threadId: String(row.thread_id),
     runId: String(row.run_id),
     provider: String(row.provider),
-    modeCeiling: row.mode_ceiling === 'plan' ? 'plan' : 'default',
     accessLevel: grantedLevel(row.access_level),
     // A row this process did not mint (one from before a restart, revoked at boot) is of epoch 0 and rotates.
     epoch: meta?.epoch ?? 0,

@@ -191,9 +191,9 @@ describe('harness gateway: resolution (absorbs AdapterRegistry)', () => {
     expect(() => testHarness({ adapters: [pi(), pi()], profileHome: home() })).toThrow(/already registered/)
   })
 
-  it('keeps today\'s capability values and adds planMode and contextUsage', () => {
+  it('keeps today\'s capability values and adds contextUsage', () => {
     const { harness } = full()
-    expect(harness.resolveStored({ instanceId: 'pi:openai', llmProvider: '', model: 'm' }, { purpose: 'turn' }).caps).toMatchObject({ ...pi().capabilities, planMode: true, contextUsage: 'none' })
+    expect(harness.resolveStored({ instanceId: 'pi:openai', llmProvider: '', model: 'm' }, { purpose: 'turn' }).caps).toMatchObject({ ...pi().capabilities, contextUsage: 'none' })
   })
 })
 

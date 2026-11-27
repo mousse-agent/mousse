@@ -1,7 +1,7 @@
 /**
  * Images sent with an answer to an agent's question. Every provider's question tool takes text only (Claude Code's
  * AskUserQuestion, Codex's request_user_input), so each image is saved as a file and its path is added to the answer
- * of the question it answers: the agent opens it with its own image viewer. Mousse's `ask_user` also returns the
+ * of the question it answers: the agent opens it with its own image viewer. Mousse's `question_ask` also returns the
  * images themselves (`UserQuestionService.requestAnswers`' `onAttachments`).
  */
 

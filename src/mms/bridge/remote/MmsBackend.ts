@@ -35,7 +35,7 @@ import { defaultIntegrationActor } from '../../../shared/integrations/actor'
 import { resolveEffectiveSkills } from '../../integrations/catalog/EffectiveIntegrationResolver'
 
 /** Chat modes a remote composer offers, as in the desktop composer's mode menu. */
-const REMOTE_CHAT_MODES = ['plan', 'agent', 'build'] as const
+const REMOTE_CHAT_MODES = ['agent', 'build'] as const
 
 /** A queued message without its image data, which can be megabytes. */
 function queueRow(item: QueuedMessage): Record<string, unknown> {
@@ -278,20 +278,21 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     const result = (await dispatchMethod({ mms: this.services, globalSequence: this.revision }, 'threads.create', create)) as
       { thread: { id: string } } & Record<string, unknown>
     if (!caller) return result
-    // A thread an agent of the device started holds who started it and its mode from this same write on. It is out of the
-    // sidebar here when the caller asks (`hidden: true`, what a newer computer sends for an agent's thread); a computer
-    // from before it sends none and the thread shows, as it always did. A person's thread from a phone never is hidden.
+    // A thread an agent of the device started holds who started it and its mode from this same write on. It starts in the
+    // sidebar: an agent's thread is a handoff (#2004), whatever a computer from before that asks. Only a personal bot's is
+    // hidden here, and the bot is named by its first message (`remoteAgent.ts`), so `hidden: true` is kept with the
+    // agent until then. A person's thread from a phone never is hidden.
+    const agent = started ? { ...started.agent, ...(hidden === true ? { hidden: true as const } : {}) } : undefined
     const thread = this.services.threads.updateThreadMeta(
       result.thread.id,
       {
-        startedFrom: { node: caller.node, ...(typeof startedFromProjectId === 'string' ? { projectId: startedFromProjectId } : {}), ...(started ? { agent: started.agent } : {}) },
+        startedFrom: { node: caller.node, ...(typeof startedFromProjectId === 'string' ? { projectId: startedFromProjectId } : {}), ...(agent ? { agent } : {}) },
         ...(started ? { permissionMode: started.permissionMode } : {})
       },
       { touch: false }
     )
-    const shown = started && hidden === true ? this.services.threads.setThreadHidden(thread.id, true) : thread
     this.services.events.broadcast('threads:updated', { threads: this.services.threads.listAllThreads() })
-    return { ...result, thread: shown }
+    return { ...result, thread }
   }
   /**
    * Which of this machine's projects is the same Git repository as the one described: an id, or
@@ -659,6 +660,8 @@ export class MmsRemoteBackend implements RemoteBackendPort {
           // A run that hit a usage limit: when it resets and whether it continues by itself. Absent otherwise.
           ...(pause ? { paused: { runId: pause.runId, until: pause.until, estimated: pause.estimated, autoResume: pause.autoResume, ...(pause.stale ? { stale: true } : {}), ...(pause.limitKind ? { limitKind: pause.limitKind } : {}) } } : {})
         },
+        // The turn as now, with a held chain's card or without one: a stream that starts again shows it, or clears it.
+        turnState: s.orchestrator.getTurnState(threadId),
         revision: this.revision()
       }
     )

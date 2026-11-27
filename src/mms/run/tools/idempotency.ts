@@ -28,15 +28,16 @@ export const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   // The retired merge tools only report a finished task's result (and pin it again).
   'integrate_delegation',
   'integrate_subagent',
-  // Phase 5 Mousse MCP server (SPEC §15.1).
+  // Phase 5 Mousse MCP server (SPEC §15.1). `thread_list` reads only; a ledger row of `list_subagents` names it now.
   'thread_read',
+  'thread_list',
   'queue_list',
   // Reads a thread's terminals from memory; never writes to them.
   'terminal_read',
   // A bot's Mousse tools (PR 6 §3). A consult's effects are the consult run's own calls, each in the
   // ledger; an escalation writes only bots.db. Either cut off by a crash leaves nothing unknown.
   'consult',
-  'escalate'
+  'permission_ask'
 ])
 
 /** Tools with side effects. Listed for documentation; any unknown tool is also non-idempotent. */
@@ -57,10 +58,10 @@ export const NON_IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   // Phase 4 delegation (SPEC §14.2). `task_status` acknowledges a published result.
   'delegate_task',
   'continue_subagent',
-  'answer_subagent',
+  'request_answer',
   'task_status',
   'task_cancel',
-  'ask_user',
+  'question_ask',
   'queue_enqueue',
   // Start, stop or hold background work of the thread (issue #1605).
   'monitor_start',

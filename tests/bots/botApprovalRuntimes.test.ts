@@ -233,7 +233,7 @@ describe('"Run commands" at each runtime\'s own gate (the owner\'s Claude Code a
     const mine = [workspace.files!, workspace.scratch]
     // Codex on Linux and macOS: Mousse's permission profile, reading `:minimal`, writing only the bot's folders.
     const codex = codexBotSandbox(prepared.authority, { codexPackage: '/opt/codex', platform: 'linux' })
-    expect(codexTurnPolicy('default', undefined, 'ask', codex)).toEqual({ approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE })
+    expect(codexTurnPolicy(undefined, 'ask', codex)).toEqual({ approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE })
     expect(codexBotSandboxConfig(codex)).toMatchObject({
       [`permissions.${CODEX_BOT_PROFILE}`]: { filesystem: { ':minimal': 'read', '/opt/codex': 'read', ...Object.fromEntries(mine.map((root) => [root, 'write'])) }, network: { enabled: false } }
     })

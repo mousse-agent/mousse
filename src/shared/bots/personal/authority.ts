@@ -269,7 +269,7 @@ export interface BotAuthority {
    */
   spend: SpendScope | null
   /**
-   * The `escalate` app tool (6c-2): the bot asks its owner for a permission it lacks. The dispatch
+   * The `permission_ask` app tool (6c-2): the bot asks its owner for a permission it lacks. The dispatch
    * ends at the wall; the text is what the call returns. Absent: the turn cannot escalate.
    */
   escalate?(request: { permission: unknown; reason: string; toolCallId?: string }): string
@@ -346,7 +346,8 @@ export interface BotSubagents {
   wait(request: { subagent?: string; timeoutMs?: number; signal?: AbortSignal }): Promise<{ subagents: BotSubagentView[]; note?: string } | { refused: string }>
   /** One subagent with its result once it ended, or (without `subagent`) every one, without results. */
   result(request: { subagent?: string }): { subagents: BotSubagentView[]; note?: string } | { refused: string }
-  stop(request: { subagent: string }): { stopped: BotSubagentView } | { refused: string }
+  /** A retry of the same tool call (`toolCallId`) answers as the first did and stops nothing more. */
+  stop(request: { subagent: string; toolCallId?: string }): { stopped: BotSubagentView } | { refused: string }
   /**
    * For `model_list`: by entry, what a subagent there would run without (in the owner's words), or why it can't run
    * there, for what the work's turn holds now (the hold rule, `subagentHold`). An entry it would run on as the work does

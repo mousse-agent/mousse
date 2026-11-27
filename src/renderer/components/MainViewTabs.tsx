@@ -9,7 +9,7 @@ import { createPortal } from 'react-dom'
 import type { MainView } from '../../shared/types'
 import { BrowserTab, ChevronLeft, FileText, FolderOpen, GitCompare, GitPullRequest, Globe, MessagesSquare, Plus, Terminal, X } from '../lib/icons'
 import { sideChatTitle, useOpenSideChat, useSideChatsStore } from '../stores/sideChatsStore'
-import { useAppStore } from '../stores/appStore'
+import { documentTabsForThread, shownDocumentTab, useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { surfaceTabItems, type SurfaceTabItem } from '../lib/surfaces'
 import { focusInitialMenuItem, useMenuKeyboard } from '../hooks/useMenuKeyboard'
@@ -36,11 +36,10 @@ export function MainViewTabs() {
   const threads = useAppStore((state) => state.threads)
   const browsers = useAppStore((state) => state.browserTabs)
   const documentTabs = useAppStore((state) => state.documentTabs)
-  const documentsTabVisible = useAppStore((state) => state.documentsTabVisible)
-  const documents = documentsTabVisible ? documentTabs : []
+  const documents = documentTabsForThread(documentTabs, activeThreadId)
   const activeTerminalId = useAppStore((state) => state.activeProjectTerminalTabByThread[state.activeThreadId ?? '__standalone__'])
   const activeBrowserId = useAppStore((state) => state.browserActiveTabByThread[state.activeThreadId ?? '__standalone__'])
-  const activeDocumentId = useAppStore((state) => state.activeDocumentTabId)
+  const activeDocumentId = useAppStore((state) => shownDocumentTab(state)?.id)
   const openSideChat = useOpenSideChat(activeThreadId)
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 })

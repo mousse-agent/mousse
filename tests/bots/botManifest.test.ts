@@ -190,7 +190,7 @@ describe('round-1 review fixes', () => {
   it('only web, skill and the bot\'s own app tools can be granted: delegation, thread and queue tools are refused at publish', () => {
     expect(manifestProblem(valid({ appTools: ['web_search', 'web_fetch'] }))).toBeUndefined()
     expect(manifestProblem(valid({ appTools: [...BOT_DEFAULT_APP_TOOLS] }))).toBeUndefined()
-    for (const tool of ['delegate_task', 'continue_subagent', 'create_subagents', 'thread_fork', 'thread_merge_back', 'queue_enqueue', 'thread_read', 'ask_user', 'read'])
+    for (const tool of ['delegate_task', 'continue_subagent', 'create_subagents', 'thread_fork', 'thread_merge_back', 'queue_enqueue', 'thread_read', 'question_ask', 'read'])
       expect(manifestProblem(valid({ appTools: [tool] })), tool).toContain(`the Mousse tool ${tool}`)
   })
 
@@ -253,10 +253,10 @@ it('a grant an older build approved with telling_set still reads as well formed 
 })
 
 describe('default app tools (Bot Phase 1 §5.10)', () => {
-  it('every new bot gets the web, its schedules, profile, depth, model, escalate, run_report, the five memory tools and its open items', () => {
+  it('every new bot gets the web, its schedules, profile, depth, model, permission_ask, run_report, the five memory tools and its open items', () => {
     expect([...BOT_DEFAULT_APP_TOOLS].sort()).toEqual([
-      'bot_schedule_add', 'bot_schedule_list', 'bot_schedule_remove', 'escalate', 'item_list', 'item_save', 'memory_forget', 'memory_list', 'memory_read', 'memory_save', 'memory_search',
-      'run_report', 'set_depth', 'set_profile', 'use_model', 'web_fetch', 'web_search'
+      'bot_schedule_add', 'bot_schedule_list', 'bot_schedule_remove', 'item_list', 'item_save', 'memory_forget', 'memory_list', 'memory_read', 'memory_save', 'memory_search',
+      'permission_ask', 'run_report', 'set_depth', 'set_profile', 'use_model', 'web_fetch', 'web_search'
     ])
     for (const tool of BOT_MEMORY_TOOLS) {
       expect(BOT_DEFAULT_APP_TOOLS).toContain(tool)
@@ -267,7 +267,7 @@ describe('default app tools (Bot Phase 1 §5.10)', () => {
   })
 
   it('the bot\'s own tools are not permissions; the web tools are', () => {
-    for (const tool of ['bot_schedule_add', 'set_depth', 'use_model', 'set_profile', 'escalate', ...BOT_MEMORY_TOOLS]) expect(isOwnBotAppTool(tool), tool).toBe(true)
+    for (const tool of ['bot_schedule_add', 'set_depth', 'use_model', 'set_profile', 'permission_ask', ...BOT_MEMORY_TOOLS]) expect(isOwnBotAppTool(tool), tool).toBe(true)
     for (const tool of ['web_search', 'web_fetch', 'consult']) expect(isOwnBotAppTool(tool), tool).toBe(false)
   })
 

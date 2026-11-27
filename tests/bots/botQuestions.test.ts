@@ -1,5 +1,5 @@
 /**
- * A bot's questions in its chat (`ask_owner`, issue #1123), over a real engine and a real `bots.db`: the question is
+ * A bot's questions in its chat (`question_ask`, issue #1123), over a real engine and a real `bots.db`: the question is
  * asked through the bot's own tool, shown as its own bubble under the turn's reply, answered by a tap through the
  * registered `bots.questions.answer` handler or by a reply in the owner's words, and moved past by any other message.
  *
@@ -51,7 +51,7 @@ const tools = new Map(botTools(() => ({ host: f.bots.tools, models: { pickable: 
 /** One of the bot's tools, called from a running turn as its runtime would. */
 async function tool(name: string, prepared: PreparedBotTurn, threadId: string, args: Record<string, unknown>): Promise<{ text: string; isError?: boolean }> {
   const ctx = {
-    caller: { threadId, runId: 'r', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+    caller: { threadId, runId: 'r', provider: 'pi', accessLevel: 'lineage' },
     turn: { threadId, bot: prepared.authority },
     toolCallId: `call-${Math.random()}`,
     signal: new AbortController().signal,
@@ -70,10 +70,10 @@ async function chatTurn(text: string, id: string, replyTo?: string) {
   return { message, activation, payload, prepared }
 }
 
-/** A chat turn that asks `args` with `ask_owner` and ends with `reply`; its question's bubble. */
+/** A chat turn that asks `args` with `question_ask` and ends with `reply`; its question's bubble. */
 async function asked(args: Record<string, unknown> = FLATS, reply = 'I found two.', id = 'q1') {
   const turn = await chatTurn('Find me a flat to view this week.', id)
-  const answer = await tool('ask_owner', turn.prepared, turn.payload.threadId, args)
+  const answer = await tool('question_ask', turn.prepared, turn.payload.threadId, args)
   expect(answer.isError).toBeFalsy()
   expect(JSON.parse(answer.text)).toEqual({ asked: true, questionId: expect.stringMatching(/^q_/), note: QUESTION_ASKED_TEXT })
   await finish(f, turn.payload, 'completed', { text: reply })
@@ -212,17 +212,17 @@ describe('a question in the chat', () => {
 })
 
 describe('what a question never does', () => {
-  it('ask_owner after escalate in the same turn is refused: a tap at the wall would count as Not now', async () => {
+  it('question_ask after escalate in the same turn is refused: a tap at the wall would count as Not now', async () => {
     const turn = await chatTurn('Book the viewing for me', 'w1')
     expect(turn.prepared.authority.escalate!({ permission: { tool: 'browser' }, reason: 'To book it on the site.' })).toBe(botAskedText('use the browser', BOT_ASK_DEFERRED_TEXT))
-    expect(await tool('ask_owner', turn.prepared, turn.payload.threadId, FLATS)).toEqual({ text: QUESTION_AFTER_ASK_TEXT, isError: true })
+    expect(await tool('question_ask', turn.prepared, turn.payload.threadId, FLATS)).toEqual({ text: QUESTION_AFTER_ASK_TEXT, isError: true })
     await finish(f, turn.payload, 'completed', { text: 'I need the browser.' })
     expect(chatOf(f, botId).some((message) => message.question)).toBe(false)
   })
 
-  it('escalate after ask_owner wins: the question is withdrawn unshown, and the wall’s answer tells the bot to ask again', async () => {
+  it('escalate after question_ask wins: the question is withdrawn unshown, and the wall’s answer tells the bot to ask again', async () => {
     const turn = await chatTurn('Book a viewing', 'w2')
-    expect(JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, FLATS)).text).asked).toBe(true)
+    expect(JSON.parse((await tool('question_ask', turn.prepared, turn.payload.threadId, FLATS)).text).asked).toBe(true)
     turn.prepared.authority.escalate!({ permission: { tool: 'browser' }, reason: 'To book it.' })
     await finish(f, turn.payload, 'completed', { text: 'I need the browser first.' })
     expect(chatOf(f, botId).some((message) => message.question)).toBe(false)
@@ -232,15 +232,15 @@ describe('what a question never does', () => {
     await flush()
     const continued = f.store.lastMainDispatch(turn.activation.id)!
     expect(continued.kind).toBe('continue')
-    expect(continued.prompt.text).toContain('Your question "Which flat should I book a viewing for?" was not shown to the owner, because you also asked for a permission. Ask it again with ask_owner if you still need to know.')
+    expect(continued.prompt.text).toContain('Your question "Which flat should I book a viewing for?" was not shown to the owner, because you also asked for a permission. Ask it again with question_ask if you still need to know.')
      // The continuation can ask it again: the unshown question never counted as the turn's one.
     const again = await start(f, turn.activation.id, continued.n)
-    expect(JSON.parse((await tool('ask_owner', again.prepared, again.payload.threadId, FLATS)).text).asked).toBe(true)
+    expect(JSON.parse((await tool('question_ask', again.prepared, again.payload.threadId, FLATS)).text).asked).toBe(true)
   })
 
   it('a turn the owner stopped shows no question', async () => {
     const turn = await chatTurn('Find me a flat', 's1')
-    await tool('ask_owner', turn.prepared, turn.payload.threadId, FLATS)
+    await tool('question_ask', turn.prepared, turn.payload.threadId, FLATS)
     await f.bots.service.chatStop(botId)
     await finish(f, turn.payload, 'interrupted', { text: '' })
     expect(chatOf(f, botId).some((message) => message.question)).toBe(false)
@@ -250,9 +250,9 @@ describe('what a question never does', () => {
   it('asks up to four questions in one call, each its own bubble under the reply; a fifth is refused', async () => {
     const turn = await chatTurn('Plan my move', 'c1')
     const four = ['Which flat?', 'Which day?', 'Which movers?', 'Keep the sofa?'].map((question) => ({ question, yesNo: true }))
-    expect(await tool('ask_owner', turn.prepared, turn.payload.threadId, { questions: [...four, { question: 'And the cat?', yesNo: true }] })).toEqual({ text: expect.stringContaining('at most 4 questions'), isError: true })
+    expect(await tool('question_ask', turn.prepared, turn.payload.threadId, { questions: [...four, { question: 'And the cat?', yesNo: true }] })).toEqual({ text: expect.stringContaining('at most 4 questions'), isError: true })
     expect(f.store.activationQuestions(turn.activation.id)).toEqual([])
-    const asked = JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, { questions: four })).text)
+    const asked = JSON.parse((await tool('question_ask', turn.prepared, turn.payload.threadId, { questions: four })).text)
     expect(asked).toEqual({ asked: true, questionIds: [expect.stringMatching(/^q_/), expect.stringMatching(/^q_/), expect.stringMatching(/^q_/), expect.stringMatching(/^q_/)], note: QUESTION_ASKED_TEXT })
     await finish(f, turn.payload, 'completed', { text: 'A few things first.' })
     const bubbles = chatOf(f, botId).filter((message) => message.question && message.activationId === turn.activation.id)
@@ -266,14 +266,14 @@ describe('what a question never does', () => {
   it('questions are not counted: open ones of other turns and earlier days stop nothing', async () => {
     for (let i = 0; i < 30; i += 1) f.store.insertQuestion({ id: `q_seed-${i}`, botId, activationId: `act-seed-${i}`, dispatchN: 1, lane: 'chat', spec: { question: `Q${i}`, choices: [{ label: 'A' }, { label: 'B' }], other: false }, createdAt: f.store.now() })
     const turn = await chatTurn('Find me a flat', 'c1')
-    expect(JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, FLATS)).text).asked).toBe(true)
-    expect(JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, { question: 'And when?', yesNo: true })).text).asked).toBe(true)
+    expect(JSON.parse((await tool('question_ask', turn.prepared, turn.payload.threadId, FLATS)).text).asked).toBe(true)
+    expect(JSON.parse((await tool('question_ask', turn.prepared, turn.payload.threadId, { question: 'And when?', yesNo: true })).text).asked).toBe(true)
   })
 
   it('the same question again returns the one already asked; reworded or reordered, it is still the same', async () => {
     const turn = await chatTurn('Find me a flat', 'c1')
-    const first = JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, FLATS)).text)
-    const again = JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, { question: '  which FLAT should I book a viewing for ', choices: ['flat b', 'Flat A'] })).text)
+    const first = JSON.parse((await tool('question_ask', turn.prepared, turn.payload.threadId, FLATS)).text)
+    const again = JSON.parse((await tool('question_ask', turn.prepared, turn.payload.threadId, { question: '  which FLAT should I book a viewing for ', choices: ['flat b', 'Flat A'] })).text)
     expect(again).toEqual({ asked: true, questionId: first.questionId, note: QUESTION_ASKED_TEXT })
     await finish(f, turn.payload, 'completed', { text: 'Two options.' })
     expect(chatOf(f, botId).filter((message) => message.question)).toHaveLength(1)

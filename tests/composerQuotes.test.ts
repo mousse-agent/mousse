@@ -39,19 +39,19 @@ describe('Reply pills in the composer', () => {
     expect(quoteTokenFor(`${long} two`, registry)).not.toBe(first)
   })
 
-  // What the agent receives: the quote in double quotes with one blank line above and below, wherever it sits.
+  // What the agent receives: the quote as a Markdown quote with one blank line above and below, wherever it sits.
   const rows: Array<{ name: string; typed: (t: string[]) => string; sent: string }> = [
-    { name: 'between words', typed: ([a]) => `Why is ${a} true?`, sent: 'Why is\n\n"quoted words"\n\ntrue?' },
-    { name: 'at the start', typed: ([a]) => `${a} explain this`, sent: '"quoted words"\n\nexplain this' },
-    { name: 'at the end', typed: ([a]) => `About this: ${a} `, sent: 'About this:\n\n"quoted words"' },
-    { name: 'alone', typed: ([a]) => a!, sent: '"quoted words"' },
-    { name: 'after a line break', typed: ([a]) => `First line\n${a}\nnext`, sent: 'First line\n\n"quoted words"\n\nnext' },
-    { name: 'two in a row', typed: ([a, b]) => `${a} ${b} compare`, sent: '"quoted words"\n\n"other\nlines"\n\ncompare' },
-    { name: 'with words between two', typed: ([a, b]) => `${a} and ${b}`, sent: '"quoted words"\n\nand\n\n"other\nlines"' }
+    { name: 'between words', typed: ([a]) => `Why is ${a} true?`, sent: 'Why is\n\n> quoted words\n\ntrue?' },
+    { name: 'at the start', typed: ([a]) => `${a} explain this`, sent: '> quoted words\n\nexplain this' },
+    { name: 'at the end', typed: ([a]) => `About this: ${a} `, sent: 'About this:\n\n> quoted words' },
+    { name: 'alone', typed: ([a]) => a!, sent: '> quoted words' },
+    { name: 'after a line break', typed: ([a]) => `First line\n${a}\nnext`, sent: 'First line\n\n> quoted words\n\nnext' },
+    { name: 'two in a row', typed: ([a, b]) => `${a} ${b} compare`, sent: '> quoted words\n\n> other\n>\n> lines\n\ncompare' },
+    { name: 'with words between two', typed: ([a, b]) => `${a} and ${b}`, sent: '> quoted words\n\nand\n\n> other\n>\n> lines' }
   ]
   for (const row of rows) {
     it(`expands a pill ${row.name}`, () => {
-      const { registry, tokens } = registryWith('quoted words', 'other\nlines')
+      const { registry, tokens } = registryWith('quoted words', 'other\n\nlines')
       expect(expandQuoteTokens(row.typed(tokens), registry)).toBe(row.sent)
     })
   }
@@ -90,23 +90,29 @@ describe('Reply pills in the composer', () => {
   })
 
   // What the sent bubble shows: a quote paragraph written by the expansion above becomes a pill again.
-  it('splits a sent message into its words and the quotes it replied with', () => {
-    const { registry, tokens } = registryWith('quoted words', 'other\nlines')
-    const quotes = [...registry.values()]
+  it('splits a sent message into its words and the quotes it replied with, on a computer that never saw them', () => {
+    const { registry, tokens } = registryWith('quoted words', 'other\n\nlines')
     const sent = expandQuoteTokens(`Why is ${tokens[0]} true? ${tokens[1]} compare`, registry)
-    expect(splitSentQuotes(sent, quotes)).toEqual([
+    expect(splitSentQuotes(sent)).toEqual([
       { kind: 'text', text: 'Why is' },
       { kind: 'quote', text: 'quoted words' },
       { kind: 'text', text: 'true?' },
-      { kind: 'quote', text: 'other\nlines' },
+      { kind: 'quote', text: 'other\n\nlines' },
       { kind: 'text', text: 'compare' }
     ])
-    expect(splitSentQuotes('"quoted words"', quotes)).toEqual([{ kind: 'quote', text: 'quoted words' }])
   })
 
-  it('leaves quote marks inside a sentence, and quotes never replied to here, as words', () => {
-    const quotes = ['quoted words']
-    expect(splitSentQuotes('He said "quoted words" twice', quotes)).toEqual([{ kind: 'text', text: 'He said "quoted words" twice' }])
-    expect(splitSentQuotes('a\n\n"something else"\n\nb', quotes)).toEqual([{ kind: 'text', text: 'a\n\n"something else"\n\nb' }])
+  it('leaves a paragraph that only partly quotes, and quote marks inside a sentence, as words', () => {
+    expect(splitSentQuotes('a\n> quoted words\n\nb')).toEqual([{ kind: 'text', text: 'a\n> quoted words\n\nb' }])
+    expect(splitSentQuotes('He said "quoted words" twice', ['quoted words'])).toEqual([{ kind: 'text', text: 'He said "quoted words" twice' }])
+  })
+
+  it('still shows a quote sent in double quotes before, when this app replied with it', () => {
+    expect(splitSentQuotes('a\n\n"quoted words"\n\nb', ['quoted words'])).toEqual([
+      { kind: 'text', text: 'a' },
+      { kind: 'quote', text: 'quoted words' },
+      { kind: 'text', text: 'b' }
+    ])
+    expect(splitSentQuotes('a\n\n"something else"\n\nb', ['quoted words'])).toEqual([{ kind: 'text', text: 'a\n\n"something else"\n\nb' }])
   })
 })

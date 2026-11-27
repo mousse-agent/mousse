@@ -34,19 +34,17 @@ beforeEach(() => {
   vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} })
   ;(window as unknown as { mousse: unknown }).mousse = {
     applets: {
-      // The native guest never mounts here: these tests cover the DOM around it.
+      // The applet's page never mounts here: these tests cover the DOM around it.
       mount: vi.fn(() => new Promise(() => {})),
       unmount: vi.fn(async () => {}),
-      update: vi.fn(async () => {}),
+      visible: vi.fn(async () => {}),
       appearance: vi.fn(async () => {}),
-      snapshot: vi.fn(async () => ({})),
-      suspend: vi.fn(async () => {}),
       onEvent: vi.fn(() => () => {}),
       get: vi.fn(async () => ({ source: { html: '<p>hi</p>', css: '', js: '' } })),
       export: vi.fn(async () => {})
     }
   }
-  useAppStore.setState({ activeThreadId: 'thread-1', profileId: 'profile-1', documentTabs: [], activeDocumentTabId: null, documentsTabVisible: false, mainAreaOpen: false })
+  useAppStore.setState({ activeThreadId: 'thread-1', profileId: 'profile-1', documentTabs: [], activeDocumentTabByThread: {}, mainAreaOpen: false })
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
@@ -84,7 +82,7 @@ describe('inline applets', () => {
     expect(state.mainAreaOpen).toBe(true)
     expect(state.documentTabs).toHaveLength(1)
     expect(state.documentTabs[0]).toMatchObject({ title: 'Image test', applet: { threadId: 'thread-1', reference } })
-    expect(state.activeDocumentTabId).toBe(state.documentTabs[0].id)
+    expect(state.activeDocumentTabByThread['thread-1']).toBe(state.documentTabs[0].id)
 
     // A second click reuses the tab.
     act(() => name.click())

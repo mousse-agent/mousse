@@ -1,4 +1,9 @@
+import { isRunningVariant, isToolAlias } from '../../../../shared/toolAliases'
+import { isNativeHelperThread, ownBotOf } from '../../../../shared/threadLineage'
 import type { RunEngine } from '../../RunEngine'
+import { familyOf, recordAddress, recordedAddress, resolveAddress, type AddressSources } from '../../addressing'
+import { resolveSubagent, visibleSubagents } from '../../delegation/subagentAddress'
+import type { ThreadAddresses } from './addressedCall'
 import { appearanceTools } from './appearance'
 import { appletTools } from './applets'
 import { askUserTools } from './askUser'
@@ -18,6 +23,7 @@ import { monitorTools } from './monitors'
 import { profilerTools } from './profiler'
 import { projectGitTools } from './projectGit'
 import { quickActionTools, runningTools } from './quickActions'
+import { REQUEST_ANSWER_KINDS, requestAnswerTool } from './requestAnswer'
 import { ToolRegistry, type ToolAccessPolicy, type ToolRegistryOptions } from './registry'
 import { scheduleTools } from './schedules'
 import { secretTools } from './secrets'
@@ -26,17 +32,22 @@ import { skillTools } from './skills'
 import { taskTools } from './tasks'
 import { terminalTools } from './terminals'
 import { botThreadReach, lineageRelation, threadTools } from './thread'
+import { threadCreateTool } from './threadCreate'
 import { shareWakeTools, threadWakeTools } from './threadWakes'
 import type { AppToolTurns } from './turns'
 import { webTools } from './web'
 
 /** The models a turn may name, a bot's or a thread's (`shareWakeTools`). */
 const MODEL_LIST_TOOL = 'model_list'
+/** Asking the person and taking a question back, a bot's (its owner) or a thread's (the user) (`shareWakeTools`). */
+const QUESTION_TOOLS: readonly string[] = ['question_ask', 'question_withdraw']
+/** The tools that answer each kind of request: `request_answer`'s variants, never listed or called by their own names. */
+const ANSWER_TOOLS: readonly string[] = Object.values(REQUEST_ANSWER_KINDS).map((kind) => kind.tool)
 
 export * from './types'
 export * from './refusal'
 export * from './registry'
-export { compileTool, heldBeforeArguments, holdsPerson, parentHolds, plannedFromAbove, toolNeeds, unattendedRefusal, type CompiledTool, type RunProvenance, type ToolEffect, type ToolNeeds } from './authority'
+export { compileTool, heldBeforeArguments, holdsPerson, parentHolds, toolNeeds, unattendedRefusal, type CompiledTool, type RunProvenance, type ToolEffect, type ToolNeeds } from './authority'
 export * from './turns'
 export type { AgentAccessResult, AgentActionDetails, AgentApprovalResult, AgentArchiveResult, AgentArchiveOwnResult, AgentCreatedThread, AgentRemoteThreadRequest, AgentRemoteThreadResult, RemoteProjectCandidate, AgentQueueCommand, AgentQueueResult, AgentScheduleHost, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, ApprovalRequestInfo, AppToolHost, QueueSnapshot, RemoteThreadsHost, ThreadSearchHit } from './host'
 export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessage, agentMessageText, cleanRemoteSenderTitle, BOT_MESSAGE_END, BOT_MESSAGE_PREFIX, botMessage, botMessageText, isPersonMessage, personTurnRequest } from './agentMessage'
@@ -88,6 +99,49 @@ function agentAccessPolicy(host: AppToolHost, engine: RunEngine): ToolAccessPoli
 }
 
 /**
+ * What resolves the thread tools' `thread` addresses (`addressing.ts`), read at call time: the lineage and titles the
+ * family reads, the helpers' mirror threads, the bots the caller may reach, and the run store's receipts, which keep what
+ * a retry key resolved to across a restart.
+ */
+function threadAddresses(host: AppToolHost, engine: RunEngine, bots: (() => BotAppToolDeps | undefined) | undefined): ThreadAddresses {
+  const titleOf = (threadId: string): string | undefined => {
+    const thread = host.threadMeta?.(threadId)
+    return thread ? thread.name ?? '' : undefined
+  }
+  const sources: AddressSources = {
+    parentOf: (threadId) => threadFamily(host, engine).parentOf(threadId),
+    childrenOf: (threadId) => visibleSubagents({ delegations: engine.delegations, titleOf }, threadId),
+    helpersOf: (threadId) => (host.listThreads?.() ?? []).filter((thread) => isNativeHelperThread(thread) && thread.lineage?.parentThreadId === threadId).map((thread) => ({ threadId: thread.id, title: thread.name ?? '' })),
+    titleOf,
+    exists: (threadId) => host.threadMeta?.(threadId) !== undefined,
+    // `others` (a bot turn that holds bot_send, `botReachOf`): its owner's other bots, through the bot port. `own` (any
+    // other thread): the bot that started it, from the thread record alone.
+    botsFor: (callerThreadId, reach) => {
+      if (reach === 'own') {
+        const own = ownBotOf(host.threadMeta?.(callerThreadId))
+        return own ? [{ botId: own.botId, name: own.name }] : []
+      }
+      const deps = bots?.()
+      const activation = deps?.host.activationOf(callerThreadId)
+      return activation && activation.role !== 'subagent' ? deps?.host.bots?.list(activation.botId).map(({ botId, name }) => ({ botId, name })) ?? [] : []
+    }
+  }
+  return {
+    resolve: (callerThreadId, address, options) => resolveAddress(sources, callerThreadId, address, options),
+    recorded: (key) => recordedAddress(engine.store, key),
+    record: (key, callerThreadId, resolved) => recordAddress(engine.store, key, callerThreadId, resolved),
+    subagentOf: (callerThreadId, ref) => {
+      const found = resolveSubagent({ delegations: engine.delegations, titleOf }, callerThreadId, ref)
+      return found.ok ? found.childThreadId : undefined
+    },
+    family: (callerThreadId) => {
+      const { members, complete } = familyOf(sources, callerThreadId)
+      return { members: [{ threadId: callerThreadId, title: titleOf(callerThreadId) ?? '', relation: 'self' }, ...members], complete }
+    }
+  }
+}
+
+/**
  * One registry over every app-tool module (PR 2 §2). The Mousse MCP server's is built over the
  * thread owner with the run engine (which adds the thread tools); an in-process loop builds its
  * own over its dependencies. Both register the same definitions and handlers.
@@ -109,8 +163,6 @@ export function createAppToolRegistry(input: {
     awaitLiveRun: host.awaitLiveRun ? (threadId) => host.awaitLiveRun!(threadId) : undefined,
     toolLedger: host.toolLedger ? (runId) => host.toolLedger!(runId) : undefined,
     readOnlyThread: host.readOnlyThread ? (threadId) => host.readOnlyThread!(threadId) : undefined,
-    threadCeiling: host.threadCeiling ? (threadId) => host.threadCeiling!(threadId) : undefined,
-    liveCeiling: host.liveCeiling ? (threadId) => host.liveCeiling!(threadId) : undefined,
     subagentThread: host.subagentThread ? (threadId) => host.subagentThread!(threadId) : undefined,
     personHeld: host.personHeld ? (caller) => host.personHeld!(caller) : undefined,
     parentThread: host.parentThread ? (threadId) => host.parentThread!(threadId) : undefined,
@@ -120,6 +172,7 @@ export function createAppToolRegistry(input: {
     askApproval: host.askApproval ? (threadId, questions, options) => host.askApproval!(threadId, questions, options) : undefined,
     turns: input.turns,
     access: engine ? agentAccessPolicy(host, engine) : undefined,
+    addresses: engine ? threadAddresses(host, engine, input.bots) : undefined,
     botTimeZone: () => botMemory()?.memory?.zone(),
     ...input.options
   })
@@ -129,13 +182,35 @@ export function createAppToolRegistry(input: {
     for (const tool of tools) registry.register(tool)
   }
   // `model_list` serves a bot's turn (the models its work runs on) and any thread's (the picker's), one tool by one name.
-  const bots = botTools(input.bots)
-  const delegation = delegationTools(host)
+  const allBots = botTools(input.bots)
+  const allDelegation = delegationTools(host)
+  const allThreads = engine ? threadTools(host, engine, input.bots) : []
+  // `request_answer` answers a subagent's request, another thread's approval or, for a bot, its owner's answer to its
+  // work, each by the tool that answered it before.
+  const answers = requestAnswerTool({
+    subagent: allDelegation.find((tool) => tool.name === REQUEST_ANSWER_KINDS.subagent.tool),
+    approval: allThreads.find((tool) => tool.name === REQUEST_ANSWER_KINDS.approval.tool),
+    relay: allBots.find((tool) => tool.name === REQUEST_ANSWER_KINDS.relay.tool)
+  }, {
+    request: (requestId) => host.approvalRequest?.(requestId),
+    parentThread: (threadId) => host.parentThread?.(threadId),
+    answered: (threadId, keys) => host.answeredRequest?.(threadId, keys),
+    botQuestion: (threadId, requestId) => {
+      const deps = input.bots?.()
+      const activation = deps?.host.activationOf(threadId)
+      return Boolean(activation && deps?.host.questions?.asked?.(activation.botId, requestId))
+    }
+  })
+  const [bots, delegation, threads] = [allBots, allDelegation, allThreads].map((tools) => tools.filter((tool) => !ANSWER_TOOLS.includes(tool.name)))
   const models = shareWakeTools(bots.filter((tool) => tool.name === MODEL_LIST_TOOL), delegation.filter((tool) => tool.name === MODEL_LIST_TOOL))
-  add('delegation', delegation.flatMap((tool) => (tool.name === MODEL_LIST_TOOL ? models : [tool])))
-  add('questions', [...askUserTools(host), ...secretTools(host), ...bugReportTools(host)])
+  // `thread_create` starts a subagent (`delegate_task`'s declaration) or a thread (the thread family's): one tool, two
+  // kinds. It is listed where `delegate_task` was, first: a runtime with a tight schema budget (Antigravity) keeps it.
+  // `delegate_task` and `create_subagent` are old names of its subagent kind.
+  const threadCreate = threadCreateTool({ subagent: delegation.find((tool) => tool.name === 'delegate_task')!, thread: threads.find((tool) => tool.name === 'thread_create') })
+  add('delegation', delegation.flatMap((tool) => (tool.name === MODEL_LIST_TOOL ? models : tool.name === 'delegate_task' ? [threadCreate] : isToolAlias(tool.name) && !isRunningVariant(tool.name) ? [] : [tool])))
+  add('questions', [...shareWakeTools(bots.filter((tool) => QUESTION_TOOLS.includes(tool.name)), askUserTools(host)), answers, ...secretTools(host), ...bugReportTools(host)])
   add('tasks', [...taskTools(host), ...goalTools(host)])
-  add('thread', engine ? threadTools(host, engine, input.bots) : [])
+  add('thread', threads.filter((tool) => tool.name !== 'thread_create'))
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])
   add('skills', skillTools(host))
   add('quickActions', [...quickActionTools(host), ...runningTools(host), ...monitorTools(host)])
@@ -145,7 +220,7 @@ export function createAppToolRegistry(input: {
   add('computer', computerTools(host))
   add('applets', appletTools())
   // `wake`, `reminder_list` and `reminder_cancel` serve a bot's turn and any thread's (`shareWakeTools`).
-  add('bots', [...shareWakeTools(bots.filter((tool) => tool.name !== MODEL_LIST_TOOL), threadWakeTools(host)), ...botCatalogueTools(() => registry), ...(input.botMemory ? [...botMemoryTools(input.botMemory), ...botItemTools(input.botMemory)] : [])])
+  add('bots', [...shareWakeTools(bots.filter((tool) => tool.name !== MODEL_LIST_TOOL && !QUESTION_TOOLS.includes(tool.name)), threadWakeTools(host)), ...botCatalogueTools(() => registry), ...(input.botMemory ? [...botMemoryTools(input.botMemory), ...botItemTools(input.botMemory)] : [])])
   add('projectGit', projectGitTools(host))
   add('profiler', profilerTools(host, engine))
   add('appearance', appearanceTools(host))

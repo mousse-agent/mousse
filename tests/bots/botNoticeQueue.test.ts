@@ -177,7 +177,7 @@ describe('a thread that waits on a person', () => {
     const text = prompt(message)
     expect(text).toContain('A blocker')
     expect(text).toContain('<quoted from="approval req-1">\n[q1] Run npm test?\nOptions: once = "Approve once"; no = "Reject"\n</quoted>')
-    expect(text).toContain('approval_respond')
+    expect(text).toContain('request_answer')
   })
 })
 

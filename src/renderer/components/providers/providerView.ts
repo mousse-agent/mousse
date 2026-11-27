@@ -59,6 +59,11 @@ export interface DriverInfo {
    * CLI (`setup: existing`); the Add dialog asks which (Codex).
    */
   setups?: boolean
+  /**
+   * The Add dialog's sign-in path, when the agent signs in from Mousse: its label. It adds the entry
+   * with its defaults and starts that sign-in at once; Configure manually stays beside it.
+   */
+  signInLabel?: string
 }
 
 /** The entry runs Mousse's own Codex download with Sign in with ChatGPT. */
@@ -74,10 +79,11 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     description: "Anthropic's Claude Code, signed in through its own sign-in.",
     multiInstance: true,
     customModels: true,
-    homeHint: '~/.claude'
+    homeHint: '~/.claude',
+    signInLabel: 'Continue with Claude'
   },
   codex: {
-    label: 'ChatGPT subscription',
+    label: 'Codex',
     iconId: 'openai',
     family: 'agent',
     description: 'Use your ChatGPT plan through Codex.',
@@ -85,7 +91,8 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     multiInstance: true,
     customModels: true,
     homeHint: '~/.codex',
-    setups: true
+    setups: true,
+    signInLabel: 'Continue with ChatGPT'
   },
   antigravity: {
     label: 'Antigravity',
@@ -99,7 +106,8 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     addHint: 'Mousse uses agy on this computer, or installs it after adding.',
     // The first entry only: an entry with a home of its own signs out of that home alone.
     signOutHint: 'Also signs out agy on this computer',
-    bestEffortNaming: 'Antigravity is told not to use tools; a few native actions could still run before Mousse stops them.'
+    bestEffortNaming: 'Antigravity is told not to use tools; a few native actions could still run before Mousse stops them.',
+    signInLabel: 'Continue with Google'
   },
   cursor: {
     label: 'Cursor',
@@ -108,7 +116,8 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     description: "Cursor's agent, signed in with your Cursor account or an API key. Cursor approves its tools itself.",
     multiInstance: true,
     customModels: false,
-    bundled: true
+    bundled: true,
+    signInLabel: 'Continue with Cursor'
   },
   grok: {
     label: 'Grok',
@@ -117,7 +126,8 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     description: "xAI's Grok CLI, signed in with your Grok account or an xAI API key. Grok asks Mousse before it runs a tool.",
     multiInstance: true,
     customModels: false,
-    homeHint: '~/.grok'
+    homeHint: '~/.grok',
+    signInLabel: 'Continue with Grok'
   },
   opencode: {
     label: 'OpenCode',
@@ -134,6 +144,7 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     iconId: 'acp',
     family: 'agent',
     description: 'Any agent that speaks the Agent Client Protocol, started from a command you enter.',
+    bestEffortNaming: 'The agent is told not to use tools and runs in an empty folder; its own tools could still run before Mousse stops it.',
     multiInstance: true,
     customModels: false,
     customCommand: true,

@@ -20,7 +20,8 @@ import type { ApprovalRefusal } from '../../approvalRights'
 import type { SteerStrategy } from '../../CommandPolicy'
 import type { RunEngine } from '../../RunEngine'
 import type { AnsweredBy } from '../../ThreadApprovals'
-import type { AgentActor, ModeCeiling } from '../../types'
+import type { AgentActor, AgentNotePayload } from '../../types'
+import type { HeldMessage } from '../../AgentChains'
 import type { AppearanceToolHost } from './appearance'
 import type { DelegationToolsHost } from './delegation'
 import type { LacksReport, LiveRunGate } from './registry'
@@ -50,8 +51,6 @@ export interface AgentSendResult {
   queued: boolean
   /** The same `clientRequestId` was sent before: this is the first result, nothing new was started. */
   replayed: boolean
-  /** The mode the message was sent in: Plan when the thread is kept in Plan, whatever the sender asked for. */
-  mode?: 'agent' | 'plan'
 }
 
 /** What `thread_create` asks for, checked for shape by the tool. */
@@ -66,8 +65,6 @@ export interface AgentThreadRequest {
   /** The model's reasoning level; needs `model`. Absent: its default. */
   effort?: string
   firstMessage?: string
-  /** Mode of the first message; defaults to agent. */
-  mode?: 'agent' | 'plan'
   /**
    * Keep the thread out of the person's sidebar (`Thread.hidden`): a bot's chat lists it, and the side panel of the
    * thread that launched it. Absent: hidden. false: an independent thread the person follows in the sidebar.
@@ -92,6 +89,11 @@ export interface AgentRemoteThreadRequest {
    * which has no project of its own, gives this or `projectId`.
    */
   fromProjectId?: string
+  /**
+   * The thread starts in no project there (`projectId: null`): nothing is matched, and that computer needs no project. Also
+   * what a launch without a project here becomes: a bot that names no `fromProjectId`, an agent whose thread has none.
+   */
+  noProject?: true
   title?: string
   workspace: 'project' | 'new_worktree'
   /** Both or neither: a model that computer offers, else its default. */
@@ -99,7 +101,6 @@ export interface AgentRemoteThreadRequest {
   model?: string
   effort?: string
   firstMessage?: string
-  mode?: 'agent' | 'plan'
   /** As for a thread here: absent or true keeps it out of the sidebar of the computer that runs it; false shows it there. */
   hidden?: boolean
 }
@@ -154,7 +155,7 @@ export interface RemoteThreadsHost {
   /** `thread_read` view `summary`: the thread record there and its newest runs (newest first), as that computer answers them. */
   summary(target: RemoteTarget): Promise<{ thread: Record<string, unknown>; runs: Array<Record<string, unknown>> }>
   wait(target: RemoteTarget, request: { runId?: string; timeoutMs: number; signal?: AbortSignal }): Promise<RemoteWaitResult>
-  send(target: RemoteTarget, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'sent'; runId?: string; queued: boolean; replayed: boolean; mode?: string } | RemoteUncertain>
+  send(target: RemoteTarget, input: { content: string }, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'sent'; runId?: string; queued: boolean; replayed: boolean; mode?: string } | RemoteUncertain>
   steer(target: RemoteTarget, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'accepted'; runId: string } | { status: 'ignored'; reason: string; runId?: string } | RemoteUncertain>
   interrupt(target: RemoteTarget, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'stopped' | 'left'; runId?: string; left?: string } | RemoteUncertain>
   /**
@@ -181,7 +182,7 @@ export interface AgentCreatedThread {
   /** The mode the thread's turns run in: no wider than the creator's. */
   permissionMode: PermissionMode
   /** The first message: what became of it. Absent when none was asked for. */
-  firstMessage?: ({ sent: true } & AgentSendResult) | { sent: false; reason: string }
+  firstMessage?: ({ sent: true } & AgentSendResult) | { sent: false; reason: string; held?: HeldMessage }
   /** The same `clientRequestId` created this thread before; nothing new was made. */
   replayed: boolean
 }
@@ -242,8 +243,8 @@ export interface QueueSnapshot {
 
 /** One change an agent asks of a thread's queue. `expectedRevision` is the revision the agent last read. */
 export type AgentQueueCommand =
-  | { op: 'enqueue'; content: string; mode: 'agent' | 'plan'; expectedRevision?: string }
-  | { op: 'edit'; itemId: string; content?: string; mode?: 'agent' | 'plan'; expectedRevision: string }
+  | { op: 'enqueue'; content: string; expectedRevision?: string }
+  | { op: 'edit'; itemId: string; content: string; expectedRevision: string }
   | { op: 'remove'; itemId: string; expectedRevision: string }
   | { op: 'reorder'; orderedIds: string[]; expectedRevision: string }
   | { op: 'promote'; itemId: string; expectedRevision: string; expectedRunId: string }
@@ -272,7 +273,7 @@ export interface ApprovalRequestInfo {
   /** The thread that asked. */
   threadId: string
   status: 'pending' | 'answered' | 'cancelled'
-  /** A saved approval (a command, a file change, a tool), whose answers the rule `canAnswerApproval` governs; false for a plain question for the user (`ask_user`). */
+  /** A saved approval (a command, a file change, a tool), whose answers the rule `canAnswerApproval` governs; false for a plain question for the user (`question_ask`). */
   approval: boolean
   questions: UserQuestion[]
 }
@@ -362,14 +363,14 @@ export interface AppToolHost extends DelegationToolsHost {
     questions: PendingUserQuestions['questions'],
     options: { signal?: AbortSignal; timeoutMs?: number; onAttachments?: (attachments: UserQuestionAttachments) => void }
   ): Promise<UserQuestionAnswers>
-  /** Dismisses the thread's open questions (an in-process `ask_user` whose turn stopped). */
+  /** Dismisses the thread's open questions (an in-process `question_ask` whose turn stopped). */
   dismissQuestions?(threadId: string): void
   /**
-   * `ask_user` with `wait: false`: the question is saved and shown, and its id comes back at once. The answer reaches the
+   * `question_ask` with `wait: false`: the question is saved and shown, and its id comes back at once. The answer reaches the
    * thread later, through its inbox. Absent: questions always wait.
    */
   askWithoutWaiting?(threadId: string, questions: PendingUserQuestions['questions'], runId: string | null): string
-  /** `withdraw_question`: the thread's agent no longer needs its open question. False when it was not open there. */
+  /** `question_withdraw`: the thread's agent no longer needs its open question. False when it was not open there. */
   withdrawQuestion?(threadId: string, requestId: string): boolean
   /** Secret requests and commands that use them (`secret_request`, `secret_run`); absent: those tools refuse. */
   secrets?(): SecretToolHost | undefined
@@ -421,10 +422,6 @@ export interface AppToolHost extends DelegationToolsHost {
   readOnlyThread?(threadId: string): boolean
   /** The thread's project directory, which scopes the MCP relay's servers; absent: global servers only. */
   projectPathFor?(threadId: string): string | undefined
-  /** The ceiling the thread's delegations gave it (the listing ignores the turn's mode). */
-  threadCeiling?(threadId: string): ModeCeiling
-  /** `plan` while an ancestor of the thread runs a Plan turn: narrowing from above, read at every call. */
-  liveCeiling?(threadId: string): ModeCeiling | undefined
   /** The thread is a Mousse subagent, from its lineage. */
   subagentThread?(threadId: string): boolean
   /** The run holds `person`: a person started it and its thread is not a subagent (§1.3 "Provenance"). */
@@ -441,7 +438,7 @@ export interface AppToolHost extends DelegationToolsHost {
    */
   botHomeOf?(threadId: string): string | undefined
   awaitLiveRun?(threadId: string): Promise<LiveRunGate | undefined> | undefined
-  /** The permission mode the caller's run enforces, from its attempt's binding (never from the mode ceiling). */
+  /** The permission mode the caller's run enforces, from its attempt's binding. */
   permissionModeFor?(runId: string): PermissionMode | undefined
   /** Asks the thread's user to approve a call (an approval request: see `ApprovalTag`). */
   askApproval?(threadId: string, questions: PendingUserQuestions['questions'], options: { signal: AbortSignal; approval: ApprovalTag }): Promise<UserQuestionAnswers>
@@ -490,7 +487,12 @@ export interface AppToolHost extends DelegationToolsHost {
    * a steer, and refused while the thread waits on a question or approval or is paused. A retry with the same
    * `clientRequestId` returns the first result.
    */
-  sendToThread?(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentSendResult>
+  sendToThread?(threadId: string, input: { content: string }, options: { clientRequestId: string; actor: AgentActor; notify?: { messageKey: string } }): Promise<AgentSendResult>
+  /**
+   * Counts a note that asks for attention as one message of `actor`'s chain (issue #1442). Past the chain's budget the
+   * note is kept for the person's Continue or Stop and `AgentMessageHeld` is thrown.
+   */
+  admitAgentNote?(threadId: string, requestKey: string, payload: AgentNotePayload, actor: AgentActor): void
   /**
    * Watches the message `messageKey` sent to `targetThreadId` (`notify` on `thread_send` and `thread_create`): Mousse
    * tells the sending thread when the work it started waits on a person (once) and when it ends (SPEC §15.1). Once per
@@ -505,7 +507,7 @@ export interface AppToolHost extends DelegationToolsHost {
    * creation is decided and recorded before anything exists, so a retry with the same `clientRequestId` finishes
    * or returns that one thread, whatever the caller's run or the settings look like by then.
    */
-  createThread?(input: AgentThreadRequest, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentCreatedThread>
+  createThread?(input: AgentThreadRequest, options: { clientRequestId: string; actor: AgentActor; notify?: { messageKey: string } }): Promise<AgentCreatedThread>
   /**
    * `thread_create` with `computer` (issue #1160): a top-level thread on another of the user's computers, in its project
    * that is the caller's repository. The launch is recorded before any call (`remote_launches`), every call is marked as
@@ -525,20 +527,20 @@ export interface AppToolHost extends DelegationToolsHost {
    */
   queueSnapshot?(threadId: string): QueueSnapshot
   /**
-   * One agent command on a thread's queue (`queue_enqueue`, `queue_edit`, `queue_remove`, `queue_reorder`,
-   * `queue_promote_to_steer`). `options.clientRequestId` is the full request key: a retry returns the first
+   * One agent command on a thread's queue (`queue_enqueue`, or `queue_update` with op edit, remove, move or
+   * send_now). `options.clientRequestId` is the full request key: a retry returns the first
    * result. Throws a `QueueConflictError` when the queue is not as the caller expects.
    */
   queueCommand?(threadId: string, command: AgentQueueCommand, options: { clientRequestId: string; actor: AgentActor }): AgentQueueResult
-  /** Stops run `runId` of another thread and what is below it, as `actor`'s Stop (`thread_interrupt`). */
+  /** Stops run `runId` of another thread and what is below it, as `actor`'s Stop (`thread_stop`). */
   stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** Archives (`archived`) or unarchives another thread through the app's own Archive, as a personal bot's call (`thread_archive`). */
   setThreadArchived?(threadId: string, archived: boolean, options: { actor: AgentActor; clientRequestId: string }): Promise<AgentArchiveResult>
   /** Archives the caller's own thread once its running turn ends well (`thread_archive` from a thread's agent). */
   archiveOwnThreadAfterTurn?(options: { actor: AgentActor }): AgentArchiveOwnResult
   /**
-   * Hides a thread the calling bot started from its owner's sidebar, or shows it there again (`thread_hide`). `changed`
-   * is false when it already was so.
+   * Hides a thread the calling bot started from its owner's sidebar, or shows it there again (`thread_update hidden`).
+   * `changed` is false when it already was so.
    */
   setThreadHidden?(threadId: string, hidden: boolean, options: { actor: AgentActor }): { hidden: boolean; changed: boolean }
   /**
@@ -553,10 +555,10 @@ export interface AppToolHost extends DelegationToolsHost {
    */
   steerStrategyOf?(threadId: string): SteerStrategy | null
   /**
-   * Steers run `runId` of another thread with `text` as `actor`'s message (`thread_steer`, and a personal bot's
-   * `thread_send` to a working thread). `tool` is the bot tool the call came from, for its grant (default `thread_steer`).
+   * Steers run `runId` of another thread with `text` as `actor`'s message: a note that joins it (`thread_send` intent
+   * note, once `thread_steer`), and a personal bot's `thread_send` to a working thread.
    */
-  steerRun?(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor; tool?: 'thread_steer' | 'thread_send' }): Promise<AgentRunCommandResult>
+  steerRun?(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /**
    * A personal bot's note to a thread it started: throws unless its turn may message threads and the thread runs no wider
    * than the device the owner wrote from may run (`device_limit`).
@@ -574,6 +576,12 @@ export interface AppToolHost extends DelegationToolsHost {
   appearance?(): AppearanceToolHost | undefined
   /** The request `requestId` in any state, or undefined when nobody asked it. */
   approvalRequest?(requestId: string): ApprovalRequestInfo | undefined
+  /**
+   * Which kind of request an earlier call of `callerThreadId` under one of `keys` answered, by its receipt
+   * (`answer_subagent:` or `approval_respond:` with the caller and the key), so `request_answer` replays a retry as that
+   * kind after the request itself is gone.
+   */
+  answeredRequest?(callerThreadId: string, keys: readonly string[]): 'subagent' | 'approval' | undefined
   /**
    * Answers an approval of another thread as `actor` (`approval_respond`) through the one settlement the app,
    * the CLI and `answer_subagent` use: the rule `canAnswerApproval` decides, one answer wins and the loser learns

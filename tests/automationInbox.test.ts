@@ -353,10 +353,10 @@ describe('the draft tool in an ordinary chat', () => {
     }
     const list = automationTools({ automations: () => host } as unknown as AppToolHost)
     const save = list.find((tool) => tool.name === 'automation_draft_save')!
-    expect(save.listed!({ threadId: 'chat', readOnly: false, modeCeiling: 'default' } as never)).toBe(true)
-    expect(save.listed!({ threadId: 'run-thread', readOnly: false, modeCeiling: 'default' } as never)).toBe(false)
+    expect(save.listed!({ threadId: 'chat', readOnly: false } as never)).toBe(true)
+    expect(save.listed!({ threadId: 'run-thread', readOnly: false } as never)).toBe(false)
     // The manager's other tools stay the manager's.
-    expect(list.find((tool) => tool.name === 'automation_list')!.listed!({ threadId: 'chat', readOnly: false, modeCeiling: 'default' } as never)).toBe(false)
+    expect(list.find((tool) => tool.name === 'automation_list')!.listed!({ threadId: 'chat', readOnly: false } as never)).toBe(false)
 
     const result = JSON.parse((await save.handler(CHECK, ctx('chat'))).text) as { draftId: string; problems: string[] }
     expect(result.problems).toEqual([])
@@ -382,8 +382,8 @@ describe('the draft tool in an ordinary chat', () => {
       runs: { liveRunFor: (caller) => runs.liveRunFor(caller), report: (caller, level, summary) => runs.report(caller, level, summary) }
     }
     const report = automationTools({ automations: () => host } as unknown as AppToolHost).find((tool) => tool.name === 'run_report')!
-    expect(report.listed!({ threadId: 'run-thread', readOnly: false, modeCeiling: 'default' } as never)).toBe(true)
-    expect(report.listed!({ threadId: 'chat', readOnly: false, modeCeiling: 'default' } as never)).toBe(false)
+    expect(report.listed!({ threadId: 'run-thread', readOnly: false } as never)).toBe(true)
+    expect(report.listed!({ threadId: 'chat', readOnly: false } as never)).toBe(false)
     const call = { caller: { threadId: 'run-thread', runId: 'engine-1' }, turn: { threadId: 'run-thread' }, toolCallId: 'c' } as unknown as ToolCallContext
     expect(JSON.parse((await report.handler({ level: 'look', summary: 'Two flaky tests' }, call)).text)).toMatchObject({ level: 'look' })
     expect(JSON.parse((await report.handler({ level: 'quiet', summary: 'Nothing new.', leftOff: 'Checked today.' }, call)).text)).toMatchObject({ leftOff: expect.stringContaining('not kept: only a bot scheduled run') })

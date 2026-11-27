@@ -47,7 +47,7 @@ describe('the bot model setting', () => {
   })
 })
 
-const policy: RunPolicy = { mode: 'default', origin: 'bot', approvals: 'grants', tools: { allow: ['read'] }, authority: { kind: 'bot', digest: 'd1' } }
+const policy: RunPolicy = { origin: 'bot', approvals: 'grants', tools: { allow: ['read'] }, authority: { kind: 'bot', digest: 'd1' } }
 
 const catalog: ModelCatalog = {
   format: 1,

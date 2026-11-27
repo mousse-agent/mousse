@@ -45,7 +45,7 @@ function entry(groupId: unknown, ctx: ToolCallContext, registry: () => ToolRegis
   if (group.id === 'computer' && !held.some((tool) => COMPUTER_TOOL_NAMES.includes(tool.name))) {
     if (!bot?.appTools.has(COMPUTER_USE_TOOL)) {
       // No grant: ask for it, unless the owner switched it off or allowed it since the turn started (`held` says which).
-      lines.push('', bot?.held?.({ tool: BOT_COMPUTER_PERMISSION }) ?? 'None of these tools are yours on this turn. Ask for "use the computer" with escalate (tool computer) when your owner wants something done in an app.')
+      lines.push('', bot?.held?.({ tool: BOT_COMPUTER_PERMISSION }) ?? 'None of these tools are yours on this turn. Ask for "use the computer" with permission_ask (tool computer) when your owner wants something done in an app.')
       return lines.join('\n')
     }
     const request = held.some((tool) => tool.name === COMPUTER_USE_REQUEST_TOOL)
@@ -55,7 +55,7 @@ function entry(groupId: unknown, ctx: ToolCallContext, registry: () => ToolRegis
   // The owner's MCP tools this turn holds: a chat reaches them only here, so its listed tools never change with them.
   const mcp = group.id === 'mcp' ? bot?.mcpTools ?? [] : []
   if (!held.length && !mcp.length) {
-    lines.push('', 'None of these tools are yours on this turn. Where the group needs a permission, ask for it with escalate; otherwise this kind of turn does not use them.')
+    lines.push('', 'None of these tools are yours on this turn. Where the group needs a permission, ask for it with permission_ask; otherwise this kind of turn does not use them.')
     return lines.join('\n')
   }
   if (bot?.catalogue === 'use_tool') {

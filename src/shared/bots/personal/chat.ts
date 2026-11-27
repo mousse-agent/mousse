@@ -133,7 +133,7 @@ export interface BotChatMessage {
   /** A bot's message: the owner's reaction on it, an emoji (`bots.chat.react`). */
   reaction?: string
   /**
-   * A bot's question to tap an answer to (`ask_owner`, `bots.questions.answer`); on the owner's message that answered
+   * A bot's question to tap an answer to (`question_ask`, `bots.questions.answer`); on the owner's message that answered
    * one, its id alone. Absent from older services.
    */
   question?: BotChatQuestion
@@ -208,6 +208,8 @@ export interface BotSummary {
    * how the app shows "Started by <name>". Absent from older services.
    */
   homeThreadId?: string
+  /** Messages to other bots or wakes past the limit between bots, waiting for the owner's Continue or Stop (issue #1443). */
+  chainHold?: BotChainHoldView
   /** The chat turn that runs now (its status line and Stop); absent while the chat is free. `offline`: it waits for the internet. */
   chat?: { activationId: string; offline?: true }
   /** Work that runs or waits beside the chat (docs/plans/bot-always-free.md), oldest first. */
@@ -231,6 +233,12 @@ export interface BotSummary {
    * Bots list. Absent from older services and from what other devices get.
    */
   reach?: BotDeviceAccessMode
+  /**
+   * Its face picture (`face.png` in its files folder): `key` is what the saved one was drawn from, absent when none is
+   * saved. The app draws and saves it (`bots.facePicture.save`) when the key it would draw differs. Absent from older
+   * services, which save none.
+   */
+  facePicture?: { key?: string }
 }
 
 /** How many of a bot's tasks its summary carries. */
@@ -407,6 +415,17 @@ export interface BotReminderItem {
 }
 
 /** About this bot. */
+/** What a bot holds for its owner (`BotSummary.chainHold`): its batch, how many steps, and to which bots. */
+export interface BotChainHoldView {
+  /** The batch an answer names: the oldest held step (`bots.chainHold.answer`). */
+  holdId: string
+  held: number
+  /** The bots its held messages are for, by name. */
+  to: string[]
+  /** Held wake-ups. */
+  wakes: number
+}
+
 export interface BotDetail {
   summary: BotSummary
   permissions: BotPermissionItem[]

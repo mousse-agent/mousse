@@ -17,7 +17,7 @@ import type { HarnessCaps } from '../../src/shared/harness/types'
 
 /** Mousse's tools that ask the person, as the app-tool registry describes them (`asksUser`, `access`). */
 const MOUSSE_TOOLS: Record<string, { asksUser?: 'question' | 'approval'; access: string }> = {
-  ask_user: { asksUser: 'question', access: 'actsAsCaller' },
+  question_ask: { asksUser: 'question', access: 'actsAsCaller' },
   thread_read: { access: 'readsOthers' }
 }
 

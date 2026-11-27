@@ -44,6 +44,7 @@ import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatCompo
 import type { ChatReference } from '../../../shared/chatReferences'
 import { botThreadReferenceRefusal } from '../../lib/threadReference'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
+import { BotChainHoldNotice } from './BotChainHoldNotice'
 import { botGroupTime, placeMessages } from './messageGroups'
 import { botDoingLine, chatRows, resumedWork, resumedWorkLine, withNotes, type BotChatRow, type OwnerMarks } from './botChatShape'
 import { BOT_CHAT_WINDOW_STEP, rowIndex, rowKey, windowStart } from './botChatWindow'
@@ -1204,6 +1205,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         {pasted.offer}
         <ComposerNoticeProvider>
           <ComposerNoticeSource notice={error ? { tone: 'error', title: error, onDismiss: () => useBotsStore.setState({ error: null, errorBotId: null }) } : null} />
+          <BotChainHoldNotice botId={bot.id} botName={bot.name} hold={bot.chainHold} />
           <ComposerNoticeSlot />
           {replying && <div className="bot-quote bot-replying" data-author={replying.author} role="status" aria-label={`Replying to ${quoteOwner(replying, bot.name)}: ${quoteLine(replying)}`}>
             <QuoteLine quote={replying} botName={bot.name} />

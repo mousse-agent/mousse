@@ -106,7 +106,9 @@ export function jobEffectiveMay(job: ScheduledJob, threadMode: PermissionMode): 
  * A job whose Who is a bot: the same record and row as any job, with the bot's face, its own pause, and the runs its
  * run lane made (the bot's activations). Its May is the bot's grant. Undefined for a bot that is gone or deleted.
  */
-function botJobItem(job: ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> }, facts: BotAutomationFacts, computer: AutomationItem['computer']): AutomationItem {
+function botJobItem(job: ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> }, facts: BotAutomationFacts, computer: AutomationItem['computer'], sources: AutomationIndexSources): AutomationItem {
+  // A request URL's address and its log, as for any automation that takes requests.
+  const request = requestPart(job, sources)
   const runs = facts.runs.map(run => {
     const parked = parkedBotRun(run, job.botSkip?.reason === 'bot_waiting_for_owner')
     if (parked) return parked
@@ -129,9 +131,10 @@ function botJobItem(job: ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> 
     kind: 'job',
     id: job.id,
     name: job.name,
-    trigger: 'time',
+    trigger: job.trigger?.webhook && job.schedule.kind === 'manual' ? 'request' : job.schedule.kind === 'manual' ? 'on_demand' : 'time',
     schedule: job.schedule,
     whenText: facts.whenText ?? '',
+    ...(request ? { request } : {}),
     who: { kind: 'bot', name: facts.botName, look: facts.look },
     paused,
     ...(jobPaused && job.resumeAt ? { pausedUntil: job.resumeAt } : {}),
@@ -202,7 +205,8 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
       ? { kind: 'saved_agent', name: savedAgentName(job.agent.definitionId, sources), definitionId: job.agent.definitionId }
       : { kind: 'agent', name: job.selection?.model ?? 'Default agent' }
   const wakesOn = job.trigger?.threadEvent
-  const trigger = wakesOn ? 'thread_event' : job.trigger?.webhook && job.schedule.kind === 'manual' ? 'request' : job.schedule.kind === 'manual' ? 'on_demand' : 'time'
+  // A draft that is to take requests shows as one before its URL is set up.
+  const trigger = wakesOn ? 'thread_event' : (job.trigger?.webhook || job.draft?.request) && job.schedule.kind === 'manual' ? 'request' : job.schedule.kind === 'manual' ? 'on_demand' : 'time'
   // A draft is not paused: it has never been on.
   const paused = !job.draft && (job.state === 'paused' || (!job.enabled && job.state !== 'running'))
   const active = jobActiveRun(job, now)
@@ -400,7 +404,7 @@ export function buildAutomationIndex(sources: AutomationIndexSources): Automatio
       if (!unavailable.includes('bots')) unavailable.push('bots')
       continue
     }
-    if (facts) items.push(botJobItem(job as ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> }, facts, computer))
+    if (facts) items.push(botJobItem(job as ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> }, facts, computer, sources))
   }
   try {
     for (const ask of sources.asks?.() ?? []) items.push(askItem(ask, sources, computer))

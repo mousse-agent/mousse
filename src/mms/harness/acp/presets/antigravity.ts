@@ -1,4 +1,4 @@
-import { execFile, spawn, spawnSync } from 'node:child_process'
+import { execFile, spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -26,7 +26,7 @@ export const ANTIGRAVITY_LABEL = 'Antigravity'
 export const ANTIGRAVITY_NATIVE_STEER_FROM = '1.5.0'
 
 /**
- * The agent rejects plan mode and publishes no usage: the base ACP capabilities. `steer` stays `interrupt_restart`
+ * The agent publishes no usage: the base ACP capabilities. `steer` stays `interrupt_restart`
  * although a 1.5 `agy` takes a steer into the running prompt (`ANTIGRAVITY_QUIRKS.nativeSteerFrom`): `native` would let
  * the engine push a subagent's notice into a running turn as a prompt of its own (SPEC §14.3). A person's steer goes in at once either way; how is the session's choice.
  */
@@ -169,6 +169,11 @@ export interface AntigravityLaunchOptions {
   /** The user's extra launch arguments and variables. */
   args(): string[]
   env(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv
+  /**
+   * Starts a single request's agent in its place (`oneShot/places.ts` `spawnInPlace`), `cwd` being the place's `work`
+   * folder: its tree is recorded before it runs and ends with proof. Without it a single request does not start.
+   */
+  spawnOneShot?(cwd: string, launch: { command: string; args: string[]; env: NodeJS.ProcessEnv }): ChildProcessWithoutNullStreams
 }
 
 /**
@@ -176,9 +181,11 @@ export interface AntigravityLaunchOptions {
  * on stderr or through the `BROWSER` helper) goes to `onAuthUrl` once it proves to be a Google
  * sign-in with a loopback callback this process owns.
  *
- * A one-shot on `agy` (`request.purpose === 'one_shot'`) gets a launch of its own (`antigravityOneShotArgs`): its
- * scratch folder as working folder, an empty home of its own as gemini dir ({@link antigravityOneShotHome}),
- * {@link oneShotAntigravityEnv}, its own settings, none of the user's arguments, variables or skill links. On the 1.1.1 server a one-shot keeps the ordinary launch, which is not checked.
+ * A single request (`request.purpose === 'one_shot'`) runs in its place (`options.spawnOneShot`): the place's `work`
+ * folder as working folder, its `tmp` as temporary folder. On `agy` it gets a launch of its own
+ * (`antigravityOneShotArgs`): the place's empty `home` as gemini dir ({@link antigravityOneShotHome}),
+ * {@link oneShotAntigravityEnv}, settings of its own, none of the user's arguments, variables or skill links. On the
+ * 1.1.1 server it keeps the ordinary launch, which is not checked.
  */
 export function antigravityConnectionFactory(options: AntigravityLaunchOptions): AcpConnectionFactory {
   return (request) => {
@@ -186,8 +193,10 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
     if (!runtime) throw new Error('Install Google Antigravity or select its official ACP binary first')
     const { binary, kind } = runtime
     if (request.bot && kind !== 'native') throw new Error('Bot turns require the agy CLI.')
-    const oneShot = request.purpose === 'one_shot' && kind === 'native'
-    if (oneShot && !request.cwd) throw new Error('An Antigravity one-shot needs a folder of its own.')
+    // A single request's place: `<place>/work` is its folder (`AntigravityProviderService.oneShotTransport`).
+    const place = request.purpose === 'one_shot' ? oneShotPlaceOf(request.cwd) : undefined
+    if (request.purpose === 'one_shot' && (!place || !options.spawnOneShot)) throw new Error('An Antigravity single request runs only in a place of its own.')
+    const oneShot = place !== undefined && kind === 'native'
     const env = oneShot ? oneShotAntigravityEnv(process.env) : scrubbedAntigravityEnv(process.env)
     const geminiHome = antigravityGeminiHome(options.privateHome ?? options.profileDir, request.bot)
     mkdirSync(geminiHome, { recursive: true, mode: 0o700 })
@@ -211,7 +220,7 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
       chmodSync(browserHelper, 0o700)
     }
     // A one-shot reads its `config` (hooks, MCP servers, plugins) from an empty home of its own (`antigravityOneShotHome`).
-    const oneShotHome = oneShot ? antigravityOneShotHome(geminiHome, request.cwd!) : undefined
+    const oneShotHome = oneShot ? antigravityOneShotHome(place!.dir) : undefined
     if (oneShotHome) mkdirSync(oneShotHome, { recursive: true, mode: 0o700 })
     env.GEMINI_HOME = oneShotHome ?? geminiHome
     if (kind === 'legacy') {
@@ -228,22 +237,22 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
     env.BROWSER = `${quotedHelper} %s`
     env.PYTHONUNBUFFERED = '1'
     env.ELECTRON_RUN_AS_NODE = '1'
-    const tempDir = join(options.profileHome, 'antigravity-tmp', crypto.randomUUID())
+    const tempDir = place ? join(place.dir, 'tmp') : join(options.profileHome, 'antigravity-tmp', crypto.randomUUID())
     mkdirSync(tempDir, { recursive: true, mode: 0o700 })
     if (process.platform === 'win32') { env.TEMP = tempDir; env.TMP = tempDir }
     else env.TMPDIR = tempDir
     // Bot turns must use ACP approvals and the MCP servers Mousse supplies for their grant; a one-shot runs nothing.
-    const args = oneShotHome ? antigravityOneShotArgs(binary, oneShotHome, acpDir, request.cwd!)
+    const args = oneShotHome ? antigravityOneShotArgs(binary, oneShotHome, acpDir, place!.id)
       : [...antigravityRuntimeArgs(kind, geminiHome), ...(request.bot ? ['--include-default-customizations=false'] : options.args())]
     const launchEnv = request.bot || oneShot ? env : options.env(env)
     if (options.privateHome) privateSignInEnv(launchEnv, kind)
-    // A process group on POSIX, so Stop ends the agent's helpers with it (`treeKilledChild`).
-    const child = spawn(binary, args, {
+    // A process group on POSIX, so Stop ends the agent's helpers with it (`treeKilledChild`). A single request's tree
+    // is its place's (a job, or a group with its watcher).
+    const child = place ? options.spawnOneShot!(request.cwd!, { command: binary, args, env: launchEnv }) : spawn(binary, args, {
       env: launchEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-      detached: process.platform !== 'win32',
-      ...(oneShot ? { cwd: request.cwd } : {})
+      detached: process.platform !== 'win32'
     })
     const acceptAuthUrl = (url: string) => {
       if (callbackTarget(url)) request.onAuthUrl?.(url)
@@ -259,7 +268,8 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
       },
       onExit: () => {
         request.onExit?.()
-        void rm(tempDir, { recursive: true, force: true }).catch(() => undefined)
+        // A single request's temporary folder goes with its place.
+        if (!place) void rm(tempDir, { recursive: true, force: true }).catch(() => undefined)
       }
     })
     // The launcher starts the real agent and its local harness: closing ends all of them.
@@ -273,15 +283,26 @@ export function antigravityGeminiHome(root: string, bot?: boolean): string {
   return join(root, bot ? 'bot-gemini-home' : 'gemini-home')
 }
 
-/** Where an entry's one-shot scratch folders are, under its state folder; each folder's name is its request's id. */
+/** The prefix of a single request's settings folder in `agy`'s app data (`antigravityOneShotCliDir`). */
 export const ANTIGRAVITY_ONE_SHOT_DIR = 'one-shot'
 
+/** A place id: what `randomUUID` gives. */
+const PLACE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** The place a single request's folder `<place>/work` is in, with its id; undefined for any other folder. */
+function oneShotPlaceOf(cwd: string | undefined): { dir: string; id: string } | undefined {
+  if (!cwd || basename(cwd) !== 'work') return undefined
+  const dir = dirname(cwd)
+  const id = basename(dir)
+  return PLACE_ID.test(id) ? { dir, id } : undefined
+}
+
 /**
- * The folder under `agy`'s app data where a one-shot's settings and logs go (`--cli_dir_name`), named after its
- * scratch folder so the request's files are found, and removed, with it.
+ * The folder under `agy`'s app data where a single request's settings and logs go (`--cli_dir_name`), named after its
+ * place's id: a typed leftover of the place, removed with it (`antigravityLeftoverRules`).
  */
-export function antigravityOneShotCliDir(cwd: string): string {
-  return `${ANTIGRAVITY_ONE_SHOT_DIR}-${basename(cwd)}`
+export function antigravityOneShotCliDir(placeId: string): string {
+  return `${ANTIGRAVITY_ONE_SHOT_DIR}-${placeId}`
 }
 
 /**
@@ -299,17 +320,13 @@ export const ANTIGRAVITY_ONE_SHOT_SETTINGS = Object.freeze({
   permissions: { deny: ['read_file(*)', 'write_file(*)', 'read_url(*)', 'execute_url(*)', 'command(*)', 'unsandboxed(*)', 'mcp(*)'] }
 })
 
-/** Where an entry's one-shot homes are, beside its `gemini-home` (`antigravityOneShotHome`). */
-export const ANTIGRAVITY_ONE_SHOT_HOMES_DIR = 'one-shot-homes'
-
 /**
- * The empty home a one-shot passes as `--gemini-dir`, beside the entry's `geminiHome` and named after its scratch
- * folder `cwd`. `agy` reads the global hooks and MCP servers from `<gemini-dir>/config` (`hooks.json`,
- * `mcp_config.json`); neither `--cli_dir_name` nor `--include-default-customizations=false` keeps them out (seen on
- * agy 1.5.18), so a one-shot's home has none. It also holds the request's record (`oneShotGuards`).
+ * The empty home a single request passes as `--gemini-dir`: `home` in its place. `agy` reads the global hooks and MCP
+ * servers from `<gemini-dir>/config` (`hooks.json`, `mcp_config.json`); neither `--cli_dir_name` nor
+ * `--include-default-customizations=false` keeps them out (seen on agy 1.5.18), so a single request's home has none.
  */
-export function antigravityOneShotHome(geminiHome: string, cwd: string): string {
-  return join(dirname(geminiHome), ANTIGRAVITY_ONE_SHOT_HOMES_DIR, basename(cwd))
+export function antigravityOneShotHome(placeDir: string): string {
+  return join(placeDir, 'home')
 }
 
 /**
@@ -319,12 +336,12 @@ export function antigravityOneShotHome(geminiHome: string, cwd: string): string 
  * reads a relative one from the gemini dir. Refused when this `agy`'s flags were not read ({@link readAgyAcpFlags}),
  * it cannot keep the settings apart, or the app data has no relative path from `home`.
  */
-function antigravityOneShotArgs(binary: string, home: string, acpDir: string, cwd: string): string[] {
+function antigravityOneShotArgs(binary: string, home: string, acpDir: string, placeId: string): string[] {
   const flags = knownAgyAcpFlags(binary)
   if (!flags?.cliDir) throw harnessAppError({ code: 'wont_run', message: 'This agy cannot keep a single request apart from its other sessions. Update agy.' })
   const appData = relative(home, acpDir)
   if (!appData || isAbsolute(appData)) throw harnessAppError({ code: 'wont_run', message: `Antigravity's app data ${acpDir} has no relative path from ${home}.` })
-  const cliDir = antigravityOneShotCliDir(cwd)
+  const cliDir = antigravityOneShotCliDir(placeId)
   const settingsDir = join(acpDir, cliDir)
   mkdirSync(settingsDir, { recursive: true, mode: 0o700 })
   writeFileSync(join(settingsDir, 'settings.json'), JSON.stringify(ANTIGRAVITY_ONE_SHOT_SETTINGS), { mode: 0o600 })

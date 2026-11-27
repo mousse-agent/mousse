@@ -23,9 +23,11 @@ import type { ChatImageAttachment } from '../../../../shared/types'
 import { providerTakesImage } from '../../../../shared/imageLimits'
 import { normalizePermissionMode, permissionModeAllows, type PermissionLimits, type PermissionMode as ThreadPermissionMode } from '../../../../shared/permissionMode'
 import { applyEffortToModelId, parseThinkingSuffixFromModelId, supportedEffortOf } from '../../../../shared/modelVariants'
-import { ONE_SHOT_SPARE_IDLE_MS, ONE_SHOT_SPARE_SYSTEM, OneShotInput, oneShotLaunchKey, oneShotSpareMessage, oneShotUsesSpare, type OneShotSpare } from './oneShotSpare'
+import { ONE_SHOT_SINGLE_REQUEST_ENV, ONE_SHOT_SPARE_IDLE_MS, ONE_SHOT_SPARE_SYSTEM, OneShotInput, oneShotLaunchKey, oneShotSpareMessage, oneShotUsesSpare, type OneShotSpare } from './oneShotSpare'
+import { releasePlace, reservePlace, spawnInPlace, type PlaceProcess } from '../../oneShot/places'
+import type { OneShotEvents, OneShotTransport, OneShotWireRequest } from '../../oneShot/route'
 import { AppError } from '../../../../shared/errors'
-import { PROVIDER_TURN_CAP } from '../../../../shared/harness/types'
+import { PROVIDER_TURN_CAP, harnessAppError } from '../../../../shared/harness/types'
 import type { ProviderToolEvent } from '../../../../shared/agentActivity'
 import { CLAUDE_INSTANCE_ID } from '../../../../shared/providerInstances'
 import { catalogModelsOnRoute, MODEL_CATALOG_FORMAT, type ModelCatalog, type ModelCatalogEntry, type ModelCatalogRoute } from '../../../../shared/modelCatalog'
@@ -75,7 +77,6 @@ import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './ch
 import { CancelInProgress, claudeQueryProcess, DEFAULT_LIVE_TIMINGS, LiveSession, noteClaudeQuerySpawn, type ClaudeProcess, type LiveRun, type LiveTimings } from './liveSession'
 import { spawnProviderProcess, windowsProviderTree, type WindowsProviderTree } from '../../windowsProviderProcess'
 import { reapProcessTree, type SpawnedRoot } from '../../stopProcesses'
-import { spawnWindowsJobProcess, type WindowsJobProcess } from '../../windowsJobProcess'
 import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
 import { providerApiError, providerReportedError, providerStatusError, readUsageLimit } from '../../../orchestrator/providerErrors'
 import type { ProviderRetries } from '../../../../shared/providerRetry'
@@ -266,7 +267,6 @@ export type ClaudeSubscriptionChatInput = {
   onSession?: (session: { sessionId: string; promptId?: string }) => void
   images?: ChatImageAttachment[]
   signal?: AbortSignal
-  mode?: 'plan' | 'default'
   /**
    * The thread's permission mode for this turn (`ask`, `accept_edits`, `auto`, `full`); absent reads as
    * the default (`accept_edits`). Enforced through Claude Code's own permission mode, the PreToolUse
@@ -374,7 +374,7 @@ type TurnContext = {
   controller: AbortController
   integrations: ClaudeTurnIntegrations | undefined
   editCounter: ClaudeNativeEditCounter
-  planTurn: boolean
+  /** A read-only child: every call goes through the hook and canUseTool's read-only allowlist. */
   restricted: boolean
   /** The thread's permission mode this turn runs in (already lowered when Claude Code refuses to bypass). */
   permissionMode: ThreadPermissionMode
@@ -382,6 +382,8 @@ type TurnContext = {
   locked?: ClaudeLockedGate
 }
 type Dependencies = {
+  /** The entry this service runs (default the built-in `claude`): a single request's place is recorded under it. */
+  instanceId?: string
   /**
    * Mousse's model catalog as read, before version limits (default `bundledModelCatalog()`); this
    * service gates it for the running Mousse. Tests use made-up models.
@@ -1087,7 +1089,7 @@ export class ClaudeSubscriptionProviderService {
   private policyStored = false
 
   constructor(
-    profileHome: string,
+    private readonly profileHome: string,
     private readonly questions: UserQuestionService,
     private readonly dependencies: Dependencies = {}
   ) {
@@ -1344,18 +1346,22 @@ export class ClaudeSubscriptionProviderService {
     }
   }
   /**
-   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a
-   * commit message on the chosen model (`oneShotOptions`): one turn, no tools, no saved session (it
-   * never shows in the user's `claude --resume`), and nothing of the user's setup that could run a
-   * command. It never retries.
+   * `claude:cli`: the runner's request (a thread title, a branch name, a pull request draft, a commit message, a bot's
+   * name or digest) as one turn with no tools on the chosen model (`oneShotOptions`): no tool offered, no saved session
+   * (it never shows in the user's `claude --resume`), nothing of the user's setup that could run a command, and one
+   * request on the wire (`CLAUDE_CODE_MAX_RETRIES=0`, no non-streaming fallback). Each process runs in a place of its own
+   * (`oneShot/places.ts`), its folder the place's `work`. Reads the sign-in as last checked: it never waits for a check.
    *
    * A title or branch name (`oneShotUsesSpare`) runs on a process started ahead when one is waiting with the same launch
    * (`oneShotSpare.ts`), with its instructions in its message. Only New Thread or Send can leave a spare behind.
    * Both belong to the account and launch they were started under (`oneShotGeneration`): after a sign-out, a reconnect or
-   * a stop, the request ends and nothing is started for it again. A process started ahead that ended before it said
-   * anything, under the same account, is not a request: the request then starts its own.
+   * a stop, the request ends and nothing is started for it again. The handoff fence: a spare that ended before it took
+   * the prompt was never asked, so the request starts its own; once it has taken the prompt, nothing sends it again.
    */
-  async oneShot(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
+  oneShotTransport(spec: Pick<OneShotSpec, 'model' | 'effort' | 'task' | 'namingOrigin'>): OneShotTransport {
+    return { send: async (wire, events, signal) => (await this.oneShotRequest(spec, wire, events, signal)).text }
+  }
+  private async oneShotRequest(spec: Pick<OneShotSpec, 'model' | 'effort' | 'task' | 'namingOrigin'>, wire: OneShotWireRequest, events: OneShotEvents, signal: AbortSignal): Promise<{ text: string }> {
     signal.throwIfAborted()
     const generation = this.oneShotGeneration
     const requireCurrent = (): void => {
@@ -1364,23 +1370,22 @@ export class ClaudeSubscriptionProviderService {
         throw new Error('Claude Code was signed out or stopped before it answered.')
       }
     }
-    if (this.checkDue()) await this.status()
     requireCurrent()
-    if (!this.configured()) {
+    if (!this.signedInAsChecked()) {
       this.dropOneShotSpare()
-      throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+      throw harnessAppError({ code: 'signed_out', message: this.signInRequiredMessage(), instanceId: this.oneShotInstanceId() })
     }
     const { model, effort } = this.oneShotModel(spec)
     const spared = oneShotUsesSpare(spec.task)
     const controller = new AbortController()
-    const options: Options = { ...this.oneShotOptions(controller), model, ...(effort ? { effort } : {}), systemPrompt: spared ? ONE_SHOT_SPARE_SYSTEM : spec.system }
-    if (!spared) return this.runOneShot(spec.prompt, options, controller, spec, signal)
+    const options: Options = { ...this.oneShotOptions(controller), model, ...(effort ? { effort } : {}), systemPrompt: spared ? ONE_SHOT_SPARE_SYSTEM : wire.system }
+    if (!spared) return this.runOneShot(wire.prompt, options, controller, events, signal)
     // The terminal can switch accounts between status checks without changing any launch setting.
     const account = this.accountSubject()
     if (!account) {
       this.latestOneShotKey = undefined
       this.dropOneShotSpare()
-      return this.runOneShot(spec.prompt, { ...options, systemPrompt: spec.system }, controller, spec, signal)
+      return this.runOneShot(wire.prompt, { ...options, systemPrompt: wire.system }, controller, events, signal)
     }
     const requireSameAccount = (): void => {
       requireCurrent()
@@ -1388,18 +1393,22 @@ export class ClaudeSubscriptionProviderService {
         throw new Error('The Claude Code sign-in changed before it answered.')
       }
     }
-    const message = oneShotSpareMessage(spec.system, spec.prompt)
+    const message = oneShotSpareMessage(wire.system, wire.prompt)
     const key = oneShotLaunchKey(options, account)
     this.latestOneShotKey = key
     const spare = this.takeOneShotSpare(key)
-    let answer = spare ? await this.answerOnSpare(spare, message, spec, signal, requireSameAccount) : undefined
+    let answer = spare ? await this.answerOnSpare(spare, message, events, signal, requireSameAccount) : undefined
     if (!answer) {
       if (spare) requireSameAccount()
-      answer = await this.runOneShot(message, options, controller, spec, signal)
+      answer = await this.runOneShot(message, options, controller, events, signal)
     }
     requireSameAccount()
     if (this.latestOneShotKey === key && (spec.namingOrigin === 'new_thread' || spec.namingOrigin === 'send')) this.startOneShotSpare(key, generation, options)
     return answer
+  }
+  /** The entry single requests are recorded under (a place's record). */
+  private oneShotInstanceId(): string {
+    return this.dependencies.instanceId ?? CLAUDE_INSTANCE_ID
   }
   /**
    * The model and reasoning level a one-shot runs on, at the standard speed. A level the model does not offer runs at the
@@ -1420,9 +1429,13 @@ export class ClaudeSubscriptionProviderService {
     return { model: baseId, ...(effort ? { effort } : {}) }
   }
   /** One request on a process of its own, started now, with `prompt` as its input. */
-  private async runOneShot(prompt: string, options: Options, controller: AbortController, spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
+  private async runOneShot(prompt: string, options: Options, controller: AbortController, events: OneShotEvents, signal: AbortSignal): Promise<{ text: string }> {
     signal.throwIfAborted()
-    const { query, close } = this.openOneShot(prompt, options, controller, oneShotUsesSpare(spec.task))
+    // The entry is still the one admitted (the program its check read, its sign-in); the prompt is the process's input,
+    // so it leaves as the process starts. The launch path is not compared: an npm install's script is not the program
+    // its check read.
+    events.sending()
+    const { query, close } = this.openOneShot(prompt, options, controller)
     const abort = (): void => close(signal.reason)
     if (signal.aborted) abort()
     else signal.addEventListener('abort', abort, { once: true })
@@ -1430,7 +1443,7 @@ export class ClaudeSubscriptionProviderService {
       const started = await query
       signal.throwIfAborted()
       controller.signal.throwIfAborted()
-      const answer = await this.readOneShot(started, spec, controller.signal)
+      const answer = await this.readOneShot(started, events, controller.signal)
       signal.throwIfAborted()
       controller.signal.throwIfAborted()
       return answer
@@ -1439,14 +1452,25 @@ export class ClaudeSubscriptionProviderService {
       signal.removeEventListener('abort', abort)
     }
   }
-  /** The answer a one-shot's query gives: its result's text, or its failure. */
-  private async readOneShot(query: Query, spec: OneShotSpec, signal: AbortSignal, heard?: () => void): Promise<{ text: string }> {
+  /** The answer a one-shot's query gives: its result's text, or its failure. Its text streams to the runner's cap. */
+  private async readOneShot(query: Query, events: OneShotEvents, signal: AbortSignal, heard?: () => void): Promise<{ text: string }> {
     // A loop's implicit iterator return may close the SDK transport before its process tree is inventoried.
     const messages = query[Symbol.asyncIterator]()
     for (let next = await messages.next(); !next.done; next = await messages.next()) {
       const message = next.value
       heard?.()
-      spec.onActivity()
+      events.activity()
+      if (message.type === 'stream_event') {
+        const event = message.event as { type?: string; delta?: { type?: string; text?: string } }
+        if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta.text) events.text(event.delta.text)
+        continue
+      }
+      // No tool is offered; one the model asks for anyway ends the request.
+      if (message.type === 'assistant') {
+        const used = (message.message.content as Array<{ type?: string; name?: string }>).find((block) => block.type === 'tool_use')
+        if (used) events.tool(used.name ?? 'a tool')
+        continue
+      }
       if (message.type !== 'result') continue
       const failure = resultFailure(message)
       if (failure) throw failure
@@ -1456,11 +1480,12 @@ export class ClaudeSubscriptionProviderService {
     throw new Error('Claude Code ended without an answer.')
   }
   /**
-   * The request on a process started ahead. Undefined when the process ended (or could not start) before it said
-   * anything: the request has not been made, and the caller decides whether it may start its own. The process is closed
-   * afterwards either way.
+   * The request on a process started ahead. Undefined when the process ended (or could not start) before it took the
+   * prompt: the request has not been made, and the caller decides whether it may start its own. Once it has taken the
+   * prompt (`OneShotInput.taken`) it may have sent it, so its failure is the request's (the handoff fence). The process
+   * is closed afterwards either way.
    */
-  private async answerOnSpare(spare: OneShotSpare, message: string, spec: OneShotSpec, signal: AbortSignal, requireSameAccount: () => void): Promise<{ text: string } | undefined> {
+  private async answerOnSpare(spare: OneShotSpare, message: string, events: OneShotEvents, signal: AbortSignal, requireSameAccount: () => void): Promise<{ text: string } | undefined> {
     const abort = (): void => spare.close(signal.reason)
     if (signal.aborted) abort()
     else signal.addEventListener('abort', abort, { once: true })
@@ -1469,10 +1494,11 @@ export class ClaudeSubscriptionProviderService {
       const query = await spare.query
       if (spare.controller.signal.aborted || signal.aborted) return undefined
       requireSameAccount()
+      events.sending()
       spare.input.push(message)
-      return await this.readOneShot(query, spec, spare.controller.signal, () => { heard = true })
+      return await this.readOneShot(query, events, spare.controller.signal, () => { heard = true })
     } catch (error) {
-      if (heard || signal.aborted) throw error
+      if (heard || signal.aborted || spare.input.taken) throw error
       return undefined
     } finally {
       signal.removeEventListener('abort', abort)
@@ -1507,8 +1533,11 @@ export class ClaudeSubscriptionProviderService {
     this.dropOneShotSpare()
     const controller = new AbortController()
     const input = new OneShotInput()
-    const { query, close } = this.openOneShot(input, { ...options, abortController: controller }, controller, true, () => input.end())
-    const spare: OneShotSpare = { key, generation, input, controller, query, close, timer: setTimeout(() => this.dropOneShotSpare(spare), ONE_SHOT_SPARE_IDLE_MS) }
+    const { query, close } = this.openOneShot(input, { ...options, abortController: controller }, controller, () => input.end())
+    const spare: OneShotSpare = {
+      key, generation, input, controller, query, close,
+      timer: setTimeout(() => this.dropOneShotSpare(spare), ONE_SHOT_SPARE_IDLE_MS)
+    }
     spare.timer.unref?.()
     // One that could not start is dropped; a request that took it meanwhile starts its own.
     query.catch(() => this.dropOneShotSpare(spare))
@@ -1520,59 +1549,47 @@ export class ClaudeSubscriptionProviderService {
     spare.close()
   }
   /**
-   * Owns pending and running one-shots. Register cleanup as soon as a query is closed or aborted, so logout
-   * and shutdown wait even when the SDK has not returned the query yet.
+   * A single request's Claude Code process, in a place of its own (`oneShot/places.ts`): its record first, then its
+   * folder, whose `work` is the process's working folder; the process tree is recorded before it runs
+   * (`spawnInPlace`). Closing ends the query, proves the tree has gone and removes the place; without proof the place is
+   * left to the sweep. Registered at once, so sign-out and shutdown wait for it even before the SDK returned the query.
    */
-  private openOneShot(prompt: string | OneShotInput, options: Options, controller: AbortController, naming: boolean, end?: () => void): { query: Promise<Query>; close: (reason?: unknown) => void } {
-    let job: WindowsJobProcess | undefined
+  private openOneShot(prompt: string | OneShotInput, options: Options, controller: AbortController, end?: () => void): { query: Promise<Query>; close: (reason?: unknown) => void } {
+    const place = reservePlace(this.profileHome, { route: 'claude:cli', instanceId: this.oneShotInstanceId() })
+    const work = join(place.dir, 'work')
+    let proc: PlaceProcess | undefined
     let closing = false
-    if (naming && process.platform === 'win32') {
-      const stderr = options.stderr
-      options = { ...options, spawnClaudeCodeProcess: (target) => {
-        if (closing || job) throw new Error('The Windows naming process is already started or closed')
-        job = spawnWindowsJobProcess(target)
-        const child = job.child
-        child.on('message', (pid) => {
-          if (typeof pid === 'number') trackChildProcess({ pid, once: (_event, listener) => child.once('exit', listener) }, 'claude')
-        })
-        child.stderr.setEncoding('utf8').on('data', (data: string) => stderr?.(data))
-        return child
-      } }
+    const stderr = options.stderr
+    const given: Options = { ...options, cwd: work, spawnClaudeCodeProcess: (target) => {
+      if (closing || proc) throw new Error('The single request\'s Claude Code process is already started or closed')
+      proc = spawnInPlace(place, { command: target.command, args: target.args, env: target.env as NodeJS.ProcessEnv, purpose: 'claude-one_shot', instanceId: this.oneShotInstanceId(), cwd: work })
+      proc.child.stderr.setEncoding('utf8').on('data', (data: string) => stderr?.(data))
+      return proc.child
+    } }
+    let query: Promise<Query>
+    try {
+      mkdirSync(work, { mode: 0o700 })
+      query = this.createQuery(prompt, given)
+    } catch (error) {
+      void releasePlace(place, undefined)
+      throw error
     }
-    const query = this.createQuery(prompt, options)
-    const report = (error: unknown): void => console.warn('[claude-subscription] a one-shot process could not be ended', { error: error instanceof Error ? error.message : String(error) })
+    const report = (error: unknown): void => console.warn('[claude-subscription] a single request\'s process could not be ended', { error: error instanceof Error ? error.message : String(error) })
     const close = (reason?: unknown): void => {
       if (!this.oneShotClosers.delete(close)) return
       closing = true
-      const abort = (): void => { controller.abort(reason); end?.() }
-      let stopped: Promise<void>
-      if (job) {
-        // The job is ours even if the query has not returned, or its process already exited. Its stop never uses stdin.
-        stopped = job.stop()
-        abort()
-        void query.then((started) => started.close()).catch(report)
-      } else {
-        stopped = query.then((started) => this.reapOneShot(started, abort), abort).catch(report)
-      }
-      const reaping = stopped.finally(() => this.oneShotReaping.delete(reaping))
-      void reaping.catch(report)
+      controller.abort(reason)
+      end?.()
+      const stopped = (async () => {
+        try { (await query).close() } catch { /* never started, or already closed */ }
+        const released = await releasePlace(place, proc)
+        if (!released.reaped) console.warn('[claude-subscription] a single request\'s process did not end; its place is left to the sweep', { id: place.id })
+      })()
+      const reaping = stopped.catch(report).finally(() => this.oneShotReaping.delete(reaping))
       this.oneShotReaping.add(reaping)
     }
     this.oneShotClosers.add(close)
     return { query, close }
-  }
-  /** Inventories the tree before SDK shutdown can close its root. */
-  private async reapOneShot(query: Query, abort: () => void): Promise<void> {
-    const target = claudeQueryProcess(query)
-    const close = (): void => {
-      try { query.close() } catch { /* The reaper still ends the process. */ }
-      finally { abort() }
-    }
-    if (!target) { close(); return }
-    const reap = this.dependencies.reap
-    if (reap) close()
-    const outcome = reap ? await reap(target.pid, target.root) : await reapProcessTree(target.pid, { graceMs: CLAUDE_STOP_GRACE_MS, root: target.root, close })
-    if (outcome === 'killed' || outcome === 'survived') console.warn('[claude-subscription] a one-shot process did not exit when closed', { pid: target.pid, outcome })
   }
   /**
    * The options of a one-shot. Claude Code loads no settings files (`settingSources: []`), so no hook,
@@ -1586,11 +1603,15 @@ export class ClaudeSubscriptionProviderService {
    * enforce still run: Claude Code gives no caller a switch over those.
    */
   private oneShotOptions(controller: AbortController): Options {
+    // The folder is each process's place (`openOneShot`).
     const base = this.dependencies.lockedEnv
-      ? this.housekeepingOptions(this.standaloneWorkspace('one-shot'), controller)
-      : this.options(this.standaloneWorkspace('one-shot'), controller, this.finalEnv({ ...claudeSignInEnvironment(this.environment()), ...this.entrypointEnv(this.environment()) }))
+      ? this.housekeepingOptions('', controller)
+      : this.options('', controller, this.finalEnv({ ...claudeSignInEnvironment(this.environment()), ...this.entrypointEnv(this.environment()) }))
     return {
       ...base,
+      // One request on the wire: no retry of a 429 or a 5xx, and no second, non-streaming request after a failed stream
+      // (counted at a stub: 11 requests without them, 1 with them).
+      env: { ...base.env, ...ONE_SHOT_SINGLE_REQUEST_ENV },
       settingSources: [],
       settings: { disableAllHooks: true },
       hooks: {},
@@ -1636,6 +1657,10 @@ export class ClaudeSubscriptionProviderService {
     // Refresh a stale result in the background; the first check comes from `status()`.
     if (this.cliProbe && this.checkDue()) void this.status()
     return this.cliProbe?.result.kind === 'signed_in'
+  }
+  /** Signed in as the last check found, read only: a single request neither waits for nor starts a check. */
+  private signedInAsChecked(): boolean {
+    return !this.stopped && !this.settingsError && !this.signedOut() && Boolean(this.binary()) && this.cliProbe?.result.kind === 'signed_in'
   }
   configuredProvider(): ConfiguredProvider | undefined {
     return this.configured()
@@ -2643,14 +2668,20 @@ export class ClaudeSubscriptionProviderService {
    * A turn failed (not a stop) after its message reached Claude. `history` is the canonical history as
    * the failed turn left it, which is what the next request will carry unless something is undone first.
    * A turn a usage limit ended also leaves its session resumable, like a stopped one.
+   *
+   * True when the thread's live process holds the turn up to the failure: a request that carries `history` continues it
+   * there (`reusableLive`), with what Claude answered and every tool result.
    */
-  commitFailed(threadId: string, history: string): void {
-    this.recordBoundary(threadId, history)
+  commitFailed(threadId: string, history: string): boolean {
+    const kept = this.recordBoundary(threadId, history)
     this.fingerprintInterruptedSession(threadId, history)
+    return kept
   }
-  private recordBoundary(threadId: string, history: string): void {
+  private recordBoundary(threadId: string, history: string): boolean {
     const live = this.live.get(threadId)
-    if (live && !live.dead && live.meta.pushedFailed === true) live.meta.expectedKey = historyKey(history)
+    if (!live || live.dead || live.meta.pushedFailed !== true) return false
+    live.meta.expectedKey = historyKey(history)
+    return true
   }
   private commitObligations(threadId: string): void {
     const pending = this.liveCommits.get(threadId)
@@ -3090,7 +3121,7 @@ export class ClaudeSubscriptionProviderService {
                     }
                   }
                 // A delegated child's policy (no native subagents; read-only for a shared child).
-                const childDenial = event.hook_event_name === 'PreToolUse' ? claudeChildToolDenial(turn.input.child, event.tool_name) : undefined
+                const childDenial = event.hook_event_name === 'PreToolUse' ? claudeChildToolDenial(turn.input.child, event.tool_name, (event.tool_input ?? {}) as Record<string, unknown>) : undefined
                 if (childDenial)
                   return {
                     hookSpecificOutput: {
@@ -3108,7 +3139,7 @@ export class ClaudeSubscriptionProviderService {
                   isMousseServerTool(event.tool_name)
                   ? { updatedInput: { ...(event.tool_input as Record<string, unknown>), [TURN_TOKEN_KEY]: turn.input.mcpTurnToken } }
                   : undefined
-                // Restricted turns route every call through canUseTool so its read-only allowlist holds.
+                // A read-only child's turns route every call through canUseTool so its read-only allowlist holds.
                 // So does every command (and, under Ask, every edit) the thread's permission mode
                 // does not allow without asking: the user's own allow rules must not skip Mousse's
                 // check. Other tools (MCP tools, reads) follow Claude Code's own rules.
@@ -3170,14 +3201,14 @@ export class ClaudeSubscriptionProviderService {
             return { behavior: 'deny', message: 'This call could not be checked against the bot\'s permissions, so it does not run.' }
           }
         }
-        const childDenial = claudeChildToolDenial(input.child, toolName)
+        const childDenial = claudeChildToolDenial(input.child, toolName, args)
         if (childDenial) return { behavior: 'deny', message: childDenial }
         // While a person is asked about the call it does not run: a steer does not wait for it (it answers it).
         const asking = <T>(ask: () => Promise<T>): Promise<T> => {
           input.onToolAwaiting?.(context.toolUseID, true)
           return ask().finally(() => input.onToolAwaiting?.(context.toolUseID, false))
         }
-        // Mousse's own tools are scoped by the run's credential (mode ceiling, caller thread);
+        // Mousse's own tools are scoped by the run's credential (caller thread, read-only child);
         // the server refuses what the run may not do, so they need no extra prompt.
         if (input.mcp && toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX))
           return { behavior: 'allow', updatedInput: args }
@@ -3188,14 +3219,6 @@ export class ClaudeSubscriptionProviderService {
         if (input.mcp && toolName === 'ToolSearch')
           return { behavior: 'allow', updatedInput: args }
         // (A read-only child's own allowlist is `claudeChildToolDenial`, above.)
-        if (
-          turn.planTurn &&
-          !['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'].includes(toolName)
-        )
-          return {
-            behavior: 'deny',
-            message: 'This turn is planning only; edits and shell commands are disabled.'
-          }
         try {
           if (toolName === 'AskUserQuestion') {
             if (input.approvals === 'never') return { behavior: 'deny', message: QUESTIONS_REFUSED_MESSAGE }
@@ -3653,12 +3676,10 @@ export class ClaudeSubscriptionProviderService {
       if (live && liveRun) void live.interrupt().catch(() => undefined)
       else if (query) void query.interrupt().catch(() => cancel())
     }
-    const planTurn = input.mode === 'plan'
     const readOnlyChild = input.child?.readOnly === true
-    // Plan turns and read-only children route every call through the hook and canUseTool's
-    // read-only allowlist, in Claude Code's default permission mode: its own plan mode would
-    // inject its planning and ExitPlanMode flow, and a plan turn replies with its plan as a message.
-    const restricted = planTurn || readOnlyChild
+    // A read-only child routes every call through the hook and canUseTool's read-only allowlist, in
+    // Claude Code's default permission mode.
+    const restricted = readOnlyChild
     // Full access needs Claude Code to allow bypassing permissions. The gateway already lowers the
     // mode when the user's settings forbid it; reading them again here keeps a settings edit made
     // since then from ever starting a bypass Claude Code would refuse.
@@ -3669,7 +3690,7 @@ export class ClaudeSubscriptionProviderService {
     const threadMode: ThreadPermissionMode = (requestedMode === 'full' && bypassDisabled) || (requestedMode === 'auto' && claudeAutoModeDisabled(this.environment(), { cwd: input.cwd }))
       ? 'accept_edits'
       : requestedMode
-    const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted, permissionMode: threadMode, ...(lockedTurn ? { locked: new ClaudeLockedGate(lockedTurn, Boolean(input.mcp), () => { if (live?.meta.bot) live.meta.closeAfterTurn = true }) } : {}) }
+    const turn: TurnContext = { input, controller, integrations, editCounter, restricted, permissionMode: threadMode, ...(lockedTurn ? { locked: new ClaudeLockedGate(lockedTurn, Boolean(input.mcp), () => { if (live?.meta.bot) live.meta.closeAfterTurn = true }) } : {}) }
     // The bot's private temporary folder is in use until this turn ends; the last of its turns to end empties it.
     const releaseBotTemp = botTemp ? holdClaudeBotTemp(botTemp.dir) : undefined
     // The folder of the turn's settings file (`claudeLockedSettingsFile`), removed when it ends.
@@ -3839,7 +3860,7 @@ export class ClaudeSubscriptionProviderService {
           // Claude Code copies the session up to the cut into a new one and leaves the source as it was.
           ...(branch ? { resumeSessionAt: branch.at, forkSession: true, sessionId: branch.id } : {}),
           permissionMode,
-          // Claude Code's own plan tools never reach the model: Mousse's Plan mode is a read-only turn whose reply is the plan.
+          // Claude Code's own plan-mode tools never reach the model: their approval flow would hold the turn.
           disallowedTools: [...CLAUDE_PLAN_TOOLS],
           // A live query can switch to bypass on a later turn even when it starts in ask mode,
           // unless Claude Code's settings forbid bypassing permissions at all.

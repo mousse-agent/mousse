@@ -5,7 +5,7 @@ import { PiRpcEngine, type PiRpcEngineOptions } from '../../src/mms/harness/pi/e
 import { RunCounters, TurnBudget, type BudgetLimits } from '../../src/mms/harness/budget'
 import type { RunPolicy } from '../../src/shared/harness/types'
 
-const policy = (budget: RunPolicy['budget']): RunPolicy => ({ mode: 'default', approvals: 'ask', budget })
+const policy = (budget: RunPolicy['budget']): RunPolicy => ({ approvals: 'ask', budget })
 
 describe('Pi budgets policy', () => {
   it('the RPC engine reserves token and cost limits, and a definition stays refused there until it earns `exact`', () => {

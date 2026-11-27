@@ -83,6 +83,75 @@ describe('new thread project picker', () => {
   })
 })
 
+describe('Add project on another computer', () => {
+  it('browses that computer’s folders and adds the one picked there', async () => {
+    const browse = vi.fn(async (_method: string, params: { node?: string; path?: string }) => {
+      if (!params.path) return { path: null, parent: null, folders: [{ name: 'Home', path: '/home/me' }] }
+      if (params.path === '/home/me') return { path: '/home/me', parent: '/home', folders: [{ name: 'code', path: '/home/me/code' }] }
+      return { path: params.path, parent: '/home/me', folders: [] }
+    })
+    ;(window as unknown as { mousse: unknown }).mousse = { platformRequest: { request: browse } }
+    const onOpenRemoteProject = vi.fn(async (_path: string): Promise<string | undefined> => undefined)
+    const device = { ...deviceProps([computer('n-self', 'Studio Mac', true), computer('n-mini', 'Mac mini')]), onOpenRemoteProject }
+    act(() => root.render(createElement(ComposerProjectPicker, {
+      projects: [],
+      workspace: { node: 'n-mini' as NodeId, worktreeEnabled: false },
+      disabled: false,
+      device,
+      onChange: vi.fn(),
+      onOpenProject: async () => {},
+      onError: () => {}
+    })))
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="Project"]')!.click())
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-project-id="__open_project__"]')!.click())
+    const folders = () => document.querySelector<HTMLElement>('[aria-label="Folders on Mac mini"]')!
+    const folder = (name: string) => [...folders().querySelectorAll('button')].find((button) => button.textContent === name)!
+    expect(browse).toHaveBeenCalledWith('folders.browse', { node: 'n-mini' })
+    await act(async () => folder('Home').click())
+    await act(async () => folder('code').click())
+    expect(browse).toHaveBeenLastCalledWith('folders.browse', { node: 'n-mini', path: '/home/me/code' })
+    // The folder browsed to is the one added: nothing was typed.
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Folder path on Mac mini"]')!.value).toBe('/home/me/code')
+    const add = [...document.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Add')!
+    await act(async () => add.click())
+    expect(onOpenRemoteProject).toHaveBeenCalledWith('/home/me/code')
+  })
+
+  it('holds Add while a folder loads, and a folder that fails keeps the one shown before', async () => {
+    let release: (value: unknown) => void = () => {}
+    const browse = vi.fn(async (_method: string, params: { node?: string; path?: string }) => {
+      if (!params.path) return { path: '/home/me', parent: '/home', folders: [{ name: 'code', path: '/home/me/code' }, { name: 'locked', path: '/home/me/locked' }] }
+      if (params.path === '/home/me/locked') throw Object.assign(new Error('That folder cannot be read.'), { code: 'forbidden' })
+      return new Promise((resolve) => { release = resolve })
+    })
+    ;(window as unknown as { mousse: unknown }).mousse = { platformRequest: { request: browse } }
+    const onOpenRemoteProject = vi.fn(async (_path: string): Promise<string | undefined> => undefined)
+    const device = { ...deviceProps([computer('n-self', 'Studio Mac', true), computer('n-mini', 'Mac mini')]), onOpenRemoteProject }
+    act(() => root.render(createElement(ComposerProjectPicker, {
+      projects: [],
+      workspace: { node: 'n-mini' as NodeId, worktreeEnabled: false },
+      disabled: false,
+      device,
+      onChange: vi.fn(),
+      onOpenProject: async () => {},
+      onError: () => {}
+    })))
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="Project"]')!.click())
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-project-id="__open_project__"]')!.click())
+    const folder = (name: string) => [...document.querySelectorAll<HTMLButtonElement>('[aria-label="Folders on Mac mini"] button')].find((button) => button.textContent === name)!
+    const add = () => [...document.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Add')!
+    await act(async () => folder('locked').click())
+    expect(document.body.textContent).toContain('That folder cannot be read.')
+    expect(folder('code')).toBeDefined()
+    await act(async () => folder('code').click())
+    // Still on /home/me until /home/me/code arrives: Add would add the folder shown before.
+    expect(add().disabled).toBe(true)
+    await act(async () => release({ path: '/home/me/code', parent: '/home/me', folders: [] }))
+    expect(add().disabled).toBe(false)
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Folder path on Mac mini"]')!.value).toBe('/home/me/code')
+  })
+})
+
 type GitMock = Record<'status' | 'log' | 'branches' | 'diffStats', ReturnType<typeof vi.fn>>
 
 /** The project folder's Git as the daemon answers it; a repository on `master` unless told otherwise. */

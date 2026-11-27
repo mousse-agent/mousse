@@ -179,14 +179,14 @@ describe('budgets, deadlines and the owner writing', () => {
     expect((await writing).text).toContain('Issue #12 filed.')
   })
 
-  it('at its deadline a call that only reads says work_required; one that may write is uncertain, with work_start the fix', async () => {
+  it('at its deadline a call that only reads says work_required; one that may write is uncertain, with thread_create the fix', async () => {
     const talk = await chat('Read my note and file an issue.', 'm1')
     const call = registryFor(talk)
     hangs = new Set([READ, WRITE])
-    expect(refusalOf(await use(call, READ))?.refused).toMatchObject({ code: 'work_required', fix: 'work_start' })
+    expect(refusalOf(await use(call, READ))?.refused).toMatchObject({ code: 'work_required', fix: 'thread_create' })
     expect(waiting.get(READ)!.signal.aborted).toBe(true)
     const write = refusalOf(await use(call, WRITE))?.refused
-    expect(write).toMatchObject({ code: 'uncertain', fix: 'work_start', retry: 'never' })
+    expect(write).toMatchObject({ code: 'uncertain', fix: 'thread_create', retry: 'never' })
     // The deadline stopped the call; what the server says after it is dropped.
     expect(waiting.get(WRITE)!.signal.aborted).toBe(true)
   })
@@ -241,9 +241,9 @@ describe('budgets, deadlines and the owner writing', () => {
     const { workId } = await f.bots.tools.work.start(botId, asking.activation.id, { title: 'Flat hunt', brief: 'Find two flats.', key: 'w1' })
     await finish(f, asking.payload, 'completed', { text: 'On it.' })
     const work = await start(f, workId)
-    const askOwner = botTools(() => ({ host: f.bots.tools })).find((entry) => entry.name === 'ask_owner') as MousseTool
+    const askOwner = botTools(() => ({ host: f.bots.tools })).find((entry) => entry.name === 'question_ask') as MousseTool
     await askOwner.handler({ question: 'Which flat?', choices: ['Flat A', 'Flat B'] }, {
-      caller: { threadId: work.payload.threadId, runId: 'r', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+      caller: { threadId: work.payload.threadId, runId: 'r', provider: 'pi', accessLevel: 'lineage' },
       turn: { threadId: work.payload.threadId, bot: work.prepared.authority }, toolCallId: 'ask-1', signal: new AbortController().signal, transport: 'mcp'
     } as unknown as ToolCallContext)
     await finish(f, work.payload, 'completed', { text: 'I asked which flat.' })
@@ -290,7 +290,7 @@ describe('budgets, deadlines and the owner writing', () => {
     expect(refusalOf(await use(call, READ))?.refused).toMatchObject({ code: 'work_required', message: expect.stringContaining("this turn's") })
     const before = sent.length
     const spent = refusalOf(await call('web_fetch', { url: 'https://example.com' }))?.refused
-    expect(spent).toMatchObject({ code: 'work_required', fix: 'work_start', message: expect.stringContaining("didn't run") })
+    expect(spent).toMatchObject({ code: 'work_required', fix: 'thread_create', message: expect.stringContaining("didn't run") })
     expect(sent).toHaveLength(before)
   })
 })

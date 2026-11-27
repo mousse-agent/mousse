@@ -16,7 +16,7 @@ import type { ProviderAdapter } from '../../src/mms/harness/adapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import { parseModelRef } from '../../src/shared/agents/schema'
-import { getDefaultSettings, oneShotProviderOptions, resolveModelForMode, type MousseSettings } from '../../src/shared/settings'
+import { getDefaultSettings, resolveModelForMode, type MousseSettings } from '../../src/shared/settings'
 import type { OneShotSpec } from '../../src/mms/harness/driver'
 
 const pi = new PiStubAdapter()
@@ -142,16 +142,15 @@ describe('chat title model', () => {
     expect(hidden.oneShot).not.toHaveBeenCalled()
   })
 
-  it('the title picker offers only instances that run one request, without their Bedrock models', async () => {
+  it("the listing says per model whether it names threads: the test kit's Pi on its legacy route, an agent without one-shots unavailable with why", async () => {
     const { harness } = await titleProfile()
     const listings = harness.listedLlmProviders({ kind: 'device' })
-    expect(listings.find((option) => option.instanceId === 'pi:openai')?.oneShot).toBe(true)
-    expect(listings.find((option) => option.instanceId === 'claude')?.oneShot).toBe(false)
-    const bedrock = { id: 'amazon-bedrock', instanceId: 'pi:amazon-bedrock', label: 'Bedrock', oneShot: true, models: [{ id: 'claude-on-aws', label: 'Claude on AWS', oneShot: false as const }] }
-    const mixed = { id: 'openrouter', instanceId: 'pi:openrouter', label: 'OpenRouter', oneShot: true, models: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B', oneShot: false as const }] }
-    const choices = oneShotProviderOptions([...listings, bedrock, mixed])
-    expect(choices.map((option) => option.instanceId)).toEqual(['pi:openai', 'pi:openrouter'])
-    expect(choices.find((option) => option.instanceId === 'pi:openrouter')?.models.map((model) => model.id)).toEqual(['a'])
+    const openai = listings.find((option) => option.instanceId === 'pi:openai')!
+    expect(openai.oneShot).toBe(true)
+    expect(openai.models.map((model) => model.title)).toEqual(openai.models.map(() => ({ state: 'legacy', route: 'legacy:pi' })))
+    const agent = listings.find((option) => option.instanceId === 'claude')!
+    expect(agent.oneShot).toBe(false)
+    expect(agent.models.every((model) => model.title?.state === 'unavailable' && model.title.reason === 'Test claude cannot run a single request.')).toBe(true)
   })
 })
 

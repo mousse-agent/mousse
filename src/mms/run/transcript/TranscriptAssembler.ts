@@ -124,7 +124,7 @@ function shownToolName(message: ChatMessage): string {
   // A provider that names the server apart (Codex): `server` with the tool's own name.
   if (activity?.kind === 'generic' && activity.server) return mcpDisplayName(raw)
   if (!raw) return 'tool'
-  if (subagentToolName(raw)) return 'subagent'
+  if (subagentToolName(raw, message.toolCall?.input)) return 'subagent'
   const name = normalizeToolName(raw)
   return name === 'Generic' || name === 'Mcp' ? 'tool' : name
 }
@@ -134,7 +134,7 @@ function isBackgroundOrSubagent(message: ChatMessage): boolean {
   const activity = message.activity
   if (activity?.kind === 'subagent') return true
   if (activity && 'background' in activity && activity.background === true) return true
-  return subagentToolName(toolNameOf(message)) !== null
+  return subagentToolName(toolNameOf(message), message.toolCall?.input) !== null
 }
 
 /**
@@ -481,7 +481,7 @@ export class TranscriptAssembler {
       status: 'processing',
       ...(named ? { toolName: named } : {}),
       // Only a Mousse subagent call keeps its (bounded) record; any other arguments live on the item, capped.
-      ...(subagentToolName(toolName) && input ? { input } : {})
+      ...(subagentToolName(toolName, input) && input ? { input } : {})
     }
   }
 
@@ -491,8 +491,8 @@ export class TranscriptAssembler {
     existing: ChatMessage['toolCall'] | undefined
   ): NonNullable<ChatMessage['toolCall']> {
     const toolName = parsed.toolName ?? existing?.toolName ?? event.activity?.toolName
-    const subagent = subagentToolName(toolName ?? event.title)
     const input = event.input ? { ...existing?.input, ...event.input } : (existing?.input ?? parsed.input)
+    const subagent = subagentToolName(toolName ?? event.title, input)
     return {
       title: event.title,
       summary: event.summary,
@@ -538,7 +538,7 @@ export class TranscriptAssembler {
     const parentId = activity && !activity.parentId && event.parentCallId ? this.callToMessage.get(event.parentCallId) : undefined
     if (activity && parentId && parentId !== activity.id) activity = { ...activity, parentId }
     const toolName = open.toolCall?.toolName ?? open.activity?.toolName ?? open.toolCall?.title ?? ''
-    const keepsInput = !activity || subagentToolName(toolName) !== null
+    const keepsInput = !activity || subagentToolName(toolName, event.input ?? open.toolCall?.input) !== null
     const updated: ChatMessage = {
       ...open,
       ...(activity ? { activity } : {}),
@@ -739,7 +739,7 @@ export class TranscriptAssembler {
    *
    * `asksPerson`: while the thread has a question pending that no provider call reported (`waitingOnPerson` only knows
    * the provider's own approvals and questions), the calls that may be the one asking it: Mousse's own tools that ask
-   * the person (`ask_user`, an approval). The steer answers such a question, as it answers the provider's.
+   * the person (`question_ask`, an approval). The steer answers such a question, as it answers the provider's.
    */
   foregroundTools(waitingOnPerson: ReadonlySet<string> = new Set(), asksPerson?: (toolName: string) => boolean): ForegroundTool[] {
     const tools: ForegroundTool[] = []

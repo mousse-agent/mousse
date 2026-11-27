@@ -1,5 +1,5 @@
-import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { InstallOwner } from '../../../shared/harness/status'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import type { ResolvedSettings } from '@anthropic-ai/claude-agent-sdk'
@@ -38,10 +38,12 @@ import { ptyAvailable, redactSignIn, runInPty, terminalText, transcriptLinks, ty
 import { runHarness } from '../spawn'
 import { InstanceVault } from '../vault'
 import { ALL_MIRROR_FIELDS, SIGN_OUT_MIRROR_FIELDS } from '../vendorMirror'
+import { claudeFacts } from '../oneShot/routes'
+import type { OneShotRouteDecision } from '../oneShot/route'
+import { managedSettingsPaths } from '../vendors/claude/accountSubject'
 
 export const CLAUDE_CODE_CAPS: HarnessCaps = Object.freeze({
   ...CLAUDE_SUBSCRIPTION_CAPABILITIES,
-  planMode: true,
   contextUsage: 'reported',
   // Claude Code asks Mousse through its permission callback under the mode Mousse sets.
   toolControl: 'approval_only',
@@ -135,6 +137,8 @@ export interface ClaudeCodeDriverOptions {
   platform?: NodeJS.Platform
   /** Test seam: whether an organisation's Claude Code policy applies, fixed (default: read per entry). */
   managedPolicy?: () => boolean
+  /** Test seam: whether a Claude Code managed settings file is on this computer (default: looked for, `managedSettingsFound`). */
+  managedSettingsFile?: () => boolean
   /** Test seam: the fresh policy reading of one entry (default `readClaudeManagedPolicy`). */
   readPolicy?: (input: ManagedPolicyReadInput) => Promise<boolean>
   /** Test seam: the containment evidence (default `CONTAINMENT_EVIDENCE`). */
@@ -171,15 +175,34 @@ export function claudeFamilyAlias(model: string): string | undefined {
   return /(?:^|[^a-z])(opus|sonnet|haiku)(?:[^a-z]|$)/i.exec(model)?.[1]?.toLowerCase()
 }
 
+/** How long a look for Claude Code's managed settings files is reused by the title listing and admission. */
+const MANAGED_SETTINGS_LOOK_MS = 60_000
+let managedSettingsLook: { found: boolean; at: number; platform: NodeJS.Platform } | undefined
+
+/**
+ * Whether a managed settings file (`managed-settings.json` or its `managed-settings.d` drop-ins) is on this computer:
+ * Claude Code applies its hooks whatever a caller asks. A few existence checks, reused for a minute; never on a start path.
+ */
+function managedSettingsFound(platform: NodeJS.Platform): boolean {
+  const now = Date.now()
+  if (managedSettingsLook && managedSettingsLook.platform === platform && now - managedSettingsLook.at < MANAGED_SETTINGS_LOOK_MS) return managedSettingsLook.found
+  const found = managedSettingsPaths(platform).some((file) => existsSync(file) || existsSync(join(dirname(file), 'managed-settings.d')))
+  managedSettingsLook = { found, at: now, platform }
+  return found
+}
+
+const CLAUDE_ROUTE: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: 'claude:cli' as const, facts: claudeFacts(false) }) })
+const CLAUDE_MANAGED_ROUTE: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: 'claude:cli' as const, facts: claudeFacts(true) }) })
+
 /** Vault entries of an API-key entry. */
 const SECRET = { apiKey: 'anthropic_api_key' } as const
 
-function readAuth(service: ClaudeSubscriptionProviderService, status: Awaited<ReturnType<ClaudeSubscriptionProviderService['status']>>, signInCommand: string, inApp: boolean): AuthReading {
+function readAuth(service: ClaudeSubscriptionProviderService, status: Awaited<ReturnType<ClaudeSubscriptionProviderService['status']>>, signInCommand: string, inApp: boolean, userHome = false): AuthReading {
   const methodLabel = 'Claude Code sign-in'
   // Signed in from Mousse: the Sign in button, with the command to copy kept beside it as the fallback.
   const signedOut = (message: string | undefined): AuthReading =>
     inApp
-      ? { state: 'signed_out', methodLabel, message: 'Not signed in. Choose Sign in to sign this account in.', signInCommand, canSignIn: true }
+      ? { state: 'signed_out', methodLabel, message: userHome ? 'Not signed in. Choose Sign in to sign in.' : 'Not signed in. Choose Sign in to sign this account in.', signInCommand, canSignIn: true }
       : { state: 'signed_out', methodLabel, message, signInCommand }
   switch (status.state) {
     case 'connected': {
@@ -201,8 +224,8 @@ function readAuth(service: ClaudeSubscriptionProviderService, status: Awaited<Re
 /**
  * Claude Code through the official Agent SDK. The built-in `claude` instance runs exactly as the
  * user set Claude Code up (their home, settings and sign-in); an added instance gets its own
- * `CLAUDE_CONFIG_DIR`, signed in with Claude's own `claude auth login` in that home. Mousse never
- * handles Claude tokens.
+ * `CLAUDE_CONFIG_DIR`. Either signs in from Mousse with Claude's own `claude auth login` in its home
+ * (where no terminal runs here: the command to copy). Mousse never handles Claude tokens.
  */
 export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): HarnessDriver {
   /**
@@ -271,8 +294,9 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     privateHome: true,
     canInstall: false,
     customModels: true,
-    // Chat titles, pull request drafts and commit messages: one turn with no tools (`service.oneShot`).
-    oneShot: true,
+    // Thread titles, branch names, pull request drafts, commit messages: one turn with no tool offered and one request
+    // on the wire (`service.oneShotTransport`). Held, or best-effort where managed settings can enforce hooks.
+    oneShotRoute: () => ((options.managedSettingsFile ?? (() => managedSettingsFound(platform)))() ? CLAUDE_MANAGED_ROUTE : CLAUDE_ROUTE),
     methodLabel: 'Claude Code sign-in',
     // Mousse's own PreToolUse hook stamps each Mousse call with the turn's token (`updatedInput`).
     mcpTurnBinding: 'per_call',
@@ -378,6 +402,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
                 }
               : {}),
             stateDir: context.stateDir,
+            instanceId: context.instanceId,
             findBinary: () => live().findBinary(),
             baseEnv: () => environmentOf(live()),
             launchConfig: launch,
@@ -413,15 +438,22 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
       /** The sign-in terminal that is running, so removing the instance can end it. */
       let activeRun: PtyRun | undefined
       /**
-       * `claude auth login` in the instance's home. The link goes to the page (with a paste field
-       * for the code Claude may ask for), and the sign-in counts only once `claude auth status` in
-       * that home says signed in. The terminal's output is never logged or stored.
+       * An entry on the user's own home (the built-in one, or an added one without a home of its own)
+       * signs in from Mousse too: the same `claude auth login`, in that home. API-key and locked
+       * entries keep their own sign-in.
+       */
+      const inAppOnDefaultHome = !privateHome && !onKey && !claudeLocked(context.config)
+      /**
+       * `claude auth login` in the instance's home (the user's own one when it has none: no
+       * `CLAUDE_CONFIG_DIR` is set). The link goes to the page (with a paste field for the code Claude
+       * may ask for), and the sign-in counts only once `claude auth status` in that home says signed
+       * in. The terminal's output is never logged or stored.
        */
       const signInInTerminal = async (session: LoginSession, cwd: string): Promise<ProviderLoginResult> => {
         const pasted: string[] = []
         const fail = (message: string): ProviderLoginResult => ({ success: false, sessionId: session.sessionId, error: redactSignIn(message, pasted) })
         // Only a folder Mousse owns: a link to another account's folder would sign that account in.
-        const problem = ownedHomeProblem(privateHome!, context.profileHome)
+        const problem = privateHome ? ownedHomeProblem(privateHome, context.profileHome) : undefined
         if (problem) return fail(problem)
         const launch = service.authLaunch()
         // No terminal here (or no executable yet): the command to copy, as for the user's own Claude.
@@ -456,10 +488,13 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
               waiting = code
               type()
             }, () => undefined)
+          // A folder Mousse owns is the one Claude Code starts in (the home, or the entry's state folder
+          // on the user's own home): no project settings of Mousse's own folder or a project are read.
+          const startIn = privateHome ?? context.stateDir
+          if (!privateHome) mkdirSync(startIn, { recursive: true, mode: 0o700 })
           run = runInPty(launch.command, [...launch.args, 'auth', 'login'], {
             env: launch.env,
-            // The home is the folder Claude Code starts in: no project settings of Mousse's own folder are read.
-            cwd: privateHome!,
+            cwd: startIn,
             cols: SIGN_IN_COLUMNS,
             ...(options.pty?.spawn ? { spawn: options.pty.spawn } : {}),
             onOutput: (transcript) => {
@@ -596,7 +631,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         // older Mousse; an added one only its sign-out (its launch settings were always in config).
         vendorMirror: service.vendorMirror(shared ? ALL_MIRROR_FIELDS : SIGN_OUT_MIRROR_FIELDS),
         ...(shared ? { validateLaunch: (patch: CliProviderConfigPatch) => service.validateLaunch(patch) } : {}),
-        auth: async ({ force }) => readAuth(service, await service.status({ force }), signInCommand, Boolean(privateHome) && ptyRuns()),
+        auth: async ({ force }) => readAuth(service, await service.status({ force }), signInCommand, (Boolean(privateHome) || inAppOnDefaultHome) && ptyRuns(), !privateHome),
         // Read from the home and the variables Claude Code reads; `claude auth status` is the turn's own check.
         identity: async () => service.accountSubject(),
         // Claude Code refuses `bypassPermissions` when the user's settings say so.
@@ -609,11 +644,11 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
           await service.status()
           await service.refreshModels(cwd)
         },
-        signIn: privateHome ? signInInTerminal : (session, cwd) => service.login(session, cwd),
+        signIn: privateHome || inAppOnDefaultHome ? signInInTerminal : (session, cwd) => service.login(session, cwd),
         signOut: privateHome ? signOutOfHome : () => service.logout(),
         forgetConversation: (threadId) => service.forgetConversation(threadId),
         compactConversation: (request) => service.compactConversation(request.threadId, request.history, request.instanceId, request.focus, request.signal, { cacheCold: request.cacheCold === true }),
-        oneShot: (spec, signal) => service.oneShot(spec, signal),
+        oneShotTransport: (spec) => service.oneShotTransport(spec),
         setLiveHost: (host) => service.setLiveHost(host),
         inFlightContinuation: (threadId) => service.inFlightContinuation(threadId),
         hasContinuation: (threadId, id) => service.hasContinuation(threadId, id),

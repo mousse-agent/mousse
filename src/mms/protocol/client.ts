@@ -150,6 +150,7 @@ export const SHARED_READ_METHODS: ReadonlySet<string> = new Set([
   'queue.list',
   'settings.get',
   'settings.getOptions',
+  'settings.titleOptions',
   'skills.list',
   'storage.policy',
   'subagents.list',

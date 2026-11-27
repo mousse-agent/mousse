@@ -32,7 +32,7 @@ export type HarnessEvent =
   | { type: 'tool.start'; callId: string; name: string; input?: unknown }
   | { type: 'tool.update'; callId: string; output: unknown }
   | { type: 'tool.end'; callId: string; status: ToolEndStatus; output?: unknown; synthesized?: true }
-  | { type: 'request'; requestId: string; kind: 'approval' | 'question' | 'plan'; payload: unknown }
+  | { type: 'request'; requestId: string; kind: 'approval' | 'question'; payload: unknown }
   | { type: 'usage'; input?: number; output?: number; cacheRead?: number; cacheWrite?: number }
   | { type: 'context'; input: number; window?: number }
   | { type: 'native_ref'; ref: NativeSessionRef }

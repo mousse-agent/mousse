@@ -36,7 +36,9 @@ function hostOf(url: string | undefined): string {
  * while on screen. While the split view is open it shows the same tab larger: the preview is then one
  * line, with no picture, and asks for none.
  */
-export function BotBrowserPreview({ bot, view }: { bot: BotSummary; view: BotBrowserView }) {
+export function BotBrowserPreview({ bot, view: given }: { bot: BotSummary; view: BotBrowserView }) {
+  // Its picture and cursor as they are now: the chat that passes `view` keeps it still between pictures.
+  const view = useBotBrowserStore((state) => state.views[bot.id]) ?? given
   const host = hostOf(view.tab?.url)
   const figure = useRef<HTMLElement>(null)
   const paneOpen = useBotBrowserStore((state) => state.pane === bot.id)
@@ -71,7 +73,8 @@ export function BotBrowserPreview({ bot, view }: { bot: BotSummary; view: BotBro
 export function BotBrowserPane({ bot, view, fullScreen }: { bot: BotSummary; view: BotBrowserView; fullScreen?: WatchedBrowserFullScreen }) {
   const busy = useBotBrowserStore((state) => state.busy)
   const open = (url: string | undefined) => void useBotBrowserStore.getState().open(bot.id, url)
-  return <WatchedBrowserPane kit={botBrowserKit} browserKey={bot.id} label={`${bot.name}'s browser`} user={bot.name} view={view} open={open}
+  // One view per browser: another bot's never inherits this one's pending input or menu.
+  return <WatchedBrowserPane key={bot.id} kit={botBrowserKit} browserKey={bot.id} label={`${bot.name}'s browser`} user={bot.name} view={view} open={open}
     {...(fullScreen ? { fullScreen } : {})}
     closed={(typed) => <>
       <p>{view.stopped ? 'The browser stopped.' : `${bot.name}'s browser is closed.`}</p>

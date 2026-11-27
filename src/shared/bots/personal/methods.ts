@@ -152,7 +152,7 @@ export const BOTS_PERSONAL_V2_METHODS = [
  * there, and an older service that lacks them is still compatible (`guiDaemonCompatibility` lists only the set above).
  */
 export const BOTS_WORK_METHODS = ['bots.reminders.snooze', 'bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots', 'bots.model.setImage', 'bots.chat.react', 'bots.questions.answer', 'bots.memory.edit',
-  'bots.actions.answer', 'bots.chat.clear', 'bots.memory.wipe', 'bots.reset', 'bots.model.setCustom'] as const
+  'bots.actions.answer', 'bots.chat.clear', 'bots.memory.wipe', 'bots.reset', 'bots.model.setCustom', 'bots.chainHold.answer', 'bots.facePicture.save'] as const
 export type BotsPersonalV2Method = (typeof BOTS_PERSONAL_V2_METHODS)[number] | (typeof BOTS_WORK_METHODS)[number]
 export const BOTS_PERSONAL_V2_CAPABILITY = 'bots.personal.v2'
 
@@ -222,6 +222,11 @@ export interface BotsPersonalV2Api {
    * service lacks it: the owner answers with Reply.
    */
   'bots.actions.answer': { params: { actionId: string; digest: string; answer: 'send' | 'not_now' }; result: { status: string } }
+  /**
+   * The owner's Continue or Stop on what the bot holds past the limit between bots (`BotSummary.chainHold`), named by its
+   * batch (`holdId`): one already settled is refused (`hold_settled`). Only from a window on this computer.
+   */
+  'bots.chainHold.answer': { params: { botId: string; holdId: string; answer: 'continue' | 'stop' }; result: { sent: number; stopped: number; failed: number } }
   'bots.questions.answer': { params: { botId: string; questionId: string; choice: string; clientRequestId: string }; result: { message: BotChatMessage; question?: BotChatMessage } }
   /** `permissionId` is a `BotDetail.permissions` item's id (its fingerprint). */
   'bots.permissions.set': { params: { botId: string; permissionId: string; enabled: boolean }; result: BotDetail }
@@ -286,6 +291,11 @@ export interface BotsPersonalV2Api {
    * bot's name, look, permissions and models stay.
    */
   'bots.reset': { params: { botId: string }; result: { bot: BotSummary } }
+  /**
+   * The app's picture of the bot's face (a PNG, base64), drawn from `key` (`BotSummary.facePicture`): written into the
+   * bot's files folder as `face.png`. Only the bot's own computer's app sends it.
+   */
+  'bots.facePicture.save': { params: { botId: string; key: string; png: string }; result: { path: string } }
   'bots.schedules.remove': { params: { botId: string; scheduleId: string }; result: BotDetail }
   'bots.memory.list': { params: { botId: string; history?: boolean }; result: BotMemoryListing }
   'bots.memory.forget': { params: { botId: string; id: string }; result: BotMemoryForgetResult }

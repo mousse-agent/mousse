@@ -207,7 +207,7 @@ describe('main-agent existing in-app browser pipeline', () => {
             sink.tool({ kind: 'build_tool_call', title: call.name, summary: call.name, details: [], phase: 'start', callId: call.id })
             const turn = main.orchestrator.appToolTurns.get(input.runId)
             const outcome = await main.orchestrator.mcpToolRegistry().call(call.name, { ...call.arguments, [TURN_TOKEN_KEY]: host.bridge!.turnToken }, {
-              credential: { threadId: input.threadId, runId: input.runId, provider: 'pi', modeCeiling: turn?.modeCeiling ?? 'default', accessLevel: turn?.accessLevel ?? 'lineage', binding: 'per_call', current: () => true },
+              credential: { threadId: input.threadId, runId: input.runId, provider: 'pi', accessLevel: turn?.accessLevel ?? 'lineage', binding: 'per_call', current: () => true },
               toolCallId: call.id,
               signal: input.signal
             }).catch((error: unknown) => ({ text: error instanceof Error ? error.message : String(error), isError: true }))

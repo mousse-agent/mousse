@@ -176,7 +176,7 @@ function fileChangePatch(name: string, args: Record<string, unknown>): ActivityP
  * `isRoot` is false for a call a subagent made: a subagent's to-do list is only a nested row.
  */
 export function claudeActivityStart(name: string, input: unknown, isRoot: boolean): ActivityPatch | undefined {
-  if (subagentToolName(name)) return undefined
+  if (subagentToolName(name, input)) return undefined
   const args = record(input)
   const isAgent = name === 'Agent' || name === 'Task'
   if (!args) return isAgent ? { kind: 'subagent' } : undefined
@@ -256,6 +256,8 @@ export interface ClaudeCallContext {
   /** A web search's query or a fetch's URL. */
   query?: string
   editMode?: string
+  /** A Mousse subagent call (`thread_create` names it by its arguments, known only at the start). */
+  subagent?: true
 }
 
 const CONTEXT_CHARS = 1000
@@ -273,7 +275,8 @@ export function claudeCallContext(name: string, input: unknown, isRoot: boolean)
     ...(start?.kind ? { kind: start.kind } : {}),
     ...(change ? { path: clip(change.path, CONTEXT_CHARS), change: change.change } : {}),
     ...(query ? { query: clip(query, CONTEXT_CHARS) } : {}),
-    ...(editMode ? { editMode: clip(editMode, 40) } : {})
+    ...(editMode ? { editMode: clip(editMode, 40) } : {}),
+    ...(subagentToolName(name, input) ? { subagent: true as const } : {})
   }
 }
 
@@ -370,7 +373,7 @@ export function claudeActivityComplete(
   isError: boolean
 ): ClaudeCompletion {
   const name = context.name
-  if (subagentToolName(name)) return { handedOff: false }
+  if (context.subagent || subagentToolName(name)) return { handedOff: false }
   const result = record(toolUseResult)
   // The reader follows the kind the arguments gave the call, not what is left of them.
   const kind: ActivityKind | undefined = context.kind

@@ -3334,6 +3334,7 @@ function CompactionRow({ text, metadata }: { text: string; metadata: CompactionM
 /**
  * A turn's retries of a failed provider request: a spinner and the count while they run (what failed in its tooltip),
  * then that the provider recovered, or that a Stop ended them. When they run out the row becomes the turn's error.
+ * Its label stays still while it runs: only the count changes, once per retry.
  */
 function ProviderRetryRow({ text, state }: { text: string; state: ProviderRetryState }) {
   const retrying = state.status === "retrying";
@@ -3343,6 +3344,7 @@ function ProviderRetryRow({ text, state }: { text: string; state: ProviderRetryS
     shimmerLabel={label}
     completeLabel={label}
     isAnimating={retrying}
+    shimmer={false}
   /></div>;
 }
 

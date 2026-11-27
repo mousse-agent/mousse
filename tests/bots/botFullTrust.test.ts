@@ -104,7 +104,7 @@ describe('Allow everything', () => {
     f.bots.setFullTrust(botId, true)
     // A run started by hand asks nobody, waits for nothing and messages no bot (BOT_TURN_KINDS).
     const manual = await start(f, await activate('manual'))
-    for (const tool of ['ask_owner', 'work_wait', 'bot_send', 'work_start']) expect(manual.prepared.authority.appTools.has(tool)).toBe(false)
+    for (const tool of ['question_ask', 'work_wait', 'bot_send', 'work_start']) expect(manual.prepared.authority.appTools.has(tool)).toBe(false)
     await finish(f, manual.payload, 'completed', { text: 'Done.' })
     // A chat turn waits for nothing and starts no subagent.
     await f.bots.service.chatSend({ botId, text: 'Hi', clientRequestId: 'hi' })

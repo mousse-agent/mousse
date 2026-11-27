@@ -25,7 +25,7 @@ describe('continue_subagent and the title address (issue #142)', () => {
       expect(out.first.delegationId).toBeTruthy()
       expect(out.first.title).toBe('API reviewer')
       expect(out.again).toMatchObject({ started: false, code: 'title_taken', title: 'api   REVIEWER', existing: [{ childThreadId: out.first.childThreadId, title: 'API reviewer', latestDelegationId: out.first.delegationId }] })
-      expect(out.again.message).toContain('continue_subagent')
+      expect(out.again.message).toContain('thread_send')
       expect(out.other.started).not.toBe(false)
       expect(d.engine.delegations.listForParentThread(parent.id)).toHaveLength(2)
       expect(d.store.listAllThreads().filter((thread) => thread.lineage?.parentThreadId === parent.id)).toHaveLength(2)
@@ -110,7 +110,7 @@ describe('continue_subagent and the title address (issue #142)', () => {
     })
 
     it('a subagent waiting for an answer is never auto-rejected: the caller gets the question, then answers it', async () => {
-      const { d, steps, out, say, start } = world()
+      const { d, parent, steps, out, say, start } = world()
       steps['go'] = async (tools) => { out.first = await start(tools, 'API reviewer') }
       await say('go')
       const questions = (d.orch as any).questions
@@ -121,6 +121,8 @@ describe('continue_subagent and the title address (issue #142)', () => {
         out.wrongThread = await tools.answerSubagent({ subagent: 'Nobody', requestId: pending.requestId, answers: { q1: 'a' } }, { toolCallId: 'a0' }) as Json
         out.answered = await tools.answerSubagent({ subagent: 'API reviewer', requestId: pending.requestId, answers: { q1: 'b' } }, { toolCallId: 'a1' }) as Json
         out.answeredTwice = await tools.answerSubagent({ subagent: 'API reviewer', requestId: pending.requestId, answers: { q1: 'b' } }, { toolCallId: 'a2' }) as Json
+        out.retried = await tools.answerSubagent({ subagent: 'API reviewer', requestId: pending.requestId, answers: { q1: 'b' } }, { toolCallId: 'a1' }) as Json
+        out.reused = await tools.answerSubagent({ subagent: 'API reviewer', requestId: 'another', answers: { q1: 'b' } }, { toolCallId: 'a1' }) as Json
       }
       await say('again')
       expect(out.blocked).toMatchObject({ started: false, code: 'needs_answer', subagent: 'API reviewer', childThreadId: out.first.childThreadId, questions: [{ requestId: pending.requestId }] })
@@ -129,6 +131,12 @@ describe('continue_subagent and the title address (issue #142)', () => {
       expect(out.answered).toEqual({ answered: true, subagent: 'API reviewer', childThreadId: out.first.childThreadId, requestId: pending.requestId })
       await expect(asked).resolves.toEqual({ q1: 'b' })
       expect(out.answeredTwice).toMatchObject({ answered: false, code: 'no_such_question' })
+      // A retry of the call that answered (its id) gets that answer back once the question is gone, and request_answer
+      // reads its kind from the receipt; the same id for another request is a conflict.
+      expect(out.retried).toEqual({ ...out.answered, replayed: true })
+      expect(out.reused).toMatchObject({ answered: false, code: 'client_request_id_conflict' })
+      expect((d.orch as any).answeredRequest(parent.id, ['a1'])).toBe('subagent')
+      expect((d.orch as any).answeredRequest(parent.id, ['a0'])).toBeUndefined()
       // No follow-up was started by the blocked call.
       expect(d.engine.delegations.listForChildThread(out.first.childThreadId)).toHaveLength(1)
       expect(d.orch.getMessages(out.first.childThreadId).some((message) => message.role === 'user' && message.content.includes('b'))).toBe(true)
@@ -175,7 +183,7 @@ describe('continue_subagent and the title address (issue #142)', () => {
       }
       await say('go')
       await say('again')
-      expect(out.byId).toMatchObject({ started: false, code: 'subagent_trashed', message: expect.stringContaining('delegate_task') })
+      expect(out.byId).toMatchObject({ started: false, code: 'subagent_trashed', message: expect.stringContaining('thread_create (kind "subagent")') })
       expect(out.byTitle).toMatchObject({ started: false, code: 'unknown_subagent' })
     })
 
@@ -206,29 +214,6 @@ describe('continue_subagent and the title address (issue #142)', () => {
       await say('retry')
       expect(out.two).toMatchObject({ delegationId: out.one.delegationId, replayed: true })
       expect(d.engine.delegations.listForChildThread(out.first.childThreadId)).toHaveLength(2)
-    })
-
-    it('narrows to the subagent\'s own ceiling: a plan subagent stays plan under a default caller, and a plan caller makes a plan follow-up', async () => {
-      const { d, adapter, steps, out, say, start, settled } = world()
-      steps['go'] = async (tools) => { out.planChild = await start(tools, 'Planner', { modeCeiling: 'plan' }) }
-      steps['default-continue'] = async (tools) => { out.fromDefault = await tools.continueSubagent({ subagent: 'Planner', prompt: 'Again' }, { toolCallId: 'c1' }) as Json }
-      await say('go')
-      await settled(out.planChild.childRunId)
-      await say('default-continue')
-      await settled(out.fromDefault.childRunId)
-      expect(d.engine.delegations.get(out.fromDefault.delegationId)).toMatchObject({ modeCeiling: 'plan' })
-      expect(adapter.turns.filter((turn) => turn.threadId === out.planChild.childThreadId).map((turn) => turn.mode)).toEqual(['plan', 'plan'])
-
-      // A default subagent continued by a plan-ceiling caller runs the follow-up in plan mode.
-      const world2 = world()
-      world2.steps['go'] = async (tools) => { world2.out.child = await world2.start(tools, 'Builder', { workspace: 'isolated', role: 'implement' }) }
-      await world2.say('go')
-      await world2.settled(world2.out.child.childRunId)
-      const planCaller = (world2.d.orch as any).delegationTools(world2.d.orch.getOrCreateSession(world2.parent.id), world2.d.engine.listRuns(world2.parent.id)[0].runId, 'plan') as DelegationToolHost
-      const followUp = await planCaller.continueSubagent({ subagent: 'Builder', prompt: 'Plan the next step' }, { toolCallId: 'c9' }) as Json
-      await world2.settled(followUp.childRunId)
-      expect(world2.d.engine.delegations.get(followUp.delegationId)).toMatchObject({ modeCeiling: 'plan', workspace: 'isolated', role: 'implement' })
-      expect(world2.adapter.turns.filter((turn) => turn.threadId === world2.out.child.childThreadId).map((turn) => turn.mode)).toEqual(['agent', 'plan'])
     })
   })
 
@@ -262,24 +247,21 @@ describe('continue_subagent and the title address (issue #142)', () => {
   })
 
   describe('nested subagents (issue #142)', () => {
-    it('a subagent starts subagents of its own, and its authority only narrows down the tree', async () => {
+    it('a subagent starts subagents of its own, each in its own title namespace', async () => {
       const seen: Json = {}
       const { d, adapter, steps, out, say, start, settled } = world(async (input, tools) => {
-        if (!input.prompt.endsWith('Review Planner')) return `done: ${input.prompt}`
-        // The subagent is itself a caller: it cannot widen the plan ceiling it was given.
-        seen.broader = await tools!.delegateTask({ prompt: 'Edit', title: 'Editor', workspace: 'isolated', modeCeiling: 'default' } as never, { toolCallId: 'g0' }).catch((error: { code?: string }) => ({ code: error.code }))
+        if (!input.prompt.endsWith('Review Lead')) return `done: ${input.prompt}`
         seen.grandchild = await tools!.delegateTask({ prompt: 'Survey', title: 'Surveyor', workspace: 'shared', role: 'research' } as never, { toolCallId: 'g1' })
         seen.taken = await tools!.delegateTask({ prompt: 'Survey', title: ' surveyor', workspace: 'shared', role: 'research' } as never, { toolCallId: 'g2' })
-        return 'Planned.'
+        return 'Led.'
       })
-      steps['go'] = async (tools) => { out.child = await start(tools, 'Planner', { modeCeiling: 'plan' }) }
+      steps['go'] = async (tools) => { out.child = await start(tools, 'Lead') }
       await say('go')
       await settled(out.child.childRunId)
       await settled(seen.grandchild.childRunId)
-      expect(seen.broader).toEqual({ code: 'mousse_ceiling_exceeded' })
-      // The grandchild inherited the plan ceiling and ran in plan mode.
-      expect(d.engine.delegations.get(seen.grandchild.delegationId)).toMatchObject({ parentThreadId: out.child.childThreadId, modeCeiling: 'plan' })
-      expect(adapter.turns.find((turn) => turn.threadId === seen.grandchild.childThreadId)?.mode).toBe('plan')
+      // The grandchild is the child's own subagent.
+      expect(d.engine.delegations.get(seen.grandchild.delegationId)).toMatchObject({ parentThreadId: out.child.childThreadId, workspace: 'shared' })
+      expect(adapter.turns.find((turn) => turn.threadId === seen.grandchild.childThreadId)?.mode).toBe('agent')
       // Titles are unique per parent: the child's own subagents have their own namespace.
       expect(seen.taken).toMatchObject({ started: false, code: 'title_taken' })
       // The grandchild is the child's subagent, not the main thread's: the main thread cannot reach it.
@@ -331,6 +313,32 @@ describe('continue_subagent and the title address (issue #142)', () => {
         expect(d.engine.getRun(out.continued.childRunId)?.status).toBe('cancelled')
         await say('cancel-again')
         expect(out.nothing).toMatchObject({ cancelled: [], note: expect.stringContaining('no open task') })
+      } finally { release() }
+    })
+
+    it('a Stop by title retried with its request id replays what it stopped, and never stops a follow-up started since', async () => {
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      const { d, adapter, steps, out, say, start } = world(async (input) => {
+        await gate
+        return `done: ${input.prompt}`
+      })
+      steps['go'] = async (tools) => { out.first = await start(tools, 'API reviewer') }
+      steps['cancel'] = async (tools) => { out.cancelled = await tools.taskCancel({ subagent: 'API reviewer' }, { toolCallId: 'mcp:stop-1' }) as Json }
+      steps['again'] = async (tools) => { out.continued = await tools.continueSubagent({ subagent: 'API reviewer', prompt: 'Newer work' }, { toolCallId: 'c1' }) as Json }
+      steps['retry'] = async (tools) => { out.retried = await tools.taskCancel({ subagent: 'API reviewer' }, { toolCallId: 'mcp:stop-1' }) as Json }
+      try {
+        await say('go')
+        await waitFor(() => adapter.turns.some((turn) => turn.threadId === out.first.childThreadId), 'the child to start')
+        await say('cancel')
+        expect(out.cancelled.cancelled).toEqual([out.first.delegationId])
+        await say('again')
+        expect(out.continued.delegationId).toBeTruthy()
+        // The reply of the first Stop was lost: the retry (another turn of the same thread) replays it.
+        await say('retry')
+        expect(out.retried).toMatchObject({ subagent: 'API reviewer', cancelled: [out.first.delegationId], replayed: true })
+        expect(d.engine.delegations.get(out.continued.delegationId)?.status).toBe('running')
+        expect(d.engine.getRun(out.continued.childRunId)?.status).not.toBe('cancelled')
       } finally { release() }
     })
   })

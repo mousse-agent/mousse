@@ -9,6 +9,7 @@ import type { ChatImageAttachment } from '../../../shared/types'
 import { IMAGE_MAX_DATA_CHARS } from '../../../shared/imageLimits'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { harnessAppError } from '../../../shared/harness/types'
+import type { AppError } from '../../../shared/errors'
 import { compareVersions } from '../../../shared/net/version'
 import type { ContinuationInfo, LiveProcessHost } from '../driver'
 import { interruptWithDeadline, loadWithDeadline, SessionLoadTimeoutError } from '../supervise'
@@ -22,7 +23,7 @@ import { sessionMcpServers } from './mcp'
 import { mousseServerToolOf } from '../../run/mcp/attachment'
 import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
-import { AGENT_DEFAULT_MODEL, agentModels, agentModes, mergeModelOptions, modelOptions, planModeId, thoughtConfigOption, type ModelControl, type ThoughtConfig } from './models'
+import { AGENT_DEFAULT_MODEL, agentModels, agentModes, mergeModelOptions, modelOptions, thoughtConfigOption, type ModelControl, type ThoughtConfig } from './models'
 import {
   answerPermission,
   classifyGenericOption,
@@ -39,6 +40,7 @@ import { answerBotPermission, checkBotFileRequest } from './botApprovals'
 import type { BotAuthority } from '../../../shared/bots/personal/authority'
 import { acpAgentError, acpQuotaReply, agentCancelledError, promptStopOutcome } from './stopReason'
 import { xaiHandlers, xaiStopFailure } from './xai'
+import { ONE_SHOT_INSTRUCTION } from '../oneShot/runner'
 
 /** The title is generic on agy: its launch arguments name the role and describe the work. */
 function subagentActivity(rawInput: unknown, title: string | undefined, background = false) {
@@ -343,8 +345,8 @@ function refuseFile(refuse: (what: string) => void, what: string): Promise<never
   return Promise.reject(new Error('This request runs no tools.'))
 }
 
-/** The first line of every one-shot prompt (`AcpSessions.oneShot`). */
-export const ONE_SHOT_INSTRUCTION = 'Use only the input below. Do not use tools, read or write files, run commands, or ask questions. Reply with only the requested text.'
+/** The first line of every one-shot prompt (`AcpSessions.oneShot`): the runner's (`oneShot/runner.ts`). */
+export { ONE_SHOT_INSTRUCTION }
 /** A one-shot ends past this, whatever the agent still sends (the gateway's inactivity bound comes first when it goes quiet). */
 export const ONE_SHOT_DEADLINE_MS = 180_000
 /** A one-shot's answer ends once it is longer than this many characters. */
@@ -363,16 +365,12 @@ export interface OneShotInput {
   prompt: string
   signal: AbortSignal
   onActivity(): void
-  /** The session the agent opened, once it has: its files are this request's (`AntigravityProviderService.oneShot`). */
+  /** Each part of the answer as it streams (the runner's cap). */
+  onText?(chunk: string): void
+  /** Right before the prompt is sent, after the launch and session: a throw stops the request unsent. */
+  beforePrompt?(): void
+  /** The session the agent opened, once it has: its files are this request's (`AntigravityProviderService.oneShotTransport`). */
   onSession?(sessionId: string): void
-  /** The agent process started, with its id when it has one. */
-  onStarted?(pid: number | undefined): void
-  /**
-   * Called once: the process tree has ended and its output is read (`AcpProcess.exited`), whenever that is (before
-   * this returns, or later when it outlived {@link ONE_SHOT_REAP_MS}), or no process started. Only then may the caller
-   * touch the request's files.
-   */
-  onEnded?(): void
   /**
    * The launch reads its sign-in somewhere turns do not (an added Antigravity entry's one-shot home): an
    * "authentication required" answer fails the request without marking the profile signed out.
@@ -381,6 +379,17 @@ export interface OneShotInput {
   /** Tests: {@link ONE_SHOT_DEADLINE_MS} and {@link ONE_SHOT_OUTPUT_CAP}. */
   deadlineMs?: number
   outputCap?: number
+}
+
+/**
+ * A single request's quota notice (`acpQuotaReply`) as the model's limit (`rate_limited`, scope `model`): the request
+ * ran on that model only, so the entry's other models stay eligible. Keeps the reset the notice names.
+ */
+function oneShotQuota(quota: AppError | undefined, label: string): AppError | undefined {
+  if (!quota) return undefined
+  const details = (quota.details ?? {}) as { resetsAt?: unknown; estimated?: unknown }
+  const resetAt = details.estimated !== true && typeof details.resetsAt === 'string' ? details.resetsAt : undefined
+  return harnessAppError({ code: 'rate_limited', scope: 'model', ...(resetAt ? { resetAt } : {}), message: `${label}'s quota for this model is used up: ${quota.message}` })
 }
 
 /** Waits for `process` to end; one still running after {@link ONE_SHOT_REAP_MS} fails the request. */
@@ -590,8 +599,6 @@ export interface AcpChatInput {
   instanceId?: string
   cwd: string
   model: string
-  /** `plan`: the session runs in the agent's plan mode (only where the agent offers one). */
-  mode?: 'default' | 'plan'
   /**
    * The thread's permission mode for this turn: whether `session/request_permission` and client
    * file writes are answered without asking. Absent asks about everything.
@@ -1432,6 +1439,19 @@ export class AcpSessions {
   }
 
   /**
+   * A saved session that an older build left in the agent's own plan mode (named `plan` or `architect`) goes back to
+   * the agent's default mode, so its turns run as they would in a new session.
+   */
+  private async leaveAgentPlanMode(active: AcpProcess): Promise<void> {
+    const current = active.currentModeId
+    if (!current || !active.defaultModeId || current === active.defaultModeId) return
+    const mode = (active.modes ?? []).find((entry) => entry.id === current)
+    if (!/^(plan|architect)$/i.test(current) && !(mode && /^(plan|architect)$/i.test(mode.name))) return
+    await active.connection.agent.request(methods.agent.session.setMode, { sessionId: active.sessionId!, modeId: active.defaultModeId })
+    active.currentModeId = active.defaultModeId
+  }
+
+  /**
    * Records a session's models and modes; returns them. `known` is what a reopened session said
    * when it opened: it stands in for what a load's missing reply would have said, and `currentModeId`
    * is the mode the replay left it in.
@@ -1680,22 +1700,6 @@ export class AcpSessions {
     }
   }
 
-  /** Puts the session in the agent's plan mode for a plan turn, and back for a normal one. */
-  private async selectMode(active: AcpProcess, mode: AcpChatInput['mode']): Promise<void> {
-    const plan = planModeId(active.modes ?? [])
-    if (mode === 'plan') {
-      if (!plan) throw new Error(`${this.options.label} has no plan mode`)
-      if (active.currentModeId === plan) return
-      await active.connection.agent.request(methods.agent.session.setMode, { sessionId: active.sessionId!, modeId: plan })
-      active.currentModeId = plan
-      return
-    }
-    if (plan && active.currentModeId === plan && active.defaultModeId && active.defaultModeId !== plan) {
-      await active.connection.agent.request(methods.agent.session.setMode, { sessionId: active.sessionId!, modeId: active.defaultModeId })
-      active.currentModeId = active.defaultModeId
-    }
-  }
-
   /**
    * `mcp` attaches the Mousse MCP server to the ACP session (SPEC §15.2) and `orchestrationInstructions`
    * goes into the session's first prompt. The token is stable per thread, so a live session is reused
@@ -1857,7 +1861,7 @@ export class AcpSessions {
       clearTimeout(silenceTimer)
       silenceTimer = undefined
       if (!prompting || !(silenceMs > 0) || (current.openRequests ?? 0) > 0) return
-      // Mousse's own tools (`ask_user`, approvals) ask the user through the thread's
+      // Mousse's own tools (`question_ask`, approvals) ask the user through the thread's
       // questions, not through the ACP connection, and may wait up to an hour: the agent is not
       // silent while one is open. The clock starts over (a full window) once the last one is answered.
       if (questions.listPendingForThread(input.threadId).length > 0) {
@@ -1921,7 +1925,7 @@ export class AcpSessions {
           : isCommand
             ? commandActivity(event.rawInput, event.title)
             : undefined
-        const record = subagentToolName(event.name) ? (recordSubagentCall(event.name, event.rawInput, {}) ?? undefined) : undefined
+        const record = recordSubagentCall(event.name, event.rawInput, {}) ?? undefined
         // A start with a title only names a Mousse tool by it (`computer_use_request (mousse MCP Server)`): kept as that
         // title, a form `mousseServerToolOf` reads, never made into another name.
         const name = event.name ?? (event.title !== undefined && mousseServerToolOf(event.title)?.server === 'mousse' ? event.title : undefined)
@@ -1936,7 +1940,7 @@ export class AcpSessions {
             ? activity.command
             : title
         // Any other call's row shows what it was called with (a search's query, a fetch's URL), as Claude's rows do.
-        const plain = !subagent && !isCommand && !subagentToolName(name)
+        const plain = !subagent && !isCommand && !subagentToolName(name, event.rawInput)
         const args = plain && !cua ? acpArgs(event.rawInput) : undefined
         openTools.set(event.toolCallId, {
           title,
@@ -2015,9 +2019,7 @@ export class AcpSessions {
           const toolName = tracked?.name ?? event.name
           const rawInput = tracked?.rawInput ?? event.rawInput
           const outputText = extractToolOutputText(event)
-          const record = subagentToolName(toolName)
-            ? (recordSubagentCall(toolName, rawInput, { text: outputText, isError: event.status === 'failed' }) ?? undefined)
-            : undefined
+          const record = recordSubagentCall(toolName, rawInput, { text: outputText, isError: event.status === 'failed' }) ?? undefined
           // Any other call's row keeps its result text (bounded where the row is kept), as Claude's rows do: a web
           // search's row lists the sites it found from it.
           const resultOutput = !record && outputText && (tracked?.plain ?? true) ? { output: outputText } : undefined
@@ -2139,7 +2141,7 @@ export class AcpSessions {
       input.onSession?.(active.sessionId)
       if (!claimedContinuation) {
         await this.selectModel(active, input.model)
-        if (!quirks.modelConfigId) await this.selectMode(active, input.mode)
+        if (!quirks.modelConfigId) await this.leaveAgentPlanMode(active)
       }
       input.signal?.throwIfAborted()
       const imageBlocks = (input.images ?? []).map((image) => {
@@ -2554,28 +2556,18 @@ export class AcpSessions {
    * as `one_shot_tool_refused`. The answer is the agent's text, ended past {@link ONE_SHOT_OUTPUT_CAP} characters or
    * {@link ONE_SHOT_DEADLINE_MS}. One attempt, never saved or resumed; `signal` stops it. The process tree is ended
    * while the refusals still listen, so a tool it reports while it ends refuses the answer too, and is waited for up
-   * to {@link ONE_SHOT_REAP_MS}: one still running then fails the request, and `onEnded` says when it has gone.
+   * to {@link ONE_SHOT_REAP_MS}: one still running then fails the request. A quota notice sent as the answer, or reported
+   * as the agent's error, fails it as a usage limit.
    */
   async oneShot(input: OneShotInput): Promise<string> {
     const { label, quirks } = this.options
     input.signal.throwIfAborted()
     // xAI's tagged prompts end on a notice this request does not wait for.
     if (quirks.xaiExtensions) throw harnessAppError({ code: 'unsupported', message: `${label} cannot run a single request.` })
-    let active: AcpProcess
-    try {
-      await this.options.beforeLaunch?.('one_shot')
-      input.signal.throwIfAborted()
-      active = this.launch('one_shot', undefined, undefined, input.cwd)
-    } catch (error) {
-      // Nothing started: nothing of this request runs on.
-      input.onEnded?.()
-      throw error
-    }
+    await this.options.beforeLaunch?.('one_shot')
+    input.signal.throwIfAborted()
+    const active = this.launch('one_shot', undefined, undefined, input.cwd)
     active.cwd = input.cwd
-    input.onStarted?.(active.child.pid)
-    // Registered first, so the caller hears of the end before this request settles on it (`reaped`).
-    if (active.exited) void active.exited.then(() => input.onEnded?.())
-    else input.onEnded?.()
     let failed: Error | undefined
     const fail = (error: Error) => {
       failed ??= error
@@ -2602,6 +2594,7 @@ export class AcpSessions {
       input.onActivity()
       if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') {
         text += event.content.text ?? ''
+        if (event.content.text) input.onText?.(event.content.text)
         if (text.length > cap) fail(harnessAppError({ code: 'protocol', message: `${label} wrote more than ${cap.toLocaleString('en-US')} characters, so Mousse stopped it.` }))
       }
     }
@@ -2629,6 +2622,7 @@ export class AcpSessions {
       }
       if (failed) throw failed
       const prompt = [ONE_SHOT_INSTRUCTION, input.system, input.prompt].filter((part) => part.trim()).join('\n\n')
+      input.beforePrompt?.()
       prompting = true
       const outcome = await active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId, prompt: [{ type: 'text', text: prompt }] })
       // What the agent wrote just before it answered is still on its way (see `chat`).
@@ -2638,12 +2632,20 @@ export class AcpSessions {
       const ended = promptStopOutcome(label, outcome)
       if (ended === 'cancelled') throw agentCancelledError(label)
       if (ended) throw ended
+      // A quota notice sent as the answer ("Individual quota reached. … Resets in 3h45m30s.", as agy writes it) is never
+      // a title, whichever agent sent it: the model's limit, until the reset it names.
+      const quota = oneShotQuota(acpQuotaReply(text, this.options.usageLimitProvider), label)
+      if (quota) throw quota
       return text
     } catch (error) {
       if (failed) throw failed
       if (input.signal.aborted) throw error
       if (input.signInUnverified && isAuthRequired(error)) throw harnessAppError({ code: 'signed_out', message: `${label} answered that this request is not signed in.` })
-      throw this.authRequiredError(active, error) ?? acpAgentError(error) ?? error
+      // The agent asked for a sign-in: the entry is marked signed out, and the request fails as one.
+      const signIn = this.authRequiredError(active, error)
+      if (signIn) throw harnessAppError({ code: 'signed_out', message: signIn.message })
+      // A quota the agent reports as its error (`RESOURCE_EXHAUSTED (code 429): Individual quota reached…`) is a usage limit.
+      throw acpAgentError(error, this.options.usageLimitProvider) ?? error
     } finally {
       clearTimeout(deadline)
       input.signal.removeEventListener('abort', abort)

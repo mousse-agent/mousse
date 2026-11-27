@@ -372,7 +372,8 @@ describe('the held launch', () => {
       if (row.local) writeFileSync(join(stateDir, 'grok-held.json'), JSON.stringify({ version: 1, records: row.local }))
       expect(driver.caps({}, row.version, undefined, 'grok:work').toolControl).toBe(row.turns ? 'approval_only' : 'uncontrolled')
       const turnsWhy = driver.toolControlReason!({}, row.version, 'grok:work')
-      const titlesWhy = driver.oneShotRefusal!({}, row.version, 'grok:work')
+      const titles = driver.oneShotRoute!({ config: {}, installedVersion: row.version, instanceId: 'grok:work', model: 'grok-4.6' })
+      const titlesWhy = 'refused' in titles ? titles.refused : undefined
       expect(turnsWhy === undefined).toBe(row.turns)
       expect(titlesWhy === undefined).toBe(row.titles)
       if (row.reason) expect([turnsWhy, titlesWhy].filter(Boolean).join(' ')).toMatch(row.reason)
@@ -458,7 +459,7 @@ describe('the held launch', () => {
     await new Promise((resolve) => setTimeout(resolve, 2_100))
     expect(driver.caps({}, '9.9.9', undefined, 'grok:work').toolControl).toBe('uncontrolled')
     expect(driver.toolControlReason!({}, '9.9.9', 'grok:work')).toContain(join(root, 'system', 'requirements.toml'))
-    expect(driver.oneShotRefusal!({}, '9.9.9', 'grok:work')).toContain('requirements.toml')
+    expect((driver.oneShotRoute!({ config: {}, installedVersion: '9.9.9', instanceId: 'grok:work', model: 'grok-4.6' }) as { refused: string }).refused).toContain('requirements.toml')
     runtime.probed!('9.9.8', { soon: true })
     expect(heldCheck).not.toHaveBeenCalled()
   })

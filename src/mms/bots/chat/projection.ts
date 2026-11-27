@@ -649,7 +649,14 @@ export class BotChatProjection {
       : String(approval?.text ?? 'Send this action?').split('\n')[0]
     const waitingOn = this.store.waitingQuestions(definition.id)
     const chatQuestions = this.store.openChatQuestions(definition.id)
-    const needsOwner = !paused && (asks.length + waitingOn.length + chatQuestions.length > 0
+    const held = this.store.heldChainSteps(definition.id)
+    const chainHold = held[0] ? {
+      holdId: held[0].holdId,
+      held: held.length,
+      to: [...new Set(held.flatMap((hold) => hold.kind === 'message' ? [String((hold.payload as { toName?: unknown }).toName ?? '')] : []))].filter(Boolean),
+      wakes: held.filter((hold) => hold.kind === 'wake').length
+    } : undefined
+    const needsOwner = !paused && (asks.length + waitingOn.length + chatQuestions.length > 0 || held.length > 0
       || parkedNeedsOwner(this.store.activationsIn(definition.id, ['blocked']), { store: () => this.store }))
     // Threads it started that still work keep it busy: it manages them. Those that ended are listed, never counted.
     const threads = this.launchedOf(definition.id)
@@ -692,6 +699,7 @@ export class BotChatProjection {
       unread: this.store.unread(definition.id, registry?.readSeq ?? 0),
       createdAt: registry?.createdAt ?? new Date(now).toISOString(),
       ...(registry?.homeThreadId ? { homeThreadId: registry.homeThreadId } : {}),
+      ...(chainHold ? { chainHold } : {}),
       ...(chatTurn ? { chat: { activationId: chatTurn.id, ...(chatTurn.offline ? { offline: true as const } : {}) } } : {}),
       ...(work.length ? { work } : {}),
       ...(threads.length ? { threads } : {}),

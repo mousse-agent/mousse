@@ -1,5 +1,5 @@
 /**
- * Work that asks its owner a question and waits for the answer (`ask_owner` in work, issue #1123), over a real engine and
+ * Work that asks its owner a question and waits for the answer (`question_ask` in work, issue #1123), over a real engine and
  * a real `bots.db`: the question's bubble is posted at once under the owner's message, the rest of the turn is refused so
  * it ends, the work waits without a run slot (`blocked`, `question`), and the answer carries it on in its own thread
  * (`question_answered`, `resumeWork`).
@@ -11,7 +11,7 @@
  * - Forget of the answer: before the work read it (it waits again), after (it stays with the work, and its copies in the
  *   work's prompt, the captured continuation and the chat's relay call go); of the bubble while the asking turn still
  *   runs, or before a restart (the work ends); a relay of words the owner forgot is refused
- * - restarts: while it waits, between the answer and the resume, right after `ask_owner` with its dispatch cut
+ * - restarts: while it waits, between the answer and the resume, right after `question_ask` with its dispatch cut
  * - several pieces each waiting: an answer wakes only its own
  * - a scheduled run asks and waits the same way (#1360); a run started by hand and a consult are never offered it
  *   (subagents: botWorkSubagents.test.ts)
@@ -56,11 +56,11 @@ const call = <T = unknown>(method: string, params: Record<string, unknown>): Pro
 
 const tools = new Map(botTools(() => ({ host: f.bots.tools })).map((tool) => [tool.name, tool]))
 /** One of the bot's tools, called from a running turn as its runtime would. */
-async function tool(name: string, prepared: PreparedBotTurn, threadId: string, args: Record<string, unknown>): Promise<{ text: string; isError?: boolean }> {
+async function tool(name: string, prepared: PreparedBotTurn, threadId: string, args: Record<string, unknown>, toolCallId = `call-${Math.random()}`): Promise<{ text: string; isError?: boolean }> {
   const ctx = {
-    caller: { threadId, runId: 'r', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+    caller: { threadId, runId: 'r', provider: 'pi', accessLevel: 'lineage' },
     turn: { threadId, bot: prepared.authority },
-    toolCallId: `call-${Math.random()}`,
+    toolCallId,
     signal: new AbortController().signal,
     transport: 'mcp'
   } as unknown as ToolCallContext
@@ -89,11 +89,11 @@ async function handOff(title: string, key: string) {
   return { workId, asked: turn.message }
 }
 
-/** Work that runs, asks `args` with `ask_owner`, and ends its turn; its question's bubble. */
+/** Work that runs, asks `args` with `question_ask`, and ends its turn; its question's bubble. */
 async function workThatAsks(title = 'Flat hunt', key = 'w1', args: Record<string, unknown> = FLATS) {
   const { workId, asked } = await handOff(title, key)
   const work = await start(f, workId)
-  const answer = await tool('ask_owner', work.prepared, work.payload.threadId, args)
+  const answer = await tool('question_ask', work.prepared, work.payload.threadId, args)
   expect(JSON.parse(answer.text)).toEqual({ asked: true, questionId: expect.stringMatching(/^q_/), note: QUESTION_WORK_ASKED_TEXT })
   const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === workId)!
   expect(f.store.message(bubble.id)?.tell).toBe('soon')
@@ -247,10 +247,10 @@ describe('the chat passes on an answer (question_answer)', () => {
     const { workId, work, bubble, questionId } = await workThatAsks()
     await endTurn(work)
     // The chat knows what its work waits on, with the id to pass an answer on with.
-    expect(f.bots.questionLines(botId)).toEqual([`"Flat hunt" waits for the owner's answer to your question "${FLATS.question}" (Flat A · Flat B · Something else) [${questionId}]. If the owner answers it in the chat, pass it on with question_answer.`])
+    expect(f.bots.questionLines(botId)).toEqual([`"Flat hunt" waits for the owner's answer to your question "${FLATS.question}" (Flat A · Flat B · Something else) [${questionId}]. If the owner answers it in the chat, pass it on with request_answer.`])
     // A chat question the owner taps: the turn it starts carries their answer, so it may pass one on too.
     const asking = await chat('Anything else?', 'c1')
-    await tool('ask_owner', asking.prepared, asking.payload.threadId, { question: 'Shall I also look at parking?', yesNo: true })
+    await tool('question_ask', asking.prepared, asking.payload.threadId, { question: 'Shall I also look at parking?', yesNo: true })
     await finish(f, asking.payload, 'completed', { text: 'One thing.' })
     const chatBubble = chatOf(f, botId).find((message) => message.question && message.activationId === asking.activation.id)!
     await tap(chatBubble.question!.questionId, 'Yes')
@@ -284,6 +284,26 @@ describe('the chat passes on an answer (question_answer)', () => {
     await finish(f, own.payload, 'completed', { text: 'OK.' })
     const kept = await chat('Go with the second one', 'c2')
     expect(JSON.parse((await tool('question_answer', kept.prepared, kept.payload.threadId, { questionId, answer: 'The second one' })).text)).toMatchObject({ ok: true })
+  })
+
+  it('a retried relay replays what it did, and never answers the question again once Forget opened it again', async () => {
+    const memory = memoryStore()
+    const { work, questionId } = await workThatAsks()
+    await endTurn(work)
+    const own = await chat('Go with the second one', 'c1')
+    // The work does not read the answer yet.
+    f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
+    const relay = () => tool('question_answer', own.prepared, own.payload.threadId, { questionId, answer: 'The second one' }, 'mcp:relay-1')
+    expect(JSON.parse((await relay()).text)).toMatchObject({ ok: true })
+    expect(JSON.parse((await relay()).text)).toMatchObject({ ok: true, replayed: true })
+    expect(f.store.question(questionId)).toMatchObject({ status: 'answered', answer: { text: 'The second one', by: 'chat' } })
+    // The owner forgets their message before the work read the answer: the question is open again, and a retry of the
+    // call that passed it on passes nothing on.
+    memory.forget(botId, { refs: [journaled(memory, own.message, 'owner_msg', 'chat')], by: 'owner_ui' })
+    expect(f.store.question(questionId)).toMatchObject({ status: 'open', answer: null })
+    expect(await relay()).toEqual({ text: QUESTION_ANSWER_FORGOTTEN_TEXT, isError: true })
+    expect(f.store.question(questionId)).toMatchObject({ status: 'open', answer: null })
+    f.store.setError(botId, null)
   })
 })
 
@@ -389,7 +409,7 @@ describe('Forget', () => {
     expect(journalText(report!).text).toBe('I booked a viewing of Flat B for Saturday.')
   })
 
-  it('of the owner’s words the chat passed on: the chat’s question_answer call and the work’s copy go; of the question’s bubble: its ask_owner call and the line that quoted it', async () => {
+  it('of the owner’s words the chat passed on: the chat’s relay call and the work’s copy go; of the question’s bubble: its question_ask call and the line that quoted it', async () => {
     const memory = memoryStore()
     const { workId, work, questionId, bubble } = await workThatAsks()
     await endTurn(work)
@@ -398,23 +418,29 @@ describe('Forget', () => {
     await finish(f, own.payload, 'completed', { text: 'Got it.' })
     await flush()
     const resumed = mainDispatches(workId).at(-1)!
-    const [askCall] = captured(memory, { threadId: mainDispatches(workId)[0]!.threadId, lane: 'run', activationId: workId }, [
-      { id: 'ask', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(), toolCall: { title: 'ask_owner', summary: '', details: [], status: 'complete', toolName: 'mcp__mousse__ask_owner', input: { question: FLATS.question, choices: FLATS.choices } } } as ChatMessage
-    ])
-    const [relayCall] = captured(memory, { threadId: own.payload.threadId, lane: 'chat', activationId: own.activation.id }, [
-      { id: 'relay', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(), toolCall: { title: 'question_answer', summary: '', details: [], status: 'complete', toolName: 'mcp__mousse__question_answer', input: { questionId, answer: 'The second one, Flat B' } } } as ChatMessage
-    ])
+    // Recorded under the tool's name now, and under its old name (`ask_owner`) by a turn before the rename.
+    const [askCall, oldAskCall] = captured(memory, { threadId: mainDispatches(workId)[0]!.threadId, lane: 'run', activationId: workId }, ['question_ask', 'ask_owner'].map((name) =>
+      ({ id: `ask-${name}`, role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(), toolCall: { title: name, summary: '', details: [], status: 'complete', toolName: `mcp__mousse__${name}`, input: { question: FLATS.question, choices: FLATS.choices } } } as ChatMessage)
+    ))
+    // The relay, under its name now and under its old name (`question_answer`, which named the question `questionId`).
+    const [relayCall, oldRelayCall] = captured(memory, { threadId: own.payload.threadId, lane: 'chat', activationId: own.activation.id }, [
+      ['request_answer', { requestId: questionId }], ['question_answer', { questionId }]
+    ].map(([name, id]) => ({ id: `relay-${name}`, role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(), toolCall: { title: name, summary: '', details: [], status: 'complete', toolName: `mcp__mousse__${name}`, input: { ...(id as object), answer: 'The second one, Flat B' } } } as ChatMessage)))
     const [copy] = captured(memory, { threadId: resumed.threadId, lane: 'run', activationId: workId }, [{ id: 'cont', role: 'user', content: resumed.prompt.text, timestamp: f.store.now() } as ChatMessage])
     memory.forget(botId, { refs: [journaled(memory, own.message, 'owner_msg', 'chat')], by: 'owner_ui' })
-    expect(journalText(relayCall!)).toMatchObject({ redacted_at: expect.any(String) })
-    expect(journalText(relayCall!).text).not.toContain('Flat B')
+    for (const call of [relayCall, oldRelayCall]) {
+      expect(journalText(call!)).toMatchObject({ redacted_at: expect.any(String) })
+      expect(journalText(call!).text).not.toContain('Flat B')
+    }
     expect(f.store.dispatch(workId, resumed.n)!.prompt.text).not.toContain('Flat B')
     expect(journalText(copy!).text).not.toContain('Flat B')
-    // The question itself is not forgotten yet: its ask_owner call stays.
+    // The question itself is not forgotten yet: its question_ask call stays.
     expect(journalText(askCall!).redacted_at).toBeNull()
     memory.forget(botId, { refs: [journaled(memory, bubble, 'notice')], by: 'owner_ui' })
-    expect(journalText(askCall!)).toMatchObject({ redacted_at: expect.any(String) })
-    expect(journalText(askCall!).text).not.toMatch(/flat/i)
+    for (const call of [askCall, oldAskCall]) {
+      expect(journalText(call!)).toMatchObject({ redacted_at: expect.any(String) })
+      expect(journalText(call!).text).not.toMatch(/flat/i)
+    }
   })
 
   it('of the bubble while the work’s asking turn still runs: the work ends with its line when the turn ends, and never reports', async () => {
@@ -504,7 +530,7 @@ describe('restarts', () => {
     expect(mainDispatches(workId)).toHaveLength(2)
   })
 
-  it('right after ask_owner, its turn cut by the restart: it waits for the answer instead of carrying on', async () => {
+  it('right after question_ask, its turn cut by the restart: it waits for the answer instead of carrying on', async () => {
     const { workId, work } = await workThatAsks()
     f.runs.markTerminal(work.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     await restart()
@@ -527,8 +553,8 @@ describe('a scheduled run that asks (#1360)', () => {
     if (scheduled.kind !== 'started') throw new Error(scheduled.kind)
     await flush()
     const run = await start(f, scheduled.activationId)
-    expect(run.prepared.authority.appTools.has('ask_owner')).toBe(true)
-    expect(JSON.parse((await tool('ask_owner', run.prepared, run.payload.threadId, FLATS)).text)).toEqual({ asked: true, questionId: expect.stringMatching(/^q_/), note: QUESTION_WORK_ASKED_TEXT })
+    expect(run.prepared.authority.appTools.has('question_ask')).toBe(true)
+    expect(JSON.parse((await tool('question_ask', run.prepared, run.payload.threadId, FLATS)).text)).toEqual({ asked: true, questionId: expect.stringMatching(/^q_/), note: QUESTION_WORK_ASKED_TEXT })
     await endTurn(run)
     expect(f.store.activation(scheduled.activationId)).toMatchObject({ status: 'blocked', endReason: 'question' })
     const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === scheduled.activationId)!
@@ -551,7 +577,7 @@ describe('a scheduled run that asks (#1360)', () => {
     const run = await start(f, scheduled.activationId)
     expect(f.bots.removeSchedule(botId, scheduleId)).toBe(true)
     expect(f.store.activation(scheduled.activationId)?.status).toBe('running')
-    const asked = await tool('ask_owner', run.prepared, run.payload.threadId, FLATS)
+    const asked = await tool('question_ask', run.prepared, run.payload.threadId, FLATS)
     expect(asked.text).toContain('removed this schedule')
     await expect(f.bots.tools.wakes!.wait!(botId, scheduled.activationId, { brief: 'Check again.', dueAt: new Date(f.clock.now + 60 * 60_000).toISOString() })).rejects.toThrow('removed this schedule')
     expect(f.store.countQuestions(botId, {})).toBe(0)
@@ -565,7 +591,7 @@ describe('a scheduled run that asks (#1360)', () => {
     const manual = await f.bots.activate({ botId, input: 'Check new listings.', clientRequestId: 'by-hand' })
     await flush()
     const run = await start(f, manual.id)
-    expect(run.prepared.authority.appTools.has('ask_owner')).toBe(false)
+    expect(run.prepared.authority.appTools.has('question_ask')).toBe(false)
     expect(f.bots.askOwner(botId, manual.id, [{ spec: { question: 'Which?', choices: [{ label: 'A' }, { label: 'B' }], other: true } }])).toEqual({ asked: false, text: QUESTION_NOT_OFFERED_TEXT })
     expect(f.store.countQuestions(botId, {})).toBe(0)
   })
@@ -573,21 +599,21 @@ describe('a scheduled run that asks (#1360)', () => {
 
 describe('where it is never offered', () => {
 
-  it('work is offered ask_owner but not question_answer; a consult is offered neither', async () => {
+  it('work is offered question_ask but not question_answer; a consult is offered neither', async () => {
     const definitions = f.host.definitions
     const current = definitions.revision(botId, f.store.registry(botId)!.revision!)!
     const published = definitions.publishRevision({ ...current, context: [{ key: 'docs', title: 'Docs expert', agent: { instructions: 'You know the docs.' }, model: { mode: 'auto', depth: 'normal' } }] })
     f.store.setPublished(botId, published.revision!)
     const { workId } = await handOff('Flat hunt', 'w1')
     const work = await start(f, workId)
-    expect(work.prepared.authority.appTools.has('ask_owner')).toBe(true)
+    expect(work.prepared.authority.appTools.has('question_ask')).toBe(true)
     expect(work.prepared.authority.appTools.has('question_answer')).toBe(false)
     const asked = work.prepared.authority.consult!({ context: 'docs', question: 'What does it say?' })
     await flush()
     const consultN = f.store.dispatches(workId).find((dispatch) => dispatch.kind === 'consult')!.n
     const consult = f.bots.prepare(payloadOf(f, workId, consultN))
     if ('refused' in consult) throw new Error(consult.refused)
-    expect(consult.authority.appTools.has('ask_owner')).toBe(false)
+    expect(consult.authority.appTools.has('question_ask')).toBe(false)
     expect(consult.authority.appTools.has('question_answer')).toBe(false)
     void asked.catch(() => undefined)
   })
@@ -616,7 +642,7 @@ describe("the bot's browser", () => {
     const work = await start(f, workId)
     // The work takes a screenshot of the page (botBrowserScreenshot.test.ts: what browser_screenshot keeps), then asks.
     expect(keepToolImages({ activationId: workId, filesFolder: work.prepared.authority.workspace!.files!, source: 'browser-screenshot', images: [{ data: PNG }] })).toContain('Your owner sees')
-    await tool('ask_owner', work.prepared, work.payload.threadId, FLATS)
+    await tool('question_ask', work.prepared, work.payload.threadId, FLATS)
     const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === workId)!
     expect(bubble.attachments).toEqual([expect.objectContaining({ name: expect.stringMatching(/^browser-screenshot-.+\.png$/) })])
     expect(f.bots.service.attachmentFile(botId, bubble.id, 0).name).toBe(bubble.attachments![0]!.name)

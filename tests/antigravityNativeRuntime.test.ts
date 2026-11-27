@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { methods, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk'
@@ -340,7 +341,12 @@ describe('launching each runtime', () => {
 
   describe('a one-shot', () => {
     const HELP = 'Flags:\n  --cli_dir_name   Subdirectory under app_data_dir\n  --include-default-customizations  Include default customizations (default true)\n'
-    /** A one-shot launched on `kind`, its scratch folder made as the service makes it, with `agy acp --help` printing `help`. */
+    /** A place's id (`oneShot/places.ts`). */
+    const PLACE = '00000000-0000-4000-8000-0000000000a1'
+    /**
+     * A single request launched on `kind`, in a place's `work` folder made as the service makes it, with `agy acp --help`
+     * printing `help`. The place's spawner (`spawnInPlace` in the service) is recorded like any start.
+     */
     const launchOneShot = async (kind: 'legacy' | 'native', help = HELP, handlers: Record<string, unknown> = {}, extra: { privateHome?: string; onExit?: () => void } = {}) => {
       const dir = mkdtempSync(join(tmpdir(), 'mousse-agy-launch-'))
       homes.push(dir)
@@ -348,34 +354,41 @@ describe('launching each runtime', () => {
       writeFileSync(binary, `agy ${help.length}`)
       spawned.help = help
       await readAgyAcpFlags(binary)
-      const cwd = join(dir, 'one-shot', 'request-1')
+      const place = join(dir, 'one-shot', PLACE)
+      const cwd = join(place, 'work')
       mkdirSync(cwd, { recursive: true })
+      const spawnOneShot = vi.fn((folder: string, launch: { command: string; args: string[]; env: NodeJS.ProcessEnv }) =>
+        spawn(launch.command, launch.args, { cwd: folder, env: launch.env, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessWithoutNullStreams)
       process.env.MOUSSE_TEST_USER_SECRET = 'kept out'
       try {
         const env = vi.fn((base: NodeJS.ProcessEnv) => ({ ...base, USER_VAR: '1' }))
         const privateHome = extra.privateHome ? join(dir, extra.privateHome) : undefined
-        const connection = antigravityConnectionFactory({ profileDir: dir, profileHome: dir, ...(privateHome ? { privateHome } : {}), runtime: () => ({ kind, binary, source: 'user' }), args: () => ['--user-flag'], env })(
+        const connection = antigravityConnectionFactory({ profileDir: dir, profileHome: dir, ...(privateHome ? { privateHome } : {}), runtime: () => ({ kind, binary, source: 'user' }), args: () => ['--user-flag'], env, spawnOneShot })(
           { purpose: 'one_shot', cwd, handlers: { requestPermission: vi.fn(), ...handlers }, ...(extra.onExit ? { onExit: extra.onExit } : {}) } as never)
-        return { dir, cwd, call: spawned.calls.at(-1)!, env, connection }
+        return { dir, place, cwd, call: spawned.calls.at(-1)!, env, connection, spawnOneShot }
       } finally {
         delete process.env.MOUSSE_TEST_USER_SECRET
       }
     }
 
-    it("starts agy in its own folder on an empty home with its own settings, an allowlisted environment, and none of the user's flags, variables or skill links", async () => {
-      const { dir, cwd, call, env } = await launchOneShot('native')
+    it("starts agy in its place's folder on the place's empty home with its own settings, an allowlisted environment, and none of the user's flags, variables or skill links", async () => {
+      const { dir, place, cwd, call, env, spawnOneShot } = await launchOneShot('native')
       const geminiHome = join(dir, 'gemini-home')
-      const home = join(dir, 'one-shot-homes', 'request-1')
+      const home = join(place, 'home')
+      // Started by the place's spawner, in the place's `work` folder.
+      expect(spawnOneShot).toHaveBeenCalledOnce()
       expect(call.cwd).toBe(cwd)
       // The home's hooks and MCP servers (`<gemini-dir>/config`) stay out; its app data (sign-in, sessions) is the entry's.
-      expect(call.args).toEqual(['acp', '--gemini-dir', home, '--app-data-dir', join('..', '..', 'gemini-home', 'antigravity-acp'), '--cli_dir_name', 'one-shot-request-1', '--include-default-customizations=false'])
+      expect(call.args).toEqual(['acp', '--gemini-dir', home, '--app-data-dir', join('..', '..', '..', 'gemini-home', 'antigravity-acp'), '--cli_dir_name', `one-shot-${PLACE}`, '--include-default-customizations=false'])
+      // Its temporary folder is the place's too, removed with it.
+      expect(call.env.TEMP ?? call.env.TMPDIR).toBe(join(place, 'tmp'))
       expect(readdirSync(home)).toEqual([])
       expect(env).not.toHaveBeenCalled()
       expect(call.env.MOUSSE_TEST_USER_SECRET).toBeUndefined()
       expect(call.env.USER_VAR).toBeUndefined()
       expect(call.env.GEMINI_HOME).toBe(home)
       expect(call.env.PATH ?? call.env.Path).toBeDefined()
-      const settings = JSON.parse(readFileSync(join(geminiHome, 'antigravity-acp', 'one-shot-request-1', 'settings.json'), 'utf8')) as Record<string, unknown>
+      const settings = JSON.parse(readFileSync(join(geminiHome, 'antigravity-acp', `one-shot-${PLACE}`, 'settings.json'), 'utf8')) as Record<string, unknown>
       expect(settings).toMatchObject({ toolPermission: 'strict', allowNonWorkspaceAccess: false, agentMode: '', permissions: { deny: expect.arrayContaining(['command(*)', 'write_file(*)', 'read_file(*)', 'mcp(*)']) } })
       // The home's own settings and skill links are left as they are.
       expect(existsSync(join(geminiHome, 'antigravity-acp', 'settings.json'))).toBe(false)
@@ -388,9 +401,9 @@ describe('launching each runtime', () => {
       await expect(launchOneShot('native', 'Flags:\n  --gemini-dir  Path\n')).rejects.toMatchObject({ code: 'wont_run' })
     })
 
-    it("starts an added entry's one-shot on an empty home beside its own, its sign-in still read from its own app data", async () => {
-      const { dir, call } = await launchOneShot('native', HELP, {}, { privateHome: join('entry', 'home') })
-      expect(call.args.slice(0, 5)).toEqual(['acp', '--gemini-dir', join(dir, 'entry', 'home', 'one-shot-homes', 'request-1'), '--app-data-dir', join('..', '..', 'gemini-home', 'antigravity-acp')])
+    it("starts an added entry's single request on its place's empty home, its sign-in still read from its own app data", async () => {
+      const { place, call } = await launchOneShot('native', HELP, {}, { privateHome: join('entry', 'home') })
+      expect(call.args.slice(0, 5)).toEqual(['acp', '--gemini-dir', join(place, 'home'), '--app-data-dir', join('..', '..', '..', 'entry', 'home', 'gemini-home', 'antigravity-acp')])
       expect(call.env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE).toBe('1')
     })
 
@@ -407,10 +420,18 @@ describe('launching each runtime', () => {
       expect(onExit).toHaveBeenCalledTimes(1)
     })
 
-    it("keeps the 1.1.1 server's ordinary launch", async () => {
-      const { call } = await launchOneShot('legacy')
+    it("keeps the 1.1.1 server's ordinary launch, in its place", async () => {
+      const { cwd, call } = await launchOneShot('legacy')
       expect(call.args).toContain('--user-flag')
-      expect(call.cwd).toBeUndefined()
+      expect(call.cwd).toBe(cwd)
+    })
+
+    it('starts nothing outside a place', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'mousse-agy-launch-'))
+      homes.push(dir)
+      const factory = antigravityConnectionFactory({ profileDir: dir, profileHome: dir, runtime: () => ({ kind: 'native', binary: join(dir, 'agy.exe'), source: 'user' }), args: () => [], env: (base) => base, spawnOneShot: vi.fn() })
+      expect(() => factory({ purpose: 'one_shot', cwd: join(dir, 'one-shot', 'request-1'), handlers: {} } as never)).toThrow('place of its own')
+      expect(spawned.calls).toHaveLength(0)
     })
 
     it('refuses a terminal or unknown request that arrives on the wire, and answers it as not found', async () => {

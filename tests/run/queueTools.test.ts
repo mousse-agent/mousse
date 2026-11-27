@@ -1,8 +1,8 @@
 /**
- * `queue_list`, `queue_enqueue`, `queue_edit`, `queue_remove`, `queue_reorder` and `queue_promote_to_steer` through the
- * registry's central check (docs/run-engine/SPEC §15.1): which threads they reach, what the caller must name (the
- * queue revision, the run), what each tool asks of its host, how a refusal reaches the agent, and what a listing
- * shows. The queue itself is covered end to end in `queueEditDaemon.test.ts`.
+ * `queue_list`, `queue_enqueue` and `queue_update` (and its old names `queue_edit`, `queue_remove`, `queue_reorder` and
+ * `queue_promote_to_steer`) through the registry's central check (docs/run-engine/SPEC §15.1): which threads they
+ * reach, what the caller must name (the queue revision, the run), what each tool asks of its host, how a refusal
+ * reaches the agent, and what a listing shows. The queue itself is covered end to end in `queueEditDaemon.test.ts`.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { QueuedMessage, Thread } from '../../src/shared/types'
@@ -20,14 +20,24 @@ const item = (id: string, patch: Partial<QueuedMessage> = {}): QueuedMessage => 
   images: [{ data: 'c2VjcmV0LWltYWdl', mimeType: 'image/png' }], inboxIds: ['inbox-1'], ...patch
 })
 
-/** One command per tool, as the agent would send it, and the command the host must be given. */
-const TOOLS: Array<{ tool: string; args: Record<string, unknown>; command: AgentQueueCommand }> = [
-  { tool: 'queue_enqueue', args: { content: 'hello', expectedRevision: 'rev-1' }, command: { op: 'enqueue', content: 'hello', mode: 'agent', expectedRevision: 'rev-1' } },
+/**
+ * One command per tool, as the agent would send it, and the command the host must be given: under each old name, and
+ * as the `op` of `queue_update` that replaced it. `key` is the name its request key keeps (the old tool's).
+ */
+const TOOLS: Array<{ tool: string; args: Record<string, unknown>; command: AgentQueueCommand; key?: string }> = [
+  { tool: 'queue_enqueue', args: { content: 'hello', expectedRevision: 'rev-1' }, command: { op: 'enqueue', content: 'hello', expectedRevision: 'rev-1' } },
   { tool: 'queue_edit', args: { itemId: 'i1', content: 'new', expectedRevision: 'rev-1' }, command: { op: 'edit', itemId: 'i1', content: 'new', expectedRevision: 'rev-1' } },
   { tool: 'queue_remove', args: { itemId: 'i1', expectedRevision: 'rev-1' }, command: { op: 'remove', itemId: 'i1', expectedRevision: 'rev-1' } },
   { tool: 'queue_reorder', args: { orderedIds: ['i2', 'i1'], expectedRevision: 'rev-1' }, command: { op: 'reorder', orderedIds: ['i2', 'i1'], expectedRevision: 'rev-1' } },
-  { tool: 'queue_promote_to_steer', args: { itemId: 'i1', expectedRevision: 'rev-1', expectedRunId: 'run-x' }, command: { op: 'promote', itemId: 'i1', expectedRevision: 'rev-1', expectedRunId: 'run-x' } }
+  { tool: 'queue_promote_to_steer', args: { itemId: 'i1', expectedRevision: 'rev-1', expectedRunId: 'run-x' }, command: { op: 'promote', itemId: 'i1', expectedRevision: 'rev-1', expectedRunId: 'run-x' } },
+  { tool: 'queue_update', key: 'queue_edit', args: { op: 'edit', itemId: 'i1', content: 'new', expectedRevision: 'rev-1' }, command: { op: 'edit', itemId: 'i1', content: 'new', expectedRevision: 'rev-1' } },
+  { tool: 'queue_update', key: 'queue_remove', args: { op: 'remove', itemId: 'i1', expectedRevision: 'rev-1' }, command: { op: 'remove', itemId: 'i1', expectedRevision: 'rev-1' } },
+  { tool: 'queue_update', key: 'queue_reorder', args: { op: 'move', orderedIds: ['i2', 'i1'], expectedRevision: 'rev-1' }, command: { op: 'reorder', orderedIds: ['i2', 'i1'], expectedRevision: 'rev-1' } },
+  { tool: 'queue_update', key: 'queue_promote_to_steer', args: { op: 'send_now', itemId: 'i1', expectedRevision: 'rev-1', expectedRunId: 'run-x' }, command: { op: 'promote', itemId: 'i1', expectedRevision: 'rev-1', expectedRunId: 'run-x' } }
 ]
+
+/** Whether a row's command takes the thread new work (an archived thread refuses it). */
+const takesWork = (command: AgentQueueCommand): boolean => ['enqueue', 'edit', 'promote'].includes(command.op)
 
 describe('the queue tools (SPEC §15.1)', () => {
   let fx: DelegationFixture | undefined
@@ -70,14 +80,20 @@ describe('the queue tools (SPEC §15.1)', () => {
   describe('on the caller\'s own thread', () => {
     it('each tool reaches its host as a command of the caller, scoped to the caller\'s thread', async () => {
       const { call, host, callerRun } = await world()
-      for (const { tool, args, command } of TOOLS) {
+      for (const { tool, args, command, key } of TOOLS) {
         const result = await call(tool, { ...args, clientRequestId: `req-${tool}` })
         expect(result.isError, tool).toBeUndefined()
         expect(host.queueCommand, tool).toHaveBeenLastCalledWith('caller', command, {
-          clientRequestId: `${tool}:caller:req-${tool}`,
+          clientRequestId: `${key ?? tool}:caller:req-${tool}`,
           actor: { kind: 'agent', threadId: 'caller', runId: callerRun.runId, toolCallId: expect.stringMatching(/^mcp:/) }
         })
       }
+    })
+
+    it('a call under an old name is its own op, whatever op it names', async () => {
+      const { call, host } = await world()
+      expect((await call('queue_remove', { op: 'send_now', itemId: 'i1', expectedRevision: 'rev-1', expectedRunId: 'run-x' })).isError).toBeUndefined()
+      expect(host.queueCommand).toHaveBeenLastCalledWith('caller', { op: 'remove', itemId: 'i1', expectedRevision: 'rev-1' }, expect.anything())
     })
 
     it('a call without a clientRequestId is keyed by its own call id: two calls are two commands, a retry that names its key is one', async () => {
@@ -87,17 +103,6 @@ describe('the queue tools (SPEC §15.1)', () => {
       const keys = vi.mocked(host.queueCommand!).mock.calls.map((entry) => entry[2].clientRequestId)
       expect(new Set(keys).size).toBe(2)
       expect(keys.every((key) => /^queue_remove:caller:mcp:/.test(key))).toBe(true)
-    })
-
-    it('a plan ceiling cannot ask for an agent turn', async () => {
-      const { call, denied, host } = await world()
-      const ceiling = { modeCeiling: 'plan' as const }
-      for (const [tool, args] of [['queue_enqueue', { content: 'x', mode: 'agent' }], ['queue_edit', { itemId: 'i1', mode: 'agent', expectedRevision: 'rev-1' }]] as const)
-        expect((await denied(call(tool, { ...args }, ceiling)))!.code, tool).toBe('mousse_ceiling_exceeded')
-      expect(host.queueCommand).not.toHaveBeenCalled()
-      // Its default under a plan ceiling is a plan turn.
-      await call('queue_enqueue', { content: 'x' }, ceiling)
-      expect(host.queueCommand).toHaveBeenLastCalledWith('caller', { op: 'enqueue', content: 'x', mode: 'plan' }, expect.anything())
     })
   })
 
@@ -151,12 +156,12 @@ describe('the queue tools (SPEC §15.1)', () => {
     it('an archived thread takes no new message, edit or steer, but its queue can be tidied (remove, reorder)', async () => {
       const { call, denied, threads, host } = await world()
       threads.set('target', thread('target', { archivedAt: NOW }))
-      for (const { tool, args } of TOOLS.filter((entry) => ['queue_enqueue', 'queue_edit', 'queue_promote_to_steer'].includes(entry.tool))) {
+      for (const { tool, args } of TOOLS.filter((entry) => takesWork(entry.command))) {
         const error = await denied(call(tool, { ...args, threadId: 'target' }))
         expect(error, tool).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'thread_archived' } })
       }
       expect(host.queueCommand).not.toHaveBeenCalled()
-      for (const { tool, args } of TOOLS.filter((entry) => ['queue_remove', 'queue_reorder'].includes(entry.tool)))
+      for (const { tool, args } of TOOLS.filter((entry) => !takesWork(entry.command)))
         expect((await call(tool, { ...args, threadId: 'target' })).isError, tool).toBeUndefined()
     })
   })
@@ -170,8 +175,11 @@ describe('the queue tools (SPEC §15.1)', () => {
         expect(result.isError, tool).toBe(true)
         expect(result.text, tool).toMatch(/expectedRevision is required/)
       }
-      const promote = await call('queue_promote_to_steer', { itemId: 'i1', expectedRevision: 'rev-1' })
-      expect(promote).toMatchObject({ isError: true, text: expect.stringMatching(/expectedRunId/) })
+      for (const [tool, args] of [['queue_promote_to_steer', {}], ['queue_update', { op: 'send_now' }]] as const)
+        expect(await call(tool, { ...args, itemId: 'i1', expectedRevision: 'rev-1' }), tool).toMatchObject({ isError: true, text: expect.stringMatching(/expectedRunId/) })
+      // queue_update names its op, one of the four.
+      for (const op of [undefined, 'promote', 'enqueue'])
+        expect(await call('queue_update', { op, itemId: 'i1', content: 'x', expectedRevision: 'rev-1' }), String(op)).toMatchObject({ isError: true, text: expect.stringMatching(/op must be one of/) })
       const own = await call('queue_enqueue', { content: 'x' })
       expect(own.isError).toBeUndefined()
       const other = await call('queue_enqueue', { content: 'x', threadId: 'target' })
@@ -186,8 +194,12 @@ describe('the queue tools (SPEC §15.1)', () => {
         { itemId: 'i1', content: '  ', expectedRevision: 'rev-1' },
         { itemId: 'i1', mode: 'root', expectedRevision: 'rev-1' },
         { content: 'x', expectedRevision: 'rev-1' }
-      ]) expect((await call('queue_edit', args)).isError, JSON.stringify(args)).toBe(true)
+      ]) {
+        expect((await call('queue_edit', args)).isError, JSON.stringify(args)).toBe(true)
+        expect((await call('queue_update', { ...args, op: 'edit' })).isError, JSON.stringify(args)).toBe(true)
+      }
       expect((await call('queue_reorder', { orderedIds: ['a', 1], expectedRevision: 'rev-1' })).isError).toBe(true)
+      expect((await call('queue_update', { op: 'move', orderedIds: ['a', 1], expectedRevision: 'rev-1' })).isError).toBe(true)
       expect((await call('queue_enqueue', { content: ' ' })).isError).toBe(true)
       expect(host.queueCommand).not.toHaveBeenCalled()
     })
@@ -201,7 +213,7 @@ describe('the queue tools (SPEC §15.1)', () => {
       expect(await denied(call('queue_edit', args))).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'revision_mismatch', expectedRevision: 'rev-1', revision: 'rev-9' } })
       answer.result = () => { throw new QueueConflictError('ceiling_exceeded', 'Too loose.', { callerMode: 'ask', targetMode: 'full' }) }
       expect(await denied(call('queue_promote_to_steer', { itemId: 'i1', expectedRevision: 'rev-1', expectedRunId: 'r' }))).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'ceiling_exceeded', callerMode: 'ask', targetMode: 'full' } })
-      answer.result = () => { throw new QueueAccessError('A message queued as a plan turn cannot be turned into an agent turn by another writer.') }
+      answer.result = () => { throw new QueueAccessError('This message cannot be changed by another writer.') }
       expect(await denied(call('queue_edit', args))).toMatchObject({ code: 'mousse_scope_denied', message: expect.stringContaining('another writer') })
       answer.result = () => { throw new DomainRpcError('agent_queue_full', 'full') }
       expect(await denied(call('queue_edit', args))).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_queue_full' } })
@@ -248,7 +260,10 @@ describe('the queue tools (SPEC §15.1)', () => {
 
     it('a host without queue commands says so instead of failing', async () => {
       const { call } = await world({ queueCommand: undefined, queueSnapshot: undefined })
-      for (const { tool, args } of TOOLS) expect(await refusalIn(call(tool, { ...args })), tool).toMatchObject({ message: `${tool} is not available in this host.` })
+      for (const { tool, args } of TOOLS) {
+        const named = tool === 'queue_enqueue' ? tool : 'queue_update'
+        expect(await refusalIn(call(tool, { ...args })), tool).toMatchObject({ message: `${named} is not available in this host.` })
+      }
       expect(await refusalIn(call('queue_list'))).toMatchObject({ message: 'queue_list is not available in this host.' })
     })
   })

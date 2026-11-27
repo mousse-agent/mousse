@@ -484,8 +484,12 @@ export function knownToolName(rawName: string | undefined): string | undefined {
     case 'webfetch':
       return 'WebFetch'
     case 'skill':
+    case 'skillload':
+    case 'skilllist':
     case 'loadskill':
     case 'listskills':
+    case 'skillload':
+    case 'skilllist':
       return 'Skill'
     case 'agent':
       return 'Agent'
@@ -595,7 +599,7 @@ function genericDraft(
   server: string | undefined
 ): ActivityDraft {
   // A Mousse delegation call keeps only its bounded record, never the prompt.
-  const delegation = subagentToolName(rawName) ? recordSubagentCall(rawName, input, {}) : null
+  const delegation = subagentToolName(rawName, input) ? recordSubagentCall(rawName, input, {}) : null
   const kept = delegation ? delegation.input : capRecord(input)
   const resolvedServer = server ?? serverOf(rawName)
   return {
@@ -611,7 +615,7 @@ function typedDraft(
   input: Record<string, unknown> | undefined,
   base: DraftBase
 ): ActivityDraft | undefined {
-  if (!input || subagentToolName(rawName)) return undefined
+  if (!input || subagentToolName(rawName, input)) return undefined
   switch (normalizeToolName(rawName)) {
     case 'Bash': {
       const command = str(input.command)

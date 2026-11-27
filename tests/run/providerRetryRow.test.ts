@@ -1,18 +1,22 @@
 /**
  * A turn whose provider requests fail: the real error and its retry count reach the transcript and the run, the
- * retries are one row that turns recovered or becomes the error, and a passing failure the runtime did not retry is
- * sent again only when nothing of the turn happened. A real `OrchestratorService` and Run Engine over a temporary
- * profile, with a scripted adapter in place of the provider.
+ * retries are one row that turns recovered or becomes the error, and a provider failure the runtime did not retry is
+ * sent again only when nothing of the turn happened, or continued on the runtime's kept session after a tool ran. A
+ * real `OrchestratorService` and Run Engine over a temporary profile, with a scripted adapter in place of the provider
+ * (hand-authored: it proves Mousse's side; the Codex and Claude Code sides have their own tests).
  *
- * Inputs: the runtime's own retries (recovered, ran out); a passing failure with no retries (before any output, after
- * a tool started, after the provider answered); a Stop during Mousse's wait; a failure that is not the provider's.
+ * Inputs: the runtime's own retries (recovered, ran out); a provider failure with no retries (before any output, after
+ * a tool started, after the provider answered; with and without a kept session); the #1999 400 mid-turn; a usage limit
+ * mid-turn; a Stop during Mousse's wait; a failure that is not the provider's.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AdapterHost, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
-import { providerStatusError } from '../../src/mms/orchestrator/providerErrors'
+import { providerStatusError, usageLimitError } from '../../src/mms/orchestrator/providerErrors'
+import { codexHarnessError } from '../../src/mms/harness/drivers/codex/adapter'
+import { CodexTurnFailure } from '../../src/mms/harness/vendors/codex/CodexProviderService'
 import type { RunRecord } from '../../src/mms/run/types'
 import type { ChatMessage } from '../../src/shared/types'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
@@ -24,11 +28,16 @@ const REFUSED = 'Connection refused — a firewall or proxy may be blocking it (
 const unreachable = (details?: Record<string, unknown>) =>
   providerStatusError(undefined, REFUSED, { provider: 'claude', code: 'provider_unavailable', errorInfo: { category: 'unavailable', retryable: true }, ...(details ? { details } : {}) })
 
+/** Issue #1999: `/v1/responses` answered 400 with a bare "Bad Request" envelope, as Codex 0.162.1 reports it. */
+const ENVELOPE_400 = JSON.stringify({ error: { message: 'Bad Request', type: null, code: null, param: null }, status: 400 }, null, 2)
+const opaque400 = () => codexHarnessError(new CodexTurnFailure(ENVELOPE_400, { message: ENVELOPE_400, codexErrorInfo: 'other' }), 'codex-2')
+
 /** What one call of the provider does before the scripted reply: report frames, or throw. */
-type Step = (sink: TurnSink) => Promise<void> | void
+type Step = (sink: TurnSink, input: TurnInput) => Promise<void> | void
 
 class RetryAdapter extends ScriptedAdapter {
   readonly steps: Step[] = []
+  readonly inputs: TurnInput[] = []
   calls = 0
   constructor() {
     super('pi', PI_TEST_CAPABILITIES, (input) => `reply: ${input.prompt}`)
@@ -36,9 +45,17 @@ class RetryAdapter extends ScriptedAdapter {
 
   override async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
     this.calls += 1
-    await this.steps.shift()?.(sink)
+    this.inputs.push(input)
+    await this.steps.shift()?.(sink, input)
     return super.startTurn(input, sink, ctl, host)
   }
+}
+
+/** A tool the model ran, start to result. */
+const ranTool = (sink: TurnSink, callId: string): void => {
+  sink.progress()
+  sink.tool({ phase: 'start', callId, kind: 'mcp_tool_call', title: 'Write file', summary: '', details: [] })
+  sink.tool({ phase: 'complete', callId, kind: 'mcp_tool_call', title: 'Write file', summary: 'done', details: [] })
 }
 
 describe('a turn whose provider requests fail', () => {
@@ -145,6 +162,51 @@ describe('a turn whose provider requests fail', () => {
 
     expect(adapter.calls).toBe(1)
     expect(runOf().status).toBe('failed')
+  })
+
+  it('the #1999 400 after a tool ran continues the kept session with a short turn: the request and the tool are not repeated', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const adapter = new RetryAdapter()
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    adapter.steps.push((sink) => {
+      ranTool(sink, 'call-1')
+      sink.sessionKept?.()
+      throw opaque400()
+    }, async () => { await held })
+    const { runOf, messages } = await run(adapter, { wait: false })
+
+    // While the continuation runs, the row counts the retry out of ten.
+    await waitFor(() => adapter.calls === 2, 'the continuation')
+    expect(retryRows(messages())).toEqual([expect.objectContaining({ content: 'Retrying provider… (1/10)', providerRetry: expect.objectContaining({ status: 'retrying', attempt: 1, maxAttempts: 10, cause: 'error 400' }) })])
+    release()
+    await waitFor(() => runOf().status === 'completed', 'the run to finish')
+
+    const [first, second] = adapter.inputs
+    expect(first.prompt).toBe('Do the work')
+    expect(first.continuesFailedRequest).toBeUndefined()
+    // The continuation goes on in the same run and attempt, with a note in place of the request.
+    expect(second).toMatchObject({ runId: first.runId, attemptId: first.attemptId, continuesFailedRequest: true })
+    expect(second.prompt).not.toContain('Do the work')
+    expect(second.prompt).toMatch(/failed \(error 400\).*Continue/)
+    // The tool ran once: its row is the only one.
+    expect(messages().filter((message) => message.activity && message.toolCall)).toHaveLength(1)
+    expect(retryRows(messages())).toEqual([expect.objectContaining({ content: 'Provider recovered after 1 retry', streaming: false })])
+    expect(messages().filter((message) => message.error)).toEqual([])
+  })
+
+  it('a usage limit after a tool ran still pauses the run: it is never retried', async () => {
+    const adapter = new RetryAdapter()
+    adapter.steps.push((sink) => {
+      ranTool(sink, 'call-1')
+      sink.sessionKept?.()
+      throw usageLimitError({ provider: 'codex', resetsAt: new Date(Date.now() + 3_600_000).toISOString(), estimated: false })
+    })
+    const { runOf, messages } = await run(adapter)
+
+    expect(adapter.calls).toBe(1)
+    expect(runOf().status).toBe('paused')
+    expect(retryRows(messages())).toEqual([])
   })
 
   it('a Stop during the wait ends the turn there: nothing is sent again', async () => {

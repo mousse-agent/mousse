@@ -7,6 +7,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { claudeChildToolDenial } from '../../src/mms/harness/vendors/claude/childPolicy'
 import { StaticAgentIntegrationLookup } from '../../src/mms/agentDefinitions/lookups'
 import { resolveBuiltinToolGrants } from '../../src/shared/agents/grants'
+import type { EffectiveAgentGrants } from '../../src/shared/agents/types'
+import { canonicalToolCall } from '../../src/shared/toolAliases'
+import { definitionToolGranted, recordAuthorizedCall, takeAuthorizedCall, type DefinitionAuthority } from '../../src/mms/agentDefinitions/definitionGate'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import { readRefusal } from '../../src/mms/run/mcp/appTools'
@@ -34,7 +37,7 @@ describe('an old tool name', () => {
     server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
     await server.start()
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, ...turn }))
-    const token = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!.token
+    const token = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, binding: 'drained_turn', generation: 'g' })!.token
     const rpc = async (method: string, params: Record<string, unknown>): Promise<RpcBody> => {
       const response = await fetch(server!.url, {
         method: 'POST',
@@ -97,11 +100,105 @@ describe("an agent definition's saved grant of an old tool name", () => {
   })
 })
 
+describe("an agent definition's grant of an old queue tool", () => {
+  const holding = (...ids: string[]): EffectiveAgentGrants => ({ skills: [], mcpTools: [], builtinTools: ids.map((id) => ({ id, source: 'explicit' as const })), denied: [] })
+
+  it('holds the one op of queue_update that tool was, and a grant of queue_update holds every op', () => {
+    const rows: Array<[grant: string, called: string, args: Record<string, unknown>, held: boolean]> = [
+      ['queue_edit', 'queue_update', { op: 'edit' }, true],
+      ['queue_edit', 'queue_update', { op: 'send_now' }, false],
+      ['queue_edit', 'queue_update', {}, false],
+      ['queue_reorder', 'queue_update', { op: 'move' }, true],
+      ['queue_reorder', 'queue_update', { op: 'remove' }, false],
+      ['queue_promote_to_steer', 'queue_update', { op: 'send_now' }, true],
+      // Called under the old name, the call is that op whatever op it names.
+      ['queue_edit', 'queue_edit', { op: 'send_now' }, true],
+      ['queue_edit', 'queue_promote_to_steer', {}, false],
+      ['queue_update', 'queue_update', { op: 'send_now' }, true],
+      ['queue_update', 'queue_remove', {}, true]
+    ]
+    for (const [grant, called, args, held] of rows) expect(definitionToolGranted(called, holding(grant), [], args), `${grant} → ${called} ${JSON.stringify(args)}`).toBe(held)
+  })
+
+  it('stays that op when the definition is resolved: it never becomes all of queue_update', () => {
+    const lookup = new StaticAgentIntegrationLookup({ builtinToolIds: ['queue_update'] })
+    for (const mode of ['explicit', 'inherit'] as const) {
+      const { grants } = resolveBuiltinToolGrants({ mode, allowlist: ['queue_edit'] }, lookup)
+      expect(definitionToolGranted('queue_update', { skills: [], mcpTools: [], builtinTools: grants, denied: [] }, [], { op: 'send_now' }), mode).toBe(false)
+    }
+  })
+
+  it("a runtime gate's approval of a call under the old name is taken by the registry's call under the new one, and only for that op", () => {
+    const authority = { grants: holding('queue_edit') } as DefinitionAuthority
+    const call = { turnToken: 't', callId: 'c1', args: { itemId: 'i1', content: 'x', expectedRevision: 'r1' } }
+    recordAuthorizedCall(authority, { ...call, toolName: 'queue_edit' })
+    expect(takeAuthorizedCall(authority, { ...call, toolName: 'queue_update', args: { ...call.args, op: 'send_now' } })).toBe(false)
+    recordAuthorizedCall(authority, { ...call, toolName: 'queue_edit' })
+    expect(takeAuthorizedCall(authority, { ...call, toolName: 'queue_update', args: { ...call.args, op: 'edit' } })).toBe(true)
+  })
+})
+
 describe("a read-only Claude subagent's call under an old name", () => {
   it('passes the gate its new name passes', () => {
     for (const [old, renamed] of [['list_models', 'model_list'], ['load_skill', 'skill_load'], ['list_skills', 'skill_list'], ['list_computers', 'computer_list']]) {
       expect(claudeChildToolDenial({ readOnly: true }, `mcp__mousse__${renamed}`), renamed).toBeUndefined()
       expect(claudeChildToolDenial({ readOnly: true }, `mcp__mousse__${old}`), old).toBeUndefined()
+    }
+  })
+})
+
+describe("the thread family's old names", () => {
+  it('are one variant of their new tool: the call is translated before anything checks it', () => {
+    expect(canonicalToolCall('thread_interrupt', { threadId: 't', runId: 'r' })).toEqual({ name: 'thread_stop', args: { threadId: 't', runId: 'r' } })
+    expect(canonicalToolCall('thread_merge_back', { threadId: 't' })).toEqual({ name: 'thread_return', args: { threadId: 't' } })
+    expect(canonicalToolCall('thread_hide', { threadId: 't' })).toEqual({ name: 'thread_update', args: { threadId: 't', hidden: true } })
+    expect(canonicalToolCall('thread_hide', { threadId: 't', hidden: false })).toEqual({ name: 'thread_update', args: { threadId: 't', hidden: false } })
+    expect(canonicalToolCall('thread_steer', { threadId: 't', runId: 'r', text: 'Also check the tests' })).toEqual({ name: 'thread_send', args: { threadId: 't', runId: 'r', content: 'Also check the tests', intent: 'note' } })
+    // A new name passes through as it is.
+    expect(canonicalToolCall('thread_send', { threadId: 't', content: 'Go', intent: 'work' })).toEqual({ name: 'thread_send', args: { threadId: 't', content: 'Go', intent: 'work' } })
+  })
+
+  it('delegate_task and create_subagent are thread_create kind subagent, whatever kind the call names', () => {
+    expect(canonicalToolCall('delegate_task', { title: 'A', prompt: 'p', kind: 'thread' })).toEqual({ name: 'thread_create', args: { title: 'A', prompt: 'p', kind: 'subagent' } })
+    expect(canonicalToolCall('create_subagent', { name: 'A', task: 'p', access: 'write' })).toEqual({ name: 'thread_create', args: { kind: 'subagent', title: 'A', prompt: 'p', workspace: 'isolated', role: 'implement', wake: 'always' } })
+  })
+
+  const holding = (...ids: string[]): EffectiveAgentGrants => ({ skills: [], mcpTools: [], builtinTools: ids.map((id) => ({ id, source: 'explicit' as const })), denied: [] })
+
+  it("in a definition's grant hold only their own variant of the new tool, and the new name holds every variant", () => {
+    const rows: Array<[grant: string, called: string, args: Record<string, unknown>, held: boolean]> = [
+      // A steer grant sends notes, under either name, and never work.
+      ['thread_steer', 'thread_send', { threadId: 't', content: 'Note', intent: 'note' }, true],
+      ['thread_steer', 'thread_steer', { threadId: 't', runId: 'r', text: 'Note' }, true],
+      ['thread_steer', 'thread_send', { threadId: 't', content: 'Do this', intent: 'work' }, false],
+      ['thread_steer', 'thread_send', { threadId: 't', content: 'Do this' }, false],
+      // A hide grant hides and shows, and never changes a subagent's access.
+      ['thread_hide', 'thread_update', { threadId: 't', hidden: true }, true],
+      ['thread_hide', 'thread_hide', { threadId: 't' }, true],
+      ['thread_hide', 'thread_update', { threadId: 't', access: { readOnly: false } }, false],
+      ['thread_hide', 'thread_stop', { threadId: 't', runId: 'r' }, false],
+      ['thread_send', 'thread_send', { threadId: 't', content: 'Do this', intent: 'work' }, true],
+      ['thread_send', 'thread_steer', { threadId: 't', runId: 'r', text: 'Note' }, true],
+      ['thread_interrupt', 'thread_stop', { threadId: 't', runId: 'r' }, true],
+      // A delegate_task grant starts subagents and never a thread; a thread_create grant starts both.
+      ['delegate_task', 'thread_create', { kind: 'subagent', title: 'A', prompt: 'p' }, true],
+      ['delegate_task', 'thread_create', { kind: 'thread', projectId: 'p', title: 'A' }, false],
+      ['delegate_task', 'thread_create', { projectId: 'p', title: 'A' }, false],
+      ['create_subagent', 'thread_create', { kind: 'subagent', title: 'A', prompt: 'p' }, true],
+      ['create_subagent', 'thread_create', { kind: 'thread', projectId: 'p', title: 'A' }, false],
+      ['thread_create', 'thread_create', { kind: 'subagent', title: 'A', prompt: 'p' }, true],
+      ['thread_create', 'delegate_task', { title: 'A', prompt: 'p' }, true]
+    ]
+    for (const [grant, called, args, held] of rows) expect(definitionToolGranted(called, holding(grant), [], args), `${grant} → ${called} ${JSON.stringify(args)}`).toBe(held)
+  })
+
+  it("stay that variant when the definition is resolved: a steer grant never becomes all of thread_send", () => {
+    const lookup = new StaticAgentIntegrationLookup({ builtinToolIds: ['thread_send', 'thread_update'] })
+    for (const mode of ['explicit', 'inherit'] as const) {
+      const { grants } = resolveBuiltinToolGrants({ mode, allowlist: ['thread_steer', 'thread_hide'] }, lookup)
+      const builtinTools = { skills: [], mcpTools: [], builtinTools: grants, denied: [] }
+      expect(definitionToolGranted('thread_send', builtinTools, [], { threadId: 't', content: 'Do this', intent: 'work' }), mode).toBe(false)
+      expect(definitionToolGranted('thread_update', builtinTools, [], { threadId: 't', access: { readOnly: false } }), mode).toBe(false)
     }
   })
 })

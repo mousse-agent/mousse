@@ -120,20 +120,18 @@ describe('the client name of a turn', () => {
     expect((await service().turn('full')).CLAUDE_CODE_ENTRYPOINT).toBe('sdk-ts')
   })
 
-  it("a plan turn keeps its thread's name and never enters Claude Code's plan mode", async () => {
+  it("a turn never enters Claude Code's own plan mode: its plan-mode tools are off", async () => {
     const fixture = service()
     const optionsOf = () => fixture.started.at(-1)!.options
-    // The turn runs read-only in the default mode, with Claude Code's plan tools off.
-    expect((await fixture.turn('ask', 'ask-thread', { mode: 'plan' })).CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
+    expect((await fixture.turn('ask', 'ask-thread')).CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
     expect(optionsOf().permissionMode).toBe('default')
     expect(optionsOf().disallowedTools).toEqual(expect.arrayContaining(['EnterPlanMode', 'ExitPlanMode']))
-    expect((await fixture.turn('auto', 'auto-thread', { mode: 'plan' })).CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
   })
 
   it('a chat title or other one-shot carries the name too', async () => {
     const { service: claude, started } = service()
     await claude.status()
-    await claude.oneShot({ model: 'sonnet', prompt: 'Name this chat', onActivity: () => {} }, new AbortController().signal)
+    await claude.oneShotTransport({ model: 'sonnet' }).send({ model: 'sonnet', system: '', prompt: 'Name this chat' }, { activity: () => {}, text: () => {}, tool: () => {}, launching: () => {}, sending: () => {} }, new AbortController().signal)
     expect(started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
   })
 })

@@ -10,6 +10,7 @@ import { BotEngineError } from './activation/BotEngine'
 import type { BotChatService } from './chat/BotChatService'
 import { botMemoryMethods } from './memory/methods'
 import { BotDefinitionError, isBotId } from './definitions/BotDefinitionStore'
+import { isFacePictureKey, MAX_FACE_PICTURE_BYTES } from './facePicture'
 
 /**
  * The Bot UI's methods (`bots.personal.v2`, Bot Phase 1 §5.11): profile-bound, validated with exact
@@ -37,6 +38,7 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.chat.react': ['botId', 'messageId', 'emoji'],
   'bots.asks.answer': ['botId', 'askId', 'answer'],
   'bots.actions.answer': ['actionId', 'digest', 'answer'],
+  'bots.chainHold.answer': ['botId', 'holdId', 'answer'],
   'bots.questions.answer': ['botId', 'questionId', 'choice', 'clientRequestId'],
   'bots.permissions.set': ['botId', 'permissionId', 'enabled'],
   'bots.permissions.revoke': ['botId', 'permissionId'],
@@ -54,8 +56,12 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.chat.clear': ['botId'],
   'bots.memory.wipe': ['botId', 'keep'],
   'bots.reset': ['botId'],
-  'bots.model.setCustom': ['botId', 'name', 'pick', 'description']
+  'bots.model.setCustom': ['botId', 'name', 'pick', 'description'],
+  'bots.facePicture.save': ['botId', 'key', 'png']
 }
+
+/** A face picture's base64, at most `MAX_FACE_PICTURE_BYTES` decoded. */
+const FACE_PICTURE_BASE64 = /^[A-Za-z0-9+/]+={0,2}$/
 
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const ASK_ID = /^esc_[0-9a-f-]{36}$/
@@ -131,6 +137,11 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
       // New bot offers every device or this computer alone; picking devices one by one is About's.
       if (p.access !== undefined && !isNewBotAccess(p.access)) throw new DomainRpcError('invalid_params', 'A new bot reaches every device or only this computer')
       break
+    case 'bots.facePicture.save':
+      if (!isFacePictureKey(p.key)) throw new DomainRpcError('invalid_params', 'A face picture key is 1 to 512 printable characters')
+      if (typeof p.png !== 'string' || p.png.length > Math.ceil(MAX_FACE_PICTURE_BYTES / 3) * 4 || !FACE_PICTURE_BASE64.test(p.png))
+        throw new DomainRpcError('invalid_params', 'A face picture is a PNG of at most 2 MB, in base64')
+      break
     case 'bots.model.setImage':
       if (p.pick === undefined) throw new DomainRpcError('invalid_params', 'Give the pick, or null')
       if (p.pick !== null) imagePick(p.pick)
@@ -179,6 +190,9 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
     case 'bots.asks.answer':
       if (typeof p.askId !== 'string' || !ASK_ID.test(p.askId)) throw new DomainRpcError('invalid_params', 'An ask id is required')
       if (p.answer !== 'allow' && p.answer !== 'not_now') throw new DomainRpcError('invalid_params', 'The answer must be allow or not_now')
+      break
+    case 'bots.chainHold.answer':
+      if (!text(p.holdId, 100) || (p.answer !== 'continue' && p.answer !== 'stop')) throw new DomainRpcError('invalid_params', 'Name the held batch and Continue or Stop.')
       break
     case 'bots.actions.answer':
       if (!text(p.actionId, 100) || !text(p.digest, 64) || (p.answer !== 'send' && p.answer !== 'not_now')) throw new DomainRpcError('invalid_params', 'Name the held action, its digest and Send or Not now.')
@@ -261,6 +275,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.chat.markRead': return bots.markRead(botId, p.seq as number)
     case 'bots.chat.react': return bots.react(botId, p.messageId as string, p.emoji as string | null)
     case 'bots.asks.answer': return bots.answer(botId, p.askId as string, p.answer as 'allow' | 'not_now')
+    case 'bots.chainHold.answer': return bots.answerChainHold(botId, p.holdId as string, p.answer as 'continue' | 'stop')
     case 'bots.actions.answer': return bots.answerAction({ actionId: p.actionId as string, digest: p.digest as string, answer: p.answer as 'send' | 'not_now' })
     case 'bots.questions.answer': return bots.answerQuestion({ botId, questionId: p.questionId as string, choice: p.choice as string, clientRequestId: p.clientRequestId as string })
     case 'bots.permissions.set': return bots.setPermission(botId, p.permissionId as string, p.enabled as boolean)
@@ -275,6 +290,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.chat.clear': return bots.chatClear(botId)
     case 'bots.memory.wipe': return bots.memoryWipe(botId, p.keep === 'saved' ? 'saved' : undefined)
     case 'bots.reset': return bots.reset(botId)
+    case 'bots.facePicture.save': return bots.facePictureSave(botId, p.key as string, Buffer.from(p.png as string, 'base64'))
     case 'bots.schedules.remove': return bots.removeSchedule(botId, p.scheduleId as string)
     // WP6's handlers, over the profile's memory (their own checks: an entry id like m12, a folder that exists).
     case 'bots.memory.list':
@@ -296,6 +312,13 @@ export function registerPersonalBotMethods(domains: DomainHandlerRegistry, botsF
       async handle(_context, params, binding) {
         if (method === 'bots.permissions.set' && (_context.connection?.clientType !== 'gui' || _context.connection?.bridgeCaller))
           throw new DomainRpcError('forbidden', 'Change permissions in the app window.')
+        // Only the owner lets bots go on messaging each other (issue #1443): a person at a window on this computer, never
+        // an agent, the CLI or another device (none has the method; `REMOTE_BOT_METHODS` leaves it out).
+        if (method === 'bots.chainHold.answer' && (_context.connection?.clientType !== 'gui' || _context.connection?.bridgeCaller))
+          throw new DomainRpcError('forbidden', 'Answer this in the Mousse window on the computer that runs the bot.')
+        // The face picture is the app window's drawing of the bot's look: no agent, CLI or other device writes it.
+        if (method === 'bots.facePicture.save' && (_context.connection?.clientType !== 'gui' || _context.connection?.bridgeCaller))
+          throw new DomainRpcError('forbidden', 'Only the Mousse window saves a bot\'s face picture.')
         try {
           const bots = await botsForProfile(binding!.profileId)
           // The profile's bots.db could not be opened: bots are unavailable, nothing else is affected.

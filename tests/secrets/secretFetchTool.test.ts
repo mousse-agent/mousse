@@ -17,7 +17,7 @@ it('offers a bound read only to work with a ledger and hands it to the home vaul
   }
   const tool = secretTools(host as never).find((t) => t.name === 'secret_fetch')!
   expect(tool).toBeDefined()
-  expect(tool.listed!({ readOnly: false, modeCeiling: 'default' })).toBe(false)
+  expect(tool.listed!({ readOnly: false })).toBe(false)
   expect(BOT_SECRET_TOOLS).toContain('secret_fetch')
   const turn = appTurn({
     threadId: 'work',

@@ -298,11 +298,10 @@ function toolsFor(
 }
 
 const turn = {
-  threadId: 'own-1', runId: 'run-1', turnToken: 'tok', mode: 'agent', modeFacts: { readOnly: false, agent: true, build: false }, modeCeiling: 'default',
-  subagent: false, actor: { kind: 'main' }, enabledSkills: [], loadedSkills: [], settingsEnabled: () => true
+  threadId: 'own-1', runId: 'run-1', turnToken: 'tok', mode: 'agent', modeFacts: { readOnly: false, agent: true, build: false },  subagent: false, actor: { kind: 'main' }, enabledSkills: [], loadedSkills: [], settingsEnabled: () => true
 } as unknown as AppToolTurn
 function ctx(signal = new AbortController().signal): ToolCallContext {
-  return { caller: { threadId: 'own-1', runId: 'run-1', provider: 'claude', modeCeiling: 'default', accessLevel: 'manage' }, turn, toolCallId: 'call-1', signal, transport: 'mcp' }
+  return { caller: { threadId: 'own-1', runId: 'run-1', provider: 'claude', accessLevel: 'manage' }, turn, toolCallId: 'call-1', signal, transport: 'mcp' }
 }
 
 async function call(registry: ReturnType<typeof toolsFor>, name: ProfilerToolName, args: Record<string, unknown> = {}, context = ctx()) {
@@ -317,7 +316,7 @@ describe('the profiler tools', () => {
     const { service } = profilerFixture(dir)
     let settings: ProfilerSettings = normalizeProfilerSettings()
     const registry = toolsFor(() => settings, service)
-    const listed = () => registry.listFor({ readOnly: false, modeCeiling: 'default' }).map((tool) => tool.name).filter((name) => name.startsWith('profiler_'))
+    const listed = () => registry.listFor({ readOnly: false }).map((tool) => tool.name).filter((name) => name.startsWith('profiler_'))
     expect(listed()).toEqual([])
     expect(registry.get('profiler_overview')!.available!(turn)).toMatch(/profiler is off/)
     settings = { ...settings, enabled: true }
@@ -347,7 +346,7 @@ describe('the profiler tools', () => {
 
   it('are not listed in a service without a profiler', () => {
     const registry = toolsFor(() => ON, null)
-    expect(registry.listFor({ readOnly: false, modeCeiling: 'default' }).filter((tool) => tool.name.startsWith('profiler_'))).toEqual([])
+    expect(registry.listFor({ readOnly: false }).filter((tool) => tool.name.startsWith('profiler_'))).toEqual([])
   })
 
   it('profiler_overview: every process by role, the baseline, trends and breaches, numbers only', async () => {

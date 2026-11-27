@@ -5,7 +5,9 @@ import { isStricter, type PermissionMode } from '../../shared/permissionMode'
 import { narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { DaemonEpoch } from './DaemonEpoch'
 import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreError'
-import { inheritedAgentHops } from './agentHops'
+import { reservedAddressTitle } from './addressing'
+import { inheritedAgentChain, inheritedAgentHops } from './agentHops'
+import { AgentChains, chainIdOf } from './AgentChains'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
 import { deliverBotResults, withoutBotParentRows, type BotExecutionPort } from './delegation/botPort'
@@ -47,7 +49,6 @@ import {
   type DelegationWake,
   type DelegationWorkspace,
   type EffectRecord,
-  type ModeCeiling,
   type ProviderRef,
   type ReceiptRecord,
   type RunOutcome,
@@ -107,12 +108,19 @@ export type RunCommand =
        * remembered as an agent's, with the count of agent messages in a row, exactly as a send with an `actor`, but
        * writes no event and does not refuse a paused thread (the queue holds such an item while a pause lasts).
        */
-      agentOrigin?: { hops: number }
+      agentOrigin?: { hops: number; chain?: string }
       /**
        * The run delivers settle notices (SPEC §15.1): it carries the count of agent messages in a row of the runs the
        * notices are about and adds none of its own. It is not an agent's message.
        */
       noticeHops?: number
+      /** With `noticeHops`: the chain of the messages the notices are about; the turn stays in it (issue #1442). */
+      noticeChain?: string
+      /**
+       * A message held at its chain's budget that the person's Continue sends (issue #1443): its hold is settled and the
+       * message counted with the run, in one transaction, so it stays held until its run exists and is never sent twice.
+       */
+      chainHold?: string
       /**
        * A person's message that waits behind a usage-limit pause instead of ending it: on a paused thread the run
        * is created `queued`, the pause and its timer stay, and the result says so (`heldByPause`). The sender
@@ -168,8 +176,6 @@ export interface SendDelegation {
   parentRunId: string
   prompt: string
   wake: DelegationWake
-  /** The follow-up's ceiling: the caller's authority narrowed by the subagent's own policy. */
-  modeCeiling?: ModeCeiling
   /** The follow-up's access level, narrowed the same way. */
   accessLevel?: AgentAccessLevel
   /** The subagent's workspace policy, role and selection, copied from its first task. */
@@ -220,7 +226,7 @@ export interface StopRequest {
   /** Also cancels the runs a person queued on `threadId` (today's `clearQueue`). */
   clearQueue?: boolean
   /**
-   * Another thread's agent asked for the Stop (`thread_interrupt`): everything it ends is recorded as the
+   * Another thread's agent asked for the Stop (`thread_stop`): everything it ends is recorded as the
    * agent's (`interruptedBy: 'agent'`) and one `agent.action` event is written in the same transaction.
    */
   actor?: AgentActor
@@ -297,8 +303,6 @@ export interface DelegationRequest {
   readOnly?: boolean
   wake: DelegationWake
   title?: string
-  /** The most the child may do (SPEC §15.1); the caller has already checked it against its own. */
-  modeCeiling?: ModeCeiling
   /** The agent access level the child is granted (SPEC §15.1); the caller has already narrowed it by its own. */
   accessLevel?: AgentAccessLevel
   /**
@@ -336,7 +340,6 @@ export interface RemoteDelegationTarget {
   /** The task as that computer's thread receives it (the subagent's guidance and the prompt). */
   prompt: string
   permissionMode: PermissionMode
-  chatMode: 'agent' | 'plan'
   worktree: boolean
   projectId: string | null
   instanceId: string | null
@@ -549,7 +552,9 @@ un_time_limits). */
   readonly remoteLaunches: RemoteLaunchRecords
   /** Saved approval requests (SPEC §17). */
   readonly approvals: ThreadApprovals
-  /** Questions agents asked without waiting (`ask_user` with `wait: false`). */
+  /** The chains of agent messages and the messages held at their budget (issues #1442, #1443). */
+  readonly chains: AgentChains
+  /** Questions agents asked without waiting (`question_ask` with `wait: false`). */
   readonly openQuestions: OpenQuestions
   /** Context handoffs (SPEC §16.1). */
   readonly handoffs: HandoffService
@@ -592,6 +597,7 @@ un_time_limits). */
     this.runTimeLimits = new RunTimeLimitRecords(opts.store)
     this.remoteLaunches = new RemoteLaunchRecords(opts.store)
     this.approvals = new ThreadApprovals(opts.store, { outbox: this.outbox, lineage: (threadId) => this.delegations.getLineage(threadId) })
+    this.chains = new AgentChains(opts.store)
     this.openQuestions = new OpenQuestions(opts.store)
     this.handoffs = new HandoffService(opts.store)
     this.transfers = new ContextTransfers(opts.store)
@@ -1194,7 +1200,7 @@ un_time_limits). */
    * A message to a bot work's row (`thread_send`) goes to the bots through the port as the owner's note (`work_note`),
    * never into the work thread's inbox. Null when the thread is no running work's.
    */
-  noteBotWork(threadId: string, text: string, options: { from?: string; requestKey?: string } = {}): string | null {
+  noteBotWork(threadId: string, text: string, options: { from?: string; requestKey?: string; own?: boolean } = {}): string | null {
     const work = this.runningBotWork(threadId)
     if (!work) return null
     const port = this.botExecution
@@ -1560,12 +1566,15 @@ un_time_limits). */
       if (!parent || parent.threadId !== input.parentThreadId)
         fail('bad_request', `Run ${input.parentRunId} is not a run of thread ${input.parentThreadId}.`)
       if (!input.prompt.trim()) fail('bad_request', 'A delegated task needs a prompt.')
-      this.refuseBotNesting(input.parentThreadId)
+      this.refuseBotThreadDelegation(input.parentThreadId)
       if (parent.outcome?.stopRequested)
         reject('parent_stopping', 'The calling run is being stopped; it cannot start subagents.')
       // Admission: a Stop of the parent's thread after this run started fences it off (nothing awaits before the commit below).
       if (isRunAdmissionStale(this.store, parent.runId))
         reject('parent_stopping', 'The thread was stopped after this run started; the run cannot start subagents.')
+      // A subagent's title is its address, so it may not be one of the words and prefixes addresses are made of.
+      const reserved = input.title ? reservedAddressTitle(input.title) : undefined
+      if (reserved) reject('reserved_title', `A subagent can't be titled "${input.title!.trim()}": ${reserved} is how threads are addressed. Choose another title.`)
       const taken = input.title ? host.titleConflicts?.(input.parentThreadId, input.title) ?? [] : []
       if (taken.length) throw new TitleTakenRejection(input.title!, taken)
       const { threadId: childThreadId } = host.createThread({ kind: 'delegation', request: input })
@@ -1576,10 +1585,20 @@ un_time_limits). */
     })
   }
 
-  /** A bot's subagent has one level: it starts no subagent of its own, by any tool. */
-  private refuseBotNesting(parentThreadId: string): void {
+  /** A bot's subagent starts its own subagents through its bot's port only (`requestBotDelegation`), never as a thread does. */
+  private refuseBotThreadDelegation(parentThreadId: string): void {
     if (this.delegations.botChildOf(parentThreadId))
-      reject('bot_subagent_nesting', "A bot's subagent can't start subagents of its own. Do this part yourself, or say in your result what would help.")
+      reject('bot_subagent_nesting', "A bot's subagent starts its own subagents with subagent_start, not this tool.")
+  }
+
+  /**
+   * A bot subagent's own subagent (docs/plans/tool-api.md §2.8, "Nesting"), at any depth: only of the same bot's same work.
+   * The port then decides whether that subagent's run may start one now (`authorizeSubagent`).
+   */
+  private refuseForeignBotNesting(parentThreadId: string, bot: BotDelegation): void {
+    const above = this.delegations.botChildOf(parentThreadId)?.bot
+    if (above && (above.botId !== bot.botId || above.rootActivationId !== bot.rootActivationId))
+      reject('bot_subagent_nesting', "A bot's subagent starts subagents only for its own work.")
   }
 
   /**
@@ -1600,7 +1619,7 @@ un_time_limits). */
       if (!parent || parent.threadId !== input.parentThreadId)
         fail('bad_request', `Run ${input.parentRunId} is not a run of thread ${input.parentThreadId}.`)
       if (!input.prompt.trim()) fail('bad_request', 'A delegated task needs a prompt.')
-      this.refuseBotNesting(input.parentThreadId)
+      this.refuseForeignBotNesting(input.parentThreadId, input.bot)
       if (TERMINAL_RUN_STATUSES.has(parent.status) || parent.outcome?.stopRequested || isRunAdmissionStale(this.store, parent.runId))
         reject('parent_stopping', "The work's turn is ending; it can't start subagents now.")
       const authorized = port.authorizeSubagent({ botId: input.bot.botId, rootActivationId: input.bot.rootActivationId, parentRunId: input.parentRunId })
@@ -1700,7 +1719,9 @@ un_time_limits). */
     const child = this.store.createRun({
       threadId: childThreadId,
       source: 'delegation',
-      clientRequestId: `${input.clientRequestId}:child`
+      clientRequestId: `${input.clientRequestId}:child`,
+      // The subagent's task is part of the chain of the run that delegated it.
+      outcome: { agentChain: chainIdOf(this.store, input.parentRunId) }
     })
     const delegation = this.delegations.create({
       parentRunId: input.parentRunId,
@@ -1711,7 +1732,6 @@ un_time_limits). */
       model: input.model,
       prompt: input.prompt,
       wake: input.wake,
-      modeCeiling: input.modeCeiling,
       accessLevel: input.accessLevel,
       workspace: input.workspace,
       role: input.role,
@@ -1767,7 +1787,7 @@ un_time_limits). */
       return this.store.db.transaction(() => {
         this.checkFollowUp(input.childThreadId, input.delegation)
         const tracked = input.delegation
-        const run = this.store.createRun({ threadId: input.childThreadId, source: 'delegation', clientRequestId: input.clientRequestId })
+        const run = this.store.createRun({ threadId: input.childThreadId, source: 'delegation', clientRequestId: input.clientRequestId, outcome: { agentChain: chainIdOf(this.store, input.delegation.parentRunId) } })
         const delegation = this.delegations.create({
           parentRunId: tracked.parentRunId,
           parentThreadId: tracked.parentThreadId,
@@ -1777,7 +1797,6 @@ un_time_limits). */
           model: tracked.model,
           prompt: tracked.prompt,
           wake: tracked.wake,
-          modeCeiling: tracked.modeCeiling,
           accessLevel: narrowAgentAccess(tracked.accessLevel, narrowestAccess(this.delegations.listForChildThread(input.childThreadId))),
           workspace: tracked.workspace,
           role: tracked.role
@@ -2254,7 +2273,6 @@ un_time_limits). */
       parentRunId: parentRun.runId,
       prompt: command.prompt ?? '',
       wake: 'always',
-      modeCeiling: first.modeCeiling ?? undefined,
       // The narrowest level any task of this subagent was given: a follow-up never restores what an
       // earlier one narrowed (SPEC §15.1).
       accessLevel: narrowestAccess(tasks),
@@ -2276,7 +2294,7 @@ un_time_limits). */
       // only for the pause it was queued for (it may have ended meanwhile).
       if (paused && (isFencedSource(command.source) || isPauseHeldSource(command.source)) && !resuming) return refuse('thread_paused')
       // A message an agent sent never ends a pause the user's usage limit put there: it can stop the
-      // paused run first (`thread_interrupt`), and send once that is done.
+      // paused run first (`thread_stop`), and send once that is done.
       if (paused && (command.actor || command.refuseWhilePaused) && !resuming) return refuse('thread_paused')
       if (resuming && (!paused || command.continuationOfRunId !== paused.runId)) return refuse('pause_ended')
       const refusal = this.continuationRefusal(command)
@@ -2287,6 +2305,9 @@ un_time_limits). */
       // request is settled and the run exists, or nothing is (SPEC §17.3).
       // A continue turn that would deliver nothing (a send already took the group) is not a run.
       if (command.bindDelivery && this.approvals.deliverableCount(command.bindDelivery.requestIds) === 0) return refuse('approvals_already_delivered')
+      const hold = command.chainHold ? this.chains.getHold(command.chainHold) : null
+      if (command.chainHold && (!hold || !this.chains.settleHold(command.chainHold, 'continued'))) return refuse('hold_settled')
+      if (hold) this.chains.count(hold.chainId)
       const settlement = command.settleApprovals ? this.approvals.settleForSend(command.threadId, command.settleApprovals) : null
       const continuationOf = command.continuationOfRunId
       // A run that carries on agent work (a provider's continuation, the resume after a pause) keeps the count of agent
@@ -2296,11 +2317,25 @@ un_time_limits). */
         : command.noticeHops !== undefined
           ? (command.noticeHops > 0 ? command.noticeHops : undefined)
           : inheritedAgentHops(store, command.threadId, command.source, continuationOf)
+      // The chain (issue #1442): an agent's message joins its sender's, and a follow-up on a subagent its parent run's; a
+      // settle notice stays in the chain of the messages it reports on, and a run that carries on work (a continuation, a
+      // resume) in the chain of the run it carries on. A person's message starts its own and gives the chain the thread
+      // was in a new budget.
+      const latest = store.listRuns(command.threadId, { limit: 1 })[0]
+      const chain = command.actor || command.agentOrigin
+        ? (command.actor ?? command.agentOrigin)!.chain
+        : command.delegation
+          ? chainIdOf(store, command.delegation.parentRunId)
+          : command.noticeHops !== undefined
+            ? command.noticeChain ?? (latest && chainIdOf(store, latest.runId))
+            : inheritedAgentChain(store, command.threadId, command.source, continuationOf)
+      if (!command.actor && !command.agentOrigin && latest && isFollowUpSource(command.source)) this.chains.renew(chainIdOf(store, latest.runId))
       const outcome: RunOutcome = {
         ...(continuationOf ? { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } : {}),
         // Remembered with the run, so a message an agent sent is still known as one when it starts later.
         ...(command.actor ? { sentByAgent: true as const, agentHops: command.actor.hops ?? 1 } : command.agentOrigin ? { sentByAgent: true as const, agentHops: command.agentOrigin.hops } : {}),
-        ...(carriedHops !== undefined ? { agentHops: carriedHops } : {})
+        ...(carriedHops !== undefined ? { agentHops: carriedHops } : {}),
+        ...(chain ? { agentChain: chain } : {})
       }
       const run = store.createRun({
         threadId: command.threadId,
@@ -2321,7 +2356,6 @@ un_time_limits). */
           model: tracked.model,
           prompt: tracked.prompt,
           wake: tracked.wake,
-          modeCeiling: tracked.modeCeiling,
           accessLevel,
           workspace: tracked.workspace,
           role: tracked.role

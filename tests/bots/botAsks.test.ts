@@ -206,7 +206,7 @@ describe('asks in the chat', () => {
     // The same activation goes on: the owner's request is in the thread's own history, not asked again.
     expect(next.prepared).toMatchObject({ history: 'thread', lane: 'chat' })
     expect(next.prepared.prompt).toContain('The owner allowed: use your threads.')
-    expect(next.prepared.prompt).toContain('The owner allowed: run commands. Your work has it now: hand the job to work_start.')
+    expect(next.prepared.prompt).toContain('The owner allowed: run commands. Your work has it now: hand the job to your work (thread_create, kind "subagent").')
     expect(next.prepared.authority.check(app('thread_create'))).toEqual({ ok: true })
     await finish(f, next.payload, 'completed', { text: 'Here are your repos.' })
     expect(f.store.activation(activation.id)!.status).toBe('done')
@@ -472,13 +472,13 @@ describe('a card for one of the bot\'s own tools', () => {
     f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, appTools: manifest.appTools.filter((tool) => tool !== 'set_profile') }))
     const { payload, prepared } = await chat('Call yourself Scout.', 'm-rename')
     const call: NormalisedCall = { kind: 'app', tool: 'set_profile', args: { name: 'Scout' } }
-    expect(prepared.authority.check(call)).toMatchObject({ ok: false, wall: { kind: 'escalated', permission: 'change its name or description' } })
+    expect(prepared.authority.check(call)).toMatchObject({ ok: false, wall: { kind: 'escalated', permission: 'change its name, description or look' } })
     await finish(f, payload, 'interrupted', { text: 'I need your OK first.', outcome: { interruptedBy: 'bot_wall' } })
     const reply = chatOf(f, botId).at(-1)!
-    expect(reply.ask).toMatchObject({ status: 'open', title: 'change its name or description' })
+    expect(reply.ask).toMatchObject({ status: 'open', title: 'change its name, description or look' })
     expect(JSON.stringify(reply.ask)).not.toMatch(/set_profile|set profile/)
     const { message } = await f.bots.service.answer(botId, reply.ask!.askId, 'not_now')
-    expect(askAnsweredLine('Penny', message.ask!)).toBe('You said not now to Penny: change its name or description')
+    expect(askAnsweredLine('Penny', message.ask!)).toBe('You said not now to Penny: change its name, description or look')
   })
 })
 

@@ -82,7 +82,7 @@ try {
   if (f.read(workspace) !== 'live-provider-ok\n') throw new Error('Live action redo did not restore model edit')
   evidence.undo = true; evidence.redo = true
   phase = 'read-only-followup'
-  await client.request('orchestrator.send', { threadId, mode: 'plan', content:
+  await client.request('orchestrator.send', { threadId, mode: 'agent', content:
     'Use read to inspect value.txt without changing any file. Reply LIVE_READ_OK if it contains live-provider-ok. Do not use any other tools or services.' }, 120_000)
   if (!main.orchestrator.getMessages(threadId).some((message) => message.content.includes('LIVE_READ_OK'))) throw new Error('Read-only followup did not verify task bytes')
   evidence.readOnlyFollowup = true

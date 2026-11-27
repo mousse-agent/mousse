@@ -7,6 +7,7 @@ import type { Options, SandboxSettings, Settings, SpawnedProcess, SpawnOptions }
 import type { ToolCall } from '@earendil-works/pi-ai'
 import type { BotAuthority, BotMcpTool } from '../../../shared/bots/personal/authority'
 import { botAppToolRefusal, checkBuiltinCall, checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
+import { canonicalToolCall } from '../../../shared/toolAliases'
 import { runtimeExpandedPath } from '../../bots/authority/botAuthority'
 import { mousseTempEntries } from '../../data/closedPlaces'
 import { neutralToolIdempotent, neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../../shared/harness/tools'
@@ -14,6 +15,8 @@ import type { HarnessCaps } from '../../../shared/harness/types'
 import { withoutTransportFields } from '../../agentDefinitions/definitionGate'
 import { CLAUDE_MOUSSE_TOOL_PREFIX, CLAUDE_RELAY_TOOL_PREFIX } from '../../run/mcp/attachment'
 import type { ToolLedger } from '../../run/mcp/appTools/types'
+import { readRefusal } from '../../run/mcp/appTools/refusal'
+import type { ToolHost } from '../adapter'
 import { CLAUDE_LOCKED_TOOLS_ITEMS, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_TURN_EXTRA_ARGS } from '../vendors/claude/turnFrames'
 import { spawnProviderProcess, windowsProviderTree, type WindowsProviderTree } from '../windowsProviderProcess'
@@ -63,7 +66,7 @@ export const CLAUDE_BUILTIN_TOOLS: readonly string[] = Object.freeze([
   'WebSearch', 'Workflow', 'Write'
 ])
 
-/** Claude Code's own plan-mode tools, turned off on every turn: Mousse's Plan mode is a read-only turn that replies with the plan. */
+/** Claude Code's own plan-mode tools, turned off on every turn: their approval flow would hold the turn. */
 export const CLAUDE_PLAN_TOOLS: readonly string[] = Object.freeze(['EnterPlanMode', 'ExitPlanMode'])
 
 /** Variables that hold Claude Code's credential: never visible to a sandboxed command. */
@@ -89,7 +92,6 @@ export function claudeLockedCaps(base: HarnessCaps, input: { platform: NodeJS.Pl
     hasContainmentEvidence({ driver: 'claude', kind, platform: input.platform, cliVersion: input.cliVersion, ...(kind === 'tools' ? { items: CLAUDE_LOCKED_TOOLS_ITEMS } : {}) }, input.evidence)
   return Object.freeze({
     ...base,
-    planMode: false,
     // A locked turn runs in Claude Code's default mode under Mousse's grant gate: never its auto mode.
     autoPermissionMode: false,
     toolControl: proven('tools') ? 'exact' : 'approval_only',
@@ -138,6 +140,8 @@ export const CLAUDE_NATIVE_TOOLS: NativeToolTable = Object.freeze({
 /** What a bot turn runs with, from the turn's bot authority and the runtime's facts. */
 export interface ClaudeLockedTurn {
   authority: BotAuthority
+  /** A Mousse tool call as the registry will run it (`ToolHost.resolveAppCall`): the gate judges its variant. */
+  resolveAppCall?: ToolHost['resolveAppCall']
   /**
    * The turn runs on the owner's own entry, not a locked one: only their sign-in over the locked environment, the
    * SDK's own process handling, and no organisation-policy reading. Every call still goes through
@@ -645,7 +649,12 @@ export class ClaudeLockedGate {
       case 'unknown':
         return { ok: false, reason: wallMessage({ kind: 'tool', tool: toolName }) }
       case 'app': {
-        const refusal = botAppToolRefusal(authority, classified.tool, withoutTransportFields(args))
+        // The call as Mousse's server will run it: an old name is its new tool with that variant's arguments, and a tool
+        // of variants (`request_answer`) is the variant its request is, which the bot's grant names.
+        const resolved = this.turn.resolveAppCall?.(classified.tool, args)
+        if (resolved && 'refused' in resolved) return { ok: false, reason: readRefusal(resolved.refused.text)?.message ?? resolved.refused.text }
+        const call = resolved ?? { ...canonicalToolCall(classified.tool, withoutTransportFields(args)), variant: undefined }
+        const refusal = botAppToolRefusal(authority, call.variant ?? call.name, withoutTransportFields(call.args))
         return refusal ? { ok: false, reason: refusal } : { ok: true, classified }
       }
       // Held to the grant here and again by the relay, which runs it on the owner's connection and writes its row.

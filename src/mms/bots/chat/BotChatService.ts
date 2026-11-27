@@ -264,10 +264,25 @@ export class BotChatService {
     return { ...detail, summary: this.withReach(detail.summary) }
   }
 
-  /** The summary with which devices reach the bot, for the Bots list's lock. */
+  /**
+   * The summary with which devices reach the bot, for the Bots list's lock, and the key its face picture was drawn from,
+   * so the app draws it again only when that changes (`bots.facePicture.save`).
+   */
   private withReach(summary: BotSummary): BotSummary {
     const access = this.options.deviceAccess
-    return access ? { ...summary, reach: access.get(summary.id).access.mode } : summary
+    const key = this.engine.facePictureKey(summary.id)
+    return { ...summary, ...(access ? { reach: access.get(summary.id).access.mode } : {}), facePicture: key ? { key } : {} }
+  }
+
+  /** `bots.facePicture.save`: the app's picture of the bot's face, written into its files folder as `face.png`. */
+  facePictureSave(botId: string, key: string, png: Buffer): { path: string } {
+    this.engine.definitionOf(botId)
+    try {
+      return this.engine.saveFacePicture(botId, key, png)
+    } catch (error) {
+      if (error instanceof BotEngineError) throw error
+      throw new BotEngineError('invalid_params', error instanceof Error ? error.message : String(error))
+    }
   }
 
   /** `bots.personal.list`: every bot that is not deleted, oldest first. */
@@ -830,6 +845,11 @@ export class BotChatService {
   markRead(botId: string, seq: number): Record<string, never> {
     this.engine.markRead(botId, seq)
     return {}
+  }
+
+  /** `bots.chainHold.answer`: the owner's Continue or Stop on what the bot holds past the limit between bots. */
+  answerChainHold(botId: string, holdId: string, answer: 'continue' | 'stop'): Promise<{ sent: number; stopped: number; failed: number }> {
+    return this.engine.answerChainHold(botId, holdId, answer)
   }
 
   /** `bots.asks.answer` (§5.4). */

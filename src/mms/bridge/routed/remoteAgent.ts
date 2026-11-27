@@ -161,6 +161,10 @@ export class RemoteAgentCalls {
       case 'queue.enqueue': {
         const content = String(params.content)
         this.assertBody(content)
+        // An older computer asks for `plan` to keep its task read-only; this version has no such mode, so it refuses
+        // rather than run the task as an agent that may edit.
+        if (params.mode !== undefined && params.mode !== 'agent')
+          throw new DomainRpcError('mode_not_supported', 'This computer no longer runs read-only (plan) tasks for another computer. Send it as an agent task.')
         const deadline = params[ROUTED_DEADLINE_KEY]
         if (deadline !== undefined && (method !== 'orchestrator.send' || !Number.isSafeInteger(deadline) || (deadline as number) < 1))
           throw new DomainRpcError('invalid_params', `${ROUTED_DEADLINE_KEY} must be a whole number of minutes, at least 1.`)
@@ -168,12 +172,15 @@ export class RemoteAgentCalls {
         // A personal bot's message shows its name and face here; anything else it carries is not taken from it.
         const bot = params[ROUTED_AGENT_BOT_KEY] !== undefined ? parseRoutedAgentBot(params[ROUTED_AGENT_BOT_KEY]) : undefined
         // A bot there that started this thread (not as its subagent) makes it that bot's here too, for display: the Bot
-        // threads filter, its Started-by bar and, while hidden, quiet. Before the send, so its first turn is quiet already.
-        if (bot && launchedBySender && !thread.startedFrom?.agent?.subagent && !thread.startedByBot)
+        // threads filter, its Started-by bar and, while hidden, quiet. Hidden only now, when its create asked: an agent's
+        // thread is a handoff and shows (#2004). Before the send, so its first turn is quiet already.
+        if (bot && launchedBySender && !thread.startedFrom?.agent?.subagent && !thread.startedByBot) {
           services.threads.setRemoteStartedByBot(threadId, { botId: bot.id, name: bot.name, node: call.node })
+          if (thread.startedFrom?.agent?.hidden) services.threads.setThreadHidden(threadId, true)
+        }
         const actor = this.actor(call, mode, this.hops(threadId, call, launchedBySender), bot)
         if (!this.replay(key)) this.assertLimits(call, threadId, true)
-        const sent = await services.orchestrator.sendForRemoteAgent(threadId, { content, mode: params.mode === 'plan' ? 'plan' : 'agent' }, {
+        const sent = await services.orchestrator.sendForRemoteAgent(threadId, { content }, {
           clientRequestId: key,
           actor,
           // The agent that started the thread sends its tasks: the guidance before a subagent's task stays out of the chat.

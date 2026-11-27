@@ -93,7 +93,7 @@ import { BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION } from '../shared/bots/
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { UsageLimitTracker } from './models/usageLimits'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
-import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
+import { BotScheduleBook, botJobWhenOf } from './scheduled/botJobs'
 import { migrateBotSchedules } from './scheduled/botScheduleMigration'
 import type { BotStore } from './bots/store/BotStore'
 import { botScheduleLabel } from '../shared/scheduleLabel'
@@ -201,6 +201,9 @@ import { LimitPoller } from './usageHistory/limitPoller'
 import { forEachYielding, startupBackgroundTimed, startupPhase } from './startup/startupTiming'
 import { logInfo } from './log/diag'
 import { onThreadBranchChanged } from './workspace/threadHeads'
+import { schedulePlaceSweep } from './harness/oneShot/sweep'
+import { ANTIGRAVITY_LEFTOVER_RULES, sweepLegacyAntigravityOneShots } from './harness/acp/presets/antigravity/oneShotGuards'
+import { botDigestOneShot, botNameOneShot } from './bots/botOneShots'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.delete'
@@ -468,6 +471,8 @@ export class MmsProfileServices {
   private finishStartupLifecycle: () => void = () => undefined
   private deferredStartupWork?: Promise<void>
   private startupWorkStopped = false
+  /** Cancels the post-ready sweep of single requests' places, while it waits. */
+  private cancelPlaceSweep?: () => void
   private readonly requests = new OwnedWorkBarrier()
   private stopOperation?: Promise<void>
   private readonly ownerHandle: MmsOwnerHandle | null
@@ -909,14 +914,7 @@ export class MmsProfileServices {
       },
       archiveThread: (threadId) => { this.threads.setThreadArchived(threadId, true) },
       // Naming a new bot: one short call on the model its activations would use.
-      oneShot: async ({ selection, prompt, signal }) => (await harness.oneShot({
-        selection: { instanceId: selection.instanceId, llmProvider: selection.instanceId.split(':')[0] ?? '', model: selection.model, ...(selection.effort ? { effort: selection.effort } : {}) },
-        signal,
-        purpose: 'title',
-        system: 'Name a helper in 2–3 words.',
-        prompt,
-        maxChars: 60
-      })).text,
+      oneShot: ({ selection, prompt, signal }) => botNameOneShot(harness, { selection, prompt, ...(signal ? { signal } : {}) }),
       // The owner's home folder by its real path: `~` and variables are refused in a bot's paths.
       instructions: (bot) => botInstructions({ ...bot, homeFolder: homedir() }),
       scheduleLabel: (when) => botScheduleLabel(when),
@@ -946,6 +944,12 @@ export class MmsProfileServices {
       otherComputers: () => this.remoteAutomations?.computers() ?? [],
       // Which devices reach each bot: a new bot's choice is saved before the bot is published.
       deviceAccess: this.botDeviceAccess,
+      // The secrets a bot's home thread may use, for its profile: names and labels only, read when it asks.
+      secretsHeld: (threadId) => {
+        const vault = this.secretVault
+        if (!vault) return []
+        return vault.list().filter((entry) => vault.usableIn(entry.name, threadId)).map((entry) => ({ name: entry.name, ...(entry.label ? { label: entry.label } : {}) }))
+      },
       browser: botBrowsers,
       // "Use your threads" removed: what the bot sent that has not started leaves its owner's threads.
       threadsWithdrawn: (bot) => { this.orchestrator.withdrawBotThreadMessages(bot) },
@@ -975,15 +979,7 @@ export class MmsProfileServices {
           reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
             .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') })),
           // The digest of a fold (docs/plans/bot-context.md §14): one call with no tools on the bot's chat model.
-          digest: async ({ selection, system, prompt, signal }) => (await harness.oneShot({
-            selection: { instanceId: selection.instanceId, llmProvider: selection.instanceId.split(':')[0] ?? '', model: selection.model },
-            signal,
-            purpose: 'title',
-            task: 'chat_digest',
-            system,
-            prompt,
-            maxChars: BOT_CHAT_DIGEST.digest * 8
-          })).text
+          digest: ({ selection, system, prompt, signal }) => botDigestOneShot(harness, { selection, system, prompt, ...(signal ? { signal } : {}) })
         }
       })
       botMemory = memory
@@ -1364,9 +1360,9 @@ export class MmsProfileServices {
       watch: (threadId) => this.syncThreadEventWatch(threadId),
       botExists: (botId) => this.personalBots?.list().some((bot) => bot.id === botId) ?? false,
       addBotSchedule: (botId, input) => {
-        const when = botWhenOf(input.schedule)
-        if (!when) throw new Error('A bot repeats: give it a time that repeats.')
-        const entry = this.botSchedules.add(botId, { when, prompt: input.prompt, name: input.name, tellMe: input.tellMe }, 'owner')
+        const when = botJobWhenOf(input.schedule)
+        if (!when) throw new Error('That time is not valid.')
+        const entry = this.botSchedules.add(botId, { when, prompt: input.prompt, name: input.name, tellMe: input.tellMe, ...(input.cliName ? { cliName: input.cliName } : {}) }, 'owner')
         return this.scheduled.getJob(entry.jobId)!
       },
       personCeiling: (threadId) => this.orchestrator.scheduledCreatorCeiling(threadId),
@@ -2591,6 +2587,7 @@ export class MmsProfileServices {
   beginShutdown(): void {
     // The start's deferred passes stop at their next step; what waits for the lifecycle pass goes on (and is refused).
     this.startupWorkStopped = true
+    this.cancelPlaceSweep?.()
     this.finishStartupLifecycle()
     void this.undoRetention.stop()
     void this.threadExpiry.stop()
@@ -2794,6 +2791,13 @@ export class MmsProfileServices {
     void startupBackgroundTimed('queueRecovery', () => this.orchestrator.recoverStartupQueues(), log)
     // The storage service is the only scheduler; it runs the trash sweep inside its own run.
     this.storageCleanup.start()
+    // What ended single requests left (thread titles and the like, `oneShot/places.ts`), a minute after ready.
+    // Antigravity's own leftovers (its settings folder and session files) are typed by its rules.
+    this.cancelPlaceSweep = schedulePlaceSweep(this.homeDir, {
+      stopped: stopping,
+      rules: ANTIGRAVITY_LEFTOVER_RULES,
+      also: () => sweepLegacyAntigravityOneShots(this.homeDir)
+    })
     await startupBackgroundTimed('threadRuntimes', () => this.threadRuntimes.settleRestartedThreads(stopping), log)
   }
 
@@ -3210,7 +3214,7 @@ export class MmsProfileServices {
     this.runReconciler?.stop()
     this.stopInboxWakes?.()
     this.stopInboxWakes = null
-    // No new credentials; in-flight Mousse tool calls (a blocked ask_user) abort so turns can drain.
+    // No new credentials; in-flight Mousse tool calls (a blocked question_ask) abort so turns can drain.
     // Only detach what start() attached; a partially constructed profile has no server.
     const mcpServer = this.mcpServer as MousseMcpServer | undefined
     if (mcpServer?.running) this.orchestrator.setMcpAttachment(null)

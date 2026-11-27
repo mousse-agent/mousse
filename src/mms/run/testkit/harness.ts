@@ -8,6 +8,7 @@ import { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { ProviderInstanceService } from '../../harness/instanceMap'
 import type { ProviderAdapter } from '../../harness/adapter'
 import type { McpTurnBinding } from '../mcp/appTools/registry'
+import { legacyOneShotRoute } from '../../harness/oneShot/routes'
 
 /** The turn binding each real driver declares (`harness/drivers/*`), for test drivers of the same kind. */
 const TURN_BINDINGS: Partial<Record<ProviderAdapter['driver'], McpTurnBinding>> = { claude: 'per_call', codex: 'drained_turn', antigravity: 'drained_turn', acp: 'drained_turn', pi: 'per_call' }
@@ -38,11 +39,11 @@ export function adapterDriver(adapter: ProviderAdapter, extra: Partial<HarnessCa
     mcpImageResults: MCP_IMAGE_RESULTS[adapter.driver] ?? false,
     ...(MASKS_TOOL_RESULTS[adapter.driver] ? { masksToolResults: true } : {}),
     ...(RELAY_APPROVALS[adapter.driver] ? { relay: { approvals: RELAY_APPROVALS[adapter.driver]! } } : {}),
-    // Only pi here: the test kit's vendor drivers stand for agents without one-shots.
-    oneShot: adapter.driver === 'pi',
+    // Only pi here, on its runtime's `oneShot`: the test kit's vendor drivers stand for agents without one-shots.
+    ...(adapter.driver === 'pi' ? { oneShotRoute: legacyOneShotRoute('pi') } : {}),
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     // Mousse-run tools (strong containment) are exact; the vendor-like test runtimes ask first.
-    caps: () => ({ ...adapter.capabilities, planMode: true, contextUsage, toolControl: adapter.capabilities.containment === 'strong' ? 'exact' : 'approval_only', autoPermissionMode: false, budgets: 'unsupported', spendLimits: 'unsupported', ...caps }),
+    caps: () => ({ ...adapter.capabilities, contextUsage, toolControl: adapter.capabilities.containment === 'strong' ? 'exact' : 'approval_only', autoPermissionMode: false, budgets: 'unsupported', spendLimits: 'unsupported', ...caps }),
     create: () => ({
       adapter,
       configured: () => adapter.configured?.() ?? false,

@@ -115,12 +115,12 @@ describe('a bot run calling the setup request', () => {
     }
     turns.register(appTurn({ threadId: THREAD, runId: runRow.runId, turnToken: 'turn-1', bot: authority, approvals: 'never' }) as AppToolTurn)
     const request = (): McpCallRequest => ({
-      credential: { threadId: THREAD, runId: runRow.runId, provider: 'codex', modeCeiling: 'default', accessLevel: 'manage', binding: 'drained_turn', current: () => true },
+      credential: { threadId: THREAD, runId: runRow.runId, provider: 'codex', accessLevel: 'manage', binding: 'drained_turn', current: () => true },
       toolCallId: `mcp:call-${Math.random()}`,
       signal: new AbortController().signal
     })
     const call = async (name: string, args: Record<string, unknown>) => (await registry.call(name, args, request())) as { text: string; isError?: boolean }
-    return { fx, registry, requestSetup, call, listed: () => registry.listForThread(THREAD, 'default', runRow.runId).map((tool) => tool.name) }
+    return { fx, registry, requestSetup, call, listed: () => registry.listForThread(THREAD, runRow.runId).map((tool) => tool.name) }
   }
 
   it.each([

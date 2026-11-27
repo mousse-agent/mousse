@@ -48,7 +48,7 @@ const tools = new Map(botTools(() => ({ host: f.bots.tools })).map((tool) => [to
 /** One of the bot's tools, called from a running turn as its runtime would. */
 async function tool(name: string, prepared: PreparedBotTurn, threadId: string, args: Record<string, unknown>): Promise<{ text: string; isError?: boolean }> {
   const ctx = {
-    caller: { threadId, runId: 'r', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
+    caller: { threadId, runId: 'r', provider: 'pi', accessLevel: 'lineage' },
     turn: { threadId, bot: prepared.authority },
     toolCallId: `call-${Math.random()}`,
     signal: new AbortController().signal,
@@ -168,7 +168,7 @@ describe('a card on a message', () => {
 
   it('a question\'s card shows on its bubble, its plain copy before the answers', async () => {
     const turn = await chatTurn('Which should I buy?', 'q')
-    const answer = await tool('ask_owner', turn.prepared, turn.payload.threadId, { question: 'Which one?', choices: ['Q7', 'S8'], card: SPECS })
+    const answer = await tool('question_ask', turn.prepared, turn.payload.threadId, { question: 'Which one?', choices: ['Q7', 'S8'], card: SPECS })
     expect(JSON.parse(answer.text)).toEqual({ asked: true, questionId: expect.stringMatching(/^q_/), note: QUESTION_ASKED_TEXT })
     await finish(f, turn.payload, 'completed', { text: '' })
     const bubble = chatOf(f, botId).find((message) => message.question)!
