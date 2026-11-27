@@ -32,25 +32,36 @@ function caller(turn: Awaited<ReturnType<typeof start>>) {
     })
   })
   app.turns.register(appTurn({ threadId: payload.threadId, runId: payload.runId, bot: prepared.authority }))
-  return async (args: Record<string, unknown> = request, toolCallId = `mcp:${randomUUID()}`) => {
-    const result = await app.registry.call('work_start', args, app.request({ threadId: payload.threadId, runId: payload.runId, toolCallId }))
+  return async (args: Record<string, unknown> = request, toolCallId = `mcp:${randomUUID()}`, tool = 'work_start') => {
+    const result = await app.registry.call(tool, args, app.request({ threadId: payload.threadId, runId: payload.runId, toolCallId }))
     expect(result.isError, result.text).toBeFalsy()
     return JSON.parse(result.text)
   }
 }
 
 describe('work_start through the production registry', () => {
+  it('under its thread names (S7d4a): a retry as thread_create starts nothing new, and thread_list scope bot_work lists the work, never paged as a family', async () => {
+    const call = caller(await chat())
+    const first = await call(request, 'mcp:same')
+    expect(await call({ ...request, kind: 'subagent' }, 'mcp:same', 'thread_create')).toMatchObject({ runId: first.runId, workId: first.runId, replayed: true })
+    expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(1)
+    const listed = await call({ scope: 'bot_work' }, undefined, 'thread_list')
+    expect(listed).toEqual(await call({}, undefined, 'work_list'))
+    expect(Object.keys(listed).sort()).toEqual(['now', 'recent'])
+    expect(listed.now).toEqual([expect.objectContaining({ runId: first.runId, workId: first.runId })])
+  })
+
   it('random MCP ids return the same stored work within one chat turn', async () => {
     const call = caller(await chat())
     const first = await call()
-    expect((await call()).workId).toBe(first.workId)
+    expect((await call()).runId).toBe(first.runId)
     expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(1)
   })
 
   it('concurrent identical MCP requests start one piece of work', async () => {
     const call = caller(await chat())
     const [first, repeated] = await Promise.all([call(), call()])
-    expect(repeated).toMatchObject({ workId: first.workId, replayed: true })
+    expect(repeated).toMatchObject({ runId: first.runId, replayed: true })
     expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(1)
   })
 
@@ -58,9 +69,9 @@ describe('work_start through the production registry', () => {
     const call = caller(await chat())
     const queued = await call()
     // The run lane has no count (#1452), so work starts at once; the stored status stands in for a wait.
-    f.store.run('UPDATE bot_activations SET status = ? WHERE id = ?', 'queued', queued.workId)
+    f.store.run('UPDATE bot_activations SET status = ? WHERE id = ?', 'queued', queued.runId)
     const repeated = await call()
-    expect(repeated).toMatchObject({ workId: queued.workId, status: 'queued', replayed: true, note: expect.stringMatching(/already queued/i) })
+    expect(repeated).toMatchObject({ runId: queued.runId, status: 'queued', replayed: true, note: expect.stringMatching(/already queued/i) })
     expect(rollUpChips([{ tool: 'work_start', input: request, result: repeated }])).toMatchObject([{ text: 'already queued' }])
   })
 
@@ -75,14 +86,14 @@ describe('work_start through the production registry', () => {
     const call = caller(await chat())
     const id = `mcp:${randomUUID()}`
     const first = await call(request, id)
-    expect((await call({ ...request, ...change }, id)).workId).not.toBe(first.workId)
+    expect((await call({ ...request, ...change }, id)).runId).not.toBe(first.runId)
   })
 
   it('different model reasoning levels start different work', async () => {
     const call = caller(await chat())
     const id = `mcp:${randomUUID()}`
     const first = await call({ ...request, model: { ...pick, effort: 'low' } }, id)
-    expect((await call({ ...request, model: { ...pick, effort: 'high' } }, id)).workId).not.toBe(first.workId)
+    expect((await call({ ...request, model: { ...pick, effort: 'high' } }, id)).runId).not.toBe(first.runId)
   })
 
   it('a new dispatch after a simulated restart reuses the work, while a new chat turn starts another', async () => {
@@ -98,10 +109,10 @@ describe('work_start through the production registry', () => {
     expect(dispatch.n).toBeGreaterThan(turn.payload.dispatchN)
     const next = await start(f, turn.message.activationId!, dispatch.n)
     expect(next.prepared.history).toBe('thread')
-    expect((await caller(next)()).workId).toBe(first.workId)
+    expect((await caller(next)()).runId).toBe(first.runId)
     expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(1)
     await finish(f, next.payload, 'completed', { text: 'Already on it.' })
-    expect((await caller(await chat())()).workId).not.toBe(first.workId)
+    expect((await caller(await chat())()).runId).not.toBe(first.runId)
   })
 
   // An unfinished attempt is retryable; replaying its replacement is still one attempt, even after boot recovery.
@@ -109,12 +120,12 @@ describe('work_start through the production registry', () => {
     const turn = await chat()
     const call = caller(turn)
     const first = await call()
-    if (ending === 'failed') await runDispatch(f, first.workId, 1, { status: 'failed' })
-    else await f.bots.service.workStop(botId, first.workId)
+    if (ending === 'failed') await runDispatch(f, first.runId, 1, { status: 'failed' })
+    else await f.bots.service.workStop(botId, first.runId)
     const retry = await call()
-    expect(retry.workId).not.toBe(first.workId)
+    expect(retry.runId).not.toBe(first.runId)
     expect(retry.replayed).toBeUndefined()
-    expect((await call()).workId).toBe(retry.workId)
+    expect((await call()).runId).toBe(retry.runId)
 
     f.runs.markTerminal(turn.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     f.bots.close()
@@ -124,7 +135,7 @@ describe('work_start through the production registry', () => {
     const dispatch = f.store.lastMainDispatch(turn.message.activationId!)!
     expect(dispatch.n).toBeGreaterThan(turn.payload.dispatchN)
     const next = await start(f, turn.message.activationId!, dispatch.n)
-    expect((await caller(next)()).workId).toBe(retry.workId)
+    expect((await caller(next)()).runId).toBe(retry.runId)
     expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(2)
   })
 
@@ -140,16 +151,16 @@ describe('work_start through the production registry', () => {
     // Only a runaway fills the queue; a ceiling of one stands in for it. Work that waits counts, and is never dropped.
     f.host.maxQueuedActivations = 1
     const parked = await call({ ...request, title: 'Other job' })
-    await park(parked.workId)
+    await park(parked.runId)
     const refused = await call()
     expect(refused.status).toBe('ended')
-    expect(f.store.activation(refused.workId)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
-    expect(f.store.activation(parked.workId)?.endReason).toBe('waiting')
+    expect(f.store.activation(refused.runId)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    expect(f.store.activation(parked.runId)?.endReason).toBe('waiting')
     delete f.host.maxQueuedActivations
     const retry = await call()
-    expect(retry.workId).not.toBe(refused.workId)
+    expect(retry.runId).not.toBe(refused.runId)
     expect(retry.status).toBe('started')
-    expect((await call()).workId).toBe(retry.workId)
+    expect((await call()).runId).toBe(retry.runId)
   })
 
   it('repeats describe existing and ended work truthfully, and the report still replies to the owner message', async () => {
@@ -158,12 +169,12 @@ describe('work_start through the production registry', () => {
     const id = `mcp:${randomUUID()}`
     const first = await call(request, id)
     const repeated = await call(request, id)
-    expect(repeated).toMatchObject({ workId: first.workId, replayed: true, note: expect.stringMatching(/already in progress/i) })
+    expect(repeated).toMatchObject({ runId: first.runId, replayed: true, note: expect.stringMatching(/already in progress/i) })
     expect(rollUpChips([{ tool: 'work_start', input: request, result: repeated }], {})).toMatchObject([{ text: 'already on it' }])
-    await runDispatch(f, first.workId, 1, { text: 'Vacuum A wins.' })
+    await runDispatch(f, first.runId, 1, { text: 'Vacuum A wins.' })
     const ended = await call(request, id)
-    expect(ended).toMatchObject({ workId: first.workId, status: 'ended', note: expect.stringMatching(/already ended/i) })
+    expect(ended).toMatchObject({ runId: first.runId, status: 'ended', note: expect.stringMatching(/already ended/i) })
     expect(rollUpChips([{ tool: 'work_start', input: request, result: ended }])).toMatchObject([{ text: 'already ended' }])
-    expect(chatOf(f, botId).find((row) => row.kind === 'run_report' && row.activationId === first.workId)?.replyTo?.id).toBe(turn.message.id)
+    expect(chatOf(f, botId).find((row) => row.kind === 'run_report' && row.activationId === first.runId)?.replyTo?.id).toBe(turn.message.id)
   })
 })

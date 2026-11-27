@@ -48,7 +48,18 @@ export const MOUSSE_TOOL_ALIASES: Readonly<Record<string, string>> = Object.free
   task_status: 'thread_wait',
   task_cancel: 'thread_stop',
   list_subagents: 'thread_list',
-  continue_subagent: 'thread_send'
+  continue_subagent: 'thread_send',
+  // The subagent family, a personal bot's side (S7d4a, §2.1): its work (the chat's) and its work's subagents. Each is
+  // the variant of its thread tool that its arguments name on a bot's turn, run by the bot's own tool (`toolVariant`).
+  subagent_start: 'thread_create',
+  work_start: 'thread_create',
+  subagent_send: 'thread_send',
+  work_note: 'thread_send',
+  subagent_wait: 'thread_wait',
+  subagent_result: 'thread_wait',
+  subagent_stop: 'thread_stop',
+  work_stop: 'thread_stop',
+  work_list: 'thread_list'
 })
 
 /**
@@ -73,9 +84,10 @@ type ToolArgs = Record<string, unknown>
  * Old tools that became one variant of their new one with arguments of another shape. `args` turns the old call's
  * arguments into the new tool's, and the variant it fixes wins over the call; `holds` says whether a call of the new
  * tool is that variant, since a grant of the old name holds only that (`grantHoldsCall`). `runs`: the old tool's own
- * declaration still runs that variant, on a thread's turn or a personal bot's (`toolVariant`).
+ * declaration still runs that variant, on a thread's turn or a personal bot's (`toolVariant`); `says` names the arguments
+ * that make a call that variant, where a bot's turn lists the new tool in the bot's words (`botVariantSays`).
  */
-const MOUSSE_TOOL_ALIAS_TRANSLATIONS: Readonly<Record<string, { args(old: ToolArgs): ToolArgs; holds(args: ToolArgs): boolean; runs?: VariantTurn }>> = Object.freeze({
+const MOUSSE_TOOL_ALIAS_TRANSLATIONS: Readonly<Record<string, { args(old: ToolArgs): ToolArgs; holds(args: ToolArgs): boolean; runs?: VariantTurn; says?: string }>> = Object.freeze({
   // `thread_hide {threadId, hidden = true}` is `thread_update {threadId, hidden}`; never `access`.
   thread_hide: {
     args: ({ hidden, ...rest }: ToolArgs) => ({ ...rest, hidden: hidden === undefined ? true : hidden }),
@@ -106,8 +118,40 @@ const MOUSSE_TOOL_ALIAS_TRANSLATIONS: Readonly<Record<string, { args(old: ToolAr
     args: ({ prompt, ...rest }: ToolArgs) => ({ ...rest, ...(prompt !== undefined ? { content: prompt } : {}), intent: 'work' }),
     holds: (args: ToolArgs) => args.threadId === undefined && args.subagent !== undefined && (args.intent === undefined || args.intent === 'work'),
     runs: 'thread'
-  }
+  },
+  // S7d4a. A bot's turn names its work and its work's subagents, never a thread: a call that names `threadId` is the
+  // thread tool's own, under "use your threads". `subagent_start` (a run's main turn) and `work_start` (the chat) are the
+  // same variant; the turn is offered one of them (`ToolRegistry`). A piece of work's id is its `runId`.
+  subagent_start: { args: (args: ToolArgs) => ({ ...args, kind: 'subagent' }), holds: (args: ToolArgs) => args.kind === 'subagent', runs: 'bot', says: 'kind "subagent"' },
+  work_start: { args: (args: ToolArgs) => ({ ...args, kind: 'subagent' }), holds: (args: ToolArgs) => args.kind === 'subagent', runs: 'bot', says: 'kind "subagent"' },
+  subagent_send: {
+    args: ({ message, ...rest }: ToolArgs) => ({ ...rest, ...(message !== undefined ? { content: message } : {}), intent: 'work' }),
+    holds: (args: ToolArgs) => args.threadId === undefined && args.subagent !== undefined && (args.intent === undefined || args.intent === 'work'),
+    runs: 'bot',
+    says: 'subagent (your subagent\'s title)'
+  },
+  work_note: {
+    args: ({ workId, note, ...rest }: ToolArgs) => ({ ...rest, ...(workId !== undefined ? { runId: workId } : {}), ...(note !== undefined ? { content: note } : {}), intent: 'note' }),
+    holds: (args: ToolArgs) => args.threadId === undefined && args.runId !== undefined && args.intent === 'note',
+    runs: 'bot',
+    says: 'intent "note" and runId (a piece of your work)'
+  },
+  subagent_wait: { args: (args: ToolArgs) => args, holds: (args: ToolArgs) => noThread(args) && args.timeoutSeconds !== 0, runs: 'bot', says: 'no threadId (your subagents)' },
+  subagent_result: { args: (args: ToolArgs) => ({ ...args, timeoutSeconds: 0 }), holds: (args: ToolArgs) => noThread(args) && args.timeoutSeconds === 0, runs: 'bot', says: 'timeoutSeconds 0 (your subagents, now)' },
+  subagent_stop: { args: (args: ToolArgs) => args, holds: (args: ToolArgs) => args.threadId === undefined && args.subagent !== undefined, runs: 'bot', says: 'subagent (your subagent\'s title)' },
+  work_stop: {
+    args: ({ workId, ...rest }: ToolArgs) => ({ ...rest, ...(workId !== undefined ? { runId: workId } : {}) }),
+    holds: (args: ToolArgs) => args.threadId === undefined && args.subagent === undefined && args.runId !== undefined,
+    runs: 'bot',
+    says: 'runId alone (a piece of your work)'
+  },
+  work_list: { args: (args: ToolArgs) => ({ ...args, scope: 'bot_work' }), holds: (args: ToolArgs) => args.scope === 'bot_work', runs: 'bot', says: 'scope "bot_work"' }
 })
+
+/** A bot's call of its subagents: it names no thread and no run of one. */
+function noThread(args: ToolArgs): boolean {
+  return args.threadId === undefined && args.runId === undefined
+}
 
 /** The kind of turn an old tool's own declaration runs its variant on: a thread's (not a definition's) or a personal bot's. */
 type VariantTurn = 'thread' | 'bot'
@@ -145,10 +189,28 @@ export function isRunningVariant(name: string): boolean {
  * (under the old name) and its request keys, whichever name it came under, so a retry under either name is one request.
  */
 export function toolVariant(name: string, args: ToolArgs, turn: VariantTurn | undefined): string | undefined {
-  if (!turn) return undefined
-  for (const [old, variant] of Object.entries(MOUSSE_TOOL_ALIAS_TRANSLATIONS))
-    if (variant.runs === turn && MOUSSE_TOOL_ALIASES[old] === name && variant.holds(args)) return old
-  return undefined
+  return toolVariants(name, args, turn)[0]
+}
+
+/** Every old tool `toolVariant` could name, in order: a bot's turn is offered one of `subagent_start` and `work_start`. */
+export function toolVariants(name: string, args: ToolArgs, turn: VariantTurn | undefined): string[] {
+  if (!turn) return []
+  return Object.entries(MOUSSE_TOOL_ALIAS_TRANSLATIONS).flatMap(([old, variant]) => (variant.runs === turn && MOUSSE_TOOL_ALIASES[old] === name && variant.holds(args) ? [old] : []))
+}
+
+/** Whether `name` is an old tool only a personal bot's turn runs (S7d4a): no other turn has it under either name. */
+export function isBotVariant(name: string): boolean {
+  return own(MOUSSE_TOOL_ALIAS_TRANSLATIONS, name) && MOUSSE_TOOL_ALIAS_TRANSLATIONS[name].runs === 'bot'
+}
+
+/**
+ * What makes a call of a bot's old tool's new one that variant: the words its listing gives (`says`), and the
+ * arguments the variant fixes (`kind: "subagent"`, `intent: "note"`).
+ */
+export function botVariantSays(name: string): { says: string; fixes: ToolArgs } | undefined {
+  if (!isBotVariant(name)) return undefined
+  const variant = MOUSSE_TOOL_ALIAS_TRANSLATIONS[name]
+  return { says: variant.says ?? name, fixes: variant.args({}) }
 }
 
 /** A call as its canonical tool takes it: the canonical name, and the arguments of the variant an old name is. */

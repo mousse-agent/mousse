@@ -498,7 +498,7 @@ describe('a bot\'s work subagents as delegations', () => {
     expect(subagentRuns(f, job.id)).toEqual([])
     // The tools' schemas name the same limit the work is held to.
     const limitOf = (tool: string, field: string) => (BOT_TOOLS.find((entry) => entry.name === tool)!.parameters as { properties: Record<string, { maxLength?: number }> }).properties[field]!.maxLength
-    expect([limitOf('subagent_start', 'brief'), limitOf('subagent_send', 'message')]).toEqual([32 * 1024, 32 * 1024])
+    expect([limitOf('subagent_start', 'brief'), limitOf('subagent_send', 'content')]).toEqual([32 * 1024, 32 * 1024])
     await subagents.start({ title: 'Prices', brief: 'Find the prices.' })
     expect(threads).toHaveBeenCalledTimes(1)
     const child = await startSubagent(f, subagentRuns(f, job.id)[0]!)

@@ -79,7 +79,7 @@ export class ChatQuickCalls implements BotQuickCalls {
     const left = this.turnMs - this.busyMs()
     if (this.spent || left <= 0) {
       return {
-        text: refusalText('work_required', `This turn has used its ${seconds(this.turnMs)} for calls in the chat, so ${input.tool} didn't run. Hand the rest to work with work_start: it has the time.`, { fix: 'work_start' }),
+        text: refusalText('work_required', `This turn has used its ${seconds(this.turnMs)} for calls in the chat, so ${input.tool} didn't run. Hand the rest to work with thread_create (kind "subagent"): it has the time.`, { fix: 'thread_create' }),
         isError: true
       }
     }
@@ -115,13 +115,13 @@ export class ChatQuickCalls implements BotQuickCalls {
       // Read-only when it started and still now: stopping it changed nothing.
       if (input.readOnly && stillReadOnly()) {
         return {
-          text: refusalText('work_required', `${input.tool} ran past ${which}, so it was stopped and nothing came of it. Hand this job to work with work_start: it has the time.`, { fix: 'work_start' }),
+          text: refusalText('work_required', `${input.tool} ran past ${which}, so it was stopped and nothing came of it. Hand this job to work with thread_create (kind "subagent"): it has the time.`, { fix: 'thread_create' }),
           isError: true
         }
       }
       // It may have changed something: it was sent, and its time ran out before it answered.
       return {
-        text: refusalText('uncertain', `${input.tool} was sent and ran past ${which}, so it can't be told whether it went through. Don't call it again from the chat: tell your owner, and check first or hand it to work with work_start.`, { fix: 'work_start' }),
+        text: refusalText('uncertain', `${input.tool} was sent and ran past ${which}, so it can't be told whether it went through. Don't call it again from the chat: tell your owner, and check first or hand it to work with thread_create (kind "subagent").`, { fix: 'thread_create' }),
         isError: true,
         callState: 'uncertain'
       }

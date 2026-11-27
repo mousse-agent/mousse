@@ -9,7 +9,7 @@ import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, definitionToolGranted, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
 import { botMayBeOffered } from '../../../../shared/bots/personal/manifest'
 import { BOT_USE_TOOL } from '../../../../shared/bots/personal/catalogue'
-import { canonicalToolCall, canonicalToolName, isRunningVariant, isToolAlias, toolVariant } from '../../../../shared/toolAliases'
+import { botVariantSays, canonicalToolCall, canonicalToolName, isBotVariant, isRunningVariant, isToolAlias, toolVariants } from '../../../../shared/toolAliases'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
@@ -285,6 +285,8 @@ export function botReachOf(turn: AppToolTurn): BotReach {
 
 /** Where a call stands once its turn is known (`ToolRegistry.call`). */
 interface CallSite {
+  /** The name the call came under: an old one runs as that old tool, when the turn has it (`variantOf`). */
+  calledAs?: string
   threadId: string
   active: string
   turn: AppToolTurn
@@ -295,6 +297,11 @@ interface CallSite {
 
 /** The app tools a bot's chat calls within its quick-call budgets: they only read, and may take a while. */
 const BOT_CHAT_QUICK_TOOLS: ReadonlySet<string> = new Set(['web_search', 'web_fetch', 'secret_fetch'])
+
+/** What a turn that is no personal bot's is told when it calls a bot's old tool (`isBotVariant`). */
+function notBotsTool(calledAs: string): ToolOutcome {
+  return refused('unknown_tool', `${calledAs} is a personal bot's tool; you have no tool by that name.`)
+}
 
 function notLive(message: string): McpToolError {
   return new McpToolError('mousse_caller_not_live', message)
@@ -312,6 +319,35 @@ function asBotTool(tool: MousseTool): MousseTool {
     : tool
 }
 
+/**
+ * One schema for a thread tool and its bot variants: every property (the first schema that declares one wins; one that
+ * two of them type differently, as `thread_create`'s `model`, is either), each argument a variant fixes as one more of
+ * its values, and what all of them need. Without the tool's own schema, an argument every variant fixes is needed too,
+ * so a call is always one of them.
+ */
+function botVariantsSchema(own: JsonSchema | undefined, parts: Array<{ variant: MousseTool; fixes: Record<string, unknown> }>): JsonSchema {
+  type PropertySchema = JsonSchema & { enum?: unknown[]; type?: unknown; anyOf?: PropertySchema[] }
+  type ObjectSchema = { properties?: Record<string, PropertySchema>; required?: string[] }
+  const schemas = [...(own ? [own] : []), ...parts.map(({ variant }) => variant.inputSchema)] as ObjectSchema[]
+  const properties: Record<string, PropertySchema> = {}
+  const typeOf = (schema: PropertySchema) => JSON.stringify(schema.type ?? null)
+  for (const schema of schemas)
+    for (const [key, value] of Object.entries(schema.properties ?? {})) {
+      const kept = properties[key]
+      if (!kept) properties[key] = value
+      else if (!(kept.anyOf ?? [kept]).some((one) => typeOf(one) === typeOf(value))) properties[key] = { anyOf: [...(kept.anyOf ?? [kept]), value] }
+    }
+  for (const { fixes } of parts)
+    for (const [key, value] of Object.entries(fixes)) {
+      const declared = properties[key]
+      if (!declared) properties[key] = { type: typeof value === 'number' ? 'integer' : 'string', enum: [value] }
+      else if (declared.enum && !declared.enum.includes(value)) properties[key] = { ...declared, enum: [...declared.enum, value] }
+    }
+  const required = Object.keys(properties).filter((key) =>
+    schemas.every((schema) => schema.required?.includes(key)) || (!own && parts.every(({ fixes }) => key in fixes)))
+  return { type: 'object', properties, ...(required.length ? { required } : {}) }
+}
+
 /** Whether `text` names the thread `threadId` as a whole id (not inside another id, such as a request's). */
 function namesThread(text: string, threadId: string): boolean {
   const escaped = threadId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -322,7 +358,7 @@ function namesThread(text: string, threadId: string): boolean {
  * The tool a `use_tool` call names and its arguments, with the `clientRequestId` a retry gives taken out of them as
  * Mousse's MCP server takes it out of a direct call; or why the call is malformed.
  */
-function useToolCall(args: Record<string, unknown>): { name: string; args: Record<string, unknown>; clientRequestId?: string } | { refused: string } {
+function useToolCall(args: Record<string, unknown>): { name: string; calledAs: string; args: Record<string, unknown>; clientRequestId?: string } | { refused: string } {
   const calledAs = typeof args.tool === 'string' ? args.tool.trim().replace(/^mcp__mousse__/, '') : ''
   if (!calledAs) return { refused: 'use_tool needs tool: the name of a tool from tool_catalogue.' }
   const given = args.arguments ?? {}
@@ -330,7 +366,7 @@ function useToolCall(args: Record<string, unknown>): { name: string; args: Recor
   const { clientRequestId, ...rest } = given as Record<string, unknown>
   // An old name is the tool it was renamed to, with the arguments it adds (`canonicalToolCall`), here as for a direct call.
   const call = canonicalToolCall(calledAs, rest)
-  return { ...call, ...(typeof clientRequestId === 'string' && clientRequestId.trim() ? { clientRequestId: clientRequestId.trim() } : {}) }
+  return { ...call, calledAs, ...(typeof clientRequestId === 'string' && clientRequestId.trim() ? { clientRequestId: clientRequestId.trim() } : {}) }
 }
 
 /**
@@ -420,15 +456,36 @@ export class ToolRegistry {
     const bot = this.botListing(threadId)
     // A bot's thread tools follow its turn: what the run's registered turn holds now.
     const turn = bot.botRole && runId ? this.options.turns?.get(runId) : undefined
-    const listed = this.listFor({
+    const listing: ToolListing = {
       threadId,
       readOnly: this.options.readOnlyThread?.(threadId) === true,
       ...(this.options.subagentThread?.(threadId) === true ? { subagent: true } : {}),
       ...bot,
       ...(turn?.bot && turn.threadId === threadId ? { botTurnTools: turn.bot.appTools, ...(turn.bot.catalogue ? { botCatalogue: turn.bot.catalogue } : {}) } : {})
-    })
+    }
+    const listed = this.listFor(listing)
     // A bot's thread reads each tool as a bot uses it.
-    return bot.botRole ? listed.map(asBotTool) : listed
+    return bot.botRole ? listed.map((tool) => this.asBotListed(tool, listing, turn)) : listed
+  }
+
+  /**
+   * A tool as a bot's thread lists it (`asBotTool`). A thread tool with variants that are the bot's own (its work, its
+   * work's subagents: S7d4a) says what each does and how a call is that variant, after its own text when the turn holds
+   * the tool itself; one entry per variant, the one the turn is offered (`variantOf`).
+   */
+  asBotListed(tool: MousseTool, listing: ToolListing, turn?: AppToolTurn): MousseTool {
+    const parts = new Map<string, { variant: MousseTool; fixes: Record<string, unknown> }>()
+    for (const variant of this.variants.values()) {
+      const said = canonicalToolName(variant.name) === tool.name ? botVariantSays(variant.name) : undefined
+      if (!said || !listsTool(variant, listing)) continue
+      const kept = parts.get(said.says)
+      if (!kept || (turn && !(kept.variant.offered?.(turn) ?? true) && (variant.offered?.(turn) ?? true))) parts.set(said.says, { variant, fixes: said.fixes })
+    }
+    const own = asBotTool(tool)
+    if (!parts.size) return own
+    const holdsOwn = listsTool(tool, listing)
+    const description = [...(holdsOwn ? [own.description] : []), ...[...parts].map(([says, { variant }]) => `With ${says}: ${variant.description}`)].join('\n\n')
+    return { ...own, description, inputSchema: botVariantsSchema(holdsOwn ? own.inputSchema : undefined, [...parts.values()]) }
   }
 
   /**
@@ -451,12 +508,8 @@ export class ToolRegistry {
   catalogued(threadId: string, turn: AppToolTurn, names: readonly string[]): MousseTool[] {
     const bot = this.botListing(threadId)
     if (!bot.botRole || !turn.bot) return []
-    const listed = new Map(this.listFor({
-      threadId,
-      readOnly: this.options.readOnlyThread?.(threadId) === true,
-      ...bot,
-      botTurnTools: turn.bot.appTools
-    }).map((tool) => [tool.name, asBotTool(tool)]))
+    const listing: ToolListing = { threadId, readOnly: this.options.readOnlyThread?.(threadId) === true, ...bot, botTurnTools: turn.bot.appTools }
+    const listed = new Map(this.listFor(listing).map((tool) => [tool.name, this.asBotListed(tool, listing, turn)]))
     return names.flatMap((name) => listed.get(name) ?? [])
   }
 
@@ -581,11 +634,13 @@ export class ToolRegistry {
     // Any other name can only be one of the turn's proxied user MCP tools, looked up once the turn is known.
     if (!tool && (registered || !this.options.userMcp)) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
     const { threadId, active, turn, args, caller, boundToken } = await this.admit(callArgs, request)
+    // A bot's old tool is no other turn's, under its new name's arguments or not.
+    if (!turn.bot && isBotVariant(calledAs)) return notBotsTool(calledAs)
     const { credential } = request
-    const site: CallSite = { threadId, active, turn, credential, boundToken, request }
+    const site: CallSite = { calledAs, threadId, active, turn, credential, boundToken, request }
     const outcome = await this.dispatch(name, tool, args, caller, site)
     // `thread_list scope: family` lists the family, with paging; called by its old name `list_subagents`, it returns
-    // that tool's rows as it always did.
+    // that tool's rows as it always did. A bot's own work list (`scope: bot_work`, `work_list`) is never paged here.
     const family = name === 'thread_list' && args.scope === 'family' && calledAs !== 'list_subagents' && !outcome.isError ? this.options.addresses?.family?.(caller.threadId) : undefined
     return this.reportingLacks(name, site, family ? familyPage(family, outcome, this.readableBy(caller, turn), caller.threadId, args) : outcome)
   }
@@ -606,7 +661,7 @@ export class ToolRegistry {
           return await this.callUserMcp(inner.name, inner.args, { ...site, request: innerRequest })
         if (!named || !toolNeeds(named).callable || inner.name === BOT_USE_TOOL || !(named.variants ?? [named]).some((tool) => botMayBeOffered(tool.name)))
           return refused('unknown_tool', `You have no tool named ${inner.name}. tool_catalogue lists each group's tools.`)
-        return this.inOwnerZone(turn, await this.callAddressed(inner.name, named, inner.args, caller, { ...site, request: innerRequest }))
+        return this.inOwnerZone(turn, await this.callAddressed(inner.name, named, inner.args, caller, { ...site, calledAs: inner.calledAs, request: innerRequest }))
       }
       if (!tool) return await this.callUserMcp(name, args, site)
       return this.inOwnerZone(turn, await this.callAddressed(name, tool, args, caller, site))
@@ -628,8 +683,12 @@ export class ToolRegistry {
     const addressed = addressedArgs({ addresses: this.options.addresses, tool: name, args: given, callerThreadId: caller.threadId, toolCallId: request.toolCallId, record: !READ_ONLY_TOOL_NAMES.has(name), visible, bots: botReachOf(turn) })
     if ('refused' in addressed) return addressed.refused
     const { args, resolved } = addressed
+    // A call that named a thread by address is the thread tool, before and after it fans out (`variantOf`).
+    const named = given.thread !== undefined
     if (!resolved?.many) {
-      const outcome = await this.callAdmitted(name, this.variantOf(name, tool, args, turn), args, caller, site)
+      const called = this.variantOf(name, tool, args, turn, site.calledAs, named)
+      if (!('name' in called)) return called
+      const outcome = await this.callAdmitted(name, called, args, caller, site)
       // A thread an address named that the caller can't read by id: a refusal says no more than that.
       const target = resolved?.form === 'thread' && resolved.address !== args.threadId ? (args.threadId as string) : undefined
       return target && outcome.isError && namesThread(outcome.text, target) && !visible(target) ? OUT_OF_REACH : outcome
@@ -643,7 +702,8 @@ export class ToolRegistry {
       const each = { ...site, request: { ...request, toolCallId: keyOf(target.threadId) } }
       let outcome: ToolOutcome
       try {
-        outcome = await this.callAdmitted(name, this.variantOf(name, tool, targetArgs, turn), targetArgs, caller, each)
+        const called = this.variantOf(name, tool, targetArgs, turn, site.calledAs, named)
+        outcome = 'name' in called ? await this.callAdmitted(name, called, targetArgs, caller, each) : called
       } catch (error) {
         const refusedNow = refusalOutcome(error)
         if (!refusedNow) throw error
@@ -678,11 +738,20 @@ export class ToolRegistry {
   /**
    * The declaration that runs a call of `name`: the old tool's own when the call is the variant it became (`toolVariant`),
    * so it is checked and run as that tool always was, whichever name it came under; else `tool`. A definition's turn
-   * runs none: a definition delegates nothing.
+   * runs none: a definition delegates nothing. A bot's turn runs its own tool through the bot port or not at all: never
+   * the thread tool in its place (the one of `subagent_start` and `work_start` the turn is offered). A call that named a
+   * thread by address (`addressed`) is the thread tool: on a bot's turn, never one of its own. The registry's preflight
+   * (`resolveCall`) and its dispatch both choose here, so a gate judges the tool that runs.
    */
-  private variantOf(name: string, tool: MousseTool, args: Record<string, unknown>, turn: AppToolTurn): MousseTool {
-    const old = toolVariant(name, args, turn.bot ? 'bot' : turn.definition ? undefined : 'thread')
-    return (old && this.variants.get(old)) || tool
+  private variantOf(name: string, tool: MousseTool, args: Record<string, unknown>, turn: AppToolTurn, calledAs?: string, addressed = false): MousseTool | ToolOutcome {
+    const olds = addressed && turn.bot ? [] : toolVariants(name, args, turn.bot ? 'bot' : turn.definition ? undefined : 'thread')
+    // A bot's old name runs its own tools or none: a thread it can't take is refused, never sent to the thread tool.
+    if (turn.bot && calledAs && isBotVariant(calledAs) && !olds.length)
+      return refused('invalid_arguments', `${calledAs} is your own work's tool and takes no thread. To reach a thread, call ${name}.`)
+    const declared = olds.flatMap((old) => this.variants.get(old) ?? [])
+    if (turn.bot && olds.length && !declared.length) return refused('unavailable', `${olds[0]} is not available here: your bot's tools are not.`)
+    // A call under an old name is that tool and no other (`work_start` never runs as `subagent_start`).
+    return declared.find((variant) => variant.name === calledAs) ?? declared.find((variant) => variant.offered?.(turn) ?? true) ?? declared[0] ?? tool
   }
 
   /**
@@ -720,6 +789,7 @@ export class ToolRegistry {
     // The call's id as the MCP server will key it (`mcp:<clientRequestId>`), so a retry resolves as its receipt says.
     const key = typeof clientRequestId === 'string' && clientRequestId.trim() ? { toolCallId: `mcp:${clientRequestId.trim()}` } : {}
     const turn = this.options.turns?.get(at.runId)
+    if (turn && !turn.bot && isBotVariant(calledAs)) return { refused: notBotsTool(calledAs) }
     // Its `thread` address as the call will resolve it (a gate records nothing), so a gate judges the ids it names.
     const caller: McpCaller = { threadId: at.threadId, runId: at.runId, provider: '', accessLevel: 'manage' }
     const addressed = addressedArgs({
@@ -729,6 +799,10 @@ export class ToolRegistry {
     if ('refused' in addressed) return { refused: addressed.refused }
     const { args } = addressed
     const tool = this.tools.get(name)
+    // A bot's own tool that this call is (`variantOf`): the gate judges it by that name, as the bot's grant does.
+    const running = tool && turn ? this.variantOf(name, tool, args, turn, calledAs, named.thread !== undefined) : undefined
+    if (running && !('name' in running)) return { refused: running }
+    if (running && running !== tool) return { name, variant: running.name, args }
     if (!tool?.variantOf || !turn) return { name, variant: name, args }
     const variant = tool.variantOf(args, { threadId: at.threadId, turn, ...key })
     return 'refused' in variant ? variant : { name, variant: variant.tool.name, args: variant.args }

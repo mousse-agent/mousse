@@ -364,7 +364,7 @@ describe('the turn-kind matrix through registered dispatch', () => {
     const { registry, turns, request } = appToolRegistry(f.runs, fakeAppToolHost().host, { bots: () => ({ host: f.bots.tools }) })
     turns.register(appTurn({ threadId: turn.payload.threadId, runId: turn.payload.runId, accessLevel: 'manage', actor: defaultIntegrationActor(false), bot: turn.prepared.authority }))
     const call = (name: string, args: Record<string, unknown>) => registry.call(name, args, request({ threadId: turn.payload.threadId, runId: turn.payload.runId }))
-    const workIdOf = (outcome: { text: string }) => (JSON.parse(outcome.text) as { workId: string }).workId
+    const workIdOf = (outcome: { text: string }) => (JSON.parse(outcome.text) as { runId: string }).runId
 
     const brief = { title: 'Research', brief: 'Look up flats near the station.' }
     const first = await call('work_start', { ...brief, clientRequestId: 'a' })
