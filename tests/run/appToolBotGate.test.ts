@@ -37,7 +37,7 @@ describe('app tools under a bot’s authority (MCP)', () => {
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, bot: bot(['task_create']) }))
     const ctx = () => request({ threadId: 'thread-a', runId: run.runId })
-    expect(await registry.call('task_status', { taskId: 'd1' }, ctx())).toEqual(refused('not_granted', 'This bot is not allowed to use task_status.'))
+    expect(await registry.call('task_status', { taskId: 'd1' }, ctx())).toEqual(refused('not_granted', 'This bot is not allowed to use thread_wait.'))
     expect(fake.host.delegation).not.toHaveBeenCalled()
     expect((await registry.call('task_create', { description: 'fine' }, ctx())).isError).toBe(false)
   })

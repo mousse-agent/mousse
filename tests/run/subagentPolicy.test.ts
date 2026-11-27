@@ -186,7 +186,8 @@ describe('delegated child policy', () => {
   it('the read-only Mousse tool list runtimes use matches what the registry lets a read-only child call', () => {
     const { d } = daemon(async () => undefined)
     const registry = d.orch.mcpToolRegistry()
-    const callable = registry.list().filter((tool) => tool.callable !== 'in_process' && (tool.access === 'reads' || tool.access === 'readsOthers' || tool.readOnlySafe)).map((tool) => tool.name)
+    // The old tools a thread tool runs as its variant (`toolVariant`) are callable as they always were.
+    const callable = [...registry.list(), ...registry.variantTools()].filter((tool) => tool.callable !== 'in_process' && (tool.access === 'reads' || tool.access === 'readsOthers' || tool.readOnlySafe)).map((tool) => tool.name)
     expect(new Set(callable)).toEqual(READ_ONLY_MOUSSE_TOOLS)
   })
 

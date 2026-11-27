@@ -18,6 +18,14 @@ export function delegationRequestKey(parentThreadId: string, parentRunId: string
   return toolCallId.startsWith('mcp:') ? `delegation:${parentThreadId}:${toolCallId}` : `delegation:${parentRunId}:${toolCallId}`
 }
 
+/**
+ * The same for a Stop of a subagent by its title (`task_cancel`, or `thread_stop` with subagent): the key of its receipt,
+ * under the old tool's prefix so a retry under either name finds it.
+ */
+export function cancelRequestKey(parentThreadId: string, parentRunId: string, toolCallId: string): string {
+  return toolCallId.startsWith('mcp:') ? `task_cancel:${parentThreadId}:${toolCallId}` : `task_cancel:${parentRunId}:${toolCallId}`
+}
+
 /** The same for `continue_subagent`: the key of the follow-up's `send`. */
 export function followUpRequestKey(parentThreadId: string, parentRunId: string, toolCallId: string): string {
   return toolCallId.startsWith('mcp:') ? `continue:${parentThreadId}:${toolCallId}` : `continue:${parentRunId}:${toolCallId}`
