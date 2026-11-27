@@ -88,21 +88,6 @@
       "expiresAt": "2026-11-27T09:49:16.036Z"
     },
     {
-      "task": "remote-provisional-titles-and-own-drafts",
-      "session": "Avarnics-Mac-mini.local-ae51d2",
-      "machine": "Avarnics-Mac-mini.local",
-      "branch": "remote-provisional-titles-and-own-drafts",
-      "paths": [
-        "src/mms/bridge/remote/MmsListsSource.ts",
-        "src/shared/threadTitle.ts",
-        "src/renderer/lib/threadActions.ts",
-        "src/renderer/stores/appStore.ts",
-        "src/renderer/components/ThreadsSidebar.tsx"
-      ],
-      "claimedAt": "2026-11-26T09:12:48.179Z",
-      "expiresAt": "2026-11-26T11:12:48.179Z"
-    },
-    {
       "task": "t3/fence-approvals-s2",
       "session": "LAPTOP-HIEROJK7-a26b71",
       "machine": "LAPTOP-HIEROJK7",
@@ -142,17 +127,6 @@
       "expiresAt": "2026-11-26T11:31:29.445Z"
     },
     {
-      "task": "title-models-every-provider",
-      "session": "Animatrix-36f010",
-      "machine": "Animatrix",
-      "branch": "title-models-every-provider",
-      "paths": [
-        "src/mms/harness/acp"
-      ],
-      "claimedAt": "2026-11-26T08:30:54.870Z",
-      "expiresAt": "2026-11-26T11:05:49.099Z"
-    },
-    {
       "task": "tree-corrections",
       "session": "LAPTOP-HIEROJK7-dfae29",
       "machine": "LAPTOP-HIEROJK7",
@@ -177,7 +151,7 @@
         "src/mms/orchestrator/OrchestratorService.ts"
       ],
       "claimedAt": "2026-11-27T10:16:37.481Z",
-      "expiresAt": "2026-11-27T12:16:37.481Z"
+      "expiresAt": "2026-11-27T13:16:26.907Z"
     }
   ]
 }
