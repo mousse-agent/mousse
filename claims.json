@@ -2,18 +2,6 @@
   "version": 1,
   "claims": [
     {
-      "task": "agent-messages-show-sender",
-      "session": "Avarnics-Mac-mini.local-6a8770",
-      "machine": "Avarnics-Mac-mini.local",
-      "branch": "agent-messages-show-sender",
-      "paths": [
-        "src/renderer/chat/components/agent-elements/user-message.tsx",
-        "src/mms/orchestrator/OrchestratorService.ts"
-      ],
-      "claimedAt": "2026-11-25T18:34:18.437Z",
-      "expiresAt": "2026-11-25T20:34:18.437Z"
-    },
-    {
       "task": "background-jobs-shared",
       "session": "Animatrix-955f26",
       "machine": "Animatrix",
@@ -29,21 +17,6 @@
       ],
       "claimedAt": "2026-11-26T06:12:52.524Z",
       "expiresAt": "2026-11-26T08:12:52.524Z"
-    },
-    {
-      "task": "bot-chat-quick-tools",
-      "session": "Animatrix-7dc63c",
-      "machine": "Animatrix",
-      "branch": "bot-chat-quick-tools",
-      "paths": [
-        "src/mms/bots",
-        "src/shared/bots/personal",
-        "src/mms/harness/vendors/codex/childPolicy.ts",
-        "docs/bots.md",
-        "tests/run/toolApiContract.test.ts"
-      ],
-      "claimedAt": "2026-11-25T16:05:20.190Z",
-      "expiresAt": "2026-11-25T18:05:20.190Z"
     },
     {
       "task": "bot-subagents-delegations",
@@ -64,19 +37,6 @@
       "expiresAt": "2026-11-26T17:29:52.364Z"
     },
     {
-      "task": "fix-windows-update-install-path",
-      "session": "Animatrix-ccfd0b",
-      "machine": "Animatrix",
-      "branch": "fix-windows-update-install-path",
-      "paths": [
-        "build/installer.nsh",
-        "src/main/updates",
-        "src/main/index.ts"
-      ],
-      "claimedAt": "2026-11-25T15:27:21.463Z",
-      "expiresAt": "2026-11-25T17:27:21.463Z"
-    },
-    {
       "task": "lan-first-paths",
       "session": "Avarnics-Mac-mini.local-8600b4",
       "machine": "Avarnics-Mac-mini.local",
@@ -89,21 +49,6 @@
       ],
       "claimedAt": "2026-11-26T09:23:17.394Z",
       "expiresAt": "2026-11-26T11:23:17.394Z"
-    },
-    {
-      "task": "lists-attach-retention",
-      "session": "Avarnics-Mac-mini.local-28e6be",
-      "machine": "Avarnics-Mac-mini.local",
-      "branch": "lists-attach-retention",
-      "paths": [
-        "src/mms/bridge/routed/mergedLists.ts",
-        "src/mms/bridge/hub/service.ts",
-        "src/mms/net/store/streams.ts",
-        "src/mms/net/store/database.ts",
-        "src/mms/bridge/BridgeProfileService.ts"
-      ],
-      "claimedAt": "2026-11-25T18:09:20.891Z",
-      "expiresAt": "2026-11-25T20:09:20.891Z"
     },
     {
       "task": "macos-signing-notarization",
@@ -141,18 +86,6 @@
       ],
       "claimedAt": "2026-11-26T08:08:22.887Z",
       "expiresAt": "2026-11-26T10:08:22.887Z"
-    },
-    {
-      "task": "paste-image-names",
-      "session": "Avarnics-Mac-mini.local-43e057",
-      "machine": "Avarnics-Mac-mini.local",
-      "branch": "paste-image-names",
-      "paths": [
-        "src/renderer/utils/imageAttachments.ts",
-        "src/renderer/components/ChatComposer.tsx"
-      ],
-      "claimedAt": "2026-11-25T18:29:30.139Z",
-      "expiresAt": "2026-11-25T20:29:30.139Z"
     },
     {
       "task": "remote-provisional-titles-and-own-drafts",
@@ -238,6 +171,17 @@
       ],
       "claimedAt": "2026-11-26T08:30:54.870Z",
       "expiresAt": "2026-11-26T11:05:49.099Z"
+    },
+    {
+      "task": "tree-corrections",
+      "session": "LAPTOP-HIEROJK7-dfae29",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "tree-corrections",
+      "paths": [
+        "src/mms/run/delegation/treeCorrection.ts"
+      ],
+      "claimedAt": "2026-11-27T04:23:54.256Z",
+      "expiresAt": "2026-11-27T06:23:54.256Z"
     }
   ]
 }
