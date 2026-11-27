@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PROFILER_TOOL_NAMES } from '../../../shared/diagnostics/profiler'
+import { canonicalToolName } from '../../../shared/toolAliases'
 import type { McpAttachment } from './MousseMcpServer'
 
 import {
@@ -169,7 +170,8 @@ export function mousseCallAsksPerson(
 ): boolean {
   const served = mousseServerToolOf(toolName)
   if (served?.server === 'relay') return true
-  const tool = lookup(served ? served.tool : toolName)
+  // An old name (`ask_user`) is still callable and old transcripts have it: it asks as its tool does.
+  const tool = lookup(canonicalToolName(served ? served.tool : toolName))
   if (!tool) return served?.exact === true
   return Boolean(tool.asksUser) || tool.access === 'editsWorkspace' || tool.access === 'changesSettings'
 }
