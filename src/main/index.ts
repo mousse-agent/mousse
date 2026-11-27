@@ -114,16 +114,14 @@ const isChatgptTokenCommand = isCliMode && isChatgptTokenArgv(electronCliArgv())
 // they cannot.
 const isSshProxyCommand = isCliMode && isSshProxyArgv(electronCliArgv())
 if (!isChatgptTokenCommand && !isSshProxyCommand) configureElectronContext(app, isCliMode ? electronCliArgv() : [])
-// A CLI command or the daemon opens no window: no GPU or network service process for it.
+// A CLI command or the daemon opens no window: no GPU or network service process, and no Dock icon, for it.
 if (isCliMode) configureWindowlessElectron(app)
 
 if (isChatgptTokenCommand) {
-  app.dock?.hide()
   void import('../cli/fastpath/chatgptToken')
     .then(({ runChatgptToken }) => runChatgptToken(electronCliArgv()))
     .then((code) => app.exit(code), () => app.exit(1))
 } else if (isSshProxyCommand) {
-  app.dock?.hide()
   void import('../cli/fastpath/sshProxy')
     .then(({ runSshProxy }) => runSshProxy(electronCliArgv()))
     .then((code) => app.exit(code), () => app.exit(1))

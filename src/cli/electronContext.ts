@@ -35,13 +35,16 @@ const NETWORK_SERVICE_IN_PROCESS = 'NetworkServiceInProcess2'
  * The CLI and the daemon run in Electron for safeStorage only: they open no window and make no request
  * through Chromium's network stack. Left to its defaults, Electron still starts a GPU process and a
  * network service process for them (together about 70 MB of private memory and 230 MB of working set
- * for a daemon on Windows). This runs both inside the main process and turns GPU use off. Call before
+ * for a daemon on Windows). This runs both inside the main process and turns GPU use off. On macOS each
+ * would also show a second Mousse icon in the Dock beside the app's, so it hides that. Call before
  * `app` is ready.
  */
 export function configureWindowlessElectron(app: {
   disableHardwareAcceleration(): void
   commandLine: SwitchCommandLine
+  dock?: { hide(): void }
 }): void {
+  app.dock?.hide()
   app.disableHardwareAcceleration()
   app.commandLine.appendSwitch('in-process-gpu')
   addToSwitchList(app.commandLine, 'enable-features', NETWORK_SERVICE_IN_PROCESS)
