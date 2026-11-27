@@ -7,7 +7,7 @@ import type { RunStore } from './RunStore'
 import type { InboxRecord } from './types'
 
 /**
- * Questions an agent asked without waiting (`ask_user` with `wait: false`). The agent keeps working while the question
+ * Questions an agent asked without waiting (`question_ask` with `wait: false`). The agent keeps working while the question
  * is open; the answer reaches it later through the thread's inbox: a steer into the turn that is running, or a turn of
  * its own when none is. A question is a row in the Run Engine database, so it stays answerable after a restart, and the
  * answer and its inbox row are written in one transaction, so an answer is never lost between the two.

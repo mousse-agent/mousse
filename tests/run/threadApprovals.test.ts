@@ -258,7 +258,7 @@ describe('saved approval requests: the store and the question service', () => {
       expect(f.store.listEvents('t').filter((event) => event.type === 'approval.cancelled').map((event) => (event.payload as { reason: string }).reason)).toEqual(['withdrawn', 'stopped'])
     })
 
-    it('a run that ends closes its request and the thread leaves awaiting input; an in-memory ask_user still waits', async () => {
+    it('a run that ends closes its request and the thread leaves awaiting input; an in-memory question_ask still waits', async () => {
       const f = fixture()
       const run = await running(f.engine, 't', 'req-1')
       const request = ask(f, 't')

@@ -27,7 +27,7 @@ const command: NormalisedCall = { kind: 'builtin', tool: 'shell', nativeName: 'b
 const app = (tool: string): NormalisedCall => ({ kind: 'app', tool, args: {} })
 
 /** What only the bot and its work may have: a subagent never holds one of these, whatever the grant says. */
-const NEVER_A_SUBAGENTS = [...BOT_OWN_APP_TOOLS, ...BOT_WORK_TOOLS, ...BOT_MEMORY_TOOLS, ...BOT_SUBAGENT_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, BOT_IMAGE_TOOL, 'consult', 'escalate', 'mcp_servers', 'delegate_task', 'ask_owner', 'question_answer', 'show_card']
+const NEVER_A_SUBAGENTS = [...BOT_OWN_APP_TOOLS, ...BOT_WORK_TOOLS, ...BOT_MEMORY_TOOLS, ...BOT_SUBAGENT_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, BOT_IMAGE_TOOL, 'consult', 'permission_ask', 'mcp_servers', 'delegate_task', 'question_ask', 'question_answer', 'show_card']
 
 describe('a subagent is compiled from its work\'s grant, and holds no more', () => {
   let base: string
@@ -160,7 +160,7 @@ describe('a bot\'s work and its subagents', () => {
     expect(line.subagents).toEqual([{ title: 'Prices', model: 'Some Model on OpenRouter' }, { title: 'Reviews', model: 'Cheap Model on Cheap Router, low reasoning' }])
     // A subagent's system text says what it is, and offers nothing to ask for.
     expect(reviews.prepared.instructions).toContain('You are a subagent of this bot\'s work')
-    expect(reviews.prepared.instructions).not.toMatch(/escalate|work_start|subagent_start/)
+    expect(reviews.prepared.instructions).not.toMatch(/permission_ask|work_start|subagent_start/)
     await finish(f, reviews.payload, 'completed', { text: 'Reviews are mixed.' })
     expect(await subagents.wait({ subagent: 'Reviews' })).toMatchObject({ subagents: [{ subagent: 'Reviews', state: 'done', result: 'Reviews are mixed.' }] })
     expect(f.bots.service.get(botId).summary.work!.find((item) => item.id === job.id)!.subagents).toEqual([{ title: 'Prices', model: 'Some Model on OpenRouter' }])
@@ -175,7 +175,7 @@ describe('a bot\'s work and its subagents', () => {
     const child = await startSubagent(f, subagentNs(plain.id)[0])
     expect(child.prepared.authority.check(command)).toMatchObject({ ok: false, refused: { askId: '' } })
     // The work's own tools, asks, threads and nesting are not its: refused, with no card.
-    for (const tool of ['work_start', 'bot_schedule_add', 'remind', 'memory_save', 'set_profile', 'use_model', 'subagent_start', 'thread_list', 'escalate', 'consult'])
+    for (const tool of ['work_start', 'bot_schedule_add', 'remind', 'memory_save', 'set_profile', 'use_model', 'subagent_start', 'thread_list', 'permission_ask', 'consult'])
       expect(child.prepared.authority.check(app(tool)), tool).toMatchObject({ ok: false })
     expect(child.prepared.authority.escalate).toBeUndefined()
     expect(child.prepared.authority.consult).toBeUndefined()

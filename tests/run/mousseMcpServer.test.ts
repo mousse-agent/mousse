@@ -76,9 +76,9 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     const list = await rpc(server.url, attachment.token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} })
     const names = list.body.result.tools.map((tool: { name: string }) => tool.name).sort()
     // The fake host offers no browser, skills, quick actions, web or dev GUI: only the tools it can serve are listed.
-    expect(names).toEqual(['answer_subagent', 'approval_respond', 'ask_user', 'computer_list', 'continue_subagent', 'delegate_task', 'list_subagents', 'model_list', 'publish_applet', 'queue_edit', 'queue_enqueue', 'queue_list',
+    expect(names).toEqual(['answer_subagent', 'approval_respond', 'computer_list', 'continue_subagent', 'delegate_task', 'list_subagents', 'model_list', 'publish_applet', 'question_ask', 'question_withdraw', 'queue_edit', 'queue_enqueue', 'queue_list',
       'queue_promote_to_steer', 'queue_remove', 'queue_reorder', 'read_applet', 'task_cancel', 'task_create', 'task_list', 'task_status', 'task_update', 'thread_archive', 'thread_create', 'thread_fork',
-      'thread_interrupt', 'thread_list', 'thread_merge_back', 'thread_read', 'thread_search', 'thread_send', 'thread_steer', 'thread_update', 'thread_wait', 'withdraw_question'])
+      'thread_interrupt', 'thread_list', 'thread_merge_back', 'thread_read', 'thread_search', 'thread_send', 'thread_steer', 'thread_update', 'thread_wait'])
 
     const read = await rpc(server.url, attachment.token, call(4, 'thread_read'))
     expect(read.body.result.isError).toBeUndefined()
@@ -141,7 +141,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
         expect(JSON.parse(read.body.result.content[0].text).threadId).toBe('thread-a')
         expect(read.body.result.content).toHaveLength(1)
         // Asking the person is the run's own: refused to a helper as to a subagent.
-        const ask = await rpc(server.url, attachment.token, withMeta(id + 10, 'ask_user', { 'claudecode/toolUseId': toolUseId }, { questions: [{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], wait: false }))
+        const ask = await rpc(server.url, attachment.token, withMeta(id + 10, 'question_ask', { 'claudecode/toolUseId': toolUseId }, { questions: [{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], wait: false }))
         expect(refusalOfResponse(ask.body)).toMatchObject({ refused: { code: 'unavailable', message: expect.stringContaining('a helper cannot use it') } })
       }
       expect(boundary.deliver).not.toHaveBeenCalled()
@@ -165,7 +165,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     it('an attribution that fails holds delegable authority only', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
       const { server, attachment } = await setup({}, { attribute: async () => { throw new Error('lost') } })
-      const ask = await rpc(server.url, attachment.token, call(1, 'ask_user', { questions: [{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], wait: false }))
+      const ask = await rpc(server.url, attachment.token, call(1, 'question_ask', { questions: [{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], wait: false }))
       expect(refusalOfResponse(ask.body)).toMatchObject({ refused: { code: 'unavailable', message: expect.stringContaining('a helper cannot use it') } })
       warn.mockRestore()
     })

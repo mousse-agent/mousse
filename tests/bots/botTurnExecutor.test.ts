@@ -229,7 +229,7 @@ describe('bot turn setup', () => {
       completeAppTurn(turn: unknown, input: Record<string, unknown>): Promise<{ bot?: unknown; instructions(mcp: boolean): { sessionInstructions: string; turnPreamble: string } }>
       appToolTurns: { get(runId: string): { approvals?: string } | undefined }
     }
-    const authority = { skills: new Set<string>(), appTools: new Set(['escalate', 'memory_save']), time: { signal: new AbortController().signal } }
+    const authority = { skills: new Set<string>(), appTools: new Set(['permission_ask', 'memory_save']), time: { signal: new AbortController().signal } }
     const registered = internals.registerAppTurn(internals.getOrCreateSession('bot-thread'), 'run-bot', 'agent', false, { authority, skills: [] })
     const app = await internals.completeAppTurn(registered.turn, { promptRuntime: false, userContent: 'go', instanceId: 'pi:x', model: 'm', approvals: 'never', botInstructions: 'You are ZEBRA-REVIEWER.' })
     expect(app.bot).toBe(authority)

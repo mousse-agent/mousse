@@ -5,7 +5,7 @@ import type { AppToolHost } from './host'
 import { disabledInSettings, plainSchema, truncateForDisplay, type MousseTool } from './types'
 
 /**
- * The approval an agent-created quick action needs: the same user-question flow as `ask_user`, so
+ * The approval an agent-created quick action needs: the same user-question flow as `question_ask`, so
  * it renders in the existing question UI (modal and inline question card).
  */
 export function questionApproval(questions: Pick<UserQuestionService, 'requestAnswers'>) {

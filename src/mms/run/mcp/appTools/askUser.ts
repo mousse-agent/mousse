@@ -19,13 +19,13 @@ import { ownList } from '../../../orchestrator/questionAttachments'
 type Question = { id: string; prompt: string; options: Array<{ id: string; label: string }>; allowMultiple?: boolean }
 
 const ASK_USER_DEFINITION: Tool = {
-  name: 'ask_user',
+  name: 'question_ask',
   description: 'Ask the user one or more clarifying questions. Use when requirements are ambiguous.\n' +
     'Wait (the default) when nothing useful can happen without the answer: the call returns the answers.\n' +
     'Set wait to false when you can carry on with other parts of the job meanwhile: the call returns the question\'s id at once and you keep working. ' +
     'The answer arrives later as a message that names that id: in this turn if it is still running, otherwise as a new turn. ' +
     'Don\'t do the part that needs the answer, and don\'t ask the same thing again, until it comes. ' +
-    'Several questions can be open at once. If you no longer need one, withdraw it with withdraw_question.',
+    'Several questions can be open at once. If you no longer need one, withdraw it with question_withdraw.',
   parameters: Type.Object({
     questions: Type.Array(
       Type.Object({
@@ -41,10 +41,10 @@ const ASK_USER_DEFINITION: Tool = {
 }
 
 const WITHDRAW_QUESTION_DEFINITION: Tool = {
-  name: 'withdraw_question',
-  description: 'Withdraw a question you asked with ask_user and wait false, when you no longer need its answer (you found it out, or the plan changed). Its card goes away.',
+  name: 'question_withdraw',
+  description: 'Withdraw a question you asked with question_ask and wait false, when you no longer need its answer (you found it out, or the plan changed). Its card goes away.',
   parameters: Type.Object({
-    questionId: Type.String({ description: 'The id ask_user returned for the question.' })
+    questionId: Type.String({ description: 'The id question_ask returned for the question.' })
   })
 }
 
@@ -53,12 +53,12 @@ function openQuestionText(questionId: string): string {
   return JSON.stringify({
     questionId,
     status: 'open',
-    note: 'The question is shown to the user. Keep working on what does not need the answer. The answer arrives as a message naming this questionId. Withdraw it with withdraw_question if you no longer need it.'
+    note: 'The question is shown to the user. Keep working on what does not need the answer. The answer arrives as a message naming this questionId. Withdraw it with question_withdraw if you no longer need it.'
   }, null, 2)
 }
 
 /**
- * `ask_user` is offered in Plan mode and in Agent mode alike. Subagents and Build/Skill modes go without it so
+ * `question_ask` is offered in Plan mode and in Agent mode alike. Subagents and Build/Skill modes go without it so
  * workers implement instead of stopping to ask.
  */
 function offeredInMode(turn: AppToolTurn): boolean {
@@ -88,9 +88,9 @@ export function parseQuestions(raw: unknown): Question[] {
 }
 
 /**
- * `ask_user`: the thread's question card, answered by the user. With `wait: false` the agent does not wait: the question
+ * `question_ask`: the thread's question card, answered by the user. With `wait: false` the agent does not wait: the question
  * is saved and shown, its id comes back at once, and the answer reaches the thread later through its inbox.
- * `withdraw_question` takes such a question back.
+ * `question_withdraw` takes such a question back.
  */
 export function askUserTools(host: AppToolHost): MousseTool[] {
   const ask = async (args: Record<string, unknown>, threadId: string | undefined, ctx: ToolCallContext): Promise<ToolOutcome> => {
@@ -123,9 +123,9 @@ export function askUserTools(host: AppToolHost): MousseTool[] {
     if (ctx.transport === 'mcp') return ask(args, threadId, ctx)
     const callEvent: LlmToolEvent = {
       kind: 'build_tool_call',
-      title: 'Question tool ask_user',
+      title: 'Question tool question_ask',
       summary: 'The assistant asked the user a question.',
-      details: ['Tool: ask_user'],
+      details: ['Tool: question_ask'],
       response: JSON.stringify(args, null, 2)
     }
     ctx.timeline?.record(callEvent, 'start')
@@ -133,9 +133,9 @@ export function askUserTools(host: AppToolHost): MousseTool[] {
     const result = await abortRace(ask(args, threadId, ctx), ctx.signal, () => { if (threadId) host.dismissQuestions?.(threadId) })
     ctx.timeline?.record({
       kind: 'build_tool_result',
-      title: 'Question tool ask_user',
+      title: 'Question tool question_ask',
       summary: result.isError ? 'The question tool returned an error.' : 'The question tool returned successfully.',
-      details: ['Tool: ask_user'],
+      details: ['Tool: question_ask'],
       response: truncateForDisplay(result.text)
     }, 'complete')
     return result
@@ -143,14 +143,14 @@ export function askUserTools(host: AppToolHost): MousseTool[] {
   const withdraw = (args: Record<string, unknown>, ctx: ToolCallContext): ToolOutcome => {
     const threadId = ctx.transport === 'mcp' ? ctx.caller.threadId : ctx.turn.threadId || undefined
     const questionId = String(args.questionId ?? '').trim()
-    if (!questionId) return { text: 'withdraw_question needs the questionId ask_user returned.', isError: true }
+    if (!questionId) return { text: 'question_withdraw needs the questionId question_ask returned.', isError: true }
     if (!threadId || !host.withdrawQuestion) return { text: 'Cannot withdraw a question without an active thread.', isError: true }
     return host.withdrawQuestion(threadId, questionId)
       ? { text: `Question ${questionId} is withdrawn.`, isError: false }
       : { text: `Question ${questionId} is not open in this thread: it was already answered, dismissed, withdrawn or closed. If an answer came, it is in a message naming this id.`, isError: true }
   }
   return [{
-    name: 'ask_user',
+    name: 'question_ask',
     description: `${ASK_USER_DEFINITION.description} A call that waits returns when the user answers (at most one hour) or your run ends.`,
     inputSchema: plainSchema(ASK_USER_DEFINITION),
     definition: () => ASK_USER_DEFINITION,
@@ -158,22 +158,22 @@ export function askUserTools(host: AppToolHost): MousseTool[] {
     class: 'read',
     readOnlySafe: true,
     asksUser: 'question',
-    available: (turn) => (turn.settingsEnabled('ask_user') ? true : disabledInSettings('ask_user')),
-    offered: (turn) => offeredInMode(turn) && turn.settingsEnabled('ask_user'),
-    describe: () => 'Question tool ask_user',
+    available: (turn) => (turn.settingsEnabled('question_ask') ? true : disabledInSettings('question_ask')),
+    offered: (turn) => offeredInMode(turn) && turn.settingsEnabled('question_ask'),
+    describe: () => 'Question tool question_ask',
     handler: (args, ctx) => run(args, ctx)
   }, {
-    name: 'withdraw_question',
+    name: 'question_withdraw',
     description: WITHDRAW_QUESTION_DEFINITION.description,
     inputSchema: plainSchema(WITHDRAW_QUESTION_DEFINITION),
     definition: () => WITHDRAW_QUESTION_DEFINITION,
     access: 'actsAsCaller',
     class: 'read',
     readOnlySafe: true,
-    // Offered with `ask_user`, and only where a question can be asked without waiting.
-    available: (turn) => (turn.settingsEnabled('ask_user') ? true : disabledInSettings('ask_user')),
-    offered: (turn) => offeredInMode(turn) && turn.settingsEnabled('ask_user') && host.withdrawQuestion !== undefined,
-    describe: () => 'Question tool withdraw_question',
+    // Offered with `question_ask`, and only where a question can be asked without waiting.
+    available: (turn) => (turn.settingsEnabled('question_ask') ? true : disabledInSettings('question_ask')),
+    offered: (turn) => offeredInMode(turn) && turn.settingsEnabled('question_ask') && host.withdrawQuestion !== undefined,
+    describe: () => 'Question tool question_withdraw',
     handler: async (args, ctx) => withdraw(args, ctx)
   }]
 }

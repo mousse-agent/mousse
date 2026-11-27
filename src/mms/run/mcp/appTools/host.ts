@@ -272,7 +272,7 @@ export interface ApprovalRequestInfo {
   /** The thread that asked. */
   threadId: string
   status: 'pending' | 'answered' | 'cancelled'
-  /** A saved approval (a command, a file change, a tool), whose answers the rule `canAnswerApproval` governs; false for a plain question for the user (`ask_user`). */
+  /** A saved approval (a command, a file change, a tool), whose answers the rule `canAnswerApproval` governs; false for a plain question for the user (`question_ask`). */
   approval: boolean
   questions: UserQuestion[]
 }
@@ -362,14 +362,14 @@ export interface AppToolHost extends DelegationToolsHost {
     questions: PendingUserQuestions['questions'],
     options: { signal?: AbortSignal; timeoutMs?: number; onAttachments?: (attachments: UserQuestionAttachments) => void }
   ): Promise<UserQuestionAnswers>
-  /** Dismisses the thread's open questions (an in-process `ask_user` whose turn stopped). */
+  /** Dismisses the thread's open questions (an in-process `question_ask` whose turn stopped). */
   dismissQuestions?(threadId: string): void
   /**
-   * `ask_user` with `wait: false`: the question is saved and shown, and its id comes back at once. The answer reaches the
+   * `question_ask` with `wait: false`: the question is saved and shown, and its id comes back at once. The answer reaches the
    * thread later, through its inbox. Absent: questions always wait.
    */
   askWithoutWaiting?(threadId: string, questions: PendingUserQuestions['questions'], runId: string | null): string
-  /** `withdraw_question`: the thread's agent no longer needs its open question. False when it was not open there. */
+  /** `question_withdraw`: the thread's agent no longer needs its open question. False when it was not open there. */
   withdrawQuestion?(threadId: string, requestId: string): boolean
   /** Secret requests and commands that use them (`secret_request`, `secret_run`); absent: those tools refuse. */
   secrets?(): SecretToolHost | undefined

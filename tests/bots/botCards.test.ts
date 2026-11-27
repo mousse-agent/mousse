@@ -168,7 +168,7 @@ describe('a card on a message', () => {
 
   it('a question\'s card shows on its bubble, its plain copy before the answers', async () => {
     const turn = await chatTurn('Which should I buy?', 'q')
-    const answer = await tool('ask_owner', turn.prepared, turn.payload.threadId, { question: 'Which one?', choices: ['Q7', 'S8'], card: SPECS })
+    const answer = await tool('question_ask', turn.prepared, turn.payload.threadId, { question: 'Which one?', choices: ['Q7', 'S8'], card: SPECS })
     expect(JSON.parse(answer.text)).toEqual({ asked: true, questionId: expect.stringMatching(/^q_/), note: QUESTION_ASKED_TEXT })
     await finish(f, turn.payload, 'completed', { text: '' })
     const bubble = chatOf(f, botId).find((message) => message.question)!

@@ -1857,7 +1857,7 @@ export class AcpSessions {
       clearTimeout(silenceTimer)
       silenceTimer = undefined
       if (!prompting || !(silenceMs > 0) || (current.openRequests ?? 0) > 0) return
-      // Mousse's own tools (`ask_user`, approvals) ask the user through the thread's
+      // Mousse's own tools (`question_ask`, approvals) ask the user through the thread's
       // questions, not through the ACP connection, and may wait up to an hour: the agent is not
       // silent while one is open. The clock starts over (a full window) once the last one is answered.
       if (questions.listPendingForThread(input.threadId).length > 0) {

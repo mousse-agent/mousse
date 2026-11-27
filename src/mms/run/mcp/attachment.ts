@@ -16,7 +16,7 @@ import {
 export { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../shared/harness/mcpNames'
 /** Environment variable that carries the bearer token to the stdio bridge (never argv). */
 export const MOUSSE_MCP_TOKEN_ENV = 'MOUSSE_MCP_TOKEN'
-/** Per-call timeout runtimes should allow: `ask_user` may wait up to an hour. */
+/** Per-call timeout runtimes should allow: `question_ask` may wait up to an hour. */
 export const MOUSSE_MCP_TOOL_TIMEOUT_MS = 60 * 60 * 1000
 /** Per-call timeout of a relayed tool: under the stdio bridge's 300 s fetch ceiling. */
 export const RELAY_CALL_TIMEOUT_MS = 4 * 60_000
@@ -158,7 +158,7 @@ export { ANTIGRAVITY_MOUSSE_TOOL_PREFIX, ANTIGRAVITY_RELAY_TOOL_PREFIX, CLAUDE_M
 
 /**
  * While the thread has a question pending, whether a call named `toolName` may be the one asking it: a relayed tool
- * (its approval), or a Mousse tool that asks the person (`asksUser`: `ask_user`, a quick action's approval) or asks
+ * (its approval), or a Mousse tool that asks the person (`asksUser`: `question_ask`, a quick action's approval) or asks
  * before it edits (`editsWorkspace`, `changesSettings`), by its exact name in `lookup`. A tool `lookup` does not know counts only in the
  * exact MCP form (`mcp__mousse__<tool>`, a Mousse tool newer than the registry); in a looser form, or as a bare name,
  * an unknown tool is no Mousse call, and it runs as any call does.
@@ -189,7 +189,7 @@ export function isMousseServerTool(toolName: string): boolean {
  * the listed `reads` and `readsOthers` tools and the `readOnlySafe` ones of the app-tool registry (a test keeps them equal).
  * Runtimes that decide per tool name use it; the server refuses the rest in any case.
  */
-export const READ_ONLY_MOUSSE_TOOLS: ReadonlySet<string> = new Set(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'ask_user', 'withdraw_question', 'delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'message_parent', 'computer_list', 'model_list', 'skill_list', 'skill_load', 'web_search', 'web_fetch', 'git_status', 'git_diff', 'theme_read', 'terminal_read', 'read_applet', 'running_list', 'tool_catalogue', ...PROFILER_TOOL_NAMES])
+export const READ_ONLY_MOUSSE_TOOLS: ReadonlySet<string> = new Set(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'question_ask', 'question_withdraw', 'delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'message_parent', 'computer_list', 'model_list', 'skill_list', 'skill_load', 'web_search', 'web_fetch', 'git_status', 'git_diff', 'theme_read', 'terminal_read', 'read_applet', 'running_list', 'tool_catalogue', ...PROFILER_TOOL_NAMES])
 
 export type AcpMcpServer =
   | { name: string; type: 'http'; url: string; headers: Array<{ name: string; value: string }> }

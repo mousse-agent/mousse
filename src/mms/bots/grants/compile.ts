@@ -97,7 +97,7 @@ export interface CompileInput {
    */
   allSkills?: boolean
   /**
-   * The bot tools the thread gets beside its grant (6c-2): `escalate` on every bot thread, and
+   * The bot tools the thread gets beside its grant (6c-2): `permission_ask` on every bot thread, and
    * `consult` on the activation thread of a bot with context threads. `memory`: the five
    * `memory_*` tools (Bot Phase 1 §5.10) and the listing of the owner's MCP servers (`mcp_servers`), always on and
    * never grantable, so a bot whose stored grant predates them has them too. `frontDesk`: a chat turn
@@ -169,7 +169,7 @@ export interface CompileInput {
      */
     subagent?: true
     /**
-     * `ask_owner` (`BOT_QUESTION_TOOL`) and `question_withdraw`: questions with answers to tap; they grant nothing. Every chat turn, work and a
+     * `question_ask` (`BOT_QUESTION_TOOL`) and `question_withdraw`: questions with answers to tap; they grant nothing. Every chat turn, work and a
      * scheduled run (`BOT_TURN_KINDS`); a front desk (a chat turn) also gets `question_answer`, to pass on to work an
      * answer given in the chat.
      */
@@ -284,7 +284,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(quickActions ? BOT_QUICK_ACTION_TOOLS : []),
     ...(shared?.tasks ? BOT_TASK_TOOLS : []),
     ...(skills.length || allSkills ? ['skill_list', 'skill_load'] : []),
-    ...(own?.escalate ? ['escalate'] : []),
+    ...(own?.escalate ? ['permission_ask'] : []),
     ...(own?.consult ? ['consult'] : []),
     ...(own?.workWaiting ? ['work_wait'] : []),
     ...(own?.scheduled ? ['schedule_done'] : []),

@@ -75,7 +75,7 @@ const RUN_DEFINITION: Tool = {
   })
 }
 
-/** Offered where `ask_user` is: the thread's own agent in Agent and Plan mode, never a subagent. */
+/** Offered where `question_ask` is: the thread's own agent in Agent and Plan mode, never a subagent. */
 function requestOffered(turn: AppToolTurn): boolean {
   return turn.modeFacts.readOnly || (!turn.subagent && turn.modeFacts.agent)
 }

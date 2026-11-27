@@ -74,7 +74,7 @@ function createServices(profileId: string, profileRoot: string, integration?: St
             hash: 'mcphash1'
           }
         ],
-        builtinToolIds: ['read', 'grep', 'ask_user']
+        builtinToolIds: ['read', 'grep', 'question_ask']
       })
   })
   return { registry, resolver }
@@ -443,7 +443,7 @@ describe('integrations and grants', () => {
         { id: 'search', available: true, hash: 'h-search' }
       ],
       mcpTools: [{ serverId: 'docs', toolName: 'lookup', available: true, hash: 'h-mcp' }],
-      builtinToolIds: ['read', 'grep', 'ask_user']
+      builtinToolIds: ['read', 'grep', 'question_ask']
     })
     const inherited = resolveEffectiveGrants(nativeSettings('g'), lookup)
     expect(inherited.skills.map((item) => item.id).sort()).toEqual(['review', 'search'])

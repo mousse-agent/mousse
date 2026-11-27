@@ -37,7 +37,7 @@ describe('app tools under a bot’s authority (MCP)', () => {
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, bot: bot(['task_create']) }))
     const ctx = () => request({ threadId: 'thread-a', runId: run.runId })
-    expect(await registry.call('ask_user', { questions: [] }, ctx())).toEqual(refused('not_granted', 'This bot is not allowed to use ask_user.'))
+    expect(await registry.call('question_ask', { questions: [] }, ctx())).toEqual(refused('not_granted', 'This bot is not allowed to use question_ask.'))
     expect(fake.host.askUser).not.toHaveBeenCalled()
     expect((await registry.call('task_create', { description: 'fine' }, ctx())).isError).toBe(false)
   })
@@ -50,7 +50,7 @@ describe('app tools under a bot’s authority (MCP)', () => {
     const callRuns = vi.fn()
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, bot: { ...bot(['task_create']), callRuns } }))
     const ctx = () => request({ threadId: 'thread-a', runId: run.runId })
-    await registry.call('ask_user', { questions: [] }, ctx())
+    await registry.call('question_ask', { questions: [] }, ctx())
     expect(callRuns).not.toHaveBeenCalled()
     // The same call twice is two calls.
     expect((await registry.call('task_create', { description: 'fine' }, ctx())).isError).toBe(false)

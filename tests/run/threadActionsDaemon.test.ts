@@ -1084,7 +1084,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       const seen: Record<string, unknown> = {}
       const w = world(async (input, mcp) => {
         if (isChild(w, input.threadId)) {
-          const answer = JSON.parse((await call(mcp!, 'ask_user', { questions: [{ id: 'which', prompt: 'A or B?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] })).result!.content![0].text) as Record<string, unknown>
+          const answer = JSON.parse((await call(mcp!, 'question_ask', { questions: [{ id: 'which', prompt: 'A or B?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] })).result!.content![0].text) as Record<string, unknown>
           return `picked ${String(answer.which)}`
         }
         const child = parse(await call(mcp!, 'delegate_task', { prompt: 'Pick one', title: 'Asker', workspace: 'shared', role: 'research', instanceId: 'claude' })) as { childRunId: string; childThreadId: string }

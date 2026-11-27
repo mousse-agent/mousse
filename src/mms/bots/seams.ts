@@ -129,7 +129,7 @@ export interface BotToolHost {
   /** `mcp_servers`: the owner's MCP servers the bot may ask for, and whether it holds their tools. Absent: none here. */
   mcpServers?(botId: string, lane: BotLane): Promise<BotMcpListing>
   /**
-   * `ask_owner` (issue #1123): a question to the owner with answers to tap, shown under a chat turn's reply, or at once
+   * `question_ask` (issue #1123): a question to the owner with answers to tap, shown under a chat turn's reply, or at once
    * from work, which then waits for the answers. `asked` is false, with why, when it was not kept (a repeat, a permission
    * asked first, a turn never offered it). Absent: no questions here.
    */

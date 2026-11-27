@@ -323,7 +323,7 @@ describe("the hold: a person's steer cuts in at once; an agent's steer waits for
     }
   }
 
-  it.each([['an agent\'s, held for a command before', true], ['a person\'s, sent while it asks', false]] as const)('Mousse\'s ask_user over MCP does not hold a steer (%s): it cancels the run and answers the question', async (_name, heldBefore) => {
+  it.each([['an agent\'s, held for a command before', true], ['a person\'s, sent while it asks', false]] as const)('Mousse\'s question_ask over MCP does not hold a steer (%s): it cancels the run and answers the question', async (_name, heldBefore) => {
     const c = held()
     const handle = await c.turn()
     await c.running(1)
@@ -333,7 +333,7 @@ describe("the hold: a person's steer cuts in at once; an agent's steer waits for
       await vi.waitFor(() => expect(c.hold.held()).toBe(true))
       c.toolDone('run-1', 'call-1')
     }
-    c.mcpStart('run-1', 'ask-1', 'ask_user')
+    c.mcpStart('run-1', 'ask-1', 'question_ask')
     await vi.waitFor(() => expect(c.events()).toContain('tool:start:ask-1'))
     const answer = c.questions.requestAnswers([{ id: 'q', prompt: 'Which package manager?', options: [{ id: 'npm', label: 'npm' }, { id: 'skip', label: 'Skip' }] }], 'thread')
     answer.catch(() => undefined)

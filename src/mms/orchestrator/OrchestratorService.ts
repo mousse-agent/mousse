@@ -1916,7 +1916,7 @@ export class OrchestratorService extends EventEmitter {
         }
       }
       if (signal.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
-      // The granted app tools (the browser, `ask_user`, …) reach the runtime only over the Mousse MCP
+      // The granted app tools (the browser, `question_ask`, …) reach the runtime only over the Mousse MCP
       // server: without its bearer the turn is refused, never run without them.
       const allowed = new Set(tools?.allow ?? [])
       const requiredTools = this.mcpToolRegistry().listForTurn(threadId, runId)
@@ -3797,7 +3797,7 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * A subagent's question reaches its parent (issue #142). Every question the daemon asks on a
-   * subagent's thread (the model's own `ask_user`, a plan question, a provider's approval such as
+   * subagent's thread (the model's own `question_ask`, a plan question, a provider's approval such as
    * Codex's command approval; they all go through `UserQuestionService`) writes a `child_question`
    * row (a `reconcile_notice`) into the parent's inbox, and rule 4 wakes or steers the parent with
    * it: it answers with `answer_subagent` or asks the user. The user still sees the question under
@@ -5154,7 +5154,7 @@ export class OrchestratorService extends EventEmitter {
       personHeld: (caller) => this.runHoldsPerson(caller),
       parentThread: (threadId) => this.subagentParentOf(threadId),
       reportLacks: (report) => this.reportSubagentLacks(report),
-      // Only a bot's threads list the bot tools (`escalate`; `consult` on its activation thread).
+      // Only a bot's threads list the bot tools (`permission_ask`; `consult` on its activation thread).
       botRole: (threadId) => this.botThreads?.roleOf(threadId),
       botHomeOf: (threadId) => this.botThreads?.homeOf?.(threadId),
       awaitLiveRun: (threadId) => this.continuationGate(threadId),
@@ -14323,7 +14323,7 @@ export class OrchestratorService extends EventEmitter {
    * Cross-process: if a live peer holds the execution lease, atomically enqueue into the
    * durable MMS queue rather than starting a second turn.
    *
-   * A turn blocked on ask_user / plan ask / quick-action approval never strands a
+   * A turn blocked on question_ask / plan ask / quick-action approval never strands a
    * fresh message behind the unanswered prompt: the pending question is
    * default-rejected, the blocked turn is stopped, and the new message runs as
    * a fresh turn instead of queueing. The fresh message is always delivered as
@@ -16316,7 +16316,7 @@ export class OrchestratorService extends EventEmitter {
       const hold = new SteerHold({
         caps: opts?.externalDrainSteer && !opts.externalPeekSteer ? { ...instance.caps, steerBoundary: 'none' } : instance.caps,
         strict: release.strict,
-        // A question Mousse itself asks (`ask_user`, an approval) is answered by the steer, as a provider's is: while one
+        // A question Mousse itself asks (`question_ask`, an approval) is answered by the steer, as a provider's is: while one
         // waits, Mousse's own calls that ask the person do not hold.
         foreground: (waiting) => assembler.foregroundTools(waiting, this.mousseCallsAskingPerson(session.threadId)),
         // Such a question, asked by one of the turn's own calls, means the turn waits for a person, as a provider's own
@@ -17379,7 +17379,7 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * While the thread has a question pending, which of the turn's calls may be the one asking it: Mousse's own tools
-   * that ask the person (`asksUser`: `ask_user`, a quick action's approval), the ones that ask before they edit
+   * that ask the person (`asksUser`: `question_ask`, a quick action's approval), the ones that ask before they edit
    * (`editsWorkspace`), and the relay's (its approvals). A Mousse tool the registry does not know counts too. Such a
    * call does not hold a steer, which answers the question, as it answers one the provider asks. Undefined while no
    * question waits: every call holds as usual.

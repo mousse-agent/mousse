@@ -291,7 +291,7 @@ describe('a person\'s steer on Claude Code goes in now', () => {
   })
 
   it.each([
-    ['ask_user', 'mcp__mousse__ask_user', { questions: [{ question: 'Which?' }] }],
+    ['question_ask', 'mcp__mousse__ask_user', { questions: [{ question: 'Which?' }] }],
     ['an approval of a relayed tool', 'mcp__mousse-relay__github__create_issue', { title: 'x' }]
   ] as const)('a question Mousse asks for %s does not hold the steer: the steer answers it', async (_name, toolName, input) => {
     const w = await running()

@@ -1,6 +1,6 @@
 /**
  * Images sent with an answer to an agent's question, over the protocol a window uses: the agent's question tool gets
- * each question's answer with the saved image files named in it, `ask_user` also gets the images themselves, and the
+ * each question's answer with the saved image files named in it, `question_ask` also gets the images themselves, and the
  * transcript keeps every image under the answer it came with.
  */
 
@@ -122,7 +122,7 @@ describe('answering an agent question with images', () => {
     expect(message.questionAnswers![1]).toEqual({ prompt: which.prompt, chosen: ['Home'] })
   })
 
-  it('a caller that can carry images (ask_user) is given them by question, besides the saved paths', async () => {
+  it('a caller that can carry images (question_ask) is given them by question, besides the saved paths', async () => {
     const told: UserQuestionAttachments[] = []
     const { answered, requestId } = await ask([which], (attachments) => told.push(attachments))
     const c = await client()
@@ -192,7 +192,7 @@ describe('answering an agent question with images', () => {
   })
 })
 
-describe('ask_user', () => {
+describe('question_ask', () => {
   it('returns the images sent with the answers as images, beside the answers that name their files', async () => {
     const host = {
       askUser: async (_threadId: string, _questions: UserQuestion[], options: { onAttachments?: (attachments: UserQuestionAttachments) => void }) => {
