@@ -8534,6 +8534,7 @@ export class OrchestratorService extends EventEmitter {
       // The time of the last message it follows, so the turn it closes keeps the time it took.
       timestamp: inherited.at(-1)?.timestamp ?? new Date().toISOString()
     }
+    const starter = creation.startedBy && !sideChat ? { ...creation.startedBy, bot: this.forkStarterBot(creation.startedBy.threadId) } : undefined
     const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined, {
       id: creation.threadId, modelOverride: override, permissionMode,
       forkMessages: [...inherited.map(({ modelSelection: _model, ...message }) => message), marker],
@@ -8543,10 +8544,27 @@ export class OrchestratorService extends EventEmitter {
         ownerThreadId: sourceThread.id,
         ...(sideFolder ? { workspaceBinding: { policy: 'shared' as const, sharedPath: sideFolder, access: 'write' as const } } : {})
       } : {}),
+      // An agent's or a bot's fork names its starter as a `thread_create` thread does, so it is listed where those are
+      // (the starter's Started threads, the bot's chat and Bot threads), never nested: it is not part of its source's work.
+      ...(starter ? {
+        createdByThreadId: starter.threadId,
+        ...(starter.bot ? { startedByBot: starter.bot } : {}),
+        ...(starter.hidden ? { hidden: true } : {})
+      } : {}),
       // A fork carries the conversation, so a private thread's fork is private too.
       localOnly: this.isLocalOnly(sourceThread.id)
     })
     return { threadId: fork.id }
+  }
+
+  /** The bot whose thread `threadId` is, by its name now, as `thread_create` records it (`Thread.startedByBot`). */
+  private forkStarterBot(threadId: string): { botId: string; name: string } | undefined {
+    try {
+      const bot = this.botThreads?.botOf?.(threadId)
+      return bot ? { botId: bot.botId, name: bot.name } : undefined
+    } catch {
+      return undefined
+    }
   }
 
   /**
