@@ -428,8 +428,8 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     const described = (threadId: string, name: string) => registry.listForThread(threadId, 'default', runId).find((tool) => tool.name === name)?.description ?? ''
     for (const name of ['thread_create', 'thread_send']) {
       expect(described('home', name)).toMatch(/no count per turn, per run or per day/)
-      expect(described('home', name)).not.toMatch(/agent messages in a row without a person/)
-      expect(described('mine', name)).toMatch(/agent messages in a row without a person/)
+      expect(described('home', name)).not.toMatch(/agent messages that follow(ed)? one person's message/)
+      expect(described('mine', name)).toMatch(/agent messages that follow(ed)? one person's message/)
     }
     expect(described('home', 'thread_create')).toMatch(/no limit on how many work at once/)
   })

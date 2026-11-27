@@ -1503,7 +1503,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     assertOwnSubagentsOnly(engine, ctx.caller, threadId, 'thread_send')
     assertTakesWork(host, threadId)
     const actor = actorOf(ctx)
-    const result = acceptedRunCommand(await host.steerRun!(threadId, runId, text, { clientRequestId: requestKey ?? `thread_send:note:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor }), runId)
+    // The key keeps the old `thread_steer` name: a steer retried across the rename finds its receipt and joins nothing twice.
+    const result = acceptedRunCommand(await host.steerRun!(threadId, runId, text, { clientRequestId: requestKey ?? `thread_steer:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor }), runId)
     // A run whose answer was already complete takes no steer: the text is its thread's next turn, and the row says so.
     const summary = result.followUp
       ? bot ? 'sent a message that runs next, as the turn had just finished' : `sent a message that runs after run ${runId}, which had just finished`
@@ -1548,6 +1549,18 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       : 'It joined the turn the thread is running, in that thread\'s own mode. Approvals and questions there wait for your owner, never for you.'
     return { outcome: json({ threadId, title: title ?? null, ...result, delivery: (result.followUp ? 'queued' : 'presented') satisfies SendDelivery, ...told, note }) }
   }
+  /** Refuses unless `runId` is the thread's active run with a live turn, with the conflicts a steer naming it met. */
+  const assertNamedRunActive = (threadId: string, runId: string): void => {
+    const run = engine.getRun(runId)
+    if (!run || run.threadId !== threadId) throw new McpToolError('mousse_conflict', `Run ${runId} is not a run of this thread.`, { conflict: 'run_not_found', expectedRunId: runId })
+    if (run.status === 'paused')
+      throw new McpToolError('mousse_conflict', `Run ${runId} is paused by a usage limit and has no live turn; nothing was sent. End it with thread_stop, or wait for it to resume.`, { conflict: 'run_paused', expectedRunId: runId, activeRunId: runId })
+    if (run.status === 'queued')
+      throw new McpToolError('mousse_conflict', `Run ${runId} has not started its turn yet, so there is nothing to steer. Steer it once it is running, or send a message instead.`, { conflict: 'steer_target_not_ready', expectedRunId: runId })
+    const active = engine.getActiveRun(threadId)
+    if (active?.runId !== runId)
+      throw new McpToolError('mousse_conflict', `Run ${runId} is not the thread's active run${active ? ` (${active.runId} is)` : ' (it has none)'}; nothing was sent. Read the thread again.`, { conflict: 'run_not_active', expectedRunId: runId, ...(active ? { activeRunId: active.runId } : {}), runStatus: run.status })
+  }
   /**
    * A note (`thread_send` with intent `note`, docs/plans/tool-api.md §2.2): information that grants nothing. To the
    * caller's family it is posted to the thread's inbox and delivered as any notice is: steered into a native run, handed
@@ -1588,6 +1601,15 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       const result = await steerAsAgent(threadId, joins, content, args, ctx)
       return json({ threadId, intent: 'note', delivery: (result.followUp ? 'queued' : 'presented') satisfies SendDelivery, ...result })
     }
+    // A steer an older build accepted for this request (its `thread_steer` key) joined its run already: a retry replays it.
+    const steered = engine.store.getReceipt(`thread_steer:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`)
+    if (steered?.commandKind === 'steer' && steered.status === 'accepted' && steered.threadId === threadId) {
+      const stored = (steered.result ?? {}) as { runId?: string; sequence?: number }
+      return json({ threadId, intent: 'note', delivery: 'presented' satisfies SendDelivery, runId: stored.runId ?? null, sequence: stored.sequence ?? 0, replayed: true })
+    }
+    // A note that names a run (the old thread_steer always did) is for that run: once it ended or another one started, it
+    // is refused as a steer was, never posted for a later turn to take.
+    if (runId !== undefined) assertNamedRunActive(threadId, runId)
     assertNotBotThread(host, threadId, 'thread_send')
     if (bot) {
       assertTakesWork(host, threadId)
@@ -2107,7 +2129,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           content: { type: 'string' },
           intent: { type: 'string', enum: ['work', 'note'], description: 'work (default): a new assignment, which starts a turn or queues behind the running one. note: information for the thread, delivered into its running turn.' },
           attention: { type: 'string', enum: ['needed', 'none'], description: 'Notes only. needed (default): an idle thread gets a turn for it. none: it waits for the thread\'s next turn.' },
-          runId: { type: 'string', description: 'Notes to a thread outside your family: the running run to join, as you last read it.' },
+          runId: { type: 'string', description: 'Notes: the running run to join, as you last read it; needed outside your family. A note that names a run is refused once that run is no longer the thread\'s active run.' },
           interrupt: { type: 'boolean', description: 'Notes to your own subagent only: restart its running reply now with the note, on a runtime that cannot inject it (Claude Code, Cursor, ACP).' },
           mode: { type: 'string', enum: ['agent', 'plan'], description: 'Work only. Defaults to agent.' },
           notify: NOTIFY_SCHEMA,

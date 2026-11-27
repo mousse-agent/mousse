@@ -116,8 +116,12 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
         clientRequestId: 'thread_send:caller:mcp:send-1',
         actor: { kind: 'agent', threadId: 'caller', runId: runs.caller, toolCallId: 'mcp:send-1' }
       })
+      // A note that joins a run keeps the key the old thread_steer used, so a steer retried across the rename, under
+      // either name, is the request it was and joins the run once.
       await call('thread_steer', { threadId: 'target', runId: runs.target, text: 'also this' }, { toolCallId: 'mcp:steer-1' })
-      expect(host.steerRun).toHaveBeenLastCalledWith('target', runs.target, 'also this', expect.objectContaining({ clientRequestId: 'thread_send:note:caller:mcp:steer-1' }))
+      expect(host.steerRun).toHaveBeenLastCalledWith('target', runs.target, 'also this', expect.objectContaining({ clientRequestId: 'thread_steer:caller:mcp:steer-1' }))
+      await call('thread_send', { threadId: 'target', runId: runs.target, content: 'also this', intent: 'note' }, { toolCallId: 'mcp:steer-1' })
+      expect(host.steerRun).toHaveBeenLastCalledWith('target', runs.target, 'also this', expect.objectContaining({ clientRequestId: 'thread_steer:caller:mcp:steer-1' }))
       await call('thread_interrupt', { threadId: 'target', runId: runs.target }, { toolCallId: 'mcp:stop-1' })
       expect(host.stopRun).toHaveBeenLastCalledWith('target', runs.target, expect.objectContaining({ clientRequestId: 'thread_interrupt:caller:mcp:stop-1' }))
     })
@@ -377,10 +381,51 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       }
       expect(host.stopRun).not.toHaveBeenCalled()
       expect(host.steerRun).not.toHaveBeenCalled()
-      // Its own subagent is the caller's to stop or steer.
+      // Its own subagent is the caller's to stop or steer, once its run has started.
+      fx.engine.markStarting(own.childRunId)
+      fx.engine.markRunning(own.childRunId)
       expect((await call('thread_interrupt', { threadId: own.childThreadId, runId: own.childRunId })).isError).toBeUndefined()
       expect((await call('thread_steer', { threadId: own.childThreadId, runId: own.childRunId, text: 'x' })).isError).toBeUndefined()
       expect(runs.caller).toBe(callerRun.runId)
+    })
+
+    it('a steer, or a note that names a run, to its own subagent is refused once that run is no longer active, and nothing is posted for a later turn', async () => {
+      const { call, denied, fx, threads, host, callerRun } = await world()
+      const own = await fx.delegate(callerRun.runId, 'call-own')
+      threads.set(own.childThreadId, thread(own.childThreadId))
+      // Not started yet: nothing to steer, as before.
+      expect(await denied(call('thread_steer', { threadId: own.childThreadId, runId: own.childRunId, text: 'x' }))).toMatchObject({ details: { conflict: 'steer_target_not_ready' } })
+      const pending = () => fx.engine.inbox.listPending(own.childThreadId).filter((row) => row.kind === 'agent_note')
+      const stale = () => [
+        call('thread_steer', { threadId: own.childThreadId, runId: own.childRunId, text: 'Also check the tests' }),
+        call('thread_send', { threadId: own.childThreadId, runId: own.childRunId, content: 'Also check the tests', intent: 'note' })
+      ]
+      // The run ended: the thread is idle, and a note would start a turn there.
+      fx.finish(own.childRunId)
+      for (const sent of stale()) expect(await denied(sent)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'run_not_active', expectedRunId: own.childRunId } })
+      // Another run started since: it is named, and it is not joined.
+      const later = await fx.runningRun(own.childThreadId)
+      for (const sent of stale()) expect(await denied(sent)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'run_not_active', expectedRunId: own.childRunId, activeRunId: later.runId } })
+      expect(pending()).toEqual([])
+      expect(host.steerRun).not.toHaveBeenCalled()
+      // The active run takes it.
+      expect((await call('thread_steer', { threadId: own.childThreadId, runId: later.runId, text: 'Also check the tests' })).isError).toBeUndefined()
+    })
+
+    it('a steer to its own subagent that an older build accepted is replayed on retry, under either name, and posts nothing', async () => {
+      const { call, result, fx, threads, host, callerRun } = await world()
+      const own = await fx.delegate(callerRun.runId, 'call-own')
+      threads.set(own.childThreadId, thread(own.childThreadId))
+      fx.finish(own.childRunId)
+      // What the old thread_steer left: a steer receipt under its own key.
+      fx.engine.store.putReceipt({ clientRequestId: 'thread_steer:caller:mcp:steer-old', threadId: own.childThreadId, commandKind: 'steer', status: 'accepted', result: { runId: own.childRunId, sequence: 5 }, createdAt: new Date(0).toISOString() })
+      for (const [name, args] of [
+        ['thread_steer', { threadId: own.childThreadId, runId: own.childRunId, text: 'Also check the tests' }],
+        ['thread_send', { threadId: own.childThreadId, runId: own.childRunId, content: 'Also check the tests', intent: 'note' }]
+      ] as const)
+        expect(await result(call(name, { ...args }, { toolCallId: 'mcp:steer-old' })), name).toMatchObject({ intent: 'note', delivery: 'presented', runId: own.childRunId, sequence: 5, replayed: true })
+      expect(fx.engine.inbox.listPending(own.childThreadId)).toEqual([])
+      expect(host.steerRun).not.toHaveBeenCalled()
     })
 
   })
