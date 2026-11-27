@@ -1492,7 +1492,7 @@ export class MmsProtocolServer {
     let lastRow = -1
     if (!session.capabilities.has(THREAD_ROWS_CAPABILITY)) replay.events.forEach((event, index) => { if (event.type === 'threads.row') lastRow = index })
     for (const [index, stored] of replay.events.entries()) {
-      if (session.clientType !== 'gui' && isQualifiedId(stored.threadId)) continue
+      if (!windowsOnlyAllowed(session, stored)) continue
       // Project for this client first, so the budget counts what is actually sent.
       if (stored.type === 'bots.tell') continue // A telling is shown live once; durable rows supply catch-up.
       if (stored.type === 'threads.row' && lastRow >= 0 && index !== lastRow) continue
@@ -1633,10 +1633,7 @@ export class MmsProtocolServer {
   }
 
   private clientAcceptsEvent(session: ClientSession, event: ProtocolEvent): boolean {
-    // What happens in a thread of another computer is for windows: the CLI is not given its transcript or questions.
-    if (session.clientType !== 'gui' && isQualifiedId(event.threadId)) return false
-    // So is a chat with a bot of another computer: the CLI and agents never reach it.
-    if (session.clientType !== 'gui' && event.type.startsWith('bots.') && isQualifiedId((event.data as { botId?: unknown } | null)?.botId)) return false
+    if (!windowsOnlyAllowed(session, event)) return false
     if (!event.profileId || event.type === 'server.shutdown') return true
     const boundId = session.binding?.profileId ?? this.opts.mms.profileId
     return event.profileId === boundId
@@ -1826,6 +1823,17 @@ export class MmsProtocolServer {
       /* ignore */
     }
   }
+}
+
+/**
+ * Whether a session may be given an event about another computer, live or on replay: a thread of another computer
+ * (its transcript, its questions) and a chat with a bot of another computer are for windows only. The CLI and agents
+ * never reach them.
+ */
+function windowsOnlyAllowed(session: Pick<ClientSession, 'clientType'>, event: ProtocolEvent): boolean {
+  if (session.clientType === 'gui') return true
+  if (isQualifiedId(event.threadId)) return false
+  return !(event.type.startsWith('bots.') && isQualifiedId((event.data as { botId?: unknown } | null)?.botId))
 }
 
 /**

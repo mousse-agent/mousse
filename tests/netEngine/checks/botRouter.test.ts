@@ -196,4 +196,61 @@ describe('a window’s calls about a bot of another computer', () => {
     const live = await viewer.dispatch('bots.chat.list', { botId: q })
     expect(live.stale).toBeUndefined()
   }, 120_000)
+
+  it('answers a chat read from the copy when the owner is connected but does not answer in time', async () => {
+    const options = (router() as unknown as { options: { readWaitMs?: number } }).options
+    options.readWaitMs = 500
+    // The call never reaches the owner, and the link stays up: the viewer hears nothing back, as from a slow owner.
+    fabric.decide = (row) =>
+      row.from === viewer.endpoint && row.label === 'mousse.rpc' && row.header.t === 'call' && row.header.method === 'bots.chat.list' ? 'drop' : undefined
+    try {
+      expect(registry().row(ownerOnViewer, keeper)?.offline).toBeUndefined()
+      const started = Date.now()
+      const copy = await viewer.dispatch('bots.chat.list', { botId: q })
+      expect(Date.now() - started).toBeLessThan(4_000)
+      expect(copy.stale).toBe(true)
+      expect(copy.messages.map((message: { text: string }) => message.text)).toContain('The servers are up.')
+    } finally {
+      fabric.decide = undefined
+      delete options.readWaitMs
+    }
+  }, 60_000)
+
+  it('passes on why the bot’s computer refused an action, and only that', async () => {
+    const no = await refused(viewer.dispatch('bots.actions.answer', { botId: q, actionId: 'act_missing', digest: 'none', answer: 'send' }))
+    expect(no.code).toBe('conflict')
+    expect(no.details).toEqual({ node: ownerOnViewer, name: expect.any(String), reason: 'bot_action_gone' })
+  }, 60_000)
+
+  it('lets go of what a window showed when its connection ends or drops', async () => {
+    const ended = new AbortController()
+    const first = { id: 'window-ends', clientType: 'gui' as const, capabilities: new Set<string>(), binding: { profileId: viewer.mms.profileId, epoch: 1 }, lifetime: ended.signal }
+    await dispatchMethod({ mms: viewer.mms, connection: first, globalSequence: () => 0 }, 'bots.focus', { botId: q, focused: true })
+    expect(registry().chats.openChats()).toHaveLength(1)
+    ended.abort()
+    expect(registry().chats.openChats()).toEqual([])
+
+    // A window whose socket drops: the server says the connection closed.
+    const dropped = { id: 'window-drops', clientType: 'gui' as const, capabilities: new Set<string>(), binding: { profileId: viewer.mms.profileId, epoch: 1 } }
+    await dispatchMethod({ mms: viewer.mms, connection: dropped, globalSequence: () => 0 }, 'bots.focus', { botId: q, focused: true })
+    expect(registry().chats.openChats()).toHaveLength(1)
+    viewer.mms.domains!.notifyConnectionClosed('window-drops')
+    expect(registry().chats.openChats()).toEqual([])
+    expect(router().attached.state()).toEqual([])
+  }, 60_000)
+
+  it('refuses a call too large to send, and sends nothing', async () => {
+    const from = fabric.crossed.length
+    const no = await refused(viewer.dispatch('bots.chat.send', { botId: q, text: 'x'.repeat(50 * 1024), clientRequestId: 'router-large-1' }))
+    expect(no.code).toBe('too_large')
+    expect(sent(from)).toEqual([])
+  }, 60_000)
+
+  it('refuses a key the bot’s computer does not take from another device, and sends nothing', async () => {
+    const from = fabric.crossed.length
+    const no = await refused(viewer.dispatch('bots.chat.send', { botId: q, text: 'hi', clientRequestId: 'router-key-1', ceiling: 'full' }))
+    expect(no.code).toBe('invalid_params')
+    expect(sent(from)).toEqual([])
+    expect(ownerChat()).not.toContain('hi')
+  }, 60_000)
 })

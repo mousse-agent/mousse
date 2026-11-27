@@ -485,7 +485,7 @@ export class RoutedClient {
         if (!lost) {
           if (error instanceof NetError && error.code === 'outcome_uncertain')
             throw mayHaveHappened(computer, method)
-          throw translateNetError(error, computer, method) ?? error
+          throw translateNetError(error, computer, method, { reasons: !wire.enveloped }) ?? error
         }
         // The link went away with the call in flight. A read is sent again once, a write is found again by
         // its request id; neither goes on without end, and each loss gets its own wait for the link.
