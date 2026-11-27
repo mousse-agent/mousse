@@ -90,7 +90,11 @@ export interface RoutedStreamsPort {
 
 export interface OwnerRoutesOptions {
   services: MmsProfileServices
-  rpc: RpcDispatcher
+  /**
+   * `authorizedMethod` checks a caller again as a call is checked when it arrives (the delegation current, the grant,
+   * the device not blocked); a stream that opens after a read off the event loop is checked with it once more.
+   */
+  rpc: RpcDispatcher & { authorizedMethod?(name: string, caller: RpcContext['caller']): unknown }
   /** What this computer lets each device do here. */
   policy: Pick<SqliteNodePolicy, 'get' | 'list' | 'onChange'>
   audit: Pick<SqliteBridgeAudit, 'record' | 'countRead' | 'has' | 'countAgentCalls'>
@@ -493,7 +497,6 @@ export class OwnerRoutes {
       }
       need('threadId', request.kind === 'thread' || request.kind === 'terminal')
       need('ptyId', request.kind === 'terminal')
-      // Checked again once a thread's transcript has been read: the thread may have gone meanwhile.
       const shared = (): void => {
         if (request.threadId && !this.sharedThread(request.threadId))
           throw new DomainRpcError('thread_not_found', 'Thread not found', {
@@ -501,6 +504,14 @@ export class OwnerRoutes {
           })
       }
       shared()
+      // Checked again once a thread's transcript has been read, before the stream opens: the call was not given up
+      // (its session closed), the caller may still make it (its delegation may have expired meanwhile, or the
+      // device was blocked), and the thread is still one this computer shares.
+      const stillAllowed = (): void => {
+        if (context.signal.aborted) throw new NetError('cancelled')
+        this.options.rpc.authorizedMethod?.(routedNetMethod('stream.open'), context.caller)
+        shared()
+      }
       if (request.kind === 'terminal') {
         // The device's terminal switch decides whether it may see terminal output, here and on every record.
         if (!policy.get(node).terminal)
@@ -511,7 +522,7 @@ export class OwnerRoutes {
         )
           throw notFoundFor('pty', request.ptyId!, request.threadId!)
       }
-      const opened = await streams!.open(node, request, shared)
+      const opened = await streams!.open(node, request, stillAllowed)
       audit.countRead(node, 0)
       return { ok: true, result: opened }
     } catch (error) {

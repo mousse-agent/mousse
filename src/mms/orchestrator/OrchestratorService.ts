@@ -1466,6 +1466,15 @@ export class OrchestratorService extends EventEmitter {
     return (text) => bots(own(text))
   }
 
+  /**
+   * Masks every secret the thread may use in messages read from its database without loading it (a page read off the
+   * event loop), in place, as `getMessages` masks a loaded thread's: a value registered as a secret after a message
+   * was saved is masked too.
+   */
+  maskThreadMessages(threadId: string, messages: readonly ChatMessage[]): void {
+    this.maskThreadSecrets(threadId, messages)
+  }
+
   /** Masks every secret the thread may use in the messages, in place (their objects stay the same). */
   private maskThreadSecrets(threadId: string, messages: readonly ChatMessage[]): void {
     const mask = this.secretMaskerFor?.(threadId)

@@ -8,6 +8,7 @@ import {
   type ListsServices
 } from '../../../../src/mms/bridge/remote/MmsListsSource'
 import { MmsRemoteBackend } from '../../../../src/mms/bridge/remote/MmsBackend'
+import { ThreadDbClient } from '../../../../src/mms/data/threadDb/threadDbClient'
 import { MmsThreadSource } from '../../../../src/mms/bridge/remote/MmsThreadSource'
 import {
   PRIVATE_STREAM_QUOTA,
@@ -813,19 +814,24 @@ describe('a long thread on a private stream', () => {
 /**
  * Another computer opening one of this computer's threads that is not open yet. The transcript is read off the event
  * loop first; what the open depends on is checked again once it is read, as rows:
- * - nothing changed: the stream opens, from the page read, and the thread is not loaded;
+ * - nothing changed: the stream opens, from the page read, and the thread is not loaded, not even to learn where its
+ *   database is (the thread is in no cache: the daemon just started);
+ * - a value was registered as the thread's secret after a message holding it was saved: the viewer gets it masked;
  * - the computer's streams were closed meanwhile (a block, its access gone): it does not open;
+ * - the caller's delegation expired meanwhile: it does not open;
  * - the thread is no longer one this computer shares: it does not open;
  * - the stream is open already: it is returned as it is, nothing is read or built.
  */
 describe('a thread stream opened cold', () => {
-  async function owner() {
+  async function owner(first = '0:') {
     const o = await routedOwner({ streams: true })
     o.f.mms.threads.setSqliteStoreEnabled(true)
     const t = o.f.mms.threads.createThread('Long', undefined, undefined, { started: true })
-    const all = Array.from({ length: 8 }, (_, index) => message(index, `${index}:`.padEnd(512 * 1024, 'x')))
+    const all = Array.from({ length: 8 }, (_, index) => message(index, (index ? `${index}:` : first).padEnd(512 * 1024, 'x')))
     o.f.mms.threads.mutateThreadData(t.id, () => ({ messages: all as never }))
     expect(o.f.mms.threads.usesThreadDb(t.id)).toBe(true)
+    // As after a restart: no thread is held in memory, so a synchronous read of one would load it whole.
+    o.f.mms.threads.forgetThreadData(t.id)
     return { ...o, t }
   }
   /** Holds the transcript read until `release`; `reading` settles once it has started. */
@@ -848,11 +854,14 @@ describe('a thread stream opened cold', () => {
     const { ok, f, t, adapter } = await owner()
     const builds = vi.spyOn(MmsRemoteBackend.prototype, 'snapshot'),
       wholeReads = vi.spyOn(f.mms.orchestrator, 'getMessages'),
-      loads = vi.spyOn(f.mms.threads, 'warmThread')
+      loads = vi.spyOn(f.mms.threads, 'warmThread'),
+      waits = vi.spyOn(ThreadDbClient.prototype, 'callSync')
     const opened = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
     expect(builds).toHaveBeenCalledTimes(1)
     expect(wholeReads).not.toHaveBeenCalled()
     expect(loads).not.toHaveBeenCalled()
+    // Nothing on the event loop waited for the thread to load.
+    expect(waits.mock.calls.filter(([op]) => op === 'load')).toEqual([])
     expect(f.mms.orchestrator.hasSession(t.id)).toBe(false)
     const stream = (opened.descriptor as { id: never }).id
     expect(adapter!.privateAccess(stream)).toMatchObject({ reader: f.callerNode, open: true })
@@ -873,6 +882,37 @@ describe('a thread stream opened cold', () => {
     held.release()
     await expect(opening).rejects.toMatchObject({ code: 'cancelled' })
     expect(adapter!.privateHead(f.callerNode, t.id)).toBeUndefined()
+  }, 120_000)
+
+  it('masks a value registered as the thread secret after the message holding it was saved', async () => {
+    const { ok, f, t } = await owner('my token is hunter2 ')
+    f.mms.orchestrator.setSecrets({
+      tools: {} as never,
+      masker: (threadId) => (threadId === t.id ? (text) => text.replaceAll('hunter2', '[secret]') : undefined)
+    })
+    const opened = (await ok('stream.open', { kind: 'thread', threadId: t.id })) as RoutedStreamOpened
+    const { snapshot } = readStream(f, (opened.descriptor as { id: never }).id, t.id)
+    const first = (snapshot.messages as Array<{ content: string }>)[0].content
+    expect(first.startsWith('my token is [secret] ')).toBe(true)
+    expect(JSON.stringify(snapshot)).not.toContain('hunter2')
+  }, 120_000)
+
+  it('does not open when the caller delegation expires while its transcript is read', async () => {
+    const { raw, f, t, adapter } = await owner()
+    const held = heldRead()
+    const opening = raw('stream.open', { kind: 'thread', threadId: t.id })
+    await held.reading
+    // The caller's delegation on this computer's roster has lapsed; this computer's own has not.
+    const verify = f.targetIdentity.verifySigned.bind(f.targetIdentity)
+    vi.spyOn(f.targetIdentity, 'verifySigned').mockImplementation(((signed: never, root: never) => {
+      const value = verify(signed, root) as { subject?: string; expiresAt?: number }
+      return value?.subject === f.callerNode && value.expiresAt !== undefined ? { ...value, expiresAt: 0 } : value
+    }) as never)
+    const builds = vi.spyOn(MmsRemoteBackend.prototype, 'snapshot')
+    held.release()
+    await expect(opening).rejects.toMatchObject({ code: 'bad_delegation' })
+    expect(adapter!.privateHead(f.callerNode, t.id)).toBeUndefined()
+    expect(builds).not.toHaveBeenCalled()
   }, 120_000)
 
   it('does not open when the thread is no longer shared once its transcript is read', async () => {
