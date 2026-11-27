@@ -134,8 +134,8 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
       if (p.slots !== undefined) slots(p.slots, { all: true })
       if (p.slots !== undefined && p.model !== undefined) throw new DomainRpcError('invalid_params', 'Give the models as slots or as one model, not both')
       if (p.image !== undefined) imagePick(p.image)
-      // New bot offers every device or this computer alone; picking devices one by one is About's.
-      if (p.access !== undefined && !isNewBotAccess(p.access)) throw new DomainRpcError('invalid_params', 'A new bot reaches every device or only this computer')
+      // New bot's Devices step: this computer alone, or with the devices ticked (`all`, from an older app, is this computer).
+      if (p.access !== undefined && !isNewBotAccess(p.access)) throw new DomainRpcError('invalid_params', 'A new bot reaches this computer, and the devices picked for it')
       break
     case 'bots.facePicture.save':
       if (!isFacePictureKey(p.key)) throw new DomainRpcError('invalid_params', 'A face picture key is 1 to 512 printable characters')

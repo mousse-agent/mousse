@@ -5,7 +5,7 @@ import type { BotLook } from './look'
 import type { BotPickReason } from './modelSlots'
 import type { BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from './memory'
 import type { LlmProviderOption } from '../../settings'
-import type { NewBotAccess } from './deviceAccess'
+import type { BotDeviceChoice, NewBotAccess } from './deviceAccess'
 
 /** A computer on a bot's About and create row: this one (`this_computer`), or another of the person's computers by node. */
 export interface BotComputerChoice {
@@ -71,10 +71,16 @@ export interface BotRunsOnChoices {
   /** What the owner can add for the Images row to offer a model, while it offers none (its tooltip). */
   imagesMissing?: string
   /**
-   * New bot's Devices row: the service takes `access` on `bots.create`, saved before the bot is listed anywhere. Absent
-   * from an older service, which refuses the key, so the app shows no such row there.
+   * The service takes `access` on `bots.create`, saved before the bot is listed anywhere. Absent from an older service,
+   * which refuses the key, so the app sends none there.
    */
   reachOnCreate?: true
+  /**
+   * The owner's other devices (phones too), for New bot's Devices step, which shows only when there is at least one: a
+   * new bot reaches this computer alone plus the ones ticked there. Absent when there are none, from `bots.model.get`,
+   * and from an older service.
+   */
+  devices?: BotDeviceChoice[]
 }
 
 /** The pictures a bot made today against its caps (#1088), for the Images row's tooltip. */
@@ -184,9 +190,9 @@ export interface BotsPersonalV2Api {
    * from before rows): one model by name on every row; neither, by usage (an app from before picks). Older services
    * refuse these keys, so the app sends `model` only to a service that has `bots.model.choices`, and `slots` only to one
    * whose choices carry `providers`. `image`: the Images row (#1088), one of `imageProviders`' models; sent only to a
-   * service whose choices carry `imageProviders`. `access`: which devices reach the new bot (New bot's Devices row),
-   * saved before the bot is listed anywhere; sent only to a service whose choices carry `reachOnCreate`. Absent, every
-   * device, as before.
+   * service whose choices carry `imageProviders`. `access`: which devices reach the new bot (New bot's Devices step),
+   * saved before the bot is listed anywhere; sent only to a service whose choices carry `reachOnCreate`. Absent, or
+   * `all` from an older app, this computer alone.
    */
   'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }; result: { bot: BotSummary } }
   'bots.get': { params: { botId: string }; result: BotDetail }

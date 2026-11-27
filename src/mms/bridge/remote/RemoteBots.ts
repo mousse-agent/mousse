@@ -55,8 +55,9 @@ export type RemoteBotMethod = keyof typeof REMOTE_BOT_METHODS
 
 /**
  * The version of each method above that this computer accepts, as `net.info` reports it (`bots`), so a device sends only
- * keys this computer knows: an older one refuses any other key. 2 for `bots.create`: `reach` (`RemoteBotReach`). An
- * older computer reports none, and a device offers no choice of reach for a bot it makes there.
+ * keys this computer knows: an older one refuses any other key. 2 for `bots.create`: `reach` (`RemoteBotReach`), which
+ * this computer takes as `home_and_maker` whatever it says. An older computer reports none, and a device offers no
+ * choice of reach for a bot it makes there.
  */
 export function remoteBotVersions(): Record<RemoteBotMethod, number> {
   const out = {} as Record<RemoteBotMethod, number>
@@ -691,16 +692,16 @@ export function remoteBotMethods(options: {
     method('bots.personal.resume', async (p, port) => ({ bot: remoteBotSummary((await port.resume(botId(p))).bot) })),
     method('bots.create', async (p, port, context) => {
       const before = new Set(port.list().bots.map((bot) => bot.id))
-      // What the device asked for is saved before the bot is published (`BotChatService.create`): "home and maker" is
-      // this computer and the calling device alone, so no other device lists the bot even for a moment.
-      const access: BotDeviceAccess | undefined =
-        p.reach === 'home_and_maker' ? { mode: 'chosen', nodes: [context.caller.node] } : p.reach === 'all' ? { mode: 'all' } : undefined
+      // Saved before the bot is published (`BotChatService.create`): this computer and the calling device alone, so no
+      // other device lists the bot even for a moment. Whatever `reach` says: `all`, from a phone made before the lists
+      // were explicit, is taken as `home_and_maker`, and so is none.
+      const access: BotDeviceAccess = { mode: 'chosen', nodes: [context.caller.node] }
       const { bot } = await port.create({
         look: p.look as BotLook,
         ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}),
         description: p.description as string,
         clientRequestId: p.clientRequestId as string,
-        ...(access ? { access } : {})
+        access
       })
       remember(context.execution, bot.id)
       // The device that made it keeps it within reach; a request id that names a bot made before is answered only if the
@@ -710,9 +711,8 @@ export function remoteBotMethods(options: {
         try {
           options.madeBy?.(bot.id, context.caller.node)
         } catch {
-          // The choice could not be written: the bot keeps what a new bot has (every device, unless what is stored
-          // can't be read, when it stays on this computer until the owner picks). The device still learns of the bot
-          // it just made, and of nothing else.
+          // The choice could not be written: the bot keeps what was saved for it, or what a new bot has (this computer
+          // alone) until the owner picks. The device still learns of the bot it just made, and of nothing else.
         }
       return { bot: remoteBotSummary(bot) }
     }),

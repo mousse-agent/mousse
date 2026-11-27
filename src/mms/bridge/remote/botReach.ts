@@ -1,5 +1,5 @@
 import type { BotReachPort } from '../../protocol/botReachPort'
-import { botDeviceAllowed, HIDDEN_BOT_NAME, type BotDeviceAccess } from '../../../shared/bots/personal/deviceAccess'
+import { botDeviceAllowed, HIDDEN_BOT_NAME, type StoredBotDeviceAccess } from '../../../shared/bots/personal/deviceAccess'
 import type { NodeDelegation, NodeId, Roster } from '../../../shared/net'
 import type { NetIdentityService } from '../../net/identity/NetIdentityService'
 import type { BotDeviceAccessStore } from '../../bots/definitions/BotDeviceAccessStore'
@@ -37,8 +37,8 @@ export function accountDevices(
  * streams (not blocked here). The device list is read again after any of `changes` fires.
  */
 export function createBotReach(options: {
-  access(botId: string): BotDeviceAccess
-  choices(): { others: BotDeviceAccess; bots: BotDeviceAccess[] }
+  access(botId: string): StoredBotDeviceAccess
+  choices(): { others: StoredBotDeviceAccess; bots: StoredBotDeviceAccess[] }
   deviceOn(node: string): boolean
   devices(): readonly string[] | undefined
   changes: Array<(listener: () => void) => () => void>
@@ -67,7 +67,7 @@ export function createBotReach(options: {
       return false
     }
   }
-  const access = (botId: string): BotDeviceAccess => {
+  const access = (botId: string): StoredBotDeviceAccess => {
     try {
       return options.access(botId)
     } catch {
@@ -81,13 +81,13 @@ export function createBotReach(options: {
   }
   /** Whether no stored choice holds a bot from `node` (from every device, without one): then nothing needs looking at. */
   const noneHeld = (node?: string): boolean => {
-    let choices: { others: BotDeviceAccess; bots: BotDeviceAccess[] }
+    let choices: { others: StoredBotDeviceAccess; bots: StoredBotDeviceAccess[] }
     try {
       choices = options.choices()
     } catch {
       return false
     }
-    const allows = (choice: BotDeviceAccess): boolean => (node === undefined ? choice.mode === 'all' : botDeviceAllowed(choice, node))
+    const allows = (choice: StoredBotDeviceAccess): boolean => (node === undefined ? choice.mode === 'all' : botDeviceAllowed(choice, node))
     return allows(choices.others) && choices.bots.every(allows)
   }
   return {
