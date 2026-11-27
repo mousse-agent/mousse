@@ -899,6 +899,11 @@
     "digest": "2a27f073e7829290",
     "security": "04f7c680ffd36337"
   },
+  "threads.chainHold": {
+    "version": 1,
+    "digest": "ec5ac394f5954598",
+    "security": "926c4af141d1208d"
+  },
   "threads.clearApprovalRules": {
     "version": 1,
     "digest": "e2af3a0680e25499",

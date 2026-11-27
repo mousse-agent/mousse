@@ -1,6 +1,6 @@
 /**
  * `threads.chainHold` (issue #1443): only a person at a Mousse window answers a chain of agent messages held at its
- * budget. The CLI, an automation, a test client or a call with no connection of its own is refused before anything is
+ * budget, on this computer or on another of theirs. The CLI, an automation, a test client or a call with no connection of its own is refused before anything is
  * sent or dropped. What Continue and Stop do is in tests/run/threadActionsDaemon.test.ts.
  */
 import { expect, it, vi } from 'vitest'
@@ -26,8 +26,9 @@ it.each(['cli', 'test', 'unknown', undefined])('refuses an answer from %s and le
   expect(answerChainHold).not.toHaveBeenCalled()
 })
 
-it('takes the answer of a person at a Mousse window', async () => {
-  const { ctx, answerChainHold } = contextFrom('gui')
+// `bridge` is the person at a window on another of their computers: the card shows there too and its answer routes here.
+it.each(['gui', 'bridge'])('takes the answer of a person at a Mousse window (%s)', async (clientType) => {
+  const { ctx, answerChainHold } = contextFrom(clientType)
   await expect(dispatchMethod(ctx, 'threads.chainHold', params)).resolves.toEqual(answered)
   expect(answerChainHold).toHaveBeenCalledWith('t1', 'chain:run-1', 'continue')
 })

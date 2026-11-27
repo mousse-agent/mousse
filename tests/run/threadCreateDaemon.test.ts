@@ -520,6 +520,23 @@ describe('thread_create end to end (SPEC §15.1)', () => {
     })
   })
 
+  it('a held first message keeps its notify: when the person\'s Continue sends it, the creator is told when it settles', async () => {
+    const seen: { held?: AgentCreatedThread; runId?: string } = {}
+    const w = world(async (input, mcp, d) => {
+      if (input.threadId !== w.parent.id || input.prompt !== GO) return 'ok'
+      seen.runId = input.runId
+      spendChain(d.engine, `chain:${input.runId}`, w.parent.id, w.parent.id)
+      seen.held = parse<AgentCreatedThread>(await w.create(mcp!, { firstMessage: 'held work', clientRequestId: 'held', notify: true }))
+      return 'end'
+    })
+    await w.attach()
+    await w.run(w.parent.id, GO, 'go')
+    await waitFor(() => seen.held !== undefined && w.d.engine.listRuns(w.parent.id).every((run) => run.status === 'completed'), 'the creation', 30_000)
+    expect(seen.held!.firstMessage).toMatchObject({ sent: false, held: { chainId: `chain:${seen.runId}` } })
+    expect(await w.d.orch.answerChainHold(w.parent.id, `chain:${seen.runId}`, 'continue')).toMatchObject({ sent: 1 })
+    await waitFor(() => w.turnsOf(w.parent.id).some((turn) => String(turn.prompt).startsWith('<mousse_notice kind="thread_watch"')), 'the notice turn', 30_000)
+  })
+
   describe('how many', () => {
     it('has no count per run and none on launched threads still working: a run creates 12, all get work, and the next run creates more', async () => {
       const replies: Rpc[] = []

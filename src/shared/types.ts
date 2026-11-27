@@ -1908,6 +1908,23 @@ export interface TurnState {
    * In memory, like `step`; set only while the turn is active.
    */
   heldSteer?: HeldSteer
+  /**
+   * A chain of agent messages that started in this thread reached its budget, and its messages wait for the person's
+   * Continue or Stop (issue #1443). Shown through every phase of the thread's own turns, and after a restart, until it
+   * is decided; one chain at a time, the one held longest.
+   */
+  chainHold?: ChainHoldView
+}
+
+/** What the card of a held chain of agent messages shows (`TurnState.chainHold`). */
+export interface ChainHoldView {
+  chainId: string
+  /** Messages the agents sent each other since the chain's budget began. */
+  used: number
+  /** Messages waiting for the decision. */
+  held: number
+  /** The threads of the held messages, senders and receivers, with their titles: who is talking. */
+  between: Array<{ threadId: string; title: string | null }>
 }
 
 /** What a held steer waits for (`TurnState.heldSteer`). */

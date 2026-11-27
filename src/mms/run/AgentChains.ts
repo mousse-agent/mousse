@@ -77,6 +77,32 @@ export class AgentChains {
     return row ? toHold(row) : null
   }
 
+  /** The chains that started in `rootThreadId` and hold something, the one held longest first. */
+  heldChains(rootThreadId: string): AgentChainRecord[] {
+    return this.db
+      .statement(`SELECT c.* FROM agent_chains c JOIN agent_chain_holds h ON h.chain_id = c.chain_id
+        WHERE c.root_thread_id = ? AND h.status = 'held' GROUP BY c.chain_id ORDER BY MIN(h.created_at), MIN(h.rowid)`)
+      .all(rootThreadId)
+      .map(toChain)
+  }
+
+  /** The threads a chain that holds something started in. */
+  heldRoots(): string[] {
+    return this.db
+      .statement(`SELECT DISTINCT c.root_thread_id AS root FROM agent_chains c JOIN agent_chain_holds h ON h.chain_id = c.chain_id WHERE h.status = 'held'`)
+      .all()
+      .map((row) => String(row.root))
+  }
+
+  /** A held `thread_send` of work with this text from `senderThreadId` to `targetThreadId`, under another request: a repeat coalesces into it. */
+  heldCopy(senderThreadId: string, targetThreadId: string, content: string, requestKey: string): ChainHoldRecord | undefined {
+    return this.db
+      .statement("SELECT * FROM agent_chain_holds WHERE status = 'held' AND kind = 'work' AND sender_thread_id = ? AND target_thread_id = ? AND request_key <> ? ORDER BY created_at, rowid")
+      .all(senderThreadId, targetThreadId, requestKey)
+      .map(toHold)
+      .find((hold) => (hold.payload as { input?: { content?: unknown } } | null)?.input?.content === content)
+  }
+
   /** The chain's held messages, oldest first. */
   heldFor(chainId: string): ChainHoldRecord[] {
     return this.db.statement("SELECT * FROM agent_chain_holds WHERE chain_id = ? AND status = 'held' ORDER BY created_at, rowid").all(chainId).map(toHold)
