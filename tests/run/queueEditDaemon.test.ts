@@ -371,7 +371,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
         // The queue moves on (the item is removed), and the model retries the call it never saw the answer to.
         const after = (await list(mcp!, w.other.id)).revision
         seen.remove = await call(mcp!, 'queue_remove', { threadId: w.other.id, itemId: ids.one, expectedRevision: after })
-        seen.retry = await call(mcp!, 'queue_edit', { threadId: w.other.id, itemId: ids.one, content: 'edited once', expectedRevision: revision, clientRequestId: 'edit-1' })
+        // The retry comes under the tool's new name: an old name and its new one are the same request.
+        seen.retry = await call(mcp!, 'queue_update', { op: 'edit', threadId: w.other.id, itemId: ids.one, content: 'edited once', expectedRevision: revision, clientRequestId: 'edit-1' })
         // The same key for another command is a mistake of the caller, not a retry.
         seen.reused = await call(mcp!, 'queue_remove', { threadId: w.parent.id, itemId: ids.one, expectedRevision: revision, clientRequestId: 'edit-1' })
         return 'ok'
@@ -389,8 +390,11 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       expect(w.queue(w.other.id)).toEqual([])
       // One edit, one removal: nothing was recorded twice.
       expect(w.events(w.other.id, 'agent.action').map((event) => (event.payload as { action: string }).action)).toEqual(['edited_queued_message', 'removed_queued_message'])
-      // The retry is still a call in the caller's ledger.
-      expect(w.d.engine.tools.listForRun(w.latestRun(w.parent.id).runId).filter((entry) => entry.tool === 'queue_edit')).toHaveLength(2)
+      // The retry is still a call in the caller's ledger. Every call is recorded under the canonical name, whatever name it
+      // came under: the edit, the removal, the retry and the reused key.
+      const ledger = w.d.engine.tools.listForRun(w.latestRun(w.parent.id).runId).map((entry) => entry.tool)
+      expect(ledger.filter((tool) => tool === 'queue_update')).toHaveLength(4)
+      expect(ledger.filter((tool) => tool === 'queue_edit' || tool === 'queue_remove')).toEqual([])
       release.resolve()
     })
 
