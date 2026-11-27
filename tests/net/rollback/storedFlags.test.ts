@@ -58,7 +58,7 @@ it('stores the routing flag only while it is off, so an earlier version still lo
   }
 }, 60_000)
 
-it('has both switches for other computers on by default, and keeps a choice to turn them off', async () => {
+it('has "Let my other devices work here" on by default, and keeps the owner\'s choice for it and for the SSH server', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'net-default-on-')))
   const main = await MousseMainService.create({
     homeDir: join(root, 'home'),

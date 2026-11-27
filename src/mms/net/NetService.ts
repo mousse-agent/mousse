@@ -253,6 +253,8 @@ const JOIN_CLOCK_LIMIT_MS = 30_000
  * members keep moving the role (list sync, renewals and routes travel as session messages, not calls).
  */
 const CONTROL_METHOD = /^authority\.transfer\./
+/** `net_local_markers`: "Share bots" was off and only the devices known without the user's list were switched off yet. */
+const BOTS_UNSHARED_PARTIAL = 'bots-unshared.partial'
 /** The refusal of a device of this user's list that is not connected here. */
 const notConnected = () =>
   new NetError('forbidden', undefined, { details: { reason: 'not_connected' } })
@@ -422,6 +424,8 @@ export class NetService {
   private webrtcBlockedFor = ''
   private stopped = false
   private disabled = false
+  /** "Share bots" was off and the user's list could not be read yet: `shareBots: false` stays stored (`keepBotsUnshared`). */
+  private botsUnsharedPending = false
   private disabling?: Promise<NetStatus>
   private lastError?: keyof typeof NET_ERRORS
   private renewal?: { cancel(): void }
@@ -556,6 +560,7 @@ export class NetService {
     setAsideKeychainNetwork(this.options.profileDir)
     const db = new NetDatabase({ profileDir: this.options.profileDir, clock: this.clock })
     let botsUnshared = false
+    this.botsUnsharedPending = false
     try {
       db.transaction(() =>
         db.database.exec(
@@ -1007,15 +1012,31 @@ export class NetService {
    * Once, for a computer that had "Share bots with other devices" off: every device it knows (its user's list, every
    * device with a record here, every engine pairing) gets its Bots switch off, so none reaches a bot it could not reach
    * before, and the configuration is saved without the old switch in the same transaction, so this never runs again.
+   * A list that cannot be read now is left for the next start, as the connections record does: the devices known
+   * otherwise are switched off at once, `shareBots: false` stays stored, and each later start switches off the listed
+   * devices that still have no row of their own (a device with one has the owner's choice since), until the list reads.
    */
   private keepBotsUnshared(db: NetDatabase, identity: NetIdentityService, policy: SqliteNodePolicy): void {
-    const nodes = new Set<string>(listedOwnNodes(identity) ?? [])
-    for (const row of policy.list()) nodes.add(row.node)
-    for (const row of db.database.prepare('SELECT node FROM net_connections').all()) nodes.add(String(row.node))
-    if (db.database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='net_engine_peers'").get())
-      for (const row of db.database.prepare('SELECT local_id FROM net_engine_peers').all()) nodes.add(String(row.local_id))
+    const listed = listedOwnNodes(identity)
+    const partial = !!db.database
+      .prepare('SELECT 1 FROM net_local_markers WHERE name=?')
+      .get(BOTS_UNSHARED_PARTIAL)
+    const nodes = new Set<string>(listed ?? [])
+    if (partial) for (const row of policy.list()) nodes.delete(row.node)
+    else {
+      for (const row of policy.list()) nodes.add(row.node)
+      for (const row of db.database.prepare('SELECT node FROM net_connections').all()) nodes.add(String(row.node))
+      if (db.database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='net_engine_peers'").get())
+        for (const row of db.database.prepare('SELECT local_id FROM net_engine_peers').all()) nodes.add(String(row.local_id))
+    }
     db.transaction(() => {
       for (const node of nodes) if (isId('node', node)) policy.set(node as NodeId, { bots: false })
+      this.botsUnsharedPending = listed === undefined
+      if (this.botsUnsharedPending)
+        db.database
+          .prepare('INSERT OR IGNORE INTO net_local_markers VALUES(?,?)')
+          .run(BOTS_UNSHARED_PARTIAL, Math.trunc(this.clock.now()))
+      else db.database.prepare('DELETE FROM net_local_markers WHERE name=?').run(BOTS_UNSHARED_PARTIAL)
       this.writeConfig(db)
     })
   }
@@ -1023,7 +1044,9 @@ export class NetService {
     // An earlier version rejects any other key in `features` as corrupt storage and then fails to load Net
     // at all. The routing flag is on by default, so it is written only while it is off: a profile that
     // never turned it off can go back to an earlier build.
-    const { features, ...rest } = this.config
+    const { features, ...config } = this.config
+    // Kept while the update that replaced it waits for the user's list (`keepBotsUnshared`); an earlier build reads it.
+    const rest = this.botsUnsharedPending ? { ...config, shareBots: false } : config
     const stored: NetConfiguration = features
       ? {
           ...rest,

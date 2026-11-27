@@ -50,6 +50,8 @@ describe('speech (dictation and read-aloud)', () => {
   it('is admitted for every access preset, with the Bots switch on or off, and refused only to a blocked device', async () => {
     const speech = Object.keys(METHOD_ACCESS).filter((name) => name.startsWith('speech.'))
     expect(speech).toContain('speech.transcribe')
+    // Its own class, which no device switch reads: not the bots class it shared before.
+    for (const method of speech) expect(METHOD_ACCESS[method as keyof typeof METHOD_ACCESS], method).toBe('speech')
     const peer = t.owner.net.session(t.callerNode).peer
     const admitted = (method: string): boolean => {
       try {
