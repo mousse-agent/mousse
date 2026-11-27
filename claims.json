@@ -16,19 +16,6 @@
       "expiresAt": "2026-11-27T17:32:25.878Z"
     },
     {
-      "task": "bot-self-profile",
-      "session": "Avarnics-Mac-mini.local-05ef38",
-      "machine": "Avarnics-Mac-mini.local",
-      "branch": "bot-self-profile",
-      "paths": [
-        "src/shared/bots/personal",
-        "src/mms/run/mcp/appTools/bots.ts",
-        "src/renderer/components/bots/face"
-      ],
-      "claimedAt": "2026-11-27T17:05:02.566Z",
-      "expiresAt": "2026-11-27T19:05:02.566Z"
-    },
-    {
       "task": "bot-skills-and-browser-handoff",
       "session": "Animatrix-17eea9",
       "machine": "Animatrix",
