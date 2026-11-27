@@ -951,10 +951,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private readonly subagentNotes = new Map<string, { attached: boolean; waiting: string[]; taken: Map<string, string[]> }>()
   /**
-   * Per running subagent turn (its child run), the manifest it was compiled from (`compileSubagent`'s `effective`): its
-   * own subagents hold no more (docs/plans/tool-api.md §2.8, "Nesting").
+   * Per running subagent turn (its child run), the manifest it was compiled from (`compileSubagent`'s `effective`) and
+   * the entry it runs on: its own subagents hold no more, and no less tightly (docs/plans/tool-api.md §2.8, "Nesting").
    */
-  private readonly subagentHeld = new Map<string, BotManifest>()
+  private readonly subagentHeld = new Map<string, { manifest: BotManifest; selection: ProviderSelection }>()
   /** Each work's `subagent_wait` calls waiting for one of its subagents to end. */
   private readonly subagentWaiters = new Map<string, Set<() => void>>()
   /** Notice turns running when their owner wrote (`queueChatInTx`): told once to wrap up (`OWNER_WAITS_STEER`). In memory only. */
@@ -6991,23 +6991,26 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       wait: (request) => this.waitSubagents(main, request),
       result: (request) => this.subagentResult(main.row.id, request, childrenOf(main)),
       stop: (request) => this.stopSubagent(main.row.id, request, childrenOf(main)),
-      holdOn: (instanceIds) => this.holdOnEntries(main.row.id, instanceIds)
+      holdOn: (instanceIds) => this.holdOnEntries(main.row.id, instanceIds, main.sub?.runId)
     }
   }
 
   /**
    * For `model_list`: what a subagent on each entry would run without, or why it can't run there, by the hold rule for
-   * what the work's turn holds now. An entry it would run on as the work does is left out.
+   * what the work's turn holds now (a subagent's own: what that subagent holds, on its entry). An entry it would run on
+   * as its parent does is left out.
    */
-  private holdOnEntries(activationId: string, instanceIds: readonly string[]): Record<string, { lacks: string[] } | { refused: string }> {
+  private holdOnEntries(activationId: string, instanceIds: readonly string[], parentRunId?: string): Record<string, { lacks: string[] } | { refused: string }> {
     const row = this.store.activation(activationId)
     const definition = row ? this.host.definitions.revision(row.botId, row.revision) : undefined
     const grant = row ? this.store.activeGrant(row.botId) : undefined
-    if (!row || !definition || !grant) return {}
-    const manifest = this.subagentManifestOf(row, definition, grant.manifest)
+    const parent = parentRunId !== undefined ? this.subagentHeld.get(parentRunId) : undefined
+    if (!row || !definition || !grant || (parentRunId !== undefined && !parent)) return {}
+    const workHolds = this.subagentManifestOf(row, definition, grant.manifest)
+    const manifest = parent ? intersectManifest(parent.manifest, workHolds) : workHolds
     const marks: Record<string, { lacks: string[] } | { refused: string }> = {}
     for (const instanceId of new Set(instanceIds)) {
-      const hold = this.holdOf(row, instanceId, manifest)
+      const hold = this.holdOf(row, instanceId, manifest, parent?.selection.instanceId)
       if (hold.refused) marks[instanceId] = { refused: hold.refused === 'web' ? 'You have no web, and a subagent there would still search the web on its own.' : `It would hold "${BOT_HELD_POWER_TEXT[hold.refused]}" less tightly than your entry.` }
       else if (hold.withheld.length) marks[instanceId] = { lacks: hold.withheld.map((power) => BOT_HELD_POWER_TEXT[power]) }
     }
@@ -7130,10 +7133,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (again) return { started: this.subagentView(again, false), note: SUBAGENT_STARTED_NOTE, ...(again.spec.lacks?.length ? { lacks: again.spec.lacks } : {}) }
     const capped = this.subagentCapped(row.id, under, title)
     if (capped) return { refused: capped }
-    const model = await this.subagentModel(row, request.model)
+    const model = await this.subagentModel(row, request.model, main.sub?.runId)
     if ('refused' in model) return model
     const held = this.compileSubagent(row, model.selection, this.live.get(row.id)?.deadline ?? this.now(), main.sub?.runId)
-    if ('refused' in held) return { refused: held.hold ? await this.holdRefusedText(row, model.selection.instanceId, held.hold, held.manifest!) : held.refused }
+    if ('refused' in held) return { refused: held.hold ? await this.holdRefusedText(row, model.selection.instanceId, held.hold, held.manifest!, held.parentEntry) : held.refused }
     // After every wait: the turn, the caps and the title are read again, and the thread and its first turn are written
     // before anything else of this process runs.
     const current = this.subagentTurn(main)
@@ -7201,10 +7204,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (this.subagentRunning(record)) return this.noteSubagent(record, message)
     const capped = this.subagentCapped(row.id, under)
     if (capped) return { refused: capped }
-    const model = await this.subagentModel(row, record.spec.pick ? { pick: record.spec.pick, name: { name: record.spec.model, entry: '' } } : undefined)
+    const model = await this.subagentModel(row, record.spec.pick ? { pick: record.spec.pick, name: { name: record.spec.model, entry: '' } } : undefined, main.sub?.runId)
     if ('refused' in model) return model
     const held = this.compileSubagent(row, model.selection, this.live.get(row.id)?.deadline ?? this.now(), main.sub?.runId)
-    if ('refused' in held) return { refused: held.hold ? await this.holdRefusedText(row, model.selection.instanceId, held.hold, held.manifest!) : held.refused }
+    if ('refused' in held) return { refused: held.hold ? await this.holdRefusedText(row, model.selection.instanceId, held.hold, held.manifest!, held.parentEntry) : held.refused }
     const current = this.subagentTurn(main)
     if (!current) return { refused: SUBAGENT_TURN_ENDED_TEXT }
     const fresh = this.subagentNamed(row.id, request.subagent, under)
@@ -7278,7 +7281,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const own = new Set(this.subagentRecords(activationId, threadId).map((record) => record.threadId))
       if (!own.size) return []
       const taking = new Set([...ended.values()].flat())
-      return this.untoldSubagents(activationId).filter((entry) => own.has(entry.threadId) && !taking.has(entry.childRunId))
+      // One it read already (`subagent_wait`, `subagent_result`) is not told again, as for the work's own.
+      const read = this.live.get(activationId)?.subagentsRead
+      return this.untoldSubagents(activationId).filter((entry) => own.has(entry.threadId) && !taking.has(entry.childRunId) && !read?.has(entry.childRunId))
     }
     const text = (messages: readonly string[], ends: readonly BotSubagentRunRow[]) =>
       [...(messages.length ? [subagentNoteText(messages)] : []), ...ends.map(subagentNoticeText)].join('\n\n') || undefined
@@ -7317,16 +7322,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * The model a subagent runs on: the work's own selection now, or a pick the work named, resolved on its own entry for
-   * this bot (its sign-in, its usage limit, whether it can hold a bot) and never replaced by another.
+   * The model a subagent runs on: its parent's (the work's own selection now, or the subagent's that starts it), or a
+   * pick the work named, resolved on its own entry for this bot (its sign-in, its usage limit, whether it can hold a bot)
+   * and never replaced by another.
    */
-  private async subagentModel(row: BotActivationRow, asked: Parameters<BotSubagents['start']>[0]['model']): Promise<{ selection: ProviderSelection; name: string; pick?: BotModelPick & { instanceId: string } } | { refused: string }> {
+  private async subagentModel(row: BotActivationRow, asked: Parameters<BotSubagents['start']>[0]['model'], parentRunId?: string): Promise<{ selection: ProviderSelection; name: string; pick?: BotModelPick & { instanceId: string } } | { refused: string }> {
     if (!asked) {
-      if (!row.selection) return { refused: `No model is chosen for this work yet. ${SUBAGENT_NOTHING_STARTED}` }
-      const name = await this.selectionName(row, row.selection)
-      const limited = this.entryLimitOf(row.botId, { instanceId: row.selection.instanceId, model: row.selection.model })
+      const own = parentRunId !== undefined ? this.subagentHeld.get(parentRunId)?.selection : row.selection
+      if (parentRunId !== undefined && !own) return { refused: SUBAGENT_TURN_ENDED_TEXT }
+      if (!own) return { refused: `No model is chosen for this work yet. ${SUBAGENT_NOTHING_STARTED}` }
+      const name = await this.selectionName(row, own)
+      const limited = this.entryLimitOf(row.botId, { instanceId: own.instanceId, model: own.model })
       if (limited) return { refused: `${name} is at its usage limit until ${clockTime(limited.until)}. ${SUBAGENT_NOTHING_STARTED}` }
-      return { selection: { ...row.selection }, name }
+      return { selection: { ...own }, name }
     }
     const name = workModelText(asked.name)
     const limited = this.entryLimitOf(row.botId, asked.pick)
@@ -7357,7 +7365,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * with its entry, so the owner sees which provider did a part of the job.
    */
   private async selectionName(row: BotActivationRow, selection: ProviderSelection): Promise<string> {
-    const named = row.trigger.kind === 'work' && row.trigger.model ? row.trigger.model : undefined
+    const named = row.trigger.kind === 'work' && row.trigger.model && selection.instanceId === row.selection?.instanceId && selection.model === row.selection.model ? row.trigger.model : undefined
     if (named && named.entry) return workModelText(named)
     let options: BotModelOption[] = []
     try {
@@ -7394,10 +7402,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * The hold rule (`subagentHold`) for a subagent of the work on `instanceId`: the work's entry and that one, as their
-   * drivers say they hold a bot here now, for what `manifest` holds.
+   * The hold rule (`subagentHold`) for a subagent on `instanceId`: its parent's entry (`parentEntry`, a subagent's own
+   * subagent; the work's otherwise) and that one, as their drivers say they hold a bot here now, for what `manifest`
+   * holds. Each level is held against the one above it, so no level holds less tightly than any above.
    */
-  private holdOf(row: BotActivationRow, instanceId: string, manifest: BotManifest): BotSubagentHold {
+  private holdOf(row: BotActivationRow, instanceId: string, manifest: BotManifest, parentEntry?: string): BotSubagentHold {
     const read = (id: string): BotRuntimeHold | undefined => {
       try {
         return this.host.harness.botHold?.(id)
@@ -7405,7 +7414,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return undefined
       }
     }
-    const work = row.selection?.instanceId
+    const work = parentEntry ?? row.selection?.instanceId
     return subagentHold({
       work: work ? read(work) : undefined,
       sub: read(instanceId),
@@ -7425,7 +7434,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Why a subagent can't start on an entry whose runtime can't run without a power it holds less tightly than the work's
    * (the web, when the work has none and that runtime searches the web on its own), and the owner's entries that would do.
    */
-  private async holdRefusedText(row: BotActivationRow, instanceId: string, hold: BotSubagentHold, manifest: BotManifest): Promise<string> {
+  private async holdRefusedText(row: BotActivationRow, instanceId: string, hold: BotSubagentHold, manifest: BotManifest, parentEntry?: string): Promise<string> {
     const entry = await this.entryName(instanceId)
     const power = hold.refused ?? 'web'
     const why = power === 'web'
@@ -7438,7 +7447,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // None named.
     }
     const fit = [...new Map(options.map((option) => [option.instanceId, option.entry])).entries()]
-      .filter(([id]) => id !== instanceId && this.holdOf(row, id, manifest).refused === undefined)
+      .filter(([id]) => id !== instanceId && this.holdOf(row, id, manifest, parentEntry).refused === undefined)
       .map(([, name]) => plainLabel(name, 40))
     return `A subagent can't run on ${entry}: ${why}. ${fit.length ? `These would do: ${[...new Set(fit)].join(', ')}.` : 'Start it on your own model.'} ${SUBAGENT_NOTHING_STARTED}`
   }
@@ -7449,20 +7458,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * what that runtime would hold less tightly than the work's (`holdOf`): refused when that runtime can't run without it,
    * can't hold the bot to its grant, or (Codex) is a version not checked for bots.
    */
-  private compileSubagent(row: BotActivationRow, selection: ProviderSelection, deadline: number, parentRunId?: string): { compiled: Extract<ReturnType<typeof compileBotThread>, { ok: true }>; effective: BotManifest; definition: BotDefinition; grant: { digest: string; manifest: BotManifest }; hold: BotSubagentHold } | { refused: string; hold?: BotSubagentHold; manifest?: BotManifest } {
+  private compileSubagent(row: BotActivationRow, selection: ProviderSelection, deadline: number, parentRunId?: string): { compiled: Extract<ReturnType<typeof compileBotThread>, { ok: true }>; effective: BotManifest; definition: BotDefinition; grant: { digest: string; manifest: BotManifest }; hold: BotSubagentHold } | { refused: string; hold?: BotSubagentHold; manifest?: BotManifest; parentEntry?: string } {
     const definition = this.host.definitions.revision(row.botId, row.revision)
     const grant = this.store.activeGrant(row.botId)
     // A grant narrowed since the work started (About → Remove) holds the subagent to what it holds now.
     if (!definition || !grant) return { refused: `Your permissions changed since this work started. ${SUBAGENT_NOTHING_STARTED}` }
     const unchecked = this.host.runsOnNote?.(selection.instanceId)
     if (unchecked) return { refused: `${unchecked.text} ${SUBAGENT_NOTHING_STARTED}` }
-    // A subagent's own subagent holds no more than that subagent: what it was compiled from, within the grant now.
-    const parentHeld = parentRunId !== undefined ? this.subagentHeld.get(parentRunId) : undefined
-    if (parentRunId !== undefined && !parentHeld) return { refused: SUBAGENT_TURN_ENDED_TEXT }
+    // A subagent's own subagent holds no more than that subagent (what it was compiled from, within the grant now), and
+    // is held against that subagent's entry, not the work's: never less tightly than its parent.
+    const parent = parentRunId !== undefined ? this.subagentHeld.get(parentRunId) : undefined
+    if (parentRunId !== undefined && !parent) return { refused: SUBAGENT_TURN_ENDED_TEXT }
     const workHolds = this.subagentManifestOf(row, definition, grant.manifest)
-    const holds = parentHeld ? intersectManifest(parentHeld, workHolds) : workHolds
-    const hold = this.holdOf(row, selection.instanceId, holds)
-    if (hold.refused) return { refused: `A subagent can't run there. ${SUBAGENT_NOTHING_STARTED}`, hold, manifest: holds }
+    const holds = parent ? intersectManifest(parent.manifest, workHolds) : workHolds
+    const parentEntry = parent?.selection.instanceId
+    const hold = this.holdOf(row, selection.instanceId, holds, parentEntry)
+    if (hold.refused) return { refused: `A subagent can't run there. ${SUBAGENT_NOTHING_STARTED}`, hold, manifest: holds, ...(parentEntry ? { parentEntry } : {}) }
     // Commands its runtime would hold less tightly: it runs with no command tool there.
     const effective = hold.withheld.includes('shell') ? { ...holds, tools: holds.tools.filter((tool) => tool !== 'shell') } : holds
     const compiled = compileBotThread({
@@ -7728,7 +7739,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.executing.add(dispatchId)
     this.liveRuns.set(payload.runId, row.id)
     this.subagentNotes.set(payload.runId, { attached: false, waiting: [], taken: new Map() })
-    this.subagentHeld.set(payload.runId, effective)
+    this.subagentHeld.set(payload.runId, { manifest: effective, selection: { ...spec.selection } })
     // What it holds for the whole of its turn, like a consult's: a switch turned off stops the work and its subagents.
     main.consultPowers.set(payload.runId, powersOf(compiled.permissions))
     // Its running time is counted in the work's from now.
@@ -7757,9 +7768,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     const browser = compiled.permissions.browser ? this.browserTurn(row, payload.runId, main.controller.signal) : undefined
     const first = runs.delegations.listForChildThread(delegation.childThreadId)[0]?.delegationId === delegation.delegationId
-    // The owner's corrections of the work since the run that started it, which it could not take in while it waited.
-    const parentRun = runs.getRun(delegation.parentRunId)
-    const workThreadId = nestedUnder !== undefined ? this.store.dispatch(row.id, main.n)?.threadId ?? delegation.parentThreadId : delegation.parentThreadId
+    // The owner's corrections of the work since the work's run that its tree hangs from, which it could not take in
+    // while it waited: at any depth, what its parent started with and what came after (not only what came after its
+    // parent started).
+    const workMain = nestedUnder !== undefined ? this.liveMain(row.id) : undefined
+    if (nestedUnder !== undefined && !workMain) return orphaned()
+    const parentRun = runs.getRun(workMain?.parentRunId ?? delegation.parentRunId)
+    const workThreadId = workMain?.dispatch.threadId ?? delegation.parentThreadId
     const corrections = parentRun ? botSubagentStartsWith(runs.store, { workThreadId, parentRun, childThreadId: delegation.childThreadId }) : []
     const prompt = [payload.prompt ?? '', ...(corrections.length ? [subagentNoteText(corrections)] : [])].join('\n\n')
     return {

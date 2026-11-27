@@ -88,6 +88,14 @@ describe('a bot\'s subagents nest past one level', () => {
     expect(mid.result({ subagent: 'Shops' })).toMatchObject({ subagents: [{ subagent: 'Shops', state: 'done', result: 'Shop A, Shop B.' }] })
   })
 
+  it('a parent that read its subagent\'s result already is not told it finished', async () => {
+    const { prices, shops } = await family()
+    await finish(f, shops.payload, 'completed', { text: 'Shop A, Shop B.' })
+    expect(prices.prepared.authority.subagents!.result({ subagent: 'Shops' })).toMatchObject({ subagents: [{ subagent: 'Shops', state: 'done', result: 'Shop A, Shop B.' }] })
+    expect(prices.prepared.steer!.peek()).toBeUndefined()
+    expect(prices.prepared.steer!.take()).toBeUndefined()
+  })
+
   it('a Stop at any level ends everything below it, and a subagent\'s own subagents end with its turn', async () => {
     const { job, prices, shops } = await family()
     // The person's Stop on Prices' row: Shops below it ends too; the work goes on.
@@ -116,6 +124,26 @@ describe('a bot\'s subagents nest past one level', () => {
     const late = await startSubagent(f, subagentRuns(f, job.id).at(-1)!)
     expect(late.prepared.prompt).toContain('Only ones under 300.')
     expect(late.prepared.prompt).not.toMatch(/The person told/)
+  })
+
+  it('a correction given before a subagent started reaches the subagents it starts, and theirs, three levels down', async () => {
+    const activation = await f.bots.activate({ botId, input: 'Compare three vacuum cleaners.', clientRequestId: 'w1' })
+    const job = { id: activation.id, ...(await start(f, activation.id)) }
+    await job.prepared.authority.subagents!.start({ title: 'Prices', brief: 'Find the prices.' })
+    const prices = await startSubagent(f, subagentRuns(f, job.id)[0]!)
+    prices.prepared.steer!.attached()
+    // Time passes between each step, so each run starts after the one before it and after the correction.
+    f.clock.now += 1000
+    f.bots.tools.work.noteSubagents!(botId, job.id, 'Only ones under 300.')
+    f.clock.now += 1000
+    // Shops starts after the correction, so it starts with it; so does Branch, which Shops starts later still.
+    await prices.prepared.authority.subagents!.start({ title: 'Shops', brief: 'List the shops.' })
+    const shops = await startSubagent(f, subagentRuns(f, job.id).at(-1)!)
+    expect(shops.prepared.prompt).toContain('Only ones under 300.')
+    f.clock.now += 1000
+    await shops.prepared.authority.subagents!.start({ title: 'Branch', brief: 'Check one branch.' })
+    const branch = await startSubagent(f, subagentRuns(f, job.id).at(-1)!)
+    expect(branch.prepared.prompt).toContain('Only ones under 300.')
   })
 
   describe('refusals', () => {
