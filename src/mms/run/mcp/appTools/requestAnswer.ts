@@ -61,7 +61,10 @@ export function noSuchRequest(requestId: string): ToolOutcome {
  * is the kind its receipt says; a request a thread here waits on is the caller's subagent's when the caller is its
  * direct parent, else another thread's; a question a bot's work asked its owner is that bot's to relay. A request
  * found nowhere is no such request, unless the call names its thread (one on another computer, or a plain question a
- * bot answered), which the approval tool refuses or replays in its own words.
+ * bot answered), which the approval tool refuses or replays in its own words, or it is a bot's relay (a bot turn that
+ * holds the relay, or a call under its old name): the relay's own checks then come first, as they did for
+ * `question_answer` (a turn that never relays is told so, one its owner did not start is told only theirs is passed
+ * on), and its handler is itself the lookup of the bot's questions. No thread is involved, so none is named.
  */
 export function requestKindOf(args: Record<string, unknown>, site: VariantSite, kinds: RequestKindSite): { kind: RequestKind; request?: ApprovalRequestInfo } | { refused: ToolOutcome } {
   const requestId = text(args.requestId)
@@ -76,7 +79,9 @@ export function requestKindOf(args: Record<string, unknown>, site: VariantSite, 
   if (retried) return { kind: retried, ...(request ? { request } : {}) }
   if (request) return { kind: kinds.parentThread(request.threadId) === site.threadId ? 'subagent' : 'approval', request }
   if (site.turn.bot && kinds.botQuestion?.(site.threadId, id)) return { kind: 'relay' }
-  return text(args.thread) ?? text(args.threadId) ? { kind: 'approval' } : { refused: noSuchRequest(id) }
+  if (text(args.thread) ?? text(args.threadId)) return { kind: 'approval' }
+  const relays = args.kind === 'relay' || site.turn.bot?.appTools.has(REQUEST_ANSWER_KINDS.relay.tool)
+  return site.turn.bot && relays ? { kind: 'relay' } : { refused: noSuchRequest(id) }
 }
 
 /**
