@@ -73,21 +73,40 @@ export function spawnOpencodeServer(env: InstanceEnv, launch: OpencodeLaunch, si
     timer.unref?.()
     void exited.then(() => clearTimeout(timer))
   }
-  return new Promise<StartedServer>((resolve, reject) => {
+  return readServerUrl(child, signal).then(
+    (url) => ({ endpoint: { url, password }, close, exited, ...(child.pid !== undefined ? { pid: child.pid } : {}) }),
+    (error: unknown) => {
+      killTree(child)
+      throw error
+    }
+  )
+}
+
+/**
+ * The address a started `opencode serve --stdio` gives as its first line (`{"url": ...}`), on loopback only. Rejects
+ * when the server exits, fails to start, says something else, `signal` aborts, or `timeoutMs` passes; the caller ends
+ * the process.
+ */
+export function readServerUrl(child: Pick<ChildProcess, 'stdout' | 'stderr' | 'once' | 'off'>, signal: AbortSignal, timeoutMs = READY_TIMEOUT_MS): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
     let stdout = ''
     let stderr = ''
     let settled = false
-    const fail = (error: Error) => {
-      if (settled) return
+    const finish = () => {
       settled = true
       clearTimeout(timer)
-      killTree(child)
+      signal.removeEventListener('abort', onAbort)
+      child.stdout?.off('data', onStdout)
+      child.stderr?.off('data', onStderr)
+    }
+    const fail = (error: Error) => {
+      if (settled) return
+      finish()
       reject(error)
     }
-    const timer = setTimeout(() => fail(new Error(`OpenCode's server did not start within ${READY_TIMEOUT_MS / 1000} seconds.`)), READY_TIMEOUT_MS)
-    signal.addEventListener('abort', () => fail(signal.reason instanceof Error ? signal.reason : new Error('Cancelled')), { once: true })
-    child.stderr?.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString('utf8')).slice(-4_000) })
-    child.stdout?.on('data', (chunk: Buffer) => {
+    const onAbort = () => fail(signal.reason instanceof Error ? signal.reason : new Error('Cancelled'))
+    const onStderr = (chunk: Buffer) => { stderr = (stderr + chunk.toString('utf8')).slice(-4_000) }
+    const onStdout = (chunk: Buffer) => {
       if (settled) return
       stdout += chunk.toString('utf8')
       const newline = stdout.indexOf('\n')
@@ -102,10 +121,14 @@ export function spawnOpencodeServer(env: InstanceEnv, launch: OpencodeLaunch, si
         fail(new Error(`OpenCode's server started without saying where it listens (${stdout.slice(0, newline).slice(0, 200)}).`))
         return
       }
-      settled = true
-      clearTimeout(timer)
-      resolve({ endpoint: { url: url.replace(/\/$/, ''), password }, close, exited, ...(child.pid !== undefined ? { pid: child.pid } : {}) })
-    })
+      finish()
+      resolve(url.replace(/\/$/, ''))
+    }
+    const timer = setTimeout(() => fail(new Error(`OpenCode's server did not start within ${timeoutMs / 1000} seconds.`)), timeoutMs)
+    if (signal.aborted) return onAbort()
+    signal.addEventListener('abort', onAbort, { once: true })
+    child.stderr?.on('data', onStderr)
+    child.stdout?.on('data', onStdout)
     child.once('error', (error) => fail(error))
     child.once('exit', (code) => fail(new Error(`OpenCode's server exited (${code ?? 'signal'}) before it was ready.${stderr.trim() ? ` ${stderr.trim().split('\n').at(-1)}` : ''}`)))
   })

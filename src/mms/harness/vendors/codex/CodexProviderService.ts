@@ -99,6 +99,7 @@ import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
 import { isMousseTempEntry } from '../../../data/closedPlaces'
 import { CODEX_ONE_SHOT_ITEMS, codexOneShotConfig, codexOneShotRunsOn } from './oneShot'
 import { runCodexDirectOneShot, type CodexDirectStream } from './directOneShot'
+import type { OneShotEvents, OneShotTransport, OneShotWireRequest } from '../../oneShot/route'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import { CODEX_BOT_USER_MCP_UNREADABLE, codexBotCommand, codexBotFileChange, codexBotMcpOverrides } from './botApprovals'
 import type { ChildTurnPolicy, PlanWindowUse } from '../../adapter'
@@ -381,6 +382,8 @@ export type CodexServiceDependencies = {
   compactSettleMs?: number
   /** The transport of a direct one-shot (`runCodexDirectOneShot`; tests substitute it). */
   directStream?: CodexDirectStream
+  /** Test seam: where a direct one-shot is sent (default the ChatGPT backend, `CHATGPT_CODEX_BASE_URL`). */
+  directBaseUrl?: string
   /** How long the browser sign-in may take before it is cancelled (default `CODEX_BROWSER_SIGN_IN_TIMEOUT_MS`; tests). */
   signInTimeoutMs?: number
 }
@@ -2253,17 +2256,28 @@ export class CodexProviderService {
   }
 
   /**
-   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a
-   * commit message on the chosen model. On OpenAI's own provider with a ChatGPT sign-in it is one direct
-   * request to the ChatGPT backend with Codex's own access token and no tools (`runCodexDirectOneShot`),
-   * on any model Codex lists. Otherwise it runs as one turn on an ephemeral Codex thread (never written
-   * to Codex's history) with the system text as its base instructions, a read-only sandbox in a folder
-   * of its own, no approvals (any request is refused: no run owns the thread), Codex's native tools and
-   * web search off, and every MCP server off (`codexOneShotConfig`); it is refused when the user's MCP
-   * servers cannot be listed. Any tool call Codex reports ends it, its turn interrupted. The answer is
-   * the turn's last agent message. It never retries.
+   * The runner's single request (a thread title, a branch name, a pull request draft, a commit message, a bot's name or
+   * digest; `oneShot/runner.ts`). It reads the sign-in as last checked: it never waits for a check, nor starts one.
+   *
+   * - `codex:direct` (OpenAI's own provider, a ChatGPT sign-in): one direct request with no tools to the ChatGPT backend
+   *   with Codex's own access token (`runCodexDirectOneShot`), on any model Codex lists. Nothing of Codex's setup is in it.
+   * - `codex:app_server` (any other provider: a managed entry's): one turn on an ephemeral Codex thread (never written to
+   *   Codex's history) with the system text as its base instructions, a read-only sandbox in a folder of its own, no
+   *   approvals, Codex's native tools and web search off, and every MCP server off (`codexOneShotConfig`); refused when the
+   *   user's MCP servers cannot be listed. Codex still offers tools config cannot remove (`apply_patch` on some models,
+   *   `request_user_input`), so any tool call it reports ends the request (best-effort). The answer is the turn's last
+   *   agent message.
    */
-  async oneShot(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
+  oneShotTransport(spec: Pick<OneShotSpec, 'model' | 'effort' | 'task'>): OneShotTransport {
+    return { send: async (wire, events, signal) => (await this.oneShotRequest(spec, wire, events, signal)).text }
+  }
+
+  /** Signed in as the last check found, read only: a single request neither waits for nor starts a check. */
+  private signedInAsChecked(): boolean {
+    return !this.stopped && !this.settingsError && !this.signedOut() && Boolean(this.binary()) && this.probeResult?.result.kind === 'signed_in'
+  }
+
+  private async oneShotRequest(spec: Pick<OneShotSpec, 'model' | 'effort' | 'task'>, wire: OneShotWireRequest, events: OneShotEvents, signal: AbortSignal): Promise<{ text: string }> {
     signal.throwIfAborted()
     // Held for the whole request, so the idle close never ends the process under it.
     const key = `one-shot:${randomUUID()}`
@@ -2275,29 +2289,36 @@ export class CodexProviderService {
     let lost: (() => void) | undefined
     let releaseThreads: (() => Promise<void> | undefined) | undefined
     try {
-      if (this.checkDue()) await abortable(this.status(), signal)
-      if (!this.configured())
-        throw new AppError({ code: 'codex_not_connected', message: this.signInMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+      if (!this.signedInAsChecked()) throw harnessAppError({ code: 'signed_out', message: this.signInMessage() })
       const reserved = new Set<string>()
       const admission = await this.verifiedConnection(signal, reserved)
       conn = admission.conn
       releaseThreads = admission.release
       const effort = spec.effort ?? supportedEffortOf(spec.model, this.settings.models ?? [], EFFORTS)
-      const token = this.directOneShots() ? await abortable(this.chatGptToken(conn, signal), signal) : undefined
-      if (token) {
-        const { baseId } = parseThinkingSuffixFromModelId(spec.model)
+      const { baseId } = parseThinkingSuffixFromModelId(spec.model)
+      if (this.directOneShots()) {
+        const token = await abortable(this.chatGptToken(conn, signal), signal)
+        // The route admitted was a direct request on Codex's ChatGPT sign-in: without its token it is not sent at all.
+        if (!token) throw harnessAppError({ code: 'signed_out', message: 'Codex did not give its ChatGPT sign-in for this request. Sign in to Codex again in Settings → Providers.' })
         const listed = await abortable(this.listedModel(conn, baseId), signal)
         if (!listed)
           throw harnessAppError({ code: 'model_unavailable', message: `Codex does not list ${baseId}. Refresh models or choose another title model in Settings → Agents.` })
-        // Always the listed model, `default` included, with its own default effort when none is chosen.
         this.assertAccount(conn)
-        return await runCodexDirectOneShot({ model: listed.model || listed.id, effort: effort ?? namingEffort(spec, listed) ?? listed.defaultReasoningEffort, token, spec }, signal, this.dependencies.directStream)
+        // Always the listed model, `default` included, with its own default effort when none is chosen.
+        return await runCodexDirectOneShot({
+          model: listed.model || listed.id,
+          effort: effort ?? namingEffort(spec, listed) ?? listed.defaultReasoningEffort,
+          token,
+          system: wire.system,
+          prompt: wire.prompt,
+          events,
+          ...(this.dependencies.directBaseUrl ? { baseUrl: this.dependencies.directBaseUrl } : {})
+        }, signal, this.dependencies.directStream)
       }
       const cwd = this.standaloneWorkspace('one-shot')
       const locked = codexOneShotConfig((await abortable(readCodexUserSetup(conn, cwd), signal)).mcpServers)
       if (!locked)
         throw new AppError({ code: 'policy_unenforceable', message: 'Mousse could not read which MCP servers Codex has on, so it did not send this request.', errorInfo: { category: 'unavailable', retryable: false } })
-      const { baseId } = parseThinkingSuffixFromModelId(spec.model)
       // Checked with this Codex, not a saved listing: a model whose subagents cannot be turned off never runs one.
       const listed = await abortable(this.listedModel(conn, baseId), signal)
       if (!listed || !codexOneShotRunsOn(listed.multiAgentVersion))
@@ -2307,6 +2328,7 @@ export class CodexProviderService {
       const pinned = listed.model || listed.id
       const model = { model: pinned }
       const turnEffort = effort ?? namingEffort(spec, listed)
+      const instructions = [wire.instruction, wire.system].filter((part): part is string => Boolean(part?.trim())).join('\n\n')
       const started = await this.requestThread(conn, 'thread/start', {
         cwd,
         approvalPolicy: 'never',
@@ -2314,7 +2336,7 @@ export class CodexProviderService {
         ...model,
         modelProvider: this.modelProvider,
         config: { ...locked, model_provider: this.modelProvider },
-        baseInstructions: spec.system,
+        baseInstructions: instructions,
         ephemeral: true
       }, signal, reserved)
       const threadId = started.thread.id
@@ -2322,24 +2344,23 @@ export class CodexProviderService {
       // A thread Codex opened on another model than the checked one never runs a turn.
       if (started.model !== pinned)
         throw harnessAppError({ code: 'unsupported', message: `Codex opened this request on ${started.model} instead of ${pinned}, so Mousse did not send it.` })
-      spec.onActivity()
+      events.activity()
       // The turn's agent messages by item, and its end.
       const messages = new Map<string, string>()
       let done!: (turn: CodexTurn) => void
-      let refuse!: (reason: Error) => void
-      const completed = new Promise<CodexTurn>((resolve, reject) => { done = resolve; refuse = reject })
-      completed.catch(() => undefined)
+      const completed = new Promise<CodexTurn>((resolve) => { done = resolve })
       this.oneShots.set(threadId, (notification) => {
-        // A tool is refused before anything else runs, a slow activity callback included.
+        // A tool ends the request (the runner stops it) before anything else runs, a slow activity callback included.
         const started = notificationParams(notification, 'item/started')?.item
         if (started && !CODEX_ONE_SHOT_ITEMS.has(started.type)) {
-          refuse(new AppError({ code: 'policy_unenforceable', message: `Codex tried to use a tool (${started.type}) in a request that runs none, so Mousse stopped it.`, errorInfo: { category: 'unavailable', retryable: false } }))
+          events.tool(started.type)
           return
         }
-        spec.onActivity()
+        events.activity()
         const delta = notificationParams(notification, 'item/agentMessage/delta')
         if (delta) {
           messages.set(delta.itemId, (messages.get(delta.itemId) ?? '') + delta.delta)
+          events.text(delta.delta)
           return
         }
         const item = notificationParams(notification, 'item/completed')?.item
@@ -2352,9 +2373,10 @@ export class CodexProviderService {
         if (end && (turnId === undefined || end.turn.id === turnId)) done(end.turn)
       })
       this.assertAccount(conn)
+      events.sending()
       const turn = await conn.request('turn/start', {
         threadId,
-        input: [textInput(spec.prompt)],
+        input: [textInput(wire.prompt)],
         approvalPolicy: 'never',
         sandboxPolicy: { type: 'readOnly', networkAccess: false },
         ...model,

@@ -1,5 +1,5 @@
 /**
- * Live check of OpenCode turns and one-shots on its own server API, through the driver's runtime, against the real
+ * Live check of OpenCode turns on its own server API, through the driver's runtime, against the real
  * `opencode serve`. It needs no sign-in: OpenCode runs in throwaway data, config and database folders, and its only
  * model is an OpenAI-compatible stub in this process, which records every model request and answers with the tool
  * call each case forces. The user's own OpenCode setup is never read or written. Runs only with MOUSSE_LIVE_OPENCODE=1;
@@ -11,7 +11,6 @@
  * - in Auto-accept edits the write runs unasked;
  * - outside Full access the model is offered no shell, no OpenCode subagents, no Code Mode and no questions;
  * - a saved "always" grant in the project, or a plugin of the user's, refuses an asking turn before its prompt;
- * - a one-shot is offered no tool and makes one model request, a failed one included; its session is deleted;
  * - the server exits when the process that started it is killed (`--stdio`: its stdin closes with that process).
  */
 import { spawn } from 'node:child_process'
@@ -41,7 +40,7 @@ let stub: Server
 let stubPort = 0
 const requests: StubRequest[] = []
 let script: Step[] = []
-let noToolsReply: Step = { text: 'A title' }
+const noToolsReply: Step = { text: 'A title' }
 
 function startStub(): Promise<void> {
   stub = createServer((req, res) => {
@@ -243,16 +242,6 @@ describe.skipIf(!live)('OpenCode on its server API (real opencode serve)', () =>
     expect(requests.length).toBe(before)
   }, TIMEOUT)
 
-  it('a one-shot is offered no tool and makes one model request; its session is deleted', async () => {
-    const { runtime } = setup()
-    requests.length = 0
-    noToolsReply = { text: 'Fix login bug' }
-    const reply = await runtime.oneShot!({ model: 'stub/stub-model', system: 'You name chats.', prompt: 'fix the login bug', onActivity: () => {} } as never, AbortSignal.timeout(60_000))
-    expect(reply.text).toBe('Fix login bug')
-    expect(requests.length).toBe(1)
-    expect(requests[0]!.tools).toEqual([])
-  }, TIMEOUT)
-
   it('the server exits when the process that started it is killed', async () => {
     const { root, env, opencodeEnv } = setup()
     const jiti = join(__dirname, '..', '..', 'node_modules', 'jiti', 'lib', 'jiti-cli.mjs')
@@ -287,15 +276,5 @@ describe.skipIf(!live)('OpenCode on its server API (real opencode serve)', () =>
     while (alive(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100))
     expect(alive(pid)).toBe(false)
     await expect(fetch(`${url}/api/model`, { signal: AbortSignal.timeout(2_000) })).rejects.toBeTruthy()
-  }, TIMEOUT)
-
-  it('a failed one-shot request is not retried', async () => {
-    const { runtime } = setup()
-    requests.length = 0
-    noToolsReply = { status: 429 }
-    await expect(runtime.oneShot!({ model: 'stub/stub-model', system: '', prompt: 'name this', onActivity: () => {} } as never, AbortSignal.timeout(60_000))).rejects.toBeTruthy()
-    await new Promise((resolve) => setTimeout(resolve, 3_000))
-    expect(requests.length).toBe(1)
-    noToolsReply = { text: 'A title' }
   }, TIMEOUT)
 })

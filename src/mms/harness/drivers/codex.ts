@@ -23,7 +23,13 @@ import { compatibilityFields } from '../compatibility'
 import { CODEX_NATIVE_TOOLS } from '../vendors/codex/botApprovals'
 import { CODEX_BOT_CHECKED_VERSIONS } from '../vendors/codex/childPolicy'
 import { codexBotRunsOnNote } from '../../../shared/harness/codexBotVersion'
-import { legacyOneShotRoute } from '../oneShot/routes'
+import { CODEX_APP_SERVER_FACTS, CODEX_DIRECT_FACTS } from '../oneShot/routes'
+import type { OneShotRouteDecision } from '../oneShot/route'
+
+/** OpenAI's own provider with Codex's ChatGPT sign-in: a direct request with no tools (`runCodexDirectOneShot`). */
+const CODEX_DIRECT_ROUTE: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: 'codex:direct' as const, facts: CODEX_DIRECT_FACTS }) })
+/** A managed entry, on its own provider: an app-server turn whose native tools config cannot all remove. */
+const CODEX_APP_SERVER_ROUTE: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: 'codex:app_server' as const, facts: CODEX_APP_SERVER_FACTS }) })
 
 export const CODEX_CAPS: HarnessCaps = Object.freeze({
   ...CODEX_CAPABILITIES,
@@ -300,9 +306,10 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     privateHomeFor: (config) => (config.setup === 'managed' ? 'required' : 'allowed'),
     canInstall: true,
     customModels: true,
-    // Chat titles, pull request drafts and commit messages: one turn on an ephemeral thread (`service.oneShot`).
-    // Until its own slice, on its own one-shot code (`DriverRuntime.oneShot`), admitted with no facts claimed.
-    oneShotRoute: legacyOneShotRoute('codex'),
+    // Thread titles, branch names, pull request drafts, commit messages (`service.oneShotTransport`). An entry on the
+    // user's own Codex runs on OpenAI's provider with a ChatGPT sign-in (Mousse treats any other sign-in as signed out):
+    // a direct request, held. A managed entry runs on its own provider: an app-server turn, best-effort.
+    oneShotRoute: ({ config }) => (config.setup === 'managed' ? CODEX_APP_SERVER_ROUTE : CODEX_DIRECT_ROUTE),
     methodLabel: 'ChatGPT sign-in',
     // Codex forks a loaded thread when its bearer changes, so the bearer is kept after turns proven drained.
     mcpTurnBinding: 'drained_turn',
@@ -359,7 +366,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
   }
 
   /** What every Codex runtime does with its service: turns, listings, usage, refresh. */
-  function serviceRuntime(service: CodexProviderService): Pick<DriverRuntime, 'adapter' | 'configured' | 'configuredProvider' | 'llmProvider' | 'models' | 'modelsRefreshedAt' | 'usage' | 'useLimitReset' | 'permissionLimits' | 'refreshModels' | 'forgetConversation' | 'compactConversation' | 'oneShot'> {
+  function serviceRuntime(service: CodexProviderService): Pick<DriverRuntime, 'adapter' | 'configured' | 'configuredProvider' | 'llmProvider' | 'models' | 'modelsRefreshedAt' | 'usage' | 'useLimitReset' | 'permissionLimits' | 'refreshModels' | 'forgetConversation' | 'compactConversation' | 'oneShotTransport'> {
     return {
       adapter: new CodexAdapter(() => service),
       configured: () => service.configured(),
@@ -378,7 +385,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
       forgetConversation: (threadId) => service.forgetConversation(threadId),
       // Codex compacts with no focus of its own.
       compactConversation: (request) => service.compactConversation(request.threadId, request.history, request.instanceId, request.signal),
-      oneShot: (spec, signal) => service.oneShot(spec, signal)
+      oneShotTransport: (spec) => service.oneShotTransport(spec)
     }
   }
 

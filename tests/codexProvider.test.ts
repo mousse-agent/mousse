@@ -2,11 +2,14 @@ import { EventEmitter, getEventListeners } from 'node:events'
 import { createInterface } from 'node:readline'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
+import { harnessAppError } from '../src/shared/harness/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
-import { userCodexLimitsReader } from '../src/mms/harness/drivers/codex'
+import { codexDriver, userCodexLimitsReader } from '../src/mms/harness/drivers/codex'
+import { routeLabel } from '../src/mms/harness/oneShot/admission'
 import { LoginSession } from '../src/mms/providers/LoginSession'
 import { claudeLockedSpawn } from '../src/mms/harness/claude/locked'
 import type { WindowsProviderTree } from '../src/mms/harness/windowsProviderProcess'
@@ -1194,6 +1197,31 @@ describe('CodexProviderService options (managed Codex)', () => {
   })
 
   describe('one-shot', () => {
+    /** The provider a managed entry pins: its single requests are app-server turns (`codex:app_server`). */
+    const CUSTOM = 'openai_chatgpt_plan'
+    /** An entry on that provider, as a managed entry runs. */
+    const onProvider = (server: Pick<ReturnType<typeof scriptedServer>, 'launch'>, settings: Record<string, unknown> = {}, options: CodexServiceOptions = {}, dependencies: Omit<CodexServiceDependencies, 'launch'> = {}) =>
+      create(server, settings, { modelProvider: CUSTOM, ...options }, dependencies)
+    /**
+     * The runner's request on the service's transport, after the entry's check (admission needs one). A tool it reports
+     * ends it, as the runner does: `tools` records each.
+     */
+    const send = async (service: CodexProviderService, spec: { model: string; system: string; prompt: string; onActivity?: () => void; task?: OneShotSpec['task']; effort?: string }, signal = new AbortController().signal, tools: string[] = []) => {
+      if (!service.configured()) await service.status()
+      const stop = new AbortController()
+      const text = await service.oneShotTransport({ model: spec.model, ...(spec.effort ? { effort: spec.effort } : {}), ...(spec.task ? { task: spec.task } : {}) })
+        .send({ model: spec.model, system: spec.system, prompt: spec.prompt }, {
+          activity: spec.onActivity ?? (() => {}),
+          text: () => {},
+          tool: (what) => {
+            tools.push(what)
+            stop.abort(harnessAppError({ code: 'one_shot_tool_refused', reason: 'tool_detected', message: `Codex tried to use a tool (${what}).` }))
+          },
+          launching: () => {},
+          sending: () => {}
+        }, AbortSignal.any([signal, stop.signal]))
+      return { text }
+    }
     type Event = { method: string; params: Record<string, unknown> }
     /**
      * A server whose turn sends `events` of the turn's thread, then the turn's end (none when `end` is null).
@@ -1210,7 +1238,7 @@ describe('CodexProviderService options (managed Codex)', () => {
         if (method === 'config/read') return mcp ? { result: { config: { mcp_servers: mcp }, layers: [] } } : { error: { code: -32603, message: 'config unreadable' } }
         if (method === 'thread/start') {
           const asked = (message.params as { model?: string }).model
-          return { result: { thread: { id: 'thr-once' }, model: (honourModel && asked) || 'gpt-configured', modelProvider: 'openai', cwd: home } }
+          return { result: { thread: { id: 'thr-once' }, model: (honourModel && asked) || 'gpt-configured', modelProvider: CUSTOM, cwd: home } }
         }
         if (method === 'turn/start') {
           const write = (name: string, params: unknown) => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: name, params }) + '\n')
@@ -1230,8 +1258,8 @@ describe('CodexProviderService options (managed Codex)', () => {
       ...(multiAgentVersion === undefined ? {} : { multiAgentVersion })
     })
     const LISTED = [listed('gpt-x', null, true), listed('gpt-v1', 'v1'), listed('gpt-v2', 'v2'), listed('gpt-old'), listed('gpt-configured', 'v2')]
-    const once = (service: CodexProviderService, signal = new AbortController().signal, onActivity: () => void = () => {}) =>
-      service.oneShot({ model: 'gpt-x', system: 's', prompt: 'p', onActivity }, signal)
+    const once = (service: CodexProviderService, signal = new AbortController().signal, onActivity: () => void = () => {}, tools: string[] = []) =>
+      send(service, { model: 'gpt-x', system: 's', prompt: 'p', onActivity }, signal, tools)
     /** The `abort` listeners on the service's app-server connection. */
     const connectionListeners = (service: CodexProviderService) =>
       getEventListeners((service as unknown as { app: { conn: { signal: AbortSignal } } }).app.conn.signal, 'abort').length
@@ -1244,9 +1272,9 @@ describe('CodexProviderService options (managed Codex)', () => {
         { method: 'item/agentMessage/delta', params: { itemId: 'b', delta: 'Login ' } },
         { method: 'item/agentMessage/delta', params: { itemId: 'b', delta: 'redirect fix' } }
       ])
-      const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X', efforts: ['low', 'high'] }] })
+      const service = onProvider(server, { models: [{ id: 'gpt-x', label: 'GPT X', efforts: ['low', 'high'] }] })
       const onActivity = vi.fn()
-      const answer = await service.oneShot({ model: 'gpt-x:low', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
+      const answer = await send(service, { model: 'gpt-x:low', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
       expect(answer).toEqual({ text: 'Login redirect fix' })
       const [start] = server.requests('thread/start').map((message) => message.params as Record<string, unknown>)
       expect(start).toMatchObject({ approvalPolicy: 'never', sandbox: 'read-only', model: 'gpt-x', baseInstructions: 'Name the chat.', ephemeral: true })
@@ -1258,7 +1286,7 @@ describe('CodexProviderService options (managed Codex)', () => {
         'mcp_servers.github.enabled': false,
         'mcp_servers.mousse.enabled': false,
         'mcp_servers.mousse-relay.enabled': false,
-        model_provider: 'openai'
+        model_provider: CUSTOM
       })
       expect(CODEX_ONE_SHOT_FEATURES_OFF).toEqual(expect.arrayContaining(['shell_tool', 'unified_exec', 'view_image', 'image_generation', 'multi_agent', 'multi_agent_v2', 'apps', 'plugins', 'hooks']))
       expect(server.requests('turn/start').map((message) => message.params)).toEqual([expect.objectContaining({
@@ -1282,10 +1310,10 @@ describe('CodexProviderService options (managed Codex)', () => {
     })
 
     it('names a thread or branch at low reasoning when no level is chosen; other requests and chosen levels are left alone', async () => {
-      const effortOf = async (spec: Partial<OneShotSpec>, models: Array<Record<string, unknown>> = [leveled('gpt-x', null)]) => {
+      const effortOf = async (spec: Partial<{ model: string; task: OneShotSpec['task']; effort: string }>, models: Array<Record<string, unknown>> = [leveled('gpt-x', null)]) => {
         const server = oneShotServer([{ method: 'item/completed', params: { item: { type: 'agentMessage', id: 'a', text: 'Title' } } }], { status: 'completed' }, undefined, models)
-        const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X', efforts: ['low', 'medium', 'high'] }] })
-        await service.oneShot({ model: 'gpt-x', system: 's', prompt: 'p', onActivity: () => {}, ...spec }, new AbortController().signal)
+        const service = onProvider(server, { models: [{ id: 'gpt-x', label: 'GPT X', efforts: ['low', 'medium', 'high'] }] })
+        await send(service, { model: 'gpt-x', system: 's', prompt: 'p', ...spec }, new AbortController().signal)
         return (server.requests('turn/start')[0]!.params as { effort?: string }).effort
       }
       expect(await effortOf({ task: 'title' })).toBe('low')
@@ -1301,24 +1329,24 @@ describe('CodexProviderService options (managed Codex)', () => {
 
     it('is refused, with no thread started, when the MCP servers cannot be listed or one cannot be turned off', async () => {
       const unreadable = oneShotServer([], { status: 'completed' }, null)
-      await expect(once(create(unreadable))).rejects.toMatchObject({ code: 'policy_unenforceable' })
+      await expect(once(onProvider(unreadable))).rejects.toMatchObject({ code: 'policy_unenforceable' })
       expect(unreadable.requests('thread/start')).toEqual([])
       const unnamed = oneShotServer([], { status: 'completed' }, { 'my.server': {} })
-      await expect(once(create(unnamed))).rejects.toMatchObject({ code: 'policy_unenforceable' })
+      await expect(once(onProvider(unnamed))).rejects.toMatchObject({ code: 'policy_unenforceable' })
       expect(unnamed.requests('thread/start')).toEqual([])
     })
 
     it('runs only on a model whose subagent tools a one-shot turns off, as this Codex lists it', async () => {
       const server = oneShotServer([{ method: 'item/completed', params: { item: { type: 'agentMessage', id: 'a', text: 'Title' } } }])
-      const service = create(server)
-      const run = (model: string) => service.oneShot({ model, system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)
+      const service = onProvider(server)
+      const run = (model: string) => send(service, { model, system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)
       // Subagents of any version start a child before Codex reports the call (`v1` through its handler even
       // with the feature off); an unlisted version is refused too.
       await expect(run('gpt-v2')).rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('GPT-V2 can start subagents') })
       await expect(run('gpt-v1')).rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('GPT-V1 can start subagents') })
       await expect(run('gpt-old')).rejects.toMatchObject({ code: 'unsupported' })
       await expect(run('gpt-missing')).rejects.toMatchObject({ code: 'unsupported' })
-      await expect(service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', task: 'commit_message', onActivity: () => {} }, new AbortController().signal)).rejects.toThrow('cannot write commit messages')
+      await expect(send(service, { model: 'gpt-v2', system: 's', prompt: 'p', task: 'commit_message', onActivity: () => {} }, new AbortController().signal)).rejects.toThrow('cannot write commit messages')
       expect(server.requests('thread/start')).toEqual([])
       // `model/list` is asked with hidden models included.
       expect(server.requests('model/list').at(-1)!.params).toMatchObject({ includeHidden: true })
@@ -1329,8 +1357,8 @@ describe('CodexProviderService options (managed Codex)', () => {
     it('pins the checked model, `default` included, so a configured model never runs instead', async () => {
       // The user's config names gpt-configured (`v2`); the catalog's default, gpt-x, has no subagents.
       const server = oneShotServer([{ method: 'item/completed', params: { item: { type: 'agentMessage', id: 'a', text: 'Title' } } }])
-      const service = create(server)
-      const run = (model: string) => service.oneShot({ model, system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)
+      const service = onProvider(server)
+      const run = (model: string) => send(service, { model, system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)
       expect(await run('default')).toEqual({ text: 'Title' })
       expect(await run('gpt-x')).toEqual({ text: 'Title' })
       // Both requests name the checked model: none is left to Codex's config.
@@ -1339,10 +1367,22 @@ describe('CodexProviderService options (managed Codex)', () => {
 
       // A Codex that opens the thread on its configured model anyway: no turn runs, and the thread is let go.
       const stubborn = oneShotServer([], { status: 'completed' }, undefined, LISTED, false)
-      await expect(create(stubborn).oneShot({ model: 'default', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal))
+      await expect(send(onProvider(stubborn), { model: 'default', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal))
         .rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('gpt-configured instead of gpt-x') })
       expect(stubborn.requests('turn/start')).toEqual([])
       expect(stubborn.requests('thread/unsubscribe')).toHaveLength(1)
+    })
+
+    it("is held as a direct request on an entry on the user's own Codex, and best-effort as an app-server turn on a managed entry", () => {
+      const routeOf = (setup?: 'managed') => {
+        const decision = codexDriver({} as never).oneShotRoute!({ config: setup ? { setup } : {}, installedVersion: undefined, instanceId: 'codex', model: 'gpt-x' } as never)
+        if (!('route' in decision)) throw new Error(decision.refused)
+        return decision.route
+      }
+      expect(routeOf()).toMatchObject({ id: 'codex:direct', facts: { tools: 'none_offered', attempts: 'one', isolation: 'verified' } })
+      expect(routeLabel(routeOf())).toBe('held')
+      expect(routeOf('managed')).toMatchObject({ id: 'codex:app_server', facts: { tools: 'detected_on_report', attempts: 'unenforced', isolation: 'env_only' } })
+      expect(routeLabel(routeOf('managed'))).toBe('best_effort')
     })
 
     it('marks listed models whose subagents cannot be turned off as unable to run one-shots', () => {
@@ -1387,10 +1427,10 @@ describe('CodexProviderService options (managed Codex)', () => {
         })
         return { ...server, requests: (method: string) => server.messages.filter((message) => message.method === method) }
       }
-      const withStream = (server: { launch: NonNullable<CodexServiceDependencies['launch']> }, send: CodexDirectStream, settings: Record<string, unknown> = {}) => {
+      const withStream = (server: { launch: NonNullable<CodexServiceDependencies['launch']> }, stream: CodexDirectStream, settings: Record<string, unknown> = {}) => {
         mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
         writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, ...settings }))
-        const service = new CodexProviderService(home, questions, { launch: server.launch, directStream: send }, { launch: () => ({ binaryPath: binary }), signedOut: () => signedOut })
+        const service = new CodexProviderService(home, questions, { launch: server.launch, directStream: stream }, { launch: () => ({ binaryPath: binary }), signedOut: () => signedOut })
         services.push(service)
         return service
       }
@@ -1400,7 +1440,7 @@ describe('CodexProviderService options (managed Codex)', () => {
         const direct = directStream()
         const service = withStream(server, direct.send, { models: [{ id: 'gpt-v2', label: 'GPT V2', efforts: ['low', 'high'] }] })
         const onActivity = vi.fn()
-        const answer = await service.oneShot({ model: 'gpt-v2:low', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
+        const answer = await send(service, { model: 'gpt-v2:low', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
         expect(answer).toEqual({ text: 'Login redirect fix' })
         // Codex's token as it holds it: Mousse never asks Codex to refresh it.
         const authChecks = server.requests('getAuthStatus')
@@ -1422,10 +1462,10 @@ describe('CodexProviderService options (managed Codex)', () => {
       })
 
       it('names a thread or branch at low reasoning on this path too, unless a level is chosen', async () => {
-        const effortOf = async (spec: Partial<OneShotSpec>) => {
+        const effortOf = async (spec: Partial<{ task: OneShotSpec['task']; effort: string }>) => {
           const direct = directStream()
           const service = withStream(authServer({ authMethod: 'chatgpt', authToken: TOKEN }, [leveled('gpt-v2', 'v2')]), direct.send, { models: [{ id: 'gpt-v2', label: 'GPT V2', efforts: ['low', 'medium', 'high'] }] })
-          await service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {}, ...spec }, new AbortController().signal)
+          await send(service, { model: 'gpt-v2', system: 's', prompt: 'p', ...spec }, new AbortController().signal)
           return direct.requests[0].options.reasoningEffort
         }
         expect(await effortOf({ task: 'title' })).toBe('low')
@@ -1438,10 +1478,10 @@ describe('CodexProviderService options (managed Codex)', () => {
       it("runs the model Codex lists for `default`, with that model's own effort, and refuses an unlisted one", async () => {
         const direct = directStream()
         const service = withStream(authServer({ authMethod: 'chatgpt', authToken: TOKEN }), direct.send)
-        await service.oneShot({ model: 'default', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)
+        await send(service, { model: 'default', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)
         expect(direct.requests[0].model.id).toBe('gpt-x')
         expect(direct.requests[0].options.reasoningEffort).toBe('low')
-        await expect(service.oneShot({ model: 'gpt-missing', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'model_unavailable' })
+        await expect(send(service, { model: 'gpt-missing', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'model_unavailable' })
         expect(direct.requests).toHaveLength(1)
       })
 
@@ -1450,7 +1490,7 @@ describe('CodexProviderService options (managed Codex)', () => {
         const direct = directStream((_stream, signal) => { seen = signal })
         const service = withStream(authServer({ authMethod: 'chatgpt', authToken: TOKEN }), direct.send)
         const stop = new AbortController()
-        const run = service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, stop.signal)
+        const run = send(service, { model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, stop.signal)
         await vi.waitFor(() => expect(seen).toBeDefined())
         stop.abort(new Error('Stopped'))
         await expect(run).rejects.toThrow()
@@ -1464,16 +1504,58 @@ describe('CodexProviderService options (managed Codex)', () => {
           stream.end(message)
         })
         const service = withStream(authServer({ authMethod: 'chatgpt', authToken: TOKEN }), direct.send)
-        await expect(service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'provider_usage_limit' })
+        await expect(send(service, { model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'provider_usage_limit' })
       })
 
-      it('is not used by a managed entry on its own provider, which keeps the app-server rule and its marks', async () => {
+      it('reads the sign-in as last checked: a check that is due is neither waited for nor started', async () => {
+        const ask = (service: CodexProviderService) => service.oneShotTransport({ model: 'gpt-v2' })
+          .send({ model: 'gpt-v2', system: 's', prompt: 'p' }, { activity: () => {}, text: () => {}, tool: () => {}, launching: () => {}, sending: () => {} }, new AbortController().signal)
+        const direct = directStream()
+        const service = withStream(authServer({ authMethod: 'chatgpt', authToken: TOKEN }), direct.send)
+        await service.status()
+        const status = vi.spyOn(service, 'status')
+        vi.spyOn(service as unknown as { checkDue(): boolean }, 'checkDue').mockReturnValue(true)
+        await expect(ask(service)).resolves.toBe('Login redirect fix')
+        expect(status).not.toHaveBeenCalled()
+        // Never checked: refused as signed out at once, with no check.
+        const unchecked = withStream(authServer({ authMethod: 'chatgpt', authToken: TOKEN }), directStream().send)
+        const never = vi.spyOn(unchecked, 'status')
+        await expect(ask(unchecked)).rejects.toMatchObject({ code: 'signed_out' })
+        expect(never).not.toHaveBeenCalled()
+      })
+
+      it.each([429, 503])('a model answered %i at the backend is asked once: no WebSocket, no retry, no second request', async (status) => {
+        // pi-ai's own Codex transport, unchanged, against a loopback backend that refuses every request.
+        const contacts: string[] = []
+        const backend = createServer((request, response) => {
+          contacts.push(`${request.method} ${request.url}`)
+          request.resume()
+          response.writeHead(status, { 'content-type': 'application/json' })
+          response.end(JSON.stringify({ error: { message: 'busy' } }))
+        })
+        backend.on('upgrade', (request, socket) => { contacts.push(`UPGRADE ${request.url}`); socket.destroy() })
+        await new Promise<void>((resolve) => backend.listen(0, '127.0.0.1', resolve))
+        try {
+          const claim = Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acct' } })).toString('base64url')
+          const server = authServer({ authMethod: 'chatgpt', authToken: `e30.${claim}.sig` })
+          mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
+          writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary }))
+          const service = new CodexProviderService(home, questions, { launch: server.launch, directBaseUrl: `http://127.0.0.1:${(backend.address() as { port: number }).port}` }, { launch: () => ({ binaryPath: binary }), signedOut: () => signedOut })
+          services.push(service)
+          await expect(send(service, { model: 'gpt-x', system: 'You name chats.', prompt: 'fix the login bug' })).rejects.toThrow()
+          expect(contacts).toEqual(['POST /codex/responses'])
+        } finally {
+          backend.close()
+        }
+      })
+
+      it('is not used by a managed entry on its own provider, which keeps the app-server route and its marks', async () => {
         const server = authServer({ authMethod: 'chatgpt', authToken: TOKEN })
         const direct = directStream()
         const service = managed(server as never, { models: { list: async () => [{ id: 'gpt-v2', label: 'GPT V2', oneShot: false }] } }, { directStream: direct.send })
         await service.refreshModels()
         expect(service.models()).toEqual([{ id: 'gpt-v2', label: 'GPT V2', oneShot: false }])
-        await expect(service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'unsupported' })
+        await expect(send(service, { model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'unsupported' })
         expect(server.requests('getAuthStatus')).toEqual([])
         expect(direct.requests).toEqual([])
       })
@@ -1482,30 +1564,34 @@ describe('CodexProviderService options (managed Codex)', () => {
         ['an API-key sign-in', { authMethod: 'apikey', authToken: 'sk-test' }],
         ['no token', { authMethod: 'chatgpt', authToken: null }],
         ['a Codex that does not report one', {}]
-      ])('keeps the app-server rule with %s', async (_case, auth) => {
+      ])('is not sent, nor sent another way, with %s: the request fails as signed out', async (_case, auth) => {
+        const server = authServer(auth)
         const direct = directStream()
-        const service = withStream(authServer(auth), direct.send)
-        await expect(service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal))
-          .rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('GPT-V2 can start subagents') })
+        const service = withStream(server, direct.send)
+        await expect(send(service, { model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal))
+          .rejects.toMatchObject({ code: 'signed_out' })
         expect(direct.requests).toEqual([])
+        expect(server.requests('thread/start')).toEqual([])
       })
     })
 
-    it('ends as refused and interrupts the turn when Codex starts any tool', async () => {
+    it('reports any tool Codex starts to the runner, which ends the request; the turn is interrupted', async () => {
       for (const type of ['commandExecution', 'fileChange', 'mcpToolCall', 'webSearch', 'collabAgentToolCall', 'dynamicToolCall']) {
         const server = oneShotServer([{ method: 'item/started', params: { item: { type, id: 'tool-1' } } }], null)
-        await expect(once(create(server))).rejects.toMatchObject({ code: 'policy_unenforceable', message: expect.stringContaining(type) })
+        const tools: string[] = []
+        await expect(once(onProvider(server), undefined, undefined, tools)).rejects.toMatchObject({ code: 'one_shot_tool_refused' })
+        expect(tools).toEqual([type])
         expect(server.requests('turn/interrupt').map((message) => message.params)).toEqual([{ threadId: 'thr-once', turnId: 'turn-1' }])
         expect(server.requests('thread/unsubscribe')).toHaveLength(1)
       }
     })
 
     it('reports a failed turn, and a stop interrupts the turn and lets the thread go', async () => {
-      const failed = create(oneShotServer([], { status: 'failed', error: { message: 'model not available' } }))
+      const failed = onProvider(oneShotServer([], { status: 'failed', error: { message: 'model not available' } }))
       await expect(once(failed)).rejects.toThrow('model not available')
 
       const server = oneShotServer([{ method: 'turn/started', params: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }], null)
-      const service = create(server)
+      const service = onProvider(server)
       const stop = new AbortController()
       // Stopped once the turn runs (its first event), with no end coming.
       let events = 0
@@ -1518,10 +1604,9 @@ describe('CodexProviderService options (managed Codex)', () => {
       let mode: 'answer' | 'fail' | 'hold' = 'answer'
       const server = scriptedServer((message) => {
         const method = message.method!
-        if (method === 'getAuthStatus') return { result: { authMethod: 'chatgpt', authToken: null } }
         if (method === 'model/list') return { result: { data: LISTED, nextCursor: null } }
         if (method === 'config/read') return { result: { config: { mcp_servers: {} }, layers: [] } }
-        if (method === 'thread/start') return { result: { thread: { id: 'thr-once' }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
+        if (method === 'thread/start') return { result: { thread: { id: 'thr-once' }, model: 'gpt-x', modelProvider: CUSTOM, cwd: home } }
         if (method === 'turn/start') {
           const write = (name: string, params: unknown) => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: name, params }) + '\n')
           setImmediate(() => {
@@ -1533,7 +1618,7 @@ describe('CodexProviderService options (managed Codex)', () => {
         }
         return { result: {} }
       })
-      const service = create(server, {}, {
+      const service = onProvider(server, {}, {
         account: { read: async () => ({ kind: 'signed_in', planType: 'plus', email: null, subject: 'chatgpt:account' }) }
       })
       await service.status()

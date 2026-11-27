@@ -1,11 +1,11 @@
 /**
- * OpenCode turns and one-shots on its server API, through the driver's runtime (the adapter the gateway calls), against
+ * OpenCode turns on its server API, through the driver's runtime (the adapter the gateway calls), against
  * a hand-authored server (`fakeOpencodeServer.ts`): which rules each session gets in each mode, how an OpenCode ask
  * becomes a Mousse approval and how it is answered, what refuses an asking turn, resuming a thread's session (one saved
- * over ACP included), Stop, and the one-shot's single tool-free request. What the real OpenCode 2.0.20 does with these
+ * over ACP included) and Stop. What the real OpenCode 2.0.20 does with these
  * calls is checked in `tests/live/opencodeServer.test.ts`.
  */
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, existsSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -315,62 +315,5 @@ describe('the server', () => {
     await vi.waitFor(() => expect(server.running()).toBe(true))
     await vi.waitFor(() => expect(closed).toBe(true), { timeout: 2_000 })
     expect(server.running()).toBe(false)
-  })
-})
-
-describe('OpenCode one-shots', () => {
-  const spec = (model: string) => ({ model, system: 'You name chats.', prompt: 'fix the login bug', onActivity: () => {} })
-
-  it('one prompt in a scratch session that denies every tool; the session and its folder are gone afterwards', async () => {
-    const { fake, runtime, stateDir } = await setup()
-    fake.onPrompt = (session) => fake.reply(session.id, 'Fix login bug')
-    expect(await runtime.oneShot!(spec('anthropic/claude-haiku-5-5'), new AbortController().signal)).toEqual({ text: 'Fix login bug' })
-    const [session] = fake.sessions.values()
-    expect(session!.permissions).toEqual([{ action: '*', resource: '*', effect: 'deny' }])
-    // A title of its own, so OpenCode makes no title request of its own.
-    expect(session!.body.title).toBeTruthy()
-    expect(session!.deleted).toBe(true)
-    expect(String(fake.calls.find((call) => call.path.endsWith('/prompt'))!.body?.text)).toBe('You name chats.\n\nfix the login bug')
-    expect(existsSync(join(stateDir, 'one-shot')) ? readdirSync(join(stateDir, 'one-shot')) : []).toEqual([])
-  })
-
-  it('OpenCode’s own free models may read (they refuse a request with no tools), and nothing else', async () => {
-    const { fake, runtime } = await setup()
-    fake.onPrompt = (session) => fake.reply(session.id, 'Title')
-    await runtime.oneShot!(spec('opencode/big-pickle'), new AbortController().signal)
-    const [session] = fake.sessions.values()
-    expect(session!.permissions).toEqual([{ action: '*', resource: '*', effect: 'deny' }, { action: 'read', resource: '*', effect: 'allow' }])
-  })
-
-  it('a read in a free model one-shot runs, in its empty scratch folder; any other tool ends the request', async () => {
-    const { fake, runtime } = await setup()
-    fake.onPrompt = (session) => {
-      fake.emit('session.tool.input.started', { sessionID: session.id, assistantMessageID: 'm', id: 'r1', name: 'read' })
-      fake.emit('session.tool.called', { sessionID: session.id, assistantMessageID: 'm', id: 'r1', name: 'read', input: { path: 'x' } })
-      fake.reply(session.id, 'Title')
-    }
-    expect(await runtime.oneShot!(spec('opencode/big-pickle'), new AbortController().signal)).toEqual({ text: 'Title' })
-    const first = [...fake.sessions.values()][0]!
-    expect((first.body.location as { directory: string }).directory).toMatch(/one-shot/)
-    fake.onPrompt = (session) => fake.emit('session.tool.input.started', { sessionID: session.id, assistantMessageID: 'm', id: 'w1', name: 'write' })
-    await expect(runtime.oneShot!(spec('opencode/big-pickle'), new AbortController().signal)).rejects.toMatchObject({ code: 'policy_unenforceable' })
-  })
-
-  it('an ask in a one-shot that OpenCode cannot be told to refuse ends the request', async () => {
-    const { fake, runtime } = await setup()
-    fake.replyFails = () => true
-    fake.onPrompt = (session) => fake.emit('permission.asked', { id: 'per_9', sessionID: session.id, action: 'read', resources: ['x'] })
-    await expect(runtime.oneShot!(spec('opencode/big-pickle'), new AbortController().signal)).rejects.toMatchObject({ code: 'policy_unenforceable' })
-  })
-
-  it.each([
-    ['a tool call', (fake: FakeOpencode, id: string) => fake.emit('session.tool.input.started', { sessionID: id, assistantMessageID: 'm', id: 'c', name: 'shell' }), { code: 'policy_unenforceable' }],
-    ['a retry OpenCode schedules', (fake: FakeOpencode, id: string) => fake.emit('session.retry.scheduled', { sessionID: id, assistantMessageID: 'm', attempt: 1, at: Date.now() + 2_000, error: { type: 'provider.rate-limit', message: 'slow down' } }), { code: 'rate_limited' }]
-  ])('%s ends the request at once: one model request, nothing run', async (_name, happen, error) => {
-    const { fake, runtime } = await setup()
-    fake.onPrompt = (session) => happen(fake, session.id)
-    await expect(runtime.oneShot!(spec('anthropic/claude-haiku-5-5'), new AbortController().signal)).rejects.toMatchObject(error)
-    expect(fake.calls.some((call) => call.path.endsWith('/interrupt'))).toBe(true)
-    expect([...fake.sessions.values()][0]!.deleted).toBe(true)
   })
 })
