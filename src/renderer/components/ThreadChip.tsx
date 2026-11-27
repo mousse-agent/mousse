@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type FocusEvent, type MouseEvent, type PointerEvent, type ReactNode, type RefObject } from 'react'
 import { MessageSquare } from '../lib/icons'
-import { UNKNOWN_COMPUTER_NAME, threadComputerState, useComputers, type Computer } from '../lib/computers'
+import { UNKNOWN_COMPUTER_NAME, threadComputerState, useComputers, useSelfNode, type Computer } from '../lib/computers'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { groupProjects } from '../lib/projectGroups'
 import { projectHues } from '../lib/projectHues'
@@ -172,7 +172,11 @@ function unreachableText(state: ThreadChipState): string {
  * switches the main view to the thread in this window, and Back returns (the thread history records the switch). A
  * thread that is not listed here says why instead: deleted, or on a computer that is not connected or not sharing.
  */
-export function ThreadChip({ threadId, label }: { threadId: string; label?: ReactNode }) {
+export function ThreadChip({ threadId: linked, label }: { threadId: string; label?: ReactNode }) {
+  // A link written on another computer names this computer's threads with this computer's node: read it by its id here.
+  const qualified = parseQualifiedId(linked)
+  const self = useSelfNode(qualified !== undefined)
+  const threadId = qualified && qualified.node === self ? qualified.id : linked
   const thread = useAppStore((state) => state.threads.find((entry) => entry.id === threadId))
   const activity = useAppStore((state) => state.threadActivity[threadId])
   const lastPhase = useAppStore((state) => state.turnStates[threadId]?.phase)
