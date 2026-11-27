@@ -174,6 +174,7 @@ export function unattendedRefusal(needs: Pick<ToolNeeds, 'waitsFor' | 'botAnswer
  * and stored ceiling, never the current turn's mode (a Plan turn's narrower ceiling is enforced at call time).
  */
 export function listsTool(tool: MousseTool, listing: ToolListing): boolean {
+  if (tool.variants) return tool.variants.some((variant) => listsTool(variant, listing))
   const needs = toolNeeds(tool)
   if (listing.readOnly && !needs.readOnlyChild && !needs.messages) return false
   if (listing.modeCeiling === 'plan' && needs.planRefuses) return false
@@ -399,6 +400,7 @@ function botThreadScope(tool: MousseTool, needs: ToolNeeds, args: Record<string,
  * included (a bot grant's variants, the thread it names), and a tool that asks first is usable.
  */
 export function heldBeforeArguments(tool: MousseTool, turn: AppToolTurn, inputs: { readOnly: boolean; ceiling: ModeCeiling; person?(): boolean }): boolean {
+  if (tool.variants) return tool.variants.some((variant) => heldBeforeArguments(variant, turn, inputs))
   const needs = toolNeeds(tool)
   if (needs.readOnlyLacks && inputs.readOnly && !needs.messages) return false
   if (needs.planRefuses && inputs.ceiling === 'plan') return false
@@ -466,6 +468,7 @@ export function parentHolds(lacks: string, state: HolderState): boolean {
  * the tool declares (`offered`: a browser tool outside the binding, a screenshot a model without vision cannot see).
  */
 export function offeredThisTurn(tool: MousseTool, turn: AppToolTurn): boolean {
+  if (tool.variants) return tool.variants.some((variant) => offeredThisTurn(variant, turn))
   return !tool.offered || tool.offered(turn)
 }
 

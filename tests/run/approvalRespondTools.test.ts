@@ -138,7 +138,8 @@ describe('approval_respond (SPEC §15.1)', () => {
       [{ ...ANSWER, answers: { permission: 7 } }, /answers.permission must be an option id/],
       [{ ...ANSWER, answers: { permission: ['allow', 3] } }, /answers.permission must be an option id/],
       [{ ...ANSWER, answers: { permission: 'x'.repeat(501) } }, /at most 500 characters/],
-      [{ ...ANSWER, requestId: ' ' }, /requestId must be a non-empty string/]
+      // `request_answer` reads the kind from the id: a call without one is refused before any kind is picked.
+      [{ ...ANSWER, requestId: ' ' }, /needs the requestId of the request it answers/]
     ])('invalid input %#: a tool error and no settlement', async (args, message) => {
       const { call, host } = await world()
       const result = await call(args)

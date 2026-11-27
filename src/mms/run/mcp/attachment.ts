@@ -191,7 +191,7 @@ export function isMousseServerTool(toolName: string): boolean {
  * the listed `reads` and `readsOthers` tools and the `readOnlySafe` ones of the app-tool registry (a test keeps them equal).
  * Runtimes that decide per tool name use it; the server refuses the rest in any case.
  */
-export const READ_ONLY_MOUSSE_TOOLS: ReadonlySet<string> = new Set(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'question_ask', 'question_withdraw', 'delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'message_parent', 'computer_list', 'model_list', 'skill_list', 'skill_load', 'web_search', 'web_fetch', 'git_status', 'git_diff', 'theme_read', 'terminal_read', 'read_applet', 'running_list', 'tool_catalogue', ...PROFILER_TOOL_NAMES])
+export const READ_ONLY_MOUSSE_TOOLS: ReadonlySet<string> = new Set(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'question_ask', 'question_withdraw', 'delegate_task', 'continue_subagent', 'request_answer', 'task_status', 'task_cancel', 'list_subagents', 'message_parent', 'computer_list', 'model_list', 'skill_list', 'skill_load', 'web_search', 'web_fetch', 'git_status', 'git_diff', 'theme_read', 'terminal_read', 'read_applet', 'running_list', 'tool_catalogue', ...PROFILER_TOOL_NAMES])
 
 export type AcpMcpServer =
   | { name: string; type: 'http'; url: string; headers: Array<{ name: string; value: string }> }

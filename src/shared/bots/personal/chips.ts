@@ -263,7 +263,8 @@ function classify(name: string, input: unknown, ctx: BotChipContext): Classified
     // note now (`thread_send`), and reads as a message.
     case 'thread_fork': return { kind: 'thread_fork', icon: 'think', live: 'forking a thread' }
     case 'thread_return': return { kind: 'thread_merge', icon: 'think', live: 'handing a fork back' }
-    case 'approval_respond': return { kind: 'approval', icon: 'think', live: 'answering an approval' }
+    // Passing on its owner's answer to its work (`answer`) has no chip of its own.
+    case 'request_answer': return typeof args.answer === 'string' || typeof args.questionId === 'string' ? null : { kind: 'approval', icon: 'think', live: 'answering an approval' }
     // A thread's queue: every change rolls up into one chip.
     case 'queue_enqueue':
     case 'queue_update': return { kind: 'queue', icon: 'think', live: "changing a thread's queue" }

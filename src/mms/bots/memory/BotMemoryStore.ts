@@ -1443,7 +1443,11 @@ function redactQuestionCopies(tx: BotStoreTx, has: (table: string) => boolean, b
   const redactCalls = (tool: string, where: string, ...params: string[]) =>
     tx.statement(`UPDATE bot_journal SET text = ?, keys = '', json = NULL, redacted_at = COALESCE(redacted_at, ?) WHERE bot_id = ? AND kind = 'tool_call' AND redacted_at IS NULL
       AND (json_extract(json, '$.tool') = ? OR substr(json_extract(json, '$.tool'), -length(?)) = ?) AND ${where}`).run(text, new Date().toISOString(), botId, tool, `__${tool}`, `__${tool}`, ...params)
-  if (question.answer_message === messageId) redactCalls('question_answer', "json_extract(json, '$.input.questionId') = ?", question.id)
+  // The relay of the answer: `request_answer` names the question `requestId`, its old name `question_answer` `questionId`.
+  if (question.answer_message === messageId) {
+    redactCalls('request_answer', "json_extract(json, '$.input.requestId') = ?", question.id)
+    redactCalls('question_answer', "json_extract(json, '$.input.questionId') = ?", question.id)
+  }
   const asked = parseJson(question.spec_json)?.question
   if (question.message_id === messageId && typeof asked === 'string') for (const tool of ['question_ask', 'ask_owner']) redactCalls(tool, "activation_id = ? AND json_extract(json, '$.input.question') = ?", question.activation_id, asked)
 }

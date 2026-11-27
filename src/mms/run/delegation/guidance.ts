@@ -19,7 +19,7 @@ export function delegationGuidanceLines(): string[] {
     'A subagent gets everything you have (shell, tools, MCP servers, skills, permission mode), never more. Pick workspace "isolated" for a worktree of its own, "shared" for your own folder; pass readOnly only for a deliberately narrow reader (no shell, no edits, no other MCP servers).',
     'After delegating or continuing, end your turn. Mousse sends you a notice with the result, so do not poll; call thread_wait with its subagent or delegationId only when the notice says the result was cut off.',
     'Mousse never merges a subagent\'s work into your files. The notice of a finished task says where it worked, its base and result snapshots (SHAs kept under refs/mousse/) and the Git state it left (branch, HEAD, commits). Bring the work in yourself with git, for example `git diff --binary <base> <result> | git apply --3way` or `git cherry-pick` of its commits, and check the result.',
-    'When a subagent asks a question you can answer, use answer_subagent; otherwise ask the user. A subagent that needs input is reported as needing it.',
+    'When a subagent asks a question you can answer, use request_answer; otherwise ask the user. A subagent that needs input is reported as needing it.',
     'To run a subagent on another of the user\'s computers (another operating system, a stronger machine, a job that should outlive this one), pass computer to delegate_task; computer_list shows which ones you may use. It runs there under that computer\'s agents, in its copy of this repository; its questions are answered there, and its result names the branch its work is on there, for you to fetch.'
   ]
 }

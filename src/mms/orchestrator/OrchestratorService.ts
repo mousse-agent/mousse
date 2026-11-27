@@ -908,6 +908,8 @@ export function botSenderHops(actor: AgentActor): AgentActor {
 
 /** How many plain-question answers of bots this process keeps for a retry of the same call (`answerQuestionAsBot`). */
 const BOT_ANSWERED_QUESTIONS_KEPT = 500
+/** The receipt key prefix of a subagent's request its parent answered (`answer_subagent:<parent thread>:<call>`). */
+const SUBAGENT_ANSWER_RECEIPT = 'answer_subagent:'
 
 /** The tools with which the owner's bot acts on their threads ("use your threads"), as `botSenderOf` holds them. */
 type BotThreadActTool =
@@ -1919,6 +1921,7 @@ export class OrchestratorService extends EventEmitter {
           toolAccess: { allows: () => true, execute: (_name, _args, run) => writer(run) },
           toolLedger: this.toolLedgerFor(runId),
           runActive: () => this.runEngine?.getActiveRun(threadId)?.runId === runId,
+          resolveAppCall: (name, args) => this.mcpToolRegistry().resolveCall(name, args, { threadId, runId }),
           secretMasker: () => this.secretMaskerFor?.(threadId)
         },
         context: {
@@ -3815,7 +3818,7 @@ export class OrchestratorService extends EventEmitter {
    * subagent's thread (the model's own `question_ask`, a plan question, a provider's approval such as
    * Codex's command approval; they all go through `UserQuestionService`) writes a `child_question`
    * row (a `reconcile_notice`) into the parent's inbox, and rule 4 wakes or steers the parent with
-   * it: it answers with `answer_subagent` or asks the user. The user still sees the question under
+   * it: it answers with `request_answer` or asks the user. The user still sees the question under
    * the top-level thread. When the question is answered, dismissed or times out, its row is
    * acknowledged on the `cleared` event; one left from a previous process is acknowledged at boot.
    * Returns the function that removes the listeners.
@@ -5243,6 +5246,7 @@ export class OrchestratorService extends EventEmitter {
         return caps ? steerStrategy(caps, this.runEngine?.getActiveRun(threadId) ?? null) : null
       },
       approvalRequest: (requestId) => this.approvalRequestInfo(requestId),
+      answeredRequest: (callerThreadId, keys) => this.answeredRequest(callerThreadId, keys),
       answerApproval: (threadId, requestId, answers, options) => this.answerApprovalAsAgent(threadId, requestId, answers, options),
       automations: () => this.automationTools,
       appearance: () => this.appearanceTools
@@ -5250,6 +5254,17 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** A request in any state, for `approval_respond` to check before it answers. */
+  /** `AppToolHost.answeredRequest`: the kind an earlier answer of the caller's under one of `keys` was, by its receipt. */
+  private answeredRequest(callerThreadId: string, keys: readonly string[]): 'subagent' | 'approval' | undefined {
+    const store = this.runEngine?.store
+    for (const key of keys) {
+      if (store?.getReceipt(`${SUBAGENT_ANSWER_RECEIPT}${callerThreadId}:${key}`)) return 'subagent'
+      const approval = `approval_respond:${callerThreadId}:${key}`
+      if (store?.getReceipt(approval) || this.botAnsweredQuestions.has(approval)) return 'approval'
+    }
+    return undefined
+  }
+
   private approvalRequestInfo(requestId: string): ApprovalRequestInfo | undefined {
     const view = this.questions.getRequest(requestId)
     if (!view) return undefined
@@ -9188,7 +9203,7 @@ export class OrchestratorService extends EventEmitter {
     return {
       delegateTask,
       continueSubagent,
-      answerSubagent: (input) => this.answerSubagent(parentThreadId, parentRunId, input),
+      answerSubagent: (input, call) => this.answerSubagent(parentThreadId, parentRunId, input, call.toolCallId),
       taskStatus: (ref, options) => this.taskStatus(parentThreadId, ref, options),
       taskCancel: (ref, call) => this.taskCancel(parentThreadId, ref, call ? cancelRequestKey(parentThreadId, parentRunId, call.toolCallId) : undefined),
       listDelegations,
@@ -9671,7 +9686,7 @@ export class OrchestratorService extends EventEmitter {
         subagent: target.title,
         childThreadId,
         questions: pending.map(({ requestId: id, questions }) => ({ requestId: id, questions })),
-        message: `"${target.title}" is waiting for an answer, so it cannot take new work. Answer it with answer_subagent (or ask the user), then continue it.`
+        message: `"${target.title}" is waiting for an answer, so it cannot take new work. Answer it with request_answer (or ask the user), then continue it.`
       }
     if (engine.getRun(parentRunId)?.outcome?.stopRequested)
       return { started: false as const, code: 'parent_stopping' as const, message: 'The calling run is being stopped; it cannot continue subagents.' }
@@ -9894,9 +9909,24 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * `answer_subagent`: the answer of a question one of the caller's subagents asked, in the shape the
-   * GUI answers with. The request must be pending on that subagent's thread.
+   * GUI answers with. The request must be pending on that subagent's thread. An answer is kept as a receipt under the
+   * call (`answer_subagent:<parent thread>:<call>`): a retry gets the same answer back once the question is gone.
    */
-  private answerSubagent(parentThreadId: string, parentRunId: string, input: { subagent: string; requestId: string; answers: Record<string, string | string[]> }) {
+  private answerSubagent(parentThreadId: string, parentRunId: string, input: { subagent: string; requestId: string; answers: Record<string, string | string[]> }, toolCallId?: string) {
+    const key = toolCallId ? `${SUBAGENT_ANSWER_RECEIPT}${parentThreadId}:${toolCallId}` : undefined
+    const earlier = key ? this.runEngine?.store.getReceipt(key) : undefined
+    if (earlier) {
+      const result = earlier.result as { requestId?: unknown }
+      return result.requestId === input.requestId
+        ? { ...(result as object), replayed: true as const }
+        : { answered: false as const, code: 'client_request_id_conflict' as const, message: 'That clientRequestId already answered another request; use a fresh one for each answer.' }
+    }
+    const answered = this.answerSubagentNow(parentThreadId, parentRunId, input)
+    if (key && answered.answered) this.runEngine?.store.putReceipt({ clientRequestId: key, threadId: parentThreadId, commandKind: 'answer_subagent', status: 'accepted', result: answered, createdAt: new Date().toISOString() })
+    return answered
+  }
+
+  private answerSubagentNow(parentThreadId: string, parentRunId: string, input: { subagent: string; requestId: string; answers: Record<string, string | string[]> }) {
     const target = this.resolveSubagentTarget(parentThreadId, input.subagent)
     if (!target.ok) return { answered: false as const, ...target.refusal }
     const runsOn = this.threadStore?.getThread(target.childThreadId)?.runsOn
@@ -9975,7 +10005,7 @@ export class OrchestratorService extends EventEmitter {
         ? {
             needsInput: true,
             pendingQuestion: pending.map(({ requestId, questions }) => ({ requestId, questions })),
-            hint: `It waits for an answer. Answer it with answer_subagent (subagent "${this.titleOf(delegation.childThreadId) ?? delegation.childThreadId}", requestId ${pending[0].requestId}), or ask the user.`
+            hint: `It waits for an answer. Answer it with request_answer (requestId ${pending[0].requestId}), or ask the user.`
           }
         : {}),
       ...(row?.computer ? { computer: this.remoteTaskStatus(delegationId, row.computer) } : {}),
@@ -16879,6 +16909,7 @@ export class OrchestratorService extends EventEmitter {
           toolLedger: this.toolLedgerFor(engineRunId),
           // The app tools act only while this run is the thread's active one.
           ...(engineRunId && this.runEngine ? { runActive: () => this.runEngine?.getActiveRun(session.threadId)?.runId === engineRunId } : {}),
+          ...(engineRunId ? { resolveAppCall: (name: string, args: Record<string, unknown>) => this.mcpToolRegistry().resolveCall(name, args, { threadId: session.threadId, runId: engineRunId }) } : {}),
           // A runtime with its own tools hides the thread's secrets in their results before its session file keeps them.
           secretMasker: () => this.secretMaskerFor?.(session.threadId)
         },

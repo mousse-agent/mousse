@@ -18,6 +18,7 @@ import { monitorTools } from './monitors'
 import { profilerTools } from './profiler'
 import { projectGitTools } from './projectGit'
 import { quickActionTools, runningTools } from './quickActions'
+import { REQUEST_ANSWER_KINDS, requestAnswerTool } from './requestAnswer'
 import { ToolRegistry, type ToolAccessPolicy, type ToolRegistryOptions } from './registry'
 import { scheduleTools } from './schedules'
 import { secretTools } from './secrets'
@@ -34,6 +35,8 @@ import { webTools } from './web'
 const MODEL_LIST_TOOL = 'model_list'
 /** Asking the person and taking a question back, a bot's (its owner) or a thread's (the user) (`shareWakeTools`). */
 const QUESTION_TOOLS: readonly string[] = ['question_ask', 'question_withdraw']
+/** The tools that answer each kind of request: `request_answer`'s variants, never listed or called by their own names. */
+const ANSWER_TOOLS: readonly string[] = Object.values(REQUEST_ANSWER_KINDS).map((kind) => kind.tool)
 
 export * from './types'
 export * from './refusal'
@@ -131,13 +134,31 @@ export function createAppToolRegistry(input: {
     for (const tool of tools) registry.register(tool)
   }
   // `model_list` serves a bot's turn (the models its work runs on) and any thread's (the picker's), one tool by one name.
-  const bots = botTools(input.bots)
-  const delegation = delegationTools(host)
+  const allBots = botTools(input.bots)
+  const allDelegation = delegationTools(host)
+  const allThreads = engine ? threadTools(host, engine, input.bots) : []
+  // `request_answer` answers a subagent's request, another thread's approval or, for a bot, its owner's answer to its
+  // work, each by the tool that answered it before.
+  const answers = requestAnswerTool({
+    subagent: allDelegation.find((tool) => tool.name === REQUEST_ANSWER_KINDS.subagent.tool),
+    approval: allThreads.find((tool) => tool.name === REQUEST_ANSWER_KINDS.approval.tool),
+    relay: allBots.find((tool) => tool.name === REQUEST_ANSWER_KINDS.relay.tool)
+  }, {
+    request: (requestId) => host.approvalRequest?.(requestId),
+    parentThread: (threadId) => host.parentThread?.(threadId),
+    answered: (threadId, keys) => host.answeredRequest?.(threadId, keys),
+    botQuestion: (threadId, requestId) => {
+      const deps = input.bots?.()
+      const activation = deps?.host.activationOf(threadId)
+      return Boolean(activation && deps?.host.questions?.asked?.(activation.botId, requestId))
+    }
+  })
+  const [bots, delegation, threads] = [allBots, allDelegation, allThreads].map((tools) => tools.filter((tool) => !ANSWER_TOOLS.includes(tool.name)))
   const models = shareWakeTools(bots.filter((tool) => tool.name === MODEL_LIST_TOOL), delegation.filter((tool) => tool.name === MODEL_LIST_TOOL))
   add('delegation', delegation.flatMap((tool) => (tool.name === MODEL_LIST_TOOL ? models : [tool])))
-  add('questions', [...shareWakeTools(bots.filter((tool) => QUESTION_TOOLS.includes(tool.name)), askUserTools(host)), ...secretTools(host), ...bugReportTools(host)])
+  add('questions', [...shareWakeTools(bots.filter((tool) => QUESTION_TOOLS.includes(tool.name)), askUserTools(host)), answers, ...secretTools(host), ...bugReportTools(host)])
   add('tasks', [...taskTools(host), ...goalTools(host)])
-  add('thread', engine ? threadTools(host, engine, input.bots) : [])
+  add('thread', threads)
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])
   add('skills', skillTools(host))
   add('quickActions', [...quickActionTools(host), ...runningTools(host), ...monitorTools(host)])

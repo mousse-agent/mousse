@@ -87,7 +87,7 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   queue_list: ["read", "a thread's queue in Mousse"],
   queue_enqueue: ["queue", "a message in Mousse"],
   queue_update: ["change", "a queued message in Mousse"],
-  approval_respond: ["answer", "an approval in Mousse"],
+  request_answer: ["answer", "a request in Mousse"],
   // Memory
   memory_save: ["save", "to memory"],
   memory_search: ["search", "memory"],
@@ -134,7 +134,6 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   continue_subagent: ["message", "a subagent in Mousse"],
   recall_subagent: ["message", "a subagent in Mousse"],
   subagent_send: ["message", "a subagent in Mousse"],
-  answer_subagent: ["answer", "a subagent in Mousse"],
   task_status: ["check", "a subagent in Mousse"],
   subagent_result: ["check", "a subagent in Mousse"],
   subagent_wait: ["wait", "for a subagent in Mousse"],

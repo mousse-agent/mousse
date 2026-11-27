@@ -1382,9 +1382,9 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
           if (isOutcome(call)) return call
           if (call.lane !== 'chat' || !call.deps.host.questions) return error(ANSWER_CHAT_ONLY)
           if (typeof args.questionId !== 'string' || !args.questionId || typeof args.answer !== 'string' || !args.answer.trim()) return error('question_answer needs the question\'s id and the owner\'s answer.')
-          const relayed = call.deps.host.questions.relay(call.botId, call.activationId, args.questionId, args.answer)
+          const relayed = call.deps.host.questions.relay(call.botId, call.activationId, args.questionId, args.answer, ctx.toolCallId)
           if (!relayed.ok) return error(relayed.text)
-          return json({ ok: true, note: `"${relayed.title}" carries on with their answer. Tell the owner in a few words, as yourself, that you're on it again ("Got it, carrying on with the flats").` })
+          return json({ ok: true, ...(relayed.replayed ? { replayed: true } : {}), note: `"${relayed.title}" carries on with their answer. Tell the owner in a few words, as yourself, that you're on it again ("Got it, carrying on with the flats").` })
         }
       }),
       // Only a chat turn holds it, with `question_ask`.

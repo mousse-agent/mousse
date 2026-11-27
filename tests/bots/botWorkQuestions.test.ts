@@ -56,11 +56,11 @@ const call = <T = unknown>(method: string, params: Record<string, unknown>): Pro
 
 const tools = new Map(botTools(() => ({ host: f.bots.tools })).map((tool) => [tool.name, tool]))
 /** One of the bot's tools, called from a running turn as its runtime would. */
-async function tool(name: string, prepared: PreparedBotTurn, threadId: string, args: Record<string, unknown>): Promise<{ text: string; isError?: boolean }> {
+async function tool(name: string, prepared: PreparedBotTurn, threadId: string, args: Record<string, unknown>, toolCallId = `call-${Math.random()}`): Promise<{ text: string; isError?: boolean }> {
   const ctx = {
     caller: { threadId, runId: 'r', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
     turn: { threadId, bot: prepared.authority },
-    toolCallId: `call-${Math.random()}`,
+    toolCallId,
     signal: new AbortController().signal,
     transport: 'mcp'
   } as unknown as ToolCallContext
@@ -247,7 +247,7 @@ describe('the chat passes on an answer (question_answer)', () => {
     const { workId, work, bubble, questionId } = await workThatAsks()
     await endTurn(work)
     // The chat knows what its work waits on, with the id to pass an answer on with.
-    expect(f.bots.questionLines(botId)).toEqual([`"Flat hunt" waits for the owner's answer to your question "${FLATS.question}" (Flat A · Flat B · Something else) [${questionId}]. If the owner answers it in the chat, pass it on with question_answer.`])
+    expect(f.bots.questionLines(botId)).toEqual([`"Flat hunt" waits for the owner's answer to your question "${FLATS.question}" (Flat A · Flat B · Something else) [${questionId}]. If the owner answers it in the chat, pass it on with request_answer.`])
     // A chat question the owner taps: the turn it starts carries their answer, so it may pass one on too.
     const asking = await chat('Anything else?', 'c1')
     await tool('question_ask', asking.prepared, asking.payload.threadId, { question: 'Shall I also look at parking?', yesNo: true })
@@ -284,6 +284,26 @@ describe('the chat passes on an answer (question_answer)', () => {
     await finish(f, own.payload, 'completed', { text: 'OK.' })
     const kept = await chat('Go with the second one', 'c2')
     expect(JSON.parse((await tool('question_answer', kept.prepared, kept.payload.threadId, { questionId, answer: 'The second one' })).text)).toMatchObject({ ok: true })
+  })
+
+  it('a retried relay replays what it did, and never answers the question again once Forget opened it again', async () => {
+    const memory = memoryStore()
+    const { work, questionId } = await workThatAsks()
+    await endTurn(work)
+    const own = await chat('Go with the second one', 'c1')
+    // The work does not read the answer yet.
+    f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
+    const relay = () => tool('question_answer', own.prepared, own.payload.threadId, { questionId, answer: 'The second one' }, 'mcp:relay-1')
+    expect(JSON.parse((await relay()).text)).toMatchObject({ ok: true })
+    expect(JSON.parse((await relay()).text)).toMatchObject({ ok: true, replayed: true })
+    expect(f.store.question(questionId)).toMatchObject({ status: 'answered', answer: { text: 'The second one', by: 'chat' } })
+    // The owner forgets their message before the work read the answer: the question is open again, and a retry of the
+    // call that passed it on passes nothing on.
+    memory.forget(botId, { refs: [journaled(memory, own.message, 'owner_msg', 'chat')], by: 'owner_ui' })
+    expect(f.store.question(questionId)).toMatchObject({ status: 'open', answer: null })
+    expect(await relay()).toEqual({ text: QUESTION_ANSWER_FORGOTTEN_TEXT, isError: true })
+    expect(f.store.question(questionId)).toMatchObject({ status: 'open', answer: null })
+    f.store.setError(botId, null)
   })
 })
 
@@ -389,7 +409,7 @@ describe('Forget', () => {
     expect(journalText(report!).text).toBe('I booked a viewing of Flat B for Saturday.')
   })
 
-  it('of the owner’s words the chat passed on: the chat’s question_answer call and the work’s copy go; of the question’s bubble: its question_ask call and the line that quoted it', async () => {
+  it('of the owner’s words the chat passed on: the chat’s relay call and the work’s copy go; of the question’s bubble: its question_ask call and the line that quoted it', async () => {
     const memory = memoryStore()
     const { workId, work, questionId, bubble } = await workThatAsks()
     await endTurn(work)
@@ -402,13 +422,16 @@ describe('Forget', () => {
     const [askCall, oldAskCall] = captured(memory, { threadId: mainDispatches(workId)[0]!.threadId, lane: 'run', activationId: workId }, ['question_ask', 'ask_owner'].map((name) =>
       ({ id: `ask-${name}`, role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(), toolCall: { title: name, summary: '', details: [], status: 'complete', toolName: `mcp__mousse__${name}`, input: { question: FLATS.question, choices: FLATS.choices } } } as ChatMessage)
     ))
-    const [relayCall] = captured(memory, { threadId: own.payload.threadId, lane: 'chat', activationId: own.activation.id }, [
-      { id: 'relay', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(), toolCall: { title: 'question_answer', summary: '', details: [], status: 'complete', toolName: 'mcp__mousse__question_answer', input: { questionId, answer: 'The second one, Flat B' } } } as ChatMessage
-    ])
+    // The relay, under its name now and under its old name (`question_answer`, which named the question `questionId`).
+    const [relayCall, oldRelayCall] = captured(memory, { threadId: own.payload.threadId, lane: 'chat', activationId: own.activation.id }, [
+      ['request_answer', { requestId: questionId }], ['question_answer', { questionId }]
+    ].map(([name, id]) => ({ id: `relay-${name}`, role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(), toolCall: { title: name, summary: '', details: [], status: 'complete', toolName: `mcp__mousse__${name}`, input: { ...(id as object), answer: 'The second one, Flat B' } } } as ChatMessage)))
     const [copy] = captured(memory, { threadId: resumed.threadId, lane: 'run', activationId: workId }, [{ id: 'cont', role: 'user', content: resumed.prompt.text, timestamp: f.store.now() } as ChatMessage])
     memory.forget(botId, { refs: [journaled(memory, own.message, 'owner_msg', 'chat')], by: 'owner_ui' })
-    expect(journalText(relayCall!)).toMatchObject({ redacted_at: expect.any(String) })
-    expect(journalText(relayCall!).text).not.toContain('Flat B')
+    for (const call of [relayCall, oldRelayCall]) {
+      expect(journalText(call!)).toMatchObject({ redacted_at: expect.any(String) })
+      expect(journalText(call!).text).not.toContain('Flat B')
+    }
     expect(f.store.dispatch(workId, resumed.n)!.prompt.text).not.toContain('Flat B')
     expect(journalText(copy!).text).not.toContain('Flat B')
     // The question itself is not forgotten yet: its question_ask call stays.

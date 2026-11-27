@@ -72,6 +72,24 @@ export type ToolCapability = 'threads.start' | 'themes' | 'quick_actions'
 export const TOOL_CLASSES: ReadonlySet<string> = new Set<ToolClass>(['read', 'mutation', 'delegation'])
 
 /** Who a call acts as: the thread's active run, under the ceiling its turn was given. */
+/** What a tool of variants reads to pick the variant of a call: who calls, in which turn, and the call's id. */
+export interface VariantSite {
+  threadId: string
+  turn: AppToolTurn
+  /** The call's id as the registry keys its receipts (`mcp:<clientRequestId>` over MCP). */
+  toolCallId?: string
+}
+
+/**
+ * The variant a call is: its tool and the arguments it runs with. `conceals` is a thread the variant read from what
+ * the call named rather than from the call: a refusal that would name it gets `refusal` instead.
+ */
+export interface ToolVariant {
+  tool: MousseTool
+  args: Record<string, unknown>
+  conceals?: { threadId: string; refusal: ToolOutcome }
+}
+
 export interface McpCaller {
   threadId: string
   runId: string
@@ -358,6 +376,13 @@ export interface MousseTool {
    * handler checks it. Registration refuses a tool that takes such an argument without it.
    */
   authorize?: ToolAuthorize
+  /**
+   * A tool whose variant is decided by what its arguments name, not by an argument the caller picks (`request_answer`:
+   * the kind of the request its id names). Each variant is a whole tool with its own authority: the tool is listed and
+   * held when one of them is, and a call is checked and run as the variant `variantOf` picks, under this tool's name.
+   */
+  variants?: readonly MousseTool[]
+  variantOf?(args: Record<string, unknown>, site: VariantSite): ToolVariant | { refused: ToolOutcome }
   handler(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> | ToolOutcome
 }
 
