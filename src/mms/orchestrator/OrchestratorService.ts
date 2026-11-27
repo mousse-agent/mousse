@@ -4506,7 +4506,8 @@ export class OrchestratorService extends EventEmitter {
     // A person's Stop reaches the threads the stopped ones launched while they run work an agent started: a creator
     // that is stopped leaves no fan-out running behind it (an agent's own Stop of a thread does not cascade).
     // The cascade keeps the cause of the Stop that started it: an agent's `task_cancel` stays the agent's below.
-    if (!result.replayed && !opts.actor) {
+    // An archive stops only the thread's own work and its subagents: a thread it handed work to carries on (#2004).
+    if (!result.replayed && !opts.actor && reason !== 'archived') {
       await this.stopLaunchedThreads(result.threads, opts.byAgent === true)
       // And the threads they launched on other computers, there (kept until it is delivered).
       this.stopRemoteLaunches(result.threads, reason === 'deleted' || reason === 'expired' ? reason : 'stopped')
@@ -6748,15 +6749,14 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.runEngine
     const store = this.threadStore
     if (!engine || !store || !store.getThread(threadId)) return
-    // The one wait: the computers the thread's launches run on. Everything after it, up to the archive, runs without
-    // yielding, so no turn or message can start between the last check and the archive (an archived thread takes none).
-    const remoteWorking = await this.remoteLaunchesWorking([threadId, ...subagentDescendants(threadId, store.listAllThreads())])
+    // Nothing here waits: from the check to the archive no turn or message can start (an archived thread takes none).
+    // Threads it handed work to, here or on another computer, are not its work: the archive leaves them running.
     const thread = store.getThread(threadId)
     if (!thread || thread.archivedAt || this.lifecycle.stopping) return
     const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
     if (session?.deleted) return
     if (session) this.refreshSessionQueueFromDisk(session)
-    if (remoteWorking || this.archiveOwnThreadKept(threadId, actor.runId, session)) {
+    if (this.archiveOwnThreadKept(threadId, actor.runId, session)) {
       const target = session ?? this.getOrCreateSession(threadId)
       this.sessionAls.run(target, () => this.addSystemMessage(ARCHIVE_AFTER_TURN_KEPT))
       return
@@ -6771,22 +6771,11 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
-  /** Whether any of these threads launched a thread on another computer that is still working there (a launch still open, or one that computer cannot be asked about, counts as working). */
-  private async remoteLaunchesWorking(launcherThreadIds: readonly string[]): Promise<boolean> {
-    const remote = this.remoteThreads
-    if (!remote) return false
-    for (const id of launcherThreadIds) {
-      if ((await remote.working(id)) > 0) return true
-    }
-    return false
-  }
-
   /**
-   * Whether a thread its agent asked to archive still has local work an Archive would end (`archiveThread` is a Stop, and
-   * a Stop reaches all of it): a queued message, a run starting, running, waiting or paused, provider background work (a
-   * command it left running), or a question to the person, in the thread or a subagent below it; or a thread one of
-   * them launched here that is still working (`remoteLaunchesWorking` asks the other computers). The turn that asked
-   * (`askedRunId`) is not counted. Synchronous, so the archive can follow it with nothing starting in between.
+   * Whether a thread its agent asked to archive still has local work an Archive would end (`archiveThread` is a Stop of
+   * the thread and its subagents): a queued message, a run starting, running, waiting or paused, provider background
+   * work (a command it left running), or a question to the person, in the thread or a subagent below it. The turn that
+   * asked (`askedRunId`) is not counted. Synchronous, so the archive can follow it with nothing starting in between.
    */
   private archiveOwnThreadKept(threadId: string, askedRunId: string, session: ThreadSession | undefined): boolean {
     const engine = this.requireRunEngine()
@@ -6797,8 +6786,6 @@ export class OrchestratorService extends EventEmitter {
     const subtree = new Set([threadId, ...subagentDescendants(threadId, threads)])
     const runs = engine.store.listNonTerminalRuns()
     if (runs.some((run) => subtree.has(run.threadId) && run.runId !== askedRunId)) return true
-    const busy = new Set(runs.map((run) => run.threadId))
-    if (threads.some((thread) => thread.createdByThreadId !== undefined && subtree.has(thread.createdByThreadId) && busy.has(thread.id))) return true
     for (const id of subtree) {
       if (this.providerBackground.has(id) || this.questions.listPendingForThread(id).length > 0) return true
       const live = id === threadId ? session : this.boundSession.threadId === id ? this.boundSession : this.sessions.get(id)

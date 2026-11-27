@@ -38,8 +38,6 @@ const UNREACHED: ReadonlySet<string> = new Set(['computer_offline', 'peer_offlin
 const CONNECT_MS = 10_000
 /** The deadline of a quick call (a read, a send, a Stop). */
 const CALL_MS = 30_000
-/** The deadline of a quick probe (the working count). */
-const PROBE_MS = 8_000
 /** How long a search waits for the computer (reaching it, then its answer) before it is named as not searched. */
 export const SEARCH_MS = 10_000
 /** Without `runs.wait`, how often a wait asks the run's status. */
@@ -720,37 +718,6 @@ export class RemoteLaunchedThreads {
       const refused = remoteReachRefusal(error, target.computer, 'the search')
       return { searched: false, code: refused.code, message: refused.message }
     }
-  }
-
-  // ------------------------------------------------------------------ the working count
-
-  /**
-   * How many of the threads `launcherThreadId` launched on other computers are working: a launch not finished yet, and a
-   * launched thread whose computer says it has a run going, preparing, or a message waiting. One that cannot be asked
-   * counts as working: the cap never lets more through on a guess.
-   */
-  async working(launcherThreadId: string): Promise<number> {
-    const rows = this.deps.records.listForLauncher(launcherThreadId).filter((row) => row.state !== 'abandoned')
-    const open = rows.filter((row) => row.state === 'starting' || row.state === 'created' || row.firstMessageState === 'pending' || row.firstMessageState === 'uncertain')
-    const asked = rows.filter((row) => !open.includes(row) && row.remoteThreadId)
-    const answers = await Promise.all(asked.map(async (row) => {
-      const target = { node: row.node, computer: row.computerName, remoteThreadId: row.remoteThreadId! }
-      try {
-        const port = this.deps.port()
-        if (!port) return true
-        const versions = port.versions ? await port.versions(row.node, AbortSignal.timeout(PROBE_MS)) : undefined
-        if (versions?.['runs.wait'] !== undefined) {
-          const { result } = await this.call(target, 'runs.wait', { threadId: row.remoteThreadId, timeoutMs: 0 }, { what: 'the count', deadlineMs: PROBE_MS, connectMs: PROBE_MS, retry: false })
-          return !(isRecord(result) && (result.status === 'idle' || result.status === 'finished'))
-        }
-        const { result } = await this.call(target, 'runs.list', { threadId: row.remoteThreadId, limit: 1 }, { what: 'the count', deadlineMs: PROBE_MS, connectMs: PROBE_MS, retry: false })
-        const latest = isRecord(result) && Array.isArray(result.runs) ? (result.runs[0] as RunRecord | undefined) : undefined
-        return latest !== undefined && !TERMINAL_RUN_STATUSES.has(latest.status)
-      } catch {
-        return true
-      }
-    }))
-    return open.length + answers.filter(Boolean).length
   }
 
   // ------------------------------------------------------------------ Stops

@@ -650,6 +650,18 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
       expect(s.run(agentRun.runId).outcome).toMatchObject({ stopRequested: true })
       expect(s.run(agentRun.runId).outcome?.stopRequestedBy).toBeUndefined()
     })
+
+    it('archiving the launcher stops its subagent but not a thread it handed work to', async () => {
+      const s = await scene()
+      const launched = s.d.store.createThread('Launched', undefined, undefined, { started: true, createdByThreadId: s.parentId })
+      const agentRun = s.d.engine.store.createRun({ threadId: launched.id, source: 'mcp', outcome: { sentByAgent: true, agentHops: 1 } })
+      s.d.engine.markStarting(agentRun.runId)
+      s.d.engine.markRunning(agentRun.runId)
+      await s.d.orch.archiveThread(s.parentId, true, { waitForStop: true })
+      await waitFor(() => s.terminal(s.delegation.childRunId), 'the subagent to stop')
+      expect(s.run(agentRun.runId).status).toBe('running')
+      expect(s.run(agentRun.runId).outcome?.stopRequested).toBeFalsy()
+    })
   })
 
   it('the Stop fence: a run that is being stopped can start no subagent and continue none', async () => {

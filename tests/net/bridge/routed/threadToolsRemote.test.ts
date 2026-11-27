@@ -369,6 +369,16 @@ describe('the thread tools on a thread launched on another computer (issue #1160
     }
   }, 120_000)
 
+  it('archiving the launcher leaves the thread it handed work to there running', async () => {
+    standInForTurns()
+    const { thread, launch } = await launcher()
+    const { runId } = await launch('Build it.')
+    running(runId!)
+    await t.caller.orchestrator.archiveThread(thread.id, true, { waitForStop: true })
+    expect(t.caller.runEngine.remoteLaunches.listForLauncher(thread.id)[0]!.stop).toBeNull()
+    expect(isTerminal(runId!)).toBe(false)
+  }, 120_000)
+
   it('deleting the launcher stops the work it started there and deletes nothing there', async () => {
     standInForTurns()
     const { thread, runId: launcherRun, launch } = await launcher()
@@ -381,22 +391,6 @@ describe('the thread tools on a thread launched on another computer (issue #1160
     await vi.waitFor(() => expect(t.caller.runEngine.remoteLaunches.listForLauncher(thread.id)[0]!.stop).toMatchObject({ state: 'sent', reason: 'deleted' }), { timeout: 20_000 })
     expect(isTerminal(runId!)).toBe(true)
     expect(t.owner.threads.getThread(far)).toBeDefined()
-  }, 120_000)
-
-  it('counts the launched threads working there for thread_create\'s cap, as that computer says', async () => {
-    standInForTurns()
-    const { thread, launch } = await launcher()
-    const busy = await launch('Build it.')
-    running(busy.runId!)
-    await launch()
-    // One runs there, one is idle there.
-    expect(await remoteOf().working(thread.id)).toBe(1)
-    // A computer that cannot be asked: its threads count as working, never as free places.
-    const versions = vi.spyOn(portOf(), 'versions').mockRejectedValue(new DomainRpcError('computer_offline', 'offline'))
-    expect(await remoteOf().working(thread.id)).toBe(2)
-    versions.mockRestore()
-    t.owner.runEngine.markTerminal(busy.runId!, 'completed')
-    expect(await remoteOf().working(thread.id)).toBe(0)
   }, 120_000)
 
   describe('reachability: a refusal names which it is, with the computer', () => {
