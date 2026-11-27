@@ -238,14 +238,14 @@ describe('Model list freshness', () => {
 })
 
 describe('Providers page toolbar', () => {
-  it('heads the list with Add provider, then Refresh provider status and Refresh models; no computer choice without another computer', () => {
+  it('heads the list with Add provider, then one refresh for providers and models; no computer choice without another computer', () => {
     const html = renderToStaticMarkup(createElement(ProvidersSettings, {
       settings: {} as never, refreshProviderData: async () => ({ opts: {} as never }), updateSettings: async () => undefined, ensureValidProviderSelection: async (next) => next
     }))
-    expect(buttons(html)).toEqual(['Add provider', 'Refresh models'])
-    expect(labels(html)).toContain('Refresh provider status')
-    expect(html.indexOf('Add provider')).toBeLessThan(html.indexOf('aria-label="Refresh provider status"'))
-    expect(html.indexOf('aria-label="Refresh provider status"')).toBeLessThan(html.indexOf('Refresh models'))
+    expect(buttons(html)).toEqual(['Add provider'])
+    expect(labels(html)).toContain('Refresh providers and models')
+    expect(html.indexOf('Add provider')).toBeLessThan(html.indexOf('aria-label="Refresh providers and models"'))
+    expect(html).not.toContain('Refresh models')
     // With no other computer to choose, this one is implied.
     expect(html).not.toContain('Applying settings for')
     // Usage stays on its own page.
