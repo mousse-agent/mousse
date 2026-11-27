@@ -78,17 +78,6 @@
       "expiresAt": "2026-11-26T10:22:51.331Z"
     },
     {
-      "task": "net-helper-key-files",
-      "session": "Avarnics-Mac-mini.local-b65610",
-      "machine": "Avarnics-Mac-mini.local",
-      "branch": "net-helper-key-files",
-      "paths": [
-        "native/net-helper/ENGINE_COMMIT"
-      ],
-      "claimedAt": "2026-11-26T04:44:02.483Z",
-      "expiresAt": "2026-11-26T06:44:02.483Z"
-    },
-    {
       "task": "no-console-windows",
       "session": "Animatrix-4d1091",
       "machine": "Animatrix",
@@ -115,17 +104,6 @@
       ],
       "claimedAt": "2026-11-26T09:12:48.179Z",
       "expiresAt": "2026-11-26T11:12:48.179Z"
-    },
-    {
-      "task": "remote-snapshot-newest-part",
-      "session": "Animatrix-ceb583",
-      "machine": "Animatrix",
-      "branch": "remote-snapshot-newest-part",
-      "paths": [
-        "src/mms/bridge/remote/MmsBackend.ts"
-      ],
-      "claimedAt": "2026-11-27T06:28:55.918Z",
-      "expiresAt": "2026-11-27T08:28:55.918Z"
     },
     {
       "task": "remote-subagent-result-notice",
