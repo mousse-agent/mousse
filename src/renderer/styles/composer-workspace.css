@@ -159,6 +159,12 @@ button.new-thread-chip:hover:not(:disabled),
 .remote-project-recent:hover,
 .remote-project-recent:focus-visible { background: rgba(var(--surface-soft-rgb), 0.9); }
 .remote-project-error { margin: 0; color: var(--danger, #e5484d); font-size: 12.5px; }
+/* That computer's folders, browsed to pick one. */
+.remote-project-folders { max-height: 220px; overflow-y: auto; }
+.remote-project-folder { display: flex; align-items: center; gap: 6px; font-family: inherit; }
+.remote-project-folder > svg { flex: none; color: var(--text-secondary); }
+.remote-project-folder > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.remote-project-note { margin: 0; padding: 5px 8px; color: var(--text-secondary); font-size: 12px; }
 
 /* The branch name while it is read: a muted bar of about a short name's width, so nothing reads "loading". */
 .new-thread-branch-placeholder {

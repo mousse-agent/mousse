@@ -93,6 +93,11 @@ export interface AgentRemoteThreadRequest {
    * which has no project of its own, gives this or `projectId`.
    */
   fromProjectId?: string
+  /**
+   * The thread starts in no project there (`projectId: null`): nothing is matched, and that computer needs no project. Also
+   * what a launch without a project here becomes: a bot that names no `fromProjectId`, an agent whose thread has none.
+   */
+  noProject?: true
   title?: string
   workspace: 'project' | 'new_worktree'
   /** Both or neither: a model that computer offers, else its default. */

@@ -71,7 +71,7 @@ describe('newProjectRows', () => {
 
   it('on another computer, offers a clone and its project folders, and adds only a full path', () => {
     const there = { remote: true as const, computer: 'Mac mini', folders: ['/Users/me/dev/', '/srv/'], parent: '/Users/me/dev' }
-    expect(kinds('', there)).toEqual(['clone-hint', 'suggest', 'suggest'])
+    expect(kinds('', there)).toEqual(['open-folder', 'clone-hint', 'suggest', 'suggest'])
     expect(kinds('/Users/me/dev/api', there)).toEqual(['add-path'])
     expect(kinds('/Users/', there)).toEqual(['add-path', 'suggest'])
     expect(newProjectRows('acme/web-app', there).flatMap((group) => group.rows)).toEqual([{ kind: 'clone', repository: 'acme/web-app', name: 'web-app', destination: '/Users/me/dev/web-app' }])
