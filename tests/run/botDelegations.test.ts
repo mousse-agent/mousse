@@ -87,13 +87,31 @@ describe('a bot subagent in the run database', () => {
     expect(fx.engine.store.listRuns('sub-c1')).toEqual([])
   })
 
-  it('one level: a bot subagent starts no subagent, by either tool', async () => {
+  it('a bot subagent starts its own only through the bot port, only for its own work, and only when the port allows it', async () => {
     const work = await fx.runningRun('bot-work')
     const accepted = await botDelegate(work.runId, 'c1')
     fx.engine.markStarting(accepted.childRunId)
     fx.engine.markRunning(accepted.childRunId)
+    // Not as a thread does.
     await expect(fx.delegate(accepted.childRunId, 'deeper')).rejects.toMatchObject({ reason: 'bot_subagent_nesting' })
-    await expect(botDelegate(accepted.childRunId, 'deeper-bot')).rejects.toMatchObject({ reason: 'bot_subagent_nesting' })
+    // Not for another work.
+    const other = (call: string, bot: BotDelegation) => fx.engine.requestBotDelegation({
+      parentThreadId: accepted.childThreadId, parentRunId: accepted.childRunId, childThreadId: `sub-${call}`, newChild: true, clientRequestId: `botsub:${call}`,
+      prompt: 'Find the prices.', instanceId: 'pi:openrouter', model: 'some/model', bot, subagent: { title: 'Prices' }
+    })
+    await expect(other('foreign', { ...BOT, rootActivationId: 'act-2' })).rejects.toMatchObject({ reason: 'bot_subagent_nesting' })
+    // Not when the port refuses, nor without it.
+    port.authorize = { ok: false, code: 'bot_subagent_refused', message: 'Your turn is ending.' }
+    await expect(botDelegate(accepted.childRunId, 'refused')).rejects.toMatchObject({ reason: 'bot_subagent_refused' })
+    fx.engine.setBotPort(null)
+    await expect(botDelegate(accepted.childRunId, 'portless')).rejects.toMatchObject({ reason: 'bot_port_missing' })
+    expect(fx.engine.delegations.listForParentRun(accepted.childRunId)).toEqual([])
+    // Through the port: under the subagent's run and thread, in the work's chain.
+    fx.engine.setBotPort(port)
+    port.authorize = { ok: true }
+    const nested = await botDelegate(accepted.childRunId, 'deeper-bot')
+    expect(fx.engine.delegations.get(nested.delegationId)).toMatchObject({ parentRunId: accepted.childRunId, parentThreadId: accepted.childThreadId, bot: BOT })
+    expect(fx.engine.delegations.getLineage(nested.childThreadId)).toMatchObject({ parentThreadId: accepted.childThreadId, relationship: 'subagent' })
     // An ordinary subagent still starts its own.
     const plain = await fx.delegate(work.runId, 'plain')
     fx.engine.markStarting(plain.childRunId)
