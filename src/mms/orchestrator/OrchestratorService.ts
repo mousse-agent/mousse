@@ -856,9 +856,6 @@ export const ARCHIVE_AFTER_TURN_KEPT = 'Not archived: this thread still has work
 export const AGENT_MESSAGE_MAX_HOPS = CHAIN_BUDGET
 
 /** What Continue needs to send a held `thread_send` of work (`AgentChains`, payload of kind `work`). */
-/** An agent's message in the repeat check: when it was admitted, and once recorded its run and result, for a repeat to coalesce into. */
-type AgentMessageClaim = { at: number; runId?: string; queued?: boolean; result?: Promise<AgentSendResult> }
-
 /** A held `thread_send` or first message as Continue sends it; `watchKey` is the notify watch its sender asked for. */
 type HeldWork = { threadId: string; input: { content: string; mode: 'agent' | 'plan' }; clientRequestId: string; actor: AgentActor; watchKey?: string }
 
@@ -2018,7 +2015,7 @@ export class OrchestratorService extends EventEmitter {
   /** `thread_create` calls in flight by key, so two calls with one key make one thread. */
   private readonly agentCreations = new Map<string, { fingerprint: string; task: Promise<AgentCreatedThread> }>()
   /** Agents' messages of the last `AGENT_REPEAT_WINDOW_MS`, by `agentRepeatKey`, oldest first: the repeat check of `thread_send`. */
-  private readonly recentAgentMessages = new Map<string, AgentMessageClaim>()
+  private readonly recentAgentMessages = new Map<string, { at: number }>()
   /** Chains whose person's answer is being carried out: a second answer meanwhile is refused (issue #1443). */
   private readonly answeringChains = new Set<string>()
   /** `thread_create` calls with `computer` in progress, by request key, likewise. */
@@ -2788,16 +2785,9 @@ export class OrchestratorService extends EventEmitter {
    * computer that shows the thread gets it with the thread's turn state, and answers it here (`threads.chainHold`).
    */
   private showChainHold(rootThreadId: string): void {
-    const engine = this.runEngine
-    if (!engine) return
     let view: ChainHoldView | undefined
     try {
-      const chain = engine.chains.heldChains(rootThreadId)[0]
-      if (chain) {
-        const holds = engine.chains.heldFor(chain.chainId)
-        const ids = [...new Set(holds.flatMap((hold) => [hold.senderThreadId, hold.targetThreadId]))]
-        view = { chainId: chain.chainId, used: chain.used, held: holds.length, between: ids.map((id) => ({ threadId: id, title: this.titleOf(id) ?? null })) }
-      }
+      view = this.chainHoldOf(rootThreadId)
     } catch (error) {
       console.warn('the card of a held chain could not be shown', { rootThreadId, error: error instanceof Error ? error.message : String(error) })
       return
@@ -2805,11 +2795,23 @@ export class OrchestratorService extends EventEmitter {
     const existing = this.turnStates.get(rootThreadId)
     if (!view && !existing?.chainHold) return
     if (view && existing?.chainHold && JSON.stringify(view) === JSON.stringify(existing.chainHold)) return
-    const state: TurnState = existing ? { ...existing } : { threadId: rootThreadId, turnId: null, phase: 'idle', updatedAt: new Date().toISOString() }
+    // A new time: a window that compares its copy with this one by time (its catch-up after a gap) sees the change.
+    const state: TurnState = { ...(existing ?? { threadId: rootThreadId, turnId: null, phase: 'idle' }), updatedAt: new Date().toISOString() }
     if (view) state.chainHold = view
     else delete state.chainHold
     this.turnStates.set(rootThreadId, state)
     this.emit('turn-state', state)
+  }
+
+  /** The card as the chains are now (`showChainHold`); never a copy kept in an earlier turn state. */
+  private chainHoldOf(rootThreadId: string): ChainHoldView | undefined {
+    const engine = this.runEngine
+    const chain = engine?.chains.heldChains(rootThreadId)[0]
+    if (!engine || !chain) return undefined
+    const holds = engine.chains.heldFor(chain.chainId)
+    if (!holds[0]) return undefined
+    const ids = [...new Set(holds.flatMap((hold) => [hold.senderThreadId, hold.targetThreadId]))]
+    return { chainId: chain.chainId, holdId: holds[0].holdId, used: chain.used, held: holds.length, between: ids.map((id) => ({ threadId: id, title: this.titleOf(id) ?? null })) }
   }
 
   /** Liveness touch for an engine run (SPEC §12.4 rule 2), at most once per throttle window. */
@@ -2864,7 +2866,14 @@ export class OrchestratorService extends EventEmitter {
         this.setTurnPhase(threadId, 'idle')
         return
       }
-      const state: TurnState = { ...before, updatedAt: new Date().toISOString(), ...(existing.chainHold ? { chainHold: existing.chainHold } : {}) }
+      const { chainHold: _saved, ...earlier } = before
+      let card: ChainHoldView | undefined
+      try {
+        card = this.chainHoldOf(threadId)
+      } catch {
+        card = existing.chainHold
+      }
+      const state: TurnState = { ...earlier, updatedAt: new Date().toISOString(), ...(card ? { chainHold: card } : {}) }
       this.turnStates.set(threadId, state)
       this.emit('turn-state', state)
       this.runtimeManager?.setActivity(threadId, turnPhaseActivity(state.phase))
@@ -5562,15 +5571,6 @@ export class OrchestratorService extends EventEmitter {
     if (turnBot) this.assertBotRequestKey('thread_send', options.clientRequestId, options.actor, turnBot)
     // A thread a person keeps in Plan takes the message as a plan turn, whatever mode the sender asked for.
     const mode: 'agent' | 'plan' = this.lastChatModeOf(threadId) === 'plan' ? 'plan' : input.mode
-    // Exact repeats coalesce (issue #1443): the same text from the same sender to this thread, while its earlier copy still
-    // waits in the queue or is held for the person, is that one message (`coalesced`). Once the earlier copy has run, a
-    // repeat within the window is refused (`claimAgentMessage`). A retry with the same key replays as before.
-    const repeatKey = agentRepeatKey(threadId, agentSenderKey(options.actor), input.content)
-    const fresh = !options.chainHold && !engine.store.getReceipt(options.clientRequestId)
-    const waiting = fresh ? this.waitingAgentMessage(repeatKey) : undefined
-    if (waiting) return { ...(await waiting), replayed: true, coalesced: true }
-    const heldCopy = fresh && !bot && sender.chain ? engine.chains.heldCopy(sender.threadId, threadId, input.content, options.clientRequestId) : undefined
-    if (heldCopy) throw new AgentMessageHeld({ holdId: heldCopy.holdId, chainId: heldCopy.chainId, rootThreadId: engine.chains.get(heldCopy.chainId)?.rootThreadId ?? sender.threadId, targetThreadId: threadId, replayed: true })
     // One message of the sender's chain, decided before the send; a retry of a send that went is not counted again. Past
     // the budget it is held for the person (`AgentMessageHeld`), with the notify watch it asked for; Continue sends it
     // (`chainHold`), counted in the new budget with its run.
@@ -5581,8 +5581,9 @@ export class OrchestratorService extends EventEmitter {
       } satisfies HeldWork)
     // The same text from the same thread again within the window is refused as a repeat, decided at admission (under the
     // thread's lock, so two at once cannot both pass) and only for a new request: a retry with the same key replays.
-    const claim: AgentMessageClaim = { at: 0 }
-    const sending = this.sendGuardedAgainstRepeat(repeatKey, claim, () => this.send(
+    const repeatKey = agentRepeatKey(threadId, agentSenderKey(options.actor), input.content)
+    const claim = { at: 0 }
+    const response = await this.sendGuardedAgainstRepeat(repeatKey, claim, () => this.send(
       { content: letter.content, mode },
       false,
       {
@@ -5608,23 +5609,16 @@ export class OrchestratorService extends EventEmitter {
       // Not sent: the message it counted is given back.
       if (step) engine.chains.release(step)
       throw error
-    }).then((response): AgentSendResult => {
-      if (!response.runId || response.sequence === undefined) throw new Error('The message was not recorded as a run.')
-      const replayed = response.replayed === true
-      const queued = response.queued === true || (replayed && engine.getRun(response.runId)?.status === 'queued')
-      claim.runId = response.runId
-      claim.queued = queued
-      return { runId: response.runId, sequence: response.sequence, queued, replayed, mode }
     })
-    claim.result = sending
-    return sending
-  }
-
-  /** The result of an agent's message with this repeat key that was queued behind a turn and still waits there, if one does. */
-  private waitingAgentMessage(key: string): Promise<AgentSendResult> | undefined {
-    const earlier = this.recentAgentMessages.get(key)
-    if (!earlier?.runId || !earlier.queued || !earlier.result || Date.now() - earlier.at >= AGENT_REPEAT_WINDOW_MS) return undefined
-    return this.runEngine?.getRun(earlier.runId)?.status === 'queued' ? earlier.result : undefined
+    if (!response.runId || response.sequence === undefined) throw new Error('The message was not recorded as a run.')
+    const replayed = response.replayed === true
+    return {
+      runId: response.runId,
+      sequence: response.sequence,
+      queued: response.queued === true || (replayed && engine.getRun(response.runId)?.status === 'queued'),
+      replayed,
+      mode
+    }
   }
 
   /**
@@ -5632,7 +5626,7 @@ export class OrchestratorService extends EventEmitter {
    * `AGENT_REPEAT_WINDOW_MS` (`duplicate_message`, with when it may be sent again), else records it. In memory: a restart
    * forgets what was sent, as it forgets each run's count of sends.
    */
-  private claimAgentMessage(key: string, claim: AgentMessageClaim): void {
+  private claimAgentMessage(key: string, claim: { at: number }): void {
     const now = Date.now()
     // Entries are added in time order and never changed, so the expired ones are at the front.
     for (const [old, entry] of this.recentAgentMessages) {
@@ -5649,7 +5643,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** Runs an agent's send; when it fails after its message was recorded for the repeat check, the record goes, so a fresh try is no repeat. */
-  private async sendGuardedAgainstRepeat<T>(key: string, claim: AgentMessageClaim, send: () => Promise<T>): Promise<T> {
+  private async sendGuardedAgainstRepeat<T>(key: string, claim: { at: number }, send: () => Promise<T>): Promise<T> {
     try {
       return await send()
     } catch (error) {
@@ -5708,13 +5702,34 @@ export class OrchestratorService extends EventEmitter {
    * held until its own message is sent, in the transaction that records it: after a restart, Continue finds what was
    * not sent yet and nothing twice, and the chain's new messages wait behind it until Continue has sent it all.
    */
-  async answerChainHold(threadId: string, chainId: string, answer: 'continue' | 'stop'): Promise<{ chainId: string; sent: number; stopped: number; failed: number }> {
+  async answerChainHold(
+    threadId: string,
+    chainId: string,
+    answer: 'continue' | 'stop',
+    opts: { holdId?: string; deviceLimit?: PermissionMode } = {}
+  ): Promise<{ chainId: string; sent: number; stopped: number; failed: number }> {
     const engine = this.requireRunEngine()
     const { chains } = engine
     const chain = chains.get(chainId)
     if (!chain || chain.rootThreadId !== threadId) throw new CommandRejection('conflict', `Chain ${chainId} did not start in this thread.`)
     if (this.answeringChains.has(chainId)) throw new CommandRejection('conflict', 'This chain was already answered; what it held is being sent.')
     if (!chains.heldFor(chainId).length) throw new CommandRejection('conflict', 'Nothing of this chain is held any more.')
+    // The card's batch: an answer to one already settled never acts on what the chain held after it.
+    const batch = opts.holdId === undefined ? undefined : chains.getHold(opts.holdId)
+    if (opts.holdId !== undefined && (batch?.chainId !== chainId || batch.status !== 'held'))
+      throw new CommandRejection('hold_settled', 'These messages were already answered. The card shows what waits now.')
+    // A person on another computer lets nothing run above what this computer allows their device.
+    const limit = opts.deviceLimit
+    const aboveLimit = (hold: ChainHoldRecord): PermissionMode | undefined => {
+      if (!limit || hold.kind !== 'work') return undefined
+      const mode = this.senderMode((hold.payload as HeldWork).actor)
+      return isStricter(limit, mode) ? mode : undefined
+    }
+    if (answer === 'continue' && limit) {
+      const mode = chains.heldFor(chainId).map(aboveLimit).find(Boolean)
+      if (mode)
+        throw new DomainRpcError('permission_mode_above_ceiling', `A waiting message would run with ${describePermissionMode(mode)}, and the computer that runs this thread lets this device allow ${describePermissionMode(limit)} at most. Continue it on that computer, or Stop it here.`, { threadId, limit, reason: 'device_limit' })
+    }
     const counts = { chainId, sent: 0, stopped: 0, failed: 0 }
     this.answeringChains.add(chainId)
     try {
@@ -5730,6 +5745,8 @@ export class OrchestratorService extends EventEmitter {
       // Until nothing is held: a message the chain sends meanwhile is held behind these, and goes after them.
       for (let hold = chains.heldFor(chainId)[0]; hold; hold = chains.heldFor(chainId)[0]) {
         const current = hold
+        // One held meanwhile above the device's limit stays held, with its card, for an answer that may send it.
+        if (aboveLimit(current)) break
         try {
           if (current.kind === 'work') {
             const work = current.payload as HeldWork

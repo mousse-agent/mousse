@@ -659,6 +659,8 @@ export class MmsRemoteBackend implements RemoteBackendPort {
           // A run that hit a usage limit: when it resets and whether it continues by itself. Absent otherwise.
           ...(pause ? { paused: { runId: pause.runId, until: pause.until, estimated: pause.estimated, autoResume: pause.autoResume, ...(pause.stale ? { stale: true } : {}), ...(pause.limitKind ? { limitKind: pause.limitKind } : {}) } } : {})
         },
+        // The turn as now, with a held chain's card or without one: a stream that starts again shows it, or clears it.
+        turnState: s.orchestrator.getTurnState(threadId),
         revision: this.revision()
       }
     )

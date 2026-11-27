@@ -10,13 +10,13 @@ import type { ChainHoldView } from '../../../shared/types'
 export type ChainHoldAnswer = 'continue' | 'stop'
 
 export interface ChainHoldClient {
-  /** `threadId` is the thread the chain started in; one on another computer is answered there. */
-  answer(threadId: string, chainId: string, answer: ChainHoldAnswer): Promise<void>
+  /** `threadId` is the thread the chain started in; one on another computer is answered there. `holdId` is the card's batch. */
+  answer(threadId: string, chainId: string, holdId: string, answer: ChainHoldAnswer): Promise<void>
 }
 
 export function createChainHoldClient(api: PlatformRequestApi): ChainHoldClient {
   return {
-    async answer(threadId, chainId, answer) { await api.request('threads.chainHold', { threadId, chainId, answer }) }
+    async answer(threadId, chainId, holdId, answer) { await api.request('threads.chainHold', { threadId, chainId, holdId, answer }) }
   }
 }
 
@@ -78,14 +78,14 @@ export function ChainHoldNotice({ threadId, client }: { threadId?: string | null
   const [busy, setBusy] = useState<ChainHoldAnswer | null>(null)
   const [error, setError] = useState<string | null>(null)
   const actions = useMemo(() => client ?? createChainHoldClient(window.mousse.platformRequest), [client])
-  // Another thread, or another held chain, starts clean.
-  useEffect(() => { setBusy(null); setError(null) }, [threadId, hold?.chainId])
+  // Another thread, held chain or batch starts clean.
+  useEffect(() => { setBusy(null); setError(null) }, [threadId, hold?.chainId, hold?.holdId])
   const answer = async (choice: ChainHoldAnswer) => {
     if (!threadId || !hold || busy) return
     setBusy(choice)
     setError(null)
     // Answered on another computer first: the card goes once its turn state says so, and this press says why it did nothing.
-    try { await actions.answer(threadId, hold.chainId, choice) }
+    try { await actions.answer(threadId, hold.chainId, hold.holdId, choice) }
     catch (failure) { setError(ipcErrorLine(failure) || 'The held messages could not be changed.') }
     finally { setBusy(null) }
   }

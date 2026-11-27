@@ -3247,15 +3247,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.chainHold': {
       // The person's Continue or Stop on a chain of agent messages held at its budget (issue #1443), asked on the thread
       // the chain started in. Only a person answers it: an agent, an automation or the CLI never lets a chain go on.
-      if (!isPerson(ctx.connection)) throw new DomainRpcError('forbidden', 'Only a person at a Mousse window answers a held chain of agent messages')
+      // A routed call counts only when the calling computer's router marked it a window's (`ROUTED_SEND_WINDOW_KEY`), as it
+      // does for a window and for nothing else: an authenticated device alone is not a person.
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['threadId', 'chainId', 'answer'])
+      const routed = ctx.connection?.clientType === 'bridge'
+      if (!isPerson(ctx.connection) || (routed && p[ROUTED_SEND_WINDOW_KEY] !== 'person'))
+        throw new DomainRpcError('forbidden', 'Only a person at a Mousse window answers a held chain of agent messages')
+      rejectUnknownKeys(p, ['threadId', 'chainId', 'holdId', 'answer', ...(routed ? [ROUTED_SEND_WINDOW_KEY] : [])])
       const threadId = asString(p.threadId, 'threadId', 256)
       const chainId = asString(p.chainId, 'chainId', 256)
+      const holdId = asString(p.holdId, 'holdId', 256)
       const answer = asString(p.answer, 'answer', 16)
       if (answer !== 'continue' && answer !== 'stop') throw new DomainRpcError('invalid_params', 'answer must be continue or stop')
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
-      return asRpcRejection(() => ctx.mms.orchestrator.answerChainHold(threadId, chainId, answer))
+      const limit = deviceLimit(ctx)
+      return asRpcRejection(() => ctx.mms.orchestrator.answerChainHold(threadId, chainId, answer, { holdId, ...(limit ? { deviceLimit: limit } : {}) }))
     }
     case 'runs.cancelPause': {
       // End a pause without continuing: the run is cancelled and the thread's held messages go on.

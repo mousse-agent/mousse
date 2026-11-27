@@ -518,7 +518,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'threads.setPermissionMode': chat('thread', ['threadId', 'mode', 'ifRevision', ROUTED_AGENT_KEY], { required: ['mode'], version: 4, since: { ifRevision: 3, [ROUTED_AGENT_KEY]: 4 } }),
   'threads.clearApprovalRules': chat('thread', ['threadId', 'ruleId']),
   // Continue or Stop on a held chain of agent messages (issue #1443), on the computer whose thread it started in.
-  'threads.chainHold': chat('thread', ['threadId', 'chainId', 'answer'], { required: ['chainId', 'answer'] }),
+  // `window` is set by the calling computer's router, never by a window: a person at a window answers (`'person'`).
+  'threads.chainHold': chat('thread', ['threadId', 'chainId', 'holdId', 'answer', ROUTED_SEND_WINDOW_KEY], { required: ['chainId', 'holdId', 'answer'] }),
   'runs.resumeNow': chat('thread', ['threadId', 'runId'], {
     required: ['runId'],
     owned: { runId: 'run' }

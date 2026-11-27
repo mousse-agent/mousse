@@ -1919,6 +1919,11 @@ export interface TurnState {
 /** What the card of a held chain of agent messages shows (`TurnState.chainHold`). */
 export interface ChainHoldView {
   chainId: string
+  /**
+   * The batch the card answers: its oldest held message. The answer names it, so one that comes after this batch was
+   * settled (a late click, another computer's) is refused (`hold_settled`) and never acts on what the chain held later.
+   */
+  holdId: string
   /** Messages the agents sent each other since the chain's budget began. */
   used: number
   /** Messages waiting for the decision. */

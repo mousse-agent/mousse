@@ -53,8 +53,6 @@ export interface AgentSendResult {
   replayed: boolean
   /** The mode the message was sent in: Plan when the thread is kept in Plan, whatever the sender asked for. */
   mode?: 'agent' | 'plan'
-  /** The same text from the same sender still waited in the thread's queue: this is that message, nothing new was sent. */
-  coalesced?: true
 }
 
 /** What `thread_create` asks for, checked for shape by the tool. */

@@ -16,6 +16,7 @@ import type { ChainHoldView, TurnState } from '../../src/shared/types'
  */
 const hold = (patch: Partial<ChainHoldView> = {}): ChainHoldView => ({
   chainId: 'chain:run:1',
+  holdId: 'hold:1',
   used: 12,
   held: 2,
   between: [{ threadId: 't1', title: 'Lead' }, { threadId: 't2', title: null }],
@@ -66,7 +67,7 @@ describe('the held chain card', () => {
     setTurn(hold())
     show(client)
     await act(async () => { button(answer === 'continue' ? 'Continue' : 'Stop').click() })
-    expect(client.answer).toHaveBeenCalledWith('t1', 'chain:run:1', answer)
+    expect(client.answer).toHaveBeenCalledWith('t1', 'chain:run:1', 'hold:1', answer)
   })
 
   it('a refused answer shows its error in place of the line; the buttons work again', async () => {
@@ -88,7 +89,7 @@ describe('the held chain card', () => {
 
   it('the client asks threads.chainHold', async () => {
     const request = vi.fn(async () => undefined)
-    await createChainHoldClient({ request } as never).answer('t1', 'chain:run:1', 'stop')
-    expect(request).toHaveBeenCalledWith('threads.chainHold', { threadId: 't1', chainId: 'chain:run:1', answer: 'stop' })
+    await createChainHoldClient({ request } as never).answer('t1', 'chain:run:1', 'hold:1', 'stop')
+    expect(request).toHaveBeenCalledWith('threads.chainHold', { threadId: 't1', chainId: 'chain:run:1', holdId: 'hold:1', answer: 'stop' })
   })
 })

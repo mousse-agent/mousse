@@ -94,15 +94,6 @@ export class AgentChains {
       .map((row) => String(row.root))
   }
 
-  /** A held `thread_send` of work with this text from `senderThreadId` to `targetThreadId`, under another request: a repeat coalesces into it. */
-  heldCopy(senderThreadId: string, targetThreadId: string, content: string, requestKey: string): ChainHoldRecord | undefined {
-    return this.db
-      .statement("SELECT * FROM agent_chain_holds WHERE status = 'held' AND kind = 'work' AND sender_thread_id = ? AND target_thread_id = ? AND request_key <> ? ORDER BY created_at, rowid")
-      .all(senderThreadId, targetThreadId, requestKey)
-      .map(toHold)
-      .find((hold) => (hold.payload as { input?: { content?: unknown } } | null)?.input?.content === content)
-  }
-
   /** The chain's held messages, oldest first. */
   heldFor(chainId: string): ChainHoldRecord[] {
     return this.db.statement("SELECT * FROM agent_chain_holds WHERE chain_id = ? AND status = 'held' ORDER BY created_at, rowid").all(chainId).map(toHold)
