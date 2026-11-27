@@ -21,6 +21,7 @@ import type { RemoteListsPort } from '../../protocol/remoteListsPort'
 import type { BridgeHub } from '../hub'
 import type { ListsSnapshot } from '../remote/MmsListsSource'
 import { PRIVATE_LISTS_SUBJECT } from '../remote/privateStreams'
+import { marksOf, type ListsMarks } from '../remote/turnMarks'
 import { repositoryIdentitiesFor, type RepositoryIdentity } from '../remote/repositoryIdentity'
 import type { ComputerRef } from './computerErrors'
 import {
@@ -184,6 +185,13 @@ function listsSnapshot(value: unknown): ListsSnapshot | undefined {
     status: isRecord(value.status) ? (value.status as ListsSnapshot['status']) : {},
     chats: []
   }
+}
+
+/** A thread's status change on another computer, with the marks that computer announces it with (none from an older one). */
+interface Transition {
+  id: string
+  state: ThreadActivityState
+  marks?: ListsMarks
 }
 
 /** Why a computer was not asked or did not answer, as a search names it. */
@@ -893,11 +901,13 @@ export class MergedLists implements RemoteListsPort {
         const state = activityOfStatus(status)
         if (state && threads.has(id)) activity.set(id, state)
       }
-    const transitions: Array<{ id: string; state: ThreadActivityState }> = []
+    // How the computer announces each change (`ListsMarks`), so this one announces it the same way.
+    const marks = live ? marksOf(qualified.marks) : new Map<string, ListsMarks>()
+    const transitions: Transition[] = []
     for (const id of new Set([...c.activity.keys(), ...activity.keys()])) {
       const before = c.activity.get(id)
       const now = activity.get(id)
-      if (before !== now) transitions.push({ id, state: now ?? 'idle' })
+      if (before !== now) transitions.push({ id, state: now ?? 'idle', marks: marks.get(id) })
     }
     // An event only for a change seen on a link that was already live: a first look and a reconnect never notify.
     const asEvents = live && c.live
@@ -1037,7 +1047,7 @@ export class MergedLists implements RemoteListsPort {
     threads: boolean,
     projects: boolean,
     activity: boolean,
-    transitions: ReadonlyArray<{ id: string; state: ThreadActivityState }> = []
+    transitions: readonly Transition[] = []
   ): void {
     if (this.closed) return
     const { services } = this.options
@@ -1045,8 +1055,8 @@ export class MergedLists implements RemoteListsPort {
     if (projects) this.push('projects.updated', { projects: services.projects.listProjects() })
     if (!activity) return
     // The events first, so a window sees each change as one before the snapshot makes it the state.
-    for (const { id, state } of transitions)
-      if (this.notifies(id)) this.push('activity', { threadId: id, state }, id)
+    for (const { id, state, marks } of transitions)
+      if (this.notifies(id)) this.push('activity', { threadId: id, state, ...marks }, id)
     this.push('activity.snapshot', { activity: services.threadRuntimes.getActivitySnapshot() })
   }
 

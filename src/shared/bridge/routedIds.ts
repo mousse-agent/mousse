@@ -99,8 +99,8 @@ export const ROUTED_RESULT_ID_PATHS: Readonly<Record<string, RoutedIdPaths>> = {
   'subagents.list': { threads: ['subagents[].threadId'] },
   // The status of every thread that is not idle, by thread id.
   'activity.snapshot': { threads: ['activity{}'] },
-  // The snapshot of the private lists stream (not a method): another computer's projects, threads and statuses.
-  'lists.snapshot': { threads: ['threads[].id', 'status{}'], projects: ['projects[].id'] }
+  // The snapshot of the private lists stream (not a method): another computer's projects, threads, statuses and marks.
+  'lists.snapshot': { threads: ['threads[].id', 'status{}', 'marks{}'], projects: ['projects[].id'] }
 }
 
 /** Events with an `id` that is a thread or project id; the same rule as for results. */
