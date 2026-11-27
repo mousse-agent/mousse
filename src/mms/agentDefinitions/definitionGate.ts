@@ -2,6 +2,7 @@ import type { AgentRuntimePolicy, AgentRuntimeToolApprovalCallback } from '../..
 import type { EffectiveAgentGrants } from '../../shared/agents/types'
 import type { McpToolDescriptor } from '../../shared/integrations'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
+import { canonicalToolCall, variantsHold } from '../../shared/toolAliases'
 import { authorizeTrustedToolDispatch, canonicalizeBuiltinToolName, digestToolArguments, prepareTrustedToolDispatch } from './runtimePolicy'
 
 /**
@@ -33,13 +34,17 @@ export function definitionAuthorityDigest(authority: Pick<DefinitionAuthority, '
 
 export type DefinitionDecision = { allowed: true } | { allowed: false; message: string }
 
-/** Whether `toolName` is in the definition's effective grants (a user MCP tool by server and tool). */
-export function definitionToolGranted(toolName: string, grants: EffectiveAgentGrants, mcpTools: readonly McpToolDescriptor[] = []): boolean {
+/**
+ * Whether `toolName` is in the definition's effective grants (a user MCP tool by server and tool). With `args`, a tool
+ * granted only as an old name's variant holds just that variant (`variantsHold`); a listing passes none.
+ */
+export function definitionToolGranted(toolName: string, grants: EffectiveAgentGrants, mcpTools: readonly McpToolDescriptor[] = [], args?: Record<string, unknown>): boolean {
   const mcp = mcpTools.find((tool) => tool.providerName === toolName)
   if (mcp)
     return grants.mcpTools.some((grant) => (grant.serverId === mcp.serverId || grant.serverId === mcp.installationId) && grant.toolName === mcp.toolName)
   const canonical = canonicalizeBuiltinToolName(toolName)
-  return grants.builtinTools.some((grant) => grant.id === toolName || grant.id === canonical || canonicalizeBuiltinToolName(grant.id) === canonical)
+  const called = args && canonicalToolCall(toolName, args).args
+  return grants.builtinTools.some((grant) => (grant.id === toolName || grant.id === canonical || canonicalizeBuiltinToolName(grant.id) === canonical) && variantsHold(grant.variants, called))
 }
 
 /**
@@ -47,7 +52,7 @@ export function definitionToolGranted(toolName: string, grants: EffectiveAgentGr
  * approval), or undefined when it may go on to approval. It asks nobody.
  */
 export function definitionRefusal(authority: DefinitionAuthority, call: { toolName: string; args: Record<string, unknown>; projectPath?: string }): string | undefined {
-  if (!definitionToolGranted(call.toolName, authority.grants, authority.mcpTools)) return `Tool "${call.toolName}" is not granted to this agent definition.`
+  if (!definitionToolGranted(call.toolName, authority.grants, authority.mcpTools, call.args)) return `Tool "${call.toolName}" is not granted to this agent definition.`
   const prepared = prepareTrustedToolDispatch({
     policy: authority.policy,
     grants: authority.grants,
@@ -129,7 +134,7 @@ export async function authorizeDefinitionCall(
   authority: DefinitionAuthority,
   call: { toolName: string; args: Record<string, unknown>; projectPath?: string; signal?: AbortSignal; uncontainedShell?: boolean }
 ): Promise<DefinitionDecision> {
-  if (!definitionToolGranted(call.toolName, authority.grants, authority.mcpTools))
+  if (!definitionToolGranted(call.toolName, authority.grants, authority.mcpTools, call.args))
     return { allowed: false, message: `Tool "${call.toolName}" is not granted to this agent definition.` }
   const isMcp = (authority.mcpTools ?? []).some((tool) => tool.providerName === call.toolName)
   const base = {

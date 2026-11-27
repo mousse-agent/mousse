@@ -271,6 +271,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
         seen.independent = parse(await w.create(mcp!, { title: 'Release notes', hidden: false, clientRequestId: 'own' }))
         seen.shown = parse(await call(mcp!, 'thread_update', { threadId: (seen.quiet as AgentCreatedThread).threadId, hidden: false }))
         seen.notMine = refusal(await call(mcp!, 'thread_update', { threadId: w.other.id, hidden: true }))
+        seen.notMineOldName = refusal(await call(mcp!, 'thread_hide', { threadId: w.other.id }))
         return 'ok'
       })
       await w.attach()
@@ -287,6 +288,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(w.d.store.getThread(quiet.threadId)?.hidden).toBeUndefined()
       // A thread the agent did not start stays as the person left it.
       expect(seen.notMine).toMatch(/not one you started/)
+      expect(seen.notMineOldName).toEqual(seen.notMine)
       expect(w.d.store.getThread(w.other.id)?.hidden).toBeUndefined()
     })
 

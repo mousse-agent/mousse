@@ -70,7 +70,7 @@ export interface RunOutcome {
   usageLimitKind?: string
   /**
    * `bot_wall`: a personal bot's dispatch ended at a wall (PR 6 §5); the run engine never retries it.
-   * `agent`: another thread's agent stopped the run (`thread_interrupt`); it settles as a user's Stop does (`stoppedByPerson`).
+   * `agent`: another thread's agent stopped the run (`thread_stop`); it settles as a user's Stop does (`stoppedByPerson`).
    */
   interruptedBy?: 'user' | 'agent' | 'daemon_restart' | 'provider' | 'bot_wall'
   uncertainReason?: string

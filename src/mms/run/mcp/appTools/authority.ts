@@ -384,7 +384,7 @@ function botThreadScope(tool: MousseTool, needs: ToolNeeds, args: Record<string,
   let reach: { scope: ToolScope } | { refused: string }
   try {
     // A tool that changes nothing outside the caller's own state reaches the subagents below the owner's threads too (#1365).
-    reach = policy.botReach(caller, target, { read: needs.effect === 'none' || needs.effect === 'own', botWork: tool.name === 'thread_send' || tool.name === 'thread_interrupt' })
+    reach = policy.botReach(caller, target, { read: needs.effect === 'none' || needs.effect === 'own', botWork: tool.name === 'thread_send' || tool.name === 'thread_stop' })
   } catch {
     reach = { refused: target.threadId ? `Thread ${target.threadId} is not available to you.` : `${tool.name} is not available for this project.` }
   }

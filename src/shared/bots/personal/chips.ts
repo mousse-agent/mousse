@@ -259,10 +259,10 @@ function classify(name: string, input: unknown, ctx: BotChipContext): Classified
     case 'computer_list': return { kind: 'threads_look', icon: 'read', live: 'reading your threads' }
     case 'terminal_read': return { kind: 'threads_look', icon: 'read', live: 'reading a terminal' }
     case 'thread_wait': return { kind: 'thread_wait', icon: 'think', live: 'waiting on a thread' }
-    // Steering, forking, handing a fork back and answering an approval: each its own chip, with the thread to open.
-    case 'thread_steer': return { kind: 'thread_steer', icon: 'think', live: 'steering a thread' }
+    // Forking, handing a fork back and answering an approval: each its own chip, with the thread to open. A steer is a
+    // note now (`thread_send`), and reads as a message.
     case 'thread_fork': return { kind: 'thread_fork', icon: 'think', live: 'forking a thread' }
-    case 'thread_merge_back': return { kind: 'thread_merge', icon: 'think', live: 'handing a fork back' }
+    case 'thread_return': return { kind: 'thread_merge', icon: 'think', live: 'handing a fork back' }
     case 'approval_respond': return { kind: 'approval', icon: 'think', live: 'answering an approval' }
     // A thread's queue: every change rolls up into one chip.
     case 'queue_enqueue':
@@ -299,9 +299,10 @@ function classify(name: string, input: unknown, ctx: BotChipContext): Classified
       return { kind: 'thread_start', icon: 'think', live: 'starting a thread', ...(title ? { detail: shortChipText(title, 40) } : {}) }
     }
     case 'thread_send': return { kind: 'thread_send', icon: 'think', live: 'messaging a thread' }
-    case 'thread_interrupt': return { kind: 'thread_stop', icon: 'think', live: 'stopping a thread' }
+    case 'thread_stop': return { kind: 'thread_stop', icon: 'think', live: 'stopping a thread' }
     case 'thread_archive': return { kind: 'thread_archive', icon: 'think', live: args.archived === false ? 'unarchiving a thread' : 'archiving a thread' }
-    case 'thread_hide': return { kind: 'thread_hide', icon: 'think', live: args.hidden === false ? 'showing a thread' : 'hiding a thread' }
+    // A bot's `thread_update` hides or shows a thread it started; nothing else of it is a bot's.
+    case 'thread_update': return { kind: 'thread_hide', icon: 'think', live: args.hidden === false ? 'showing a thread' : 'hiding a thread' }
     // Its work's subagents: each one it starts or sends more work by its title; waiting on them is one chip.
     case 'subagent_start':
     case 'subagent_send': {
@@ -531,8 +532,9 @@ const QUIET_KINDS: ReadonlySet<ChipKind> = new Set(['schedules', 'work_look', 'b
  * shows it at once, before the turn ends and its message carries every chip. Null for any other call.
  */
 export function actedChip(tool: string, input: unknown, result: unknown): BotChip | null {
-  const kind = tool === 'thread_create' ? 'thread_start' : tool === 'thread_send' ? 'thread_send' : tool === 'thread_interrupt' ? 'thread_stop'
-    : tool === 'thread_archive' ? 'thread_archive' : tool === 'thread_hide' ? 'thread_hide' : undefined
+  const name = canonicalToolName(tool)
+  const kind = name === 'thread_create' ? 'thread_start' : name === 'thread_send' ? 'thread_send' : name === 'thread_stop' ? 'thread_stop'
+    : name === 'thread_archive' ? 'thread_archive' : name === 'thread_update' ? 'thread_hide' : undefined
   return kind ? outcomeChip(kind, { tool, input, result }) : null
 }
 

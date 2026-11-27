@@ -199,7 +199,7 @@ export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_
  * another bot's message started does not.
  */
 export const BOT_THREAD_ACT_TOOLS: readonly string[] = [
-  'thread_create', 'thread_send', 'thread_interrupt', 'thread_archive', 'thread_hide', 'thread_update', 'thread_steer', 'thread_fork', 'thread_merge_back',
+  'thread_create', 'thread_send', 'thread_stop', 'thread_archive', 'thread_update', 'thread_fork', 'thread_return',
   'queue_enqueue', 'queue_edit', 'queue_remove', 'queue_reorder', 'queue_promote_to_steer', 'approval_respond'
 ]
 

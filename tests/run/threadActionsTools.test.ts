@@ -117,7 +117,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
         actor: { kind: 'agent', threadId: 'caller', runId: runs.caller, toolCallId: 'mcp:send-1' }
       })
       await call('thread_steer', { threadId: 'target', runId: runs.target, text: 'also this' }, { toolCallId: 'mcp:steer-1' })
-      expect(host.steerRun).toHaveBeenLastCalledWith('target', runs.target, 'also this', expect.objectContaining({ clientRequestId: 'thread_steer:caller:mcp:steer-1' }))
+      expect(host.steerRun).toHaveBeenLastCalledWith('target', runs.target, 'also this', expect.objectContaining({ clientRequestId: 'thread_send:note:caller:mcp:steer-1' }))
       await call('thread_interrupt', { threadId: 'target', runId: runs.target }, { toolCallId: 'mcp:stop-1' })
       expect(host.stopRun).toHaveBeenLastCalledWith('target', runs.target, expect.objectContaining({ clientRequestId: 'thread_interrupt:caller:mcp:stop-1' }))
     })
@@ -198,7 +198,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
 
     it.each([
       ['questions_pending', /waiting for the user to answer a question or an approval/],
-      ['thread_paused', /paused by a usage limit.*thread_interrupt/],
+      ['thread_paused', /paused by a usage limit.*thread_stop/],
       ['merge_back_pending', /merge-back/]
     ])('a thread the engine refuses because of its state (%s) is a mousse_conflict that says why', async (code, message) => {
       const { call, denied, answers } = await world()
@@ -285,7 +285,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       answers.steer = async () => ({ status: 'ignored', reason: 'run_not_active', runId: targetRun.runId, activeRunId: null, runStatus: 'paused' })
       const error = await denied(call('thread_steer', { threadId: 'target', runId: targetRun.runId, text: 'x' }))
       expect(error).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'run_paused', expectedRunId: targetRun.runId } })
-      expect(error!.message).toMatch(/paused by a usage limit.*thread_interrupt/)
+      expect(error!.message).toMatch(/paused by a usage limit.*thread_stop/)
     })
 
     it('a steer into a run under a looser permission mode than the caller\'s is a conflict with both modes', async () => {
@@ -308,11 +308,11 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       answers.steer = async () => ({ status: 'accepted', runId: targetRun.runId, sequence: 12, replayed: false, followUp: true })
       expect(await result(call('thread_steer', { threadId: 'target', runId: targetRun.runId, text: 'x' }))).toMatchObject({ runId: targetRun.runId, followUp: true, delivery: 'queued' })
       expect(host.showAgentAction).toHaveBeenLastCalledWith({ threadId: 'target' }, expect.anything(), expect.stringMatching(/runs after run .* had just finished/))
-      // A steer the turn takes says neither.
+      // A steer the turn takes is a note presented to it.
       answers.steer = async () => ({ status: 'accepted', runId: targetRun.runId, sequence: 13, replayed: false })
       const joined = await result(call('thread_steer', { threadId: 'target', runId: targetRun.runId, text: 'y' }))
       expect(joined).not.toHaveProperty('followUp')
-      expect(joined).not.toHaveProperty('delivery')
+      expect(joined).toMatchObject({ intent: 'note', delivery: 'presented' })
       expect(host.showAgentAction).toHaveBeenLastCalledWith({ threadId: 'target' }, expect.anything(), `steered run ${targetRun.runId}`)
     })
 
@@ -640,7 +640,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(Date.now() - started).toBeGreaterThanOrEqual(50)
       expect(waited).toMatchObject({ status: 'paused', run: { runId: targetRun.runId, status: 'paused' }, pause: { reason: 'usage_limit', until: PAUSE.until }, retryAfterMs: expect.any(Number) })
       expect(waited.retryAfterMs).toBeGreaterThanOrEqual(1_000)
-      expect(waited.hint).toMatch(/not sooner.*thread_interrupt/)
+      expect(waited.hint).toMatch(/not sooner.*thread_stop/)
       // Without a run id the paused run is the one waited on.
       const again = await result(call('thread_wait', { threadId: 'target', timeoutMs: 40 }))
       expect(again).toMatchObject({ status: 'paused', run: { runId: targetRun.runId } })
