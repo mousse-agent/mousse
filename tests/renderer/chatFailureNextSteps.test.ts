@@ -217,6 +217,27 @@ describe('a failed turn', () => {
     expect(host.querySelector('.an-error-meta')!.textContent).toBe('Reference 02fb3fb4-25fbRetryReport')
   })
 
+  it("an app limit says so in Mousse's words and offers ChatGPT's App limits before Retry", () => {
+    const open = vi.fn()
+    vi.stubGlobal('open', open)
+    const limited: ChatMessage[] = [
+      failedThread[0],
+      {
+        id: 's1', role: 'system', timestamp: '2026-11-05T10:00:01.000Z',
+        content: "[provider_app_limit] ChatGPT's limit for Mousse is used up. Your plan may still have usage.",
+        error: { code: 'provider_app_limit', message: "ChatGPT's limit for Mousse is used up. Your plan may still have usage.", details: { provider: 'codex', retries: { attempt: 5, max: 5 } } }
+      }
+    ]
+    render(shown(limited, vi.fn()))
+    expect(text()).toContain('App limit reached')
+    expect(text()).not.toContain('retries')
+    expect(host.querySelector('.an-error-text')!.textContent).toBe("ChatGPT's limit for Mousse is used up. Your plan may still have usage." + 'App limits' + 'Retry' + 'Report')
+    const appLimits = [...host.querySelectorAll('button')].find((each) => each.textContent === 'App limits')!
+    expect(appLimits.title).toMatch(/App limits/)
+    act(() => appLimits.click())
+    expect(open).toHaveBeenCalledWith('https://chatgpt.com/settings/usage', '_blank', 'noopener,noreferrer')
+  })
+
   it('titles a failure by what refused it', () => {
     expect(errorTitle({ code: 'provider_api_error' })).toBe('Provider error')
     expect(errorTitle({ code: 'provider_usage_limit' })).toBe('Usage limit reached')

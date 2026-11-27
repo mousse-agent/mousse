@@ -72,7 +72,7 @@ import {
   type UserInput
 } from './protocol'
 import { isUsageLimitFailure, resetFromSnapshot, trimResetCredits } from './rateLimits'
-import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
+import { appLimitError, isAppLimitText, readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_REFUSED, type CodexBotSandbox, codexBotSandbox, codexBotSandboxConfig, codexBotWebOff, codexPackageOf, codexTurnPolicy } from './childPolicy'
@@ -3985,6 +3985,8 @@ export class CodexProviderService {
    */
   private async limitOrFailure(failure: CodexTurnFailure, run: TurnRun, conn: CodexConnection, signal: AbortSignal): Promise<Error> {
     const info = failure.codexErrorInfo
+    // An app limit is its own failure: the plan may have room, so its windows are not read for a reset.
+    if (isAppLimitText(failure.message, failure.additionalDetails)) return appLimitError('codex', failure)
     // A kind that names another failure is believed; a transport or generic one leaves the message to say.
     if (!isUsageLimitFailure(info, failure.message)) return failure
     let fresh: RateLimitSnapshot | undefined

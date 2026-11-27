@@ -2074,13 +2074,26 @@ describe('a usage limit on a Codex turn', () => {
     expect(error).toMatchObject({ code: 'provider_usage_limit', details: { estimated: false } })
   })
 
-  it('a dropped stream whose message names a usage limit is a usage limit, with no guessed reset', async () => {
-    // The subscription-sharing limit: Codex sends a transport kind, and the plan windows are not exhausted.
-    const message = 'stream disconnected before completion: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.'
-    const server = failingServer({ error: limitError({ responseStreamDisconnected: { httpStatusCode: null } }, message), rateLimits: { result: { rateLimits: { primary: window(40, 300, inHours(2)) } } } })
+  it('a plan limit Codex reports as a dropped stream is a usage limit', async () => {
+    const reset = inHours(2)
+    const server = failingServer({ error: limitError({ responseStreamDisconnected: { httpStatusCode: null } }, "stream disconnected before completion: You've hit your usage limit."), rateLimits: { result: { rateLimits: exhausted(reset) } } })
     const error = await chat(create(server)).catch((caught: unknown) => caught)
-    expect(error).toMatchObject({ code: 'provider_usage_limit', details: { provider: 'codex', estimated: true }, errorInfo: { retryable: false } })
-    expect(server.methods()).toContain('account/rateLimits/read')
+    expect(error).toMatchObject({ code: 'provider_usage_limit', details: { provider: 'codex', limitKind: 'five_hour', estimated: false, resetsAt: new Date(reset * 1000).toISOString() } })
+  })
+
+  // OpenAI's app limit (the share of the plan ChatGPT gives Mousse) as Codex 0.162 sent it, and with the code passed on.
+  const SHARING = 'stream disconnected before completion: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.'
+  it.each([
+    ['as a dropped stream', limitError({ responseStreamDisconnected: { httpStatusCode: null } }, SHARING)],
+    ['with no kind of its own', limitError('other', SHARING)],
+    ['classified as a usage limit', limitError('usageLimitExceeded', SHARING)],
+    ['as a 429 with the code in its details', { ...limitError({ responseTooManyFailedAttempts: { httpStatusCode: 429 } }, 'exceeded retry limit, last status: 429 Too Many Requests'), additionalDetails: JSON.stringify({ error: { code: 'subscription_sharing_usage_limit_exceeded' } }) }]
+  ])("an app limit %s is not a plan limit: no plan reset is read, and Mousse's own line replaces OpenAI's", async (_name, error) => {
+    const server = failingServer({ error, rateLimits: { result: { rateLimits: exhausted(inHours(2)) } } })
+    const failure = await chat(create(server)).catch((caught: unknown) => caught)
+    expect(failure).toMatchObject({ code: 'provider_app_limit', details: { provider: 'codex' }, errorInfo: { retryable: false } })
+    expect((failure as Error).message).toBe("ChatGPT's limit for Mousse is used up. Your plan may still have usage.")
+    expect(server.methods()).not.toContain('account/rateLimits/read')
   })
 
   it('a structured kind that is not a limit is believed over the message', async () => {

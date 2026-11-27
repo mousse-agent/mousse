@@ -1,4 +1,5 @@
 import type { ProviderUsageWindow, UsageResets } from '../../../../shared/providerAuth'
+import { isAppLimitText } from '../../../orchestrator/providerErrors'
 import { codexErrorKind, codexHttpStatus, type CodexErrorInfo, type RateLimitResetCredits, type RateLimitSnapshot, type RateLimitWindow } from './protocol'
 
 /** The limit the windows of a snapshot stand for. `resetsAt` (epoch seconds) is absent when the server did not report every exhausted window's reset. */
@@ -127,10 +128,10 @@ const NOT_A_LIMIT = new Set(['contextWindowExceeded', 'serverOverloaded', 'inter
 /**
  * A failed turn that stands for a plan usage limit: Codex classifies it as one, or its message names one
  * and its kind says only how the request failed (no kind, a dropped stream or connection, too many
- * failed attempts, `other`, a kind Mousse does not know). A ChatGPT subscription-sharing limit arrives
- * as `stream disconnected before completion: The ChatGPT user has reached their … usage limit`.
+ * failed attempts, `other`, a kind Mousse does not know). An app limit is never one, whatever its kind.
  */
-export function isUsageLimitFailure(info: CodexErrorInfo | null | undefined, message: string | undefined): boolean {
+export function isUsageLimitFailure(info: CodexErrorInfo | null | undefined, message: string | undefined, additionalDetails?: string | null): boolean {
+  if (isAppLimitText(message, additionalDetails)) return false
   if (isUsageLimitInfo(info)) return true
   const kind = codexErrorKind(info)
   return (kind === undefined || !NOT_A_LIMIT.has(kind)) && isUsageLimitText(message)

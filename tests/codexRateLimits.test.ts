@@ -58,11 +58,12 @@ describe('Codex usage-limit errors', () => {
     expect(isUsageLimitText(undefined)).toBe(false)
   })
 
-  // Every kind Codex sends, with a message that names a usage limit and one that does not.
+  // Every kind Codex sends, with a plan limit's wording, an app limit's, and a failure that names no limit.
+  const PLAN = "stream disconnected before completion: You've hit your usage limit. Try again at 2:01 PM."
   const SHARING = 'stream disconnected before completion: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.'
   const DROPPED = 'stream disconnected before completion: error sending request'
   it.each([
-    // kind, a message naming a limit is one, a message that does not is one
+    // kind, plan wording is a plan limit, other wording is one (an app limit never is)
     [undefined, true, false],
     ['other', true, false],
     ['responseStreamDisconnected', true, false],
@@ -80,8 +81,10 @@ describe('Codex usage-limit errors', () => {
     ['internalServerError', false, false],
     ['sandboxError', false, false],
     ['threadRollbackFailed', false, false]
-  ] as const)('a %j failure: a usage limit when the message names one (%s), else %s', (kind, withLimitText, withOtherText) => {
-    expect(isUsageLimitFailure(kind, SHARING)).toBe(withLimitText)
+  ] as const)('a %j failure: a plan limit with its wording (%s), else %s; an app limit never', (kind, withPlanText, withOtherText) => {
+    expect(isUsageLimitFailure(kind, PLAN)).toBe(withPlanText)
     expect(isUsageLimitFailure(kind, DROPPED)).toBe(withOtherText)
+    expect(isUsageLimitFailure(kind, SHARING)).toBe(false)
+    expect(isUsageLimitFailure(kind, DROPPED, JSON.stringify({ error: { code: 'subscription_sharing_usage_limit_exceeded' } }))).toBe(false)
   })
 })
