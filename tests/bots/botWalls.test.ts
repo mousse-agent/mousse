@@ -4,7 +4,7 @@
  * never expire; consults run one at a time per context thread; the startup pass settles what a crash
  * left; trashing a bot's thread ends its activation; a deleted bot is archived, then purged.
  */
-import { BOT_AUTOMATION_APP_TOOLS } from '../../src/shared/bots/personal/manifest'
+import { BOT_AUTOMATION_APP_TOOLS, BOT_PROFILE_TOOL } from '../../src/shared/bots/personal/manifest'
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -476,8 +476,9 @@ describe('consults', () => {
     expect(context).toMatchObject({ history: 'thread', authority: { role: 'context' } })
     // Depth is 1: no consult from a context thread; it narrows to read.
     expect(context.authority.consult).toBeUndefined()
-    // What every bot has by default reaches it too: the automation tools and every skill.
-    expect(context.policy.tools?.allow).toEqual(['permission_ask', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, 'skill_list', 'skill_load', 'mcp_servers', 'read', 'running_list'].sort())
+    // What every bot has by default reaches it too: the automation tools and every skill, and its own profile, as
+    // `mcp_servers` (#2065).
+    expect(context.policy.tools?.allow).toEqual(['permission_ask', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, 'skill_list', 'skill_load', 'mcp_servers', BOT_PROFILE_TOOL, 'read', 'running_list'].sort())
     expect(context.authority.counters).toBe(prepared.authority.counters)
     expect(context.authority.time.signal).toBe(prepared.authority.time.signal)
     start(payload.runId)

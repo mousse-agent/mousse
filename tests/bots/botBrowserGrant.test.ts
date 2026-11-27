@@ -181,9 +181,10 @@ describe('a bot asking for and using the browser', () => {
     await finish(f, after.payload, 'completed', { text: 'Done.' })
   })
 
-  it('a Mousse tool no bot can hold is refused at once, with no card to allow', async () => {
+  // Both are a thread's subagent (`thread_create` kind "subagent"), which a bot's turn runs as its own tool instead.
+  it.each(['delegate_task', 'create_subagent'])('a Mousse tool no bot can hold is refused at once, with no card to allow: %s', async (tool) => {
     const turn = await chat('Start a thread for this', 'm1')
-    expect(turn.prepared.authority.escalate!({ permission: { tool: 'delegate_task' }, reason: 'To delegate.' })).toMatch(/can't be given the Mousse tool delegate_task/)
+    expect(turn.prepared.authority.escalate!({ permission: { tool }, reason: 'To delegate.' })).toMatch(new RegExp(`can't be given the Mousse tool ${tool}`))
     await finish(f, turn.payload, 'completed', { text: 'I can\'t do that.' })
     expect(f.store.openAsks(botId)).toEqual([])
     expect(chatOf(f, botId).some((message) => message.ask)).toBe(false)
