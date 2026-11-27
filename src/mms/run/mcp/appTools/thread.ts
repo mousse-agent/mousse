@@ -430,16 +430,18 @@ function fitPage<T>(rows: Iterable<T>, envelope: Record<string, unknown>): { tak
   return fitBytes(rows, envelope, THREAD_READ_MAX_BYTES)
 }
 
+/** `thread_list`'s order: newest first, then by id, so a cursor's last row has one place in it. */
+const listOrder = (a: { updatedAt: string; id: string }, b: { updatedAt: string; id: string }): number =>
+  a.updatedAt > b.updatedAt ? -1 : a.updatedAt < b.updatedAt ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+
 /**
- * Where a `thread_list` page after `after` (the last row of the page before) starts in `threads`, newest first: after
- * that row, or, when it is no longer listed, at the first thread updated before it.
+ * Where a `thread_list` page after `after` (the sort key of the last row of the page before) starts in `threads`: at
+ * the first thread past that key, whether that row is still listed, or was updated since and moved up.
  */
 function resumeAt(threads: ReadonlyArray<{ id: string; updatedAt: string }>, after: { id: string; updatedAt: string } | undefined): number {
   if (!after) return 0
-  const at = threads.findIndex((thread) => thread.id === after.id)
-  if (at >= 0) return at + 1
-  const older = threads.findIndex((thread) => thread.updatedAt < after.updatedAt)
-  return older >= 0 ? older : threads.length
+  const at = threads.findIndex((thread) => listOrder(thread, after) > 0)
+  return at >= 0 ? at : threads.length
 }
 
 const RESULT_READ_ON = 'The full text is the run\'s last answer in the thread\'s transcript: read it with thread_read view "messages", and read on in a long message with textOffset.'
@@ -1991,7 +1993,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           if (!launched && args.includeUnstarted !== true && !thread.startedAt) return false
           // Archived only when asked for, even one the caller launched.
           return includeArchivedOf(args) || !thread.archivedAt
-        }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+        }).sort(listOrder)
         const projectNames = new Map(host.listProjects().map((project) => [project.id, project.name]))
         const below = subagentDescendantsIn(all)
         // The page: the rows after the cursor, one more looked for to know whether the list goes on, then the byte cap.

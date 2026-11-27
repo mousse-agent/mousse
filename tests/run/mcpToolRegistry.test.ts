@@ -727,6 +727,12 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     const next = pages[1]![0]!
     threads.set(next, { ...threads.get(next)!, localOnly: true })
     expect((await list({ limit: 3, cursor: first.nextCursor })).threads.map((row) => row.id)).toEqual([...pages[1]!.slice(1), pages[2]![0]])
+    threads.set(next, { ...threads.get(next)!, localOnly: undefined })
+    // The last row of a page updated before the next page is read: the next page goes on from where it was, and
+    // repeats none of the page before.
+    const last = pages[0]!.at(-1)!
+    threads.set(last, { ...threads.get(last)!, updatedAt: '2026-12-01T00:00:00.000Z' })
+    expect((await list({ limit: 3, cursor: first.nextCursor })).threads.map((row) => row.id)).toEqual(pages[1])
   })
 
   it('thread_read messages: a message cut short carries readMore, the call that reads that message on', async () => {
@@ -755,7 +761,8 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     const ids = (value: { threads: Array<Record<string, unknown>> }) => value.threads.map((row) => row.id)
 
     const base = await list()
-    expect(ids(base)).toEqual(['parent', 'stranger', 'elsewhere', 'loose', 'quiet'])
+    // Newest first; threads updated at the same moment by id.
+    expect(ids(base)).toEqual(['elsewhere', 'loose', 'parent', 'stranger', 'quiet'])
     expect(base.projects).toEqual([{ id: 'p1', name: 'One' }, { id: 'p2', name: 'Two' }])
     expect(base.threads.find((row) => row.id === 'stranger')).toMatchObject({
       projectId: 'p1', projectName: 'One', queuedCount: 2, pendingQuestionCount: 1, status: 'awaiting_input', activeRunId: strangerRun.runId,
