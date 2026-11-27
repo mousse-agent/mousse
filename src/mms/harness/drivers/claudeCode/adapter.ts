@@ -103,6 +103,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       if (!bot) return undefined
       return {
         authority: bot,
+        ...(host.tools.resolveAppCall ? { resolveAppCall: host.tools.resolveAppCall } : {}),
         ownerEntry: true,
         ...(host.tools.toolLedger ? { ledger: host.tools.toolLedger } : {}),
         // The bot's files folder: what Claude Code would touch without asking stays the bot's own.
@@ -123,6 +124,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     const policyAppeared = this.locked.policyAppeared?.bind(this.locked)
     return {
       authority: bot,
+      ...(host.tools.resolveAppCall ? { resolveAppCall: host.tools.resolveAppCall } : {}),
       ...(host.tools.toolLedger ? { ledger: host.tools.toolLedger } : {}),
       // Never a root and never the thread's project folder: the activation's scratch folder, or, for
       // a bot with no folder at all, an empty folder of Mousse's own.

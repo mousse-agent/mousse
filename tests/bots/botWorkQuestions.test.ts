@@ -56,11 +56,11 @@ const call = <T = unknown>(method: string, params: Record<string, unknown>): Pro
 
 const tools = new Map(botTools(() => ({ host: f.bots.tools })).map((tool) => [tool.name, tool]))
 /** One of the bot's tools, called from a running turn as its runtime would. */
-async function tool(name: string, prepared: PreparedBotTurn, threadId: string, args: Record<string, unknown>): Promise<{ text: string; isError?: boolean }> {
+async function tool(name: string, prepared: PreparedBotTurn, threadId: string, args: Record<string, unknown>, toolCallId = `call-${Math.random()}`): Promise<{ text: string; isError?: boolean }> {
   const ctx = {
     caller: { threadId, runId: 'r', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
     turn: { threadId, bot: prepared.authority },
-    toolCallId: `call-${Math.random()}`,
+    toolCallId,
     signal: new AbortController().signal,
     transport: 'mcp'
   } as unknown as ToolCallContext
@@ -284,6 +284,26 @@ describe('the chat passes on an answer (question_answer)', () => {
     await finish(f, own.payload, 'completed', { text: 'OK.' })
     const kept = await chat('Go with the second one', 'c2')
     expect(JSON.parse((await tool('question_answer', kept.prepared, kept.payload.threadId, { questionId, answer: 'The second one' })).text)).toMatchObject({ ok: true })
+  })
+
+  it('a retried relay replays what it did, and never answers the question again once Forget opened it again', async () => {
+    const memory = memoryStore()
+    const { work, questionId } = await workThatAsks()
+    await endTurn(work)
+    const own = await chat('Go with the second one', 'c1')
+    // The work does not read the answer yet.
+    f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
+    const relay = () => tool('question_answer', own.prepared, own.payload.threadId, { questionId, answer: 'The second one' }, 'mcp:relay-1')
+    expect(JSON.parse((await relay()).text)).toMatchObject({ ok: true })
+    expect(JSON.parse((await relay()).text)).toMatchObject({ ok: true, replayed: true })
+    expect(f.store.question(questionId)).toMatchObject({ status: 'answered', answer: { text: 'The second one', by: 'chat' } })
+    // The owner forgets their message before the work read the answer: the question is open again, and a retry of the
+    // call that passed it on passes nothing on.
+    memory.forget(botId, { refs: [journaled(memory, own.message, 'owner_msg', 'chat')], by: 'owner_ui' })
+    expect(f.store.question(questionId)).toMatchObject({ status: 'open', answer: null })
+    expect(await relay()).toEqual({ text: QUESTION_ANSWER_FORGOTTEN_TEXT, isError: true })
+    expect(f.store.question(questionId)).toMatchObject({ status: 'open', answer: null })
+    f.store.setError(botId, null)
   })
 })
 

@@ -5,7 +5,7 @@
  */
 import type { ApprovalRequestInfo } from './host'
 import { refused } from './refusal'
-import { CLIENT_REQUEST_ID_SCHEMA, type AppToolTurn, type JsonSchema, type McpCaller, type MousseTool } from './types'
+import { CLIENT_REQUEST_ID_SCHEMA, type JsonSchema, type MousseTool, type ToolOutcome, type VariantSite } from './types'
 
 export const REQUEST_ANSWER_TOOL = 'request_answer'
 
@@ -39,41 +39,63 @@ function isRequestKind(value: unknown): value is RequestKind {
   return typeof value === 'string' && (KINDS as string[]).includes(value)
 }
 
-/** What the kind of a request is read from: the requests the threads here wait on, and the subagents' lineage. */
+const text = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined)
+
+/** What the kind of a request is read from: the requests threads here wait on, the subagents' lineage, receipts, bots. */
 export interface RequestKindSite {
   request(requestId: string): ApprovalRequestInfo | undefined
   parentThread(threadId: string): string | undefined
+  /** The kind an earlier call of the caller's with one of these keys answered (its receipt): a retry replays as it. */
+  answered?(callerThreadId: string, keys: readonly string[]): RequestKind | undefined
+  /** Whether `requestId` is a question the work of the bot that calls asked its owner. */
+  botQuestion?(callerThreadId: string, requestId: string): boolean
 }
 
-const text = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined)
+/** What a call that names no request the caller may answer is told, whether it exists or not. */
+export function noSuchRequest(requestId: string): ToolOutcome {
+  return refused('scope_denied', `No such request: ${requestId}. It may have been answered or withdrawn already; thread_list lists the requests you may answer.`)
+}
 
 /**
- * The kind of the request a call names. A request a thread here waits on is the caller's subagent's when the caller is
- * its direct parent, else another thread's. One no thread here waits on is a question a bot's work asked its owner
- * (the bots keep those), or one already settled, withdrawn or on another computer: the kind the call names then says
- * so in its own words, as its old tool did.
+ * The kind of the request a call names, from the request itself and never from the call: a retry of an answered call
+ * is the kind its receipt says; a request a thread here waits on is the caller's subagent's when the caller is its
+ * direct parent, else another thread's; a question a bot's work asked its owner is that bot's to relay. A request
+ * found nowhere is no such request, unless the call names its thread (one on another computer, or a plain question a
+ * bot answered), which the approval tool refuses or replays in its own words.
  */
-export function requestKindOf(args: Record<string, unknown>, caller: McpCaller, turn: AppToolTurn, site: RequestKindSite): { kind: RequestKind; request?: ApprovalRequestInfo } {
-  const requestId = text(args.requestId) ?? text(args.questionId)
-  const request = requestId ? site.request(requestId) : undefined
-  if (request) return { kind: site.parentThread(request.threadId) === caller.threadId ? 'subagent' : 'approval', request }
-  if (isRequestKind(args.kind)) return { kind: args.kind }
-  // A bot's relay never names a thread: a call that does is another thread's request.
-  const namesThread = text(args.thread) ?? text(args.threadId)
-  return { kind: !namesThread && turn.bot?.appTools.has(REQUEST_ANSWER_KINDS.relay.tool) ? 'relay' : 'approval' }
+export function requestKindOf(args: Record<string, unknown>, site: VariantSite, kinds: RequestKindSite): { kind: RequestKind; request?: ApprovalRequestInfo } | { refused: ToolOutcome } {
+  const requestId = text(args.requestId)
+  const questionId = text(args.questionId)
+  if (requestId && questionId && requestId !== questionId)
+    return { refused: refused('invalid_arguments', `requestId ${requestId} and questionId ${questionId} name different requests; give only requestId.`) }
+  const id = requestId ?? questionId
+  if (!id) return { refused: refused('invalid_arguments', 'request_answer needs the requestId of the request it answers.') }
+  const request = kinds.request(id)
+  const keys = [text(args.clientRequestId), site.toolCallId].filter((key): key is string => Boolean(key))
+  const retried = keys.length ? kinds.answered?.(site.threadId, keys) : undefined
+  if (retried) return { kind: retried, ...(request ? { request } : {}) }
+  if (request) return { kind: kinds.parentThread(request.threadId) === site.threadId ? 'subagent' : 'approval', request }
+  if (site.turn.bot && kinds.botQuestion?.(site.threadId, id)) return { kind: 'relay' }
+  return text(args.thread) ?? text(args.threadId) ? { kind: 'approval' } : { refused: noSuchRequest(id) }
 }
 
-/** The arguments the kind's tool takes, from `request_answer`'s or its old name's. */
-function variantArgs(kind: RequestKind, args: Record<string, unknown>, request: ApprovalRequestInfo | undefined): Record<string, unknown> {
-  const given = (key: string, value: string | undefined) => (value ? { [key]: value } : {})
+/**
+ * The arguments the kind's tool takes, from `request_answer`'s or its old name's, and the thread it read from the
+ * request rather than the call (`conceals`: the caller may not see it, so no refusal names it).
+ */
+function variantArgs(kind: RequestKind, args: Record<string, unknown>, request: ApprovalRequestInfo | undefined): { args: Record<string, unknown>; inferred?: string } {
   const thread = text(args.thread)
+  const named = (key: string, given: string | undefined) => {
+    const value = given ?? request?.threadId
+    return { args: { ...args, ...(value ? { [key]: value } : {}), kind }, ...(!given && value ? { inferred: value } : {}) }
+  }
   switch (kind) {
     case 'subagent':
-      return { ...args, ...given('subagent', text(args.subagent) ?? thread ?? request?.threadId), kind }
+      return named('subagent', text(args.subagent) ?? thread)
     case 'approval':
-      return { ...args, ...given('threadId', text(args.threadId) ?? thread ?? request?.threadId), kind }
+      return named('threadId', text(args.threadId) ?? thread)
     case 'relay':
-      return { ...args, ...given('questionId', text(args.questionId) ?? text(args.requestId)), kind }
+      return { args: { ...args, questionId: text(args.questionId) ?? text(args.requestId), kind } }
   }
 }
 
@@ -113,14 +135,18 @@ export function requestAnswerTool(variants: Partial<Record<RequestKind, MousseTo
     readOnlySafe: true,
     describe: () => 'Answer a request',
     variants: KINDS.flatMap((kind) => variants[kind] ?? []),
-    variantOf: (args, { caller, turn }) => {
-      const { kind, request } = requestKindOf(args, caller, turn, site)
+    variantOf: (args, at) => {
+      const resolved = requestKindOf(args, at, site)
+      if ('refused' in resolved) return resolved
+      const { kind, request } = resolved
       // A call under an old name (or one naming its kind) is that kind and no other: its grant holds nothing else.
       if (isRequestKind(args.kind) && args.kind !== kind)
         return { refused: refused('not_granted', `That request is ${REQUEST_ANSWER_KINDS[kind].is}; ${REQUEST_ANSWER_KINDS[args.kind].tool} answers only ${REQUEST_ANSWER_KINDS[args.kind].is}.`, { variant: kind }) }
       const tool = variants[kind]
       if (!tool) return { refused: refused('unavailable', `Nothing here answers ${REQUEST_ANSWER_KINDS[kind].is}.`, { variant: kind }) }
-      return { tool, args: variantArgs(kind, args, request) }
+      const { args: taken, inferred } = variantArgs(kind, args, request)
+      const id = text(args.requestId) ?? text(args.questionId) ?? ''
+      return { tool, args: taken, ...(inferred ? { conceals: { threadId: inferred, refusal: noSuchRequest(id) } } : {}) }
     },
     handler: () => {
       throw new Error('request_answer runs as the kind of request its id names (variantOf).')

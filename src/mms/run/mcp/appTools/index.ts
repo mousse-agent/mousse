@@ -143,7 +143,16 @@ export function createAppToolRegistry(input: {
     subagent: allDelegation.find((tool) => tool.name === REQUEST_ANSWER_KINDS.subagent.tool),
     approval: allThreads.find((tool) => tool.name === REQUEST_ANSWER_KINDS.approval.tool),
     relay: allBots.find((tool) => tool.name === REQUEST_ANSWER_KINDS.relay.tool)
-  }, { request: (requestId) => host.approvalRequest?.(requestId), parentThread: (threadId) => host.parentThread?.(threadId) })
+  }, {
+    request: (requestId) => host.approvalRequest?.(requestId),
+    parentThread: (threadId) => host.parentThread?.(threadId),
+    answered: (threadId, keys) => host.answeredRequest?.(threadId, keys),
+    botQuestion: (threadId, requestId) => {
+      const deps = input.bots?.()
+      const activation = deps?.host.activationOf(threadId)
+      return Boolean(activation && deps?.host.questions?.asked?.(activation.botId, requestId))
+    }
+  })
   const [bots, delegation, threads] = [allBots, allDelegation, allThreads].map((tools) => tools.filter((tool) => !ANSWER_TOOLS.includes(tool.name)))
   const models = shareWakeTools(bots.filter((tool) => tool.name === MODEL_LIST_TOOL), delegation.filter((tool) => tool.name === MODEL_LIST_TOOL))
   add('delegation', delegation.flatMap((tool) => (tool.name === MODEL_LIST_TOOL ? models : [tool])))

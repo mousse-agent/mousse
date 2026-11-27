@@ -110,7 +110,7 @@ describe('continue_subagent and the title address (issue #142)', () => {
     })
 
     it('a subagent waiting for an answer is never auto-rejected: the caller gets the question, then answers it', async () => {
-      const { d, steps, out, say, start } = world()
+      const { d, parent, steps, out, say, start } = world()
       steps['go'] = async (tools) => { out.first = await start(tools, 'API reviewer') }
       await say('go')
       const questions = (d.orch as any).questions
@@ -121,6 +121,8 @@ describe('continue_subagent and the title address (issue #142)', () => {
         out.wrongThread = await tools.answerSubagent({ subagent: 'Nobody', requestId: pending.requestId, answers: { q1: 'a' } }, { toolCallId: 'a0' }) as Json
         out.answered = await tools.answerSubagent({ subagent: 'API reviewer', requestId: pending.requestId, answers: { q1: 'b' } }, { toolCallId: 'a1' }) as Json
         out.answeredTwice = await tools.answerSubagent({ subagent: 'API reviewer', requestId: pending.requestId, answers: { q1: 'b' } }, { toolCallId: 'a2' }) as Json
+        out.retried = await tools.answerSubagent({ subagent: 'API reviewer', requestId: pending.requestId, answers: { q1: 'b' } }, { toolCallId: 'a1' }) as Json
+        out.reused = await tools.answerSubagent({ subagent: 'API reviewer', requestId: 'another', answers: { q1: 'b' } }, { toolCallId: 'a1' }) as Json
       }
       await say('again')
       expect(out.blocked).toMatchObject({ started: false, code: 'needs_answer', subagent: 'API reviewer', childThreadId: out.first.childThreadId, questions: [{ requestId: pending.requestId }] })
@@ -129,6 +131,12 @@ describe('continue_subagent and the title address (issue #142)', () => {
       expect(out.answered).toEqual({ answered: true, subagent: 'API reviewer', childThreadId: out.first.childThreadId, requestId: pending.requestId })
       await expect(asked).resolves.toEqual({ q1: 'b' })
       expect(out.answeredTwice).toMatchObject({ answered: false, code: 'no_such_question' })
+      // A retry of the call that answered (its id) gets that answer back once the question is gone, and request_answer
+      // reads its kind from the receipt; the same id for another request is a conflict.
+      expect(out.retried).toEqual({ ...out.answered, replayed: true })
+      expect(out.reused).toMatchObject({ answered: false, code: 'client_request_id_conflict' })
+      expect((d.orch as any).answeredRequest(parent.id, ['a1'])).toBe('subagent')
+      expect((d.orch as any).answeredRequest(parent.id, ['a0'])).toBeUndefined()
       // No follow-up was started by the blocked call.
       expect(d.engine.delegations.listForChildThread(out.first.childThreadId)).toHaveLength(1)
       expect(d.orch.getMessages(out.first.childThreadId).some((message) => message.role === 'user' && message.content.includes('b'))).toBe(true)

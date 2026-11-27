@@ -124,6 +124,14 @@ const KINDS: Record<string, () => TurnKind> = {
   'Pi turn': () => ({ turn: { attemptToken: 'attempt-1' }, person: true, permissionMode: 'ask', credential: { binding: 'per_call', provider: 'pi' } })
 }
 
+/** The requests `request_answer` is called with, one of each kind, by id: what each row of it is called. */
+const REQUESTS: Record<string, { label: string; threadId?: string }> = {
+  'req-child': { label: 'subagent', threadId: 'thread-child' },
+  'req-b': { label: 'thread-b', threadId: 'thread-b' },
+  'req-private': { label: 'thread-private', threadId: 'thread-private' },
+  'q-1': { label: 'bot question' }
+}
+
 /** What one kind of turn holds of every tool. */
 async function snapshotOf(kind: TurnKind) {
   const fx = delegationFixture({ profileHome: mkdtempSync(join(base, 'profile-')) })
@@ -143,6 +151,8 @@ async function snapshotOf(kind: TurnKind) {
         return { permission: 'reject' }
       },
       threadMeta: (id) => (THREADS[id] ? ({ id, name: id, createdAt: '', updatedAt: '', ...THREADS[id] } as never) : undefined),
+      approvalRequest: (id) => (REQUESTS[id]?.threadId ? { requestId: id, threadId: REQUESTS[id].threadId!, status: 'pending', approval: true, questions: [] } : undefined),
+      parentThread: (id) => (id === 'thread-child' ? THREAD : undefined),
       listThreads: () => [],
       listProjects: () => [],
       browserRuntime: () => ({ resolveTarget: () => ({ backend: 'managed-chromium' }), dispatch: async () => ({}) }) as never,
@@ -157,7 +167,7 @@ async function snapshotOf(kind: TurnKind) {
       goals: { working: () => true } as never
     } as Partial<AppToolHost>)
     const turns = new AppToolTurns()
-    const deps = { host: { activationOf: () => ({ botId: 'b1', activationId: 'act-1', lane: 'run' }) }, activity: { onAppResult: vi.fn(), onAllowed: vi.fn(), drain: () => [] } } as unknown as BotAppToolDeps
+    const deps = { host: { activationOf: () => ({ botId: 'b1', activationId: 'act-1', lane: 'run' }), questions: { asked: (_bot: string, id: string) => id === 'q-1' } }, activity: { onAppResult: vi.fn(), onAllowed: vi.fn(), drain: () => [] } } as unknown as BotAppToolDeps
     const userMcp: UserMcpProxy = {
       list: async () => [userMcpTool('read'), userMcpTool('write')],
       allowed: async () => ({ allowed: true }),
@@ -192,6 +202,9 @@ async function snapshotOf(kind: TurnKind) {
     const dispatch: Record<string, string> = {}
     /** Each tool called with no arguments, and each that takes `threadId` (or `thread`) with another thread and a private one. */
     const calls = registry.list().flatMap((tool) => {
+      // `request_answer` is the kind of the request its id names: one call of each kind.
+      if (tool.name === 'request_answer')
+        return Object.entries(REQUESTS).map(([requestId, { label }]) => ({ key: `${tool.name} ${label}`, name: tool.name, args: { requestId } }))
       const schema = JSON.stringify(tool.inputSchema)
       const key = schema.includes('"threadId"') ? 'threadId' : schema.includes('"thread"') ? 'thread' : undefined
       return [

@@ -9629,7 +9629,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     questions: {
       ask: (botId, activationId, asks) => this.askOwner(botId, activationId, asks),
       withdraw: (botId, activationId, questionId) => this.withdrawQuestion(botId, activationId, questionId),
-      relay: (botId, activationId, questionId, answer) => this.relayAnswer(botId, activationId, questionId, answer)
+      relay: (botId, activationId, questionId, answer, requestKey) => this.relayAnswer(botId, activationId, questionId, answer, requestKey),
+      asked: (botId, questionId) => {
+        const question = this.store.question(questionId)
+        return question?.botId === botId && question.lane === 'run'
+      }
     },
     cards: {
       show: (botId, activationId, card) => this.showCard(botId, activationId, card)
@@ -10071,9 +10075,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * ("go with the second flat"). Only a chat turn the owner's own message or tapped answer started (`relayAnswer` in
    * `BOT_TURN_KINDS`: the tap posts the owner's row, which the answer keeps), and only for a
    * question work of this bot waits on. The answer keeps the owner's message it came from (`answer_message`), so Forget
-   * reaches it, and the bubble reads "Answered in chat".
+   * reaches it, and the bubble reads "Answered in chat". A retry of the call (`requestKey`) replays what it did, and never
+   * answers again: not even the same question opened again because the owner forgot an answer the work had not read.
    */
-  relayAnswer(botId: string, activationId: string, questionId: string, answer: string): { ok: true; title: string } | { ok: false; text: string } {
+  relayAnswer(botId: string, activationId: string, questionId: string, answer: string, requestKey?: string): { ok: true; title: string; replayed?: true } | { ok: false; text: string } {
     const row = this.store.activation(activationId)
     if (!row || row.botId !== botId || !turnRightsOf(row).relayAnswer) return { ok: false, text: BOT_RELAY_OWNER_ONLY_TEXT }
     const text = answer.replace(/\s+/g, ' ').trim()
@@ -10085,7 +10090,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!from) return { ok: false, text: BOT_RELAY_OWNER_ONLY_TEXT }
     // The owner forgot what they wrote in this turn: nothing of it is passed on, and the question stays open.
     if (this.ownerMessageForgotten(activationId)) return { ok: false, text: QUESTION_ANSWER_FORGOTTEN_TEXT }
-    const answered = this.recorded(row, () => this.answerWorkInTx(questionId, { text, by: 'chat' }, from))
+    const receipt = requestKey ? `relay-request:${activationId}:${requestKey}` : undefined
+    const earlier = receipt ? this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, receipt) : undefined
+    if (earlier) return earlier.value === questionId ? { ok: true, title: this.workTitle(work), replayed: true } : { ok: false, text: 'That clientRequestId already passed on an answer to another question; use a fresh one for each answer.' }
+    const answered = this.recorded(row, () => {
+      const done = this.answerWorkInTx(questionId, { text, by: 'chat' }, from)
+      if (done && receipt) this.store.run('INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, receipt, questionId)
+      return done
+    })
     if (!answered) return { ok: false, text: question.status === 'open' ? 'It could not be passed on. Try again.' : 'That question was already answered, or is no longer open.' }
     this.afterWorkAnswer(questionId)
     return { ok: true, title: this.workTitle(work) }

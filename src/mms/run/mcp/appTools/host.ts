@@ -581,6 +581,12 @@ export interface AppToolHost extends DelegationToolsHost {
   /** The request `requestId` in any state, or undefined when nobody asked it. */
   approvalRequest?(requestId: string): ApprovalRequestInfo | undefined
   /**
+   * Which kind of request an earlier call of `callerThreadId` under one of `keys` answered, by its receipt
+   * (`answer_subagent:` or `approval_respond:` with the caller and the key), so `request_answer` replays a retry as that
+   * kind after the request itself is gone.
+   */
+  answeredRequest?(callerThreadId: string, keys: readonly string[]): 'subagent' | 'approval' | undefined
+  /**
    * Answers an approval of another thread as `actor` (`approval_respond`) through the one settlement the app,
    * the CLI and `answer_subagent` use: the rule `canAnswerApproval` decides, one answer wins and the loser learns
    * who did. The host reads the profile's switch "Agents may answer approvals on other threads" as it is now.
