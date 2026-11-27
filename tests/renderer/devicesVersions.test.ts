@@ -2,7 +2,7 @@
 /**
  * Settings → Devices says which computers run another Mousse than this one: "Behind" or "Newer" on the row, the
  * versions and whether it updates itself in the tooltip, and under a computer that is behind how it gets updated:
- * from here when this computer installed it over SSH or its app takes update requests, otherwise "Update on <name>". The daemon is stubbed at
+ * Update on its row when this computer installed it over SSH or its app takes update requests, otherwise a muted line saying where to update it and why, with Check again where its app may have opened since. The daemon is stubbed at
  * `platformRequest`; rows of both networkings are read from `bridge.nodes`, as the section reads them.
  */
 import { act, createElement } from 'react'
@@ -107,10 +107,10 @@ describe('Settings → Devices, versions', () => {
     expect(rowText('node_c')).toMatch(/· Newer/)
     expect(titled('Newer')?.title).toBe('Desk PC runs 0.9.3 (nightly), this computer 0.9.2. It updates itself.')
     for (const node of ['node_d', 'node_e']) expect(rowText(node)).not.toMatch(/Behind|Newer/)
-    // Only the computer behind gets a way to update it; this computer didn't install it, so it's updated there.
-    expect(host.textContent).toContain('Update on Laptop')
-    expect(host.textContent).not.toContain('Update on Desk PC')
-    expect(host.textContent).not.toContain('Update on Mini')
+    // Only the computer behind says how to update it; it can't update itself, so it's updated there, with no button.
+    expect(rowText('node_b')).toContain("It can't update itself: Updates on macOS need a signed build. Update it on Laptop.")
+    expect(rowText('node_c')).not.toContain('Update')
+    expect(button('Update')).toBeUndefined()
   })
 
   it('updates a computer this one installed over SSH from here, through its update dialog', async () => {
@@ -122,8 +122,7 @@ describe('Settings → Devices, versions', () => {
     }
     answers['net.ssh.update'] = { ok: true, version: '0.9.2' }
     await mount()
-    expect(host.textContent).toContain('Update Laptop from here')
-    expect(host.textContent).not.toContain('Update on Laptop')
+    expect(rowText('node_b')).not.toContain('Update it on Laptop')
     await act(async () => button('Update…')!.click())
     await flush()
     await act(async () => button('Update')!.click())
@@ -146,7 +145,7 @@ describe('Settings → Devices, versions', () => {
     }
     await mount()
     expect(rowText('n1')).toMatch(/Connected.*· Behind/)
-    expect(titled('Update on Studio')?.title).toContain("Studio runs 0.9.0 (stable), this computer 0.9.2. It can't update itself")
+    expect(titled("It can't update itself: Updates on macOS need a signed build. Update it on Studio.")?.title).toContain("Studio runs 0.9.0 (stable), this computer 0.9.2. It can't update itself")
   })
   it('updates a computer whose app takes requests from here: its running turns, Install with that count, and Close cancels', async () => {
     const taking = { channel: 'stable', self: true, requests: true }
@@ -167,8 +166,8 @@ describe('Settings → Devices, versions', () => {
     }
     await mount()
     expect(asks).toEqual([{ node: 'node_c', step: 'refresh' }])
-    expect(host.textContent).toContain('Update Laptop from here')
-    expect(host.textContent).toContain('Update on Desk PC')
+    expect(rowText('node_c')).toContain('Open Mousse on Desk PC to update it from here.')
+    expect([...host.querySelectorAll('button')].filter((item) => item.textContent?.trim() === 'Update')).toHaveLength(1)
     expect(host.textContent).not.toMatch(/Update all/i)
 
     await act(async () => button('Update')!.click())
@@ -204,5 +203,49 @@ describe('Settings → Devices, versions', () => {
     await flush()
     expect(asks.at(-1)).toEqual({ node: 'node_b', step: 'cancel', job: 'j1' })
     expect(document.body.textContent).not.toContain('Update Laptop to 0.9.2?')
+  })
+  it('says to update a computer on itself when its Mousse is too old to ask, and Check again shows Update once it takes requests', async () => {
+    // Its Mousse predates the update report: behind, with a version, but nothing said about updating itself.
+    answers['bridge.nodes'] = { nodes: [row('node_b', 'Laptop', { version: '0.9.0', olderThanThis: true })] }
+    const asks: Array<Record<string, unknown>> = []
+    answers['net.update.there'] = (params: Record<string, unknown>) => {
+      asks.push(params)
+      return { ok: true }
+    }
+    await mount()
+    // Nothing is asked on its own for a computer that never said it updates itself, and no button pretends to update it.
+    expect(asks).toEqual([])
+    expect(rowText('node_b')).toContain('Its Mousse is too old to update from here. Update it on Laptop once.')
+    expect(button('Update')).toBeUndefined()
+
+    // Updated there since: asked again, it now takes requests, and its row offers Update.
+    answers['bridge.nodes'] = {
+      nodes: [row('node_b', 'Laptop', { version: '0.9.0', update: { channel: 'stable', self: true, requests: true }, olderThanThis: true })]
+    }
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Check again whether Laptop can be updated from here"]')!.click())
+    await flush()
+    expect(asks).toEqual([{ node: 'node_b', step: 'refresh' }])
+    expect(rowText('node_b')).not.toContain('too old')
+    await act(async () => button('Update')!.click())
+    await flush()
+    expect(asks.at(-1)).toEqual({ node: 'node_b', step: 'prepare', version: '0.9.2' })
+  })
+
+  it('says when a computer asked again answered the same, or did not answer', async () => {
+    answers['bridge.nodes'] = { nodes: [row('node_b', 'Laptop', { version: '0.9.0', olderThanThis: true })] }
+    let reachable = true
+    answers['net.update.there'] = () => {
+      if (!reachable) throw new Error('peer_offline')
+      return { ok: true }
+    }
+    await mount()
+    const check = () => document.querySelector<HTMLButtonElement>('[aria-label="Check again whether Laptop can be updated from here"]')!
+    await act(async () => check().click())
+    await flush()
+    expect(rowText('node_b')).toContain('Same answer just now.')
+    reachable = false
+    await act(async () => check().click())
+    await flush()
+    expect(rowText('node_b')).toContain("Laptop didn't answer.")
   })
 })

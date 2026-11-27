@@ -19,6 +19,18 @@
   vertical-align: -1px;
 }
 
+/* A computer behind: Update (or Check again) sits beside the row menu, as one control group (rule 7). */
+.device-row-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+/* Where to update a computer behind when not from here: one more muted line of the row description (rule 12). */
+.device-update-hint {
+  display: block;
+}
+
 
 .engine-dialog {
   display: flex;
