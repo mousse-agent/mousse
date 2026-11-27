@@ -16,8 +16,11 @@ export type NewProjectRow =
    * here. The account's repositories then show here.
    */
   | { kind: 'connect-github' }
-  /** Browsing another computer's folders for where a clone goes: use the folder shown, or open another. */
-  | { kind: 'browse-use'; path: string }
+  /**
+   * Browsing another computer's folders: use the folder shown (where a clone goes, or with `adding` the folder to add as
+   * a project there), or open another.
+   */
+  | { kind: 'browse-use'; path: string; adding?: true }
   | { kind: 'browse-open'; name: string; path: string; up?: true }
   /** Makes an empty folder and a Git repository in it. */
   | { kind: 'create'; name: string; destination: string | null }
@@ -181,8 +184,9 @@ export function withRepositories(
 
 /**
  * The rows for what is typed. On this computer: Start from (empty); a GitHub repository clones, or names a new
- * project; a path adds that folder; a name makes a new project. On another computer only a folder that is already
- * there can be added, by its path; the folders its projects are in are offered as starting points.
+ * project; a path adds that folder; a name makes a new project. On another computer a folder that is already there is
+ * added by browsing its folders (Start from) or by its path, and a GitHub repository clones there; the folders its
+ * projects are in are offered as starting points.
  */
 export function newProjectRows(text: string, where: { remote: false; parent: string | null } | { remote: true; folders: readonly string[]; computer: string; parent?: string | null }): RowGroup[] {
   const typed = text.trim()
@@ -191,7 +195,7 @@ export function newProjectRows(text: string, where: { remote: false; parent: str
     const lower = typed.toLowerCase()
     const folders = where.folders.filter((folder) => folder.toLowerCase().startsWith(lower) && folder.toLowerCase() !== lower)
     const suggestions: RowGroup[] = folders.length > 0 ? [{ label: `Folders with projects on ${where.computer}`, rows: folders.map((path) => ({ kind: 'suggest', path })) }] : []
-    if (!typed) return [{ label: 'Start from', rows: [{ kind: 'clone-hint' }] }, ...suggestions]
+    if (!typed) return [{ label: 'Start from', rows: [{ kind: 'open-folder' }, { kind: 'clone-hint' }] }, ...suggestions]
     const repository = githubRepository(typed)
     if (repository) {
       const name = repository.split('/')[1]!
@@ -216,13 +220,13 @@ export function newProjectRows(text: string, where: { remote: false; parent: str
 }
 
 /**
- * The rows of the folder browser: Use this folder (once a folder is shown), the folder above it, then the folders in it
- * that match what is typed.
+ * The rows of the folder browser: Use this folder (once a folder is shown; `adding` adds it as a project), the folder
+ * above it, then the folders in it that match what is typed.
  */
-export function browseRows(view: { path: string | null; parent: string | null; folders: readonly { name: string; path: string }[] }, text: string, computer: string): RowGroup[] {
+export function browseRows(view: { path: string | null; parent: string | null; folders: readonly { name: string; path: string }[] }, text: string, computer: string, options: { adding?: boolean } = {}): RowGroup[] {
   const typed = text.trim().toLowerCase()
   const rows: NewProjectRow[] = []
-  if (view.path) rows.push({ kind: 'browse-use', path: view.path })
+  if (view.path) rows.push({ kind: 'browse-use', path: view.path, ...(options.adding ? { adding: true as const } : {}) })
   if (view.parent && !typed) rows.push({ kind: 'browse-open', name: '..', path: view.parent, up: true })
   for (const folder of view.folders) if (!typed || folder.name.toLowerCase().includes(typed)) rows.push({ kind: 'browse-open', name: folder.name, path: folder.path })
   return [{ label: view.path ?? `Folders on ${computer}`, rows }]
