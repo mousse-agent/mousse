@@ -95,6 +95,11 @@ export const BOT_NOTIFY_NEXT = 'You wake here in your chat when that thread fini
 export const BOT_JOB_NEXT = 'This job is in your ledger: you are told here in your chat when that thread finishes or waits for a person, with its report and link. Do not call thread_wait to check: tell your owner in one line what you started, with the link, and end your turn.'
 
 /** What an agent (not a bot) is told of a thread it started out of the person's sidebar. */
+/**
+ * What an agent's older call that asked for `hidden` (no `kind`) is told: its thread shows (#2004), and what it meant by
+ * hiding one is a subagent.
+ */
+const HIDDEN_SHOWN_NOTE = ' hidden is for a personal bot\'s thread, so it shows all the same: for a private helper of your own, start a subagent (thread_create kind "subagent").'
 const AGENT_HIDDEN_NOTE = 'It is out of the person\'s sidebar: the side panel of your thread lists it, and so does All in the sidebar; it notifies them like any thread when it needs them, and shows in the sidebar once they write in it. thread_update with hidden: false shows it there.'
 
 /**
@@ -1265,7 +1270,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         ...(typeof args.effort === 'string' ? { effort: args.effort.trim() } : {}),
         ...(typeof args.firstMessage === 'string' ? { firstMessage: args.firstMessage, mode: (args.mode as 'agent' | 'plan' | undefined) ?? 'agent' } : {}),
         // Named only when given, so a key stored before keeps its fingerprint. Without it a bot's thread shows in that
-        // computer's sidebar, and an agent's is hidden there.
+        // computer's sidebar; an agent's shows there whatever it asks (#2004).
         ...(typeof args.hidden === 'boolean' ? { hidden: args.hidden } : {})
       }, { clientRequestId: requestKey, actor })
     } catch (error) {
@@ -1292,7 +1297,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           ? `The thread exists on ${launched.computer}; ${launched.computer} has not confirmed the first message yet. Mousse keeps trying under the same key, so do not send it again: call thread_create again with the same clientRequestId to learn what became of it.`
           : `Started on ${launched.computer}. Its questions and approvals wait on that computer.${bot
             ? args.hidden === true ? ' It is out of that computer\'s sidebar; your chat lists it.' : ''
-            : ' It shows in that computer\'s sidebar.'}`
+            : ` It shows in that computer's sidebar.${args.hidden === true ? HIDDEN_SHOWN_NOTE : ''}`}`
     })
   }
   /**
@@ -2746,9 +2751,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       target: (args) => ({ projectId: args.computer === undefined && typeof args.projectId === 'string' && args.projectId ? args.projectId : undefined }),
       handler: async (args, ctx) => {
         // #2004: an agent's thread is a handoff (another project, or a thread the person asked for) and always shows in the
-        // person's sidebar; work of its own out of their sight is a subagent. `hidden` stays a personal bot's (#2003). A retry
-        // of a thread an older build made hidden finds it as it was.
-        if (!ctx.turn.bot && args.hidden === true && !engine.store.getReceipt(`thread_create:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`))
+        // person's sidebar; work of its own out of their sight is a subagent. `hidden` stays a personal bot's (#2003). A new
+        // caller that names the kind is told; an older one (no `kind`) gets the thread it always got, shown, and is told why
+        // in its result. The service and the launch there never hide an agent's thread.
+        if (!ctx.turn.bot && args.hidden === true && args.kind !== undefined)
           throw new Error('hidden is for a personal bot\'s thread. A thread you start is a handoff to the person and always shows in their sidebar: leave hidden out. For work of your own out of their sight, start a subagent (kind "subagent").')
         if (args.computer !== undefined) return createOnComputer(args, ctx)
         if (!host.createThread) return notAvailable('thread_create')
@@ -2856,7 +2862,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         const setup = !created.replayed && created.firstMessage?.sent === true ? await setupOf(host, created.threadId, created.firstMessage) : {}
         // As the thread is now: a retry reports the thread the first call made.
         const hidden = host.threadMeta?.(created.threadId)?.hidden === true
-        return json({ ...created, link: threadLink(created.threadId), ...watched, ...setup, hidden, note: hidden ? AGENT_HIDDEN_NOTE : 'It shows in the person\'s sidebar: an independent thread they follow there.' })
+        const shownNote = `It shows in the person's sidebar: an independent thread they follow there.${args.hidden === true ? HIDDEN_SHOWN_NOTE : ''}`
+        return json({ ...created, link: threadLink(created.threadId), ...watched, ...setup, hidden, note: hidden ? AGENT_HIDDEN_NOTE : shownNote })
       }
     },
     {

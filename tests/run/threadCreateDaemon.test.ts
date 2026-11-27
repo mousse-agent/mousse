@@ -271,6 +271,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
         // #2004: a thread an agent starts is a handoff, whether the call names its kind or is an older caller's.
         seen.older = parse(await w.create(mcp!, { title: 'Release notes', clientRequestId: 'older' }))
         seen.kinded = parse(await w.create(mcp!, { kind: 'thread', title: 'Changelog', clientRequestId: 'kinded' }))
+        seen.olderHidden = parse(await w.create(mcp!, { title: 'Quiet notes', hidden: true, clientRequestId: 'older-hidden' }))
         seen.hiddenRefused = refusal(await w.create(mcp!, { kind: 'thread', title: 'Background check', hidden: true, clientRequestId: 'quiet' }))
         seen.hid = parse(await call(mcp!, 'thread_update', { threadId: (seen.older as AgentCreatedThread).threadId, hidden: true }))
         seen.notMine = refusal(await call(mcp!, 'thread_update', { threadId: w.other.id, hidden: true }))
@@ -283,6 +284,9 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       for (const made of [seen.older, seen.kinded] as Array<AgentCreatedThread & { hidden: boolean; note: string }>)
         expect(made).toMatchObject({ hidden: false, note: expect.stringContaining('shows in the person\'s sidebar') })
       expect(w.d.store.getThread((seen.kinded as AgentCreatedThread).threadId)?.hidden).toBeUndefined()
+      // An older caller's hidden thread is the thread it always got, shown, and it is told what hiding one means now.
+      expect(seen.olderHidden).toMatchObject({ hidden: false, note: expect.stringMatching(/shows in the person's sidebar.*kind "subagent"/) })
+      expect(w.d.store.getThread((seen.olderHidden as AgentCreatedThread).threadId)?.hidden).toBeUndefined()
       // Hidden work of its own is a subagent: nothing was made.
       expect(seen.hiddenRefused).toMatch(/hidden is for a personal bot's thread/)
       expect(seen.hiddenRefused).toMatch(/kind "subagent"/)

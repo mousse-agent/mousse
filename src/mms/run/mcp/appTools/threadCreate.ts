@@ -1,5 +1,3 @@
-import type { RunEngine } from '../../RunEngine'
-import type { AppToolHost } from './host'
 import { refused } from './refusal'
 import type { JsonSchema, MousseTool, ToolOutcome, ToolVariant, VariantSite } from './types'
 
@@ -15,8 +13,9 @@ import type { JsonSchema, MousseTool, ToolOutcome, ToolVariant, VariantSite } fr
  *   family's independent thread (`thread.ts`). An agent's is a handoff (another project, or a thread the person asked
  *   for) and always shows in the person's sidebar; `hidden` is a personal bot's (#2004, #2003).
  *
- * The tool is listed and held where either kind is. A bot's turn starts threads only: its subagents and its work start
- * through the bot port (`subagent_start`, `work_start`).
+ * The tool is listed and held where either kind is. A call that names no kind (an older caller) is a thread, as it was.
+ * A bot's turn starts threads only: its subagents and its work start through the bot port (`subagent_start`,
+ * `work_start`).
  */
 export type ThreadCreateKind = 'subagent' | 'thread'
 
@@ -27,7 +26,7 @@ const KIND_SCHEMA: JsonSchema = {
 }
 
 /** `thread_create`, from the declarations of its two kinds. Without the run engine there is no thread kind. */
-export function threadCreateTool(kinds: { subagent: MousseTool; thread?: MousseTool }, host: Pick<AppToolHost, 'threadMeta'>, engine?: RunEngine): MousseTool {
+export function threadCreateTool(kinds: { subagent: MousseTool; thread?: MousseTool }): MousseTool {
   const variants: Partial<Record<ThreadCreateKind, MousseTool>> = {
     subagent: { ...kinds.subagent, capabilities: ['threads.delegate'] },
     ...(kinds.thread ? { thread: kinds.thread } : {})
@@ -43,49 +42,29 @@ export function threadCreateTool(kinds: { subagent: MousseTool; thread?: MousseT
     ...(kinds.thread ? { botDescription: kinds.thread.botDescription ?? kinds.thread.description, botInputSchema: kinds.thread.botInputSchema ?? kinds.thread.inputSchema, botClass: kinds.thread.class } : {}),
     describe: () => 'Start a subagent or a thread',
     variants: Object.values(variants) as MousseTool[],
-    variantOf: (args, site) => kindOf(args, site, variants, properties, host, engine),
+    variantOf: (args, site) => kindOf(args, site, variants, properties),
     handler: () => {
       throw new Error('thread_create runs as the kind its call names (variantOf).')
     }
   }
 }
 
-/** The kind a call is, and the arguments that kind takes; an older caller names none (`olderCall`). */
-function kindOf(args: Record<string, unknown>, site: VariantSite, variants: Partial<Record<ThreadCreateKind, MousseTool>>, properties: Record<ThreadCreateKind, Record<string, JsonSchema>>, host: Pick<AppToolHost, 'threadMeta'>, engine?: RunEngine): ToolVariant | { refused: ToolOutcome } {
+/**
+ * The kind a call is, and the arguments that kind takes. A call that names none is an older caller's thread, passed on
+ * as it came (no `kind`), so the thread kind can tell it from a new caller's (its `hidden`, `thread.ts`).
+ */
+function kindOf(args: Record<string, unknown>, site: VariantSite, variants: Partial<Record<ThreadCreateKind, MousseTool>>, properties: Record<ThreadCreateKind, Record<string, JsonSchema>>): ToolVariant | { refused: ToolOutcome } {
   if (args.kind !== undefined && args.kind !== 'subagent' && args.kind !== 'thread') return { refused: refused('invalid_arguments', 'kind must be "subagent" or "thread".') }
-  const older = args.kind === undefined ? olderCall(args, site, host, engine) : undefined
-  const kind: ThreadCreateKind = older?.kind ?? (args.kind as ThreadCreateKind)
-  const call = older?.args ?? args
+  const kind: ThreadCreateKind = args.kind ?? 'thread'
   if (site.turn.bot && kind === 'subagent')
     return { refused: refused('not_granted', 'A bot starts its subagents with subagent_start, and its work with work_start: thread_create starts threads (kind "thread").', { variant: 'delegate_task' }) }
   const tool = variants[kind]
   if (!tool) return { refused: refused('unavailable', `kind "${kind}" is not available here.`) }
   // An argument of the other kind only is a mistake about the kind, never one to drop.
   const other = kind === 'subagent' ? 'thread' : 'subagent'
-  const foreign = Object.keys(call).filter((key) => key in properties[other] && !(key in properties[kind]))
+  const foreign = Object.keys(args).filter((key) => key in properties[other] && !(key in properties[kind]))
   if (foreign.length) return { refused: refused('invalid_arguments', `${foreign.join(', ')} ${foreign.length === 1 ? 'is' : 'are'} for kind "${other}", not "${kind}".`) }
-  return { tool, args: { ...call, kind } }
-}
-
-/**
- * The kind an older caller means when it names none, by what the call did before kinds: a thread, as it was. An agent's
- * thread it asked to hide (`hidden: true`) in its own project, with a first message, was its own work out of the person's
- * sight: that is a subagent now (#2004), unless a thread was made for this request already (a retry across the upgrade
- * finds it). Hidden anywhere else, it is still a thread, and the thread kind refuses an agent's `hidden`.
- */
-function olderCall(args: Record<string, unknown>, ctx: VariantSite, host: Pick<AppToolHost, 'threadMeta'>, engine?: RunEngine): { kind: ThreadCreateKind; args?: Record<string, unknown> } {
-  const message = typeof args.firstMessage === 'string' && args.firstMessage.trim() ? args.firstMessage : undefined
-  const ownProject = typeof args.projectId === 'string' && args.projectId === host.threadMeta?.(ctx.threadId)?.projectId
-  if (ctx.turn.bot || args.hidden !== true || args.computer !== undefined || !message || !ownProject) return { kind: 'thread' }
-  const request = typeof args.clientRequestId === 'string' && args.clientRequestId ? args.clientRequestId : ctx.toolCallId
-  if (request && engine?.store.getReceipt(`thread_create:${ctx.threadId}:${request}`)) return { kind: 'thread' }
-  // A subagent reports back to its parent, so `notify` has nothing to add; `hidden` is what it is.
-  const { projectId: _project, fromProjectId: _from, firstMessage: _message, workspace, mode, hidden: _hidden, notify: _notify, title, ...rest } = args
-  const named = typeof title === 'string' && title.trim() ? title.trim() : message.trim().split('\n')[0].slice(0, 60)
-  return {
-    kind: 'subagent',
-    args: { ...rest, prompt: message, title: named, workspace: workspace === 'new_worktree' ? 'isolated' : 'shared', ...(mode === 'plan' ? { modeCeiling: 'plan' } : {}) }
-  }
+  return { tool, args }
 }
 
 function propertiesOf(schema: JsonSchema | undefined): Record<string, JsonSchema> {

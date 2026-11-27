@@ -75,19 +75,20 @@ describe('thread_create kinds', () => {
     expect(createThread).not.toHaveBeenCalled()
   })
 
-  it('an older call with no kind starts a thread, unless it asked to hide one in its own project: that is a subagent now', async () => {
-    const { call, createThread, delegateTask, engine } = await setup()
+  it('an older call with no kind starts the thread it always did, its hidden one shown, under the same request key', async () => {
+    const { call, createThread, delegateTask } = await setup()
     await call('thread_create', { projectId: 'home', title: 'Docs pass', firstMessage: 'Tidy the docs' })
     expect(createThread).toHaveBeenCalledTimes(1)
-    await call('thread_create', { projectId: 'home', firstMessage: 'Check the flaky test\nand report', workspace: 'new_worktree', hidden: true }, 'mcp:hidden')
-    expect(delegateTask).toHaveBeenCalledWith({ prompt: 'Check the flaky test\nand report', title: 'Check the flaky test', workspace: 'isolated', modeCeiling: 'default' }, { toolCallId: 'mcp:hidden' })
-    // Hidden in another project it is still a thread, and an agent's hidden is refused.
-    expect((await denied(call('thread_create', { projectId: 'other', firstMessage: 'Look', hidden: true })))?.message).toMatch(/hidden is for a personal bot's thread/)
-    // A retry of a hidden thread an older build made under this request finds that thread, as it was.
-    engine.store.putReceipt({ clientRequestId: 'thread_create:parent:mcp:before', threadId: 'parent', commandKind: 'agent_thread', status: 'accepted', result: {}, createdAt: new Date(0).toISOString() })
-    await call('thread_create', { projectId: 'home', firstMessage: 'Check the flaky test', hidden: true }, 'mcp:before')
+    // A hidden thread in its own project, with a first message: the same thread as before (its permissions, its workspace,
+    // the chain's hold on its first message), never a subagent. The service never hides an agent's thread (#2004).
+    const quiet = await call('thread_create', { projectId: 'home', firstMessage: 'Check the flaky test', workspace: 'new_worktree', hidden: true }, 'mcp:quiet')
+    expect(quiet.isError).toBeUndefined()
+    expect(JSON.parse(quiet.text).note).toMatch(/kind "subagent"/)
     expect(createThread).toHaveBeenCalledTimes(2)
-    expect(createThread).toHaveBeenLastCalledWith(expect.objectContaining({ hidden: true }), expect.objectContaining({ clientRequestId: 'thread_create:parent:mcp:before' }))
-    expect(delegateTask).toHaveBeenCalledTimes(1)
+    expect(createThread).toHaveBeenLastCalledWith(expect.objectContaining({ projectId: 'home', workspace: 'new_worktree', firstMessage: 'Check the flaky test' }), expect.objectContaining({ clientRequestId: 'thread_create:parent:mcp:quiet' }))
+    // A retry is the same request: the key names the call, not the run.
+    await call('thread_create', { projectId: 'home', firstMessage: 'Check the flaky test', workspace: 'new_worktree', hidden: true }, 'mcp:quiet')
+    expect(createThread).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ clientRequestId: 'thread_create:parent:mcp:quiet' }))
+    expect(delegateTask).not.toHaveBeenCalled()
   })
 })

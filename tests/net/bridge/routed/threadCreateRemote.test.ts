@@ -281,6 +281,27 @@ describe('thread_create on another computer (issue #1160)', () => {
     expect(far!.hidden).toBeUndefined()
   }, 120_000)
 
+  it('an agent\'s create that a computer from before #2004 sends with hidden: true starts shown there', async () => {
+    const { thread, create } = await caller()
+    // That computer asked to hide every agent's thread here; a handoff shows (#2004), and only a bot's is hidden.
+    const records = t.caller.runEngine.remoteLaunches
+    const write = records.create.bind(records)
+    vi.spyOn(records, 'create').mockImplementation((input) => write({ ...input, hidden: true }))
+    const port = portOf()
+    const real = port.call.bind(port)
+    const sent: Array<Record<string, unknown>> = []
+    vi.spyOn(port, 'call').mockImplementation(async (node, method, params, options) => {
+      if (method === 'threads.create') sent.push(params as Record<string, unknown>)
+      return real(node, method, params, options)
+    })
+    const out = await create({ computer: t.node, clientRequestId: 'older-hidden' })
+    expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
+    expect(sent[0]).toMatchObject({ hidden: true })
+    const [far] = launchedBy(thread.id)
+    expect(far!.hidden).toBeUndefined()
+    expect(far!.startedByBot).toBeUndefined()
+  }, 120_000)
+
   it('a launch whose first create went to a computer from before hidden sends none on its retry after that computer is updated', async () => {
     const { thread, create } = await caller()
     // That computer runs the version of threads.create before hidden: the client sends the create without it.
@@ -516,7 +537,8 @@ describe('a personal bot\'s thread on another computer (issue #2003)', () => {
     const out = await create({ hidden: true, clientRequestId: 'bot-hidden' })
     expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
     const [far] = launchedBy(chat.id)
-    expect(far).toMatchObject({ hidden: true, startedFrom: { node: t.callerNode, agent: { thread: chat.id } } })
+    // Hidden once its first message named the bot there.
+    expect(far).toMatchObject({ hidden: true, startedByBot: { botId: 'bot-pip' }, startedFrom: { node: t.callerNode, agent: { thread: chat.id } } })
   }, 120_000)
 
   it('a start that names no hidden keeps the key a bot stored before hidden: its retry is the same launch, shown there', async () => {

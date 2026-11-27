@@ -160,7 +160,7 @@ export function createAppToolRegistry(input: {
   // `thread_create` starts a subagent (`delegate_task`'s declaration) or a thread (the thread family's): one tool, two
   // kinds. It is listed where `delegate_task` was, first: a runtime with a tight schema budget (Antigravity) keeps it.
   // `delegate_task` and `create_subagent` are old names of its subagent kind.
-  const threadCreate = threadCreateTool({ subagent: delegation.find((tool) => tool.name === 'delegate_task')!, thread: threads.find((tool) => tool.name === 'thread_create') }, host, engine)
+  const threadCreate = threadCreateTool({ subagent: delegation.find((tool) => tool.name === 'delegate_task')!, thread: threads.find((tool) => tool.name === 'thread_create') })
   add('delegation', delegation.flatMap((tool) => (tool.name === MODEL_LIST_TOOL ? models : tool.name === 'delegate_task' ? [threadCreate] : isToolAlias(tool.name) && !isRunningVariant(tool.name) ? [] : [tool])))
   add('questions', [...shareWakeTools(bots.filter((tool) => QUESTION_TOOLS.includes(tool.name)), askUserTools(host)), answers, ...secretTools(host), ...bugReportTools(host)])
   add('tasks', [...taskTools(host), ...goalTools(host)])

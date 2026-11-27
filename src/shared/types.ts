@@ -1616,8 +1616,11 @@ export interface ThreadStartedFrom {
    * `subagent` is set when that agent started the thread as its subagent (`delegate_task` with `computer`), not as a
    * thread of its own (`thread_create`): only such a thread shows below the agent's thread in the title bar's path. A
    * computer from before it sends none.
+   *
+   * `hidden` is set when that agent's create asked to hide the thread here. It shows all the same: only a personal bot's
+   * is hidden, once its first message names the bot (#2004, #2003).
    */
-  agent?: { thread: string; title: string; mode: PermissionMode; subagent?: true }
+  agent?: { thread: string; title: string; mode: PermissionMode; subagent?: true; hidden?: true }
 }
 
 /** The computer a thread's latest routed message came from. */
