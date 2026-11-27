@@ -64,7 +64,7 @@ import { MousseMcpServer } from './run/mcp/MousseMcpServer'
 import { isPersonMessage, personTurnRequest } from './run/mcp/appTools/agentMessage'
 import { EffectWorker } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
-import { jobThreadIn, launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
+import { jobThreadIn, launchedHereAndThere, launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
 import { readRunResultText } from './run/delegation/hold'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
@@ -844,12 +844,18 @@ export class MmsProfileServices {
       pullRequestState: (repo, number, fresh) => this.wakePullRequestState(repo, number, fresh),
       // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works. Of
       // those done, only the ones not archived and updated in the last six hours ("Recent").
-      launchedThreads: (creators) => launchedThreadsIn({
-        threads: this.threads,
-        engine: this.runEngine,
-        asks: (id) => this.questions.listPendingForThread(id).length > 0,
-        projectName: (id) => this.projects.getProject(id)?.name
-      }, creators, { doneSince: new Date(Date.now() - BOT_LAUNCHED_RECENT_MS).toISOString() }),
+      // Those it started on the user's other computers too, as the merged lists show them and how each stands there.
+      launchedThreads: (creators) => {
+        const doneSince = new Date(Date.now() - BOT_LAUNCHED_RECENT_MS).toISOString()
+        const projectName = (id: string) => this.projects.getProject(id)?.name
+        const local = launchedThreadsIn({
+          threads: this.threads,
+          engine: this.runEngine,
+          asks: (id) => this.questions.listPendingForThread(id).length > 0,
+          projectName
+        }, creators, { doneSince })
+        return launchedHereAndThere(local, this.remoteLists, creators, { doneSince, projectName })
+      },
       // A thread a bot handed a job to, for its ledger: how it stands and its last answer.
       jobThread: (threadId) => jobThreadIn({
         threads: this.threads,
