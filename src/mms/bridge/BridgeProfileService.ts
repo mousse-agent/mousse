@@ -165,8 +165,10 @@ export class BridgeProfileService {
     }
     services.botReach = botReach
     // A device that leaves the account leaves every bot's list of chosen devices; read once now for any that left while
-    // this computer was off.
+    // this computer was off. The first time the devices can be read after an update, every bot that reached every
+    // device gets the devices linked then (`snapshotBotDevices`), before any device is served below.
     const dropRemoved = (): void => {
+      services.snapshotBotDevices?.(() => this.peers.accountDevices())
       const present = this.peers.accountDevices()
       if (!present) return
       try {

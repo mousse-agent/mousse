@@ -382,6 +382,28 @@ export class MmsProfileServices {
     return this.speechRelayInstance
   }
 
+  /**
+   * The one-time move to explicit Devices lists (`BotDeviceAccessStore.snapshot`): every bot that reached every device
+   * ("All my devices", or no choice stored) gets the owner's other devices linked now, so nobody loses a bot they reached
+   * and a device linked later reaches none. It waits until both the bots and the account's devices can be read: it is
+   * tried when the bots open and whenever Bridge reads the devices (with its own directory), before Bridge serves any
+   * device. Once written, it never runs again.
+   */
+  snapshotBotDevices(
+    // `peers` is set later in construction than the bots may open: until then, the devices are not known.
+    linked: () => readonly string[] | undefined = () => (this.peers as PeerDirectory | undefined)?.accountDevices()
+  ): void {
+    const store = this.botStore
+    if (!store || !this.botDeviceAccess.needsSnapshot()) return
+    const devices = linked()
+    if (!devices) return
+    try {
+      this.botDeviceAccess.snapshot(store.listRegistry().map((row) => row.botId), devices)
+    } catch (error) {
+      console.warn('bot device lists could not be written', error instanceof Error ? error.message : String(error))
+    }
+  }
+
   private domainService(): BridgeProfileService {
     this.net.runtime()
     if (!this.bridgeService) throw new Error('Bridge profile composition is unavailable')
@@ -944,6 +966,8 @@ export class MmsProfileServices {
       otherComputers: () => this.remoteAutomations?.computers() ?? [],
       // Which devices reach each bot: a new bot's choice is saved before the bot is published.
       deviceAccess: this.botDeviceAccess,
+      // New bot's Devices step lists the owner's other devices, as About's Devices does.
+      devices: async () => this.botReach?.devices(),
       browser: botBrowsers,
       // "Use your threads" removed: what the bot sent that has not started leaves its owner's threads.
       threadsWithdrawn: (bot) => { this.orchestrator.withdrawBotThreadMessages(bot) },
@@ -1012,6 +1036,7 @@ export class MmsProfileServices {
       } catch (error) {
         console.warn('bot device choices could not be tidied', error instanceof Error ? error.message : String(error))
       }
+      this.snapshotBotDevices()
     }
     // A bot's thread from an earlier build, or of a bot that never runs again, is marked as well.
     if (opened) {

@@ -1,38 +1,43 @@
 import { mkdirSync, readFileSync, renameSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { isId } from '../../../shared/net/ids'
 import {
   DEFAULT_BOT_DEVICE_ACCESS,
+  MAX_BOT_DEVICES,
   UNREADABLE_BOT_DEVICE_ACCESS,
   botDeviceAccessProblem,
-  type BotDeviceAccess
+  type BotDeviceAccess,
+  type StoredBotDeviceAccess
 } from '../../../shared/bots/personal/deviceAccess'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 
 /**
  * Which devices reach each personal bot (`BotDeviceAccess`), kept on the bot's home computer in
- * `<profile>/bots/device-access.json`, beside the bot definitions and apart from `bots.db`, so no database version moves
- * and an older build simply ignores it:
+ * `<profile>/bots/device-access.json`, beside the bot definitions and apart from `bots.db`, so no database version moves:
  *
- *     { "version": 1, "bots": { "<botId>": { "mode": "chosen", "nodes": ["nod_…"] } } }
+ *     { "version": 2, "bots": { "<botId>": { "mode": "chosen", "nodes": ["nod_…"] } } }
  *
- * - No file, or a bot that has no entry: every device, as before this setting existed. So an update changes nothing,
- *   and a bot made later starts on every device.
- * - A file or an entry that can't be read (not JSON, another version, a value this build does not know): this computer
- *   alone for the bots it covers. A file that can't be read at all covers every bot, and the first change after it puts
- *   it aside (`device-access.json.corrupt-<time>`) and writes `missing: "this_computer"`, so the other bots stay there
- *   until the owner picks for them.
+ * - Version 2: each list is explicit. A bot without an entry reaches this computer alone, so a new bot starts there and a
+ *   device linked later reaches no bot until the owner ticks it.
+ * - No file, or version 1 (an earlier build's, where "All my devices" and a bot without an entry meant every device):
+ *   read as it was until the one-time snapshot (`snapshot`), which writes version 2 with every such bot's list set to
+ *   the devices linked at that moment, so nobody loses a bot they reached. It runs once, as soon as the account's
+ *   devices can be read, before Bridge serves any device; a file at version 2 is never snapshotted again.
+ * - A file or an entry that can't be read (not JSON, a version this build does not know, a value it does not know): this
+ *   computer alone for the bots it covers. A file that can't be read at all covers every bot, and the first change after
+ *   it (the snapshot too) puts it aside (`device-access.json.corrupt-<time>`) and writes version 2, so the other bots
+ *   stay there until the owner picks for them.
  *
  * Only this computer's own window (About) and its command line change it, through `bots.devices.set`; a new bot's choice
- * (New bot, or what the device that made it asked for) is saved before the bot is published, so no device outside it
- * ever lists the bot; and the bot that a device makes without asking gains that device. Mousse's own data is closed to
- * a bot's file tools.
+ * (New bot, or the device that made it) is saved before the bot is published, so no device outside it ever lists the
+ * bot. Mousse's own data is closed to a bot's file tools.
  */
 export const BOT_DEVICE_ACCESS_FILE = 'device-access.json'
 
 interface StoredFile {
-  version: 1
-  bots: Record<string, BotDeviceAccess>
-  /** What a bot without an entry means; absent, every device. Written only after a file that could not be read. */
+  version: 1 | 2
+  bots: Record<string, StoredBotDeviceAccess>
+  /** Version 1 only: what a bot without an entry means; absent, every device. Written only after a file that could not be read. */
   missing?: 'this_computer'
 }
 
@@ -41,16 +46,26 @@ interface State {
   key: string
   /** The file could not be read: every bot is this computer alone. */
   broken: boolean
-  bots: Map<string, { access: BotDeviceAccess; unreadable: boolean }>
-  missing: BotDeviceAccess
+  /** 1 (or no file): the snapshot has not run yet. 2: every list is explicit. */
+  version: 1 | 2
+  bots: Map<string, { access: StoredBotDeviceAccess; unreadable: boolean }>
+  missing: StoredBotDeviceAccess
 }
+
+const EVERY_DEVICE: StoredBotDeviceAccess = Object.freeze({ mode: 'all' }) as StoredBotDeviceAccess
 
 const plain = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value)
 
-/** A copy of a valid choice, with its devices in a stable order. */
-function copyOf(access: BotDeviceAccess): BotDeviceAccess {
-  return access.mode === 'chosen' ? { mode: 'chosen', nodes: [...access.nodes] } : { mode: access.mode }
+/** A copy of a choice, with its devices in a stable order. */
+function copyOf<T extends StoredBotDeviceAccess>(access: T): T {
+  return (access.mode === 'chosen' ? { mode: 'chosen', nodes: [...access.nodes] } : { mode: access.mode }) as T
+}
+
+/** A version 1 entry: what version 2 knows, or every device. */
+function legacyProblem(value: unknown): string | undefined {
+  if (plain(value) && value.mode === 'all' && Object.keys(value).length === 1) return undefined
+  return botDeviceAccessProblem(value)
 }
 
 export class BotDeviceAccessStore {
@@ -66,8 +81,11 @@ export class BotDeviceAccessStore {
     this.path = join(folder, BOT_DEVICE_ACCESS_FILE)
   }
 
-  /** The bot's choice; `unreadable` when it stands at this computer alone because what is stored can't be read. */
-  get(botId: string): { access: BotDeviceAccess; unreadable: boolean } {
+  /**
+   * The bot's choice; `unreadable` when it stands at this computer alone because what is stored can't be read. Before
+   * the snapshot, an older file's every device reads as `{ mode: 'all' }`.
+   */
+  get(botId: string): { access: StoredBotDeviceAccess; unreadable: boolean } {
     const state = this.read()
     const entry = state.bots.get(botId)
     if (entry) return { access: copyOf(entry.access), unreadable: entry.unreadable }
@@ -83,9 +101,39 @@ export class BotDeviceAccessStore {
   }
 
   /** Every stored choice, and what a bot without one has: enough to tell quickly that no bot is held from anyone. */
-  choices(): { others: BotDeviceAccess; bots: BotDeviceAccess[] } {
+  choices(): { others: StoredBotDeviceAccess; bots: StoredBotDeviceAccess[] } {
     const state = this.read()
     return { others: copyOf(state.missing), bots: [...state.bots.values()].map((entry) => copyOf(entry.access)) }
+  }
+
+  /** Whether the one-time snapshot is still to run: no file yet, or an earlier build's (version 1). */
+  needsSnapshot(): boolean {
+    const state = this.read()
+    return state.broken || state.version === 1
+  }
+
+  /**
+   * The one-time move to explicit lists, on the first start after an update. Each bot of `bots` (every bot this profile
+   * has made) whose choice is every device ("All my devices", or none stored) gets the list of `devices`, the owner's
+   * other devices linked now; one with no devices gets this computer alone. Every other choice is kept as it is, and one
+   * that can't be read stays at this computer alone. A file that can't be read is put aside and every bot stays at this
+   * computer alone. Written at version 2, so it never runs again: true when it ran now.
+   */
+  snapshot(bots: Iterable<string>, devices: readonly string[]): boolean {
+    const state = this.read()
+    if (!state.broken && state.version === 2) return false
+    const linked = [...new Set(devices)].filter((node) => isId('node', node)).slice(0, MAX_BOT_DEVICES)
+    const every: BotDeviceAccess = linked.length ? { mode: 'chosen', nodes: linked } : { mode: 'this_computer' }
+    const out: Record<string, BotDeviceAccess> = {}
+    if (state.broken) this.putAside()
+    else {
+      const resolve = (access: StoredBotDeviceAccess, unreadable: boolean): BotDeviceAccess =>
+        unreadable ? { mode: 'this_computer' } : access.mode === 'all' ? copyOf(every) : copyOf(access)
+      for (const [id, entry] of state.bots) out[id] = resolve(entry.access, entry.unreadable)
+      for (const id of bots) if (!(id in out)) out[id] = resolve(state.missing, false)
+    }
+    this.write({ version: 2, bots: out })
+    return true
   }
 
   /** Saves the bot's choice (validated), over what is stored; every other bot keeps its own. */
@@ -93,11 +141,16 @@ export class BotDeviceAccessStore {
     const problem = botDeviceAccessProblem(access)
     if (problem) throw new Error(problem)
     const state = this.read()
-    const bots: Record<string, BotDeviceAccess> = {}
+    if (state.broken) {
+      // Nothing of what was stored can be trusted: every other bot stays at this computer alone.
+      this.putAside()
+      this.write({ version: 2, bots: { [botId]: copyOf(access) } })
+      return
+    }
+    const bots: Record<string, StoredBotDeviceAccess> = {}
     for (const [id, entry] of state.bots) bots[id] = copyOf(entry.access)
     bots[botId] = copyOf(access)
-    if (state.broken) this.putAside()
-    this.write({ version: 1, bots, ...(state.broken || state.missing.mode !== 'all' ? { missing: 'this_computer' } : {}) })
+    this.write(this.fileLike(state, bots))
   }
 
   /**
@@ -109,7 +162,7 @@ export class BotDeviceAccessStore {
     const state = this.read()
     if (state.broken) return false
     let changed = false
-    const bots: Record<string, BotDeviceAccess> = {}
+    const bots: Record<string, StoredBotDeviceAccess> = {}
     for (const [id, entry] of state.bots) {
       const access = entry.access
       if (access.mode === 'chosen' && !entry.unreadable) {
@@ -119,7 +172,7 @@ export class BotDeviceAccessStore {
       } else bots[id] = copyOf(access)
     }
     if (!changed) return false
-    this.write({ version: 1, bots, ...(state.missing.mode !== 'all' ? { missing: 'this_computer' } : {}) })
+    this.write(this.fileLike(state, bots))
     return true
   }
 
@@ -131,10 +184,10 @@ export class BotDeviceAccessStore {
   dropBots(known: (botId: string) => boolean): boolean {
     const state = this.read()
     if (state.broken) return false
-    const bots: Record<string, BotDeviceAccess> = {}
+    const bots: Record<string, StoredBotDeviceAccess> = {}
     for (const [id, entry] of state.bots) if (known(id)) bots[id] = copyOf(entry.access)
     if (Object.keys(bots).length === state.bots.size) return false
-    this.write({ version: 1, bots, ...(state.missing.mode !== 'all' ? { missing: 'this_computer' } : {}) })
+    this.write(this.fileLike(state, bots))
     return true
   }
 
@@ -142,15 +195,21 @@ export class BotDeviceAccessStore {
   forget(botId: string): void {
     const state = this.read()
     if (state.broken || !state.bots.has(botId)) return
-    const bots: Record<string, BotDeviceAccess> = {}
+    const bots: Record<string, StoredBotDeviceAccess> = {}
     for (const [id, entry] of state.bots) if (id !== botId) bots[id] = copyOf(entry.access)
-    this.write({ version: 1, bots, ...(state.missing.mode !== 'all' ? { missing: 'this_computer' } : {}) })
+    this.write(this.fileLike(state, bots))
   }
 
   /** Called after every change this store makes. */
   onChange(listener: () => void): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
+  }
+
+  /** The file as it is, with these choices: before the snapshot, still version 1 with its default. */
+  private fileLike(state: State, bots: Record<string, StoredBotDeviceAccess>): StoredFile {
+    if (state.version === 2) return { version: 2, bots }
+    return { version: 1, bots, ...(state.missing.mode !== 'all' ? { missing: 'this_computer' as const } : {}) }
   }
 
   private write(file: StoredFile): void {
@@ -182,11 +241,11 @@ export class BotDeviceAccessStore {
       key = `${stat.mtimeMs}:${stat.size}:${stat.ino}`
     } catch (error) {
       if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
-        // Never written: every bot reaches every device, as it did before.
-        if (this.state?.key !== 'none') this.state = { key: 'none', broken: false, bots: new Map(), missing: DEFAULT_BOT_DEVICE_ACCESS }
+        // Never written: an earlier build's every device, until the snapshot.
+        if (this.state?.key !== 'none') this.state = { key: 'none', broken: false, version: 1, bots: new Map(), missing: EVERY_DEVICE }
         return this.state!
       }
-      return { key: 'error', broken: true, bots: new Map(), missing: UNREADABLE_BOT_DEVICE_ACCESS }
+      return { key: 'error', broken: true, version: 2, bots: new Map(), missing: UNREADABLE_BOT_DEVICE_ACCESS }
     }
     if (this.state?.key === key) return this.state
     this.state = this.parse(key)
@@ -194,23 +253,27 @@ export class BotDeviceAccessStore {
   }
 
   private parse(key: string): State {
-    const broken: State = { key, broken: true, bots: new Map(), missing: UNREADABLE_BOT_DEVICE_ACCESS }
+    const broken: State = { key, broken: true, version: 2, bots: new Map(), missing: UNREADABLE_BOT_DEVICE_ACCESS }
     let value: unknown
     try {
       value = JSON.parse(readFileSync(this.path, 'utf8'))
     } catch {
       return broken
     }
-    if (!plain(value) || value.version !== 1 || !plain(value.bots) || (value.missing !== undefined && value.missing !== 'this_computer'))
+    if (!plain(value) || !plain(value.bots)) return broken
+    const version = value.version
+    if (version === 2 ? value.missing !== undefined : version !== 1 || (value.missing !== undefined && value.missing !== 'this_computer'))
       return broken
-    const bots = new Map<string, { access: BotDeviceAccess; unreadable: boolean }>()
+    const problem = version === 2 ? botDeviceAccessProblem : legacyProblem
+    const bots = new Map<string, { access: StoredBotDeviceAccess; unreadable: boolean }>()
     for (const [botId, access] of Object.entries(value.bots))
       bots.set(
         botId,
-        botDeviceAccessProblem(access)
+        problem(access)
           ? { access: UNREADABLE_BOT_DEVICE_ACCESS, unreadable: true }
-          : { access: copyOf(access as BotDeviceAccess), unreadable: false }
+          : { access: copyOf(access as StoredBotDeviceAccess), unreadable: false }
       )
-    return { key, broken: false, bots, missing: value.missing === 'this_computer' ? UNREADABLE_BOT_DEVICE_ACCESS : DEFAULT_BOT_DEVICE_ACCESS }
+    const missing = version === 2 || value.missing === 'this_computer' ? DEFAULT_BOT_DEVICE_ACCESS : EVERY_DEVICE
+    return { key, broken: false, version: version === 2 ? 2 : 1, bots, missing }
   }
 }

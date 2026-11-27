@@ -16,7 +16,7 @@ export interface PersonalBotsClient {
    * `slots`: the rows picked on New bot (#673), all four, sent only to a service whose choices carry `providers`;
    * `model`: one model on every row (the single picker of an older service). An older service refuses the keys.
    * `image`: the Images row (#1088), sent only to a service whose choices carry `imageProviders`. `access`: the Devices
-   * row, sent only to a service whose choices carry `reachOnCreate`.
+   * step (this computer alone when it is not shown), sent only to a service whose choices carry `reachOnCreate`.
    */
   create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }): Promise<BotSummary>
   get(botId: string): Promise<BotDetail>

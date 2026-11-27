@@ -30,7 +30,7 @@ export interface FakeBots {
   live: Record<string, { activationId: string; chip?: BotChip; status?: string }>
   /** Each bot's memory entries, as `bots.memory.list` returns them. */
   memory: Record<string, BotMemoryEntry[]>
-  /** Each bot's Devices (`bots.devices.get`); a bot without one reaches every device and has none to pick. */
+  /** Each bot's Devices (`bots.devices.get`); a bot without one reaches this computer alone and has no other device to pick. */
   devices: Record<string, BotDevicesView>
   calls: Array<[string, ...unknown[]]>
   emit: {
@@ -184,7 +184,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       fake.memory[botId]![at] = entry
       return { ...entry }
     })),
-    devices: vi.fn((botId) => record('devices', [botId], () => fake.devices[botId] ?? { access: { mode: 'all' as const }, devices: [] })),
+    devices: vi.fn((botId) => record('devices', [botId], () => fake.devices[botId] ?? { access: { mode: 'this_computer' as const }, devices: [] })),
     setDevices: vi.fn((botId, access) => record('setDevices', [botId, access], () => {
       const next = { ...(fake.devices[botId] ?? { devices: [] }), access }
       delete (next as { unreadable?: true }).unreadable

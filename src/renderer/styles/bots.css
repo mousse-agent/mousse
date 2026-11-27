@@ -12,7 +12,6 @@
 .bot-row-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .bot-row-head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .bot-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; line-height: 1.3; }
-.bot-row-lock { display: inline-flex; flex: none; align-self: center; margin-right: -2px; color: var(--text-secondary); }
 .bot-row-time { flex: none; font-size: 11px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .bot-row-unread { flex: none; align-self: center; min-width: 16px; padding: 0 5px; border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; color: var(--ui-on-accent, #141218); background: var(--accent); }
 .bot-row-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.35; color: var(--text-secondary); }

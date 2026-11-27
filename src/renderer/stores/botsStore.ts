@@ -78,16 +78,19 @@ export interface NewBotDraft {
   slots: BotShownRows | null
   /** The Images row (#1088): a model to make pictures with, or null (none, the default). */
   image: BotModelPick | null
-  /** The Devices row: every device (the default) or this computer alone; sent only to a service that takes it. */
-  access: NewBotAccess['mode']
+  /**
+   * The Devices step: the owner's other devices turned on for the new bot, none at first (this computer alone). Sent
+   * only to a service that takes it.
+   */
+  devices: string[]
   /** The step New bot shows, so closing and reopening returns to it. */
   step: NewBotStep
   /** The owner typed or picked something: a click beside the dialog no longer closes it. */
   touched: boolean
 }
-/** New bot's steps: the look, what it does (name and sentence), and where it runs. */
-export type NewBotStep = 'look' | 'about' | 'runsOn'
-const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, image: null, access: 'all', step: 'look', touched: false }
+/** New bot's steps: the look, what it does (name and sentence), where it runs, and (with other devices) which reach it. */
+export type NewBotStep = 'look' | 'about' | 'runsOn' | 'devices'
+const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, image: null, devices: [], step: 'look', touched: false }
 
 /**
  * The step that can fix a refused create: a model no longer offered is Runs on's, a name or sentence the service

@@ -1,9 +1,10 @@
 /**
  * Which devices reach a bot, over real sessions: an owner computer with its real profile services and Bridge, and two
- * phones that joined it. What crosses the wire is checked here: a bot left out of a phone's list is not there for that
- * phone, a phone whose switch is off reaches no bot, and each phone's lists stream is its own.
+ * phones that joined it. What crosses the wire is checked here: an earlier build's "every device" becomes the devices
+ * linked when Bridge first reads them, so a phone linked later reaches no bot; a bot left out of a phone's list is not
+ * there for that phone, a phone whose switch is off reaches no bot, and each phone's lists stream is its own.
  */
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
@@ -29,8 +30,9 @@ function directory(prefix: string): string {
   return path
 }
 
-async function owner() {
+async function owner(seed?: (home: string) => void) {
   const home = directory('bot-devices-owner-')
+  seed?.(home)
   const auth = new ProviderAuthService(join(home, 'provider-auth.json'))
   cleanup.push(() => auth.stop())
   const services = new MmsProfileServices(
@@ -41,9 +43,10 @@ async function owner() {
     { providerAuth: auth, domains: new DomainHandlerRegistry(), installationHome: home, profileId: randomUUID(), allowLegacyProjectData: false }
   )
   cleanup.push(() => services.stop())
+  let bridge: BridgeProfileService | undefined
   const net = new NetService({
     profileDir: home,
-    composeRuntime: (runtime) => new BridgeProfileService({ services, runtime, net }).composition()
+    composeRuntime: (runtime) => (bridge = new BridgeProfileService({ services, runtime, net })).composition()
   })
   cleanup.push(() => net.shutdown())
   await net.request('net.init', { name: 'desk', listen: true, port: 0 })
@@ -79,14 +82,19 @@ async function owner() {
     }
     return { node: joined.node, rpc, answer, watch }
   }
-  return { services, net, phone }
+  return { services, net, phone, bridge: () => bridge! }
 }
 
 it('a phone left out of a bot\'s list finds no such bot, a phone switched off finds none, and each phone reads only its own lists', async () => {
-  const o = await owner()
   // The profile's bots as the bridge reads them, with one bot. A real bot would start its first turn on the computer's
   // own providers; what is tested here is what crosses the wire, not the bot.
   const bot = { id: 'bot-0123456789ab', name: 'Server keeper' }
+  const EARLIER_FILE = { version: 1, bots: { [bot.id]: { mode: 'all' } } }
+  const o = await owner((home) => {
+    mkdirSync(join(home, 'bots'), { recursive: true })
+    writeFileSync(join(home, 'bots', 'device-access.json'), JSON.stringify(EARLIER_FILE))
+  })
+  const stored = () => JSON.parse(readFileSync(o.services.botDeviceAccess.path, 'utf8')) as { version: number; bots: Record<string, unknown> }
   const reached: string[] = []
   const service = {
     list: () => ({ bots: [bot] }),
@@ -105,14 +113,26 @@ it('a phone left out of a bot\'s list finds no such bot, a phone switched off fi
   const mine = await o.phone('pocket')
   const sisters = await o.phone('tablet')
 
-  // Every device reaches every bot until the owner says otherwise, as before.
+  // The file an earlier build left: this bot on every device. Bridge started before either phone was linked, so the
+  // one-time snapshot made it this computer's alone, and two phones linked since reach it no more than a bot that is
+  // not there.
+  const missing = await sisters.answer('bots.get', { botId: 'bot-ffffffffffff' })
+  expect(missing).toMatchObject({ code: 'stream_unknown' })
+  // (This bot is not in `bots.db`, so the start's tidy-up took its entry off: no entry is this computer alone too.)
+  expect(stored().version).toBe(2)
+  expect(o.services.botDeviceAccess.get(bot.id).access).toEqual({ mode: 'this_computer' })
+  expect(await mine.answer('bots.get', { botId: bot.id })).toEqual(missing)
+  expect(await sisters.answer('bots.get', { botId: bot.id })).toEqual(missing)
+
+  // An update with both phones linked (the earlier file again, as Bridge reads the devices): each keeps the bot.
+  writeFileSync(o.services.botDeviceAccess.path, JSON.stringify(EARLIER_FILE))
+  o.services.snapshotBotDevices(() => o.bridge().peers.accountDevices())
+  expect((stored().bots[bot.id] as { nodes: string[] }).nodes.sort()).toEqual([mine.node, sisters.node].sort())
   expect(await mine.answer('bots.get', { botId: bot.id })).toMatchObject({ ok: { summary: { id: bot.id, name: 'Server keeper' } } })
   expect(await sisters.answer('bots.get', { botId: bot.id })).toMatchObject({ ok: { summary: { id: bot.id } } })
 
   // About → Devices: only the owner's phone.
   o.services.botDeviceAccess.set(bot.id, { mode: 'chosen', nodes: [mine.node] })
-  const missing = await sisters.answer('bots.get', { botId: 'bot-ffffffffffff' })
-  expect(missing).toMatchObject({ code: 'stream_unknown' })
   const before = reached.length
   for (const [method, params] of [
     ['bots.get', { botId: bot.id }],
