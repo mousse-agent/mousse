@@ -44,7 +44,7 @@ describe('existing grants', () => {
   const starter: ReturnType<typeof botStarterManifest> = {
     tools: ['read', 'list', 'search', 'edit', 'write'],
     appTools: ['web_search', 'web_fetch', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list',
-      'set_profile', 'set_depth', 'use_model', 'permission_ask', 'memory_search', 'memory_read', 'memory_list',
+      'set_profile', 'set_depth', 'use_model', 'escalate', 'memory_search', 'memory_read', 'memory_list',
       'memory_save', 'memory_forget', 'run_report'],
     mcp: [], skills: [], workspace: null, budget: { maxActiveMs: 3_600_000 }, audience: 'owner'
   }
