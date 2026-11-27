@@ -95,8 +95,10 @@ describe("an agent's browser tab", () => {
     act(() => useAppStore.setState({ activeThreadId: 'thread_b' }))
     expect(useAppStore.getState().mainView).toBe('browser')
     expect(useAppStore.getState().browserActiveTabByThread.thread_b).toBe(agentTab)
-    // Once the turn has ended, returning to the thread keeps the person's view.
-    act(() => useAppStore.setState({ activeThreadId: 'thread_a', mainView: 'files' }))
+    // Once the turn has ended, returning to the thread keeps the person's view. Each thread keeps its own panel tab,
+    // so the person moves this thread's panel to Files before leaving.
+    act(() => useAppStore.getState().setMainView('files'))
+    act(() => useAppStore.setState({ activeThreadId: 'thread_a' }))
     act(() => useAppStore.setState({ turnStates: { thread_b: { threadId: 'thread_b', phase: 'completed' } } as never }))
     act(() => useAppStore.setState({ activeThreadId: 'thread_b' }))
     expect(useAppStore.getState().mainView).toBe('files')

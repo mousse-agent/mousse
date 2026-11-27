@@ -76,7 +76,8 @@ describe('thread switching terminal lifecycle', () => {
   it('does not kill all PTYs when the active thread project changes', () => {
     expect(panelSource).not.toMatch(/clearProjectTerminalTabs/)
     expect(panelSource).not.toMatch(/prevCwd/)
-    expect(panelSource).toMatch(/let cwd = tab\?\.cwd \|\| terminalCwd/)
+    // A tab on another computer names no folder; any other tab starts in its own folder, else the thread's.
+    expect(panelSource).toMatch(/let cwd = remoteTab \? undefined : tab\?\.cwd \|\| terminalCwd/)
   })
 
   it('keeps the terminal and browser panel mounted while collapsed', () => {

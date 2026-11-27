@@ -202,7 +202,7 @@ describe('explicit profile store roots', () => {
       scheduledWebhookServer: { stop: async () => undefined },
       // The scheduler and requests settle late: the clean epoch end must still come after them.
       scheduled: { shutdown: async () => { await new Promise((resolve) => setTimeout(resolve, 20)); calls.push('scheduled done'); if (failing === 'scheduled') throw new Error('scheduled failed') } },
-      orchestrator: { holdApprovals: () => undefined, shutdown: async () => { calls.push('orchestrator') }, setRunEngine: () => { calls.push('detach') }, setBotDispatcher: () => undefined, setBotThreads: () => undefined, setBotAppTools: () => undefined },
+      orchestrator: { holdApprovals: () => undefined, shutdown: async () => { calls.push('orchestrator') }, setRunEngine: () => { calls.push('detach') }, setBotDispatcher: () => undefined, setBotThreads: () => undefined, setBotSupervision: () => undefined, setBotComputer: () => undefined, setBotAppTools: () => undefined },
       netEngine: { stop: async () => { calls.push('netEngine') } },
       net: { shutdown: async () => { calls.push('net') } },
       requests: { waitForIdle: async () => { await new Promise((resolve) => setTimeout(resolve, 10)); calls.push('requests idle') } },
@@ -212,7 +212,7 @@ describe('explicit profile store roots', () => {
       ptyManager: { shutdown: async () => { calls.push('pty') } },
       mcpManager: { shutdown: async () => { calls.push('mcp') } },
       config: { stopWatching: () => { calls.push('config') } },
-      runEngine: { shutdown: () => { calls.push('epoch ended') }, store: { db: { close: () => { calls.push('db closed') } } } },
+      runEngine: { shutdown: () => { calls.push('epoch ended') }, setBotPort: () => undefined, store: { db: { close: () => { calls.push('db closed') } } } },
       getOwnedActivity: () => ({ platform: 0, scheduled: 0, orchestrator: 0, net: 0, requests: 0, ptys: 0, headless: 0, mcp: 0 })
     })
 

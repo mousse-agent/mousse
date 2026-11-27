@@ -224,7 +224,9 @@ describe('remote subagents over Bridge (issue #469)', () => {
       for (const params of sent) for (const key of dropped) expect(params).not.toHaveProperty(key)
       // The thread there is started by the agent; without subagent it is not recorded as its subagent.
       expect(made()[0]!.startedFrom?.agent).not.toHaveProperty('subagent')
-      if (version === 3) expect(made()[0]!.hidden).toBe(true)
+      // Its create asked to hide it but did not say subagent: like any agent's thread, it shows (#2004).
+      if (version === 3) expect(made()[0]!.startedFrom?.agent).toMatchObject({ hidden: true })
+      expect(made()[0]!.hidden).toBeUndefined()
     } finally {
       vi.restoreAllMocks()
     }

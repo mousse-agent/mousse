@@ -88,7 +88,7 @@ afterEach(() => {
 
 it('rings the provider by the usage the CLI API proxy reports, follows each pushed reading, and asks for the refresh', async () => {
   await open(pooled(72))
-  expect(button()?.title).toMatch(/^5-hour.*72% left.*1 of 1 accounts active$/)
+  expect(button()?.title).toMatch(/^5-hour.*72% left\n1 of 1 accounts active$/)
   expect(ring()?.getAttribute('data-usage-level')).toBe('plenty')
   expect(watchUsage).toHaveBeenCalledWith('claude-subscription')
   // It sits just before the side-panel button.
