@@ -746,8 +746,11 @@ function ProfileModelFamilyMenu({
           )}
           <span className="model-picker-row-text">
             {/* Beside its own maker's logo (Claude Code's), the brand is not repeated ("Opus 5.5"); elsewhere it is named in full. */}
-            <span className="model-picker-row-title">
-              {providerMakerId(entry.providerId) === entry.brandId ? shortModelName(entry.family.familyLabel) : entry.family.familyLabel}
+            <span className="model-picker-row-title-line">
+              <span className="model-picker-row-title">
+                {providerMakerId(entry.providerId) === entry.brandId ? shortModelName(entry.family.familyLabel) : entry.family.familyLabel}
+              </span>
+              <span className="model-picker-row-check" aria-hidden="true">{selected ? <Check size={14} /> : null}</span>
             </span>
             {!subtitle && !entry.providerStatus ? null : (
               <span className="model-picker-row-subtitle">
@@ -759,8 +762,6 @@ function ProfileModelFamilyMenu({
           {(entry.family.contexts.length > 1) ? (
             <ChevronRight size={12} className="model-picker-row-chevron" />
           ) : null}
-          {shortcut ? <span className="model-picker-shortcut">{shortcut}</span> : null}
-          <span className="model-picker-row-check" aria-hidden="true">{selected ? <Check size={14} /> : null}</span>
         </button>
         <button
           type="button"
@@ -771,6 +772,15 @@ function ProfileModelFamilyMenu({
         >
           <Star size={14} strokeWidth={2} fill={isFavorite ? 'currentColor' : 'none'} />
         </button>
+        {shortcut ? (
+          <span
+            className="model-picker-shortcut"
+            aria-hidden="true"
+            onClick={() => selectEntry(entry)}
+          >
+            {shortcut}
+          </span>
+        ) : null}
       </div>
     )
   }

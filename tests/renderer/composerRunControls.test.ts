@@ -232,23 +232,64 @@ describe('composer model picker', () => {
     expect(modelButton().textContent).not.toContain('gpt-6.1-sol')
   })
 
-  it('lists the models, checks the selected one, and shows its reasoning levels beside them', () => {
+  it('lists the models, checks the selected one beside its name, shows its reasoning levels, and puts Ultracode in the footer', () => {
     render()
     expect([...document.querySelectorAll('.model-picker-row-title')].map((title) => title.textContent)).toEqual(['Opus 5.5', 'Sonnet 5', 'Plain 1'])
-    // The selected model carries a check, the others an empty slot.
-    expect([...document.querySelectorAll('.model-picker-row-check')].map((check) => Boolean(check.querySelector('svg')))).toEqual([true, false, false])
+    // The selected model carries a check beside its name, the others an empty slot.
+    expect([...document.querySelectorAll('.model-picker-row-title-line .model-picker-row-check')].map((check) => Boolean(check.querySelector('svg')))).toEqual([true, false, false])
     // The header says only "Reasoning": the checked row already names the model.
     expect(column()!.querySelector('.model-picker-run-head')!.textContent).toBe('Reasoning')
     expect(columnModel()).toBe('Opus 5.5')
-    expect(levels()).toEqual(['Low', 'MediumDefault', 'High', 'Extra high', 'Max', 'Ultracode'])
+    expect(levels()).toEqual(['Low', 'MediumDefault', 'High', 'Extra high', 'Max'])
     expect(checkedLevel()).toBe('High')
     expect(level('High').querySelector('.model-picker-level-check svg')).not.toBeNull()
     expect(level('Low').querySelector('.model-picker-level-check svg')).toBeNull()
-    // Speed and permissions are not in the column; Opus has one speed, so there is no footer.
+    // Speed and permissions are not in the column; Opus offers Ultracode as a footer toggle.
     expect(column()!.querySelector('[aria-label="Speed"], .composer-run-menu-permission')).toBeNull()
     expect(speeds()).toHaveLength(0)
-    expect(footer()).toBeNull()
+    const ultracode = footer()!.querySelector<HTMLButtonElement>('.model-picker-ultracode')!
+    expect(ultracode.textContent).toBe('Ultracode')
+    expect(ultracode.getAttribute('aria-pressed')).toBe('false')
     expect(document.querySelector('[role="menu"][aria-label="Run options"]')).toBeNull()
+  })
+
+  it('toggles Ultracode from the footer while preserving speed, and hides it for models without Ultracode', () => {
+    const fastOpusStandard: LlmModelOption = { id: 'opus', label: 'Opus 5.5', efforts: ['low', 'medium', 'high', 'ultracode'], defaultEffort: 'medium', thinkingOff: false }
+    const fastOpusFast: LlmModelOption = { id: 'opus-fast', label: 'Opus 5.5 (fast)', efforts: ['low', 'medium', 'high', 'ultracode'], defaultEffort: 'medium', speed: 'fast', thinkingOff: false }
+    const first = render({ models: [fastOpusStandard, fastOpusFast, sonnet], modelId: 'opus-fast:high' })
+    const ultracodeButton = () => footer()!.querySelector<HTMLButtonElement>('.model-picker-ultracode')
+    expect(ultracodeButton()!.getAttribute('aria-pressed')).toBe('false')
+    // Turning Ultracode on keeps the Fast speed variant.
+    act(() => ultracodeButton()!.click())
+    expect(first.onModelSelect).toHaveBeenCalledWith('claude-subscription', 'opus-fast:ultracode', undefined)
+
+    act(() => root.unmount())
+    root = createRoot(host)
+    const second = render({ models: [fastOpusStandard, fastOpusFast, sonnet], modelId: 'opus-fast:ultracode' })
+    expect(ultracodeButton()!.getAttribute('aria-pressed')).toBe('true')
+    expect(column()!.querySelector('[role="menuitemradio"][aria-checked="true"]')).toBeNull()
+    // ArrowRight moves from the last speed radio to Ultracode, and ArrowLeft moves back.
+    act(() => speeds()[1]!.focus())
+    key(speeds()[1]!, 'ArrowRight')
+    expect(document.activeElement).toBe(ultracodeButton())
+    key(ultracodeButton()!, 'ArrowLeft')
+    expect(document.activeElement).toBe(speeds()[1])
+    // Turning Ultracode off returns to the model's default level while keeping Fast speed.
+    act(() => ultracodeButton()!.click())
+    expect(second.onModelSelect).toHaveBeenCalledWith('claude-subscription', 'opus-fast:medium', undefined)
+
+    act(() => root.unmount())
+    root = createRoot(host)
+    // A model without Ultracode hides the toggle while keeping the footer bar steady when another listed model has it.
+    render({ models: [fastOpusStandard, sonnet], modelId: 'sonnet:high' })
+    expect(footer()).not.toBeNull()
+    expect(ultracodeButton()).toBeNull()
+
+    act(() => root.unmount())
+    root = createRoot(host)
+    // When no listed model has speed or Ultracode, there is no footer at all.
+    render({ models: [sonnet, plain], modelId: 'sonnet:high' })
+    expect(footer()).toBeNull()
   })
 
   it('puts the favorites star at the top of the provider rail, with no "All" item', () => {
@@ -432,8 +473,8 @@ describe('composer model picker', () => {
   it('keeps room for the longest level list whichever model is selected', () => {
     render({ modelId: 'sonnet:high', permission: false })
     const run = () => document.querySelector<HTMLElement>('.model-picker-run')!
-    // Opus lists six levels; the column holds room for six while Sonnet, with three, is selected.
-    expect(run().style.getPropertyValue('--model-picker-run-rows')).toBe('6')
+    // Opus lists five column levels (Ultracode lives in the footer); the column holds room for five while Sonnet, with three, is selected.
+    expect(run().style.getPropertyValue('--model-picker-run-rows')).toBe('5')
     // The column's own content does not size the picker; the reserved rows do.
     const css = readFileSync('src/renderer/styles/composer-run-controls.css', 'utf8')
     const rule = css.slice(css.indexOf('.model-picker-run {'), css.indexOf('}', css.indexOf('.model-picker-run {')))

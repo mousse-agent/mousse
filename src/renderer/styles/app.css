@@ -922,6 +922,7 @@ html.platform-darwin .titlebar-left {
   width: 16px;
   height: 16px;
   flex-shrink: 0;
+  color: var(--text-secondary);
 }
 
 .turn-edits-file-name {
@@ -1754,8 +1755,8 @@ html[data-chat-width='full'] .chat {
 .model-picker-panel {
   display: flex;
   flex-direction: column;
-  min-width: min(340px, calc(100vw - 48px));
-  max-width: min(420px, calc(100vw - 48px));
+  min-width: min(380px, calc(100vw - 48px));
+  max-width: min(460px, calc(100vw - 48px));
   max-height: var(--floating-max-height, none);
   border: 1px solid var(--ui-line-strong);
   border-radius: var(--ui-menu-radius);
@@ -1905,9 +1906,9 @@ html[data-chat-width='full'] .chat {
 }
 
 .model-picker-row {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 2px;
   border-radius: var(--ui-menu-row-radius);
   transition: background 0.12s;
 }
@@ -1918,13 +1919,24 @@ html[data-chat-width='full'] .chat {
   background: var(--ui-hover);
 }
 
-/* The selected model is marked by a check on the right; hover and the keyboard highlight fill the row. */
+/* The selected model is marked by a check right after its name. */
+.model-picker-row-title-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .model-picker-row-check {
   display: inline-flex;
-  flex: 0 0 14px;
+  align-items: center;
   justify-content: center;
-  margin-left: 2px;
+  flex-shrink: 0;
   color: var(--text-primary);
+}
+
+.model-picker-row-check:empty {
+  display: none;
 }
 
 .model-picker-row-main {
@@ -1933,7 +1945,7 @@ html[data-chat-width='full'] .chat {
   gap: var(--ui-menu-row-x);
   flex: 1;
   min-width: 0;
-  padding: 4px 4px 4px var(--ui-menu-row-x);
+  padding: 4px 6px 4px var(--ui-menu-row-x);
   text-align: left;
   color: color-mix(in srgb, var(--text-primary) 80%, transparent);
 }
@@ -1966,6 +1978,7 @@ html[data-chat-width='full'] .chat {
 }
 
 .model-picker-row-title {
+  min-width: 0;
   font-size: 13px;
   font-weight: 400;
   line-height: 1.3;
@@ -2072,37 +2085,45 @@ html[data-chat-width='full'] .chat {
   min-height: 38px;
 }
 
-/* Shortcut hints and stars are quiet chrome: faint, no fill, no colour. */
+/* Shortcut hints are quiet filled tags (no border) flush right; stars only take space on hover, focus, or when favorited. */
 .model-picker-shortcut {
   flex-shrink: 0;
-  margin-left: 4px;
-  padding: 0 5px;
-  border: 1px solid var(--ui-line);
-  border-radius: 4px;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
   font-size: 11px;
   line-height: 16px;
   font-variant-numeric: tabular-nums;
-  color: var(--ui-faint);
+  color: var(--text-secondary);
+  cursor: pointer;
 }
 
 .model-picker-star {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  margin-right: 4px;
+  width: 0;
+  height: 20px;
+  padding: 0;
+  margin-right: 0;
+  overflow: hidden;
   border-radius: var(--ui-menu-row-radius);
   color: var(--ui-faint);
   opacity: 0;
   flex-shrink: 0;
+  pointer-events: none;
   transition: opacity 0.12s, color 0.12s, background 0.12s;
 }
 
-.model-picker-row:is(:hover, .highlighted) .model-picker-star,
+.model-picker-row:hover .model-picker-star,
 .model-picker-star:focus-visible,
 .model-picker-star.active {
+  width: 22px;
+  margin-right: 4px;
+  color: var(--text-secondary);
   opacity: 1;
+  pointer-events: auto;
 }
 
 .model-picker-star:hover {
