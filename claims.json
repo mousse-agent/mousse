@@ -88,6 +88,18 @@
       "expiresAt": "2026-11-27T12:40:03.362Z"
     },
     {
+      "task": "mac-service-no-dock-icon",
+      "session": "Avarnics-Mac-mini.local-8cc96f",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "mac-service-no-dock-icon",
+      "paths": [
+        "src/cli/electronContext.ts",
+        "src/main/index.ts"
+      ],
+      "claimedAt": "2026-11-27T16:53:50.780Z",
+      "expiresAt": "2026-11-27T18:53:50.780Z"
+    },
+    {
       "task": "s7d1-thread-tool-renames",
       "session": "LAPTOP-HIEROJK7-003c84",
       "machine": "LAPTOP-HIEROJK7",
