@@ -3,6 +3,7 @@ import type { ContextSettings, MousseSettings, MousseSettingsUpdate } from '../.
 import { THEME_CSS_MAX_LENGTH, themeCssTooLong } from '../../shared/themes/cssSafety'
 import { CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings, normalizeBranchNamingSettings } from '../../shared/settings'
 import { MOUSSE_BUILTIN_TOOL_IDS } from '../../shared/integrations'
+import { canonicalToolName } from '../../shared/toolAliases'
 import { generateRandomUsername } from '../../shared/randomUsername'
 import { normalizeShortcuts } from '../../shared/commands'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
@@ -96,9 +97,10 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
   }
   const rawTools = integrations?.tools
   const validIds = new Set(MOUSSE_BUILTIN_TOOL_IDS)
+  // A tool saved under its old name (`canonicalToolName`) keeps its switch under its new one.
   const filterToolIds = (value: unknown): string[] | undefined =>
     Array.isArray(value)
-      ? value.filter((id): id is string => typeof id === 'string' && validIds.has(id))
+      ? value.flatMap((id) => (typeof id === 'string' && validIds.has(canonicalToolName(id)) ? [canonicalToolName(id)] : []))
       : undefined
   const storedTools = filterToolIds(rawTools?.enabledTools) ?? [...MOUSSE_BUILTIN_TOOL_IDS]
   const knownTools = filterToolIds(rawTools?.knownTools)

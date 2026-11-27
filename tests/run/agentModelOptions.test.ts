@@ -1,5 +1,5 @@
 /**
- * What `list_models` offers an agent is what the model picker offers a person (`pickerProviders`): entries switched on
+ * What `model_list` offers an agent is what the model picker offers a person (`pickerProviders`): entries switched on
  * in the scope, less locked ones (bot turns only), with their models less the hidden ones. An entry that cannot run
  * now is listed with the reason, so the agent can repeat it.
  */

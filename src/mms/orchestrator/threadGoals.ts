@@ -47,7 +47,7 @@ export class GoalError extends Error {
 /**
  * The goals of a profile's threads (issue #1207). `/goal` sets one and queues its first turn; after each turn of the
  * thread `afterTurn` decides, with `decideAfterGoalTurn`, whether the next goal turn is queued. The agent's
- * `goal_status` reports go through `report`. Everything is saved on the thread, so a restart keeps the goal, stopped.
+ * `goal_update` reports go through `report`. Everything is saved on the thread, so a restart keeps the goal, stopped.
  */
 export class ThreadGoals {
   /** Threads whose agent reported in the turn running now; read and cleared when the turn ends. */
@@ -129,7 +129,7 @@ export class ThreadGoals {
   }
 
   /**
-   * `goal_status` from the thread's agent, in a turn that ran under the goal `turnEpoch`. A report from a turn of a goal
+   * `goal_update` from the thread's agent, in a turn that ran under the goal `turnEpoch`. A report from a turn of a goal
    * that was replaced or continued since changes nothing. Returns what the agent is told.
    */
   report(threadId: string, status: unknown, reason: unknown, turnEpoch: string | undefined): string {
@@ -137,7 +137,7 @@ export class ThreadGoals {
     const text = typeof reason === 'string' ? reason.trim() : ''
     if (!text) throw new GoalError('invalid', 'Give a short reason.')
     const goal = this.get(threadId)
-    if (!goal) throw new GoalError('no_goal', 'This thread has no goal; goal_status is only for a thread whose person set one with /goal.')
+    if (!goal) throw new GoalError('no_goal', 'This thread has no goal; goal_update is only for a thread whose person set one with /goal.')
     if (goal.state !== 'working') return `The goal is already ${goal.state}; nothing more runs for it unless the person continues it.`
     if (turnEpoch !== goal.epoch) return 'This turn started before the person set or continued the goal it has now, so this report changes nothing. The next turn says what the goal is.'
     const next = applyGoalReport(goal, status as GoalReportStatus, text, this.host.now())

@@ -198,29 +198,29 @@ export const BOT_TOOLS: Tool[] = [
       brief: Type.String({ description: 'The whole task, standing on its own.' }),
       level: Type.Optional(Type.Union(BOT_WORK_LEVELS.map((level) => Type.Literal(level)), { description: 'How hard it is: light for a quick lookup or a small routine job, medium for most work, hard for research, a long or difficult problem, or when the owner asks you to think harder. Left out: your usual level.' })),
       model: Type.Optional(Type.Object({
-        instanceId: Type.String({ description: 'The entry\'s instanceId from work_models.' }),
-        model: Type.String({ description: 'The model\'s id from work_models.' }),
-        effort: Type.Optional(Type.String({ description: 'One of that model\'s reasoning levels from work_models, when the owner asked for one. Left out: the model\'s default.' }))
-      }, { description: 'Only when the owner, in their message, asked for this work to run on a particular model: that model, from work_models. It is for this work only; never pick one yourself. Left out: your usual model for the level.' })),
+        instanceId: Type.String({ description: 'The entry\'s instanceId from model_list.' }),
+        model: Type.String({ description: 'The model\'s id from model_list.' }),
+        effort: Type.Optional(Type.String({ description: 'One of that model\'s reasoning levels from model_list, when the owner asked for one. Left out: the model\'s default.' }))
+      }, { description: 'Only when the owner, in their message, asked for this work to run on a particular model: that model, from model_list. It is for this work only; never pick one yourself. Left out: your usual model for the level.' })),
       slot: Type.Optional(Type.String({ description: 'A custom slot of the owner\'s whose name or description matches this job; it runs on that slot\'s model.' }))
     })
   },
   {
-    name: 'work_models',
+    name: 'model_list',
     description: 'The models your owner has that work can run on, by provider entry, with each model\'s reasoning levels; the entries your work can\'t run on, and why; and the models your work usually runs on. In the chat: use it when the owner asks for a piece of work on a particular model ("do this one with Opus"), to find the one they mean, then pass it to work_start as model; if you can\'t tell which one they mean, ask them. In your work: pick a model for a subagent from it (subagent_start\'s model).',
     parameters: Type.Object({})
   },
   {
     name: 'subagent_start',
-    description: `Start a subagent: a helper that does one part of this job on its own and returns its result to you, never to the owner. Use it to split a job into parts that can go on at once, or to give one part a model better suited to it. title is a short name you address it by ("Price check"); brief is the whole task, standing on its own (it sees neither your memory nor this conversation), at most 32,768 characters: a longer one is refused whole, never cut. It can do only what you can, and it can't ask the owner for anything. It runs on your model unless you give model: an instanceId and a model, and maybe effort, from work_models; one that isn't offered there is refused and nothing starts. Keep it on your model unless the part needs another. On another entry it may run without something you have (lacks says what) or not start at all, when that entry would hold it less tightly than yours. It returns at once, and you are told when it finishes. Before you report, wait for the ones you need (subagent_wait) and stop the rest: one still running when you report is stopped. You stay responsible for the result: check what they return. There is no count of how many you start and no limit on their time; start as many as the job needs.`,
+    description: `Start a subagent: a helper that does one part of this job on its own and returns its result to you, never to the owner. Use it to split a job into parts that can go on at once, or to give one part a model better suited to it. title is a short name you address it by ("Price check"); brief is the whole task, standing on its own (it sees neither your memory nor this conversation), at most 32,768 characters: a longer one is refused whole, never cut. It can do only what you can, and it can't ask the owner for anything. It runs on your model unless you give model: an instanceId and a model, and maybe effort, from model_list; one that isn't offered there is refused and nothing starts. Keep it on your model unless the part needs another. On another entry it may run without something you have (lacks says what) or not start at all, when that entry would hold it less tightly than yours. It returns at once, and you are told when it finishes. Before you report, wait for the ones you need (subagent_wait) and stop the rest: one still running when you report is stopped. You stay responsible for the result: check what they return. There is no count of how many you start and no limit on their time; start as many as the job needs.`,
     parameters: Type.Object({
       title: Type.String({ description: 'A short name for it, unique in this work.' }),
       brief: Type.String({ maxLength: 32_768, description: 'The whole task, standing on its own, and what its result should contain. At most 32,768 characters; a longer one is refused, not cut.' }),
       model: Type.Optional(Type.Object({
-        instanceId: Type.String({ description: 'The entry\'s instanceId from work_models.' }),
-        model: Type.String({ description: 'The model\'s id from work_models.' }),
-        effort: Type.Optional(Type.String({ description: 'One of that model\'s reasoning levels from work_models. Left out: its default.' }))
-      }, { description: 'The model it runs on, from work_models. Left out: your own.' }))
+        instanceId: Type.String({ description: 'The entry\'s instanceId from model_list.' }),
+        model: Type.String({ description: 'The model\'s id from model_list.' }),
+        effort: Type.Optional(Type.String({ description: 'One of that model\'s reasoning levels from model_list. Left out: its default.' }))
+      }, { description: 'The model it runs on, from model_list. Left out: your own.' }))
     })
   },
   {
@@ -412,7 +412,7 @@ export interface BotAppToolDeps {
    */
   models?: {
     pickable(): Promise<BotModelOption[]>
-    /** `work_models` and `work_start` with a model: the same choices, and the entries a bot's work can't run on. */
+    /** `model_list` and `work_start` with a model: the same choices, and the entries a bot's work can't run on. */
     workChoices?(): Promise<BotWorkChoices>
   }
   /** `make_image` (#1088): pictures on the Images row's model. Absent: no bot here makes pictures. */
@@ -437,7 +437,7 @@ function otherNames(option: BotModelOption): string[] {
 }
 
 /**
- * `work_models`' answer: each entry the bot's work can run on, its models and their reasoning levels, in the order Runs
+ * `model_list`' answer: each entry the bot's work can run on, its models and their reasoning levels, in the order Runs
  * on lists them; the owner's other entries with why work can't run there; and the bot's Work rows by name.
  */
 export function workModelListing(choices: BotWorkChoices, rows: BotModelSlots): Record<string, unknown> {
@@ -466,14 +466,14 @@ export function workModelListing(choices: BotWorkChoices, rows: BotModelSlots): 
   }
 }
 
-/** `work_models`' note in a run's main turn: the list is for its subagents. */
+/** `model_list`' note in a run's main turn: the list is for its subagents. */
 const SUBAGENT_MODELS_NOTE = 'For a subagent you start: keep it on your own model unless a part needs another; then pass an entry\'s instanceId, a model and (if you want one) one of its efforts to subagent_start as model. Another entry is another provider: it is sent your instructions and the brief. Mind that a stronger model costs your owner more. subagentLacks says what a subagent there would run without, because that entry holds it less tightly than yours; subagentCantRun, why one can\'t run there. If an entry is under cantRunWork, a subagent can\'t run there either.'
 
 /** Why work can't start on a model, after which nothing starts: a sentence the bot passes on to the owner. */
 const NOTHING_STARTED = 'Nothing was started. Tell the owner plainly, and ask what they want.'
 
 /**
- * The model `work_start` was given (an entry and a model from `work_models`, and maybe a reasoning level), among the
+ * The model `work_start` was given (an entry and a model from `model_list`, and maybe a reasoning level), among the
  * choices now, or why not: an entry that can't run a bot says why, and a model or reasoning level the entry doesn't
  * offer is refused. Nothing else is ever chosen in its place.
  */
@@ -482,15 +482,15 @@ export function workModelChoice(choices: BotWorkChoices, asked: unknown): { opti
   const instanceId = typeof value?.instanceId === 'string' ? value.instanceId.trim() : ''
   const model = typeof value?.model === 'string' ? value.model.trim() : ''
   if (!instanceId || !model || (value?.effort !== undefined && typeof value.effort !== 'string'))
-    return { refused: 'model is an instanceId and a model from work_models, and maybe one of its reasoning levels.' }
+    return { refused: 'model is an instanceId and a model from model_list, and maybe one of its reasoning levels.' }
   const effort = typeof value?.effort === 'string' && value.effort.trim() ? value.effort.trim() : undefined
   const option = choices.options.find((candidate) => candidate.instanceId === instanceId && candidate.model === model)
   if (!option) {
     const out = choices.unavailable.find((entry) => entry.instanceId === instanceId)
     if (out) return { refused: `Work can't run on ${out.entry}: ${pickReasonText(out.reason)}. ${NOTHING_STARTED}` }
     const there = choices.options.find((candidate) => candidate.instanceId === instanceId)
-    if (there) return { refused: `${plainLabel(there.entry, 40)} doesn't offer that model for your work now (see work_models). ${NOTHING_STARTED}` }
-    return { refused: `None of the owner's entries your work can run on is "${plainLabel(instanceId, 60)}" (see work_models). ${NOTHING_STARTED}` }
+    if (there) return { refused: `${plainLabel(there.entry, 40)} doesn't offer that model for your work now (see model_list). ${NOTHING_STARTED}` }
+    return { refused: `None of the owner's entries your work can run on is "${plainLabel(instanceId, 60)}" (see model_list). ${NOTHING_STARTED}` }
   }
   if (effort && !option.efforts.includes(effort))
     return { refused: option.efforts.length
@@ -949,7 +949,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         }
       }
     }),
-    ownTool(byName.get('work_models')!, deps, {
+    ownTool(byName.get('model_list')!, deps, {
       class: 'read',
       describe: () => 'List models for work',
       handler: async (_args, ctx) => {
@@ -1435,12 +1435,12 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const subagents = ctx.turn.bot?.subagents
         if (!subagents) return error(SUBAGENTS_WORK_ONLY)
         if (typeof args.title !== 'string' || typeof args.brief !== 'string') return error('subagent_start needs a title and a brief.')
-        // A model of work_models' choices, matched as work_start matches one; nothing else is ever chosen in its place.
+        // A model of model_list' choices, matched as work_start matches one; nothing else is ever chosen in its place.
         let model: Parameters<typeof subagents.start>[0]['model']
         if (args.model !== undefined && args.model !== null) {
           const resolved = deps?.()
           const chosen = workModelChoice(resolved ? await workChoicesOf(resolved).catch(() => ({ options: [], unavailable: [] })) : { options: [], unavailable: [] }, args.model)
-          if ('refused' in chosen) return error(chosen.refused.replace('Tell the owner plainly, and ask what they want.', 'Pick another from work_models, or leave model out to use your own.').replace(/Work can't run on/, 'A subagent can\'t run on'))
+          if ('refused' in chosen) return error(chosen.refused.replace('Tell the owner plainly, and ask what they want.', 'Pick another from model_list, or leave model out to use your own.').replace(/Work can't run on/, 'A subagent can\'t run on'))
           const { option, effort } = chosen
           model = {
             pick: { instanceId: option.instanceId, model: option.model, ...(effort ? { effort } : {}), ...(option.credential ? { credential: option.credential } : {}), ...(option.account ? { account: option.account } : {}) },

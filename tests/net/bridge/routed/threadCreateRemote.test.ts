@@ -126,7 +126,7 @@ describe('thread_create on another computer (issue #1160)', () => {
   it('starts a thread there, in its copy of the repository, held to the narrowed mode, with the first message as the agent\'s', async () => {
     standInForTurns()
     const { thread, runId, create } = await caller({ mode: 'auto' })
-    // Named as list_computers names it.
+    // Named as computer_list names it.
     const name = portOf().computers()!.find((entry) => entry.node === t.node)!.name
     const out = await create({ computer: name, title: 'Run the Linux tests', firstMessage: 'Run the tests on Linux.', clientRequestId: 'launch-1' })
     expect(out.isError, JSON.stringify(out.body)).toBeUndefined()

@@ -249,7 +249,7 @@ export class RemoteLaunchedThreads {
       return { ok: true, record, node: ref.node, remoteThreadId: ref.id, computer, threadId: qualifyId(ref.node, ref.id) }
     }
     if (!listed && !found)
-      return { ok: false, code: 'unknown_computer', message: `${ref.node} is not one of the user's other computers (list_computers names them), so thread ${threadId} cannot be reached.` }
+      return { ok: false, code: 'unknown_computer', message: `${ref.node} is not one of the user's other computers (computer_list names them), so thread ${threadId} cannot be reached.` }
     const refused = this.computerRefusal(callerThreadId, ref.node, computer)
     if (refused) return { ok: false, ...refused, computer }
     return { ok: true, node: ref.node, remoteThreadId: ref.id, computer, threadId: qualifyId(ref.node, ref.id) }
@@ -268,7 +268,7 @@ export class RemoteLaunchedThreads {
   }
 
   /**
-   * `thread_list` and `thread_search` with `computer`: the computer `ref` names (a name or id from `list_computers`), as
+   * `thread_list` and `thread_search` with `computer`: the computer `ref` names (a name or id from `computer_list`), as
    * the caller may list and search it now, or why not.
    */
   computerFor(callerThreadId: string, ref: string): RemoteComputerReach {
@@ -279,7 +279,7 @@ export class RemoteLaunchedThreads {
     const byNode = computers.find((entry) => entry.node === wanted)
     const byName = computers.filter((entry) => entry.name.trim().toLowerCase() === wanted.toLowerCase())
     if (!byNode && byName.length > 1)
-      return { ok: false, code: 'ambiguous_computer', message: `Several of the user's computers are called "${wanted}"; name one by its id from list_computers.`, computers: byName.map(({ node, name }) => ({ id: node, name })) }
+      return { ok: false, code: 'ambiguous_computer', message: `Several of the user's computers are called "${wanted}"; name one by its id from computer_list.`, computers: byName.map(({ node, name }) => ({ id: node, name })) }
     const found = byNode ?? byName[0]
     if (!found) {
       const names = computers.map((entry) => entry.name)

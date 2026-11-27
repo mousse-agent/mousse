@@ -54,8 +54,8 @@ export function checkBuiltinCall(bot: Pick<BotAuthority, 'check' | 'checkAny'>, 
   return refused!
 }
 
-/** The skill tools: usable when the bot holds any skill, and `load_skill` only for a granted one. */
-const SKILL_TOOLS: ReadonlySet<string> = new Set(['list_skills', 'load_skill'])
+/** The skill tools: usable when the bot holds any skill, and `skill_load` only for a granted one. */
+const SKILL_TOOLS: ReadonlySet<string> = new Set(['skill_list', 'skill_load'])
 
 /**
  * Whether a turn's "usable now" note may name the Mousse app tool `name`: any tool on a thread's
@@ -83,7 +83,7 @@ export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills' | '
     return BOT_SCHEDULES_NOT_OWNER_TEXT
   if (SKILL_TOOLS.has(name)) {
     // The skill tools come with skills. Which skill loads is held by the turn itself: a bot turn's skills are every skill
-    // unless switched off, else only its granted ones (by id), whether `load_skill` names one by id or name.
+    // unless switched off, else only its granted ones (by id), whether `skill_load` names one by id or name.
     if (!bot.skills.size && !bot.allSkills) return wallMessage({ kind: 'tool', tool: name })
     const decided = bot.check({ kind: 'app', tool: name, args })
     if (!decided.ok && ('refused' in decided || decided.wall.kind !== 'tool')) return checkMessage(decided)

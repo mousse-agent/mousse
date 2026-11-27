@@ -81,16 +81,16 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
     const browser: BrowserRuntimePort = { resolveTarget: () => ({ backend: 'managed-chromium' }), dispatch: async () => ({}) }
     d.orch.setBrowserRuntime(browser)
     const tools = d.settings().integrations.tools
-    tools.enabledTools = tools.enabledTools!.filter((name) => name !== 'ask_user' && name !== 'create_task')
+    tools.enabledTools = tools.enabledTools!.filter((name) => name !== 'ask_user' && name !== 'task_create')
     await d.send('Hello')
     const note = usableNow(vendor.bridges[0].turnPreamble)
-    expect(note).toEqual(expect.arrayContaining(['delegate_task', 'list_tasks', 'thread_read', 'thread_fork', 'queue_enqueue']))
+    expect(note).toEqual(expect.arrayContaining(['delegate_task', 'task_list', 'thread_read', 'thread_fork', 'queue_enqueue']))
     expect(note).not.toContain('ask_user')
-    expect(note).not.toContain('create_task')
+    expect(note).not.toContain('task_create')
     expect(note.filter((name) => name.startsWith('browser_'))).toEqual([])
     // The thread's list still has them: they are listed, and refused with a reason at call time.
     const listed = d.orch.mcpToolRegistry().listForThread(d.thread.id).map((tool) => tool.name)
-    expect(listed).toEqual(expect.arrayContaining(['ask_user', 'create_task', 'browser_open']))
+    expect(listed).toEqual(expect.arrayContaining(['ask_user', 'task_create', 'browser_open']))
   }, 30_000)
 
   /** A vendor parent (in a project when `project`) that delegates a read-only (`shared`) plan-ceiling pi child. */

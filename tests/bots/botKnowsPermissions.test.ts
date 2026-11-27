@@ -149,7 +149,7 @@ describe('the stated permissions match the tools a run is given', () => {
       expect(said.browser).toBe(BOT_BROWSER_TOOLS.every((tool) => allow.has(tool)))
       expect(said.web).toBe(allow.has('web_fetch') || allow.has('web_search'))
       // Every skill, as the text says.
-      expect(allow.has('load_skill')).toBe(true)
+      expect(allow.has('skill_load')).toBe(true)
       expect(said.automation).toEqual(BOT_AUTOMATION_APP_TOOLS.filter((tool) => allow.has(tool)))
       // Every Mousse tool the run is offered is one a bot's thread lists.
       for (const tool of compiled.permissions.appTools) expect(botMayBeOffered(tool), tool).toBe(true)
@@ -164,7 +164,7 @@ describe('the stated permissions match the tools a run is given', () => {
       "- Use the browser (your own): yes, but it can't open on this run",
       "- Use your owner's threads: no",
       '- Use apps on this computer: no',
-      '- Skills: yes, every skill your owner has (list_skills)',
+      '- Skills: yes, every skill your owner has (skill_list)',
       '- Automation tools: none',
       "- Your owner's MCP servers: none set up",
       'Use what is allowed without asking. Ask with escalate only for something marked no.'
@@ -251,11 +251,11 @@ describe("a bot's thread lists only tools a bot can hold", () => {
 
   it('a bot can hold every grantable tool, every tool of each permission, the task list and the work tools', () => {
     for (const name of [...BOT_APP_TOOLS].filter((name) => !BOT_GROUP_PERMISSIONS.has(name))) expect(botMayBeOffered(name), name).toBe(true)
-    for (const name of [...BOT_BROWSER_TOOLS, ...BOT_THREAD_TOOLS, ...BOT_PROFILER_TOOLS, ...BOT_THEME_TOOLS, ...BOT_SCHEDULE_READ_TOOLS, ...BOT_SCHEDULE_ACT_TOOLS, ...BOT_SECRET_TOOLS, ...BOT_QUICK_ACTION_TOOLS, ...BOT_TASK_TOOLS, ...BOT_WORK_TOOLS, 'consult', 'list_skills', 'load_skill']) expect(botMayBeOffered(name), name).toBe(true)
+    for (const name of [...BOT_BROWSER_TOOLS, ...BOT_THREAD_TOOLS, ...BOT_PROFILER_TOOLS, ...BOT_THEME_TOOLS, ...BOT_SCHEDULE_READ_TOOLS, ...BOT_SCHEDULE_ACT_TOOLS, ...BOT_SECRET_TOOLS, ...BOT_QUICK_ACTION_TOOLS, ...BOT_TASK_TOOLS, ...BOT_WORK_TOOLS, 'consult', 'skill_list', 'skill_load']) expect(botMayBeOffered(name), name).toBe(true)
     // What a thread's agent steers, queues, forks and answers with is a bot's too, under "use your threads".
-    for (const name of ['thread_steer', 'approval_respond', 'queue_enqueue', 'thread_fork', 'thread_merge_back', 'git_status', 'list_computers']) expect(botGrantTool(name), name).toBe('threads')
+    for (const name of ['thread_steer', 'approval_respond', 'queue_enqueue', 'thread_fork', 'thread_merge_back', 'git_status', 'computer_list']) expect(botGrantTool(name), name).toBe('threads')
     // A permission's name is no tool; delegation is the work's own subagents; the heap summary pauses the service; a bot has no goal.
-    for (const name of ['delegate_task', 'continue_subagent', 'browser_request_human', ...BOT_GROUP_PERMISSIONS, 'profiler_heap_summary', 'goal_status']) expect(botMayBeOffered(name), name).toBe(false)
+    for (const name of ['delegate_task', 'continue_subagent', 'browser_request_human', ...BOT_GROUP_PERMISSIONS, 'profiler_heap_summary', 'goal_update']) expect(botMayBeOffered(name), name).toBe(false)
   })
 })
 

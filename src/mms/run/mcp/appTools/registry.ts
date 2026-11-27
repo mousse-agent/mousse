@@ -9,6 +9,7 @@ import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, definitionToolGranted, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
 import { botMayBeOffered } from '../../../../shared/bots/personal/manifest'
 import { BOT_USE_TOOL } from '../../../../shared/bots/personal/catalogue'
+import { canonicalToolName, isToolAlias } from '../../../../shared/toolAliases'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
@@ -297,10 +298,15 @@ function notLive(message: string): McpToolError {
   return new McpToolError('mousse_caller_not_live', message)
 }
 
-/** A tool as a personal bot's thread reads it: its `botDescription` and `botInputSchema` where it has them. */
+/** A tool as a personal bot's thread reads it: its `botDescription`, `botInputSchema` and `botClass` where it has them. */
 function asBotTool(tool: MousseTool): MousseTool {
-  return tool.botDescription || tool.botInputSchema
-    ? { ...tool, ...(tool.botDescription ? { description: tool.botDescription } : {}), ...(tool.botInputSchema ? { inputSchema: tool.botInputSchema } : {}) }
+  return tool.botDescription || tool.botInputSchema || tool.botClass
+    ? {
+      ...tool,
+      ...(tool.botDescription ? { description: tool.botDescription } : {}),
+      ...(tool.botInputSchema ? { inputSchema: tool.botInputSchema } : {}),
+      ...(tool.botClass ? { class: tool.botClass } : {})
+    }
     : tool
 }
 
@@ -309,7 +315,8 @@ function asBotTool(tool: MousseTool): MousseTool {
  * Mousse's MCP server takes it out of a direct call; or why the call is malformed.
  */
 function useToolCall(args: Record<string, unknown>): { name: string; args: Record<string, unknown>; clientRequestId?: string } | { refused: string } {
-  const name = typeof args.tool === 'string' ? args.tool.trim().replace(/^mcp__mousse__/, '') : ''
+  // An old name is the tool it was renamed to (`canonicalToolName`), here as for a direct call.
+  const name = typeof args.tool === 'string' ? canonicalToolName(args.tool.trim().replace(/^mcp__mousse__/, '')) : ''
   if (!name) return { refused: 'use_tool needs tool: the name of a tool from tool_catalogue.' }
   const given = args.arguments ?? {}
   if (typeof given !== 'object' || given === null || Array.isArray(given)) return { refused: 'use_tool needs arguments as an object: the arguments of the tool it names.' }
@@ -346,12 +353,14 @@ export class ToolRegistry {
         `Mousse tool ${tool.name} takes a thread id (${uncovered.join(', ')}) that the access check does not cover: make it readsOthers, managesOthers, writesThreads or editsWorkspace (for threadId), or say where it is checked with authorize: checkedInHandler(...)`
       )
     if (this.tools.has(tool.name)) throw new Error(`Mousse tool ${tool.name} is already registered`)
+    if (isToolAlias(tool.name)) throw new Error(`Mousse tool ${tool.name} is an old name of ${canonicalToolName(tool.name)}; register it under that name`)
     this.tools.set(tool.name, declaringRetryKey(tool))
     return this
   }
 
+  /** The tool `name` calls: an old name (`MOUSSE_TOOL_ALIASES`) gives the tool it was renamed to. */
   get(name: string): MousseTool | undefined {
-    return this.tools.get(name)
+    return this.tools.get(canonicalToolName(name))
   }
 
   /** Every registered tool, unlisted ones included. */
@@ -537,7 +546,10 @@ export class ToolRegistry {
    * handler write no ledger row. Only the faults (`REFUSAL_FAULT_CODES`: the credential's turn is
    * over, no such tool) are thrown as `McpToolError`s, which the server sends as JSON-RPC errors.
    */
-  async call(name: string, rawArgs: Record<string, unknown>, request: McpCallRequest): Promise<ToolOutcome> {
+  async call(calledAs: string, rawArgs: Record<string, unknown>, request: McpCallRequest): Promise<ToolOutcome> {
+    // An old name is its new one from here on, before any check and before the ledger row or a receipt names the call:
+    // the same checks, the same request key, and a retry under either name is the same request.
+    const name = canonicalToolName(calledAs)
     const registered = this.tools.get(name)
     const tool = registered && toolNeeds(registered).callable ? registered : undefined
     // Any other name can only be one of the turn's proxied user MCP tools, looked up once the turn is known.

@@ -125,17 +125,17 @@ describe('agent definition turns on the Pi RPC engine (real pinned Pi child)', (
   it('is offered its granted built-ins and the Mousse tools listed for its turn', async () => {
     const { engine, recorder, project } = await setup({
       mousseTools: () => [
-        { name: 'list_tasks', description: 'List tasks', inputSchema: { type: 'object', properties: {} }, class: 'read' }
+        { name: 'task_list', description: 'List tasks', inputSchema: { type: 'object', properties: {} }, class: 'read' }
       ]
     })
     recorder.respond(script([{ text: 'ok' }]))
     const turn = harness(project, definitionInput, {
-      definition: definition(project, 'read', 'grep', 'list_tasks', 'delegate_task'),
-      bridge: { mcp: { url: 'http://127.0.0.1:9/mcp', token: 'unused' }, turnToken: 'tt', sessionInstructions: '', turnPreamble: '', userMcp: 'proxy', toolPolicy: { allow: ['delegate_task', 'grep', 'list_tasks', 'read'] } }
+      definition: definition(project, 'read', 'grep', 'task_list', 'delegate_task'),
+      bridge: { mcp: { url: 'http://127.0.0.1:9/mcp', token: 'unused' }, turnToken: 'tt', sessionInstructions: '', turnPreamble: '', userMcp: 'proxy', toolPolicy: { allow: ['delegate_task', 'grep', 'task_list', 'read'] } }
     })
     await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
     const offered = (body(recorder.requests[0]).tools ?? []).map((tool) => tool.function.name).sort()
-    expect(offered).toEqual(['grep', 'list_tasks', 'read'])
+    expect(offered).toEqual(['grep', 'read', 'task_list'])
   }, 90_000)
 
   it('reports each request’s usage with its price', async () => {
@@ -216,7 +216,7 @@ describe('agent definition turns on the Pi RPC engine (real pinned Pi child)', (
     const bridge = {
       mcp: { url: 'http://127.0.0.1:9/mcp', token: 'unused' }, turnToken: 'tt', userMcp: 'proxy' as const,
       sessionInstructions: sessionInstructions({ mcp: true, appletGuidance: APPLET_GENERATION_GUIDANCE }),
-      turnPreamble: turnPreamble({ loadedSkills: [], appletCatalogue: '## Applets - MOUSSE_APPLET_CANARY', usableTools: ['delegate_task', 'thread_send', 'create_task'] }),
+      turnPreamble: turnPreamble({ loadedSkills: [], appletCatalogue: '## Applets - MOUSSE_APPLET_CANARY', usableTools: ['delegate_task', 'thread_send', 'task_create'] }),
       toolPolicy: { allow: ['read'] }
     }
     expect(bridge.sessionInstructions.length).toBeGreaterThan(100)
@@ -228,7 +228,7 @@ describe('agent definition turns on the Pi RPC engine (real pinned Pi child)', (
     expect(sent.messages[1].role).toBe('user')
     const user = JSON.stringify(sent.messages[1].content)
     expect(user).toContain('Summarize the release.')
-    for (const leaked of ['delegate_task', 'thread_send', 'create_task', 'MOUSSE_APPLET_CANARY', 'mousse-applet', 'Usable now']) {
+    for (const leaked of ['delegate_task', 'thread_send', 'task_create', 'MOUSSE_APPLET_CANARY', 'mousse-applet', 'Usable now']) {
       expect(user, leaked).not.toContain(leaked)
       expect(JSON.stringify(sent.messages[0]), leaked).not.toContain(leaked)
     }

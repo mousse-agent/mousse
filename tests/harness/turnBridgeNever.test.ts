@@ -314,7 +314,7 @@ describe('Mousse tools that wait for the user', () => {
     expect(r.askUser).not.toHaveBeenCalled()
     expect(r.approve).not.toHaveBeenCalled()
     // A tool that does not wait for the user still runs.
-    expect((await r.call('create_task', { description: 'fine' }, 'never')).isError).toBe(false)
+    expect((await r.call('task_create', { description: 'fine' }, 'never')).isError).toBe(false)
   })
 
   it('still ask under `ask`', async () => {
@@ -383,6 +383,6 @@ describe('Mousse tools that wait for the user are not usable under `never`', () 
     expect(offered()).toEqual(expect.arrayContaining(['ask_user', 'create_quick_action']))
     expect(offered('never')).not.toContain('ask_user')
     expect(offered('never')).not.toContain('create_quick_action')
-    expect(offered('never')).toContain('create_task')
+    expect(offered('never')).toContain('task_create')
   })
 })

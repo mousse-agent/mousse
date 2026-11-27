@@ -607,7 +607,7 @@ describe('remote subagents (issue #469)', () => {
     await expect(d.orch.send('hello', false, { threadId: out.started.childThreadId, clientRequestId: 'person-1' })).rejects.toMatchObject({ code: 'runs_on_other_computer' })
   })
 
-  it('list_computers says which computers can take a subagent', async () => {
+  it('computer_list says which computers can take a subagent', async () => {
     const { steps, out, say, mac } = remoteWorld()
     mac.allowed.push({ node: 'node-win', name: 'Windows box', online: false })
     steps['go'] = async (tools) => { out.list = await tools.listComputers() as Json }
@@ -618,7 +618,7 @@ describe('remote subagents (issue #469)', () => {
     ])
   })
 
-  it('list_models reads what that computer offers; a model it does not offer is refused before anything exists there, and a level travels with the model', async () => {
+  it('model_list reads what that computer offers; a model it does not offer is refused before anything exists there, and a level travels with the model', async () => {
     const { d, parent, steps, out, say, mac, startOnMac } = remoteWorld()
     mac.snapshots = [{
       instanceId: 'codex', driver: 'codex', displayName: 'Codex', builtIn: true, scope: { kind: 'device' },
