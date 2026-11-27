@@ -819,7 +819,8 @@ export class MmsProtocolServer {
 
     // Questions (daemon-owned)
     const questions = services.questions
-    onEmitter(questions, 'pending', (payload: { requestId: string; threadId: string }) => {
+    // `updated`: a card shown again as it changed ("correction arrived"); clients replace the one they show.
+    const onPendingQuestion = (payload: { requestId: string; threadId: string }): void => {
       services.threadRuntimes
         .getOrHydrate(payload.threadId)
         .pendingQuestionIds.add(payload.requestId)
@@ -829,7 +830,9 @@ export class MmsProtocolServer {
       emitToSubscribers(
         this.ring.push('questions.pending', supervised ? { ...payload, supervised: true } : payload, payload.threadId)
       )
-    })
+    }
+    onEmitter(questions, 'pending', onPendingQuestion)
+    onEmitter(questions, 'updated', onPendingQuestion)
     onEmitter(
       questions,
       'cleared',

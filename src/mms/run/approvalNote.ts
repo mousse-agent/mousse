@@ -1,4 +1,5 @@
 import { redactSecrets } from '../../shared/errors'
+import { FENCED_FEEDBACK } from './delegation/approvalFence'
 import type { ApprovalRecord } from './ThreadApprovals'
 
 const PROMPT_CHARS = 400
@@ -29,6 +30,9 @@ export function formatApprovalDecisions(records: readonly ApprovalRecord[], titl
   const decided = records.filter((record) => record.decision)
   if (!decided.length) return ''
   const lines = decided.map((record) => {
+    // A correction fenced it (docs/plans/tool-api.md §2.5): neither approved nor denied, it is not run.
+    if (record.feedback === FENCED_FEEDBACK)
+      return `- Not run, because the person sent a correction after you asked: ${describe(record)}. Read the correction, and ask again only if this action still applies.`
     const who = decider(record, titleOf)
     if (record.decision === 'allow') return `- ${who} approved: ${describe(record)}`
     const feedback = record.feedback ? ` Reason: ${redactSecrets(record.feedback).slice(0, FEEDBACK_CHARS)}` : ''

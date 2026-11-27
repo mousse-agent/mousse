@@ -20,6 +20,8 @@ export const PERMISSION_KEYS = {
 /** The option an approval card adds so a user can allow the same request again in this thread. */
 export const ALWAYS_OPTION_ID = 'allow_always'
 export const ALWAYS_OPTION_LABEL = 'Always for this thread'
+/** What an approval a correction fenced says (docs/plans/tool-api.md §2.5): approving it no longer runs the action. */
+export const CORRECTION_ARRIVED_NOTE = "Correction arrived: approving this won't run it. The agent reads your correction first and asks again if it still applies."
 /** What the option does and does not do, shown next to it. */
 export const ALWAYS_OPTION_NOTE = 'Always for this thread allows this exact request again, in this thread, when you are the one who sent the message. It approves the text of the request, not what it does: a command that runs scripts runs whatever they contain then. Claude\'s shell keeps its folder between calls, so the same command can run from another folder. Other commands, folders and tools still ask.'
 

@@ -3,6 +3,7 @@ import { isPermissionMode, isStricter, narrowPermissionMode, type PermissionActi
 import type { UserQuestionAnswers } from '../../shared/types'
 import { canAnswerApproval, type Answerer, type ApprovalRefusal, type LineageLookup } from './approvalRights'
 import { int, json, str, type Row } from './db/rows'
+import { correctionSince, FENCED_FEEDBACK } from './delegation/approvalFence'
 import type { EffectOutbox } from './EffectOutbox'
 import { stableStringify } from './json'
 import type { RunStore } from './RunStore'
@@ -110,7 +111,17 @@ export interface ContinuationDue {
 }
 
 export type SettleOutcome =
-  | { ok: true; decision: ApprovalDecision; scope?: 'once' | 'always'; record: ApprovalRecord; continuationDue?: ContinuationDue; rule?: ApprovalRule; siblings?: string[] }
+  | {
+      ok: true
+      decision: ApprovalDecision
+      scope?: 'once' | 'always'
+      record: ApprovalRecord
+      continuationDue?: ContinuationDue
+      rule?: ApprovalRule
+      siblings?: string[]
+      /** An allow that a correction fenced (`approvalFence.ts`): it settled as a rejection, and the action did not run. */
+      fenced?: true
+    }
   | {
       ok: false
       reason: 'unknown' | 'already_answered' | 'cancelled' | ApprovalRefusal
@@ -339,6 +350,16 @@ export class ThreadApprovals {
     return row ? toRecord(row) : null
   }
 
+  /** The time now, on the store's clock: what a request's `createdAt` is compared with. */
+  now(): string {
+    return now(this.store)
+  }
+
+  /** The correction that fences this request (it reached the thread after the request was asked), or null. */
+  fencedBy(record: Pick<ApprovalRecord, 'threadId' | 'createdAt'>): string | null {
+    return correctionSince(this.store, record.threadId, record.createdAt)
+  }
+
   listPending(threadId?: string): ApprovalRecord[] {
     return threadId === undefined ? select(this.store, "status = 'pending'") : select(this.store, "status = 'pending' AND thread_id = ?", threadId)
   }
@@ -360,9 +381,13 @@ export class ThreadApprovals {
     return select(this.store, "status = 'answered' AND delivered_at IS NULL")
   }
 
-  /** The requests a run was started to deliver (a continue turn, or a message that denied them). */
+  /**
+   * The requests a run was started to deliver (a continue turn, or a message that denied them). An allow whose grant a
+   * correction fenced (`consumeContinuationGrant` refuses it) reads as the rejection it now is, with `FENCED_FEEDBACK`.
+   */
   listDeliveredToRun(runId: string): ApprovalRecord[] {
-    return select(this.store, 'continuation_run_id = ?', runId)
+    return select(this.store, 'continuation_run_id = ?', runId).map((row): ApprovalRecord =>
+      row.decision === 'allow' && row.grantConsumedAt === null && this.fencedBy(row) ? { ...row, decision: 'reject', decisionScope: null, feedback: FENCED_FEEDBACK } : row)
   }
 
   /** How many requests a dead run left that still wait for the user, and how many of those are answered. */
@@ -394,16 +419,23 @@ export class ThreadApprovals {
     if (row.status === 'answered')
       return { ok: false, reason: 'already_answered', ...(row.answeredBy ? { answeredBy: row.answeredBy } : {}), ...(row.decision ? { decision: row.decision } : {}) }
     if (row.status === 'cancelled') return { ok: false, reason: 'cancelled', ...(row.cancelReason ? { cancelReason: row.cancelReason } : {}) }
-    const meaning = meaningOf(row.questions, answers)
+    let meaning = meaningOf(row.questions, answers)
     const rights = canAnswerApproval({ threadId: row.threadId, action: row.action, permissionKey: row.permissionKey, reason: row.reason }, answeredBy, meaning, this.deps.lineage)
     if (!rights.ok) return { ok: false, reason: rights.code }
+    // Whoever answers, an allow asked before a correction reached the thread settles as a rejection that says why.
+    const fenced = meaning.decision === 'allow' && correctionSince(this.store, row.threadId, row.createdAt) !== null
+    if (fenced) {
+      meaning = { decision: 'reject' }
+      answers = { ...answersFor(row.questions, 'reject'), feedback: FENCED_FEEDBACK }
+    }
     const always = meaning.decision === 'allow' && meaning.scope === 'always'
     const once = always ? onceAllowOption(row.questions) : undefined
     // "Always" is Mousse's own option: a request that cannot also be allowed once cannot be answered with it.
     if (always && !once) return { ok: false, reason: 'unknown' }
     const at = now(this.store)
     let feedback: string | null
-    if (answeredBy.kind === 'agent') {
+    if (fenced) feedback = FENCED_FEEDBACK
+    else if (answeredBy.kind === 'agent') {
       // An agent's words never reach the asking agent as the user's: the reason is fixed, says an agent decided, and
       // carries the agent's own note only as a short quotation. An allow carries none.
       const note = agentNoteOf(row.questions, answers)
@@ -436,12 +468,12 @@ export class ThreadApprovals {
       return current && current.status !== 'pending' ? this.settleRow(current, answers, answeredBy, enqueueDelivery) : { ok: false, reason: 'unknown' }
     }
     const record: ApprovalRecord = { ...row, status: 'answered', answers, decision: meaning.decision, decisionScope: meaning.scope ?? null, feedback, answeredBy: who, settledAt: at }
-    event(this.store, 'approval.answered', record, { decision: meaning.decision, ...(meaning.scope ? { scope: meaning.scope } : {}), answeredBy: who, answerPath: row.answerPath })
+    event(this.store, 'approval.answered', record, { decision: meaning.decision, ...(meaning.scope ? { scope: meaning.scope } : {}), answeredBy: who, answerPath: row.answerPath, ...(fenced ? { fenced: true } : {}) })
     // Only a user creates a standing rule, in the same transaction as the answer.
     const rule = always && answeredBy.kind === 'user' ? this.grantRule(record) : null
     // Identical requests waiting beside this one (a model's parallel calls) are the same decision: allow them too.
     const siblings = rule ? this.allowSiblings(record, answeredBy, enqueueDelivery) : []
-    const base = { ok: true as const, decision: meaning.decision, ...(meaning.scope ? { scope: meaning.scope } : {}), record, ...(rule ? { rule } : {}), ...(siblings.length ? { siblings } : {}) }
+    const base = { ok: true as const, decision: meaning.decision, ...(meaning.scope ? { scope: meaning.scope } : {}), record, ...(rule ? { rule } : {}), ...(siblings.length ? { siblings } : {}), ...(fenced ? { fenced: true as const } : {}) }
     if (row.answerPath === 'live') {
       if (enqueueDelivery) this.deps.outbox.enqueue({ threadId: row.threadId, runId: row.runId, kind: 'request.respond', payload: { requestId: row.requestId } })
       return base
@@ -666,6 +698,27 @@ export class ThreadApprovals {
     })
   }
 
+  /**
+   * Right before an answer reaches its waiting provider: an allow that a correction overtook on its way (it reached the
+   * thread after the request was asked) is turned into the rejection that says why, and an "always" rule it made is
+   * revoked. Returns the request as it is to be delivered.
+   */
+  fenceBeforeDispatch(requestId: string): ApprovalRecord | null {
+    return this.db.transaction(() => {
+      const row = this.get(requestId)
+      if (row?.status !== 'answered' || row.decision !== 'allow' || row.deliveredAt !== null) return row
+      if (correctionSince(this.store, row.threadId, row.createdAt) === null) return row
+      const answers: UserQuestionAnswers = { ...answersFor(row.questions, 'reject'), feedback: FENCED_FEEDBACK }
+      this.db
+        .statement("UPDATE approval_requests SET answers = ?, decision = 'reject', decision_scope = NULL, feedback = ? WHERE request_id = ? AND status = 'answered' AND delivered_at IS NULL")
+        .run(stableStringify(answers), FENCED_FEEDBACK, requestId)
+      if (row.decisionScope === 'always' && row.fingerprint) this.revokeRules(row.threadId, row.fingerprint)
+      const record: ApprovalRecord = { ...row, answers, decision: 'reject', decisionScope: null, feedback: FENCED_FEEDBACK }
+      event(this.store, 'approval.fenced', record, {})
+      return record
+    })
+  }
+
   /** The answer reached its waiting provider. */
   markDelivered(requestId: string): void {
     this.db.transaction(() => {
@@ -751,11 +804,13 @@ export class ThreadApprovals {
       const at = now(this.store)
       const row = this.db
         .statement(
-          `SELECT request_id FROM approval_requests WHERE thread_id = ? AND continuation_run_id = ? AND fingerprint = ?
+          `SELECT request_id, created_at FROM approval_requests WHERE thread_id = ? AND continuation_run_id = ? AND fingerprint = ?
              AND decision = 'allow' AND grant_consumed_at IS NULL ORDER BY created_at, rowid LIMIT 1`
         )
         .get(threadId, runId, fingerprint)
       if (!row) return false
+      // A correction that reached the thread after the request was asked fences the grant: the action asks again.
+      if (correctionSince(this.store, threadId, String(row.created_at)) !== null) return false
       const result = this.db
         .statement('UPDATE approval_requests SET grant_consumed_at = ? WHERE request_id = ? AND grant_consumed_at IS NULL')
         .run(at, String(row.request_id))

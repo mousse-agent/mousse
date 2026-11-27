@@ -621,6 +621,11 @@ export interface PendingApprovalInfo {
   /** `continue` requests of one run: how many are answered of how many the run left. */
   answered?: number
   total?: number
+  /**
+   * A correction from the person reached the thread after this was asked (docs/plans/tool-api.md §2.5): approving it
+   * no longer runs the action. The agent reads the correction and asks again if the action still applies.
+   */
+  correctionArrived?: true
 }
 
 /** One "Always for this thread" rule, as a client lists it (SPEC §17.8): the exact request it answers, and whether it applies now. */

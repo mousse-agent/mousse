@@ -267,4 +267,18 @@ describe('answering through the daemon', () => {
     expect(refused).toEqual(['Already answered: denied from the CLI.'])
     expect(buttons()).toEqual([])
   })
+
+  it('a correction that reaches the waiting thread marks the row "correction arrived"; it can still be read and denied', async () => {
+    const daemon = mockDaemon()
+    await act(async () => root.render(createElement(Chat, { messages: base, onRefused: () => undefined })))
+    daemon.setHistory([saved('r1', 2)])
+    await daemon.ask(pending('r1'))
+    expect(request()!.textContent).not.toContain('Correction arrived')
+    // The daemon shows the card again as the correction fenced it (`questions.pending` for the same request).
+    await daemon.ask({ ...pending('r1'), approval: { answerPath: 'live', correctionArrived: true } })
+    expect(host.querySelectorAll('[data-permission-request]')).toHaveLength(1)
+    expect(request()!.querySelector('.permission-request-note')!.textContent).toMatch(/^Correction arrived: approving this won't run it\./)
+    await click('Deny')
+    expect(daemon.answered).toEqual([['r1', { permission: 'reject' }, 't1']])
+  })
 })
