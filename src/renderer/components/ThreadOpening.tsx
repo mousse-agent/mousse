@@ -98,6 +98,8 @@ function ThreadOpenFailed({ threadId, reason }: { threadId: string; reason: stri
   const node = useThreadNode(threadId)
   const computer = useComputer(node)
   const [retrying, setRetrying] = useState(false)
+  // Another thread asked for since: Retry would select this one again and cancel that choice.
+  const otherOpening = useAppStore((s) => s.openingThreadId !== null && s.openingThreadId !== threadId)
   const line = node ? `Couldn't reach ${computer?.name ?? UNKNOWN_COMPUTER_NAME}` : "Couldn't open this thread"
   const detail = (node && computer && !computer.online ? offlineLabel(computer, Date.now()) : undefined) ?? reason
   const retry = () => {
@@ -108,7 +110,7 @@ function ThreadOpenFailed({ threadId, reason }: { threadId: string; reason: stri
   return (
     <div className="thread-opening-view" role="alert">
       <p className="thread-opening-line" title={detail}>{line}</p>
-      <button type="button" className="thread-opening-retry" disabled={retrying} onClick={retry}>
+      <button type="button" className="thread-opening-retry" disabled={retrying || otherOpening} onClick={retry}>
         <RefreshCw size={14} aria-hidden="true" />Retry
       </button>
     </div>

@@ -446,6 +446,16 @@ export function OrchestratorChat() {
   const [voiceMessages, setVoiceMessagesState] = useState<VoiceMessage[]>(
     () => mediaByThreadRef.current[activeMediaKeyRef.current]?.voice ?? []
   )
+  // Staged media swap with the thread in the render that shows it, matching composerDrafts / browser chips: no frame,
+  // and no send, offers one thread's files or voice notes under another's heading. The thread left keeps its own in
+  // the map (its setters mirror them there); React draws this render again with the restored ones before showing it.
+  const mediaKey = composerMediaKey(activeThreadId)
+  if (activeMediaKeyRef.current !== mediaKey) {
+    activeMediaKeyRef.current = mediaKey
+    const restored = mediaByThreadRef.current[mediaKey] ?? EMPTY_COMPOSER_MEDIA
+    setAttachedFilesState(restored.files)
+    setVoiceMessagesState(restored.voice)
+  }
   const setAttachedFiles = useCallback(
     (update: AttachedFile[] | ((prev: AttachedFile[]) => AttachedFile[])) => {
       setAttachedFilesState((prev) => {
@@ -818,19 +828,6 @@ export function OrchestratorChat() {
         ?.focus()
     }
   }, [showQuestions, renderQuestions])
-
-  // Swap staged media with the thread, matching composerDrafts / browser chips.
-  useEffect(() => {
-    const nextKey = composerMediaKey(activeThreadId)
-    const prevKey = activeMediaKeyRef.current
-    if (nextKey === prevKey) return
-    // Current thread's files/voice are already mirrored into the map by the
-    // setters; only the displayed state needs to change.
-    activeMediaKeyRef.current = nextKey
-    const restored = mediaByThreadRef.current[nextKey] ?? EMPTY_COMPOSER_MEDIA
-    setAttachedFilesState(restored.files)
-    setVoiceMessagesState(restored.voice)
-  }, [activeThreadId])
 
   // A deleted thread's staged files and voice notes (a recovered queued edit's images among them) are let go.
   useEffect(() => useAppStore.subscribe((state, previous) => {

@@ -42,8 +42,11 @@ export function ThreadComputerBar() {
   const [retrying, setRetrying] = useState(false)
   // A thread that could not be read says so in its transcript, with its own Retry.
   const failedShown = useOpenFailedShown()
+  // Another thread asked for since: selecting this one again would cancel that choice.
+  const otherOpening = useAppStore((state) => state.openingThreadId !== null && state.openingThreadId !== state.activeThreadId)
   if (!thread?.node || failedShown) return null
   const retry = () => {
+    if (useAppStore.getState().openingThreadId !== null) return
     // Opening the thread again attaches it afresh, which reads its transcript and queue from the other computer.
     setRetrying(true)
     forgetMessageImageRequests(thread.id)
@@ -54,7 +57,7 @@ export function ThreadComputerBar() {
       name={computer?.name ?? UNKNOWN_COMPUTER_NAME}
       state={threadComputerState(thread, computer)}
       offline={offlineLabel(computer, Date.now())}
-      retrying={retrying}
+      retrying={retrying || otherOpening}
       onRetry={retry}
     />
   )

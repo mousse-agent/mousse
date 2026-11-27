@@ -3,6 +3,7 @@ import type { ChatReference } from '../../shared/chatReferences'
 import { formatMousseFileLink, parseChatReference } from '../../shared/chatReferences'
 import { openProjectReference, routeLink } from '../utils/chatLinks'
 import { useAppStore } from '../stores/appStore'
+import { openAndSelect, selectOrSettle } from '../lib/threadActions'
 import { useChangesStore } from '../stores/changesStore'
 import { openSurface } from '../lib/surfaces'
 import { scopeFromKey } from './review/reviewComments'
@@ -39,14 +40,14 @@ export function openChatReference(reference: ChatReference): void {
     return
   }
   if (reference.kind === 'thread' && reference.threadId) {
-    store.switchToThread(reference.threadId)
-    void window.mousse.threads.select(reference.threadId)
+    // As a click on its row: a thread slow to open says so, and one that cannot be read offers Retry.
+    void openAndSelect(reference.threadId).catch(() => undefined)
     return
   }
   if (reference.kind === 'terminal' && reference.tabId) {
     if (reference.threadId && reference.threadId !== store.activeThreadId) {
       store.switchToThread(reference.threadId)
-      void window.mousse.threads.select(reference.threadId)
+      void selectOrSettle(reference.threadId).catch(() => undefined)
     }
     store.openSurfaceKind('terminal')
     store.setActiveProjectTerminalTab(reference.threadId ?? store.activeThreadId, reference.tabId)
@@ -56,14 +57,14 @@ export function openChatReference(reference: ChatReference): void {
     // There is no Agents tab any more; an old agent reference opens the thread that owns it.
     if (reference.threadId !== store.activeThreadId) {
       store.switchToThread(reference.threadId)
-      void window.mousse.threads.select(reference.threadId)
+      void selectOrSettle(reference.threadId).catch(() => undefined)
     }
     return
   }
   if (reference.kind === 'folder' && reference.path) {
     if (reference.threadId && reference.threadId !== store.activeThreadId) {
       store.switchToThread(reference.threadId)
-      void window.mousse.threads.select(reference.threadId)
+      void selectOrSettle(reference.threadId).catch(() => undefined)
     }
     store.openSurfaceKind('files')
     return

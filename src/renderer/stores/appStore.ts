@@ -529,8 +529,11 @@ interface AppState {
   transcriptFailed: { threadId: string; reason?: string } | null
   /** Marks a thread still opening after `OPENING_CUE_MS`, so its row and the title say it is opening. */
   showOpeningCue: (threadId: string) => void
-  /** Reads a failed thread again: the chat waits for its view as it did when it was opened. */
-  retryTranscript: (threadId: string) => void
+  /**
+   * Reads a failed thread again: the chat waits for its view as it did when it was opened. False (nothing changes)
+   * when it is not the shown failed thread, or another thread is being opened.
+   */
+  retryTranscript: (threadId: string) => boolean
   /**
    * Opens a thread the person asked for. A never-started thread is shown at once (`switchToThread`). A started one is
    * held in `openingThreadId`, so its row shows as chosen at once while the chat goes on showing the thread before:
@@ -949,10 +952,12 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       const opening = s.openingThreadId === threadId || (s.openingThreadId === null && s.activeThreadId === threadId && s.transcriptPending)
       return opening && s.openingCueThreadId !== threadId ? { openingCueThreadId: threadId } : s
     }),
-  retryTranscript: (threadId) =>
-    set((s) => (s.activeThreadId === threadId && s.transcriptFailed?.threadId === threadId
-      ? { transcriptFailed: null, transcriptPending: true, openingCueThreadId: threadId }
-      : s)),
+  retryTranscript: (threadId) => {
+    const s = get()
+    if (s.activeThreadId !== threadId || s.transcriptFailed?.threadId !== threadId || s.openingThreadId !== null) return false
+    set({ transcriptFailed: null, transcriptPending: true, openingCueThreadId: threadId })
+    return true
+  },
   openThreadWhenReady: (id, options) => {
     // Every open starts without a cue: one that is still opening after a moment gets it again (`showOpeningCue`).
     if (get().openingCueThreadId !== null) set({ openingCueThreadId: null })

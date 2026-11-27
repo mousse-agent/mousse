@@ -11,6 +11,7 @@ import { useFilesRoot } from '../hooks/useActiveProjectPath'
 import { isNewEmptyThread, localWorkspaceFor } from '../lib/newThread'
 import type { FileGrepMatch, FileText } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
+import { selectOrSettle } from '../lib/threadActions'
 import { registerAutosaveFlush } from '../services/reloadWindow'
 import { registerFileLinkOpener } from '../services/fileLinks'
 import { useMonacoCodeFont } from '../lib/monacoCodeFont'
@@ -660,7 +661,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       if (targetThreadId && targetThreadId !== store.activeThreadId) {
         expectedThreadId = targetThreadId
         useAppStore.getState().switchToThread(targetThreadId)
-        await window.mousse.threads.select(targetThreadId)
+        await selectOrSettle(targetThreadId)
         if (!stillCurrent()) return
       }
       const targetRoot = await window.mousse.app.getFilesRoot(targetThreadId)

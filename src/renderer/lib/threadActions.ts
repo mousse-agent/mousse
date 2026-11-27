@@ -54,21 +54,26 @@ export async function openAndSelect(threadId: string, options?: { keepWorkspace?
     if (store.messages.length > 0 || (thread && !isThreadStarted(thread))) return
   }
   const opening = store.openThreadWhenReady(threadId, options)
-  if (opening === 'held') {
-    const hold = isQualifiedId(threadId) ? OPENING_CUE_MS : OPEN_THREAD_HOLD_MS
-    setTimeout(() => useAppStore.getState().showOpeningThread(threadId), hold)
-  }
-  if (opening === 'cached') void afterNextPaint().then(() => useAppStore.getState().showOpeningThread(threadId))
-  // Set only while it is still opening then: a thread that showed sooner gets no cue.
-  else setTimeout(() => useAppStore.getState().showOpeningCue(threadId), OPENING_CUE_MS)
-  await selectOrSettle(threadId)
+  await selectOrSettle(threadId, opening)
 }
 
 let selectionRequest = 0
 
-/** Asks main to select a thread the store already switched to. A failed select sends no view, so the chat stops waiting for one. */
-export async function selectOrSettle(threadId: string): Promise<void> {
+/**
+ * Asks main to select a thread the store already switched to (or holds, `opening`). A failed select sends no view, so
+ * the chat stops waiting for one and says it could not be read. A thread still opening after `OPENING_CUE_MS` gets its
+ * cue. Every timer belongs to this selection: a later one, even of the same thread, makes them do nothing.
+ */
+export async function selectOrSettle(threadId: string, opening: 'cached' | 'held' | false = false): Promise<void> {
   const request = ++selectionRequest
+  const current = () => selectionRequest === request
+  if (opening === 'held') {
+    const hold = isQualifiedId(threadId) ? OPENING_CUE_MS : OPEN_THREAD_HOLD_MS
+    setTimeout(() => { if (current()) useAppStore.getState().showOpeningThread(threadId) }, hold)
+  }
+  if (opening === 'cached') void afterNextPaint().then(() => { if (current()) useAppStore.getState().showOpeningThread(threadId) })
+  // Set only while it is still opening then: a thread that showed sooner gets no cue.
+  else setTimeout(() => { if (current()) useAppStore.getState().showOpeningCue(threadId) }, OPENING_CUE_MS)
   const { profileId } = useAppStore.getState()
   try {
     await window.mousse.threads.select(threadId)
@@ -79,9 +84,12 @@ export async function selectOrSettle(threadId: string): Promise<void> {
   }
 }
 
-/** Reads a thread whose transcript could not be read again (the chat's Retry), waiting for it as when it was opened. */
+/**
+ * Reads a thread whose transcript could not be read again (the chat's Retry), waiting for it as when it was opened.
+ * Nothing happens while another thread is being opened: selecting this one again would cancel that newer choice.
+ */
 export async function retryOpenThread(threadId: string): Promise<void> {
-  useAppStore.getState().retryTranscript(threadId)
+  if (!useAppStore.getState().retryTranscript(threadId)) return
   await selectOrSettle(threadId)
 }
 

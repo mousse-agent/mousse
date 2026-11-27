@@ -10,20 +10,29 @@
  */
 import { act, createElement, Fragment } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PendingUserQuestions } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 // The shell shows which thread's transcript it was given and the composer it was handed. Every render is kept with
 // the approvals it was given to draw in the transcript: a render React draws before effects run is a frame on screen.
-const shellRenders: Array<{ threadId: string | null; approvals: number }> = []
+const shellRenders: Array<{ threadId: string | null; approvals: number; files: number }> = []
+/** The files the composer element was handed (its ChatComposer's `attachedFiles`), found by walking the element tree. */
+function stagedFiles(node: unknown): number {
+  if (!node || typeof node !== 'object') return 0
+  if (Array.isArray(node)) return node.reduce((sum: number, child) => sum + stagedFiles(child), 0)
+  const props = (node as { props?: Record<string, unknown> }).props
+  if (!props) return 0
+  if (Array.isArray(props.attachedFiles)) return props.attachedFiles.length
+  return stagedFiles(props.children)
+}
 vi.mock('../../src/renderer/chat/components/MousseAgentChatShell', async () => {
   const { createElement: create } = await import('react')
   const { ComposerNoticeProvider } = await import('../../src/renderer/components/ComposerNotice')
   return {
     MousseAgentChatShell: ({ composer, threadId, messages, permissionRequests }: { composer: never; threadId: string | null; messages: Array<{ id: string }>; permissionRequests?: Record<string, unknown> }) => {
-      shellRenders.push({ threadId, approvals: Object.keys(permissionRequests ?? {}).length })
+      shellRenders.push({ threadId, approvals: Object.keys(permissionRequests ?? {}).length, files: stagedFiles(composer) })
       return create(ComposerNoticeProvider, null,
         create('div', { 'data-shown-thread': threadId ?? '', 'data-shown-messages': messages.map((entry) => entry.id).join(' ') }),
         composer)
@@ -36,6 +45,12 @@ const NODE = 'nod_0123456789abcdefghjkmnpqrs'
 const REMOTE = `${NODE}:thr_remote`
 // The store keeps transcripts it has shown for the whole file: the failure case uses a thread no case has shown.
 const UNREACHABLE = `${NODE}:thr_unreachable`
+const REOPENED = `${NODE}:thr_reopened`
+const FAILED_FIRST = `${NODE}:thr_failed_first`
+const OPENED_AFTER = `${NODE}:thr_opened_after`
+const WITH_MEDIA = `${NODE}:thr_media`
+const FROM_REFERENCE = `${NODE}:thr_reference`
+const AS_CARD = `${NODE}:thr_card`
 const now = new Date().toISOString()
 const started = (id: string, extra: Record<string, unknown> = {}) => ({ id, name: `Thread ${id}`, createdAt: now, updatedAt: now, startedAt: now, order: 0, ...extra })
 const message = (id: string, content: string) => ({ id, role: 'user', content, timestamp: now })
@@ -134,6 +149,13 @@ async function deliverView(threadId: string, messages: unknown[]): Promise<void>
   await settle()
 }
 
+// The chat, sidebar and title bar take a while to load the first time; the first case should not pay for it.
+beforeAll(async () => {
+  await import('../../src/renderer/components/OrchestratorChat')
+  await import('../../src/renderer/components/ThreadsSidebar')
+  await import('../../src/renderer/components/TitleBarNav')
+}, 120_000)
+
 beforeEach(async () => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   threads = {}
@@ -146,7 +168,9 @@ beforeEach(async () => {
     profileId: 'prf_test', profileReady: true, workspaceReady: true, loading: false, sidebarMode: 'projects',
     threadsSidebarView: 'projects', activeThreadId: 'thread-a', openingThreadId: null, transcriptPending: false,
     transcriptFailed: null, openingCueThreadId: null, projects: [],
-    threads: [started('thread-a'), started('thread-local'), started('thread-quick'), started(REMOTE, { node: NODE, name: 'Remote work' }), started(UNREACHABLE, { node: NODE, name: 'Far work' })] as never,
+    threads: [started('thread-a'), started('thread-local'), started('thread-quick'), started(REMOTE, { node: NODE, name: 'Remote work' }), started(UNREACHABLE, { node: NODE, name: 'Far work' }),
+      started('thread-between'),
+      ...[REOPENED, FAILED_FIRST, OPENED_AFTER, WITH_MEDIA, FROM_REFERENCE, AS_CARD].map((id) => started(id, { node: NODE }))] as never,
     turnStates: {},
     messages: [message('a-1', 'First thread')] as never
   })
@@ -270,5 +294,95 @@ describe('opening a thread that is slow to show', () => {
     await deliverView(UNREACHABLE, [message('far-1', 'Far')])
     expect(host.querySelector<HTMLElement>('[data-shown-thread]')?.dataset.shownMessages).toBe('far-1')
     expect(chatText()).not.toMatch(/Loading from|Couldn't reach/)
+  })
+
+  it('shows a thread asked for again only on its own timers, not those of the earlier time it was asked for', async () => {
+    await mount()
+    const { OPENING_CUE_MS } = await import('../../src/renderer/lib/threadActions')
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const advance = async (ms: number) => { await act(async () => { vi.advanceTimersByTime(ms) }) }
+      // B, then another thread, then B again 100 ms after the first: B's first timers fire 50 ms into the second opening.
+      await click(REOPENED)
+      await advance(50)
+      await click('thread-between')
+      await advance(50)
+      await click(REOPENED)
+      await advance(OPENING_CUE_MS - 100 + 10)
+      expect(shownThread()).toBe('thread-a')
+      expect(rowOpening(REOPENED)).toBeNull()
+      await advance(100)
+      expect(shownThread()).toBe(REOPENED)
+      expect(chatText()).toContain('Loading from Mac mini…')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps a newer choice when Retry is pressed on the failed thread still on screen', async () => {
+    const useAppStore = await store()
+    const selected: string[] = []
+    // As main does, a select is echoed to the window before it is answered; the first read fails.
+    threads.select = vi.fn((id: string) => {
+      selected.push(id)
+      useAppStore.getState().switchToThread(id, { keepWorkspace: true })
+      return id === FAILED_FIRST && selected.length === 1 ? Promise.reject(new Error('peer offline')) : new Promise(() => undefined)
+    })
+    await mount()
+    const { selectThread, OPENING_CUE_MS } = await import('../../src/renderer/lib/threadActions')
+    await act(async () => { void selectThread(FAILED_FIRST).catch(() => undefined) })
+    await settle()
+    const retry = () => [...host.querySelectorAll<HTMLButtonElement>('.chat [role="alert"] button')].find((button) => button.textContent?.includes('Retry'))!
+    expect(retry()).toBeDefined()
+
+    // A newer thread is asked for; while it is held, Retry on the failed thread does not select that one again.
+    await click(OPENED_AFTER)
+    await act(async () => { retry().click() })
+    await settle()
+    expect(selected).toEqual([FAILED_FIRST, OPENED_AFTER])
+    await wait(OPENING_CUE_MS + 30)
+    expect(shownThread()).toBe(OPENED_AFTER)
+  })
+
+  it('never shows the thread before\'s staged files under the new thread', async () => {
+    await mount()
+    const input = host.querySelector<HTMLInputElement>('.chat input[type="file"]')!
+    Object.defineProperty(input, 'files', { configurable: true, value: [new File(['notes'], 'notes.txt', { type: 'text/plain' })] })
+    await act(async () => { input.dispatchEvent(new Event('change', { bubbles: true })) })
+    await settle()
+    // The control: the thread before was handed its file.
+    expect(shellRenders.at(-1)).toMatchObject({ threadId: 'thread-a', files: 1 })
+    shellRenders.length = 0
+
+    await click(WITH_MEDIA)
+    const { OPENING_CUE_MS } = await import('../../src/renderer/lib/threadActions')
+    await wait(OPENING_CUE_MS + 30)
+    expect(shownThread()).toBe(WITH_MEDIA)
+    expect(shellRenders.filter((render) => render.threadId === WITH_MEDIA).length).toBeGreaterThan(0)
+    expect(shellRenders.filter((render) => render.threadId === WITH_MEDIA && render.files > 0)).toEqual([])
+  })
+
+  it('says it could not reach the computer for a thread opened from a reference, with Retry', async () => {
+    threads.select = vi.fn(() => Promise.reject(new Error('peer offline')))
+    await mount()
+    const { openChatReference } = await import('../../src/renderer/components/ReferencePill')
+    await act(async () => { openChatReference({ kind: 'thread', threadId: FROM_REFERENCE, title: 'Thread' } as never) })
+    await settle()
+    expect(shownThread()).toBe(FROM_REFERENCE)
+    expect(host.querySelector('.chat [role="alert"]')?.textContent).toContain("Couldn't reach Mac mini")
+  })
+
+  it('marks a thread slow to open on its card in the Threads tab', async () => {
+    const useAppStore = await store()
+    useAppStore.setState({ threadsSidebarView: 'threads' })
+    await mount()
+    const card = () => [...host.querySelectorAll<HTMLElement>(`[data-area="sidebar"] .threads-sidebar-card[data-thread-id="${CSS.escape(AS_CARD)}"]`)]
+    expect(card().length).toBe(1)
+    await act(async () => { card()[0]!.click() })
+    const { OPENING_CUE_MS } = await import('../../src/renderer/lib/threadActions')
+    await wait(OPENING_CUE_MS + 30)
+    expect(card()[0]!.querySelector('[role="status"]')?.getAttribute('aria-label')).toBe('Loading from Mac mini…')
+    await deliverView(AS_CARD, [message('card-1', 'Card')])
+    expect(card()[0]!.querySelector('[role="status"]')).toBeNull()
   })
 })

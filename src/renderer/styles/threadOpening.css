@@ -79,3 +79,9 @@
   outline: none;
   background-image: var(--ui-focus-layer);
 }
+
+/* On a card the ring takes the status's place at the end of the card's top line. */
+.threads-sidebar-card-meta > .thread-opening-mark {
+  margin-left: auto;
+  flex-shrink: 0;
+}

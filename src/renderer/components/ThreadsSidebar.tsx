@@ -338,7 +338,10 @@ export function ThreadCardBody({
           )}
           <span className="threads-sidebar-card-project">{projectName ?? 'No project'}</span>
           {thread.pinnedAt && <Pin size={11} strokeWidth={2} className="threads-sidebar-card-pin" aria-label="Pinned" />}
-          <ThreadCardStatus threadId={threadId} activity={activity} live={liveActivity} awaitsApproval={awaitsApproval} updatedAt={thread.updatedAt} withAge={statusWithAge} setupFailed={thread.setupFailure?.reason} linkStatus={linkStatus} terse={terseStatus} />
+          {/* A thread slow to open shows its ring where the status sits, as a row does in its gutter. */}
+          <ThreadOpeningMark threadId={threadId}>
+            <ThreadCardStatus threadId={threadId} activity={activity} live={liveActivity} awaitsApproval={awaitsApproval} updatedAt={thread.updatedAt} withAge={statusWithAge} setupFailed={thread.setupFailure?.reason} linkStatus={linkStatus} terse={terseStatus} />
+          </ThreadOpeningMark>
           <ThreadModelIcon thread={thread} />
         </span>
         {isRenaming ? (
