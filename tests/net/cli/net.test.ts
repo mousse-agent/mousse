@@ -170,7 +170,13 @@ describe('network CLI validation', () => {
         method: 'bridge.policy',
         params: { node: nodeId, agentReach: reach }
       })
-    // Work on threads from this device: off leaves it to view threads and chat with bots.
+    // The device's bot level here.
+    for (const bots of ['off', 'use', 'full'])
+      expect(prepareNetCommand(args('bridge', 'limits', [nodeId], [['bots', bots]]))).toEqual({
+        method: 'bridge.policy',
+        params: { node: nodeId, bots }
+      })
+    // Work on threads from this device: off leaves it to view threads.
     for (const [flag, work] of [['off', false], ['on', true]] as const)
       expect(prepareNetCommand(args('bridge', 'limits', [nodeId], [['work', flag]]))).toEqual({
         method: 'bridge.policy',
@@ -195,6 +201,7 @@ describe('network CLI validation', () => {
       args('bridge', 'limits', [nodeId], [['editor', 'maybe']]),
       args('bridge', 'limits', [nodeId], [['agent-reach', 'everything']]),
       args('bridge', 'limits', [nodeId], [['work', 'maybe']]),
+      args('bridge', 'limits', [nodeId], [['bots', 'on']]),
       args('bridge', 'block', [nodeId], [['work', 'off']]),
       args('bridge', 'block', [nodeId], [['agent-reach', 'all']]),
       args('bridge', 'block', [nodeId], [['editor', 'on']]),

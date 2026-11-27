@@ -1,11 +1,11 @@
 import type { NetStatus, NodeCapability, NodeId } from '../../shared/net'
-import type { AgentReach, BridgeAccessMine, BridgeNodeConnection, BridgeNodePolicy, NetAddonRecords, PlusStatus, SshRecordView } from '../../shared/net/local'
+import type { AgentReach, BotLevel, BridgeAccessMine,BridgeNodeConnection, BridgeNodePolicy, NetAddonRecords, PlusStatus, SshRecordView } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
 import { serviceFailureLine } from './errorText'
 import { describePermissionMode, type PermissionMode } from '../../shared/permissionMode'
-import { accessPreset, accessPresetOf } from '../../shared/net/accessPresets'
+import { accessPreset, shownPresetOf } from '../../shared/net/accessPresets'
 import { channelForVersion, type SelfUpdateReport } from '../../shared/updates'
 import { compareVersions, isDevBuild } from '../../shared/net/version'
 
@@ -319,7 +319,7 @@ export function allowDetail(name: string, side: 'maker' | 'joiner'): string {
 export function presetLabel(device: Device): string | undefined {
   const policy = device.policy
   if (!policy || policy.blocked || !connectedHere(device) || !isComputer(device) || !worksOnThreads(device)) return undefined
-  const preset = accessPresetOf(policy)
+  const preset = shownPresetOf(policy)
   if (!preset) return undefined
   return preset === 'custom' ? 'Custom' : accessPreset(preset).label
 }
@@ -354,6 +354,8 @@ export type DeviceAccess = Pick<BridgeAccessMine, 'threads' | 'work' | 'terminal
   /** Which threads its agents may change; a person's own calls are not limited by it. */
   agentReach?: AgentReach
 }
+/** A device's bot level, as the tooltip names it. */
+const BOT_LEVEL_WORDS: Record<BotLevel, string> = { off: 'off', use: 'use (chat, answers, reading)', full: 'full' }
 /** Which threads a device's agents may change, as Limits names it. */
 const AGENT_REACH_WORDS: Record<AgentReach, string> = { none: 'none', launched: 'only threads they started', all: 'all threads' }
 
@@ -369,7 +371,8 @@ export function accessHere(device: Device, switches: { workOnThreads: boolean })
   if (policy.blocked) return 'blocked'
   // Each item also needs the signed grant its calls check: reads need read, sends chat, terminals write.
   const has = (cap: NodeCapability) => device.caps.includes(cap)
-  const bots = has('read') && policy.bots !== false
+  // A service from before bot levels sends none: it let the device chat with its bots.
+  const bots: BotLevel = has('read') ? (policy.bots ?? 'use') : 'off'
   if (!isComputer(device)) {
     const threads = device.caps.includes('read')
     return { threads, work: threads && device.caps.includes('write') && policy.work !== false, terminal: false, editor: false, bots }
@@ -392,14 +395,14 @@ export function accessHere(device: Device, switches: { workOnThreads: boolean })
  */
 export function accessWords(access: DeviceAccess, { phone = false }: { phone?: boolean } = {}): { line: string; detail: string } {
   const work = phone ? 'Uses threads' : 'Works on threads'
-  const parts = [access.work ? work : access.threads ? 'Reads threads' : '', access.terminal ? 'terminals' : '', access.editor ? 'editor' : '', access.bots ? 'bots' : ''].filter(Boolean)
+  const parts = [access.work ? work : access.threads ? 'Reads threads' : '', access.terminal ? 'terminals' : '', access.editor ? 'editor' : '', access.bots !== 'off' ? 'bots' : ''].filter(Boolean)
   const mode = access.work && access.maxPermissionMode ? `, up to ${describePermissionMode(access.maxPermissionMode)}` : ''
   const detail = [
     `Threads: ${access.work ? `${phone ? 'starts and sends to them' : 'works on them'}${mode}` : access.threads ? 'reads them' : 'none'}`,
     ...(access.work && access.agentReach ? [`Agents change: ${AGENT_REACH_WORDS[access.agentReach]}`] : []),
     `Terminals: ${access.terminal ? 'on' : 'off'}`,
     `Editor connections: ${access.editor ? 'on' : 'off'}`,
-    `Bots: ${access.bots ? 'on' : 'off'}`
+    `Bots: ${BOT_LEVEL_WORDS[access.bots]}`
   ].join('\n')
   // Agents that may change no thread is the one limit a person working there would not expect.
   if (access.work && access.agentReach === 'none') parts.push('agents read only')

@@ -102,13 +102,13 @@ export class BridgeProfileService {
     const { services, runtime: rt, net } = options
     this.peers = options.peers ?? new PeerDirectory({ net, engine: () => undefined })
     raiseStreamListenerLimits(services)
-    // Which of the owner's devices reach which bot here: each device's switch (Settings, Devices) and each bot's Devices
-    // (About), both kept on this computer. Every path that shows a bot to another device asks it.
+    // Which of the owner's devices reach which bot here, and at what level: each device's bot level (Settings, Devices)
+    // and each bot's Devices (About), both kept on this computer. Every path that shows a bot to another device asks it.
     const access = services.botDeviceAccess
     const reach = createBotReach({
       access: (botId) => access.get(botId).access,
       choices: () => access.choices(),
-      deviceOn: (node) => rt.policy.get(node as NodeId).bots,
+      level: (node) => rt.policy.get(node as NodeId).bots,
       // A blocked device, or one not connected here, reads nothing here, so it does not hold a bot back from the
       // streams every device may read.
       devices: () =>
@@ -134,7 +134,7 @@ export class BridgeProfileService {
             self?: boolean
             revoked?: boolean
             connection?: string
-            policy?: { bots?: boolean }
+            policy?: { bots?: string }
           }>
         }
         // Only the devices connected here are offered.
@@ -144,7 +144,7 @@ export class BridgeProfileService {
             node: entry.node,
             name: cleanDeviceName(entry.name || 'Unnamed device'),
             kind: entry.kind === 'phone' || entry.kind === 'computer' ? entry.kind : 'unknown',
-            ...(entry.policy?.bots === false ? { botsOff: true as const } : {})
+            ...(entry.policy?.bots === 'off' ? { botsOff: true as const } : {})
           }))
       }
     }

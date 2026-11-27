@@ -32,7 +32,7 @@ const refusedWith = (reason: string) => ({ code: 'forbidden', details: { reason 
 
 describe('what this computer may do there', () => {
   it('reports the defaults, and the work they allow passes', async () => {
-    expect(await access()).toMatchObject({ v: 1, blocked: false, threads: true, work: true, terminal: false, editor: false, bots: true, maxPermissionMode: 'accept_edits' })
+    expect(await access()).toMatchObject({ v: 1, blocked: false, threads: true, work: true, terminal: false, editor: false, bots: 'use', maxPermissionMode: 'accept_edits' })
     const thread = t.thread('Plan')
     expect(await call('routed.threads.pin', { threadId: thread.id, pinned: true })).toMatchObject({ ok: true })
   }, 60_000)
@@ -52,7 +52,10 @@ describe('what this computer may do there', () => {
   it('after the keeper picks Full control, reports terminals and editor connections on', async () => {
     await t.owner.net.request('bridge.policy', { node: t.callerNode, ...accessPreset('full').fields })
     try {
-      expect(await access()).toMatchObject({ threads: true, work: true, terminal: true, editor: true, maxPermissionMode: 'full', agentReach: 'all' })
+      expect(await access()).toMatchObject({ threads: true, work: true, terminal: true, editor: true, maxPermissionMode: 'full', agentReach: 'all', bots: 'full' })
+      // The bot level on its own: reported as set, and the rest stays Full control.
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, bots: 'off' })
+      expect(await access()).toMatchObject({ terminal: true, editor: true, maxPermissionMode: 'full', bots: 'off' })
     } finally {
       await t.owner.net.request('bridge.policy', { node: t.callerNode, ...accessPreset('work').fields })
     }
@@ -96,6 +99,19 @@ describe('what this computer may do there', () => {
     entry.handle = async () => { throw new NetError('forbidden') }
     try {
       expect(await there()).toEqual({ state: 'refused' })
+    } finally {
+      entry.handle = handle
+    }
+  }, 60_000)
+
+  it('a computer on a build from before bot levels says on or off, read as a level', async () => {
+    const entry = registry().get('bridge.access.mine')!
+    const handle = entry.handle
+    try {
+      for (const [bots, work, level] of [[true, true, 'full'], [true, false, 'use'], [false, true, 'off']] as const) {
+        entry.handle = async (...args) => ({ ...((await handle(...args)) as object), bots, work })
+        expect(await there(), `${bots}, work ${work}`).toMatchObject({ state: 'known', access: { bots: level } })
+      }
     } finally {
       entry.handle = handle
     }

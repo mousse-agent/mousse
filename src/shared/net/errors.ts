@@ -157,10 +157,12 @@ export function isNetErrorCode(value: unknown): value is NetErrorCode {
  * bare "not permitted". Fixed words only: it is the one detail of an error that crosses the wire.
  * `not_connected`: the other computer has not connected this device (a connection it refuses for that reason is
  * tried again slowly, never given up).
- * `work_off`: the other computer lets this device view threads and chat with bots only ("Work on threads from this
- * device" is off there), so it refuses every call that would start, change or stop work.
+ * `work_off`: the other computer lets this device view threads only ("Work on threads from this device" is off there),
+ * so it refuses every call that would start, change or stop work. Bot calls follow the bot level, not this.
  * `full_control_needed`: only a device with Full control there may update that computer's Mousse.
- * `bots_off`: the other computer's switch "Bots on this computer" is off for this device, so it refuses every bot call.
+ * `bots_off`: the other computer's bot level for this device is Off, so it refuses every bot call.
+ * `bots_full_needed`: the other computer's bot level for this device is Use, so it refuses every call that sets a bot
+ * up or makes one (the bot method's level is Full).
  */
 export const FORBIDDEN_REASONS = [
   'capability',
@@ -170,7 +172,8 @@ export const FORBIDDEN_REASONS = [
   'not_connected',
   'work_off',
   'full_control_needed',
-  'bots_off'
+  'bots_off',
+  'bots_full_needed'
 ] as const
 export type ForbiddenReason = (typeof FORBIDDEN_REASONS)[number]
 export const isForbiddenReason = (value: unknown): value is ForbiddenReason =>

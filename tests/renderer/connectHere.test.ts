@@ -20,7 +20,7 @@ const row = (node: string, name: string, extra: Record<string, unknown>) => ({
   state: 'closed',
   ...extra
 })
-const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: true, agentReach: 'launched', work: true }
+const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: 'use', agentReach: 'launched', work: true }
 const nodes = [
   row('node_a', 'Studio Mac', { self: true, connection: 'connected' }),
   row('node_b', 'Laptop', { connection: 'none', routeHeld: true, policy }),

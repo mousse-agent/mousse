@@ -1759,7 +1759,8 @@ export class NetEngineService implements EngineDirectoryPort {
             terminal: saved.terminal,
             editor: saved.editor,
             maxPermissionMode: saved.maxPermissionMode,
-            agentReach: saved.agentReach
+            agentReach: saved.agentReach,
+            bots: saved.bots
           })
       },
       grantRole,

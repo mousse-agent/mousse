@@ -74,7 +74,7 @@ beforeEach(() => {
   document.body.append(host)
   root = createRoot(host)
   request.mockClear()
-  policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: true, agentReach: 'launched' }
+  policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: 'use', agentReach: 'launched' }
   ;(window as unknown as { mousse: unknown }).mousse = {
     platformRequest: { request },
     app: { getInfo: async () => ({ deviceName: 'Desk' }) },

@@ -3,7 +3,7 @@ import type { NodeId } from '../../../shared/net'
 import { isPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import type { Clock } from '../contracts'
 import type { NetDatabase } from './database'
-import { AGENT_REACHES, isAgentReach, type AgentReach } from '../../../shared/net/local'
+import { AGENT_REACHES, isAgentReach, isBotLevel, type AgentReach, type BotLevel } from '../../../shared/net/local'
 
 /**
  * What this computer lets one other device do here, set on this computer alone. It never travels
@@ -20,10 +20,11 @@ export interface NodePolicy {
   /** The device may open its editor on a folder of this computer, over SSH to this computer's own SSH server. */
   editor: boolean
   /**
-   * The device may reach this computer's personal bots (each bot's own Devices choice still applies). Off, it reaches
-   * none of them: they are in none of its lists and every bot call from it is refused.
+   * What the device may do with this computer's personal bots (`BotLevel`; each bot's own Devices choice still
+   * applies). Off, it reaches none of them: they are in none of its lists and every bot call from it is refused. Apart
+   * from thread access: neither changes the other.
    */
-  bots: boolean
+  bots: BotLevel
   /**
    * Which threads here the device's agents may change with calls marked as an agent's (`ROUTED_AGENT_KEY`): `none`,
    * the threads its agents started here (`launched`, the default), or `all`. Decided at each call from this computer's
@@ -33,8 +34,8 @@ export interface NodePolicy {
   agentReach: AgentReach
   /**
    * A person or an agent on the device may work on threads here: start, send, steer, stop, queue, change settings and
-   * files, run Git, and make or change bots (the `work` and `bots_manage` classes of `shared/net/accessClasses.ts`).
-   * Off, it still reads threads and chats with bots, every family alike, checked on every call and every saved result.
+   * files, and run Git (the `work` class of `shared/net/accessClasses.ts`). Off, it still reads threads, every family
+   * alike, checked on every call and every saved result. Bots follow `bots` alone.
    */
   work: boolean
   createdAt: number
@@ -56,8 +57,11 @@ export const DEFAULT_MAX_PERMISSION_MODE: PermissionMode = 'accept_edits'
 export const DEFAULT_TERMINAL_ACCESS = false
 /** Editor connections from another device are off until the owner turns them on for that device. */
 export const DEFAULT_EDITOR_ACCESS = false
-/** Every device reaches this computer's bots until the owner switches bots off for it (as before the switch existed). */
-export const DEFAULT_BOTS_ACCESS = true
+/**
+ * A new device uses this computer's bots until the owner changes its level. Each bot's Devices starts at this computer
+ * alone, so it still reaches no bot until the owner adds it to one.
+ */
+export const DEFAULT_BOT_LEVEL: BotLevel = 'use'
 /** Every device works on threads here until the owner makes it view only (as before the switch existed). */
 export const DEFAULT_WORK_ACCESS = true
 
@@ -73,7 +77,7 @@ interface Row {
   max_permission_mode: string
   terminal: number
   editor: number
-  bots: number
+  bots: string
   agent_reach: string
   work: number
   created_at: number
@@ -123,7 +127,7 @@ export class SqliteNodePolicy {
       (change.blocked !== undefined && typeof change.blocked !== 'boolean') ||
       (change.terminal !== undefined && typeof change.terminal !== 'boolean') ||
       (change.editor !== undefined && typeof change.editor !== 'boolean') ||
-      (change.bots !== undefined && typeof change.bots !== 'boolean') ||
+      (change.bots !== undefined && !isBotLevel(change.bots)) ||
       (change.work !== undefined && typeof change.work !== 'boolean') ||
       (change.maxPermissionMode !== undefined && !isPermissionMode(change.maxPermissionMode)) ||
       (change.agentReach !== undefined && !isAgentReach(change.agentReach))
@@ -156,7 +160,7 @@ export class SqliteNodePolicy {
           after.maxPermissionMode,
           after.terminal ? 1 : 0,
           after.editor ? 1 : 0,
-          after.bots ? 1 : 0,
+          after.bots,
           after.agentReach,
           after.work ? 1 : 0,
           after.createdAt || this.clock.now()
@@ -192,7 +196,7 @@ export class SqliteNodePolicy {
       maxPermissionMode: DEFAULT_MAX_PERMISSION_MODE,
       terminal: DEFAULT_TERMINAL_ACCESS,
       editor: DEFAULT_EDITOR_ACCESS,
-      bots: DEFAULT_BOTS_ACCESS,
+      bots: DEFAULT_BOT_LEVEL,
       agentReach: DEFAULT_AGENT_REACH,
       work: DEFAULT_WORK_ACCESS,
       createdAt: 0
@@ -209,11 +213,11 @@ export class SqliteNodePolicy {
       terminal: row.terminal === 1,
       // Anything but a stored 1 reads as off, so a value this version does not know never grants shell access.
       editor: row.editor === 1,
-      // Only a stored 1 is on: a value this version does not know never lets a device reach a bot.
-      bots: row.bots === 1,
+      // A value this version does not know never lets a device reach a bot.
+      bots: isBotLevel(row.bots) ? row.bots : 'off',
       // A value this version does not know reaches nothing.
       agentReach: isAgentReach(row.agent_reach) ? row.agent_reach : 'none',
-      // Only a stored 1 is on: a value this version does not know leaves the device to view and chat with bots.
+      // Only a stored 1 is on: a value this version does not know leaves the device to view threads.
       work: row.work === 1,
       createdAt: row.created_at
     }

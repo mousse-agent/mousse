@@ -2,7 +2,7 @@ import { useState } from 'react'
 import {
   ACCESS_PRESETS,
   accessPreset,
-  accessPresetOf,
+  shownPresetOf,
   type AccessPresetFields
 } from '../../../shared/net/accessPresets'
 import type { NetEngineApproval } from '../../../shared/netEngine/local'
@@ -62,7 +62,7 @@ export function LevelPicker({
   busy: boolean
 }) {
   const [customize, setCustomize] = useState(false)
-  const picked = accessPresetOf(fields)
+  const picked = shownPresetOf(fields)
   return (
     <>
       <div className="engine-choice-list" role="radiogroup" aria-label="Access">

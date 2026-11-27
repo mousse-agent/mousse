@@ -12,7 +12,7 @@ import { remoteBotMethods } from '../../src/mms/bridge/remote/RemoteBots'
 import { BOT_METHODS, REMOTE_BOT_METHOD_NAMES, localBotMethods, type BotMethod } from '../../src/shared/bots/personal/methodTable'
 import { ACCESS_CLASSES, METHOD_ACCESS } from '../../src/shared/net/accessClasses'
 
-const rows = BOT_METHODS as Record<BotMethod, { local?: { by: string }; remote?: { access: string } }>
+const rows = BOT_METHODS as Record<BotMethod, { level: string; local?: { by: string }; remote?: object }>
 
 /** What one local registration registers, on its own registry. */
 function registered(register: (domains: DomainHandlerRegistry) => void): string[] {
@@ -37,41 +37,42 @@ describe('the bot method table', () => {
     for (const name of Object.keys(rows) as BotMethod[]) expect(all.includes(name) || remote.includes(name), name).toBe(true)
   })
 
-  it('offers another device exactly its remote rows, once each, each with its access class', () => {
+  it('offers another device exactly its remote rows, once each, each with the access class of its level', () => {
     expect(new Set(remote).size).toBe(remote.length)
     expect([...remote].sort()).toEqual([...REMOTE_BOT_METHOD_NAMES].sort())
     for (const name of REMOTE_BOT_METHOD_NAMES) {
-      expect(ACCESS_CLASSES, name).toContain(rows[name].remote!.access)
-      expect(METHOD_ACCESS[name], name).toBe(rows[name].remote!.access)
+      expect(ACCESS_CLASSES, name).toContain(METHOD_ACCESS[name])
+      expect(METHOD_ACCESS[name], name).toBe(rows[name].level === 'full' ? 'bots_full' : 'bots_use')
     }
-    // No bot method has a class without being offered remotely.
+    // No bot method has a class without being offered remotely, and a row only this computer serves offers nothing.
     expect(Object.keys(METHOD_ACCESS).filter((name) => name in rows && !rows[name as BotMethod].remote)).toEqual([])
+    expect((Object.keys(rows) as BotMethod[]).filter((name) => rows[name].level === 'local' && rows[name].remote)).toEqual([])
   })
 
-  it('offers another device the same methods, with the same classes, as before the table', () => {
-    expect(Object.fromEntries(REMOTE_BOT_METHOD_NAMES.map((name) => [name, rows[name].remote!.access]))).toEqual({
-      'bots.get': 'bots_chat',
-      'bots.chat.list': 'bots_chat',
-      'bots.chat.attachment': 'bots_chat',
-      'bots.memory.list': 'bots_chat',
-      'bots.chat.send': 'bots_chat',
-      'bots.chat.stop': 'bots_chat',
-      'bots.work.stop': 'bots_chat',
-      'bots.chat.markRead': 'bots_chat',
-      'bots.questions.answer': 'bots_chat',
-      'bots.reminders.snooze': 'bots_chat',
-      'bots.actions.answer': 'bots_manage',
-      'bots.asks.answer': 'bots_manage',
-      'bots.personal.pause': 'bots_manage',
-      'bots.personal.resume': 'bots_manage',
-      'bots.create': 'bots_manage',
-      'bots.update': 'bots_manage',
-      'bots.reminders.cancel': 'bots_manage',
-      'bots.schedules.remove': 'bots_manage',
-      'bots.permissions.set': 'bots_manage',
-      'bots.permissions.revoke': 'bots_manage',
-      'bots.memory.forget': 'bots_manage',
-      'bots.memory.edit': 'bots_manage'
+  it('lets a Use device chat, answer, stop and read, and keeps every other remote action for Full', () => {
+    expect(Object.fromEntries(REMOTE_BOT_METHOD_NAMES.map((name) => [name, rows[name].level]))).toEqual({
+      'bots.get': 'use',
+      'bots.chat.list': 'use',
+      'bots.chat.attachment': 'use',
+      'bots.memory.list': 'use',
+      'bots.chat.send': 'use',
+      'bots.chat.stop': 'use',
+      'bots.work.stop': 'use',
+      'bots.chat.markRead': 'use',
+      'bots.questions.answer': 'use',
+      'bots.reminders.snooze': 'use',
+      'bots.actions.answer': 'use',
+      'bots.asks.answer': 'full',
+      'bots.personal.pause': 'full',
+      'bots.personal.resume': 'full',
+      'bots.create': 'full',
+      'bots.update': 'full',
+      'bots.reminders.cancel': 'full',
+      'bots.schedules.remove': 'full',
+      'bots.permissions.set': 'full',
+      'bots.permissions.revoke': 'full',
+      'bots.memory.forget': 'full',
+      'bots.memory.edit': 'full'
     })
   })
 

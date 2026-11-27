@@ -8,7 +8,9 @@ import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS } from '../../../shared/b
 import { MAX_CHOICE_LABEL_CHARS } from '../../../shared/bots/personal/questions'
 import type { BotLook } from '../../../shared/bots/personal/look'
 import { MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotsPersonalV2Api } from '../../../shared/bots/personal/methods'
-import { REMOTE_BOT_METHOD_NAMES, remoteBotMethod, type RemoteBotMethod } from '../../../shared/bots/personal/methodTable'
+import { REMOTE_BOT_METHOD_NAMES, remoteBotLevel, remoteBotMethod, type RemoteBotMethod } from '../../../shared/bots/personal/methodTable'
+import { botLevelReaches, type BotLevel } from '../../../shared/net/local'
+import { BOT_FULL_TRUST_PERMISSION } from '../../../shared/bots/personal/manifest'
 import type { BotChatService } from '../../bots/chat/BotChatService'
 import type { RpcContext, RpcMethod } from '../../net/contracts'
 import type { PermissionMode } from '../../../shared/permissionMode'
@@ -23,11 +25,11 @@ import { REMOTE_BOT_REACH, type BotDeviceAccess } from '../../../shared/bots/per
  * each one calls the same `BotChatService` method the desktop's `bots.*` handler calls, with the same params (less
  * `attachments`, which name files on this computer) and results. No result carries a model, an instance id or a path
  * on this computer. Which methods these are, their
- * keys and their access classes are the `remote` rows of `BOT_METHODS` (`shared/bots/personal/methodTable.ts`).
+ * keys and their levels are the `remote` rows of `BOT_METHODS` (`shared/bots/personal/methodTable.ts`).
  *
- * Which devices reach which bot (`docs/bots.md`, Which devices reach a bot) is checked in `remoteBotMethods`'s one
- * wrapper, so a method added here later is held to it too: a device whose switch for bots is off is refused every one,
- * and a bot whose Devices choice leaves the device out answers exactly as a bot that is not there.
+ * What a device may do with which bot (`docs/bots.md`, Bot access per device) is checked in `remoteBotMethods`'s one
+ * wrapper, so a method added here later is held to it too: a device at Off is refused every one, a device at Use every
+ * row that needs Full, and a bot whose Devices choice leaves the device out answers exactly as a bot that is not there.
  */
 export const REMOTE_BOT_METHODS: Readonly<Record<RemoteBotMethod, { capability: NodeCapability; mutating: boolean }>> = Object.freeze(
   Object.fromEntries(REMOTE_BOT_METHOD_NAMES.map((name) => {
@@ -409,10 +411,10 @@ export function remoteBotMethods(options: {
    */
   deviceLimit?(node: string): PermissionMode
   /**
-   * Which bots the calling device reaches (`BotReachPort`): its switch for bots here, and each bot's Devices choice.
-   * Absent (tests of other things only): every device reaches every bot, as before the setting existed.
+   * Which bots the calling device reaches and what it may do with them (`BotReachPort`): its bot level here, and each
+   * bot's Devices choice. Absent (tests of other things only): every device reaches every bot at Full.
    */
-  reach?: Pick<BotReachPort, 'canReach' | 'deviceOn'> & Partial<Pick<BotReachPort, 'hiddenFor'>>
+  reach?: Pick<BotReachPort, 'canReach' | 'level'> & Partial<Pick<BotReachPort, 'hiddenFor'>>
   /**
    * A bot a device just made: it is kept within reach of that device (its choice gains the device), so the device is not
    * locked out of what it made. A bot with a choice of its own saved (asked for at creation, or set since) is left as it
@@ -427,14 +429,29 @@ export function remoteBotMethods(options: {
       return 'ask'
     }
   }
-  const shared = (node: string): void => {
-    // The device's own switch for bots here: off, every call is refused alike (only the code and the reason cross the
-    // wire, the same for every bot, so nothing tells one bot from another).
-    if (options.reach && !options.reach.deviceOn(node))
+  /**
+   * The gate: the device's bot level here against the row's level (`BOT_METHODS`), read on every admission, every run
+   * and every saved-result lookup, so a change applies to the device's next request. Off refuses every call alike, and
+   * a Use device every Full row alike: only the code and the reason cross the wire, the same for every bot, so nothing
+   * tells one bot from another. Which bot it reaches is the second check (`reachable`).
+   */
+  const admit = (node: string, name: RemoteBotMethod): void => {
+    if (!options.reach) return
+    let level: BotLevel
+    try {
+      level = options.reach.level(node)
+    } catch {
+      level = 'off'
+    }
+    if (level === 'off')
       throw new NetError('forbidden', "This computer doesn't let this device reach its bots.", { details: { reason: 'bots_off' } })
+    if (!botLevelReaches(level, remoteBotLevel(name)))
+      throw new NetError('forbidden', 'This computer lets this device use its bots, not set them up.', {
+        details: { reason: 'bots_full_needed' }
+      })
   }
-  const bots = (context: RpcContext): RemoteBotsPort => {
-    shared(context.caller.node)
+  const bots = (context: RpcContext, name: RemoteBotMethod): RemoteBotsPort => {
+    admit(context.caller.node, name)
     const port = options.bots()
     if (!port) throw new NetError('conflict', 'Bots are unavailable on this computer.')
     return port
@@ -460,8 +477,8 @@ export function remoteBotMethods(options: {
     if (named.size > 4096) named.delete(named.keys().next().value as string)
   }
   /** Before a saved result of a bot call is handed back: the device must still reach the bot it named. */
-  const savedResult = (execution: string, caller: RpcContext['caller']): void => {
-    shared(caller.node)
+  const savedResult = (execution: string, caller: RpcContext['caller'], name: RemoteBotMethod): void => {
+    admit(caller.node, name)
     if (!options.reach) return
     const botId = named.get(execution)
     if (botId !== undefined) {
@@ -472,17 +489,22 @@ export function remoteBotMethods(options: {
     if (!hidden || hidden(caller.node) !== undefined) throw new NetError('outcome_uncertain')
   }
   /** A bot the call names must be there, and within the device's reach; checked before the call is admitted. */
-  const known = (params: unknown, context: RpcContext): void => {
+  const known = (params: unknown, context: RpcContext, name: RemoteBotMethod): void => {
     const botId = (params as { botId?: unknown }).botId
-    const port = bots(context)
+    const port = bots(context, name)
     if (typeof botId !== 'string') return
     reachable(botId, context)
     refusing(() => port.get(botId))
   }
+  type Check = (p: Record<string, unknown>, port: RemoteBotsPort, context: RpcContext) => void
+  /**
+   * One remote row. Every way in (admission, a new call's check, the run, a saved result's lookup) passes the gate with
+   * this row's level; `firstCheck` (`first`) adds a check for a new call only, after the gate.
+   */
   const method = (
     name: RemoteBotMethod,
     handle: (p: Record<string, unknown>, port: RemoteBotsPort, context: RpcContext) => Promise<unknown>,
-    extra: Partial<RpcMethod> = {}
+    firstCheck?: { check: Check }
   ): RpcMethod => ({
     method: name,
     family: 'bridge',
@@ -490,12 +512,19 @@ export function remoteBotMethods(options: {
     // A read's result is the chat itself: it is never kept in the request ledger on disk.
     ...(REMOTE_BOT_METHODS[name].mutating ? {} : { ephemeral: true }),
     validate: (value) => validateRemoteBotParams(name, value),
-    authorize: (value, context) => known(value, context),
-    authorizeResult: (execution, caller) => savedResult(execution, caller),
-    ...extra,
+    authorize: (value, context) => known(value, context, name),
+    authorizeResult: (execution, caller) => savedResult(execution, caller, name),
+    ...(firstCheck
+      ? {
+          authorizeNew: (value: unknown, context: RpcContext) => {
+            const p = value as Record<string, unknown>
+            refusing(() => firstCheck.check(p, bots(context, name), context))
+          }
+        }
+      : {}),
     handle: async (value, context) => {
       const p = value as Record<string, unknown>
-      const port = bots(context)
+      const port = bots(context, name)
       // Read again as the call runs: a device taken off the bot meanwhile gets nothing.
       if (typeof p.botId === 'string') {
         reachable(p.botId, context)
@@ -513,12 +542,7 @@ export function remoteBotMethods(options: {
     }
   })
   /** For a new call only (a retry of one that went through gets its saved result): `check` refuses plainly. */
-  const first = (check: (p: Record<string, unknown>, port: RemoteBotsPort, context: RpcContext) => void): Partial<RpcMethod> => ({
-    authorizeNew: (value, context) => {
-      const p = value as Record<string, unknown>
-      refusing(() => check(p, bots(context), context))
-    }
-  })
+  const first = (check: Check): { check: Check } => ({ check })
   const gone = (what: string): never => {
     throw new NetError('stream_unknown', `${what} is gone.`)
   }
@@ -663,6 +687,12 @@ export function remoteBotMethods(options: {
       'bots.permissions.set',
       async (p, port) => remoteBotDetail(port.setPermission(botId(p), p.permissionId as string, p.enabled as boolean)),
       first((p, port, context) => {
+        // Full bot access never widens thread access: Allow everything gives "use your threads" too, so turning it on
+        // needs Full access here, as that permission does. Turning it off works from any device at Full.
+        if (p.permissionId === BOT_FULL_TRUST_PERMISSION) {
+          if (p.enabled && limitOf(context) !== 'full') throw new NetError('forbidden', 'Allow this on the computer.')
+          return
+        }
         const permission = port.get(botId(p)).permissions.find((item) => item.id === p.permissionId)
         if (!permission) gone('This permission')
         // Same rule as Allow on its card. The fingerprint is the permission's canonical request.

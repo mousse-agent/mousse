@@ -17,7 +17,7 @@ export function accessOf(nodes: readonly string[]): BotDeviceAccess {
 }
 
 /** Why a device reaches no bot here whatever is ticked: its own switch for bots is off (Settings, Devices). */
-const botsOffTip = (device: BotDeviceChoice) => `Bots on this computer are off for ${device.name} (Settings, Devices), so it reaches none of them.`
+const botsOffTip = (device: BotDeviceChoice) => `Bots are Off for ${device.name} in Settings, Devices, so it reaches none of them.`
 
 /**
  * One switch per other device of the owner's, after this computer, which is always on: New bot's Devices step and

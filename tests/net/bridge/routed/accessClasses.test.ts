@@ -1,6 +1,6 @@
 /**
  * Every remote method and stream kind has an access class (`shared/net/accessClasses.ts`), and "Work on threads from
- * this device" off (`net_node_policy.work`) leaves a device to view threads and chat with bots. Over two real daemons
+ * this device" off (`net_node_policy.work`) leaves a device to view threads; its bot level is separate. Over two real daemons
  * linked by Bridge: the keeper (`owner`) and a member (`caller`), each the receiver in turn, so the switch holds on a
  * computer that is not the keeper too. What is checked is the receiver's dispatcher, the one place every call and every
  * lookup of a saved result passes.
@@ -63,7 +63,7 @@ describe('speech (dictation and read-aloud)', () => {
     }
     try {
       for (const preset of ACCESS_PRESETS)
-        for (const bots of [true, false]) {
+        for (const bots of ['off', 'use', 'full']) {
           await t.owner.net.request('bridge.policy', { node: t.callerNode, ...preset.fields, bots })
           for (const method of speech) expect(admitted(method), `${preset.id}, bots ${bots}: ${method}`).toBe(true)
         }
@@ -71,7 +71,7 @@ describe('speech (dictation and read-aloud)', () => {
       await t.owner.net.request('bridge.policy', { node: t.callerNode, blocked: true })
       for (const method of speech) expect(admitted(method), method).toBe(false)
     } finally {
-      await t.owner.net.request('bridge.policy', { node: t.callerNode, ...accessPreset('work').fields, bots: true, blocked: false })
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, ...accessPreset('work').fields, blocked: false })
     }
   }, 60_000)
 })
@@ -157,11 +157,13 @@ describe('a device that may view threads and chat with bots only', () => {
         ['routed.orchestrator.abort', { threadId: thread.id, agent: mark() }],
         ['routed.files.read', { threadId: thread.id, path: 'a.txt' }],
         ['threads.create', { name: 'From a phone' }],
-        ['orchestrator.send', { threadId: thread.id, content: 'From a phone' }],
-        ['bots.create', { look: { colour: 'teal', accessory: 'cap' }, description: 'Tidy notes', clientRequestId: `make-${index}` }]
+        ['orchestrator.send', { threadId: thread.id, content: 'From a phone' }]
       ]
       for (const [method, params] of refused)
         await expect(rpc(method, params, { idem: `${method}-${index}-${JSON.stringify(params).length}` }), method).rejects.toMatchObject(forbidden('work_off'))
+      // Making a bot follows the bot level, not Work on threads: at Use (the default) it is refused for that.
+      const make = { look: { colour: 'teal', accessory: 'cap' }, description: 'Tidy notes', clientRequestId: `make-${index}` }
+      await expect(rpc('bots.create', make, { idem: `make-${index}` })).rejects.toMatchObject(forbidden('bots_full_needed'))
       expect(reached).toEqual(['chatSend:What is on today?'])
       expect(receiver.threads.getThread(thread.id)?.name).toBe('Plan B')
       // The result it asked for earlier cannot be read back either.
@@ -180,7 +182,7 @@ describe('a device that may view threads and chat with bots only', () => {
       const client = t.client()
       const person = await t.refused(client.call(t.node, 'orchestrator.send', { threadId: thread.id, content: 'Go on' }, { idem: 'person-send' }))
       expect(person).toMatchObject({ code: 'computer_forbidden', details: { reason: 'work_off' } })
-      expect(person.message).toContain('view threads and chat with bots only')
+      expect(person.message).toContain('view threads only')
       const agent = await t.refused(client.call(t.node, 'threads.create', { name: 'Launched', agent: mark() }, { idem: 'agent-create' }))
       expect(agent).toMatchObject({ code: 'computer_forbidden', details: { reason: 'work_off' } })
       // Reading goes on.

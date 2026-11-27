@@ -10,10 +10,14 @@ import { accessPreset } from '../../src/shared/net/accessPresets'
 import { UPDATE_NET_METHODS } from '../../src/shared/remoteUpdates'
 
 const node = 'node_test' as NodeId
-const base = { node, blocked: false, bots: true, ...accessPreset('full').fields } as unknown as NodePolicy
+const base = { node, blocked: false, ...accessPreset('full').fields } as unknown as NodePolicy
 
 const rows: Array<[string, Partial<NodePolicy>, string | undefined]> = [
   ['Full control', {}, undefined],
+  // The bot level is not one of the fields that make Full control.
+  ['Full control, bots Use', { bots: 'use' }, undefined],
+  ['Full control, bots Off', { bots: 'off' }, undefined],
+  ['Work on threads, bots Full', { ...accessPreset('work').fields, bots: 'full' }, 'full_control_needed'],
   ['Full control, blocked', { blocked: true }, 'blocked'],
   ['Work on threads', accessPreset('work').fields, 'full_control_needed'],
   ['View and chat', accessPreset('view').fields, 'full_control_needed'],
