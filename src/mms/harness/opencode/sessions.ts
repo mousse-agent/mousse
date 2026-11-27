@@ -177,6 +177,28 @@ function toolTitle(name: string, input: Record<string, unknown> | undefined): st
   return detail ? `${name} ${detail.length > 120 ? `${detail.slice(0, 117)}…` : detail}` : name
 }
 
+/** Most results a web search row keeps, as Claude's do. */
+const MAX_SEARCH_RESULTS = 20
+const RESULT_TITLE_CHARS = 300
+const RESULT_URL_CHARS = 2_000
+
+/**
+ * The results OpenCode's own web search found, from its result text: one `## [title](url)` heading a result, the title
+ * being the URL when the page has none (2.0.20 `tool/plugin/websearch.ts`). Undefined when it lists none (its "No search
+ * results found" text included).
+ */
+function webSearchResults(text: string): Array<{ title: string; url: string }> | undefined {
+  const results: Array<{ title: string; url: string }> = []
+  for (const line of text.split('\n')) {
+    const heading = /^## \[(.*)\]\((\S+)\)\s*$/.exec(line)
+    if (!heading || !/^https?:\/\//i.test(heading[2]!) || heading[2]!.length > RESULT_URL_CHARS) continue
+    const title = heading[1]!.trim() || heading[2]!
+    results.push({ title: title.length > RESULT_TITLE_CHARS ? `${title.slice(0, RESULT_TITLE_CHARS - 1)}…` : title, url: heading[2]! })
+    if (results.length === MAX_SEARCH_RESULTS) break
+  }
+  return results.length > 0 ? results : undefined
+}
+
 /** The text of a tool result's content items (`Tool.Content`). */
 function contentText(content: unknown): string | undefined {
   if (!Array.isArray(content)) return undefined
@@ -498,9 +520,16 @@ export class OpencodeSessions {
       openTools.delete(callId)
       const activity = toolActivity(tool.name, tool.input, input.cwd)
       // The result text is a command's, search's or other call's output, as other runtimes' rows keep it (the transcript
-      // bounds it; a computer use call's is held to its allowlist by the turn's tool mapper). A file change or web search
-      // has no output: its result stays the row's summary.
-      const kept = !result ? {} : activity.kind === 'command' || activity.kind === 'search' || activity.kind === 'generic' ? { output: result } : { summary: result.slice(0, 2_000) }
+      // bounds it; a computer use call's is held to its allowlist by the turn's tool mapper). A web search that succeeded
+      // keeps the results it lists; a file change, or a failed search, keeps its result as the row's summary.
+      const results = activity.kind === 'web_search' && status === 'completed' && result ? webSearchResults(result) : undefined
+      const kept = !result
+        ? {}
+        : activity.kind === 'command' || activity.kind === 'search' || activity.kind === 'generic'
+          ? { output: result }
+          : results
+            ? { results }
+            : { summary: result.slice(0, 2_000) }
       input.onTool?.({
         phase: 'complete',
         callId,

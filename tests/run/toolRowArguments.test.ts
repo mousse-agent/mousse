@@ -47,6 +47,18 @@ const RESULTS = [
   'Text: Prices fall in November.'
 ].join('\n')
 
+/** OpenCode's own web search result text: a `## [title](url)` heading, its date and its text, a result each. */
+const OPENCODE_RESULTS = [
+  '## [Best robot vacuums of 2026](https://www.example.com/vacuums)',
+  'Published: 2026-11-01T00:00:00.000Z',
+  '',
+  'Our picks…',
+  '',
+  '## [https://prices.test/vacuum?ref=1](https://prices.test/vacuum?ref=1)',
+  '',
+  'Prices fall in November.'
+].join('\n')
+
 const cleanups: Array<() => void> = []
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup() })
 
@@ -116,6 +128,14 @@ async function opencodeRows(): Promise<ChatMessage[]> {
     event('session.tool.input.started', { id: 'o-search', name: `${mousseServerName('t')}_web_search` })
     event('session.tool.called', { id: 'o-search', input: { query: 'robot vacuum prices' }, executed: false })
     event('session.tool.success', { id: 'o-search', content: [{ type: 'text', text: RESULTS }], executed: true })
+    // OpenCode's own web search and fetch, with their results as OpenCode 2.0.20 writes them
+    // (`packages/core/src/tool/plugin/websearch.ts`: one `## [title](url)` heading a result).
+    event('session.tool.input.started', { id: 'o-own-search', name: 'websearch' })
+    event('session.tool.called', { id: 'o-own-search', input: { query: 'robot vacuum prices' }, executed: false })
+    event('session.tool.success', { id: 'o-own-search', content: [{ type: 'text', text: OPENCODE_RESULTS }], metadata: { provider: 'exa' }, executed: true })
+    event('session.tool.input.started', { id: 'o-fetch', name: 'webfetch' })
+    event('session.tool.called', { id: 'o-fetch', input: { url: 'https://example.com/vacuums/review', format: 'markdown' }, executed: false })
+    event('session.tool.success', { id: 'o-fetch', content: [{ type: 'text', text: '# Review' }], metadata: { contentType: 'text/html' }, executed: true })
     fake.reply(session.id, 'done')
   }
   const transcript = transcriptSink()
@@ -167,10 +187,15 @@ describe('a tool row says what the call did', () => {
     expect(bare!.title).toBe('Checked what is running in Mousse')
   })
 
-  it('OpenCode: a web search names its query and the sites it found', async () => {
-    const [search] = drawn((await opencodeRows()).filter((row) => row.toolCall))
+  it('OpenCode: Mousse’s web search and its own name their query and the sites they found; its fetch names its URL', async () => {
+    const [search, ownSearch, fetch] = drawn((await opencodeRows()).filter((row) => row.toolCall))
     expect(search!.title).toBe('Searched the web robot vacuum prices')
     expect(search!.sites).toEqual(['Best robot vacuums of 2026example.com', 'Vacuum price trackerprices.test'])
+    expect(ownSearch!.text).toContain('robot vacuum prices')
+    expect(ownSearch!.text).toMatch(/Found 2 results/)
+    expect(ownSearch!.text).toMatch(/Best robot vacuums of 2026\s*(?:www\.)?example\.com/)
+    expect(ownSearch!.text).toMatch(/https:\/\/prices\.test\/vacuum\?ref=1\s*prices\.test/)
+    expect(fetch!.title).toContain('https://example.com/vacuums/review')
   })
 
   it('Cursor: a web search names its query and the sites it found', () => {
