@@ -372,6 +372,11 @@ export interface AutomationDraftState {
   ask?: { question: string; options: string[]; at: string }
   /** Turn on gives it one reusable thread for every run (Result: reuse). */
   reuseThread?: true
+  /**
+   * A signed request starts it (an `http` trigger). Its URL and secret are set up by the person (`scheduled.webhook.enable`),
+   * which a draft may have before Turn on; until then it shows as On request and cannot be turned on.
+   */
+  request?: true
 }
 
 /** Profile settings of the scheduler that people choose on the Scheduled page. */

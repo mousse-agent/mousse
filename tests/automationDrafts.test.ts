@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ScheduledJobService } from '../src/mms/scheduled/ScheduledJobService'
-import { AGENT_EDIT_PAUSE, AutomationDrafts, cliNameOf, type AutomationDraftsDeps } from '../src/mms/automations/AutomationDrafts'
+import { AGENT_EDIT_PAUSE, AutomationDrafts, cliNameOf, REQUEST_URL_PROBLEM, type AutomationDraftsDeps } from '../src/mms/automations/AutomationDrafts'
 import { buildAutomationIndex } from '../src/mms/automations/AutomationIndex'
 import { automationManagerWorkspace } from '../src/mms/automations/automationManager'
 import { automationTools, type AutomationToolHost } from '../src/mms/run/mcp/appTools/automations'
@@ -145,6 +145,63 @@ describe('automation drafts', () => {
     expect(resolveRunTarget(service.listJobs(), a.id.slice(0, 8))).toBe(a.id)
     expect(resolveRunTarget(service.listJobs(), 'nope')).toBeUndefined()
     expect(cliNameOf('  PR check: Thursday!  ')).toBe('pr-check-thursday')
+  })
+
+  it('keeps the trigger it was given, through the tool, the list and the page', async () => {
+    const { drafts, service } = setup()
+    const tools: AutomationToolHost = { drafts, isManagerThread: (id) => id === 'manager', botOf: () => undefined }
+    const [save, , , update] = automationTools({ automations: () => tools } as unknown as AppToolHost)
+    const ctx = { caller: { threadId: 'manager', runId: 'r1' }, turn: { threadId: 'manager' }, toolCallId: 'c1' } as unknown as ToolCallContext
+    const index = () => buildAutomationIndex({ jobs: () => service.listJobs(), thread: () => undefined, threads: () => [], projectName: () => 'mousse', threadMode: () => 'ask', computerName: 'Desk', timeZone: 'UTC' })
+    const rows: Array<{ trigger: Record<string, unknown>; contract: Record<string, unknown>; page: string; urlProblem: boolean }> = [
+      { trigger: { kind: 'http' }, contract: { kind: 'http' }, page: 'request', urlProblem: true },
+      { trigger: { kind: 'webhook' }, contract: { kind: 'http' }, page: 'request', urlProblem: true },
+      { trigger: { kind: 'request' }, contract: { kind: 'http' }, page: 'request', urlProblem: true },
+      { trigger: { kind: 'cli', name: 'Ship it' }, contract: { kind: 'cli', name: 'ship-it' }, page: 'on_demand', urlProblem: false },
+      { trigger: PR_CHECK.trigger, contract: PR_CHECK.trigger, page: 'time', urlProblem: false }
+    ]
+    for (const row of rows) {
+      const saved = JSON.parse((await save!.handler({ ...PR_CHECK, project: 'p1', trigger: row.trigger }, ctx)).text) as { draftId: string; problems: string[] }
+      const listed = drafts.list().find((entry) => entry.id === saved.draftId)!
+      expect(listed.trigger, JSON.stringify(row.trigger)).toEqual(row.contract)
+      expect(listed.cliName, JSON.stringify(row.trigger)).toBe(row.contract.kind === 'cli' ? 'ship-it' : undefined)
+      expect(index().items.find((entry) => entry.id === saved.draftId)!.trigger, JSON.stringify(row.trigger)).toBe(row.page)
+      expect(saved.problems.includes(REQUEST_URL_PROBLEM), JSON.stringify(row.trigger)).toBe(row.urlProblem)
+    }
+
+    // A CLI draft changed to a webhook loses its CLI name and keeps the webhook on a later save that leaves the trigger out.
+    const cli = drafts.save({ ...PR_CHECK, project: 'p1', trigger: { kind: 'cli' } }, { managerThreadId: 'manager' })
+    const changed = (JSON.parse((await update!.handler({ id: cli.draftId, trigger: { kind: 'webhook' } }, ctx)).text) as { automation: { trigger: unknown; cliName?: string } }).automation
+    expect(changed).toMatchObject({ trigger: { kind: 'http' } })
+    expect(changed.cliName).toBeUndefined()
+    drafts.save({ draftId: cli.draftId, name: 'Renamed' }, { managerThreadId: 'manager' })
+    expect(drafts.contract(service.getJob(cli.draftId)!).trigger).toEqual({ kind: 'http' })
+    expect(() => drafts.turnOn(cli.draftId)).toThrow(/request URL/)
+
+    // Once it has a URL, another trigger waits for the person to turn the URL off (its secret goes with it).
+    const secrets = new Map<string, string>()
+    service.setWebhookSecrets({ write: (ref, value) => { secrets.set(ref, value) }, delete: (ref) => { secrets.delete(ref) } })
+    service.enableWebhook(cli.draftId)
+    drafts.recheck(cli.draftId)
+    expect(service.getJob(cli.draftId)!.draft!.problems).toEqual([])
+    // Refused, and nothing of it is saved: the URL stays, with no CLI name.
+    expect(() => drafts.save({ draftId: cli.draftId, trigger: { kind: 'cli' } }, { managerThreadId: 'manager' })).toThrow(/still has a request URL/)
+    expect(service.getJob(cli.draftId)).toMatchObject({ trigger: { webhook: { scheme: 'mousse' } }, schedule: { kind: 'manual' } })
+    expect(service.getJob(cli.draftId)!.cliName).toBeUndefined()
+  })
+
+  it('a clock the person gives a request draft replaces its request: On demand afterwards is the CLI', () => {
+    const { drafts, service } = setup()
+    const { draftId } = drafts.save({ ...PR_CHECK, project: 'p1', trigger: { kind: 'webhook' } }, { managerThreadId: 'manager' })
+    // Edit details saves the schedule through the protocol, then the draft is re-checked.
+    service.updateJob(draftId, { schedule: { kind: 'interval', minutes: 60 } })
+    drafts.recheck(draftId)
+    service.updateJob(draftId, { schedule: { kind: 'manual' } })
+    drafts.recheck(draftId)
+    const job = service.getJob(draftId)!
+    expect(drafts.contract(job).trigger).toMatchObject({ kind: 'cli' })
+    expect(job.draft).toMatchObject({ problems: [] })
+    expect(job.draft!.request).toBeUndefined()
   })
 
   it('takes Who from the person, never the manager: a bot\'s draft turns on as the bot\'s own schedule', () => {

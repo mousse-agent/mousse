@@ -1130,6 +1130,35 @@ describe('scheduled job webhook trigger', () => {
       expect(log.url).toBe(`http://127.0.0.1:${port}/hooks/${id}`)
     })
 
+    it('a webhook draft an agent writes stays one: it waits for its URL, takes no request until Turn on, then runs from a signed request', async () => {
+      const calls: string[] = []
+      ;(mms.scheduled as unknown as { runner: { runIsolated: (prompt: string) => Promise<{ text: string; silent: boolean }> } }).runner = {
+        runIsolated: async (prompt) => { calls.push(prompt); return { text: 'ok', silent: false } }
+      }
+      const project = mms.projects.openProject(mkdtempSync(join(home, 'project-')))
+      const drafts = mms.automationDrafts
+      const { draftId, problems } = drafts.save({ name: 'Triage issue', trigger: { kind: 'webhook' }, prompt: 'Triage issue {{body.issue}}', project: project.id }, { managerThreadId: 'manager' })
+      expect(drafts.contract(mms.scheduled.getJob(draftId)!).trigger).toEqual({ kind: 'http' })
+      expect(problems).toEqual(['Set up its request URL in Edit details › Request URL.'])
+      expect(() => drafts.turnOn(draftId)).toThrow(/request URL/)
+
+      const port = await freePort()
+      const enabled = await client.request<{ job: ScheduledJob; secret: string }>('scheduled.webhook.enable', { id: draftId, port })
+      // Its URL was what kept Turn on off: the answer already says so.
+      expect(enabled.job.draft?.problems).toEqual([])
+      // A draft never runs, also on a signed request.
+      expect((await signedPost(port, draftId, '{"issue":7}', { secret: enabled.secret })).status).toBe(409)
+
+      const on = drafts.turnOn(draftId)
+      expect(on).toMatchObject({ enabled: true, schedule: { kind: 'manual' }, trigger: { webhook: { scheme: 'mousse' } } })
+      expect(drafts.contract(on).trigger).toEqual({ kind: 'http' })
+      // Its runs go to a new thread; here the isolated runner stands in for one, to read the prompt the request filled.
+      mms.scheduled.updateJob(draftId, { createThread: undefined })
+      expect((await signedPost(port, draftId, '{"issue":8}', { secret: enabled.secret })).status).toBe(202)
+      await until(() => calls.length === 1, 'the run')
+      expect(calls[0]).toMatch(/^Triage issue <webhook-data-[0-9a-f]{16}>8<\/webhook-data-[0-9a-f]{16}>\n/)
+    })
+
     it('"Agents may create jobs" is off by default, is chosen over the protocol, and refuses anything else', async () => {
       const limits = { agentJobMaxActive: 10, agentJobMinIntervalMinutes: 15, agentJobLifetimeDays: 7 }
       expect(await client.request('scheduled.settings.get')).toEqual({ settings: { agentJobs: false, ...limits } })
