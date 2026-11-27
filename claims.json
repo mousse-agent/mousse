@@ -198,6 +198,19 @@
       "expiresAt": "2026-11-27T15:50:13.257Z"
     },
     {
+      "task": "t3/s3c-bot-chain-holds",
+      "session": "LAPTOP-HIEROJK7-c01ef4",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "t3/s3c-bot-chain-holds",
+      "paths": [
+        "src/mms/bots",
+        "src/mms/run/AgentChains.ts",
+        "src/mms/orchestrator/OrchestratorService.ts"
+      ],
+      "claimedAt": "2026-11-27T15:53:06.509Z",
+      "expiresAt": "2026-11-27T17:53:06.509Z"
+    },
+    {
       "task": "tree-corrections",
       "session": "LAPTOP-HIEROJK7-dfae29",
       "machine": "LAPTOP-HIEROJK7",
