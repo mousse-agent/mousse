@@ -46,6 +46,20 @@
       "expiresAt": "2026-11-27T12:11:45.533Z"
     },
     {
+      "task": "issue-2004-thread-starter-sync",
+      "session": "LAPTOP-HIEROJK7-ae6a89",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "issue-2004-thread-starter-sync",
+      "paths": [
+        "src/mms/bridge/remote/MmsListsSource.ts",
+        "src/mms/bridge/routed/listRows.ts",
+        "src/mms/bridge/routed/mergedLists.ts",
+        "src/renderer/components/sideCard/lineageLogic.ts"
+      ],
+      "claimedAt": "2026-11-27T10:40:03.362Z",
+      "expiresAt": "2026-11-27T12:40:03.362Z"
+    },
+    {
       "task": "lan-first-paths",
       "session": "Avarnics-Mac-mini.local-8600b4",
       "machine": "Avarnics-Mac-mini.local",
