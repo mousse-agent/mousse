@@ -7,7 +7,6 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { ProviderAuthService } from '../../src/mms/providers/ProviderAuthService'
 import { runPiOneShot } from '../../src/mms/harness/drivers/pi/oneShot'
 import { LOCAL_PLACEHOLDER_KEY } from '../../src/mms/providers/local/LocalConnections'
-import { rankTitleModels } from '../../src/mms/orchestrator/TitleModelIndex'
 
 // Local model servers against fake servers on 127.0.0.1 only. Every request each server receives is recorded, so a
 // test can say exactly what was sent where (headers and body bytes), and that nothing was sent at all.
@@ -311,16 +310,6 @@ describe('local model servers', () => {
     })
     expect(await service.local.checkTools('local-ollama', 'phi3:medium')).toEqual({ ok: true, tools: 'passed' })
     expect(service.local.facts('local-ollama', 'phi3:medium')?.tools).toBe('passed')
-  })
-
-  it('leaves local models out of Automatic naming for every thread', () => {
-    const snapshot = { instanceId: 'pi:local-ollama', driver: 'pi', enabled: { effective: true }, checkedAt: 1, auth: { state: 'signed_in' }, runs: { state: 'yes' } } as never
-    const ranked = rankTitleModels({
-      snapshots: [snapshot],
-      models: () => [{ id: 'phi3:medium', label: 'phi3:medium', source: 'catalog', capabilities: { efforts: [], images: false }, hidden: false, favorite: false, local: { tools: 'reported', images: false, loaded: true } }],
-      canOneShot: () => true
-    })
-    expect(ranked).toEqual([])
   })
 
   it('reads a model list saved by an older build without failing (no models key)', async () => {

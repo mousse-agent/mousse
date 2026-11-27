@@ -27,6 +27,9 @@ import { killTree, spawnHarness } from '../spawn'
 import { ptyAvailable, runInPty, signInPrompts, type PtySpawn } from '../pty'
 import { InstanceVault } from '../vault'
 import { createAcpRuntime } from './acp'
+import { legacyOneShotRoute } from '../oneShot/routes'
+
+const grokLegacyRoute = legacyOneShotRoute('grok')
 
 /**
  * xAI's Grok CLI over ACP (the Grok preset of the ACP core). It runs the `grok` on PATH (the
@@ -158,8 +161,11 @@ export function grokDriver(options: GrokDriverOptions = {}): HarnessDriver {
     },
     // Chat titles, branch names, pull request drafts, commit messages, a bot's name and digest: one headless request
     // with no tools (`grok/oneShot.ts`), where the check proved it for this version.
-    oneShot: true,
-    oneShotRefusal: (config, version, instanceId) => gap('titles', config.displayName ?? GROK_LABEL, version, instanceId),
+    // Until its own slice, on that code (`DriverRuntime.oneShot`), admitted with no facts claimed.
+    oneShotRoute: ({ config, installedVersion, instanceId }) => {
+      const why = gap('titles', config.displayName ?? GROK_LABEL, installedVersion, instanceId)
+      return why ? { refused: `${why} Choose another model for chat titles, or Automatic.` } : grokLegacyRoute()
+    },
     updateCommand: (owner: InstallOwner) => (owner === 'standalone' ? 'grok update' : owner === 'npm' ? 'npm install -g @xai-official/grok@latest' : undefined),
     create: (context) => createGrokRuntime(context, options, (entry) => entries.set(context.instanceId, entry), (version) => recordOf(version, context.instanceId))
   }

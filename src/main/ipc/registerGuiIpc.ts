@@ -102,6 +102,7 @@ import {
 import { surfaceToWindowBackground } from '../../shared/accentPalette'
 import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu, writePngToClipboard } from '../contextMenu'
+import { setPageKeyboard } from '../zoomShortcuts'
 import { pickExecutable } from './pickExecutable'
 import { stageBotAttachment, stageThreadAttachment } from './botAttachments'
 import { chooseBrowserViewFiles, type BrowserViewFilesDeps } from './browserViewFiles'
@@ -3914,6 +3915,10 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ options: unknown }>('settings.getOptions')
     return res.options
   })
+  registerHandler('settings:getTitleOptions', async () => {
+    const res = await guiMms.request<{ titleOptions: unknown }>('settings.titleOptions')
+    return res.titleOptions
+  })
 
   registerHandler('lineEdits:getStats', () => guiMms.request('stats.lineEdits'))
   registerHandler('usageStats:getStats', () => guiMms.request('stats.usage'))
@@ -4276,6 +4281,7 @@ export function registerGuiIpc(
     showCopyMenu(getWindow, x, y, text)
   })
   registerHandler('clipboard:writeImage', (_e, png: unknown) => { writePngToClipboard(png) })
+  registerHandler('zoom:pageKeyboard', (event, on: unknown) => { setPageKeyboard(event.sender.id, on === true) })
 
   return { syncDaemonTurnSnapshot }
 }

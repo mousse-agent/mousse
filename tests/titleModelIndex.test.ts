@@ -40,12 +40,20 @@ const MODELS: Record<string, InstanceModel[]> = {
   'acp:other': [model('other-model')]
 }
 
-function rank(snapshots: InstanceSnapshot[], options: { models?: Record<string, InstanceModel[]>; canOneShot?: (id: string) => boolean; catalog?: ModelCatalog } = {}) {
+/** Admission as the gateway answers it for these fixtures: no hidden, unable or local server's model. */
+function admitsListed(models: Record<string, InstanceModel[]>) {
+  return (instanceId: string, id: string) => {
+    const listed = (models[instanceId] ?? []).find((each) => each.id === id)
+    return Boolean(listed) && !listed!.hidden && listed!.oneShot !== false && !listed!.local
+  }
+}
+
+function rank(snapshots: InstanceSnapshot[], options: { models?: Record<string, InstanceModel[]>; admits?: (id: string, model: string) => boolean; catalog?: ModelCatalog } = {}) {
   const models = options.models ?? MODELS
   return rankTitleModels({
     snapshots,
     models: (instanceId) => models[instanceId] ?? [],
-    canOneShot: options.canOneShot ?? (() => true),
+    admits: options.admits ?? admitsListed(models),
     catalog: options.catalog ?? catalog
   })
 }
@@ -109,7 +117,7 @@ describe('ranking', () => {
     expect(ids(ranked.slice(4))).toEqual(['claude/haiku', 'claude/sonnet', 'claude/opus', 'pi:groq/llama-fast'])
   })
 
-  it('leaves out entries that are not ready, locked bot entries, entries with no single requests, and hidden or one-shot-less models', () => {
+  it('leaves out entries that are not ready, locked bot entries, and every model admission does not admit', () => {
     const ranked = rank([
       claudeSnapshot({ instanceId: 'claude:off', enabled: { effective: false } }),
       claudeSnapshot({ instanceId: 'claude:out', auth: { state: 'signed_out' } }),
@@ -126,7 +134,8 @@ describe('ranking', () => {
         'claude:agent': [model('haiku')],
         'claude:mixed': [model('haiku', { hidden: true }), model('custom-agent-model', { oneShot: false }), model('sonnet')]
       },
-      canOneShot: (id) => id !== 'claude:agent'
+      // Admission refuses the agent with no route, and on the mixed entry its hidden and unable models.
+      admits: (id, modelId) => id !== 'claude:agent' && (id !== 'claude:mixed' || modelId === 'sonnet')
     })
     expect(ids(ranked)).toEqual(['claude:mixed/sonnet'])
   })
@@ -140,7 +149,7 @@ describe('ranking', () => {
     const ranked = rankTitleModels({
       snapshots: [claudeSnapshot(), codexSnapshot()],
       models: (id) => { if (id === 'claude') throw new Error('gone'); return MODELS[id] ?? [] },
-      canOneShot: () => true,
+      admits: admitsListed(MODELS),
       catalog
     })
     expect(ranked[0]).toMatchObject({ instanceId: 'codex', model: 'gpt-6-luna' })
@@ -159,12 +168,13 @@ describe('the level a naming request asks for', () => {
 })
 
 /** A gateway as the index reads it, with every read counted. */
-function gateway(snapshots: InstanceSnapshot[], options: { enabledIn?: (id: string, scope: ProviderScope) => boolean; canOneShot?: (id: string) => boolean } = {}) {
+function gateway(snapshots: InstanceSnapshot[], options: { enabledIn?: (id: string, scope: ProviderScope) => boolean; hasRoute?: (id: string) => boolean } = {}) {
   let current = snapshots
   const listeners: Array<(event: { type: string; data?: unknown }) => void> = []
   const source = {
     cachedSnapshots: vi.fn(() => current),
-    canOneShot: vi.fn(options.canOneShot ?? (() => true)),
+    admitsOneShot: vi.fn(admitsListed(MODELS)),
+    hasOneShotRoute: vi.fn(options.hasRoute ?? (() => true)),
     isEnabledInScope: vi.fn(options.enabledIn ?? (() => true)),
     catalog: { models: vi.fn((id: string) => MODELS[id] ?? []) },
     instances: {
@@ -326,7 +336,7 @@ describe('an entry not checked yet', () => {
   it('an entry that is off, a locked bot entry, one with no single requests, or off in the project is never pending', () => {
     expect(pending([unchecked({ enabled: { effective: false } })]).hasPendingProbe()).toBe(false)
     expect(pending([unchecked({ config: { profile: 'locked' } as InstanceSnapshot['config'] })]).hasPendingProbe()).toBe(false)
-    expect(pending([unchecked()], { canOneShot: () => false }).hasPendingProbe()).toBe(false)
+    expect(pending([unchecked()], { hasRoute: () => false }).hasPendingProbe()).toBe(false)
     const project: ProviderScope = { kind: 'project', projectId: 'p1' }
     expect(pending([unchecked()], { enabledIn: (_id, scope) => scope.kind === 'device' }).hasPendingProbe(project)).toBe(false)
   })

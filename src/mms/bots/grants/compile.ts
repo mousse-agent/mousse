@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_RETIRED_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_QUESTION_WITHDRAW_TOOL, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_COMPUTER_REQUEST_TOOL, BOT_COMPUTER_TOOLS, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SECRET_TOOLS, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_CHAT_NATIVE_OFF, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_AUTOMATION_ENABLE_TOOL, BOT_RETIRED_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_QUESTION_WITHDRAW_TOOL, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_COMPUTER_REQUEST_TOOL, BOT_COMPUTER_TOOLS, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SECRET_TOOLS, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_CHAT_NATIVE_OFF, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
 import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from '../../../shared/bots/personal/catalogue'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import { BOT_ITEM_TOOLS } from '../../../shared/bots/personal/items'
@@ -265,8 +265,11 @@ export function compileBotThread(input: CompileInput): CompileResult {
   const narrowSkills = input.thread.narrow?.skills
   const allSkills = input.allSkills === true && !narrowSkills
   const skills = [...new Set([...manifest.skills, ...(input.allSkills === true && narrowSkills ? narrowSkills : [])])].sort()
+  // Turning automations on (`automation_enable`): only a main turn that may act for the owner (`threads: 'all'`, its start
+  // then checked at the call, `turnRefusals`), never a consult, whose words the owner never sees.
+  const enablesAutomations = own?.threads === 'all'
   const appTools = [...new Set([
-    ...manifest.appTools.filter((tool) => !BOT_GROUP_PERMISSIONS.has(tool)),
+    ...manifest.appTools.filter((tool) => !BOT_GROUP_PERMISSIONS.has(tool) && (tool !== BOT_AUTOMATION_ENABLE_TOOL || enablesAutomations)),
     ...(themes ? BOT_THEME_TOOLS : []),
     ...(profiler ? (own?.frontDesk ? BOT_PROFILER_CHAT_TOOLS : BOT_PROFILER_TOOLS) : []),
     ...(browser ? BOT_BROWSER_TOOLS : []),

@@ -21,7 +21,7 @@ export interface BotTurnRights {
   ownerWords: boolean
   /** `chat`: may write owner facts, standing notes and Forget, and set a schedule's fixed line (`say`). */
   memoryLane: BotLane
-  /** May start, message, steer, stop or archive the owner's threads, and make or change their jobs (`threadsActOf`). */
+  /** May start, message, steer, stop or archive the owner's threads, make or change their jobs, and turn automations on (`threadsActOf`). */
   threadsAct: boolean
   /** `watch_start`. From a run it is detached: it returns at once, and its end wakes the chat, never the run. */
   watchStart: boolean
@@ -108,7 +108,9 @@ export function runProvenance(kind: string | undefined): BotActivationProvenance
 /** The tools whose cell a chat turn's start decides at the call (`BotAuthority.turnRefusals`), and the cell. */
 const TURN_TOOLS: ReadonlyArray<readonly [string, keyof BotTurnRights]> = [
   ['watch_start', 'watchStart'], ['remind', 'remind'], ['question_answer', 'relayAnswer'], ['question_ask', 'asksOwner'], ['question_withdraw', 'asksOwner'],
-  ['bot_send', 'botSend'], ['work_start', 'workStart'], ['work_wait', 'workWait'], ['subagent_start', 'subagents']
+  ['bot_send', 'botSend'], ['work_start', 'workStart'], ['work_wait', 'workWait'], ['subagent_start', 'subagents'],
+  // Turning an automation on starts work in the owner's name, as starting a thread does: never from another bot's message.
+  ['automation_enable', 'threadsAct']
 ]
 
 /** What a turn whose start no build names is told. */

@@ -15,7 +15,7 @@ export { titleEffortFor }
  * the index is rebuilt when the snapshots change, and read synchronously at each naming.
  *
  * Best first means: the provider by the catalog's `namingProviders` (Claude, then Codex, then Antigravity, then Pi's
- * providers, then OpenCode), then the model's tier (`small` first: Haiku, gpt-6-luna, gemini-3.8-flash), then a subscription before an
+ * providers, then OpenCode, then the other agents), then the model's tier (`small` first: Haiku, gpt-6-luna, gemini-3.8-flash), then a subscription before an
  * API key, a current model before an older one, the newest release, and the order the agent lists them.
  */
 
@@ -35,8 +35,8 @@ export interface RankTitleModelsInput {
   snapshots: readonly InstanceSnapshot[]
   /** An instance's models with prefs applied (`HarnessCatalog.models`). */
   models(instanceId: string): readonly InstanceModel[]
-  /** Whether the instance's driver runs single requests (`HarnessGateway.canOneShot`). */
-  canOneShot(instanceId: string): boolean
+  /** Whether the model is admitted for a single request now (`HarnessGateway.admitsOneShot`, `oneShot/admission.ts`). */
+  admits(instanceId: string, model: string): boolean
   catalog?: ModelCatalog
 }
 
@@ -65,8 +65,8 @@ interface Ranked {
 
 /**
  * Every model Automatic naming may ask, best first. A model is left out when its instance is not ready (off, signed out,
- * not running), is a locked bot entry, runs no single requests, or the model is hidden, cannot run one, or is a local
- * server's. Usage limits
+ * not running) or is a locked bot entry, or admission does not admit the model (hidden, no route, refused, a local
+ * server's, facts not read yet). Usage limits
  * are not read here: they are filtered when the index is read (`TitleModelCache.candidates`), so a reset that passes
  * brings the model back without a rebuild.
  */
@@ -75,16 +75,15 @@ export function rankTitleModels(input: RankTitleModelsInput): TitleModelCandidat
   const ranked: Ranked[] = []
   for (const snapshot of input.snapshots) {
     if (!instanceReady(snapshot) || snapshot.config?.profile === 'locked') continue
-    if (!input.canOneShot(snapshot.instanceId)) continue
     let models: readonly InstanceModel[]
     try {
       models = input.models(snapshot.instanceId)
     } catch {
       continue
     }
-    // A local server's model names only its own threads (`OrchestratorService.localTitleText`): never another
-    // thread, which would wake it or queue on its GPU.
-    const usable = models.filter((model) => !model.hidden && model.oneShot !== false && !model.local)
+    // Admission says which models may name threads: never a hidden one, one the entry cannot run a single request on,
+    // or a local server's (it names only its own threads, `OrchestratorService.localTitleText`).
+    const usable = models.filter((model) => !model.hidden && input.admits(snapshot.instanceId, model.id))
     // `default` stands for whichever model the agent picks: used only when the instance lists nothing else.
     const concrete = usable.some((model) => model.id !== 'default')
     const provider = providerRank(snapshot, list)
@@ -122,7 +121,10 @@ export function rankTitleModels(input: RankTitleModelsInput): TitleModelCandidat
 /** What the index reads from the harness gateway. The optional readers may be missing (a test's stub gateway). */
 export interface TitleModelSource {
   cachedSnapshots?(scope: ProviderScope): readonly InstanceSnapshot[]
-  canOneShot?(instanceId: string): boolean
+  admitsOneShot?(instanceId: string, model: string): boolean
+  /** `admitsOneShot` for many models of one instance, reading the instance once. */
+  titleAdmitter?(instanceId: string): (model: string) => boolean
+  hasOneShotRoute?(instanceId: string): boolean
   isEnabledInScope?(instanceId: string, scope: ProviderScope): boolean
   catalog?: { models(instanceId: string, scope: ProviderScope): InstanceModel[] }
   instances?: { subscribe?(listener: (event: { type: string; data?: unknown }) => void): () => void }
@@ -181,17 +183,23 @@ export class TitleModelCache {
   /** Builds the index again from the snapshots known now. */
   rebuild(): void {
     const source = this.source
-    if (!source?.cachedSnapshots || !source.canOneShot) {
+    if (!source?.cachedSnapshots || !source.admitsOneShot) {
       this.ranked = []
       this.snapshots = []
       return
     }
     try {
       this.snapshots = source.cachedSnapshots(DEVICE)
+      const admitters = new Map<string, (model: string) => boolean>()
+      const admitter = (instanceId: string) => {
+        let admits = admitters.get(instanceId)
+        if (!admits) admitters.set(instanceId, admits = source.titleAdmitter ? source.titleAdmitter(instanceId) : (model) => source.admitsOneShot!(instanceId, model))
+        return admits
+      }
       this.ranked = rankTitleModels({
         snapshots: this.snapshots,
         models: (instanceId) => source.catalog?.models(instanceId, DEVICE) ?? [],
-        canOneShot: (instanceId) => source.canOneShot!(instanceId),
+        admits: (instanceId, model) => admitter(instanceId)(model),
         catalog: this.options.catalog ? this.options.catalog() : modelCatalog()
       })
     } catch (error) {
@@ -213,18 +221,18 @@ export class TitleModelCache {
 
   /**
    * Whether an entry that could name threads in `scope` has not been checked yet (no `checkedAt`): turned on, not a
-   * locked bot entry, and able to run single requests. Its first check may still make it ready. A check that ended in
+   * locked bot entry, and with a route for single requests. Its first check may still make it ready. A check that ended in
    * any way (not installed, timed out, a failed sign-in check) counts as checked.
    */
   hasPendingProbe(scope: ProviderScope = DEVICE): boolean {
     const source = this.source
-    if (!source?.cachedSnapshots || !source.canOneShot) return false
+    if (!source?.cachedSnapshots || !source.hasOneShotRoute) return false
     return this.snapshots.some((snapshot) =>
       snapshot.enabled.effective &&
       snapshot.checkedAt === undefined &&
       snapshot.config?.profile !== 'locked' &&
       this.enabledIn(snapshot.instanceId, scope) &&
-      source.canOneShot!(snapshot.instanceId))
+      source.hasOneShotRoute!(snapshot.instanceId))
   }
 
   private enabledIn(instanceId: string, scope: ProviderScope): boolean {

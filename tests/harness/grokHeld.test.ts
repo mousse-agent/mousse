@@ -312,8 +312,8 @@ describe('the gateway’s one-shot gate for a driver that proves its own route',
   function setup(refusal: string | undefined) {
     const oneShot = vi.fn(async () => ({ text: 'A title' }))
     const base = adapterDriver(agent, { runtime: { oneShot } })
-    // Turns are not held (uncontrolled); one-shots are, or not, by `oneShotRefusal`.
-    const driver = { ...base, caps: () => grokCaps(false), oneShot: true, oneShotRefusal: () => refusal, toolControlReason: () => 'Grok 9.9.9 is not checked yet.' }
+    // Turns are not held (uncontrolled); one-shots are, or not, by its route (`oneShotRoute`).
+    const driver = { ...base, caps: () => grokCaps(false), oneShotRoute: () => (refusal ? { refused: refusal } : { route: { id: 'legacy:grok' as const } }), toolControlReason: () => 'Grok 9.9.9 is not checked yet.' }
     let stored: unknown = { grok: { driver: 'grok', enabled: true } }
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
     const harness: Harness = testHarness({ drivers: [driver], instances, profileHome: tempDir('mousse-grok-gate-') })

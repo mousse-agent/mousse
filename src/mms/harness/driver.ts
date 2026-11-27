@@ -1,7 +1,7 @@
 import { accessSync, constants, realpathSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { AuthState, CredentialKind, InstallOwner, PromptCacheHour } from '../../shared/harness/status'
-import type { AddOptionMethod, CustomModel, HarnessCaps, HarnessDriverKind, InstanceConfigPatch, RemoveInstallResult, RuntimeFacts, TelemetrySetting, BinaryFingerprint } from '../../shared/harness/types'
+import type { AddOptionMethod, CustomModel, HarnessCaps, HarnessDriverKind, InstanceConfigPatch, InstanceModel, RemoveInstallResult, RuntimeFacts, TelemetrySetting, BinaryFingerprint } from '../../shared/harness/types'
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { PermissionLimits } from '../../shared/permissionMode'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult, ProviderUsage, UseLimitResetResponse } from '../../shared/providerAuth'
@@ -18,6 +18,7 @@ import type { BotRuntimeHold } from '../../shared/bots/personal/subagentHold'
 import type { LatestVersionSource } from './latest'
 import type { SpendModelFacts } from './policy'
 import type { VendorMirror } from './vendorMirror'
+import type { OneShotRouteDecision, OneShotTransport } from './oneShot/route'
 
 /**
  * A driver is a kind of runtime (Claude Code, Codex, Antigravity, the pi loop). The gateway asks
@@ -219,6 +220,13 @@ export interface OneShotSpec {
   namingOrigin?: NamingOrigin
   /** Called on every event the provider sends; the gateway's inactivity timeout restarts. */
   onActivity(): void
+  /** Each new part of the answer as it streams (the runner's streaming cap), where the runtime can report it. */
+  onText?(chunk: string): void
+  /**
+   * Called once, right before the request leaves for the provider, after the runtime's own preparation (a credential
+   * read): the runner checks the entry is still the admitted one. A throw stops the request unsent.
+   */
+  beforeSend?(): void
 }
 
 /**
@@ -234,6 +242,16 @@ export const ONE_SHOT_TASK_TEXT: Readonly<Record<OneShotTask, string>> = {
   commit_message: 'write commit messages',
   chat_digest: "summarise a bot's chat",
   branch_name: 'name branches'
+}
+
+/** What a driver's `oneShotRoute` reads: the entry, its installed version and the model, all as cached. */
+export interface OneShotRouteInput {
+  config: InstanceConfig
+  installedVersion: string | undefined
+  instanceId: string
+  model: string
+  /** The model as the entry lists it, when it does. */
+  listed?: InstanceModel
 }
 
 /**
@@ -292,10 +310,16 @@ export interface DriverRuntime {
   /** The turn runtime of this instance. */
   readonly adapter: ProviderAdapter
   /**
-   * One request with no tools (`HarnessDriver.oneShot`). Throws the provider's failure; `signal`
-   * aborts it (the caller stopped, or the gateway's inactivity timeout).
+   * One request with no tools on a legacy route (`legacy:<driver>`, `HarnessDriver.oneShotRoute`). Throws the
+   * provider's failure; `signal` aborts it (the caller stopped, or the runner's bounds).
    */
   oneShot?(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }>
+  /**
+   * The transport of a route with facts (`pi:direct`, `acp:generic`): it carries the runner's request once and reports
+   * what comes back (`oneShot/runner.ts`). `spec` names the model and what the request is for; its text comes from the
+   * runner.
+   */
+  oneShotTransport?(spec: Omit<OneShotSpec, 'system' | 'prompt' | 'onActivity'>): OneShotTransport
   /** The models this entry can make pictures with in Mousse's own process (#1088); absent or empty: none. */
   imageModels?(): readonly ImageModelFacts[]
   /**
@@ -523,16 +547,11 @@ export interface HarnessDriver {
   /** Runs a model the user adds by id (custom models); otherwise only the models it lists. */
   readonly customModels: boolean
   /**
-   * Its runtimes run a single request with no tools (`DriverRuntime.oneShot`), so its models can name
-   * chats. Without it, its runtimes run turns only (absent = false).
+   * How an entry runs a single request with no tools on `model` (a thread title, a draft): its route, or why it
+   * cannot now. Read from cached state only, at every admission (`oneShot/admission.ts`). Absent: its runtimes run
+   * turns only.
    */
-  readonly oneShot?: boolean
-  /**
-   * Why this entry's one-shots cannot run now, for a driver whose one-shot route is proven per version and platform
-   * (Grok): undefined when they can. A driver that has it proves its route itself, so its one-shots do not also need
-   * turns Mousse controls (`purposeAllowed`). Absent: `oneShot` decides alone.
-   */
-  oneShotRefusal?(config: InstanceConfig, installedVersion: string | undefined, instanceId: string): string | undefined
+  oneShotRoute?(input: OneShotRouteInput): OneShotRouteDecision
   /**
    * Why the entry's tool control is less than its driver can reach, in words for the user (Grok: its held launch is not
    * proven for this version). The card and every refusal of a mode or purpose the entry cannot hold say it.

@@ -1,5 +1,5 @@
 import type { BotLane, BotManifest } from '../../shared/bots/personal/definition'
-import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from '../../shared/bots/personal/manifest'
+import { BOT_AUTOMATION_APP_TOOLS, BOT_AUTOMATION_ENABLE_TOOL, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from '../../shared/bots/personal/manifest'
 import type { BotAskRequest } from '../../shared/bots/personal/escalation'
 import { botCatalogueIndex } from '../../shared/bots/personal/catalogue'
 
@@ -138,7 +138,7 @@ export interface BotAllowed {
   threads: boolean
   /** Searching the web and fetching pages. */
   web: boolean
-  /** The automation tools held (`BOT_AUTOMATION_APP_TOOLS`): all of them unless switched off, none in a subagent. */
+  /** The automation tools held (`BOT_AUTOMATION_APP_TOOLS`, and `automation_enable` once allowed): all unless switched off, none in a subagent. */
   automation: string[]
   /** The owner's MCP servers whose tools it holds, by name (set up now): every one unless switched off; absent: none. */
   mcp?: string[]
@@ -185,7 +185,7 @@ export function botAllowedOf(manifest: BotManifest, mcpNames?: (serverIds: strin
     computer: manifest.appTools.includes(BOT_COMPUTER_PERMISSION),
     threads: manifest.appTools.includes(BOT_THREADS_PERMISSION),
     web: has('web_search') || has('web_fetch'),
-    automation: BOT_AUTOMATION_APP_TOOLS.filter((tool) => manifest.appTools.includes(tool)),
+    automation: [...BOT_AUTOMATION_APP_TOOLS, BOT_AUTOMATION_ENABLE_TOOL].filter((tool) => manifest.appTools.includes(tool)),
     ...(mcp.length ? { mcp } : {})
   }
 }

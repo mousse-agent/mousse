@@ -125,7 +125,7 @@ import type {
 } from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
 import type { WarmStartView } from '../shared/warmStart'
-import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThreadNotificationEvent } from '../shared/settings'
+import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThreadNotificationEvent, TitleOptions } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
   McpConfigSourceDescriptor,
@@ -843,6 +843,8 @@ const api = {
     set: (partial: MousseSettingsUpdate): Promise<MousseSettings> =>
       ipcRenderer.invoke('settings:set', partial),
     getOptions: (): Promise<SettingsOptions> => ipcRenderer.invoke('settings:getOptions'),
+    /** Thread titles' choices from the daemon's cached state: it never waits for a provider check. */
+    getTitleOptions: (): Promise<TitleOptions> => ipcRenderer.invoke('settings:getTitleOptions'),
     onChanged: (cb: (settings: MousseSettings) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, settings: MousseSettings) => cb(settings)
       ipcRenderer.on('settings:changed', handler)
@@ -1668,6 +1670,10 @@ const api = {
       ipcRenderer.invoke('clipboard:showCopyMenu', x, y, text),
     /** Puts a picture, as PNG bytes, on the clipboard as an image that other apps paste. */
     writeImage: (png: Uint8Array): Promise<void> => ipcRenderer.invoke('clipboard:writeImage', png)
+  },
+  zoom: {
+    /** A page the window draws (a browser without a window) has the keyboard, or no longer: its zoom keys are its own then. */
+    pageKeyboard: (on: boolean): Promise<void> => ipcRenderer.invoke('zoom:pageKeyboard', on === true)
   },
   dialog: {
     /** Native open-file dialog; resolves to the chosen absolute path, or null when cancelled. */

@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { findListedModel, modelLabel } from '../../../shared/modelChoice'
 import { TITLE_PROMPT_MAX } from '../../../shared/threadTitleText'
 import { resolveModelChoice } from '../../lib/modelChoice'
-import type { IdleCompactionSetting, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
-import { normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions } from '../../../shared/settings'
+import type { IdleCompactionSetting, LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions, TitleListing, TitleOptions } from '../../../shared/settings'
+import type { UnavailableModelProvider } from '../ModelFamilyMenu'
+import { normalizeContextSettings, normalizeExperimentalSettings } from '../../../shared/settings'
 import { Select, type SelectOption } from '../ui/Select'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import { AgentAccessSettings } from './AgentAccessSettings'
@@ -150,8 +151,11 @@ export function AgentsSettings({
 }) {
   const providers = options.llmProviders
   const hasProviders = providers.length > 0
-  // Titles are one request with no tools: only instances (and models) that run one are offered.
-  const titleProviders = oneShotProviderOptions(providers)
+  // Titles are one request with no tools: only the models admitted for one are offered (`LlmModelOption.title`), read
+  // from the daemon's cached listing (`settings.titleOptions`), which never waits for a provider check.
+  const titleOptions = useTitleOptions(settings.title)
+  const titleProviders = titlePickerProviders(titleOptions?.llmProviders ?? providers)
+  const titleUnavailableProviders = unavailableTitleProviders(titleOptions?.titleListing, titleProviders)
 
   // Blank title keys mean "Automatic": the first line names the thread at once, then the best connected model renames
   // it. `mode: 'off'` with blank keys is "First line only": no model is asked.
@@ -160,22 +164,23 @@ export function AgentsSettings({
   const titleModel = settings.title?.model ?? ''
   const titleIsAutomatic = !titleProvider || !titleModel
   const titleIsOff = titleIsAutomatic && settings.title?.mode === 'off'
-  // A stored choice the picker no longer offers (a Bedrock model, an agent without one-shots) cannot run:
-  // say so instead of showing an empty picker while titles quietly fall back.
+  // The saved choice as the daemon reads it, with its exact reason when it cannot name threads now; a computer that
+  // does not send it is read from the picker's own listing.
   const titleInstance = settings.title?.instanceId
-  const titleUnavailable = !titleIsAutomatic && providers.length > 0 && !titleProviders.some((provider) =>
-    (titleInstance ? provider.instanceId === titleInstance : provider.id === titleProvider) &&
-    Boolean(findListedModel(provider.models, titleModel)))
-  // An agent whose naming is best-effort may name threads (chosen, or Automatic with it connected): say so.
-  const bestEffortNamer = (id: string): DriverInfo | undefined => {
-    const info = (DRIVER_INFO as Partial<Record<string, DriverInfo>>)[id]
-    return info?.bestEffortNaming ? info : undefined
-  }
+  // Only the listing's saved row for the choice made now: one read before a new choice describes the old one.
+  const listedSaved = titleIsAutomatic ? undefined : titleOptions?.titleListing?.saved
+  const saved = listedSaved && listedSaved.model === titleModel && (!titleInstance || listedSaved.instanceId === titleInstance) ? listedSaved : undefined
+  const titleUnavailable = !titleIsAutomatic && (saved
+    ? saved.state === 'unavailable'
+    : providers.length > 0 && !titleProviders.some((provider) =>
+      (titleInstance ? provider.instanceId === titleInstance : provider.id === titleProvider) &&
+      Boolean(findListedModel(provider.models, titleModel))))
+  // A best-effort route may name threads (chosen, or Automatic with one admitted): say so, with what it does not hold.
   const bestEffortTitles = titleIsOff || titleUnavailable
     ? undefined
     : titleIsAutomatic
-      ? titleProviders.map((provider) => bestEffortNamer(provider.id)).find(Boolean)
-      : bestEffortNamer(titleProvider)
+      ? titleProviders.map((provider) => bestEffortNamer(provider)).find(Boolean)
+      : bestEffortNamer(titleProviders.find((provider) => titleInstance ? provider.instanceId === titleInstance : provider.id === titleProvider), titleModel)
 
   // The bots' default model: blank is Automatic (each bot picks by how deeply it works).
   const botProviders = options.botProviders ?? []
@@ -225,11 +230,11 @@ export function AgentsSettings({
           anchor="agents-title-model"
           titleId="agents-title-model-title"
           description={titleUnavailable
-            ? `${modelLabel(resolveModelChoice({ instanceId: titleInstance, provider: titleProvider, model: titleModel }, providers), { effort: false })} can't name threads here, so threads keep their first line as the title. Choose another model or Automatic.`
+            ? <span title={saved?.reason}>{`${saved?.label ?? modelLabel(resolveModelChoice({ instanceId: titleInstance, provider: titleProvider, model: titleModel }, providers), { effort: false })} can't name threads here, so threads keep their first line as the title. Choose another model or Automatic.`}</span>
             : titleIsOff
               ? 'Threads keep their first line as the title. Automatic picks a fast connected model to name threads.'
               : bestEffortTitles
-                ? <>Automatic picks a fast connected model to name threads. <span title={bestEffortTitles.bestEffortNaming}>{bestEffortTitles.label} naming is best-effort.</span></>
+                ? <>Automatic picks a fast connected model to name threads. <span title={bestEffortTitles.why}>{bestEffortTitles.label} naming is best-effort.</span></>
                 : 'Automatic picks a fast connected model to name threads.'}
           titleAction={(!titleIsAutomatic || titleIsOff) && (
             <button
@@ -248,6 +253,7 @@ export function AgentsSettings({
               ariaLabel="Thread title model"
               placeholder={titleIsOff ? 'First line only' : 'Automatic'}
               providers={titleProviders}
+              unavailableProviders={titleUnavailableProviders}
               providerId={titleIsAutomatic ? '' : titleProvider}
               instanceId={titleIsAutomatic ? undefined : settings.title?.instanceId}
               modelId={titleIsAutomatic ? '' : titleModel}
@@ -359,4 +365,55 @@ export function AgentsSettings({
       <SecretsSettings />
     </section>
   )
+}
+
+/**
+ * The title picker's models: those admitted for a single request (`LlmModelOption.title`). A computer that sends no
+ * per-model listing is read from its per-instance flag and the models it marks as unable.
+ */
+function titlePickerProviders(providers: readonly LlmProviderOption[]): LlmProviderOption[] {
+  return providers
+    .map((provider) => ({
+      ...provider,
+      models: provider.models.filter((model) => model.title ? model.title.state !== 'unavailable' : provider.oneShot === true && model.oneShot !== false)
+    }))
+    .filter((provider) => provider.models.length > 0)
+}
+
+/**
+ * Whether naming on `provider` (or on its `model`) is best-effort, with why for its tooltip: from the listing's label
+ * and facts, else (a provider still on its own one-shot code) from what its card says.
+ */
+function bestEffortNamer(provider: LlmProviderOption | undefined, model?: string): { label: string; why: string } | undefined {
+  if (!provider) return undefined
+  const models = model ? provider.models.filter((each) => each.id === model) : provider.models
+  const listed = models.find((each) => each.title?.state === 'best_effort')
+  if (listed) return { label: provider.label, why: listed.title?.facts?.join(' ') ?? '' }
+  const info = (DRIVER_INFO as Partial<Record<string, DriverInfo>>)[provider.id]
+  return info?.bestEffortNaming && models.some((each) => !each.title || each.title.state === 'legacy') ? { label: info.label, why: info.bestEffortNaming } : undefined
+}
+
+/**
+ * Thread titles' choices from the daemon's cached listing (`settings.titleOptions`), read again when the title choice
+ * or a provider's state changes. Undefined until read, or from a daemon that does not offer it.
+ */
+function useTitleOptions(title: MousseSettings['title'] | undefined): TitleOptions | undefined {
+  const [value, setValue] = useState<TitleOptions>()
+  const { snapshots } = useProviderSnapshots(DEVICE_SCOPE)
+  const key = JSON.stringify(title ?? null)
+  useEffect(() => {
+    const read = window.mousse?.settings?.getTitleOptions
+    if (!read) return
+    let live = true
+    read().then((next) => { if (live) setValue(next) }, () => undefined)
+    return () => { live = false }
+  }, [key, snapshots])
+  return value
+}
+
+/** The entries none of whose models can name threads now, each with its reason (turned off, signed out, unchecked). */
+function unavailableTitleProviders(listing: TitleListing | undefined, offered: readonly LlmProviderOption[]): UnavailableModelProvider[] {
+  return (listing?.entries ?? [])
+    .filter((entry) => !offered.some((provider) => provider.instanceId === entry.instanceId))
+    .map((entry) => ({ instanceId: entry.instanceId, label: entry.label, reason: entry.reason ?? entry.models.find((model) => model.reason)?.reason ?? `${entry.label} can't name threads now.` }))
 }

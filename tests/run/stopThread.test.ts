@@ -800,12 +800,12 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
       const prompt = s.adapter.turns.filter((turn) => turn.threadId === s.parentId).at(-1)!.prompt
       expect(prompt).toContain('Subagent "Worker"')
       expect(prompt).toContain('Which database should I use?')
-      expect(prompt).toContain(`answer_subagent`)
+      expect(prompt).toContain('request_answer')
       expect(prompt).toContain(requestId)
       // The transcript keeps it as a notice about the subagent, so the app does not show that text as the person's message.
       const stored = s.d.orch.getMessages(s.parentId).find((message) => message.role === 'user' && message.content === prompt)
       expect(stored?.subagentNotice).toMatchObject([{ event: 'question', childThreadId: s.childThreadId, title: 'Worker', requestId }])
-      // The wake read it; the parent answers with answer_subagent.
+      // The wake read it; the parent answers with answer_subagent (an old name of request_answer, still callable).
       expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('acknowledged')
       expect(await (s.d.orch as any).answerSubagent(s.parentId, wake, { subagent: 'Worker', requestId, answers: { db: 'sqlite' } })).toMatchObject({ answered: true })
       await expect(answer).resolves.toEqual({ db: 'sqlite' })
