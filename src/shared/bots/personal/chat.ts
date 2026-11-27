@@ -222,7 +222,7 @@ export interface BotSummary {
   /** Background commands it runs now (`watch_start`), oldest first: the chat's Background work, each with Stop. Absent from older services and while none runs. */
   watchers?: BotWatcherItem[]
   /**
-   * Its checklist (`create_task`, `update_task`): the tasks of its chat's thread, then of the threads its work runs in now,
+   * Its checklist (`task_create`, `task_update`): the tasks of its chat's thread, then of the threads its work runs in now,
    * oldest first and at most `BOT_TASKS_SHOWN`. Absent from older services and while it keeps none.
    */
   tasks?: BotTaskItem[]

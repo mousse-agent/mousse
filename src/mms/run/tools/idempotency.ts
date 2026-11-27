@@ -16,6 +16,8 @@ export const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'browser_find',
   'browser_extract',
   'browser_screenshot',
+  'task_list',
+  // An old name the ledger may still hold (`MOUSSE_TOOL_ALIASES`).
   'list_tasks',
   'list_subagents',
   'list_delegations',
@@ -47,8 +49,8 @@ export const NON_IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'browser_open',
   // Opening, switching or closing a tab acts; only listing them reads (`isIdempotentTool` with its arguments).
   'browser_tabs',
-  'create_task',
-  'update_task',
+  'task_create',
+  'task_update',
   'create_subagent',
   'create_subagents',
   'recall_subagent',

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { Type, type Tool } from '@earendil-works/pi-ai'
 import { TASK_STATUSES, type TaskStatus } from '../../shared/types'
 import type { TaskQueue } from './TaskQueue'
@@ -14,13 +15,13 @@ export class TaskControlTools {
   getToolDefinitions(): Tool[] {
     return [
       {
-        name: 'list_tasks',
+        name: 'task_list',
         description:
           'List all tasks in the current thread queue (pending, in progress, completed, etc.).',
         parameters: Type.Object({})
       },
       {
-        name: 'create_task',
+        name: 'task_create',
         description:
           'Create a task in the thread queue. agentId is optional — unassigned tasks are valid and editable.',
         parameters: Type.Object({
@@ -38,11 +39,11 @@ export class TaskControlTools {
         })
       },
       {
-        name: 'update_task',
+        name: 'task_update',
         description:
           'Update an existing task by id. Works for tasks with or without an assigned agent. Provide only fields to change.',
         parameters: Type.Object({
-          id: Type.String({ description: 'Task id from list_tasks or create_task.' }),
+          id: Type.String({ description: 'Task id from task_list or task_create.' }),
           description: Type.Optional(Type.String({ description: 'New task description.' })),
           status: Type.Optional(
             Type.String({
@@ -67,16 +68,21 @@ export class TaskControlTools {
     return this.getToolDefinitions().some((tool) => tool.name === name)
   }
 
+  /**
+   * `requestKey`: the call's key (the Mousse MCP server's `clientRequestId`, whichever name the tool was called by).
+   * `task_create` makes its task under an id taken from it, so a retry returns the task the first call made.
+   */
   async execute(
     name: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    requestKey?: string
   ): Promise<{ text: string; isError: boolean }> {
     try {
       switch (name) {
-        case 'list_tasks': {
+        case 'task_list': {
           return { text: JSON.stringify(this.tasks.list(), null, 2), isError: false }
         }
-        case 'create_task': {
+        case 'task_create': {
           const description = String(args.description ?? '')
           const agentId =
             typeof args.agentId === 'string' && args.agentId.trim()
@@ -86,10 +92,11 @@ export class TaskControlTools {
           if (args.status !== undefined) {
             status = String(args.status) as TaskStatus
           }
-          const task = this.tasks.createTask({ description, agentId, status })
+          const id = requestKey ? `task-${createHash('sha256').update(requestKey).digest('hex').slice(0, 20)}` : undefined
+          const task = this.tasks.createTask({ ...(id ? { id } : {}), description, agentId, status })
           return { text: JSON.stringify(task, null, 2), isError: false }
         }
-        case 'update_task': {
+        case 'task_update': {
           const id = String(args.id ?? '').trim()
           if (!id) {
             return { text: 'Task id is required.', isError: true }

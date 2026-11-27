@@ -255,7 +255,7 @@ describe("a bot's thread lists only tools a bot can hold", () => {
     // What a thread's agent steers, queues, forks and answers with is a bot's too, under "use your threads".
     for (const name of ['thread_steer', 'approval_respond', 'queue_enqueue', 'thread_fork', 'thread_merge_back', 'git_status', 'list_computers']) expect(botGrantTool(name), name).toBe('threads')
     // A permission's name is no tool; delegation is the work's own subagents; the heap summary pauses the service; a bot has no goal.
-    for (const name of ['delegate_task', 'continue_subagent', 'browser_request_human', ...BOT_GROUP_PERMISSIONS, 'profiler_heap_summary', 'goal_status']) expect(botMayBeOffered(name), name).toBe(false)
+    for (const name of ['delegate_task', 'continue_subagent', 'browser_request_human', ...BOT_GROUP_PERMISSIONS, 'profiler_heap_summary', 'goal_update']) expect(botMayBeOffered(name), name).toBe(false)
   })
 })
 

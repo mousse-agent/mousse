@@ -72,7 +72,7 @@ describe('a refused Mousse tool call', () => {
       shape: 'a conflict with data.conflict (was JSON-RPC -32006)', tool: 'thread_wait', args: { threadId: 'thread-b', runId: 'run-elsewhere' }, code: 'conflict', retry: 'after_change',
       data: { reason: 'mousse_conflict', conflict: 'run_not_found', expectedRunId: 'run-elsewhere' }
     },
-    { shape: "a handler's own error text (was plain text)", tool: 'update_task', args: { id: '' }, code: 'failed', retry: 'after_change' }
+    { shape: "a handler's own error text (was plain text)", tool: 'task_update', args: { id: '' }, code: 'failed', retry: 'after_change' }
   ]
 
   it.each(rows)('$shape is an error result in the refusal shape, the same over MCP and in process', async (row) => {
@@ -150,7 +150,7 @@ describe('clientRequestId', () => {
       expect(listed.filter((tool) => READ_ONLY_TOOL_NAMES.has(tool.name) && declares(tool.inputSchema)).map((tool) => tool.name)).toEqual([])
       // Both kinds are present, so neither check above is empty by accident.
       expect(listed.some((tool) => tool.name === 'thread_read')).toBe(true)
-      expect(listed.some((tool) => tool.name === 'create_task')).toBe(true)
+      expect(listed.some((tool) => tool.name === 'task_create')).toBe(true)
     } finally {
       fx.dispose()
     }

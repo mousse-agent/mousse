@@ -583,7 +583,7 @@ Every bot has `create_quick_action` without asking: a button in the owner's Acti
 
 ## Its task list
 
-`create_task`, `list_tasks` and `update_task` keep a checklist on the turn's own thread, as a thread's agent does. They act on nothing else, so like memory they are always on and never grantable, in main turns and subagents (`BOT_TASK_TOOLS`), never a consult.
+`task_create`, `task_list` and `task_update` keep a checklist on the turn's own thread, as a thread's agent does. They act on nothing else, so like memory they are always on and never grantable, in main turns and subagents (`BOT_TASK_TOOLS`), never a consult.
 
 ## What a bot does differently from a thread
 
@@ -591,7 +591,7 @@ Everything a thread's agent can do, a bot can too, through the permissions above
 
 - **The chat hands long work on.** A chat turn hands commands, the web, the browser and MCP tools to work (`BOT_WORK_ONLY_TOOLS`, `frontDeskManifest`), so the chat stays free to talk; its work holds them all. The owner asks in the chat, and the work does it.
 - **No heap snapshot.** `profiler_heap_summary` pauses the service, so no bot holds it; the other profiler tools give its numbers.
-- **No goal.** A thread's `/goal` is the owner's, and `goal_status` reports on it; a bot's thread never has one (`ThreadGoals.requireThread`). A bot keeps going on a job through its work, which runs until it is done and waits and wakes on its own (Work that waits, Wakes).
+- **No goal.** A thread's `/goal` is the owner's, and `goal_update` reports on it; a bot's thread never has one (`ThreadGoals.requireThread`). A bot keeps going on a job through its work, which runs until it is done and waits and wakes on its own (Work that waits, Wakes).
 - **Subagents of its own.** A bot's work splits a job with `subagent_*` rather than `delegate_task`; its subagents hold what a thread's subagent may use, within its grant (Subagents of work).
 
 ## What each kind of turn may do

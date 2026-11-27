@@ -326,7 +326,7 @@ export interface BotEngineHost {
   toolList?(threadId: string, runId: string): { count: number; chars: number } | undefined
   /** Archives a thread (#681): a deleted bot's threads, kept 30 days before the purge. */
   archiveThread?(threadId: string): Promise<unknown> | void
-  /** The task list (`create_task`) kept on a thread, oldest first. Absent: no checklist is shown. */
+  /** The task list (`task_create`) kept on a thread, oldest first. Absent: no checklist is shown. */
   threadTasks?(threadId: string): import('../../../shared/types').Task[]
   /**
    * A deleted bot's private temporary folder outside Mousse's data, named after its turns' working folder (`cwd`: its files
@@ -8950,7 +8950,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return creators.size ? this.host.launchedThreads(creators) : []
   }
 
-  /** The task list of a bot's thread changed (`create_task`, `update_task`): its summary is read again. Never throws. */
+  /** The task list of a bot's thread changed (`task_create`, `task_update`): its summary is read again. Never throws. */
   threadTasksChanged(threadId: string): void {
     const bot = this.botOf(threadId)
     if (bot) this.changed({ botId: bot.botId })

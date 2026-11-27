@@ -67,14 +67,14 @@ describe('TaskQueue validated operations', () => {
 })
 
 describe('TaskControlTools', () => {
-  it('exposes list_tasks, create_task, and update_task', () => {
+  it('exposes task_list, task_create, and task_update', () => {
     const tools = new TaskControlTools(new TaskQueue())
     expect(tools.getToolDefinitions().map((t) => t.name)).toEqual([
-      'list_tasks',
-      'create_task',
-      'update_task'
+      'task_list',
+      'task_create',
+      'task_update'
     ])
-    for (const name of ['list_tasks', 'create_task', 'update_task']) expect(tools.isTaskTool(name)).toBe(true)
+    for (const name of ['task_list', 'task_create', 'task_update']) expect(tools.isTaskTool(name)).toBe(true)
     expect(tools.isTaskTool('bash')).toBe(false)
   })
 
@@ -82,14 +82,14 @@ describe('TaskControlTools', () => {
     const queue = new TaskQueue()
     const tools = new TaskControlTools(queue)
 
-    const created = await tools.execute('create_task', {
+    const created = await tools.execute('task_create', {
       description: 'Track plan steps'
     })
     expect(created.isError).toBe(false)
     const task = JSON.parse(created.text) as { id: string; agentId?: string }
     expect(task.agentId).toBeUndefined()
 
-    const updated = await tools.execute('update_task', {
+    const updated = await tools.execute('task_update', {
       id: task.id,
       status: 'completed',
       progress: 100,
@@ -103,19 +103,19 @@ describe('TaskControlTools', () => {
       summary: 'All steps done'
     })
 
-    const listed = await tools.execute('list_tasks', {})
+    const listed = await tools.execute('task_list', {})
     expect(listed.isError).toBe(false)
     expect(JSON.parse(listed.text)).toHaveLength(1)
   })
 
   it('returns errors for invalid updates without throwing', async () => {
     const tools = new TaskControlTools(new TaskQueue())
-    const missing = await tools.execute('update_task', { id: 'nope', status: 'pending' })
+    const missing = await tools.execute('task_update', { id: 'nope', status: 'pending' })
     expect(missing.isError).toBe(true)
 
-    const created = await tools.execute('create_task', { description: 'x' })
+    const created = await tools.execute('task_create', { description: 'x' })
     const id = JSON.parse(created.text).id as string
-    const badStatus = await tools.execute('update_task', { id, status: 'not-a-status' })
+    const badStatus = await tools.execute('task_update', { id, status: 'not-a-status' })
     expect(badStatus.isError).toBe(true)
     expect(badStatus.text).toMatch(/Invalid task status/)
   })

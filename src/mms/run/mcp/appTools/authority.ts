@@ -38,7 +38,7 @@ import { McpToolError, type AppToolTurn, type FamilyRelation, type McpCaller, ty
  * (docs/plans/tool-api.md §1.2 "Retry"), and its effect is never `none`.
  */
 export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'task_status', 'list_subagents', 'list_computers', 'list_models', 'list_tasks',
+  'task_status', 'list_subagents', 'list_computers', 'list_models', 'task_list',
   'thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'schedule_list', 'terminal_read', 'read_applet',
   'automation_list', 'list_skills', 'load_skill', 'tool_catalogue', 'mcp_servers', 'theme_read',
   'git_status', 'git_diff',

@@ -19,6 +19,8 @@ export type TaskUpdatePatch = {
 }
 
 export type TaskCreateInput = {
+  /** The id to create it under; a task that already has it is returned as it is, and nothing is created. */
+  id?: string
   description: string
   agentId?: string
   status?: TaskStatus
@@ -75,6 +77,8 @@ export class TaskQueue extends EventEmitter {
    * Create a task. `agentId` is optional — unassigned tasks are first-class and editable.
    */
   createTask(input: TaskCreateInput): Task {
+    const existing = input.id ? this.tasks.get(input.id) : undefined
+    if (existing) return existing
     const description = String(input.description ?? '').trim()
     if (!description) {
       throw new Error('Task description is required.')
@@ -90,7 +94,7 @@ export class TaskQueue extends EventEmitter {
         : undefined
 
     const task: Task = {
-      id: uuidv4(),
+      id: input.id ?? uuidv4(),
       description,
       agentId,
       status: input.status ?? 'pending',

@@ -1,14 +1,15 @@
 import { TaskControlTools } from '../../../tasks/TaskControlTools'
 import { TaskQueue } from '../../../tasks/TaskQueue'
 import type { AppToolHost } from './host'
-import { disabledInSettings, plainSchema, truncateForDisplay, type MousseTool } from './types'
+import { CLIENT_REQUEST_ID_SCHEMA, disabledInSettings, plainSchema, truncateForDisplay, type MousseTool } from './types'
 
 /** The thread's task-queue tools, for the main orchestrator in every chat mode (not subagents). */
 export function taskTools(host: AppToolHost): MousseTool[] {
   return new TaskControlTools(new TaskQueue()).getToolDefinitions().map((tool): MousseTool => ({
     name: tool.name,
     description: tool.description,
-    inputSchema: plainSchema(tool),
+    // `task_create` keeps its first result under a retry's `clientRequestId`.
+    inputSchema: tool.name === 'task_create' ? plainSchema(tool, { clientRequestId: CLIENT_REQUEST_ID_SCHEMA }) : plainSchema(tool),
     definition: () => tool,
     access: 'actsAsCaller',
     class: 'read',
@@ -21,7 +22,7 @@ export function taskTools(host: AppToolHost): MousseTool[] {
     handler: async (args, ctx) => {
       const queue = host.tasks(ctx.turn.threadId || undefined)
       if (!queue) throw new Error(`Unknown tool: ${tool.name}`)
-      if (ctx.transport === 'mcp') return new TaskControlTools(queue).execute(tool.name, args)
+      if (ctx.transport === 'mcp') return new TaskControlTools(queue).execute(tool.name, args, ctx.toolCallId)
       ctx.timeline?.record({
         kind: 'build_tool_call',
         title: `Task tool ${tool.name}`,
@@ -30,7 +31,7 @@ export function taskTools(host: AppToolHost): MousseTool[] {
         response: JSON.stringify(args, null, 2)
       }, 'start')
       ctx.markEffect?.()
-      const result = await new TaskControlTools(queue).execute(tool.name, args)
+      const result = await new TaskControlTools(queue).execute(tool.name, args, ctx.toolCallId)
       ctx.timeline?.record({
         kind: 'build_tool_result',
         title: `Task tool ${tool.name}`,

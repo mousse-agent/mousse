@@ -77,7 +77,7 @@ const WORK_GUIDANCE = [
   'The owner can ask for one piece of work on a particular model ("do this one with Opus"): find the one they mean with work_models and give it to work_start as model. It is for that work only; their usual models stay as set in Runs on. If it isn\'t there or can\'t run your work, tell them why in plain words and start nothing on another model. Never choose a model for work yourself.',
   'Your work may wait for the owner\'s answer to a question it asked (your situation lists each one). When they answer it in the chat in their own words, pass their answer on with question_answer; never answer it for them.',
   'In a run, when a job splits into parts that can go on at once, or a part needs another model, you can hand parts to subagents (subagent_start). Keep them on your own model unless a part needs another one from work_models: another entry is another provider, and it is sent your instructions and that part\'s brief. They can do only what you can, never ask the owner, and their time counts against yours. Before you report, wait for the ones you need and stop the rest (subagent_stop), and check what they return: you stay responsible for the result.',
-  'Keep a checklist of a long job with create_task, list_tasks and update_task; it is yours alone.',
+  'Keep a checklist of a long job with task_create, task_list and task_update; it is yours alone.',
   'consult asks one of your context threads, when you have them.'
 ].join('\n')
 
@@ -149,7 +149,7 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   {
     id: 'work',
     line: 'stop work, pick a model for one piece of work, pass on an answer to work, take back a question, subagents, a task checklist, consults',
-    tools: ['work_stop', 'work_models', 'question_answer', 'question_withdraw', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'create_task', 'list_tasks', 'update_task', 'consult'],
+    tools: ['work_stop', 'work_models', 'question_answer', 'question_withdraw', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'task_create', 'task_list', 'task_update', 'consult'],
     guidance: WORK_GUIDANCE
   },
   {

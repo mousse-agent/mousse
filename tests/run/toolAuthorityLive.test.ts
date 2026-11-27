@@ -263,15 +263,15 @@ describe('a parent\'s Plan reaches its child\'s mode facts (§1.3 "Subagents")',
 describe('a definition turn\'s per-turn list (§1.3 "Removed": `offered` is the per-turn definition filter)', () => {
   it('holds only what its grants name, and never a delegation tool even when granted', () => {
     const turns = new AppToolTurns()
-    const grants = { builtinTools: [{ id: 'list_tasks' }, { id: 'delegate_task' }], mcpTools: [] }
+    const grants = { builtinTools: [{ id: 'task_list' }, { id: 'delegate_task' }], mcpTools: [] }
     turns.register(appTurn({ threadId: 't', runId: 'r', definition: { grants, mcpTools: [] } as never }))
     const registry = new ToolRegistry({ activeRunId: () => 'r', turns })
-      .register(tool('list_tasks', 'reads'))
-      .register(tool('create_task', 'actsAsCaller'))
+      .register(tool('task_list', 'reads'))
+      .register(tool('task_create', 'actsAsCaller'))
       .register(tool('delegate_task', 'actsAsCaller', { class: 'delegation' }))
-    expect(registry.listForTurn('t', 'r').map((listed) => listed.name)).toEqual(['list_tasks'])
+    expect(registry.listForTurn('t', 'r').map((listed) => listed.name)).toEqual(['task_list'])
     // Another turn of the thread gets its stable list.
-    expect(registry.listForTurn('t', undefined).map((listed) => listed.name)).toEqual(['list_tasks', 'create_task', 'delegate_task'])
+    expect(registry.listForTurn('t', undefined).map((listed) => listed.name)).toEqual(['task_list', 'task_create', 'delegate_task'])
   })
 })
 

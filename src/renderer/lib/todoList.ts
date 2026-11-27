@@ -101,7 +101,7 @@ function claudeTaskList(messages: readonly ChatMessage[]): TodoEntry[] {
 
 /**
  * The thread's to-do list: its runtime's own (Claude Code's tasks, else its latest `TodoWrite`, or Codex's latest plan),
- * then the tasks the agent keeps on the thread with Mousse's `create_task`.
+ * then the tasks the agent keeps on the thread with Mousse's `task_create`.
  */
 export function threadTodoEntries(messages: readonly ChatMessage[], tasks: readonly Task[] = []): TodoEntry[] {
   const claude = claudeTaskList(messages)

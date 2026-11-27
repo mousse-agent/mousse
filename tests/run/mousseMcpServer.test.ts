@@ -76,9 +76,9 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     const list = await rpc(server.url, attachment.token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} })
     const names = list.body.result.tools.map((tool: { name: string }) => tool.name).sort()
     // The fake host offers no browser, skills, quick actions, web or dev GUI: only the tools it can serve are listed.
-    expect(names).toEqual(['answer_subagent', 'approval_respond', 'ask_user', 'continue_subagent', 'create_task', 'delegate_task', 'list_computers', 'list_models', 'list_subagents', 'list_tasks',
-      'publish_applet', 'queue_edit', 'queue_enqueue', 'queue_list', 'queue_promote_to_steer', 'queue_remove', 'queue_reorder', 'read_applet', 'task_cancel', 'task_status',
-      'thread_archive', 'thread_create', 'thread_fork', 'thread_interrupt', 'thread_list', 'thread_merge_back', 'thread_read', 'thread_search', 'thread_send', 'thread_steer', 'thread_update', 'thread_wait', 'update_task', 'withdraw_question'])
+    expect(names).toEqual(['answer_subagent', 'approval_respond', 'ask_user', 'continue_subagent', 'delegate_task', 'list_computers', 'list_models', 'list_subagents',
+      'publish_applet', 'queue_edit', 'queue_enqueue', 'queue_list', 'queue_promote_to_steer', 'queue_remove', 'queue_reorder', 'read_applet', 'task_cancel', 'task_create', 'task_list', 'task_status', 'task_update',
+      'thread_archive', 'thread_create', 'thread_fork', 'thread_interrupt', 'thread_list', 'thread_merge_back', 'thread_read', 'thread_search', 'thread_send', 'thread_steer', 'thread_update', 'thread_wait', 'withdraw_question'])
 
     const read = await rpc(server.url, attachment.token, call(4, 'thread_read'))
     expect(read.body.result.isError).toBeUndefined()
@@ -213,19 +213,19 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
   it('a drained Codex turn keeps its bearer: the calls Mousse received match what the runtime announced', async () => {
     const { server, fx, run, bearer, turns } = await setup()
     const first = bearer()
-    await rpc(server.url, first.token, call(1, 'list_tasks'))
+    await rpc(server.url, first.token, call(1, 'task_list'))
     expect(server.turnEnded({ threadId: 'thread-a', runId: run.runId, tokenHash: first.tokenHash, settlement: { status: 'completed', drain: { mousseCalls: 1, toolsSettled: true } } })).toBe('kept')
     fx.engine.markTerminal(run.runId, 'completed')
     const next = await fx.runningRun('thread-a')
     turns.register(appTurn({ threadId: 'thread-a', runId: next.runId }))
     expect(bearer({ runId: next.runId }).token).toBe(first.token)
-    expect((await rpc(server.url, first.token, call(2, 'list_tasks'))).body.result.isError).toBeUndefined()
+    expect((await rpc(server.url, first.token, call(2, 'task_list'))).body.result.isError).toBeUndefined()
   })
 
   it('a completed Codex turn whose Mousse call Codex never completed rotates, and the old bearer is refused next turn', async () => {
     const { server, fx, run, bearer, turns, enqueued } = await setup()
     const first = bearer()
-    await rpc(server.url, first.token, call(1, 'list_tasks'))
+    await rpc(server.url, first.token, call(1, 'task_list'))
     // Codex announced the call, Mousse answered it, but Codex sent no completion of its own (the
     // service closed the row when the turn ended): the turn is not proven drained.
     expect(server.turnEnded({ threadId: 'thread-a', runId: run.runId, tokenHash: first.tokenHash, settlement: { status: 'completed', drain: { mousseCalls: 1, toolsSettled: false } } })).toBe('rotated')
@@ -243,10 +243,10 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     const { server, bearer, registered, tasks } = await setup()
     const claude = bearer({ instanceId: 'claude', binding: 'per_call', generation: 'claude|default|0|0' })
     const task = { description: 'P' }
-    const unstamped = await rpc(server.url, claude.token, call(1, 'create_task', task))
+    const unstamped = await rpc(server.url, claude.token, call(1, 'task_create', task))
     expect(unstamped.body.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_caller_not_live })
     expect(tasks.list()).toHaveLength(0)
-    const stamped = await rpc(server.url, claude.token, call(2, 'create_task', { ...task, [TURN_TOKEN_KEY]: registered.turn.turnToken }))
+    const stamped = await rpc(server.url, claude.token, call(2, 'task_create', { ...task, [TURN_TOKEN_KEY]: registered.turn.turnToken }))
     expect(stamped.body.result.isError).toBeUndefined()
     expect(tasks.list()).toHaveLength(1)
   })
@@ -343,7 +343,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     // A hidden (in-process only) tool is unknown over MCP.
     expect((await rpc(server.url, attachment.token, call(3, 'create_subagent', { name: 'a', task: 'b' }))).body.error).toMatchObject({ code: -32601 })
     // A tool that fails on its own input is a tool result the model can read, not a protocol error.
-    const invalid = await rpc(server.url, attachment.token, call(4, 'update_task', { id: '' }))
+    const invalid = await rpc(server.url, attachment.token, call(4, 'task_update', { id: '' }))
     expect(invalid.body.error).toBeUndefined()
     expect(invalid.body.result.isError).toBe(true)
 

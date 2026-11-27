@@ -7,6 +7,7 @@ import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 import { BOT_MEMORY_TOOLS } from './memory'
 import { BOT_ITEM_TOOLS } from './items'
 import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from './catalogue'
+import { canonicalToolName } from '../../toolAliases'
 
 /**
  * A bot manifest's canonical form, the subset rule of approval, and the plain words the approval
@@ -269,10 +270,10 @@ export const BOT_QUICK_ACTIONS_PERMISSION = 'quick_actions'
 export const BOT_QUICK_ACTION_TOOLS: readonly string[] = ['create_quick_action']
 
 /**
- * The task list of the turn's own thread (`create_task`, `list_tasks`, `update_task`): a checklist the agent keeps for
+ * The task list of the turn's own thread (`task_create`, `task_list`, `task_update`): a checklist the agent keeps for
  * itself. It acts on nothing else, so like memory it is always on and never grantable, in every turn but a consult.
  */
-export const BOT_TASK_TOOLS: readonly string[] = ['create_task', 'list_tasks', 'update_task']
+export const BOT_TASK_TOOLS: readonly string[] = ['task_create', 'task_list', 'task_update']
 
 /** Every thread tool a bot can hold, all under "use your threads". */
 export const BOT_THREAD_TOOLS: readonly string[] = [...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS]
@@ -406,7 +407,9 @@ export function isBotTurnHeldTool(name: string): boolean {
  * `secrets` and `create_quick_action` is `quick_actions`. Any other tool is its own (the heap summary too, which no bot
  * holds).
  */
-export function botGrantTool(tool: string): string {
+export function botGrantTool(name: string): string {
+  // An old name asks for, and is granted as, the tool it was renamed to.
+  const tool = canonicalToolName(name)
   if (BROWSER_TOOLS.has(tool)) return BOT_BROWSER_PERMISSION
   if (PROFILER_TOOL_SET.has(tool)) return BOT_PROFILER_PERMISSION
   if (THEME_TOOL_SET.has(tool)) return BOT_THEMES_PERMISSION
@@ -497,7 +500,8 @@ export function manifestProblem(value: unknown): string | undefined {
   const strings = (list: unknown) => Array.isArray(list) && list.every((item) => typeof item === 'string' && item.length > 0 && item.length <= 256)
   if (!Array.isArray(manifest.tools) || !manifest.tools.every((tool) => typeof tool === 'string' && isNeutralTool(tool))) return 'A built-in tool is not one Mousse knows.'
   if (!strings(manifest.appTools)) return 'An app tool name is invalid.'
-  const refusedApp = (manifest.appTools as string[]).find((tool) => !BOT_APP_TOOLS.has(tool) && !BOT_RETIRED_APP_TOOLS.has(tool))
+  // A grant an older build approved may name a tool by its old name (`canonicalToolName`): it is that tool.
+  const refusedApp = (manifest.appTools as string[]).find((tool) => !BOT_APP_TOOLS.has(canonicalToolName(tool)) && !BOT_RETIRED_APP_TOOLS.has(tool))
   if (refusedApp !== undefined) return `A bot can't be given the Mousse tool ${refusedApp}: it would reach other threads, act in your name or ask you, outside the bot's permissions.`
   if (!strings(manifest.skills)) return 'A skill id is invalid.'
   if (!Array.isArray(manifest.mcp) || !manifest.mcp.every((pair) => pair && typeof pair === 'object' && typeof pair.serverId === 'string' && typeof pair.tool === 'string' && MCP_PART.test(pair.serverId) && MCP_PART.test(pair.tool))) return 'An MCP tool is invalid.'

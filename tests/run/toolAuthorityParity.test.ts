@@ -111,7 +111,7 @@ const KINDS: Record<string, () => TurnKind> = {
     turn: {
       definition: {
         policy: definitionPolicy,
-        grants: { skills: [], mcpTools: [{ id: 'srv__read', source: 'definition' as never }], builtinTools: ['create_task', 'list_tasks', 'ask_user', 'thread_fork', 'thread_read', 'browser_open', 'theme_set'].map((id) => ({ id, source: 'definition' as never })), denied: [] },
+        grants: { skills: [], mcpTools: [{ id: 'srv__read', source: 'definition' as never }], builtinTools: ['task_create', 'task_list', 'ask_user', 'thread_fork', 'thread_read', 'browser_open', 'theme_set'].map((id) => ({ id, source: 'definition' as never })), denied: [] },
         mcpTools: [userMcpTool('read')],
         approve: async () => ({ status: 'denied', reason: 'definition approval asked' })
       } as unknown as DefinitionAuthority,

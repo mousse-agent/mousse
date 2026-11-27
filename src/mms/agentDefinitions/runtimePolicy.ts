@@ -21,13 +21,18 @@ import { normalizeOsPath } from '../orchestrator/toolPathSafety'
 import { gitMetadataRefusal, touchesGitMetadata } from '../agents/gitMetadata'
 import { BROWSER_READ_TOOLS, isBrowserAutomationTool } from '../orchestrator/browser/tools'
 import { browserRuntimeHostBindingMessage, readHostBrowserRuntime } from '../orchestrator/browser/binding'
+import { MOUSSE_TOOL_ALIASES } from '../../shared/toolAliases'
 
-/** Legacy Mousse build-tool names → canonical built-in ids. Stored definitions may still name them. */
+/**
+ * Legacy Mousse build-tool names → canonical built-in ids, and the app tools' old names (`MOUSSE_TOOL_ALIASES`). Stored
+ * definitions may still name them.
+ */
 export const BUILTIN_TOOL_ALIASES: Readonly<Record<string, string>> = {
   read_file: 'read',
   write_file: 'write',
   list_dir: 'ls',
-  run_command: 'bash'
+  run_command: 'bash',
+  ...MOUSSE_TOOL_ALIASES
 }
 
 const READ_FS_TOOLS = new Set(['read', 'grep', 'find', 'ls', 'git_status', 'git_diff'])

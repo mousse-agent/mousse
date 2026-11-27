@@ -12,6 +12,7 @@ import {
   sanitizeCuaInput,
   sanitizeCuaOutput,
 } from "../../../../../shared/cuaActivity";
+import { canonicalToolName } from "../../../../../shared/toolAliases";
 
 const MOUSSE_TOOL_PREFIX = "tool-mcp__mousse__";
 const CUSTOM_TOOL_PREFIX = "tool-mcp__custom__";
@@ -147,9 +148,9 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   subagent_stop: ["stop", "a subagent in Mousse"],
   list_subagents: ["list", "subagents in Mousse"],
   list_delegations: ["list", "subagents in Mousse"],
-  create_task: ["create", "a task in Mousse"],
-  list_tasks: ["list", "tasks in Mousse"],
-  update_task: ["update", "a task in Mousse"],
+  task_create: ["create", "a task in Mousse"],
+  task_list: ["list", "tasks in Mousse"],
+  task_update: ["update", "a task in Mousse"],
   list_computers: ["list", "computers in Mousse"],
   computer_tools: ["list", "computer tools"],
   computer_use: ["use", "the computer"],
@@ -183,7 +184,7 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   browser_open: ["open", "a page in the browser"],
   theme_read: ["read", "themes in Mousse"],
   theme_set: ["change", "the theme in Mousse"],
-  goal_status: ["check", "the goal in Mousse"],
+  goal_update: ["check", "the goal in Mousse"],
   git_status: ["check", "Git status"],
   git_diff: ["read", "the Git diff"],
 };
@@ -201,7 +202,8 @@ export type MousseToolLabels = { running: string; done: string; failed: string }
 
 export function mousseToolLabels(tool: string): MousseToolLabels {
   const family = FAMILIES.find(([prefix]) => tool.startsWith(prefix));
-  const own = TOOLS[tool] ?? (family ? ([family[1], family[2]] as const) : undefined);
+  // A call an older transcript names by a tool's old name reads as the tool it was renamed to.
+  const own = TOOLS[canonicalToolName(tool)] ?? (family ? ([family[1], family[2]] as const) : undefined);
   if (!own) {
     const name = tool.replace(/_/g, " ").trim();
     return { running: `Running ${name} in Mousse`, done: `Ran ${name} in Mousse`, failed: `Couldn't run ${name} in Mousse` };

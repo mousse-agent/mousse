@@ -2580,7 +2580,7 @@ export class OrchestratorService extends EventEmitter {
   private goalsRecovered = false
   /** The goal each thread's running turn runs under (`ThreadGoal.epoch`), recorded when the turn starts. */
   private readonly goalTurnEpochs = new Map<string, { runId?: string; epoch?: string }>()
-  /** The same, by the turn's run, for the agent's `goal_status` call. */
+  /** The same, by the turn's run, for the agent's `goal_update` call. */
   private readonly goalRunEpochs = new Map<string, string>()
   /** The definition runs of each thread, for its public Stop (`stopDefinitionRuns`). */
   private readonly definitionStops = new Map<string, Set<DefinitionStop>>()
@@ -16184,7 +16184,7 @@ export class OrchestratorService extends EventEmitter {
       const editNote = editDirectory ? await this.editedPromptNote(editDirectory, conversationBranchId, turnId, turnStartSha, checkpointCwd) : undefined
       // The first turn on a different model: the agent is told which model it is and which wrote the earlier replies.
       const modelNote = displayUserMessage ? this.modelChangeNoteFor(session.messages, turnPresentationStart, turnId, reuseLastUser) : undefined
-      // A thread with a working goal: every turn tells the agent the goal and how to report on it (`goal_status`).
+      // A thread with a working goal: every turn tells the agent the goal and how to report on it (`goal_update`).
       const goal = this.threadStore?.getThread(session.threadId)?.goal
       const turnEpoch = this.goalTurnEpochs.get(session.threadId)?.epoch
       const goalText = goal?.state === 'working' && turnEpoch && goal.epoch === turnEpoch ? goalNote(goal) : undefined

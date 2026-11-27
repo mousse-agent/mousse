@@ -25,9 +25,9 @@ const PHASE5_TOOLS: Record<string, string> = {
   task_cancel: 'actsAsCaller',
   list_subagents: 'actsAsCaller',
   ask_user: 'actsAsCaller',
-  create_task: 'actsAsCaller',
-  update_task: 'actsAsCaller',
-  list_tasks: 'actsAsCaller',
+  task_create: 'actsAsCaller',
+  task_update: 'actsAsCaller',
+  task_list: 'actsAsCaller',
   thread_read: 'readsOthers',
   thread_wait: 'readsOthers',
   thread_send: 'managesOthers',
@@ -157,7 +157,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
       expect(host.delegation).toHaveBeenLastCalledWith(expect.objectContaining({ runId: run.runId }))
       expect(delegation.listSubagents).toHaveBeenCalledTimes(1)
       fx.engine.markTerminal(run.runId, 'completed')
-      const ended = await registry.call('list_tasks', {}, ctx()).catch((err) => err)
+      const ended = await registry.call('task_list', {}, ctx()).catch((err) => err)
       expect(ended.code).toBe('mousse_caller_not_live')
     })
 
@@ -193,7 +193,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
 
     it('per_call: a Claude call must carry the active turn token, which is stripped before the handler', async () => {
       const { registry, ctx, registered, tasks } = await setup()
-      const claude = (args: Record<string, unknown>) => registry.call('create_task', args, ctx({ binding: 'per_call', provider: 'claude' }))
+      const claude = (args: Record<string, unknown>) => registry.call('task_create', args, ctx({ binding: 'per_call', provider: 'claude' }))
       await expect(claude({ description: 'P' })).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
       await expect(claude({ description: 'P', [TURN_TOKEN_KEY]: 'an-earlier-turn' })).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
       expect(tasks.list()).toHaveLength(0)
@@ -205,7 +205,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     it('per_call: a runtime that tags calls by attempt must carry the active attempt token', async () => {
       const { registry, ctx, turns, run, tasks } = await setup()
       turns.register(appTurn({ threadId: 'parent', runId: run.runId, attemptToken: 'attempt-2' }))
-      const pi = (token: string) => registry.call('create_task', { description: 'P', [ATTEMPT_TOKEN_KEY]: token }, ctx({ binding: 'per_call', provider: 'pi:openai' }))
+      const pi = (token: string) => registry.call('task_create', { description: 'P', [ATTEMPT_TOKEN_KEY]: token }, ctx({ binding: 'per_call', provider: 'pi:openai' }))
       await expect(pi('attempt-1')).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
       expect(tasks.list()).toHaveLength(0)
       await pi('attempt-2')
@@ -307,9 +307,9 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     expect(JSON.parse(asked.text)).toEqual({ q1: 'a' })
     expect(host.askUser).toHaveBeenCalledWith('parent', expect.any(Array), expect.objectContaining({ timeoutMs: 60 * 60 * 1000 }))
     for (const removed of ['present_plan', 'show_document']) expect(registry.get(removed), removed).toBeUndefined()
-    const created = JSON.parse((await registry.call('create_task', { description: 'Write tests' }, ctx())).text)
+    const created = JSON.parse((await registry.call('task_create', { description: 'Write tests' }, ctx())).text)
     expect(tasks.list().map((task) => task.id)).toEqual([created.id])
-    const failed = await registry.call('update_task', { id: '' }, ctx())
+    const failed = await registry.call('task_update', { id: '' }, ctx())
     expect(failed.isError).toBe(true)
   })
 

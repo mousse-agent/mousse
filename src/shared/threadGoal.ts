@@ -1,13 +1,13 @@
 /**
  * Thread goals (issue #1207): `/goal <what done looks like>` sets a goal on a thread, and Mousse keeps starting turns
- * until the agent reports it met (`goal_status`), the agent is blocked, a limit is reached or the person stops it.
+ * until the agent reports it met (`goal_update`), the agent is blocked, a limit is reached or the person stops it.
  * The goal is saved on the thread (`Thread.goal`), so it survives a restart.
  */
 
 /** `working`: Mousse starts the next turn after each one. The others start nothing until Continue. */
 export type ThreadGoalState = 'working' | 'met' | 'stuck' | 'stopped'
 
-/** What the agent says with `goal_status`. */
+/** What the agent says with `goal_update`. */
 export type GoalReportStatus = 'met' | 'continue' | 'blocked'
 
 /** Why a goal stopped. */
@@ -35,7 +35,7 @@ export interface ThreadGoal {
   turns: number
   /** Goal turns allowed before the goal stops; Continue allows this many again. */
   turnLimit: number
-  /** Goal turns in a row that ended without a `goal_status` report. */
+  /** Goal turns in a row that ended without a `goal_update` report. */
   silentTurns: number
   /** The agent's latest report. */
   lastReport?: GoalReport
@@ -53,7 +53,7 @@ export const MAX_GOAL_REASON = 500
 export const GOAL_SILENT_TURN_LIMIT = 2
 
 /** The name of the app tool the agent reports with. */
-export const GOAL_STATUS_TOOL = 'goal_status'
+export const GOAL_UPDATE_TOOL = 'goal_update'
 
 /** The choices Settings offers for the turn limit. A value saved by hand outside these stays listed. */
 export const GOAL_TURN_LIMIT_CHOICES = [5, 10, 20, 50, 100] as const
@@ -83,7 +83,7 @@ export function stoppedGoal(goal: ThreadGoal, cause: GoalStopCause, now: string)
 }
 
 /**
- * A `goal_status` report: `met` ends the goal, `blocked` makes it stuck, `continue` keeps it working. Only a working
+ * A `goal_update` report: `met` ends the goal, `blocked` makes it stuck, `continue` keeps it working. Only a working
  * goal takes a report; any other is returned as it is.
  */
 export function applyGoalReport(goal: ThreadGoal, status: GoalReportStatus, reason: string, now: string): ThreadGoal {
@@ -100,7 +100,7 @@ export interface GoalTurnEnd {
   outcome: GoalTurnOutcome
   /** The turn was one Mousse started for the goal (not a message the person sent). */
   goalTurn: boolean
-  /** The agent called `goal_status` in this turn. */
+  /** The agent called `goal_update` in this turn. */
   reported: boolean
   /** An approval or a question is still waiting for the person. */
   waitingForPerson: boolean
@@ -135,7 +135,7 @@ export function goalNote(goal: Pick<ThreadGoal, 'text' | 'turns' | 'turnLimit'>)
     '<mousse_goal>',
     `This thread has a goal. Done looks like: ${goal.text}`,
     `Keep working toward it. Mousse starts the next turn for you after this one (turn ${goal.turns} of at most ${goal.turnLimit}), so do as much as you can in each turn and don't ask whether to continue.`,
-    `Before you end each turn, call the ${GOAL_STATUS_TOOL} tool once: "met" only when the goal is fully done and you checked it, "blocked" when you can't go on without the person (say what you need), or "continue" with a short note of what you did and what is next.`,
+    `Before you end each turn, call the ${GOAL_UPDATE_TOOL} tool once: "met" only when the goal is fully done and you checked it, "blocked" when you can't go on without the person (say what you need), or "continue" with a short note of what you did and what is next.`,
     '</mousse_goal>'
   ].join('\n')
 }

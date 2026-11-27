@@ -381,7 +381,7 @@ export interface AppToolHost extends DelegationToolsHost {
   terminals?(): TerminalReadHost | undefined
   /** The thread's task queue; null when the owner keeps none (no task tools). */
   tasks(threadId: string | undefined): TaskQueue | null
-  /** The threads' goals (`/goal`): whether one is working, and the agent's `goal_status` report. Absent: no goal tool. */
+  /** The threads' goals (`/goal`): whether one is working, and the agent's `goal_update` report. Absent: no goal tool. */
   goals?: {
     working(threadId: string): boolean
     /** Records the report of the caller's run; returns what the agent is told. Throws on a report it refuses. */

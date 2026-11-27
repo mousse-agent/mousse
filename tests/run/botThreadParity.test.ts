@@ -297,8 +297,8 @@ describe('a bot uses what a thread\'s agent can', () => {
 
     it('keeps a task list with no permission', async () => {
       const { call } = await world({ grant: [] })
-      expect(await call('create_task', { description: 'Read the logs' })).toMatchObject({ error: false })
-      expect((await call('list_tasks')).text).toContain('Read the logs')
+      expect(await call('task_create', { description: 'Read the logs' })).toMatchObject({ error: false })
+      expect((await call('task_list')).text).toContain('Read the logs')
     })
   })
 
@@ -307,7 +307,7 @@ describe('a bot uses what a thread\'s agent can', () => {
       const { call, host } = await world({ role: 'subagent', tools: ['shell'], botTools: { escalate: false, consult: false, subagent: true, threads: 'all', profiler: true, tasks: true } })
       expect(await call('thread_steer', { threadId: 'mine', runId: 'run-9', text: 'Stop after the build.' })).toMatchObject({ error: false })
       expect(host.steerRun).toHaveBeenCalled()
-      expect(await call('create_task', { description: 'Part one' })).toMatchObject({ error: false })
+      expect(await call('task_create', { description: 'Part one' })).toMatchObject({ error: false })
       for (const tool of ['schedule_list', 'secret_request', 'create_quick_action']) expect(await call(tool, {}), tool).toMatchObject({ error: true })
     })
   })
