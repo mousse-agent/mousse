@@ -340,3 +340,84 @@ describe('floating app UI over an applet', () => {
     expect(lastClip()).toEqual(OPEN_CLIP)
   })
 })
+
+// While the transcript scrolls, the native view hides and a picture of the applet stands in for it in the page. These
+// cover what that picture shows: never an empty box where the applet was.
+describe("an applet's cached frame", () => {
+  let emit: (event: { runtimeId: string; type: string }) => void
+  const frame = () => app.querySelector<HTMLImageElement>('.mousse-applet-scroll-frame')
+  /** Runs queued frames and fake timers for `ms`, and the promises they start. */
+  async function pass(ms: number) {
+    for (let round = 0; round < 12; round++) {
+      const queued = frames.splice(0)
+      await act(async () => {
+        for (const callback of queued) callback(0)
+        await vi.advanceTimersByTimeAsync(round ? 0 : ms)
+      })
+      if (!queued.length && !frames.length && round) break
+    }
+  }
+  async function start(images: Array<string | undefined>) {
+    api.snapshot.mockImplementation(async () => ({ image: images.length > 1 ? images.shift() : images[0] }))
+    await act(async () => root.render(createElement(AppletCard, { reference })))
+    await pass(150)
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    vi.stubGlobal('Image', class { src = ''; decode = async () => {} })
+    api.onEvent.mockImplementation((callback: typeof emit) => { emit = callback; return () => {} })
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('keeps the last picture when the transcript scrolls right after the applet is used', async () => {
+    await start(['data:image/png;base64,first', 'data:image/png;base64,second'])
+    expect(frame()?.src).toBe('data:image/png;base64,first')
+    // A click inside the applet changes its pixels; the chat scrolls before a new picture is taken.
+    await act(async () => {
+      emit({ runtimeId: 'runtime-1', type: 'visual-changed' })
+      scroller.dispatchEvent(new Event('scroll'))
+    })
+    expect(api.suspend).toHaveBeenCalledTimes(1)
+    expect(frame()?.src).toBe('data:image/png;base64,first')
+    // Once scrolling stops, a fresh picture replaces it.
+    await pass(400)
+    await pass(150)
+    expect(frame()?.src).toBe('data:image/png;base64,second')
+  })
+
+  it('uses a picture taken just before a scroll started', async () => {
+    await start(['data:image/png;base64,first'])
+    let finish!: (value: { image: string }) => void
+    api.snapshot.mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+    await act(async () => emit({ runtimeId: 'runtime-1', type: 'visual-changed' }))
+    await pass(150)
+    await act(async () => { scroller.dispatchEvent(new Event('scroll')) })
+    await act(async () => finish({ image: 'data:image/png;base64,clicked' }))
+    expect(frame()?.src).toBe('data:image/png;base64,clicked')
+  })
+
+  it('tries again when a capture comes back empty', async () => {
+    await start([undefined, 'data:image/png;base64,late'])
+    expect(frame()).toBeNull()
+    await pass(400)
+    expect(frame()?.src).toBe('data:image/png;base64,late')
+  })
+
+  // The view is see-through, so the picture is cut away under it while it shows. Before the view goes, the whole picture
+  // must already be in the page: the other order leaves a moment with neither.
+  it.each([
+    ['the transcript scrolls', () => scroller.dispatchEvent(new Event('scroll')), () => api.suspend],
+    ['a layer covers it', () => { label({ left: 50, top: 50, width: 800, height: 500 }) }, () => api.update]
+  ])('is whole in the page before the view hides when %s', async (_case, act0, call) => {
+    await start(['data:image/png;base64,first'])
+    expect(frame()?.style.clipPath).not.toBe('')
+    let clipWhenHidden: string | undefined
+    call().mockImplementation(async (input?: { visible?: boolean }) => {
+      if (input?.visible !== true) clipWhenHidden = frame()?.style.clipPath
+    })
+    await act(async () => act0())
+    await pass(0)
+    expect(clipWhenHidden).toBe('')
+  })
+})
