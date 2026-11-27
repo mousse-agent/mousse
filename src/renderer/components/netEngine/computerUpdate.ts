@@ -30,20 +30,21 @@ export function computerUpdateWay(
   if (canAsk && online && current && update?.requests) return { kind: 'request', detail }
   // A development build here has no release to send: the other computer is updated on itself.
   if (!canAsk || !current) return { kind: 'there', hint: `Update Mousse on ${name}.`, detail, check: false }
-  if (!online) return { kind: 'there', hint: `Offline. Update it here once it's back, or on ${name}.`, detail, check: false }
-  if (!update)
-    return {
-      kind: 'there',
-      hint: `Its Mousse is too old to update from here. Update it on ${name} once.`,
-      detail,
-      check: true
-    }
-  if (!update.self)
+  // What it last said about updating itself (or that it said nothing) holds while it is offline too.
+  if (update && !update.self)
     return {
       kind: 'there',
       hint: `It can't update itself${update.reason ? `: ${update.reason.replace(/\.$/, '')}` : ''}. Update it on ${name}.`,
       detail,
       check: false
     }
+  if (!update)
+    return {
+      kind: 'there',
+      hint: `Its Mousse is too old to update from here. Update it on ${name} once.`,
+      detail,
+      check: online
+    }
+  if (!online) return { kind: 'there', hint: `Offline. Update it here once it's back, or on ${name}.`, detail, check: false }
   return { kind: 'there', hint: `Open Mousse on ${name} to update it from here.`, detail, check: true }
 }

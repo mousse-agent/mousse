@@ -205,7 +205,8 @@ export function EngineDevicesSection() {
     setChecks((now) => ({ ...now, [node]: 'checking' }))
     let answer: 'same' | 'failed' = 'same'
     try {
-      await window.mousse.platformRequest.request('net.update.there', { node, step: 'refresh' })
+      // `version` keeps what it answers, like `refresh`, but fails when it does not answer now.
+      await window.mousse.platformRequest.request('net.update.there', { node, step: 'version' })
     } catch {
       answer = 'failed'
     }

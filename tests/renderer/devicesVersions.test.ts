@@ -210,7 +210,7 @@ describe('Settings → Devices, versions', () => {
     const asks: Array<Record<string, unknown>> = []
     answers['net.update.there'] = (params: Record<string, unknown>) => {
       asks.push(params)
-      return { ok: true }
+      return { version: '0.9.0' }
     }
     await mount()
     // Nothing is asked on its own for a computer that never said it updates itself, and no button pretends to update it.
@@ -224,7 +224,7 @@ describe('Settings → Devices, versions', () => {
     }
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Check again whether Laptop can be updated from here"]')!.click())
     await flush()
-    expect(asks).toEqual([{ node: 'node_b', step: 'refresh' }])
+    expect(asks).toEqual([{ node: 'node_b', step: 'version' }])
     expect(rowText('node_b')).not.toContain('too old')
     await act(async () => button('Update')!.click())
     await flush()
@@ -235,8 +235,9 @@ describe('Settings → Devices, versions', () => {
     answers['bridge.nodes'] = { nodes: [row('node_b', 'Laptop', { version: '0.9.0', olderThanThis: true })] }
     let reachable = true
     answers['net.update.there'] = () => {
+      // As the daemons answer `version`: no answer now is an error, never what was kept from before.
       if (!reachable) throw new Error('peer_offline')
-      return { ok: true }
+      return { version: '0.9.0' }
     }
     await mount()
     const check = () => document.querySelector<HTMLButtonElement>('[aria-label="Check again whether Laptop can be updated from here"]')!

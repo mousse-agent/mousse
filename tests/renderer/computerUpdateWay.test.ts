@@ -22,6 +22,8 @@ const rows: Row[] = [
   ['takes requests, but only uses this computer', { ...base, update: takes }, { canAsk: false }, 'there:Update Mousse on Laptop.'],
   ['takes requests, this build has no release', { ...base, update: takes }, { canAsk: true, current: '' }, 'there:Update Mousse on Laptop.'],
   ['offline', { ...base, state: 'closed' as never, update: takes }, { canAsk: true }, "there:Offline. Update it here once it's back, or on Laptop."],
+  ["offline, said it can't update itself", { ...base, state: 'closed' as never, update: cannot }, { canAsk: true }, "there:It can't update itself: Updates on macOS need a signed build. Update it on Laptop."],
+  ['offline, too old to report', { ...base, state: 'closed' as never }, { canAsk: true }, 'there:Its Mousse is too old to update from here. Update it on Laptop once.'],
   ['too old to report', { ...base }, { canAsk: true }, 'there+check:Its Mousse is too old to update from here. Update it on Laptop once.'],
   ["can't update itself", { ...base, update: cannot }, { canAsk: true }, "there:It can't update itself: Updates on macOS need a signed build. Update it on Laptop."],
   ['app not open', { ...base, update: selfOnly }, { canAsk: true }, 'there+check:Open Mousse on Laptop to update it from here.']
