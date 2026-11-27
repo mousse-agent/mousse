@@ -26,8 +26,23 @@ const LISTED = 12
 export type AddressRelation = 'self' | 'parent' | 'sibling' | 'child' | 'descendant' | 'native'
 
 export type AddressTarget =
-  | { kind: 'thread'; threadId: string; title?: string; relation?: AddressRelation }
+  /** `parentThreadId`: a descendant's parent, so a Stop of the subagent above it can account for it. */
+  | { kind: 'thread'; threadId: string; title?: string; relation?: AddressRelation; parentThreadId?: string }
   | { kind: 'bot'; botId: string; name: string }
+
+/**
+ * Which bots `bot:` may name for a caller: `others`, the owner's other bots, for a bot turn that holds `bot_send`; `own`,
+ * the bot that started the caller's thread, for any other thread (no read of the bots' store); `none` otherwise.
+ */
+export type BotReach = 'others' | 'own' | 'none'
+
+/** How a call resolves: several targets allowed or not, which threads the caller may see named, which bots it reaches. */
+export interface ResolveOptions {
+  many: boolean
+  /** Whether the caller may read the thread by id. A thread it can't is never matched by title nor listed as a candidate. */
+  visible?(threadId: string): boolean
+  bots?: BotReach
+}
 
 export interface AddressCandidate {
   threadId?: string
@@ -36,8 +51,13 @@ export interface AddressCandidate {
   relation?: AddressRelation | 'bot'
 }
 
-/** What an address resolved to: `many` for `children` and `descendants`, which may be any number of targets. */
+/**
+ * What a call named and resolved to: `many` for `children` and `descendants`, which may be any number of targets. `form`
+ * is the argument it was named by (`thread`, or the older `threadId`, `subagent`, `delegationId`); a `subagent` or
+ * `delegationId` is resolved by its tool, so its record has no targets.
+ */
 export interface ResolvedAddress {
+  form?: 'thread' | 'threadId' | 'subagent' | 'delegationId'
   address: string
   targets: AddressTarget[]
   many: boolean
@@ -58,8 +78,8 @@ export interface AddressSources {
   titleOf(threadId: string): string | undefined
   /** A thread of this computer has this id. */
   exists(threadId: string): boolean
-  /** The bots the caller may reach (its own bot, or a bot's other bots). */
-  botsFor?(callerThreadId: string): Array<{ botId: string; name: string }>
+  /** The bots the caller may reach as `reach` says; never called for `none`. */
+  botsFor?(callerThreadId: string, reach: Exclude<BotReach, 'none'>): Array<{ botId: string; name: string }>
 }
 
 /** The reserved word or prefix `title` is or starts with; a subagent may not be titled so. Undefined when it is free. */
@@ -98,8 +118,8 @@ export function familyMembers(sources: AddressSources, threadId: string): Array<
 }
 
 /** The subagents below `threadId`, breadth first: its children, then theirs. */
-function descendants(sources: AddressSources, threadId: string): Array<{ threadId: string; title: string; relation: 'child' | 'descendant' }> {
-  const out: Array<{ threadId: string; title: string; relation: 'child' | 'descendant' }> = []
+function descendants(sources: AddressSources, threadId: string): Array<{ threadId: string; title: string; relation: 'child' | 'descendant'; parentThreadId: string }> {
+  const out: Array<{ threadId: string; title: string; relation: 'child' | 'descendant'; parentThreadId: string }> = []
   let level = [threadId]
   const seen = new Set(level)
   for (let depth = 0; level.length && depth < MAX_DEPTH; depth += 1) {
@@ -108,7 +128,7 @@ function descendants(sources: AddressSources, threadId: string): Array<{ threadI
       for (const child of sources.childrenOf(id)) {
         if (seen.has(child.threadId)) continue
         seen.add(child.threadId)
-        out.push({ ...child, relation: depth === 0 ? 'child' : 'descendant' })
+        out.push({ ...child, relation: depth === 0 ? 'child' : 'descendant', parentThreadId: id })
         next.push(child.threadId)
       }
     level = next
@@ -145,7 +165,9 @@ function byTitle(address: string, name: string, members: Array<{ threadId: strin
  * Resolves `address` for `callerThreadId`. `many`: the tool takes several targets (send, stop, wait), so `children` and
  * `descendants` resolve; elsewhere they are refused. An id resolves to itself unchecked: the tool's own checks decide.
  */
-export function resolveAddress(sources: AddressSources, callerThreadId: string, rawAddress: string, options: { many: boolean }): AddressResolution {
+export function resolveAddress(sources: AddressSources, callerThreadId: string, rawAddress: string, options: ResolveOptions): AddressResolution {
+  // A thread the caller can't read by id is never matched by title nor named as a candidate: a refusal discloses nothing.
+  const seen = <T extends { threadId: string }>(members: T[]): T[] => (options.visible ? members.filter((member) => member.threadId === callerThreadId || options.visible!(member.threadId)) : members)
   const address = rawAddress.trim()
   if (!address) return unknown('thread must name a thread: an id, self, parent, child:<title>, sibling:<title>, bot:<name> or the title of a thread of your family.', [])
   if (!isNamedAddress(address, sources)) return { ok: true, address, targets: [{ kind: 'thread', threadId: address }], many: false }
@@ -160,7 +182,7 @@ export function resolveAddress(sources: AddressSources, callerThreadId: string, 
   if (word === 'children' || word === 'descendants') {
     if (!options.many) return { ok: false, reason: 'not_for_this_tool', message: `${word} names several threads, which only thread_send, thread_stop and thread_wait take. Name one thread.` }
     const below = descendants(sources, callerThreadId).filter((member) => word === 'descendants' || member.relation === 'child')
-    return { ok: true, address, targets: below.map((member) => thread(member.threadId, member.title, member.relation)), many: true }
+    return { ok: true, address, targets: below.map((member) => ({ ...thread(member.threadId, member.title, member.relation), ...(member.relation === 'descendant' ? { parentThreadId: member.parentThreadId } : {}) })), many: true }
   }
   const prefixed = PREFIXED.exec(address)
   if (prefixed) {
@@ -168,14 +190,15 @@ export function resolveAddress(sources: AddressSources, callerThreadId: string, 
     if (!name.trim()) return unknown(`${prefix.toLowerCase()}: needs a name after it.`, [])
     switch (prefix.toLowerCase()) {
       case 'child':
-        return byTitle(address, name, sources.childrenOf(callerThreadId).map((child) => ({ ...child, relation: 'child' as const })), 'your subagents')
+        return byTitle(address, name, seen(sources.childrenOf(callerThreadId)).map((child) => ({ ...child, relation: 'child' as const })), 'your subagents')
       case 'sibling': {
         const parent = sources.parentOf(callerThreadId)
         if (!parent) return { ok: false, reason: 'no_parent', message: 'This thread is not a subagent, so it has no siblings.' }
-        return byTitle(address, name, sources.childrenOf(parent).filter((child) => child.threadId !== callerThreadId).map((child) => ({ ...child, relation: 'sibling' as const })), 'your siblings')
+        return byTitle(address, name, seen(sources.childrenOf(parent)).filter((child) => child.threadId !== callerThreadId).map((child) => ({ ...child, relation: 'sibling' as const })), 'your siblings')
       }
       default: {
-        const bots = sources.botsFor?.(callerThreadId) ?? []
+        const reach = options.bots ?? 'none'
+        const bots = reach === 'none' ? [] : sources.botsFor?.(callerThreadId, reach) ?? []
         const wanted = name.replace(/\s+/g, ' ').trim().toLowerCase()
         const matches = bots.filter((bot) => bot.botId === name.trim() || bot.name.replace(/\s+/g, ' ').trim().toLowerCase() === wanted)
         const candidates = bots.map((bot) => ({ botId: bot.botId, title: bot.name, relation: 'bot' as const }))
@@ -186,7 +209,7 @@ export function resolveAddress(sources: AddressSources, callerThreadId: string, 
     }
   }
   const self = sources.titleOf(callerThreadId)
-  return byTitle(address, address, [...(self !== undefined ? [{ threadId: callerThreadId, title: self, relation: 'self' as const }] : []), ...familyMembers(sources, callerThreadId)], 'your family')
+  return byTitle(address, address, [...(self !== undefined ? [{ threadId: callerThreadId, title: self, relation: 'self' as const }] : []), ...seen(familyMembers(sources, callerThreadId))], 'your family')
 }
 
 /** The receipt kind that keeps what an address resolved to under a retry key. */
@@ -223,7 +246,7 @@ export function recordedAddress(store: AddressReceiptStore, key: string): Resolv
 export function recordAddress(store: AddressReceiptStore, key: string, callerThreadId: string, resolved: ResolvedAddress, now = new Date().toISOString()): ResolvedAddress {
   const earlier = recordedAddress(store, key)
   if (earlier) return earlier
-  const result: ResolvedAddress = { address: resolved.address, targets: resolved.targets, many: resolved.many }
+  const result: ResolvedAddress = { form: resolved.form ?? 'thread', address: resolved.address, targets: resolved.targets, many: resolved.many }
   store.putReceipt({ clientRequestId: key, threadId: callerThreadId, commandKind: ADDRESS_RECEIPT_KIND, status: 'accepted', result, createdAt: now })
   return result
 }

@@ -36,8 +36,9 @@ import {
   type ToolTimeline
 } from './types'
 import { asRefusal, readRefusal, refused, refusalText } from './refusal'
-import { addressedArgs, fanOutCalls, fanOutRow, withAddress, type ThreadAddresses } from './addressedCall'
-import { ADDRESSED_TOOLS } from '../../addressing'
+import { addressedArgs, fanOutCalls, fanOutRow, fanOutRows, notSentRow, OUT_OF_REACH, withAddress, type ThreadAddresses } from './addressedCall'
+import { ADDRESSED_TOOLS, type BotReach } from '../../addressing'
+import { BOT_SEND_TOOL } from '../../../../shared/bots/personal/botMessages'
 import { delegableTurn, hostingTurn, type CallAttribution } from '../../nativeHelpers'
 import {
   compileTool,
@@ -271,6 +272,15 @@ function declaringRetryKey(tool: MousseTool): MousseTool {
       return READ_ONLY_TOOL_NAMES.has(target.name) ? schema : withRetryKey(schema)
     }
   })
+}
+
+/**
+ * Which bots `bot:` may name: the owner's other bots for a bot turn that holds `bot_send` (never a bot's subagent); for
+ * any other thread, only the bot that started it, read from the thread, never from the bots' store.
+ */
+export function botReachOf(turn: AppToolTurn): BotReach {
+  if (!turn.bot) return 'own'
+  return turn.bot.appTools.has(BOT_SEND_TOOL) && turn.bot.role !== 'subagent' ? 'others' : 'none'
 }
 
 /** Where a call stands once its turn is known (`ToolRegistry.call`). */
@@ -610,13 +620,23 @@ export class ToolRegistry {
    */
   private async callAddressed(name: string, tool: MousseTool, given: Record<string, unknown>, caller: McpCaller, site: CallSite): Promise<ToolOutcome> {
     const { turn, request } = site
-    const addressed = addressedArgs(this.options.addresses, name, given, caller.threadId, request.toolCallId, !READ_ONLY_TOOL_NAMES.has(name))
+    const visible = this.readableBy(caller, turn)
+    const addressed = addressedArgs({ addresses: this.options.addresses, tool: name, args: given, callerThreadId: caller.threadId, toolCallId: request.toolCallId, record: !READ_ONLY_TOOL_NAMES.has(name), visible, bots: botReachOf(turn) })
     if ('refused' in addressed) return addressed.refused
     const { args, resolved } = addressed
-    if (!resolved?.many) return this.callAdmitted(name, this.variantOf(name, tool, args, turn), args, caller, site)
+    if (!resolved?.many) {
+      const outcome = await this.callAdmitted(name, this.variantOf(name, tool, args, turn), args, caller, site)
+      // A thread an address named that the caller can't read by id: a refusal says no more than that.
+      const target = resolved?.form === 'thread' && resolved.address !== args.threadId ? (args.threadId as string) : undefined
+      return target && outcome.isError && namesThread(outcome.text, target) && !visible(target) ? OUT_OF_REACH : outcome
+    }
     if (args.runId !== undefined) return refused('invalid_arguments', `runId names one run; leave it out with thread "${resolved.address}".`)
+    // Each target's key comes from the call's key and the target; the one target of a set is keyed as a call that named it.
+    const keyOf = (threadId: string) => (resolved.targets.length === 1 ? request.toolCallId : `${request.toolCallId}:${threadId}`)
     const one = async ({ target, args: targetArgs }: ReturnType<typeof fanOutCalls>[number]) => {
-      const each = { ...site, request: { ...request, toolCallId: `${request.toolCallId}:${target.threadId}` } }
+      // Cancelled: no later target is sent anything.
+      if (request.signal.aborted) return notSentRow(target, visible(target.threadId))
+      const each = { ...site, request: { ...request, toolCallId: keyOf(target.threadId) } }
       let outcome: ToolOutcome
       try {
         outcome = await this.callAdmitted(name, this.variantOf(name, tool, targetArgs, turn), targetArgs, caller, each)
@@ -625,14 +645,30 @@ export class ToolRegistry {
         if (!refusedNow) throw error
         outcome = refusedNow
       }
-      return fanOutRow(target, outcome)
+      return fanOutRow(target, outcome, visible(target.threadId))
     }
     const calls = fanOutCalls(name, args, resolved)
+    const rows = new Map<string, Record<string, unknown>>()
     // Waits run side by side; a send or a Stop runs one target at a time, in the order the address recorded.
-    const results = name === 'thread_wait' ? await Promise.all(calls.map(one)) : []
-    if (name !== 'thread_wait') for (const call of calls) results.push(await one(call))
+    if (name === 'thread_wait') (await Promise.all(calls.map(one))).forEach((row, index) => rows.set(calls[index].target.threadId, row))
+    else for (const call of calls) rows.set(call.target.threadId, await one(call))
+    const results = fanOutRows(resolved, rows, visible)
     const note = !results.length ? `"${resolved.address}" names no thread now.` : name === 'thread_stop' ? 'Stopping each of your subagents also stops what it delegated, deepest first.' : undefined
     return { text: JSON.stringify({ address: resolved.address, results, ...(note ? { note } : {}) }) }
+  }
+
+  /** Whether the caller may read a thread by id, as `thread_read` checks it: what an address may name to it. */
+  private readableBy(caller: McpCaller, turn: AppToolTurn): (threadId: string) => boolean {
+    const read = this.tools.get('thread_read')
+    return (threadId) => {
+      if (threadId === caller.threadId) return true
+      if (!read) return false
+      try {
+        return !('refusal' in this.heldNow(read, { threadId }, caller, { turn }))
+      } catch {
+        return false
+      }
+    }
   }
 
   /**
@@ -679,12 +715,16 @@ export class ToolRegistry {
     const { name, args: named } = canonicalToolCall(calledAs, given)
     // The call's id as the MCP server will key it (`mcp:<clientRequestId>`), so a retry resolves as its receipt says.
     const key = typeof clientRequestId === 'string' && clientRequestId.trim() ? { toolCallId: `mcp:${clientRequestId.trim()}` } : {}
+    const turn = this.options.turns?.get(at.runId)
     // Its `thread` address as the call will resolve it (a gate records nothing), so a gate judges the ids it names.
-    const addressed = addressedArgs(this.options.addresses, name, named, at.threadId, key.toolCallId, false)
+    const caller: McpCaller = { threadId: at.threadId, runId: at.runId, provider: '', accessLevel: 'manage' }
+    const addressed = addressedArgs({
+      addresses: this.options.addresses, tool: name, args: named, callerThreadId: at.threadId, toolCallId: key.toolCallId, record: false,
+      visible: turn ? this.readableBy(caller, turn) : () => false, bots: turn ? botReachOf(turn) : 'none'
+    })
     if ('refused' in addressed) return { refused: addressed.refused }
     const { args } = addressed
     const tool = this.tools.get(name)
-    const turn = this.options.turns?.get(at.runId)
     if (!tool?.variantOf || !turn) return { name, variant: name, args }
     const variant = tool.variantOf(args, { threadId: at.threadId, turn, ...key })
     return 'refused' in variant ? variant : { name, variant: variant.tool.name, args: variant.args }
@@ -752,7 +792,7 @@ export class ToolRegistry {
    * lacks, a person's provenance. The refusal, or the compiled tool and its scope. Run when the call is admitted, and
    * again once a person answered its ask (`askFirst`), so what changed while it waited holds.
    */
-  private heldNow(tool: MousseTool, args: Record<string, unknown>, caller: McpCaller, site: CallSite): { refusal: ToolOutcome } | { compiled: CompiledTool; scope: ReturnType<CompiledTool['authorize']> } {
+  private heldNow(tool: MousseTool, args: Record<string, unknown>, caller: McpCaller, site: Pick<CallSite, 'turn'>): { refusal: ToolOutcome } | { compiled: CompiledTool; scope: ReturnType<CompiledTool['authorize']> } {
     const { turn } = site
     const compiled = this.compiled(tool, turn, caller)
     // A bot's thread tool ("use your threads"): its grant first, which this turn holds only in the lanes that may use the

@@ -114,13 +114,16 @@ function threadAddresses(host: AppToolHost, engine: RunEngine, bots: (() => BotA
     helpersOf: (threadId) => (host.listThreads?.() ?? []).filter((thread) => isNativeHelperThread(thread) && thread.lineage?.parentThreadId === threadId).map((thread) => ({ threadId: thread.id, title: thread.name ?? '' })),
     titleOf,
     exists: (threadId) => host.threadMeta?.(threadId) !== undefined,
-    // A bot's chat or work reaches its owner's other bots; a thread a bot started, that bot. A bot's subagent, none.
-    botsFor: (callerThreadId) => {
+    // `others` (a bot turn that holds bot_send, `botReachOf`): its owner's other bots, through the bot port. `own` (any
+    // other thread): the bot that started it, from the thread record alone.
+    botsFor: (callerThreadId, reach) => {
+      if (reach === 'own') {
+        const own = ownBotOf(host.threadMeta?.(callerThreadId))
+        return own ? [{ botId: own.botId, name: own.name }] : []
+      }
       const deps = bots?.()
       const activation = deps?.host.activationOf(callerThreadId)
-      if (activation) return activation.role === 'subagent' ? [] : deps?.host.bots?.list(activation.botId).map(({ botId, name }) => ({ botId, name })) ?? []
-      const own = ownBotOf(host.threadMeta?.(callerThreadId))
-      return own ? [{ botId: own.botId, name: own.name }] : []
+      return activation && activation.role !== 'subagent' ? deps?.host.bots?.list(activation.botId).map(({ botId, name }) => ({ botId, name })) ?? [] : []
     }
   }
   return {
