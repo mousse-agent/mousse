@@ -20,7 +20,7 @@ Everything else gets the one review pass its tier sets in [review](../review/SKI
 
 ## Members
 
-Two reviewers at high effort, each from a different model family, neither of them the author. The human who agrees to the council names the families; if they have not, ask in the same line as the request. Use the newest model of each family that is available, looked up when the council starts. Never write a model ID into a skill or a brief. When the council judges design proposals, a member may share a family with a proposer, as long as it is a fresh session and the proposals carry no author names.
+Two reviewers at high effort, each from a different model family, neither of them the author. The council's families are the human's choice, never yours. Use the ones they have saved. When none are saved, ask them to name the families in the same line as the request, and save the answer as a standing preference so no later council asks again. Families the human names when asking for a council override the saved ones for that council, and the saved ones stay as they are. Use the newest model of each family that is available, looked up when the council starts. Never write a model ID into a skill or a brief. When the council judges design proposals, a member may share a family with a proposer, as long as it is a fresh session and the proposals carry no author names.
 
 If a member is unavailable or out of usage, say so and run with the other alone. Do not substitute another family, and do not retry a member that hit its limit.
 

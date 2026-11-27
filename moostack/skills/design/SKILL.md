@@ -19,7 +19,9 @@ The level follows what the choice costs to undo, not how much code it is. Use th
 | 2 | A design that crosses areas, a new subsystem, or a replacement for one | Two proposers from different model families, and a third when the two disagree on shape | A rubric and one outside judge, then the human picks |
 | 3 | A protocol, storage format or security boundary that is costly to change once it ships | Three proposers from different model families | A [council](../council/SKILL.md) judges them against the rubric and names the winner; a split goes to the human |
 
-When the human names a level, use it. Otherwise say the level and why in one line. Levels 2 and 3 spend usage on other models, so wait for the go, and ask in that same line for the model families and, at level 3, the yes to the council. Reuse those answers for the rest of the design.
+When the human names a level, use it. Otherwise say the level and why in one line. Levels 2 and 3 spend usage on other models, so wait for the go, and at level 3 ask in that same line for the yes to the council.
+
+The proposer families are the human's choice, never yours. Use the ones they have saved. When none are saved, ask them in that same line to name the families, and save the answer as a standing preference so no later design asks again. Families the human names when asking for a design override the saved ones for that design, and the saved ones stay as they are.
 
 ## 1. State the problem without a solution
 
