@@ -2338,6 +2338,10 @@ export class NetEngineService implements EngineDirectoryPort {
   serving(node: NodeId): boolean {
     return !!this.started?.peers.serving(node)
   }
+  accepted(node: NodeId): boolean {
+    const started = this.started
+    return !started || started.pairing.accepted(node)
+  }
   name(node: NodeId): string | undefined {
     return this.started?.peers.get(node)?.name
   }
