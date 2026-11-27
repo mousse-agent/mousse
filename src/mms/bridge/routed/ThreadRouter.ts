@@ -396,7 +396,8 @@ export class ThreadRouter implements ThreadRouterPort {
       if (ref?.node !== node) continue
       const { offline: _offline, notShared: _notShared, ...rest } = thread
       const row = this.lists?.row(thread.id)
-      const listed = row ? { ...rest, node, order: row.order } : { ...rest, node }
+      // The bot here that started it, which the lists name on its row (`MergedLists.withBot`), stays named.
+      const listed = row ? { ...rest, node, order: row.order, ...(row.startedByBot ? { startedByBot: row.startedByBot } : {}) } : { ...rest, node }
       out = { ...out, [key]: listed }
     }
     return out

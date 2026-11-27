@@ -1515,5 +1515,11 @@ describe('a thread a bot here started there', () => {
     h.lists.nodeOffline(h.node)
     expect(changed).toEqual([['bot-chat']])
     expect(launchedHereAndThere([], h.lists, new Set(['bot-chat']))).toMatchObject([{ threadId: h.q('bots'), status: 'idle' }])
+
+    // Renamed in view (its stream says so before the lists do): the bot hears of it at once.
+    changed.length = 0
+    h.lists.applyMetadata(h.node, { id: 'bots', name: 'Renamed', createdAt: iso(0), updatedAt: iso(5), startedFrom: from.agent('bot-chat') })
+    expect(changed).toEqual([['bot-chat']])
+    expect(launchedHereAndThere([], h.lists, new Set(['bot-chat']))[0]?.title).toBe('Renamed')
   })
 })

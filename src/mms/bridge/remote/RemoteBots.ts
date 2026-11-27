@@ -1,7 +1,9 @@
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
 import { botActionRefusalText, isBotActionRefusalCode } from '../../../shared/bots/personal/actionRefusal'
 import { NetError, type NodeCapability, type NodeId } from '../../../shared/net'
-import type { BotChatCard, BotChatMessage, BotDetail, BotError, BotSummary } from '../../../shared/bots/personal/chat'
+import { launchedActive, type BotChatCard, type BotChatMessage, type BotDetail, type BotError, type BotSummary } from '../../../shared/bots/personal/chat'
+import { isQualifiedId } from '../../../shared/threadRef'
+import { managingLine } from '../../bots/chat/projection'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS } from '../../../shared/bots/personal/definition'
 import { MAX_CHOICE_LABEL_CHARS } from '../../../shared/bots/personal/questions'
 import type { BotLook } from '../../../shared/bots/personal/look'
@@ -302,7 +304,21 @@ export function remoteBotError(error: BotError): BotError {
 export function remoteBotSummary(bot: BotSummary): BotSummary {
   // Which devices reach the bot is set and shown on its own computer only.
   const { error, reach: _reach, ...rest } = bot
-  return { ...rest, ...(error ? { error: remoteBotError(error) } : {}) }
+  return { ...rest, ...withoutOtherComputersThreads(bot), ...(error ? { error: remoteBotError(error) } : {}) }
+}
+
+/**
+ * The bot's threads as another device sees them: only those on this computer. A thread the bot started on a further
+ * computer (a qualified id) is that computer's to share, and it may block the device reading this bot; "Managing …",
+ * which names threads, then names only the threads left.
+ */
+function withoutOtherComputersThreads(bot: BotSummary): Pick<BotSummary, 'threads' | 'stateText'> {
+  const threads = bot.threads ?? []
+  const here = threads.filter((thread) => !isQualifiedId(thread.threadId))
+  if (here.length === threads.length) return {}
+  const managing = here.filter(launchedActive)
+  const stateText = bot.stateText.startsWith('Managing ') ? (managing.length ? managingLine(managing) : 'Working…') : bot.stateText
+  return { threads: here, stateText }
 }
 
 /** About a bot as another device sees it. */

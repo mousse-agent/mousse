@@ -1100,6 +1100,8 @@ export class MergedLists implements RemoteListsPort {
     if (sameRow(known, row)) return
     c.threads.set(known.id, row)
     this.pushLists(true, false, false)
+    // A bot that started it lists its new title (or its archiving) now, not at its next refresh.
+    this.noteBotRows(this.botLaunchers(c, [known.id]))
   }
 
   /** A person sent in the thread from this computer: it moves to the front of its group and notifies. */
