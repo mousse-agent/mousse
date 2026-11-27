@@ -170,6 +170,21 @@
       "expiresAt": "2026-11-27T19:01:39.557Z"
     },
     {
+      "task": "s7d4b-bot-thread-tools",
+      "session": "LAPTOP-HIEROJK7-fe1694",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "s7d4b-bot-thread-tools",
+      "paths": [
+        "src/shared/toolAliases.ts",
+        "src/mms/run/mcp/appTools/registry.ts",
+        "src/mms/run/mcp/appTools/bots.ts",
+        "src/mms/run/mcp/appTools/addressedCall.ts",
+        "src/mms/run/mcp/appTools/thread.ts"
+      ],
+      "claimedAt": "2026-11-27T18:20:10.874Z",
+      "expiresAt": "2026-11-27T20:20:10.874Z"
+    },
+    {
       "task": "t3/fence-approvals-s2",
       "session": "LAPTOP-HIEROJK7-a26b71",
       "machine": "LAPTOP-HIEROJK7",
