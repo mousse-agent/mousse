@@ -10,6 +10,7 @@ import type { Delegations } from '../Delegations'
 import type { Inbox } from '../Inbox'
 import type { RunStore } from '../RunStore'
 import { stoppedByPerson, TERMINAL_RUN_STATUSES, type DelegationRecord, type RunRecord, type RunStatus } from '../types'
+import { botWorkActivationOf, listBotWork } from './botWork'
 import { childBusyInputs, isChildBusy, type ChildBusyInputs } from './hold'
 import type { RemoteSubagentOverlay } from './remoteSubagents'
 
@@ -63,7 +64,8 @@ export function taskOutcome(delegation: DelegationRecord, childRun: RunRecord | 
   const interruptedBy = childRun?.outcome?.interruptedBy
   if (delegation.result) return outcomeOfRun(delegation.result.runStatus, interruptedBy)
   if (delegation.status === 'running') {
-    if (!childRun) return 'interrupted'
+    // A bot's work has no run of its own: it goes on until the bots end its projection.
+    if (!childRun) return botWorkActivationOf(delegation) ? 'running' : 'interrupted'
     const outcome = outcomeOfRun(childRun.status, interruptedBy)
     return outcome !== 'running' && busy ? 'waiting_for_subagents' : outcome
   }
@@ -129,6 +131,11 @@ function buildView(sources: SubagentViewSources, parentThreadId: string, visited
     const tasks = sources.delegations.listForChildThread(lineage.threadId).filter((task) => task.parentThreadId === parentThreadId)
     if (tasks.length === 0) continue
     summaries.push(summarize(sources, lineage.threadId, thread.name, tasks, visited))
+  }
+  // A bot's chat lists its work, with the work's own subagents below it (`delegation/botWork.ts`).
+  for (const work of listBotWork(sources.store, parentThreadId)) {
+    const thread = sources.thread(work.childThreadId)
+    if (thread) summaries.push(summarize(sources, work.childThreadId, thread.name, [work], visited))
   }
   return summaries
 }

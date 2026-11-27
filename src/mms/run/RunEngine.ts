@@ -9,6 +9,7 @@ import { inheritedAgentHops } from './agentHops'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
 import { deliverBotResults, withoutBotParentRows, type BotExecutionPort } from './delegation/botPort'
+import { botWorkActivationOf, botWorkInto } from './delegation/botWork'
 import { RemoteLaunchRecords } from './delegation/remoteLaunches'
 import { RemoteSubagentRecords } from './delegation/remoteSubagents'
 import { inheritRevisions } from './delegation/treeCorrection'
@@ -1149,6 +1150,38 @@ un_time_limits). */
 
   get botPort(): BotExecutionPort | null {
     return this.botExecution
+  }
+
+  /**
+   * The running bot work projected into `threadId` (`delegation/botWork.ts`), or null for any other thread. Reads the
+   * run database only, so an ordinary thread never waits on bots.db.
+   */
+  runningBotWork(threadId: string): { activationId: string; parentThreadId: string } | null {
+    const work = botWorkInto(this.store, threadId)
+    const activationId = work?.status === 'running' ? botWorkActivationOf(work) : undefined
+    return activationId ? { activationId, parentThreadId: work!.parentThreadId } : null
+  }
+
+  /**
+   * A Stop of a bot work's row in the thread tree (`thread_stop`) goes to the bots through the port, which stop the work
+   * as `work_stop` does; never to the projection or the work's runs directly. Null when the thread is no running work's.
+   */
+  async stopBotWork(threadId: string): Promise<'stopped' | 'ended' | 'not_found' | 'no_port' | null> {
+    const work = this.runningBotWork(threadId)
+    if (!work) return null
+    const port = this.botExecution
+    return port?.stopBotWork ? port.stopBotWork(work.activationId) : 'no_port'
+  }
+
+  /**
+   * A message to a bot work's row (`thread_send`) goes to the bots through the port as the owner's note (`work_note`),
+   * never into the work thread's inbox. Null when the thread is no running work's.
+   */
+  noteBotWork(threadId: string, text: string): string | null {
+    const work = this.runningBotWork(threadId)
+    if (!work) return null
+    const port = this.botExecution
+    return port?.noteBotWork ? port.noteBotWork(work.activationId, text) : 'no_port'
   }
 
   /**

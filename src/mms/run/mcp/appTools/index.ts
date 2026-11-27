@@ -76,6 +76,8 @@ function agentAccessPolicy(host: AppToolHost, engine: RunEngine): ToolAccessPoli
     family: (caller, threadId) => familyRelation(threadFamily(host, engine), caller.threadId, threadId),
     // A personal bot: its own rule for threads; it reaches every project.
     botReach: (caller, target, options) => {
+      // The bot's own running work, its child in the thread tree: a Stop or a message goes to the bots through the port.
+      if (options?.botWork && target.threadId && engine.runningBotWork(target.threadId)?.parentThreadId === caller.threadId) return { scope: 'manage' }
       if (target.threadId !== undefined) return botThreadReach(host, engine, caller.threadId, target.threadId, options)
       return { scope: 'manage' }
     }

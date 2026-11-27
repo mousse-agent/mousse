@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { BOT_WORK_ROW_SQL } from './delegation/botWork'
 import { isPermissionMode } from '../../shared/permissionMode'
 import { isAgentAccessLevel, type AgentAccessLevel } from '../../shared/settings'
 import { json, str, type Row } from './db/rows'
@@ -297,9 +298,10 @@ export class Delegations {
     })
   }
 
+  /** A bot work's projection (`delegation/botWork.ts`) is never among them: it is the bots' to change, not a thread's task. */
   private list(column: 'parent_run_id' | 'parent_thread_id' | 'child_thread_id', value: string): DelegationRecord[] {
     return this.db
-      .statement(`SELECT * FROM delegations WHERE ${column} = ? ORDER BY created_at, rowid`)
+      .statement(`SELECT * FROM delegations WHERE ${column} = ? AND NOT ${BOT_WORK_ROW_SQL} ORDER BY created_at, rowid`)
       .all(value)
       .map(toDelegation)
   }
