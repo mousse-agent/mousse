@@ -8,8 +8,9 @@
  * and whether the correction reached the thread (a subagent of the corrected thread, a thread of another tree, the
  * corrected thread itself).
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService, type ApprovalTag } from '../../src/mms/orchestrator/UserQuestionService'
+import { formatApprovalDecisions } from '../../src/mms/run/approvalNote'
 import { FENCED_FEEDBACK } from '../../src/mms/run/delegation/approvalFence'
 import { reviseTree } from '../../src/mms/run/delegation/treeCorrection'
 import type { Answerer } from '../../src/mms/run/approvalRights'
@@ -25,7 +26,10 @@ const USER: Answerer = { kind: 'user', via: 'gui' }
 
 describe('an approval from before a correction cannot release its action', () => {
   let f: DelegationFixture
-  afterEach(() => f?.dispose())
+  afterEach(() => {
+    vi.restoreAllMocks()
+    f?.dispose()
+  })
 
   /** `parent` with its running subagent `child`, and `stranger`: a running subagent of another tree. */
   const setup = async () => {
@@ -86,6 +90,32 @@ describe('an approval from before a correction cannot release its action', () =>
     f.advance(1_000)
     await correct('Do not publish; only build.')
     expect(f.engine.approvals.consumeContinuationGrant(child, runId, 'fp')).toBe(false)
+  })
+
+  it('the restarted run is told the fenced action did not run, not that it was approved', async () => {
+    const { child, correct } = await setup()
+    const runId = f.engine.getActiveRun(child)!.runId
+    f.engine.approvals.create({ requestId: 'kept', threadId: child, runId, instanceId: 'pi', provider: 'pi', action: 'command', permissionKey: 'pi:command', fingerprint: 'fp', answerPath: 'continue', questions: [{ id: 'permission', prompt: 'Run npm publish?', options: [{ id: 'allow', label: 'Allow once', decision: 'allow', scope: 'once' }] }] })
+    f.engine.approvals.settle('kept', ALLOW, USER)
+    f.engine.approvals.bindDelivery(['kept'], runId)
+    f.advance(1_000)
+    await correct('Do not publish; only build.')
+    const note = formatApprovalDecisions(f.engine.approvals.listDeliveredToRun(runId))
+    expect(note).not.toContain('approved')
+    expect(note).toContain('- Not run, because the person sent a correction after you asked: Run npm publish?. Read the correction')
+  })
+
+  it('an approval kept only in memory (its save failed) is fenced as well', async () => {
+    const { child, questions, correct } = await setup()
+    vi.spyOn(f.engine.approvals, 'create').mockImplementationOnce(() => { throw new Error('disk full') })
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const answered = questions.requestAnswers(QUESTIONS, child, { approval: TAG })
+    const [pending] = questions.listPendingForThread(child)
+    expect(f.engine.approvals.listPending(child)).toEqual([])
+    f.advance(1_000)
+    await correct('Do not publish; only build.')
+    expect(questions.settle(pending!.requestId, ALLOW, USER)).toEqual({ ok: true, decision: 'reject', fenced: true })
+    expect(await answered).toEqual({ permission: 'reject', feedback: FENCED_FEEDBACK })
   })
 
   it.each([

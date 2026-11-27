@@ -32,6 +32,7 @@ import {
   type LineageLookup
 } from '../run/approvalRights'
 import { approvalFingerprint } from '../run/approvalFingerprint'
+import { FENCED_FEEDBACK } from '../run/delegation/approvalFence'
 import type { OpenQuestionCloseReason, OpenQuestionRecord, OpenQuestions } from '../run/OpenQuestions'
 import { describeQuestionAnswers } from './questionAnswers'
 import {
@@ -139,6 +140,8 @@ interface PendingRequest {
   resolve: (answers: UserQuestionAnswers) => void
   reject: (error: Error) => void
   timer?: ReturnType<typeof setTimeout>
+  /** An approval kept only in memory (its save failed): when it was asked, on the store's clock, for the fence. */
+  askedAt?: string
   /** Told the images sent with the answer, before the answers resolve (`requestAnswers`' `onAttachments`). */
   onAttachments?: (attachments: UserQuestionAttachments) => void
 }
@@ -390,6 +393,7 @@ export class UserQuestionService extends EventEmitter {
       }
     }
     const durable = record !== null
+    const askedAt = binding && !durable ? binding.store.now() : undefined
     if (options.approval?.helper) this.noteHelper(requestId, options.approval.helper)
     // The person takes as long as they need, whoever started the turn: only the caller's own deadline ends it.
     const timeoutMs = options.timeoutMs
@@ -421,6 +425,7 @@ export class UserQuestionService extends EventEmitter {
         questions: shown.questions,
         ...(shown.approval ? { approval: shown.approval } : {}),
         durable,
+        ...(askedAt ? { askedAt } : {}),
         resolve,
         reject,
         ...(timer ? { timer } : {}),
@@ -448,6 +453,7 @@ export class UserQuestionService extends EventEmitter {
     if ((pending?.durable || (!pending && this.binding))) return this.settleSaved(requestId, answers, answeredBy, options)
     if (!pending) return { ok: false, reason: 'unknown' }
     let decision: 'allow' | 'reject' | undefined
+    let fenced = false
     if (pending.approval) {
       // An approval is never settled for an unnamed answerer: nothing here may skip the rule.
       if (!answeredBy) return { ok: false, reason: 'answerer_required' }
@@ -460,6 +466,14 @@ export class UserQuestionService extends EventEmitter {
         this.lineage
       )
       if (!rights.ok) return { ok: false, reason: rights.code }
+      // The same fence as a saved request's (`ThreadApprovals.settleRow`): a correction since it was asked refuses an allow.
+      if (decision === 'allow' && pending.askedAt && this.binding?.store.fencedBy({ threadId: pending.threadId, createdAt: pending.askedAt })) {
+        const reject = pending.approval.options.find((option) => option.decision === 'reject')
+        const questionId = pending.questions[0]?.id
+        answers = { ...(reject && questionId !== undefined ? { [questionId]: reject.id } : {}), feedback: FENCED_FEEDBACK }
+        decision = 'reject'
+        fenced = true
+      }
     }
 
     if (pending.timer) clearTimeout(pending.timer)
@@ -469,7 +483,7 @@ export class UserQuestionService extends EventEmitter {
     }
     pending.resolve(answers)
     this.emit('cleared', { requestId, threadId: pending.threadId })
-    return { ok: true, ...(decision ? { decision } : {}) }
+    return { ok: true, ...(decision ? { decision } : {}), ...(fenced ? { fenced: true as const } : {}) }
   }
 
   private settleSaved(requestId: string, answers: UserQuestionAnswers, answeredBy: Answerer | undefined, options: { continuation?: boolean }): SettleResult {

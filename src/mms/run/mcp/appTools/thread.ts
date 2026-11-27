@@ -2634,7 +2634,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (result.ok && bot && !result.replayed) botChip(bot, 'approval_respond', threadId, titleOf(threadId), undefined, { decision: result.decision })
         // `fenced`: a correction reached the thread after the request was asked, so the allow released nothing.
         if (result.ok && 'fenced' in result && result.fenced)
-          return json({ ok: true, outcome: 'fenced', threadId, requestId, decision: 'reject', message: 'Not run: a correction from the person reached that thread after it asked. It reads the correction and asks again if the action still applies.' })
+          return json({ ok: true, outcome: 'fenced', threadId, requestId, decision: 'reject', ...(result.replayed ? { replayed: true } : {}), message: 'Not run: a correction from the person reached that thread after it asked. It reads the correction and asks again if the action still applies.' })
         if (result.ok) return json({ ok: true, threadId, requestId, decision: result.decision, ...(result.replayed ? { replayed: true } : {}) })
         switch (result.reason) {
           case 'question_for_user':

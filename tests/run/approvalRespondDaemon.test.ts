@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
+import { recordRevision } from '../../src/mms/run/delegation/treeCorrection'
 import { TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
@@ -717,6 +718,14 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       // The continuation is the run that names the one the restart cut off; its source says whose turn it is.
       expect(runsOf(second, threadId).find((run) => run.outcome?.continuationOf)).toMatchObject({ source })
       expect(second.engine.approvals.get(requestIds[0]!)).toMatchObject({ answeredBy: { kind: 'user', via: 'bridge', ...('node' in answerer ? { node: answerer.node } : {}) } })
+    })
+
+    it('a retry of an allow that a correction fenced is still fenced', async () => {
+      const { threadId, requestIds } = await crashWhileAsking(dir!, ['npm publish'])
+      const { second, answer } = await reboot()
+      recordRevision(second.engine.store, { threadId: 'lead', title: 'Lead', text: 'Only build.', deliveries: [{ threadId, title: null, state: 'pending', how: 'after_answer' }] })
+      expect(answer(threadId, requestIds[0]!, 'allow', 'a1')).toEqual({ ok: true, decision: 'reject', replayed: false, fenced: true })
+      expect(answer(threadId, requestIds[0]!, 'allow', 'a1')).toEqual({ ok: true, decision: 'reject', replayed: true, fenced: true })
     })
 
     it('answers given only by an agent record the decisions and start nothing: continuing after a restart is the person\'s click', async () => {

@@ -350,6 +350,11 @@ export class ThreadApprovals {
     return row ? toRecord(row) : null
   }
 
+  /** The time now, on the store's clock: what a request's `createdAt` is compared with. */
+  now(): string {
+    return now(this.store)
+  }
+
   /** The correction that fences this request (it reached the thread after the request was asked), or null. */
   fencedBy(record: Pick<ApprovalRecord, 'threadId' | 'createdAt'>): string | null {
     return correctionSince(this.store, record.threadId, record.createdAt)
@@ -376,9 +381,13 @@ export class ThreadApprovals {
     return select(this.store, "status = 'answered' AND delivered_at IS NULL")
   }
 
-  /** The requests a run was started to deliver (a continue turn, or a message that denied them). */
+  /**
+   * The requests a run was started to deliver (a continue turn, or a message that denied them). An allow whose grant a
+   * correction fenced (`consumeContinuationGrant` refuses it) reads as the rejection it now is, with `FENCED_FEEDBACK`.
+   */
   listDeliveredToRun(runId: string): ApprovalRecord[] {
-    return select(this.store, 'continuation_run_id = ?', runId)
+    return select(this.store, 'continuation_run_id = ?', runId).map((row): ApprovalRecord =>
+      row.decision === 'allow' && row.grantConsumedAt === null && this.fencedBy(row) ? { ...row, decision: 'reject', decisionScope: null, feedback: FENCED_FEEDBACK } : row)
   }
 
   /** How many requests a dead run left that still wait for the user, and how many of those are answered. */

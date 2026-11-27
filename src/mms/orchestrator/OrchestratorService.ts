@@ -261,6 +261,7 @@ import {
 } from '../../shared/permissionMode'
 import { describeApprovalRefusal, startedByPerson, type Answerer } from '../run/approvalRights'
 import { describeApproval, formatApprovalDecisions } from '../run/approvalNote'
+import { FENCED_FEEDBACK } from '../run/delegation/approvalFence'
 import { agentNoteOf, type ApprovalRecord, type ApprovalRule, type ContinuationDue } from '../run/ThreadApprovals'
 import { allowsOrchestrationActions, buildModeChangeNotice, chatModeEquals, getChatModeLabel, getLastUserChatMode, normalizeChatMode } from '../../shared/chatMode'
 import { AgentRegistry } from '../agents/AgentRegistry'
@@ -5282,7 +5283,7 @@ export class OrchestratorService extends EventEmitter {
         // The same call, retried: this agent's own answer, found again (the thread and the call id together, since
         // the call id of a retry carries no caller).
         if (by?.kind === 'agent' && by.threadId === actor.threadId && by.toolCallId === actor.toolCallId && settled.decision)
-          return { ok: true, decision: settled.decision, replayed: true }
+          return { ok: true, decision: settled.decision, replayed: true, ...(asking?.feedback === FENCED_FEEDBACK ? { fenced: true as const } : {}) }
         return { ok: false, reason: 'already_answered', ...(by ? { answeredBy: by } : {}), ...(settled.decision ? { decision: settled.decision } : {}) }
       }
       case 'cancelled':
