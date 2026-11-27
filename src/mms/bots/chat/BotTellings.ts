@@ -61,6 +61,20 @@ export class BotTellings {
     }
   }
 
+  /**
+   * The bot's messages past `readSeq` that asked to be told now or soon and still want the owner, newest first, at most
+   * `limit`: what another device's notification of the bot follows, withdrawn once one leaves this list.
+   */
+  attention(botId: string, readSeq: number, limit = 20): string[] {
+    const ids = this.store.all(`SELECT id FROM bot_messages WHERE bot_id = ? AND seq > ? AND tell IN ('now', 'soon') ORDER BY seq DESC LIMIT ?`, botId, readSeq, limit)
+    const open: string[] = []
+    for (const { id } of ids) {
+      const row = this.store.message(String(id))
+      if (row && this.unread(row)) open.push(row.id)
+    }
+    return open
+  }
+
   private unread(row: BotMessageRow): boolean {
     const bot = this.store.registry(row.botId)
     if (!bot || bot.deletedAt || row.seq <= bot.readSeq) return false

@@ -1075,9 +1075,21 @@ export const ROUTED_TRANSPORT_METHODS: Readonly<Record<string, RoutedTransportRo
   }
 )
 
-/** The kinds of private stream a computer can open. */
+/** The kinds of private stream a computer opens with `routed.stream.open`: its work on this computer's threads. */
 export const ROUTED_STREAM_KINDS = ['thread', 'lists', 'channel', 'terminal'] as const
 export type RoutedStreamKind = (typeof ROUTED_STREAM_KINDS)[number]
+/**
+ * The bot streams one device opens on the bot's computer, each for itself: `bots`, the feed of the bots it reaches
+ * (`bridge.bots.open`), and `bot`, one bot's chat (`bridge.bot.open`). They stand apart from thread sharing: admitted
+ * and kept by the device's bot level and each bot's Devices alone, with their own room (`PRIVATE_BOT_STREAMS_TOTAL`).
+ */
+export const BOT_STREAM_KINDS = ['bots', 'bot'] as const
+export type BotStreamKind = (typeof BOT_STREAM_KINDS)[number]
+/** Every kind of private stream: the routed ones and the bot ones. */
+export const PRIVATE_STREAM_KINDS = [...ROUTED_STREAM_KINDS, ...BOT_STREAM_KINDS] as const
+export type PrivateStreamKind = RoutedStreamKind | BotStreamKind
+export const isBotStreamKind = (kind: string | undefined): kind is BotStreamKind =>
+  kind === 'bots' || kind === 'bot'
 
 /** What `routed.stream.open` answers. */
 export interface RoutedStreamOpened {

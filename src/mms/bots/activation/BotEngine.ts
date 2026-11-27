@@ -8462,6 +8462,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { activationId: working.id, ...(chip ? { chip } : {}), ...(status ? { status } : {}) }
   }
 
+  /**
+   * What another device needs to tell of a bot and to take it back (`BotStreamSources`): how far its chat is read, its
+   * newest message and how loudly it asked to be told, and the messages past the read mark that still want the owner.
+   */
+  feedTelling(botId: string): { readSeq: number; latest?: { id: string; seq: number; author: 'owner' | 'bot'; tell?: 'now' | 'soon' | 'later' }; attention: string[] } {
+    const readSeq = this.store.registry(botId)?.readSeq ?? 0
+    const last = this.store.lastMessage(botId)
+    const latest = last ? { id: last.id, seq: last.seq, author: last.author, ...(last.tell ? { tell: last.tell } : {}) } : undefined
+    return { readSeq, ...(latest ? { latest } : {}), attention: this.tellings.attention(botId, readSeq) }
+  }
+
   private settleConsult(row: BotActivationRow, dispatch: BotDispatchRow, run: RunRecord, outcome: { text?: string }, fromExecutor: boolean): void {
     const key = `${row.id}:${dispatch.n}`
     this.liveRuns.delete(run.runId)

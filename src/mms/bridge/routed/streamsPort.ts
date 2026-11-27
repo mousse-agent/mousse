@@ -28,7 +28,7 @@ export function routedStreamsPort(
       return {
         descriptor,
         head: threads.store.head(descriptor.id),
-        kind: spec.kind,
+        kind: request.kind,
         subject: privateRecordSubject(spec)
       }
     },

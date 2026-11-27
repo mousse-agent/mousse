@@ -44,7 +44,8 @@ import { RemoteAutomations } from './routed/remoteAutomations'
 import { PrivateSources, raiseStreamListenerLimits } from './routed/privateSources'
 import { RoutedStaging } from './routed/staging'
 import { routedStreamsPort } from './routed/streamsPort'
-import { isPrivateKey } from './remote/privateStreams'
+import { isPrivateKey, privateRecordSubject, type PrivateSpec } from './remote/privateStreams'
+import { BOT_STREAM_KINDS, isBotStreamKind, ROUTED_STREAM_KINDS } from '../../shared/bridge/routed'
 import { deviceLabelOf, deviceNameOf } from './routed/deviceName'
 import { clearDeviceRules, deviceActivityOf, messageSendersOf, validateActivityParams } from './deviceActivity'
 import type { BridgeActivityMethod, BridgeActivityParams } from '../../shared/bridge/deviceActivity'
@@ -80,6 +81,8 @@ export class BridgeProfileService {
   private presenceBytes = 0
   private readonly domain: NetDomainComposition
   private stopped = false
+  /** Whether a private stream may still be read: a bot stream only while its reader reaches it (the constructor). */
+  private readonly botStreamReadable: (spec: PrivateSpec) => boolean
   private activated = false
   private disableDrains: Promise<unknown>[] = []
   private closing?: Promise<void>
@@ -308,7 +311,20 @@ export class BridgeProfileService {
             : threadSource.onThread(threadId, listener, onError)
         }
       }
+    // A device's bot streams are its own and need no thread switch, only that it reaches them now: it is on the account
+    // and not blocked here, its bot level is not Off, and (one bot's chat) that bot is there and its Devices include it.
+    // Asked on every read; when it says no, the stream ends (`endLostBotStreams` below).
+    const botStreamReadable = (spec: PrivateSpec): boolean => {
+      if (!isBotStreamKind(spec.kind)) return true
+      if (rt.policy.isBlocked(spec.reader as NodeId) || reach.level(spec.reader) === 'off') return false
+      const present = this.peers.accountDevices()
+      if (present && !present.includes(spec.reader as NodeId)) return false
+      if (spec.kind === 'bots') return true
+      return !!services.personalBots?.botIds().includes(spec.subject) && reach.canReach(spec.subject, spec.reader)
+    }
+    this.botStreamReadable = botStreamReadable
     this.threads = new ThreadStreamAdapter({
+      privateReadable: botStreamReadable,
       db: rt.db,
       store: this.spaces.store,
       generations: rt.streams,
@@ -512,12 +528,37 @@ export class BridgeProfileService {
       deviceLimit: botDeviceLimitFrom(rt.policy),
       // Which bots the calling device reaches; a bot it made stays within its reach, unless a choice was saved for it.
       reach,
-      madeBy: keepMakerInReach(access, reach, (botId) => services.personalBots?.reachChanged(botId))
+      madeBy: keepMakerInReach(access, reach, (botId) => services.personalBots?.reachChanged(botId)),
+      // The bots feed and one bot's chat, read by the device that opened them alone.
+      openStream: async (reader, stream) => {
+        const spec: PrivateSpec = { reader, kind: stream.kind, subject: stream.kind === 'bot' ? stream.botId : '' }
+        const descriptor = this.threads.openPrivate(spec)
+        return { descriptor, head: this.threads.store.head(descriptor.id), kind: stream.kind, subject: privateRecordSubject(spec) }
+      }
     }))
       rt.rpc.register({
         ...method,
         handle: (params, context) => this.track(method.handle(params, context))
       })
+    // A device that no longer reaches a bot (its level set to Off, left out of the bot's Devices, blocked here or gone
+    // from the account, the bot deleted or kept to this computer) loses that bot's chat at once on both transports, and
+    // its whole feed with Off; the feed itself drops a bot it no longer reaches.
+    const endLostBotStreams = (): void => {
+      if (this.stopped) return
+      const bots = services.personalBots?.botIds() ?? []
+      // A deleted bot's chat ends as a stream that is not there; one the device lost ends as one it may not read.
+      const deleted = this.threads.closePrivate({ kind: 'bot', where: (spec) => !bots.includes(spec.subject) })
+      const refused = this.threads.closePrivate({ kinds: BOT_STREAM_KINDS, where: (spec) => !botStreamReadable(spec) })
+      for (const stream of deleted) void this.track(this.peers.failStream(stream, 'stream_unknown')).catch(() => undefined)
+      for (const stream of refused) void this.track(this.peers.failStream(stream, 'forbidden')).catch(() => undefined)
+    }
+    const offLostReach = reach.onChange(endLostBotStreams)
+    const botEvents = services.personalBots?.events
+    botEvents?.on('changed', endLostBotStreams)
+    this.disposers.add(() => {
+      offLostReach()
+      botEvents?.off('changed', endLostBotStreams)
+    })
     this.hub = new BridgeHub({
       db: rt.db,
       identity: rt.identity,
@@ -748,8 +789,11 @@ export class BridgeProfileService {
           // Engine pairings are never on the v1 roster: one that is serving keeps what it holds.
           const keeps = granted && ((node: NodeId) => granted(node) || this.peers.serving(node))
           for (const node of nodes) {
+            // A device's bot streams are not thread work: they stay while it still reaches the bots (bot level, the
+            // bots' Devices), with thread sharing off or its "Works on threads" gone (`endLostBotStreams`).
+            closed.push(...this.threads.closePrivate({ reader: node, kinds: BOT_STREAM_KINDS, where: (spec) => !this.botStreamReadable(spec) }))
             if (keeps?.(node)) continue
-            closed.push(...this.threads.closePrivate({ reader: node }))
+            closed.push(...this.threads.closePrivate({ reader: node, kinds: ROUTED_STREAM_KINDS }))
             this.routes.pages.dropCaller(node)
             this.staging.dropCaller(node)
           }

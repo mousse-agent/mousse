@@ -1,6 +1,7 @@
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { NetError } from '../../../shared/net'
 import type { SqliteNodePolicy } from '../../net/store/nodePolicy'
+import { botsFeedSource, botStreamSource } from '../remote/BotStreamSources'
 import { mmsJson } from '../remote/jsonOutput'
 import { MmsListsSource, type ListsServices } from '../remote/MmsListsSource'
 import { MmsRemoteBackend } from '../remote/MmsBackend'
@@ -25,6 +26,8 @@ export function raiseStreamListenerLimits(services: MmsProfileServices, count = 
     services.pullRequestWatch,
     services.ptyManager
   ]
+  // The bot streams listen to the bots' events, a few listeners each.
+  if (services.personalBots) emitters.push(services.personalBots.events)
   for (const emitter of emitters)
     if (emitter.getMaxListeners() < count) emitter.setMaxListeners(count)
   services.events.setMaxListeners(count)
@@ -145,6 +148,10 @@ export class PrivateSources {
         }
       case 'terminal':
         return terminalSource(this.services, spec)
+      case 'bots':
+        return botsFeedSource(this.services, spec.reader)
+      case 'bot':
+        return botStreamSource(this.services, spec.reader, spec.subject)
     }
   }
 }

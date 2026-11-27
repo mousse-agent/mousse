@@ -1,6 +1,7 @@
 import type { BlobId, EventId, NodeDelegation, NodeId, Roster, StreamId } from '../../../shared/net'
 import { NetError } from '../../../shared/net/errors'
 import { NET_PROTO_MINOR } from '../../../shared/net/limits'
+import { isBotStreamKind } from '../../../shared/bridge/routed'
 import type {
   AppendOutcome,
   BlobStore,
@@ -17,7 +18,7 @@ import { decodeEnvelope } from './codec'
  * computer of the user may see (see `bridge/remote/privateStreams.ts`).
  */
 export interface PrivateStreamBinding {
-  privateAccess(stream: StreamId): { reader: NodeId; open: boolean } | undefined
+  privateAccess(stream: StreamId): { reader: NodeId; kind?: string; open: boolean } | undefined
   /** The one device that may read a stream that is not private but is still that device's alone (a phone's own lists). */
   boundReader?(stream: StreamId): NodeId | undefined
 }
@@ -43,15 +44,17 @@ export class NodeStreamAuthority implements StreamAuthority {
       const delegation = this.current(peer)
       if (descriptor.kind === 'node.thread') {
         const bound = this.privateStreams?.privateAccess(stream)
-        // A private stream is read by the one computer it is bound to, and only while that computer
-        // holds "Works on threads": a phone, a read-only device or another computer never reads it.
-        // A stream that was closed is not read at all until its computer opens it again.
+        // A private stream is read by the one device it is bound to, and only while that device holds
+        // "Works on threads": a phone, a read-only device or another computer never reads it. A bot
+        // stream (the bots feed, a bot's chat) stands apart from thread sharing: its own device reads it
+        // with `read` alone, while its bot level and the bot's Devices let it (`open`).
+        // A stream that was closed is not read at all until its device opens it again.
         if (bound)
           return (
             bound.open &&
             peer.node === bound.reader &&
             delegation.caps.includes('read') &&
-            delegation.caps.includes('settings')
+            (isBotStreamKind(bound.kind) || delegation.caps.includes('settings'))
           )
         // A stream that is one device's own (a phone's lists, which carry only the bots it reaches) is read by it alone.
         const reader = this.privateStreams?.boundReader?.(stream)

@@ -40,6 +40,23 @@ export const REMOTE_BOT_METHODS: Readonly<Record<RemoteBotMethod, { capability: 
 export type { RemoteBotMethod }
 
 /**
+ * The bot streams another device opens here, each for itself: the feed of the bots it reaches and one bot's chat. Both
+ * stand apart from thread sharing; `remoteBotMethods`' gate admits them by the bot level and each bot's Devices.
+ */
+export const BOT_STREAM_METHODS: Readonly<Record<'bridge.bots.open' | 'bridge.bot.open', { capability: NodeCapability; mutating: false }>> = Object.freeze({
+  'bridge.bots.open': { capability: 'read', mutating: false },
+  'bridge.bot.open': { capability: 'read', mutating: false }
+})
+
+/** What a bot stream's open answers: the stream, where it is now, and the `threadId` its records carry. */
+export interface RemoteBotStreamOpened {
+  descriptor: unknown
+  head: { epoch: number; seq: number }
+  kind: 'bots' | 'bot'
+  subject: string
+}
+
+/**
  * The version of each method above that this computer accepts, as `net.info` reports it (`bots`), so a device sends only
  * keys this computer knows: an older one refuses any other key. 2 for `bots.create`: `reach` (`RemoteBotReach`), which
  * this computer takes as `home_and_maker` whatever it says. An older computer reports none, and a device offers no
@@ -327,6 +344,13 @@ function fitted(message: RemoteBotMessage, budget = RESULT_BYTES): RemoteBotMess
 }
 
 type RemotePage = Omit<BotsPersonalV2Api['bots.chat.list']['result'], 'messages'> & { messages: RemoteBotMessage[] }
+/** A page of a bot's chat as another device gets it (`bots.chat.list`, a bot stream's snapshot). */
+export type RemoteBotPage = RemotePage
+
+/** A chat row as another device gets it, within one reply or one stream record. */
+export const fittedBotMessage = (message: BotChatMessage): RemoteBotMessage => fitted(remoteBotMessage(message))
+/** The newest messages of a page that fit one reply or one snapshot, as `bots.chat.list` answers another device. */
+export const fittedBotPage = (page: BotsPersonalV2Api['bots.chat.list']['result']): RemotePage => fittedPage(page)
 
 /** A page within one reply: the newest messages that fit; the device asks for the older ones with `beforeSeq`. */
 function fittedPage(page: BotsPersonalV2Api['bots.chat.list']['result']): RemotePage {
@@ -421,6 +445,11 @@ export function remoteBotMethods(options: {
    * is (`keepMakerInReach`). No other bot changes.
    */
   madeBy?(botId: string, node: string): void
+  /**
+   * Opens a bot stream for the calling device alone (`bridge.bots.open`, `bridge.bot.open`), after this gate: the
+   * device's bot level (any but Off) and, for one bot's chat, that bot in its reach. Absent: neither is offered.
+   */
+  openStream?(reader: NodeId, stream: { kind: 'bots' } | { kind: 'bot'; botId: string }): Promise<RemoteBotStreamOpened>
 }): RpcMethod[] {
   const limitOf = (context: RpcContext): PermissionMode => {
     try {
@@ -435,7 +464,7 @@ export function remoteBotMethods(options: {
    * a Use device every Full row alike: only the code and the reason cross the wire, the same for every bot, so nothing
    * tells one bot from another. Which bot it reaches is the second check (`reachable`).
    */
-  const admit = (node: string, name: RemoteBotMethod): void => {
+  const admit = (node: string, name: RemoteBotMethod | 'use'): void => {
     if (!options.reach) return
     let level: BotLevel
     try {
@@ -445,7 +474,7 @@ export function remoteBotMethods(options: {
     }
     if (level === 'off')
       throw new NetError('forbidden', "This computer doesn't let this device reach its bots.", { details: { reason: 'bots_off' } })
-    if (!botLevelReaches(level, remoteBotLevel(name)))
+    if (!botLevelReaches(level, name === 'use' ? 'use' : remoteBotLevel(name)))
       throw new NetError('forbidden', 'This computer lets this device use its bots, not set them up.', {
         details: { reason: 'bots_full_needed' }
       })
@@ -556,7 +585,50 @@ export function remoteBotMethods(options: {
           throw new NetError('conflict', botActionRefusalText('bot_action_too_large'), { details: { reason: 'bot_action_too_large' } })
       }
   }
+  /**
+   * The bot streams: the bots feed and one bot's chat, each the caller's own. The same gate as every row: the bot level
+   * (at least Use) when the open is admitted and again as it runs; a bot it can't reach answers as one that is not
+   * there. Every read afterwards is checked again where the stream is served (`privateReadable` in the Bridge).
+   */
+  const streamMethod = (name: 'bridge.bots.open' | 'bridge.bot.open', open: NonNullable<typeof options.openStream>): RpcMethod => {
+    const botOf = (value: unknown): string | undefined => (name === 'bridge.bot.open' ? (value as { botId: string }).botId : undefined)
+    const check = (value: unknown, context: RpcContext): void => {
+      admit(context.caller.node, 'use')
+      const id = botOf(value)
+      if (id === undefined) return
+      reachable(id, context)
+      const port = options.bots()
+      if (!port) throw new NetError('conflict', 'Bots are unavailable on this computer.')
+      refusing(() => port.get(id))
+    }
+    return {
+      method: name,
+      family: 'bridge',
+      ...BOT_STREAM_METHODS[name],
+      ephemeral: true,
+      validate: (value) => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new NetError('bad_request')
+        const keys = Object.keys(value)
+        if (name === 'bridge.bots.open') {
+          if (keys.length) throw new NetError('bad_request')
+          return {}
+        }
+        if (keys.length !== 1 || !isBotId((value as { botId?: unknown }).botId)) throw new NetError('bad_request')
+        return { botId: (value as { botId: string }).botId }
+      },
+      authorize: check,
+      handle: async (value, context) => {
+        check(value, context)
+        const id = botOf(value)
+        return open(context.caller.node, id === undefined ? { kind: 'bots' } : { kind: 'bot', botId: id })
+      }
+    }
+  }
+  const streams = options.openStream
+    ? [streamMethod('bridge.bots.open', options.openStream), streamMethod('bridge.bot.open', options.openStream)]
+    : []
   return [
+    ...streams,
     method('bots.get', async (p, port) => remoteBotDetail(port.get(botId(p)))),
     method('bots.chat.list', async (p, port) =>
       fittedPage(
