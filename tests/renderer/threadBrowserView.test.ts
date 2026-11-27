@@ -76,7 +76,7 @@ describe('a thread agent\'s browser without a window, in its Browser panel', () 
     const pane = host.querySelector<HTMLElement>('aside.watched-browser-pane')!
     expect(pane.getAttribute('aria-label')).toBe('The agent\'s browser')
     await vi.waitFor(() => expect(methods()).toContain('browser.view.watch'))
-    expect(pane.textContent).toContain('The agent\'s browser, without a window. Take over to click or type.')
+    expect(pane.textContent).toContain('The agent\'s browser, without a window. Click it to take over.')
 
     act(() => button('Take over')!.click())
     await vi.waitFor(() => expect(button('Give back')).toBeDefined())
