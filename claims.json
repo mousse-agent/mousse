@@ -34,6 +34,20 @@
       "expiresAt": "2026-11-26T17:29:52.364Z"
     },
     {
+      "task": "chain-record-budget-hold",
+      "session": "LAPTOP-HIEROJK7-e2c361",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "chain-record-budget-hold",
+      "paths": [
+        "src/mms/run/AgentChains.ts",
+        "src/mms/run/agentHops.ts",
+        "src/mms/run/db/migrations.ts",
+        "src/mms/orchestrator/OrchestratorService.ts"
+      ],
+      "claimedAt": "2026-11-27T11:37:40.166Z",
+      "expiresAt": "2026-11-27T13:37:40.166Z"
+    },
+    {
       "task": "codex-loaded-threads-never-wait",
       "session": "Animatrix-33f3d9",
       "machine": "Animatrix",
@@ -58,20 +72,6 @@
       ],
       "claimedAt": "2026-11-27T10:40:03.362Z",
       "expiresAt": "2026-11-27T12:40:03.362Z"
-    },
-    {
-      "task": "lan-first-paths",
-      "session": "Avarnics-Mac-mini.local-8600b4",
-      "machine": "Avarnics-Mac-mini.local",
-      "branch": "mousse/1c08161d",
-      "paths": [
-        "src/renderer/components/netEngine/engineRows.ts",
-        "src/mms/netEngine/NetEngineService.ts",
-        "src/shared/netEngine/local.ts",
-        "native/net-helper/ENGINE_COMMIT"
-      ],
-      "claimedAt": "2026-11-26T09:23:17.394Z",
-      "expiresAt": "2026-11-26T11:23:17.394Z"
     },
     {
       "task": "remote-project-add-and-projectless-threads",
@@ -113,18 +113,6 @@
       ],
       "claimedAt": "2026-11-27T10:40:41.104Z",
       "expiresAt": "2026-11-27T12:40:41.104Z"
-    },
-    {
-      "task": "thread-blank-until-scroll",
-      "session": "Animatrix-29e4c3",
-      "machine": "Animatrix",
-      "branch": "thread-blank-until-scroll",
-      "paths": [
-        "src/renderer/chat/components/agent-elements/virtual/end-follower.ts",
-        "src/renderer/chat/components/agent-elements/message-list.tsx"
-      ],
-      "claimedAt": "2026-11-26T09:31:29.445Z",
-      "expiresAt": "2026-11-26T11:31:29.445Z"
     },
     {
       "task": "tree-corrections",
