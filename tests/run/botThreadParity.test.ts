@@ -208,7 +208,7 @@ describe('a bot uses what a thread\'s agent can', () => {
     it('starts a thread on another computer in the repository of a project it names', async () => {
       const createRemoteThread = vi.fn(async () => ({ status: 'launched' as const, threadId: 'n2:t9', computer: 'Mac mini', title: 'Build', replayed: false, firstMessage: 'sent' as const }))
       const { call } = await world({ host: { createRemoteThread: createRemoteThread as never } })
-      expect(await call('thread_create', { computer: 'Mac mini', title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: true, text: expect.stringMatching(/fromProjectId/) })
+      expect(await call('thread_create', { computer: 'Mac mini', title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: true, text: expect.stringMatching(/projectId.*fromProjectId/) })
       expect(await call('thread_create', { computer: 'Mac mini', fromProjectId: 'p1', title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: false })
       expect(createRemoteThread).toHaveBeenCalledWith(expect.objectContaining({ computer: 'Mac mini', fromProjectId: 'p1' }), expect.objectContaining({ clientRequestId: expect.stringMatching(/^thread_create:work:/) }))
       // Its request names no hidden: the thread shows there, and a key it stored before hidden existed keeps its
@@ -216,6 +216,11 @@ describe('a bot uses what a thread\'s agent can', () => {
       const [request] = createRemoteThread.mock.calls.at(-1)! as unknown as [Record<string, unknown>]
       expect(request).not.toHaveProperty('hidden')
       expect(remoteThreadFingerprint(request as never)).not.toMatch(/hidden/)
+      // A project of that computer alone is enough: no project here is named.
+      expect(await call('thread_create', { computer: 'Mac mini', projectId: 'n2:p7', title: 'Build', firstMessage: 'Build it.', clientRequestId: 'direct' })).toMatchObject({ error: false })
+      const [direct] = createRemoteThread.mock.calls.at(-1)! as unknown as [Record<string, unknown>]
+      expect(direct).toMatchObject({ computer: 'Mac mini', projectId: 'n2:p7' })
+      expect(direct).not.toHaveProperty('fromProjectId')
     })
   })
 

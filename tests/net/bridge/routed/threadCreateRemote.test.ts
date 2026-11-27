@@ -87,11 +87,14 @@ function standInForTurns(): void {
     startTurn({ input, permissionMode: opts.permissionMode, agent: opts.agent })) as never)
 }
 
-/** A thread on the caller in the repository's project, with a live run in `mode`, and its agent's `thread_create`. */
-async function caller(options: { mode?: 'auto' | 'full' | 'accept_edits'; project?: string } = {}) {
+/**
+ * A thread on the caller in the repository's project (`project`: another folder; null: no project at all), with a live
+ * run in `mode`, and its agent's `thread_create`.
+ */
+async function caller(options: { mode?: 'auto' | 'full' | 'accept_edits'; project?: string | null } = {}) {
   allow()
-  const project = t.caller.projects.openProject(options.project ?? repo.path)
-  const thread = t.caller.threads.createThread(`Launcher ${++seq}`, project.id, project.path, { permissionMode: options.mode ?? 'auto' } as never)
+  const project = options.project === null ? undefined : t.caller.projects.openProject(options.project ?? repo.path)
+  const thread = t.caller.threads.createThread(`Launcher ${++seq}`, project?.id, project?.path, { permissionMode: options.mode ?? 'auto' } as never)
   const sent = await t.caller.runEngine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: `launcher-send-${seq}`, source: 'gui' })
   if (sent.status !== 'accepted') throw new Error('launcher run not accepted')
   t.caller.runEngine.markStarting(sent.runId)
@@ -336,6 +339,39 @@ describe('thread_create on another computer (issue #1160)', () => {
     expect(launchedBy(thread.id)[0]!.hidden).toBe(true)
   }, 120_000)
 
+  describe('a project of that computer named with projectId needs nothing here', () => {
+    it('starts there from a thread with no project here, with the id as thread_list with computer gives it', async () => {
+      const { thread, create } = await caller({ project: null })
+      const out = await create({ computer: t.node, projectId: qualifyId(t.node, ownerProject), clientRequestId: 'direct-1' })
+      expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
+      expect(launchedBy(thread.id)).toEqual([expect.objectContaining({ projectId: ownerProject })])
+    }, 120_000)
+
+    it('starts there from a project here whose Git remote is another one, by its plain id too', async () => {
+      const fork = repository()
+      const { thread, create } = await caller({ project: fork.path })
+      const out = await create({ computer: t.node, projectId: ownerProject, clientRequestId: 'direct-2' })
+      expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
+      expect(launchedBy(thread.id)).toEqual([expect.objectContaining({ projectId: ownerProject })])
+    }, 120_000)
+
+    it('fromProjectId still finds that computer\'s checkout of a project here, and refuses one it has none of', async () => {
+      const here = t.caller.projects.openProject(repo.path).id
+      const { thread, create } = await caller({ project: null })
+      const out = await create({ computer: t.node, fromProjectId: here, clientRequestId: 'from-1' })
+      expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
+      expect(launchedBy(thread.id)).toEqual([expect.objectContaining({ projectId: ownerProject })])
+      const other = t.caller.projects.openProject(repository().path).id
+      const refused = await create({ computer: t.node, fromProjectId: other, clientRequestId: 'from-2' })
+      expect(refused.isError).toBe(true)
+      expect(refused.body.data).toMatchObject({ code: 'no_matching_project' })
+      // With both, projectId must be one of the checkouts fromProjectId finds.
+      const both = await create({ computer: t.node, fromProjectId: other, projectId: ownerProject, clientRequestId: 'from-3' })
+      expect(both.body.data).toMatchObject({ code: 'no_matching_project' })
+      expect(launchedBy(thread.id)).toHaveLength(1)
+    }, 120_000)
+  })
+
   describe('refusals name which they are, with the computer, and make nothing there', () => {
     const before = () => t.owner.threads.listAllThreads().length
     const refusal = async (args: Record<string, unknown>, options: Parameters<typeof caller>[0] = {}, setup?: () => void) => {
@@ -392,7 +428,24 @@ describe('thread_create on another computer (issue #1160)', () => {
 
     it('no project for the repository there', async () => {
       const elsewhere = repository()
-      expect(await refusal({}, { project: elsewhere.path })).toMatchObject({ code: 'no_matching_project' })
+      expect(await refusal({}, { project: elsewhere.path })).toMatchObject({ code: 'no_matching_project', message: expect.stringContaining('projectId') })
+      expect(await refusal({}, { project: null })).toMatchObject({ code: 'no_matching_project', message: expect.stringContaining('projectId') })
+    }, 120_000)
+
+    it('a projectId that computer does not have, or one of another computer, lists its projects', async () => {
+      const missing = await refusal({ projectId: 'no-such-project' }, { project: null })
+      expect(missing).toMatchObject({ code: 'no_matching_project', candidates: expect.arrayContaining([expect.objectContaining({ projectId: ownerProject })]) })
+      expect(await refusal({ projectId: qualifyId('another-node', ownerProject) }, { project: null })).toMatchObject({ code: 'no_matching_project' })
+    }, 120_000)
+
+    it('a projectId of that computer still meets the checks of who may start threads there', async () => {
+      const direct = { projectId: ownerProject }
+      expect(await refusal(direct, { project: null }, () => allow(false))).toMatchObject({ code: 'computer_not_allowed' })
+      expect(await refusal(direct, { project: null }, () => policy.set(t.callerNode, { agentReach: 'none' }))).toMatchObject({ code: 'computer_not_allowed' })
+      const offline = await refusal(direct, { project: null }, () => {
+        vi.spyOn(portOf(), 'computers').mockReturnValue([{ node: t.node, name: 'Linux box', online: false }])
+      })
+      expect(offline).toMatchObject({ code: 'computer_offline' })
     }, 120_000)
 
     it('several checkouts there: refused with the candidates, and one of them can be named', async () => {

@@ -5966,12 +5966,13 @@ export class OrchestratorService extends EventEmitter {
         : undefined
       if (choice) return refuse(choice.code, choice.message.replace('Nothing was started.', 'No thread was created.'), at)
     }
-    // The owner's bot ("use your threads") names the project here whose repository it means; its thread runs in Full
-    // access, or no wider than the device its owner wrote from, as a thread it starts here does.
+    // The owner's bot ("use your threads") has no project of its own, so it names one: one of that computer's
+    // (projectId), or one here whose repository it means (fromProjectId). Its thread runs in Full access, or no wider
+    // than the device its owner wrote from, as a thread it starts here does.
     const bot = this.botSenderOf(options.actor, 'thread_create')
-    if (bot && !input.fromProjectId) return refuse('no_matching_project', 'Name the project here whose repository the thread is for, with fromProjectId (thread_list lists them).', at)
-    if (!bot && input.fromProjectId !== undefined) return refuse('no_matching_project', 'fromProjectId is for personal bots: a thread starts there in its own project\'s repository.', at)
-    const project = await this.remoteProjectFor(callerThreadId, computer, input.projectId, bot ? input.fromProjectId : undefined)
+    if (bot && !input.fromProjectId && !input.projectId)
+      return refuse('no_matching_project', `Name the project: projectId, one of ${computer.name}'s (thread_list with computer lists them), or fromProjectId, a project here whose repository ${computer.name} has a checkout of.`, at)
+    const project = await this.remoteProjectFor(callerThreadId, computer, input.projectId, input.fromProjectId)
     if (!project.ok) return refuse(project.code, project.message, { ...at, ...(project.candidates ? { candidates: project.candidates } : {}) })
     // The launcher's own mode, never looser than its run; that computer narrows it to the limit it set for this one.
     const permissionMode = bot ? bot.limit ?? 'full' : narrowPermissionMode(this.requestedPermissionMode(callerThreadId), this.runPermissionMode(options.actor.runId))
@@ -6087,30 +6088,48 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * The project of `computer` the thread starts in: the one that is the caller's repository, or `wanted` among those
-   * that may be. No strong match, or several, refuses with the candidates; nothing is cloned there (#484).
+   * The project of `computer` the thread starts in. `wantedRef` alone (a project of that computer, plain or qualified
+   * as thread_list with computer names it) is taken as it is once that computer lists it: no project here and no Git
+   * match is needed. Otherwise the project there that is the repository of `fromProjectId` (a project here) or of the
+   * caller's own project, `wantedRef` choosing among those that may be. No strong match, or several, refuses with the
+   * candidates; nothing is cloned there (#484).
    */
-  private async remoteProjectFor(callerThreadId: string, computer: { node: string; name: string }, wanted: string | undefined, fromProjectId?: string):
+  private async remoteProjectFor(callerThreadId: string, computer: { node: string; name: string }, wantedRef: string | undefined, fromProjectId?: string):
     Promise<{ ok: true; projectId: string } | { ok: false; code: string; message: string; candidates?: RemoteProjectCandidate[] }> {
-    // A bot's own project is the one it names (`fromProjectId`); an agent's thread, its own.
+    let wanted = wantedRef
+    if (wantedRef !== undefined) {
+      const qualified = parseQualifiedId(wantedRef)
+      if (qualified && qualified.node !== computer.node)
+        return { ok: false, code: 'no_matching_project', message: `Project ${wantedRef} is not one of ${computer.name}'s: thread_list with computer lists its projects.` }
+      wanted = qualified ? qualified.id : wantedRef
+    }
+    if (wanted !== undefined && fromProjectId === undefined) return this.remoteProjectNamed(computer, wanted, wantedRef!)
+    // The repository is the one of the project here it names (`fromProjectId`), else of the caller's own thread.
     const projectId = fromProjectId ?? this.threadStore?.getThread(callerThreadId)?.projectId
     const projectPath = projectId ? this.projectManager?.getProject(projectId)?.path : undefined
     if (!projectPath)
-      return { ok: false, code: 'no_matching_project', message: fromProjectId ? `There is no project ${fromProjectId} here, so there is no repository to find on ${computer.name}.` : `This thread has no project, so there is no repository to find on ${computer.name}.` }
+      return {
+        ok: false,
+        code: 'no_matching_project',
+        message: fromProjectId
+          ? `There is no project ${fromProjectId} here, so there is no repository to find on ${computer.name}. Name one of ${computer.name}'s projects with projectId instead (thread_list with computer lists them).`
+          : `This thread has no project, so there is no repository to find on ${computer.name}. Name one of ${computer.name}'s projects with projectId (thread_list with computer lists them).`
+      }
     let found: Awaited<ReturnType<RemoteComputersPort['projectCandidates']>>
     try {
       found = await this.remoteComputers!.projectCandidates(computer.node, projectPath, AbortSignal.timeout(30_000))
     } catch (error) {
       return { ok: false, ...remoteThreadRefusal(error, computer.name) }
     }
-    if (!found) return { ok: false, code: 'no_matching_project', message: 'This thread\'s project is not a Git repository, so it cannot be matched on another computer.' }
+    if (!found)
+      return { ok: false, code: 'no_matching_project', message: `This project is not a Git repository, so it cannot be matched on another computer. Name one of ${computer.name}'s projects with projectId instead (thread_list with computer lists them).` }
     const strong = found.match && !found.match.weak ? [found.match.projectId] : found.candidates.filter((entry) => !entry.weak).map((entry) => entry.projectId)
     const candidates: RemoteProjectCandidate[] = found.match
       ? [{ projectId: found.match.projectId, ...(found.match.weak ? { weak: true } : {}) }]
       : found.candidates
     if (wanted !== undefined) {
       if (strong.includes(wanted)) return { ok: true, projectId: wanted }
-      return { ok: false, code: 'no_matching_project', message: `Project ${wanted} of ${computer.name} is not a checkout of this repository that Mousse can tell apart from a fork.`, ...(candidates.length ? { candidates } : {}) }
+      return { ok: false, code: 'no_matching_project', message: `Project ${wanted} of ${computer.name} is not a checkout of this repository that Mousse can tell apart from a fork. To start there anyway, name it with projectId alone, without fromProjectId.`, ...(candidates.length ? { candidates } : {}) }
     }
     if (strong.length === 1) return { ok: true, projectId: strong[0]! }
     if (strong.length > 1)
@@ -6119,9 +6138,33 @@ export class OrchestratorService extends EventEmitter {
       ok: false,
       code: 'no_matching_project',
       message: candidates.length
-        ? `${computer.name} has a project that shares this repository's first commit but not its remotes, so it may be another repository. Open the same repository there first.`
-        : `${computer.name} has no project for this repository. Open (or clone) it there first.`,
+        ? `${computer.name} has a project that shares this repository's first commit but not its remotes, so it may be another repository. If it is the one meant, name it with projectId; else open the same repository there first.`
+        : `${computer.name} has no project for this repository. Name one of its projects with projectId (thread_list with computer lists them), or open (or clone) the repository there first.`,
       ...(candidates.length ? { candidates } : {})
+    }
+  }
+
+  /** The project `computer` lists as `id` (`ref`, as the caller named it), or the refusal that lists its projects. */
+  private async remoteProjectNamed(computer: { node: string; name: string }, id: string, ref: string):
+    Promise<{ ok: true; projectId: string } | { ok: false; code: string; message: string; candidates?: RemoteProjectCandidate[] }> {
+    let listed: unknown
+    try {
+      listed = await this.remoteComputers!.call(computer.node, 'projects.list', {}, { signal: AbortSignal.timeout(30_000) })
+    } catch (error) {
+      return { ok: false, ...remoteThreadRefusal(error, computer.name) }
+    }
+    const rows = listed && typeof listed === 'object' && Array.isArray((listed as { projects?: unknown }).projects) ? (listed as { projects: unknown[] }).projects : []
+    const projects: RemoteProjectCandidate[] = rows.flatMap((row) => {
+      if (!row || typeof row !== 'object') return []
+      const { id: projectId, name } = row as { id?: unknown; name?: unknown }
+      return typeof projectId === 'string' ? [{ projectId, ...(typeof name === 'string' && name ? { name } : {}) }] : []
+    })
+    if (projects.some((entry) => entry.projectId === id)) return { ok: true, projectId: id }
+    return {
+      ok: false,
+      code: 'no_matching_project',
+      message: `${computer.name} has no project ${ref}. Name one of its projects with projectId (thread_list with computer lists them).`,
+      ...(projects.length ? { candidates: projects } : {})
     }
   }
 
