@@ -89,7 +89,7 @@ export interface AutomationDraftsDeps {
   /** Whether the bot exists (and is not deleted). */
   botExists?(botId: string): boolean
   /** Turn on with a bot as Who: the bot's schedule, made the way its own schedules are (`BotScheduleBook.add`). */
-  addBotSchedule?(botId: string, input: { schedule: JobSchedule; prompt: string; name: string; tellMe: TellMe }): ScheduledJob
+  addBotSchedule?(botId: string, input: { schedule: JobSchedule; prompt: string; name: string; tellMe: TellMe; cliName?: string }): ScheduledJob
   /** The mode the person holds for a run on this thread (or the profile's): Turn on holds the draft to it. */
   personCeiling(threadId?: string): PermissionMode
   /** One reusable thread for every run of an automation (Result: reuse). */
@@ -345,7 +345,8 @@ export class AutomationDrafts {
         break
       case 'http':
         // A request URL and its secret are set up by the person (the secret is shown only to them), in Edit details.
-        if (!current?.trigger?.webhook) problems.push(REQUEST_URL_PROBLEM)
+        // A bot's is set up once it is on: Turn on makes the bot's own schedule, a new automation with its own URL.
+        if (!current?.trigger?.webhook && !bot) problems.push(REQUEST_URL_PROBLEM)
         break
       case 'thread_event': {
         const thread = this.deps.thread(trigger.threadId)
@@ -364,8 +365,13 @@ export class AutomationDrafts {
     if (trigger.kind !== 'http' && current?.trigger?.webhook) fail('It still has a request URL. Turn it off in Edit details › Request URL first, or keep it on request.')
     if (bot) {
       if (this.deps.botExists && !this.deps.botExists(bot)) problems.push('That bot is gone. Pick another Who.')
+      // Turn on makes a new automation, the bot's, so a draft's request URL (and its secret) would not go with it.
+      if (current?.draft && current.trigger?.webhook) problems.push('Turn off its request URL in Edit details › Request URL first. A bot\'s request URL is set up once it is on.')
+      // A bot runs on a repeating time (at most once a minute), once, when it is run (Run now, the CLI) or on a request
+      // URL. Its runs are its own, in its lane: it does not wake on another thread's pull request.
+      if (trigger.kind === 'thread_event') problems.push('A bot does not wake on a pull request. Pick another When, or ask it in its chat to watch one.')
       const when = trigger.kind === 'time' ? botWhenOf(trigger.schedule) : undefined
-      const problem = when ? botScheduleProblem(when, prompt || 'x') : 'A bot repeats: give it a time that repeats, at most once a minute.'
+      const problem = when ? botScheduleProblem(when, prompt || 'x') : undefined
       if (problem) problems.push(problem)
     }
     if (!prompt.trim()) problems.push('Say what it should do.')
@@ -594,7 +600,7 @@ export class AutomationDrafts {
     const who = job.draft!.who
     if (who?.kind === 'bot') {
       if (!this.deps.addBotSchedule) fail('Bots are not available now.')
-      const made = this.deps.addBotSchedule(who.botId, { schedule: job.schedule, prompt: job.prompt, name: job.name, tellMe: tellMeOf(job) })
+      const made = this.deps.addBotSchedule(who.botId, { schedule: job.schedule, prompt: job.prompt, name: job.name, tellMe: tellMeOf(job), ...(job.cliName ? { cliName: job.cliName } : {}) })
       try {
         this.deps.meta?.move(job.id, made.id)
       } catch {
