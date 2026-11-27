@@ -6,9 +6,9 @@ import {
   type PermissionMode
 } from '../../../shared/permissionMode'
 import { isExecutableJobEdit } from '../../../shared/jobPermissionEdit'
-import { listingKey, listingServes, selectionFromListing, type ModelOverride } from '../../../shared/providerInstances'
+import type { ModelOverride } from '../../../shared/providerInstances'
 import type { LlmProviderOption } from '../../../shared/settings'
-import { findListedModel, modelChoiceOf, modelLabel } from '../../../shared/modelChoice'
+import { upgradeSelection } from '../../../shared/modelSelection'
 import type {
   JobSchedule,
   Project,
@@ -24,7 +24,8 @@ import { parseSimpleCron } from './scheduledLabels'
 
 /** What the editor offers to choose from. */
 export interface ScheduledCatalog {
-  models: ModelGroup[]
+  /** The model listings the Who picker offers, as the app's model menu reads them. */
+  providers: LlmProviderOption[]
   projects: Project[]
   /** Threads a job can run on: no subagent threads, no settled ones. */
   threads: Thread[]
@@ -32,43 +33,12 @@ export interface ScheduledCatalog {
   defaultPermissionMode: PermissionMode
 }
 
-export interface ModelChoice {
-  key: string
-  label: string
-  selection: ModelOverride
-}
+export const EMPTY_CATALOG: ScheduledCatalog = { providers: [], projects: [], threads: [], defaultPermissionMode: DEFAULT_PERMISSION_MODE }
 
-export interface ModelGroup {
-  label: string
-  choices: ModelChoice[]
-}
-
-export const EMPTY_CATALOG: ScheduledCatalog = { models: [], projects: [], threads: [], defaultPermissionMode: DEFAULT_PERMISSION_MODE }
-
-const KEY_SEPARATOR = '\u0000'
-
-export function modelGroups(providers: LlmProviderOption[]): ModelGroup[] {
-  return providers
-    .filter((provider) => provider.models.length > 0)
-    .map((provider) => ({
-      label: provider.label,
-      choices: provider.models.map((model) => ({
-        key: `${listingKey(provider)}${KEY_SEPARATOR}${model.id}`,
-        label: modelLabel(modelChoiceOf({ instanceId: provider.instanceId, provider: provider.id, model: model.id }, model.label)),
-        selection: selectionFromListing(provider, model.id)
-      }))
-    }))
-}
-
-/**
- * The key of the choice that serves a job's selection, whatever its reasoning level (the job keeps
- * its level while its model is unchanged); a model the lists no longer offer gets a key of its own.
- */
-export function modelKeyOf(selection: ModelOverride | undefined, groups: ModelGroup[], providers: LlmProviderOption[]): string {
-  if (!selection) return ''
-  const listing = providers.find((provider) => listingServes(provider, selection))
-  if (listing) return `${listingKey(listing)}${KEY_SEPARATOR}${findListedModel(listing.models, selection.model)?.id ?? selection.model}`
-  return `${selection.instanceId ?? selection.llmProvider}${KEY_SEPARATOR}${selection.model}`
+/** Whether two job selections run the same: one entry, one model, one reasoning level. */
+export function sameSelection(a: ModelOverride | null, b: ModelOverride | null): boolean {
+  if (!a || !b) return a === b
+  return (a.instanceId ?? '') === (b.instanceId ?? '') && a.llmProvider === b.llmProvider && a.model === b.model && (a.effort ?? '') === (b.effort ?? '')
 }
 
 export type WorkspaceKind = 'project' | 'newWorktree' | 'worktree'
@@ -82,11 +52,13 @@ export interface JobDraft {
   runAt: string
   minutes: string
   expr: string
-  modelKey: string
+  /**
+   * The model, its entry and reasoning level the job runs on; `null` is the default agent. A model its provider no
+   * longer lists is kept as it was, so saving without touching it changes nothing.
+   */
+  selection: ModelOverride | null
   /** The saved agent that does the work (`ScheduledJob.agent`); `''` when a model does. */
   agentId: string
-  /** The model of a job whose provider no longer lists it; kept so saving without touching it changes nothing. */
-  staleSelection?: ModelOverride
   /** How much the run may do without asking; `''` follows the thread. Never above what the person holds. */
   permissionMode: '' | PermissionMode
   projectId: string
@@ -113,7 +85,7 @@ export function newDraft(): JobDraft {
     // Not a preset, so an untouched new job opens on Custom.
     minutes: '30',
     expr: '0 9 * * *',
-    modelKey: '',
+    selection: null,
     agentId: '',
     permissionMode: '',
     projectId: '',
@@ -124,10 +96,8 @@ export function newDraft(): JobDraft {
   }
 }
 
-export function draftFromJob(job: ScheduledJob, catalog: ScheduledCatalog, providers: LlmProviderOption[]): JobDraft {
+export function draftFromJob(job: ScheduledJob): JobDraft {
   const base = newDraft()
-  const modelKey = modelKeyOf(job.selection, catalog.models, providers)
-  const known = catalog.models.some((group) => group.choices.some((choice) => choice.key === modelKey))
   return {
     ...base,
     name: job.name,
@@ -136,9 +106,9 @@ export function draftFromJob(job: ScheduledJob, catalog: ScheduledCatalog, provi
     runAt: job.schedule.kind === 'once' ? toLocalInput(job.schedule.runAt) : base.runAt,
     minutes: job.schedule.kind === 'interval' ? String(job.schedule.minutes ?? 30) : base.minutes,
     expr: job.schedule.kind === 'cron' ? job.schedule.expr ?? base.expr : base.expr,
-    modelKey,
+    // A level packed into the model (written before #490) is read as its own field.
+    selection: job.selection ? upgradeSelection(job.selection) : null,
     agentId: job.agent?.definitionId ?? '',
-    ...(job.selection && !known ? { staleSelection: job.selection } : {}),
     permissionMode: job.permissionMode ? normalizePermissionMode(job.permissionMode) : '',
     projectId: job.projectId ?? '',
     threadId: job.threadId ?? '',
@@ -182,7 +152,7 @@ export function loweredPermission(draft: JobDraft, initial: JobDraft, catalog: S
   if (draft.permissionMode === '' || draft.permissionMode !== initial.permissionMode) return undefined
   const held = heldPermissionMode(draft, catalog, job)
   if (!held.exact || !isStricter(held.mode, draft.permissionMode)) return undefined
-  return isExecutableJobEdit(patchOf(initial, draft, catalog)) ? held.mode : undefined
+  return isExecutableJobEdit(patchOf(initial, draft)) ? held.mode : undefined
 }
 
 export function workspaceChoices(draft: JobDraft): Array<{ value: WorkspaceKind; label: string }> {
@@ -281,16 +251,13 @@ const sameSchedule = (a: JobDraft, b: JobDraft): boolean => {
   }
 }
 
-const choiceOf = (draft: JobDraft, catalog: ScheduledCatalog): ModelChoice | undefined =>
-  catalog.models.flatMap((group) => group.choices).find((choice) => choice.key === draft.modelKey)
-
 /** Only what the person changed, so saving never rewrites a field they did not touch. `null` clears. */
-export function patchOf(initial: JobDraft, draft: JobDraft, catalog: ScheduledCatalog): ScheduledJobPatch {
+export function patchOf(initial: JobDraft, draft: JobDraft): ScheduledJobPatch {
   const patch: ScheduledJobPatch = {}
   if (draft.name.trim() !== initial.name.trim()) patch.name = draft.name.trim()
   if (draft.prompt.trim() !== initial.prompt.trim()) patch.prompt = draft.prompt.trim()
   if (!sameSchedule(initial, draft)) patch.schedule = scheduleOf(draft)
-  if (draft.modelKey !== initial.modelKey) patch.selection = choiceOf(draft, catalog)?.selection ?? null
+  if (!sameSelection(draft.selection, initial.selection)) patch.selection = draft.selection
   if (draft.agentId !== initial.agentId) patch.agent = draft.agentId ? { definitionId: draft.agentId } : null
   if (draft.permissionMode !== initial.permissionMode) patch.permissionMode = draft.permissionMode || null
   if (draft.projectId !== initial.projectId) patch.projectId = draft.projectId || null

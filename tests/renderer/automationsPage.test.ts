@@ -17,7 +17,7 @@ import { ownedWhenText, skippedDates, whenText, zonedDayOffset } from '../../src
 import { botComputerOptions } from '../../src/renderer/components/bots/BotRunsOn'
 import { whenSentence } from '../../src/renderer/components/automations/AutomationDetail'
 import { openEdit, setInboxClient, useInboxStore } from '../../src/renderer/components/automations/inbox/inboxStore'
-import { cronFormOf, cronOfForm, draftFromJob, heldPermissionMode, modelGroups, newDraft, patchOf, validateDraft, type ScheduledCatalog } from '../../src/renderer/components/scheduled/jobDraft'
+import { cronFormOf, cronOfForm, draftFromJob, heldPermissionMode, newDraft, patchOf, validateDraft, type ScheduledCatalog } from '../../src/renderer/components/scheduled/jobDraft'
 import { clockText, describeSchedule, humanCron, nameFromPrompt } from '../../src/renderer/components/scheduled/scheduledLabels'
 
 const openThread = vi.hoisted(() => vi.fn(async (_threadId: string) => undefined))
@@ -99,7 +99,7 @@ describe('labels', () => {
   })
 
   it('words the detail\'s When', () => {
-    const draft = (patch: Partial<ReturnType<typeof draftFromJob>>) => ({ ...draftFromJob(job(), catalog, providers), ...patch })
+    const draft = (patch: Partial<ReturnType<typeof draftFromJob>>) => ({ ...draftFromJob(job()), ...patch })
     expect(whenSentence(draft({ scheduleKind: 'cron', expr: '0 9 * * 1-5' }))).toBe(`Every weekday at ${clockText(9, 0)}`)
     expect(whenSentence(draft({ scheduleKind: 'interval', minutes: '30' }))).toBe('Every 30 minutes')
     expect(whenSentence(draft({ scheduleKind: 'manual' }))).toBe('When you run it')
@@ -108,11 +108,11 @@ describe('labels', () => {
 
 // ── The page ──────────────────────────────────────────────────────────────────────────────────
 
-const providers = [{ id: 'anthropic', instanceId: 'claude:main', label: 'Claude', models: [{ id: 'sonnet', label: 'Sonnet' }] }] as unknown as LlmProviderOption[]
+const providers = [{ id: 'anthropic', instanceId: 'claude:main', label: 'Claude', models: [{ id: 'sonnet', label: 'Sonnet', efforts: ['low', 'high'], defaultEffort: 'high', thinkingOff: false }] }] as unknown as LlmProviderOption[]
 const projects = [{ id: 'p1', name: 'mousse', path: '/work/mousse', createdAt: '', order: 0 }] as Project[]
 /** The threads the pickers list (a test that needs a thread with a pull request puts one here). */
 let catalogThreads: Thread[] = []
-const catalog: ScheduledCatalog = { models: modelGroups(providers), projects, threads: [], defaultPermissionMode: 'accept_edits' }
+const catalog: ScheduledCatalog = { providers, projects, threads: [], defaultPermissionMode: 'accept_edits' }
 
 function job(patch: Partial<ScheduledJob> = {}): ScheduledJob {
   return { id: 'j1', name: 'Nightly', prompt: 'Check CI', schedule: { kind: 'interval', minutes: 30 }, enabled: true, state: 'scheduled', nextRunAt: new Date(Date.now() + 3_600_000).toISOString(), createdAt: '', updatedAt: '', ...patch }
@@ -120,11 +120,11 @@ function job(patch: Partial<ScheduledJob> = {}): ScheduledJob {
 
 describe('job draft', () => {
   it('round-trips a job to an empty patch, and sends a Tell me change alone', () => {
-    const initial = draftFromJob(job({ projectId: 'p1', tellMe: 'every' }), catalog, providers)
+    const initial = draftFromJob(job({ projectId: 'p1', tellMe: 'every' }))
     expect(initial.tellMe).toBe('every')
-    expect(patchOf(initial, initial, catalog)).toEqual({})
-    expect(patchOf(initial, { ...initial, tellMe: 'needs_you' }, catalog)).toEqual({ tellMe: 'needs_you' })
-    expect(draftFromJob(job(), catalog, providers).tellMe).toBe('look')
+    expect(patchOf(initial, initial)).toEqual({})
+    expect(patchOf(initial, { ...initial, tellMe: 'needs_you' })).toEqual({ tellMe: 'needs_you' })
+    expect(draftFromJob(job()).tellMe).toBe('look')
   })
 
   it('reads the plain forms of the When builder from cron and writes them back', () => {
@@ -146,10 +146,10 @@ describe('job draft', () => {
   })
 
   it('sends a mode in a patch, and null to clear it', () => {
-    const initial = draftFromJob(job({ permissionMode: 'ask', permissionCeiling: 'full' }), catalog, providers)
-    expect(patchOf(initial, { ...initial, permissionMode: 'accept_edits' }, catalog)).toEqual({ permissionMode: 'accept_edits' })
-    expect(patchOf(initial, { ...initial, permissionMode: '' }, catalog)).toEqual({ permissionMode: null })
-    expect(patchOf(initial, { ...initial, name: 'Renamed' }, catalog)).toEqual({ name: 'Renamed' })
+    const initial = draftFromJob(job({ permissionMode: 'ask', permissionCeiling: 'full' }))
+    expect(patchOf(initial, { ...initial, permissionMode: 'accept_edits' })).toEqual({ permissionMode: 'accept_edits' })
+    expect(patchOf(initial, { ...initial, permissionMode: '' })).toEqual({ permissionMode: null })
+    expect(patchOf(initial, { ...initial, name: 'Renamed' })).toEqual({ name: 'Renamed' })
   })
 })
 
@@ -431,6 +431,34 @@ describe('Edit details, from the inbox', () => {
     expect(document.body.textContent).toContain('Always, like a reminder')
     expect($('[aria-labelledby$="tell-label"]')).toBeNull()
     expect($('[data-testid="automation-bot-end"]')?.textContent).toContain('Ends')
+  })
+
+  const whoPicker = () => $<HTMLButtonElement>('[data-testid="automation-who"] .settings-model-btn')!
+  const save = () => click([...document.querySelectorAll('button')].find((button) => button.textContent === 'Save'))
+
+  it('picks Who in the app\'s model picker: a model at a level saves on its entry', async () => {
+    const mousse = await mount([item({ key: 'job:j1', name: 'Nightly' })], [job({ id: 'j1', name: 'Nightly', projectId: 'p1' })])
+    await openForm('job:j1')
+    const picker = whoPicker
+    expect(picker().getAttribute('aria-label')).toBe('Who: Claude')
+    await click(picker())
+    await click([...document.querySelectorAll<HTMLElement>('[role="option"]')].find((entry) => entry.textContent!.includes('Sonnet')))
+    await click([...document.querySelectorAll<HTMLElement>('.model-picker-run-settings [role="menuitemradio"]')].find((entry) => entry.textContent!.startsWith('Low')))
+    expect(picker().getAttribute('aria-label')).toBe('Who: Sonnet · Low')
+    await save()
+    expect(mousse.scheduled.update).toHaveBeenLastCalledWith('j1', { selection: { instanceId: 'claude:main', llmProvider: 'anthropic', model: 'sonnet', effort: 'low', name: 'Sonnet' } })
+  })
+
+  it('opens a job on its model at its level, and the menu\'s default-agent choice clears it', async () => {
+    const picker = whoPicker
+    const onModel = await mount([item({ key: 'job:j2', name: 'Weekly' })], [job({ id: 'j2', name: 'Weekly', projectId: 'p1', selection: { instanceId: 'claude:main', llmProvider: 'anthropic', model: 'sonnet', effort: 'high' } })])
+    await openForm('job:j2')
+    expect(picker().getAttribute('aria-label')).toBe('Who: Sonnet · High')
+    await click(picker())
+    await click([...document.querySelectorAll('.model-picker-clear')].find((button) => button.textContent === 'Claude'))
+    expect(picker().getAttribute('aria-label')).toBe('Who: Claude')
+    await save()
+    expect(onModel.scheduled.update).toHaveBeenLastCalledWith('j2', { selection: null })
   })
 
   it('shows who actually ran each run, and when its saved agent changed since the run before', async () => {

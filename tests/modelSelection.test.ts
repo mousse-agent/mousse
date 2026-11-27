@@ -7,7 +7,8 @@ import { contextHandoff } from '../src/mms/orchestrator/contextHandoff'
 import { SettingsStore } from '../src/mms/settings/SettingsStore'
 import { decodeScopes } from '../src/mms/harness/scope'
 import { findModelInCatalog } from '../src/renderer/components/agentDefinitions/editorIssues'
-import { modelGroups, modelKeyOf } from '../src/renderer/components/scheduled/jobDraft'
+import { draftFromJob, patchOf } from '../src/renderer/components/scheduled/jobDraft'
+import type { ScheduledJob } from '../src/shared/types'
 import { modelChoiceOf, modelLabel } from '../src/shared/modelChoice'
 import { agentModelId, pickedSelection, pickerModelId, splitStoredModel, upgradeSelection } from '../src/shared/modelSelection'
 import type { LlmProviderOption } from '../src/shared/settings'
@@ -98,9 +99,12 @@ describe('catalog checks on screens', () => {
   it('find a model saved with its level, so the agent editor and scheduled jobs accept it', () => {
     const catalogs = { providers } as never
     expect(findModelInCatalog(catalogs, 'claude-subscription', 'opus:high', 'claude')).toEqual({ providerLabel: 'Claude Code', modelLabel: 'Claude Opus 5.5' })
-    const groups = modelGroups(providers)
-    const listedKey = groups[0]!.choices[0]!.key
-    expect(modelKeyOf({ instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus', effort: 'high' }, groups, providers)).toBe(listedKey)
-    expect(modelKeyOf({ instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus:high' }, groups, providers)).toBe(listedKey)
+    // A job saved with its level packed into the model is read as the listed model at that level, and saving it
+    // untouched changes nothing.
+    const job = (model: string, effort?: string) => ({ id: 'j', name: 'n', prompt: 'p', schedule: { kind: 'manual' }, selection: { instanceId: 'claude', llmProvider: 'claude-subscription', model, ...(effort ? { effort } : {}) } }) as ScheduledJob
+    const packed = draftFromJob(job('opus:high'))
+    expect(packed.selection).toEqual({ instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus', effort: 'high' })
+    expect(patchOf(packed, draftFromJob(job('opus', 'high')))).toEqual({})
+    expect(patchOf(packed, draftFromJob(job('opus', 'low')))).toEqual({ selection: { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus', effort: 'low' } })
   })
 })

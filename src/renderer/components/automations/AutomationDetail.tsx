@@ -1,6 +1,8 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ChevronDown, ChevronLeft, ChevronRight, X } from '../../lib/icons'
-import { modelLabel } from '../../../shared/modelChoice'
+import { findListedModel, modelLabel } from '../../../shared/modelChoice'
+import type { ModelPick } from '../../../shared/modelSelection'
+import { listingServes } from '../../../shared/providerInstances'
 import { resolveModelChoice } from '../../lib/modelChoice'
 import { describePermissionMode, narrowPermissionMode, PERMISSION_MODES, isStricter, type PermissionMode } from '../../../shared/permissionMode'
 import { TELL_ME_LABELS, type AutomationItem, type AutomationRun } from '../../../shared/automations'
@@ -31,7 +33,8 @@ import { ownedWhenText, skippedDates, whenText, zoneName } from './automationTim
 import { missedText, runText } from './automationList'
 import { projectsOn, type ComputerChoice } from './computerChoice'
 import { isWorkflowPrompt } from '../../../shared/jobPermissionEdit'
-import { parseWhoKey, whoKey, whoName as nameOfWho, whoOptions, type AutomationLibrary, type Who } from './whoDo'
+import { SettingsModelPicker } from '../settings/SettingsModelPicker'
+import { severalEntries } from '../bots/BotRunsOn'
 import { BotFaceStill } from '../bots/face/BotFace'
 import { DeliveryLog, RequestFields, RequestSetup, type RequestApi } from './RequestTrigger'
 import { eventNouns, THREAD_EVENT_CHOICES, THREAD_EVENT_MIN_GAP_MS, threadEventChoice, threadEventText } from '../../../shared/threadEvents'
@@ -151,7 +154,6 @@ export function AutomationDetail({
   item,
   initial,
   catalog,
-  library,
   defaultName,
   profileId,
   viewerZone,
@@ -175,8 +177,6 @@ export function AutomationDetail({
   item?: AutomationItem
   initial: JobDraft
   catalog: ScheduledCatalog
-  /** The bots that may fill Who. */
-  library: AutomationLibrary
   /** The default agent's name. */
   defaultName: string
   profileId: string
@@ -232,7 +232,7 @@ export function AutomationDetail({
   )
   const shown = attempted ? errors : {}
   const patch = (changes: Partial<JobDraft>) => { setDraft((current) => ({ ...current, ...changes })); setFailure(null) }
-  const unchanged = isUnchanged(patchOf(initial, draft, catalog))
+  const unchanged = isUnchanged(patchOf(initial, draft))
   const lowered = loweredPermission(draft, initial, catalog, job)
   const builderKind: BuilderKind = draft.scheduleKind === 'cron' ? cronForm : draft.scheduleKind
   const parts = cronParts(draft.expr)
@@ -301,21 +301,18 @@ export function AutomationDetail({
     ...(!threadLocked && draft.threadId && !projectThreads.some((thread) => thread.id === draft.threadId) ? [{ value: draft.threadId, label: 'Unknown thread' }] : []),
     ...projectThreads.map((thread) => ({ value: thread.id, label: thread.name }))
   ]
-  // Who: the default agent, a model or a saved agent. A model the lists no longer offer stays chosen until changed.
-  const who: Who = draft.agentId ? { kind: 'agent', id: draft.agentId } : draft.modelKey ? { kind: 'model', key: draft.modelKey } : { kind: 'default' }
-  const naming = { defaultName, models: catalog.models, library }
-  const staleModel = draft.staleSelection && draft.modelKey !== '' && !catalog.models.some((group) => group.choices.some((choice) => choice.key === draft.modelKey))
-    ? `${modelLabel(resolveModelChoice({ ...draft.staleSelection, provider: draft.staleSelection.llmProvider }))} (not available now)`
-    : undefined
+  // Who: the default agent, a model at a reasoning level, or a saved agent, in the app's model picker. A model the lists
+  // no longer offer stays chosen until changed.
+  const selection = draft.agentId ? null : draft.selection
+  const listing = selection ? catalog.providers.find((provider) => listingServes(provider, selection)) : undefined
+  const listedModel = selection && listing ? findListedModel(listing.models, selection.model) : undefined
+  const selectionName = selection ? modelLabel(resolveModelChoice({ ...selection, provider: selection.llmProvider }, catalog.providers)) : ''
   // A saved agent an automation was made with before saved agents were removed keeps its name until it is changed.
   const savedAgentName = draft.agentId ? (draft.agentId === initial.agentId && item?.who.kind === 'saved_agent' ? item.who.name : 'Saved agent') : undefined
-  const whoLabel = staleModel ?? savedAgentName ?? nameOfWho(who, naming)
-  const whoChoices = whoOptions({ ...naming, withBots: false, current: { key: whoKey(who), label: whoLabel } })
-  const chooseWho = (key: string) => {
-    const next = parseWhoKey(key)
-    if (next.kind === 'agent') patch({ agentId: next.id, modelKey: '' })
-    else if (next.kind === 'model') patch({ agentId: '', modelKey: next.key })
-    else patch({ agentId: '', modelKey: '' })
+  const whoLabel = savedAgentName ?? (selection ? `${selectionName}${listedModel ? '' : ' (not available now)'}` : defaultName)
+  const chooseModel = (llmProvider: string, pick: ModelPick, instanceId?: string) => {
+    const name = catalog.providers.find((provider) => listingServes(provider, { instanceId, llmProvider }))?.models.find((model) => model.id === pick.model)?.label
+    patch({ agentId: '', selection: { ...(instanceId ? { instanceId } : {}), llmProvider, model: pick.model, ...(pick.effort ? { effort: pick.effort } : {}), ...(name ? { name } : {}) } })
   }
 
   // May: the effective mode a run gets, from what is chosen here, held to what the person holds.
@@ -330,7 +327,7 @@ export function AutomationDetail({
 
   // Next and why.
   const savedSchedule = scheduleOf(draft)
-  const scheduleChanged = Boolean(patchOf(initial, draft, catalog).schedule)
+  const scheduleChanged = Boolean(patchOf(initial, draft).schedule)
   const next = !scheduleChanged && !paused && job.nextRunAt ? job.nextRunAt : null
   const skipped = whyOpen ? skippedDates(savedSchedule, now) : []
   const code = scheduleCode(savedSchedule)
@@ -468,15 +465,22 @@ export function AutomationDetail({
           ) : remoteNode ? (
             <span className="automation-form-value" data-testid="automation-who" title={`Who does it is picked on ${owner.name}`}>{item?.who.name ?? whoLabel}</span>
           ) : (
-            <Select
-              ariaLabelledBy={id('who-label')}
-              className="automation-field-select"
-              value={whoKey(who)}
-              options={whoChoices}
-              title="Who does it"
-              renderValue={() => <span data-testid="automation-who">{whoLabel}</span>}
-              onChange={chooseWho}
-            />
+            <span className="automation-who-picker" data-testid="automation-who">
+              <SettingsModelPicker
+                ariaLabel="Who"
+                providers={catalog.providers}
+                providerId={listedModel && listing ? listing.id : ''}
+                instanceId={listedModel ? selection?.instanceId : undefined}
+                modelId={listedModel?.id ?? ''}
+                effort={listedModel ? selection?.effort : undefined}
+                placeholder={whoLabel}
+                title={listedModel ? undefined : whoLabel}
+                entry={listedModel && listing && severalEntries(catalog.providers) ? listing.label : undefined}
+                onSelect={chooseModel}
+                // The default agent is the picker's no-model choice, at the right of its footer.
+                clear={{ label: defaultName, title: 'Your default agent does it', active: !draft.agentId && !draft.selection, onClear: () => patch({ agentId: '', selection: null }) }}
+              />
+            </span>
           )}
         </FormRow>
 
