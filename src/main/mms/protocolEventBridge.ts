@@ -8,6 +8,14 @@ import type { Thread, ThreadRowPayload, TurnState, TurnStateSnapshot } from '../
 
 export type BroadcastFn = (channel: string, data: unknown) => void
 
+/** Where the older part of a long transcript begins, when a replacement carries one. */
+function earlierOf(value: unknown): { before: string; count: number } | undefined {
+  const earlier = value as { before?: unknown; count?: unknown } | null | undefined
+  return earlier && typeof earlier.before === 'string' && typeof earlier.count === 'number'
+    ? { before: earlier.before, count: earlier.count }
+    : undefined
+}
+
 /**
  * A thread list as the `threads:updated` channel carries it: `{ threads, version }` when the service versioned the
  * snapshot (a push or a `threads.list` reply), so the window can drop one older than a list it already holds;
@@ -126,11 +134,17 @@ export function bridgeProtocolEvent(
       return true
     }
     case 'thread.messages': {
-      const snapshot = event.data as { messages?: unknown; replace?: boolean } | null
+      const snapshot = event.data as { messages?: unknown; replace?: boolean; earlier?: unknown } | null
       const messages = snapshot?.messages
       // Background replacements (undo) still reach the renderer so it can retire cached transcripts.
       if (threadId != null && (forwardTranscript || snapshot?.replace === true)) {
-        broadcast('orchestrator:thread-messages', { threadId, messages, ...(snapshot?.replace === true ? { replace: true } : {}) })
+        const earlier = snapshot?.replace === true ? earlierOf(snapshot.earlier) : undefined
+        broadcast('orchestrator:thread-messages', {
+          threadId,
+          messages,
+          ...(snapshot?.replace === true ? { replace: true } : {}),
+          ...(earlier ? { earlier } : {})
+        })
       }
       return true
     }

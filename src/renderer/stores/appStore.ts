@@ -1149,15 +1149,24 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
         if (snapshot.replace) rememberMessages(snapshot.threadId, sortMessagesDeterministic(snapshot.messages))
         return s
       }
+      const earlier = snapshot.replace ? snapshot.earlier : undefined
+      const had = s.activeThreadId ? s.earlierByThread[s.activeThreadId] : undefined
+      // A replacement of a long thread's newest part (a resync) keeps the older pages this window loaded:
+      // the rows before its boundary are not part of it, and the prompt stays where those pages left it.
+      const boundary = earlier ? parseCursor(earlier.before).id : undefined
+      const boundaryAt = boundary === undefined ? -1 : s.messages.findIndex((message) => message.id === boundary)
+      const kept = boundaryAt > 0 ? s.messages.slice(0, boundaryAt) : []
       // A snapshot that repeats the transcript (a hydration or resync while a reply streams) keeps it as it is.
       const messages = sharedMessages(s.messages, snapshot.replace
-        ? sortMessagesDeterministic(snapshot.messages)
+        ? sortMessagesDeterministic([...kept, ...snapshot.messages.filter((message) => !kept.some((row) => row.id === message.id))])
         : reconcileMessageSnapshot(s.messages, snapshot.messages))
       if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
-      // A replacement is the whole transcript: nothing earlier is left to load.
-      if (snapshot.replace && s.activeThreadId && s.earlierByThread[s.activeThreadId]) {
+      // A replacement is the whole transcript unless it says what is left before it to load.
+      const next = kept.length > 0 ? had : earlier
+      if (snapshot.replace && s.activeThreadId && (had?.before !== next?.before || had?.count !== next?.count)) {
         const earlierByThread = { ...s.earlierByThread }
-        delete earlierByThread[s.activeThreadId]
+        if (next) earlierByThread[s.activeThreadId] = next
+        else delete earlierByThread[s.activeThreadId]
         return { messages, earlierByThread, transcriptPending: false }
       }
       if (messages === s.messages && !s.transcriptPending) return s

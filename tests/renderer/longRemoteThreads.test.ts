@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { forgetMessageImageRequests, hydrateMessageImages, missingImages, resetMessageImageRequests, type MessageImageDeps } from '../../src/renderer/lib/messageImages'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
-import type { ChatMessage } from '../../src/shared/types'
+import type { ChatMessage, ThreadMessagesSnapshot } from '../../src/shared/types'
+import { bridgeProtocolEvent } from '../../src/main/mms/protocolEventBridge'
+import { PresentationState } from '../../src/main/mms/PresentationState'
 
 const message = (id: string, patch: Partial<ChatMessage> = {}): ChatMessage =>
   ({ id, role: 'user', content: id, timestamp: `2026-10-27T10:00:${id.padStart(2, '0').slice(-2)}Z`, ...patch }) as ChatMessage
@@ -149,6 +151,58 @@ describe('the older part of a long thread in the window', () => {
     useAppStore.getState().applyEarlierMessages('nod_b:t', [message('1')], { before: '1', count: 2 })
     expect(useAppStore.getState().messages.map((entry) => entry.id)).toEqual(['8', '9'])
     expect(useAppStore.getState().earlierByThread['nod_b:t']).toEqual({ before: '1', count: 2 })
+  })
+})
+
+describe('a resync of a long thread of another computer', () => {
+  const initial = useAppStore.getInitialState()
+  beforeEach(() => {
+    useAppStore.setState({ ...initial, profileId: 'p', activeThreadId: 'nod_a:t', messages: [], earlierByThread: {} })
+  })
+  afterEach(() => { useAppStore.setState({ ...initial }) })
+  const view = (messages: ChatMessage[], earlier?: { before: string; count: number }) =>
+    useAppStore.getState().applyThreadView({ threadId: 'nod_a:t', messages, ...(earlier ? { earlier } : {}) })
+  // The resync event as the service sends it, through the main process to the window.
+  const resync = (messages: ChatMessage[], earlier?: { before: string; count: number }) => {
+    const presentation = new PresentationState()
+    presentation.setActiveThreadId('nod_a:t')
+    bridgeProtocolEvent(
+      { type: 'thread.messages', sequence: 1, threadId: 'nod_a:t', data: { messages, replace: true, ...(earlier ? { earlier } : {}) } } as never,
+      (channel, data) => { if (channel === 'orchestrator:thread-messages') useAppStore.getState().applyThreadMessages(data as ThreadMessagesSnapshot, 'p') },
+      presentation
+    )
+  }
+  const shown = () => useAppStore.getState().messages.map((entry) => entry.id)
+  const prompt = () => useAppStore.getState().earlierByThread['nod_a:t']
+
+  it('keeps "Load earlier messages" when older messages are still on the other computer', () => {
+    view([message('8'), message('9')], { before: '8', count: 7 })
+    resync([message('8'), message('9'), message('10')], { before: '8', count: 7 })
+    expect(shown()).toEqual(['8', '9', '10'])
+    expect(prompt()).toEqual({ before: '8', count: 7 })
+  })
+
+  it('keeps the older pages this window loaded, and the prompt where they left it', () => {
+    view([message('8'), message('9')], { before: '8', count: 7 })
+    useAppStore.getState().applyEarlierMessages('nod_a:t', [message('5'), message('6'), message('7')], { before: '5', count: 4 })
+    resync([message('8'), message('9'), message('10')], { before: '8', count: 7 })
+    expect(shown()).toEqual(['5', '6', '7', '8', '9', '10'])
+    expect(prompt()).toEqual({ before: '5', count: 4 })
+  })
+
+  it('shows no prompt once every older page was loaded', () => {
+    view([message('8'), message('9')], { before: '8', count: 7 })
+    useAppStore.getState().applyEarlierMessages('nod_a:t', [message('1'), message('7')], undefined)
+    resync([message('8'), message('9')], { before: '8', count: 7 })
+    expect(shown()).toEqual(['1', '7', '8', '9'])
+    expect(prompt()).toBeUndefined()
+  })
+
+  it('drops the prompt for a replacement that is the whole thread', () => {
+    view([message('8'), message('9')], { before: '8', count: 7 })
+    resync([message('1'), message('9')])
+    expect(shown()).toEqual(['1', '9'])
+    expect(prompt()).toBeUndefined()
   })
 })
 

@@ -61,6 +61,19 @@ describe('a window is told what the live stream knows, once it arrives', () => {
     expect(attachment.served).toBeUndefined()
   })
 
+  it('tells a window what is left to load before the newest part of a long thread, on a resync', async () => {
+    const thread = t.thread()
+    const id = t.qualified(thread.id)
+    const attachment = inside.obtain(t.node, thread.id)
+    focus(thread.id)
+    const newest = [{ id: 'm8', role: 'user', content: 'x' }]
+    inside.onUpdate(attachment, { kind: 'snapshot', value: snapshot(thread.id, { messages: newest, earlier: { before: 'm8', count: 7 } }) })
+    const from = t.events.length
+    inside.onUpdate(attachment, { kind: 'snapshot', value: snapshot(thread.id, { messages: newest, earlier: { before: 'm8', count: 7 } }) })
+    const resync = t.events.slice(from).find((event) => event.threadId === id && event.type === 'thread.messages')!
+    expect(resync.data).toMatchObject({ replace: true, earlier: { before: 'm8', count: 7 } })
+  })
+
   it('puts a window right after the offline copy, and never lets the copy replace a newer live view', async () => {
     const thread = t.thread()
     const id = t.qualified(thread.id)
