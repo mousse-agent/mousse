@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it } from 'vitest'
-import { ComputerBadgeView, ThreadComputerBadge, computerBadgeTitle } from '../../src/renderer/components/ComputerBadge'
+import { AlsoOnBadge, ComputerBadgeView, ThreadComputerBadge, alsoOnTitle, computerBadgeTitle } from '../../src/renderer/components/ComputerBadge'
 import { computerNotice } from '../../src/renderer/components/ComputerNotice'
 import { ComposerNotice } from '../../src/renderer/components/ComposerNotice'
 import { ComputerSurfaceNote, surfaceNoteFor } from '../../src/renderer/components/ComputerSurfaceNote'
@@ -38,10 +38,18 @@ describe('the computer badge', () => {
     expect(css).toMatch(/\.computer-badge:not\(\[data-state='online'\]\) \.computer-badge-icon::after \{/)
   })
 
-  it('says "Also on" for a project of this computer that another computer holds too', () => {
-    expect(computerBadgeTitle('Studio', 'online', 'Offline', 'also')).toBe('Also on Studio')
-    expect(computerBadgeTitle('Studio', 'offline', 'Offline · last seen 5m ago', 'also')).toBe('Also on Studio · Offline · last seen 5m ago')
-    expect(html(createElement(ComputerBadgeView, { name: 'Studio', state: 'online', of: 'also' }))).toContain('title="Also on Studio"')
+  it('marks the other computers a project is also on with one icon, listing each on hover', () => {
+    const computers = [
+      { name: 'Studio', state: 'online' as const },
+      { name: 'Desk', state: 'offline' as const, offline: 'Offline · last seen 5m ago' }
+    ]
+    expect(alsoOnTitle(computers)).toBe('Also on\n• Studio\n• Desk · Offline · last seen 5m ago')
+    const badge = html(createElement(AlsoOnBadge, { computers }))
+    expect(badge.match(/class="computer-badge-icon"/g)).toHaveLength(1)
+    expect(badge).toContain('data-state="online"')
+    // Struck through only when none of them can be reached.
+    expect(html(createElement(AlsoOnBadge, { computers: [computers[1]] }))).toContain('data-state="offline"')
+    expect(html(createElement(AlsoOnBadge, { computers: [] }))).toBe('')
   })
 
   it('shows nothing for a thread of this computer, and the node-less fallback name for an unknown one', () => {
