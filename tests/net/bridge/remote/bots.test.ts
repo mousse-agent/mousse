@@ -31,6 +31,7 @@ import { actionDigest } from '../../../../src/mms/bots/actions/BotActions'
 import { aloneKey, argumentContract } from '../../../../src/mms/bots/actions/BotAlone'
 import { botManifestDigest } from '../../../../src/mms/bots/grants/compile'
 import { getDefaultSettings } from '../../../../src/shared/settings'
+import { BotDeviceAccessStore } from '../../../../src/mms/bots/definitions/BotDeviceAccessStore'
 
 const at = '2026-11-07T09:00:00.000Z'
 const BOT = 'bot-0123456789ab'
@@ -38,12 +39,12 @@ const ASK = 'esc_00000000-0000-0000-0000-000000000000'
 const context = { caller: { node: 'n', user: 'u' } } as unknown as RpcContext
 
 /** Calls a method the way the dispatcher does for a new execution: validate, authorize, authorizeNew, handle. */
-async function call(methods: RpcMethod[], name: RemoteBotMethod, params: unknown): Promise<unknown> {
+async function call(methods: RpcMethod[], name: RemoteBotMethod, params: unknown, caller: RpcContext = context): Promise<unknown> {
   const method = methods.find((entry) => entry.method === name)!
   const valid = method.validate ? method.validate(params) : params
-  method.authorize?.(valid, context)
-  method.authorizeNew?.(valid, context)
-  return method.handle(valid, context)
+  method.authorize?.(valid, caller)
+  method.authorizeNew?.(valid, caller)
+  return method.handle(valid, caller)
 }
 
 async function refused(work: () => Promise<unknown>): Promise<NetError> {
@@ -248,10 +249,22 @@ describe('bot methods on a real bot', () => {
   it('pauses, resumes and creates a bot', async () => {
     expect(await call(methods, 'bots.personal.pause', { botId })).toMatchObject({ bot: { id: botId, state: 'paused' } })
     expect(await call(methods, 'bots.personal.resume', { botId })).toMatchObject({ bot: { id: botId } })
-    const made = (await call(methods, 'bots.create', { look: { colour: 'teal', accessory: 'cap' }, name: 'Notes', description: 'Tidy my notes', clientRequestId: 'phone-c1' })) as { bot: BotSummary }
-    expect(made.bot).toMatchObject({ name: 'Notes', description: 'Tidy my notes' })
-    const again = (await call(methods, 'bots.create', { look: { colour: 'teal', accessory: 'cap' }, name: 'Notes', description: 'Tidy my notes', clientRequestId: 'phone-c1' })) as { bot: BotSummary }
-    expect(again.bot.id).toBe(made.bot.id)
+    // A bot made from another device reaches that device, so the computer keeps its Devices and the caller is a real node.
+    const dir = mkdtempSync(join(tmpdir(), 'bots-create-reach-'))
+    const store = new BotDeviceAccessStore(dir)
+    const maker = botFixture({ deviceAccess: store })
+    try {
+      const phone = { caller: { node: newId('node'), user: 'u' } } as unknown as RpcContext
+      const making = remoteBotMethods({ bots: () => maker.bots.service })
+      const params = { look: { colour: 'teal', accessory: 'cap' }, name: 'Notes', description: 'Tidy my notes', clientRequestId: 'phone-c1' }
+      const made = (await call(making, 'bots.create', params, phone)) as { bot: BotSummary }
+      expect(made.bot).toMatchObject({ name: 'Notes', description: 'Tidy my notes' })
+      const again = (await call(making, 'bots.create', params, phone)) as { bot: BotSummary }
+      expect(again.bot.id).toBe(made.bot.id)
+    } finally {
+      maker.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('refuses an unknown bot before the call is admitted', async () => {
