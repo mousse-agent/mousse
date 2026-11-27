@@ -2787,10 +2787,14 @@ export class ClaudeSubscriptionProviderService {
     let excess = this.idleLive().length - cap
     while (excess-- > 0 && this.evictIdleLive()) { /* the oldest is closed */ }
   }
-  /** Closes the least recently used idle process with no background work; false when every one is needed. */
+  /** Closes an idle process with no background work (idle delegated children first, then least recently used); false when every one is needed. */
   private evictIdleLive(): boolean {
     let victim: LiveSession<TurnContext> | undefined
-    for (const live of this.idleLive()) if (!victim || live.lastUsed < victim.lastUsed) victim = live
+    for (const live of this.idleLive()) {
+      const liveDelegated = live.meta.delegated === true
+      const victimDelegated = victim?.meta.delegated === true
+      if (!victim || (liveDelegated !== victimDelegated ? liveDelegated : live.lastUsed < victim.lastUsed)) victim = live
+    }
     if (!victim) return false
     this.closeLiveSession(victim.threadId, victim, 'idle')
     return true
@@ -2828,7 +2832,7 @@ export class ClaudeSubscriptionProviderService {
     resume: string | undefined,
     create: (live: LiveSession<TurnContext>) => Options,
     mcp: Omit<LaunchContext, 'threadId'> & { servers: () => TurnMcp; mousse: McpAttachment | null },
-    bot?: { idleCloseMs: number }
+    retention?: { idleCloseMs?: number; bot?: true; delegated?: true }
   ): Promise<LiveSession<TurnContext> | undefined> {
     const timings = this.liveConfig
     if (!timings) return undefined
@@ -2918,9 +2922,17 @@ export class ClaudeSubscriptionProviderService {
         // Claude's own turn (a background result) ended too: the count of idle processes is checked again.
         idle: () => queueMicrotask(() => this.trimIdleLive())
       },
-      bot ? { ...timings, idleCloseMs: bot.idleCloseMs } : timings
+      retention?.idleCloseMs !== undefined ? { ...timings, idleCloseMs: retention.idleCloseMs } : timings
     )
-    created.meta = { hardParts: key.hard, softKey: key.soft, permissionMode: key.mode, flags: key.flags, entrypoint: key.entrypoint, ...(bot ? { bot: true } : {}) }
+    created.meta = {
+      hardParts: key.hard,
+      softKey: key.soft,
+      permissionMode: key.mode,
+      flags: key.flags,
+      entrypoint: key.entrypoint,
+      ...(retention?.bot ? { bot: true } : {}),
+      ...(retention?.delegated ? { delegated: true } : {})
+    }
     this.live.set(threadId, created)
     try {
       // Before its output is read or a prompt pushed (#358): the SDK takes Claude Code's answer by itself.
@@ -3925,7 +3937,11 @@ export class ClaudeSubscriptionProviderService {
           }, {
             servers: turnServers, mousse, timeoutMs: claudeMcpRegistrationMs(env), signal: controller.signal,
             beforeStart: () => assertSignIn('live'), leftOut, policy
-          }, botWarm ? { idleCloseMs: BOT_LIVE_IDLE_CLOSE_MS } : undefined)
+          }, botWarm
+            ? { idleCloseMs: BOT_LIVE_IDLE_CLOSE_MS, bot: true }
+            : input.child
+              ? { idleCloseMs: this.liveConfig?.delegateIdleCloseMs, delegated: true }
+              : undefined)
         } catch (error) {
           // A refused change started nothing: the conversation is as it was, so the next request can resume it.
           // Mousse keeps the refused message in the transcript, so the history the next request carries has

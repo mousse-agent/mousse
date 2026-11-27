@@ -37,7 +37,7 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
-function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[0]>['connect']>, initial?: (home: string) => unknown, extra: { loadDeadlineMs?: number; questions?: UserQuestionService } = {}) {
+function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[0]>['connect']>, initial?: (home: string) => unknown, extra: { loadDeadlineMs?: number; idleCloseMs?: number; delegateIdleCloseMs?: number; maxIdleAgents?: number; questions?: UserQuestionService } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-cursor-driver-'))
   homes.push(home)
   const stateDir = instanceStateDir(home, INSTANCE)
@@ -52,7 +52,7 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
   harness.setLiveHost({ notice: (threadId, text) => notices.push([threadId, text]) })
   harnesses.push(harness)
   const texts = new Map<string, string>()
-  const spec = (threadId: string, binding: TurnSpec['binding'], options: { prompt?: string; history?: string; cwd?: string | null; signal?: AbortSignal; mcp?: { url: string; token: string }; tool?: (event: StreamingLlmToolEvent) => void; hold?: HoldControl; sink?: TurnSpec['sink'] } = {}): TurnSpec => ({
+  const spec = (threadId: string, binding: TurnSpec['binding'], options: { prompt?: string; history?: string; cwd?: string | null; child?: TurnInput['child']; signal?: AbortSignal; mcp?: { url: string; token: string }; tool?: (event: StreamingLlmToolEvent) => void; hold?: HoldControl; sink?: TurnSpec['sink'] } = {}): TurnSpec => ({
     binding,
     input: {
       threadId,
@@ -62,6 +62,7 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
       mode: 'agent',
       prompt: options.prompt ?? 'hi',
       cwd: options.cwd === undefined ? home : options.cwd,
+      ...(options.child ? { child: options.child } : {}),
       nativeHistory: options.history ?? '',
       signal: options.signal ?? new AbortController().signal
     } as unknown as TurnInput,
@@ -841,5 +842,64 @@ describe("Cursor rows keep the agent's words", () => {
       { kind: 'text', content: '\n\n    next' },
       { kind: 'text', content: '    more' }
     ])
+  })
+})
+
+describe('Cursor idle live agent retention', () => {
+  it('bounds idle live agents (evicting delegated children first), closes them without losing saved history, and resumes on the next turn', async () => {
+    let created = 0
+    let runs = 0
+    const host = new FakeCursorHost({
+      create: () => ({ agentId: `agent-${++created}` }),
+      resume: (params) => ({ agentId: params.agentId as string }),
+      send: (params, fake) => {
+        const runId = `run-${++runs}`
+        setImmediate(() => {
+          fake.emit({ event: 'delta', runId, update: { type: 'text-delta', text: `reply:${params.agentId}` } })
+          fake.emit({ event: 'run_end', runId, status: 'finished' })
+        })
+        return { runId }
+      }
+    })
+    const { turn, state } = setup(host.connect, undefined, { idleCloseMs: 60_000, delegateIdleCloseMs: 60_000, maxIdleAgents: 2 })
+
+    await (await turn('i1')).result
+    await (await turn('i2')).result
+    expect(host.calls('close')).toEqual([])
+
+    // Delegated child completes while 2 interactive agents are idle: the child is evicted first via `close`,
+    // yet its saved session keeps its historyKey so a follow-up resumes via `resume` rather than `create`.
+    await (await turn('child', { child: { readOnly: false } })).result
+    expect(host.calls('close')).toEqual([{ agentId: 'agent-3' }])
+    expect(state().sessions.child?.agentId).toBe('agent-3')
+    expect(state().sessions.child?.historyKey).toBeTruthy()
+    expect(host.calls('prune')).toEqual([])
+
+    // Resuming the evicted child reopens agent-3 via `resume` (not `create`).
+    await (await turn('child', { child: { readOnly: false }, history: 'reply:agent-3' })).result
+    expect(host.calls('resume')).toContainEqual(expect.objectContaining({ agentId: 'agent-3' }))
+    expect(created).toBe(3)
+  })
+
+  it('closes an idle delegated agent after delegateIdleCloseMs while keeping interactive agents warm', async () => {
+    let created = 0
+    let runs = 0
+    const host = new FakeCursorHost({
+      create: () => ({ agentId: `agent-${++created}` }),
+      send: (_params, fake) => {
+        const runId = `run-${++runs}`
+        setImmediate(() => {
+          fake.emit({ event: 'delta', runId, update: { type: 'text-delta', text: 'ok' } })
+          fake.emit({ event: 'run_end', runId, status: 'finished' })
+        })
+        return { runId }
+      }
+    })
+    const { turn, state } = setup(host.connect, undefined, { idleCloseMs: 60_000, delegateIdleCloseMs: 40, maxIdleAgents: 4 })
+
+    await (await turn('interactive')).result
+    await (await turn('child', { child: { readOnly: false } })).result
+    await vi.waitFor(() => expect(host.calls('close')).toEqual([{ agentId: 'agent-2' }]))
+    expect(state().sessions.child?.agentId).toBe('agent-2')
   })
 })

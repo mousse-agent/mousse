@@ -87,6 +87,12 @@ export interface CursorDriverOptions {
   cancelDeadlineMs?: number
   /** Test seam: how long reopening a saved agent may take. */
   loadDeadlineMs?: number
+  /** Test seam: how long an idle live agent stays open before closing while keeping its saved history. */
+  idleCloseMs?: number
+  /** Test seam: how long an idle delegated child's live agent stays open before closing. */
+  delegateIdleCloseMs?: number
+  /** Test seam: how many idle live agents stay open per instance. */
+  maxIdleAgents?: number
 }
 
 /** The account a key belongs to, without the key itself: an HMAC when Cursor cannot say. */
@@ -223,7 +229,10 @@ function createCursorRuntime(context: DriverContext, options: CursorDriverOption
     signInRequiredMessage: `Sign in to ${label} in Settings → Providers before chatting`,
     notice: (threadId, text) => liveHost?.notice?.(threadId, text),
     ...(options.cancelDeadlineMs !== undefined ? { cancelDeadlineMs: options.cancelDeadlineMs } : {}),
-    ...(options.loadDeadlineMs !== undefined ? { loadDeadlineMs: options.loadDeadlineMs } : {})
+    ...(options.loadDeadlineMs !== undefined ? { loadDeadlineMs: options.loadDeadlineMs } : {}),
+    ...(options.idleCloseMs !== undefined ? { idleCloseMs: options.idleCloseMs } : {}),
+    ...(options.delegateIdleCloseMs !== undefined ? { delegateIdleCloseMs: options.delegateIdleCloseMs } : {}),
+    ...(options.maxIdleAgents !== undefined ? { maxIdleAgents: options.maxIdleAgents } : {})
   })
 
   /** Who a key belongs to: `me`, or the key's HMAC when Cursor cannot be asked. Throws when Cursor refuses the key. */

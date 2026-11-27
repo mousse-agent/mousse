@@ -96,7 +96,7 @@ function scriptedAgent(script: AgentScript) {
   return { ...agentApp, calls, cancels }
 }
 
-function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean; cancelDeadlineMs?: number; promptSilenceMs?: number; clientFs?: boolean; formElicitation?: boolean; backgroundWork?: boolean; continuationSettleMs?: number; continuationQuietMs?: number; wakeGraceMs?: number; idleCloseMs?: number } = {}) {
+function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean; cancelDeadlineMs?: number; promptSilenceMs?: number; clientFs?: boolean; formElicitation?: boolean; backgroundWork?: boolean; continuationSettleMs?: number; continuationQuietMs?: number; wakeGraceMs?: number; idleCloseMs?: number; delegateIdleCloseMs?: number; maxIdleSessions?: number } = {}) {
   const saved = new Map<string, SavedAcpSession>()
   let models: LlmModelOption[] = []
   const questions = new UserQuestionService()
@@ -114,6 +114,8 @@ function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { c
     ...(options.continuationQuietMs !== undefined ? { continuationQuietMs: options.continuationQuietMs } : {}),
     ...(options.wakeGraceMs !== undefined ? { wakeGraceMs: options.wakeGraceMs } : {}),
     ...(options.idleCloseMs !== undefined ? { idleCloseMs: options.idleCloseMs } : {}),
+    ...(options.delegateIdleCloseMs !== undefined ? { delegateIdleCloseMs: options.delegateIdleCloseMs } : {}),
+    ...(options.maxIdleSessions !== undefined ? { maxIdleSessions: options.maxIdleSessions } : {}),
     store: {
       saved: (threadId) => saved.get(threadId),
       setSaved: (threadId, value) => (value ? saved.set(threadId, value) : saved.delete(threadId)),
@@ -2078,5 +2080,93 @@ describe('an idle thread’s agent process', () => {
     await vi.waitFor(() => expect(background).toEqual([true, false]))
     expect(agent.connections[0].killed).toBe(false)
     await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
+  })
+
+  it('bounds idle processes per instance, evicting delegated children first while preserving saved sessions for resume', async () => {
+    let nextSession = 0
+    const calls: string[] = []
+    const agent = inProcessAgent((app: AgentApp) => {
+      app
+        .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: { loadSession: true }, authMethods: [] }))
+        .onRequest(methods.agent.session.new, () => {
+          const sessionId = `native-${++nextSession}`
+          calls.push(`new:${sessionId}`)
+          return { sessionId, ...DEFAULT_SESSION } as never
+        })
+        .onRequest(methods.agent.session.load, (c) => {
+          calls.push(`load:${c.params.sessionId}`)
+          return DEFAULT_SESSION as never
+        })
+        .onRequest(methods.agent.session.prompt, () => ({ stopReason: 'end_turn' as const }))
+    })
+    const { sessions, saved } = core(agent.connect, { idleCloseMs: 60_000, delegateIdleCloseMs: 60_000, maxIdleSessions: 2 })
+    const run = (threadId: string, opts: { delegated?: true; history?: string } = {}) =>
+      sessions.chat({ threadId, cwd: process.cwd(), model: 'default', permissionMode: 'full', prompt: 'hi', onText: vi.fn(), ...opts })
+
+    // Two interactive threads fill the cap of 2.
+    await run('i1')
+    sessions.commitConversation('i1', 'h-i1')
+    await run('i2')
+    sessions.commitConversation('i2', 'h-i2')
+    expect(agent.connections.map((c) => c.killed)).toEqual([false, false])
+
+    // A delegated child finishes while 2 interactive threads are idle: the delegated child is evicted first,
+    // and its subsequent commitConversation still fingerprints the saved session so a follow-up resumes it.
+    await run('child', { delegated: true })
+    sessions.commitConversation('child', 'h-child')
+    expect(agent.connections[0].killed).toBe(false)
+    expect(agent.connections[1].killed).toBe(false)
+    expect(agent.connections[2].killed).toBe(true)
+    expect(saved.get('child')?.historyKey).toBeTruthy()
+
+    // A third interactive thread evicts the oldest interactive one (i1).
+    await run('i3')
+    sessions.commitConversation('i3', 'h-i3')
+    expect(agent.connections[0].killed).toBe(true)
+    expect(agent.connections[1].killed).toBe(false)
+    expect(agent.connections[3].killed).toBe(false)
+
+    // Resuming the evicted delegated child reopens its saved session instead of creating a new one.
+    await run('child', { delegated: true, history: 'h-child' })
+    expect(calls).toContain('load:native-3')
+  })
+
+  it('closes an idle delegated child after the shorter delegate grace while an interactive thread stays open', async () => {
+    let nextSession = 0
+    const agent = inProcessAgent((app: AgentApp) => {
+      app
+        .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: { loadSession: true }, authMethods: [] }))
+        .onRequest(methods.agent.session.new, () => ({ sessionId: `native-${++nextSession}`, ...DEFAULT_SESSION } as never))
+        .onRequest(methods.agent.session.prompt, () => ({ stopReason: 'end_turn' as const }))
+    })
+    const { sessions } = core(agent.connect, { idleCloseMs: 60_000, delegateIdleCloseMs: 40, maxIdleSessions: 4 })
+
+    await sessions.chat({ threadId: 'interactive', cwd: process.cwd(), model: 'default', permissionMode: 'full', prompt: 'hi', onText: vi.fn() })
+    await sessions.chat({ threadId: 'child', cwd: process.cwd(), model: 'default', permissionMode: 'full', prompt: 'hi', onText: vi.fn(), delegated: true })
+    await vi.waitFor(() => expect(agent.connections[1].killed).toBe(true))
+    expect(agent.connections[0].killed).toBe(false)
+  })
+
+  it('AcpAdapter forwards child turns as delegated so they use the shorter idle grace', async () => {
+    const received: Array<{ threadId: string; delegated?: true }> = []
+    const adapter = new AcpAdapter(
+      () => ({
+        chat: async (input) => {
+          received.push({ threadId: input.threadId, ...(input.delegated ? { delegated: input.delegated } : {}) })
+          return 'ok'
+        },
+        commitConversation: vi.fn(),
+        configured: () => true
+      }),
+      { driver: 'acp', label: 'Fake agent', capabilities: {} as never }
+    )
+    const noop = () => {}
+    const sink = { text: noop, thinking: noop, tool: noop, progress: noop, usage: noop, providerRef: noop, steerAccepted: noop, providerMetrics: noop, nativeMessages: noop, compaction: noop, retry: noop, lineEdits: noop } as never
+    const ctl = { drainSteer: () => undefined, heartbeat: noop } as never
+    const host = { tools: {}, context: { nativeHistoryAfterTurn: (t: string) => t, recoverOverflow: () => null, prepareNativeContext: () => null } } as never
+    const base = { runId: 'r1', attemptId: 'a1', cwd: process.cwd(), instanceId: 'acp:fake', model: 'default', llmProvider: 'acp', modelPinned: true, mode: 'agent', prompt: 'hi', messages: [], signal: new AbortController().signal } as never
+    await adapter.startTurn({ ...base, threadId: 'interactive' }, sink, ctl, host)
+    await adapter.startTurn({ ...base, threadId: 'child', child: { readOnly: false } }, sink, ctl, host)
+    expect(received).toEqual([{ threadId: 'interactive' }, { threadId: 'child', delegated: true }])
   })
 })
