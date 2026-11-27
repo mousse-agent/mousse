@@ -74,7 +74,8 @@ export function readTerminals(terminals: TerminalReadHost, threadId: string, arg
     return { text: mask(refusalText('invalid_arguments', `This thread has no terminal ${String(args.terminalId)} now: pick one from terminals.`, { data: { threadId, terminals: listed.map(terminalView) } })), isError: true }
   }
   const kept = terminals.output(chosen.ptyId)
-  const page = terminalPage(kept?.scrollback ?? '', { ...(lines ? { lines } : {}), ...(before ? { before } : {}), droppedLines: kept?.droppedLines ?? 0, ...(kept?.columns ? { columns: kept.columns } : {}), mask })
+  const scrollback = kept?.scrollback ?? ''
+  const page = terminalPage(scrollback, { ...(lines ? { lines } : {}), ...(before ? { before } : {}), droppedLines: kept?.droppedLines ?? 0, ...(kept?.columns ? { columns: kept.columns } : {}), mask })
   const output = {
     terminalId: chosen.ptyId,
     title: chosen.title,
@@ -83,7 +84,11 @@ export function readTerminals(terminals: TerminalReadHost, threadId: string, arg
     lastLine: page.lastLine,
     ...(page.more ? { more: `Older lines are kept: pass before ${page.fromLine} to read them.` } : {}),
     ...(page.cut ? { cut: 'Long lines were shortened, or fewer lines fit the size limit.' } : {}),
-    text: page.text
+    text: page.text,
+    // The cut-text fields (docs/plans/tool-api.md §1.2 "Paging"): readMore is the page before this one, as bounded as this.
+    truncated: Boolean(page.more || page.cut),
+    totalChars: scrollback.length,
+    ...(page.more ? { readMore: { tool: TERMINAL_READ_TOOL, args: { threadId, terminalId: chosen.ptyId, before: page.fromLine, ...(lines ? { lines } : {}) } } } : {})
   }
   return { text: mask(JSON.stringify({ threadId, terminals: listed.map(terminalView), output, note: DATA_NOTE })) }
 }

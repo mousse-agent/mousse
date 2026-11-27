@@ -479,7 +479,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
     it('a bot\'s own turn is held to its walls: a send, steer or Stop is refused', async () => {
       const { fx, registry, turns, request, host, callerRun } = await world()
       const wall = (tool: string) => ({ kind: 'tool', tool })
-      turns.register(appTurn({ threadId: 'caller', runId: callerRun.runId, bot: { check: (what: { tool: string }) => ({ ok: false, wall: wall(what.tool) }), skills: new Set() } as never }))
+      turns.register(appTurn({ threadId: 'caller', runId: callerRun.runId, bot: { check: (what: { tool: string }) => ({ ok: false, wall: wall(what.tool) }), skills: new Set(), appTools: new Set() } as never }))
       for (const [name, args] of [
         ['thread_send', { threadId: 'target', content: 'x' }],
         ['thread_steer', { threadId: 'target', runId: 'any', text: 'x' }],

@@ -194,4 +194,33 @@ describe('thread addresses', () => {
     expect(stopped.results.map((row) => row.threadId)).toEqual([reader, writer, nested])
     expect(stopped.results[2]).toMatchObject({ status: 'stopped' })
   })
+
+  // S6b: the family as a list (docs/plans/tool-api.md §1.2 "Family", "Paging").
+
+  it('thread_list scope family lists the caller first, then the family it can read, in pages bound to it and the query', async () => {
+    const { call, result, threads, delegation, reader, writer, nested } = await family()
+    vi.mocked(delegation.listSubagents).mockReturnValue([{ title: 'Writer', childThreadId: nested, state: 'running', latestDelegationId: 'd-nested' }] as never)
+    const rows = (page: Record<string, unknown>) => (page.items as Array<{ thread: string; relation: string; parentThread?: string }>).map(({ thread, relation, parentThread }) => [thread, relation, parentThread])
+    const whole = await result(call('thread_list', reader, { scope: 'family' }))
+    expect(rows(whole)).toEqual([[reader, 'self', undefined], ['parent', 'parent', undefined], [writer, 'sibling', 'parent'], [nested, 'child', reader]])
+    // A row of the caller's own subagent carries what list_subagents says of it.
+    expect((whole.items as unknown[])[3]).toMatchObject({ title: 'Writer', state: 'running', latestDelegationId: 'd-nested' })
+    expect(whole).toMatchObject({ nextCursor: null, complete: true })
+    const first = await result(call('thread_list', reader, { scope: 'family', limit: 2 }))
+    expect(rows(first).map(([id]) => id)).toEqual([reader, 'parent'])
+    expect(first).toMatchObject({ complete: false, nextCursor: expect.any(String) })
+    const second = await result(call('thread_list', reader, { scope: 'family', limit: 2, cursor: first.nextCursor }))
+    expect(rows(second).map(([id]) => id)).toEqual([writer, nested])
+    expect(second).toMatchObject({ nextCursor: null, complete: true })
+    // Another thread, or another query, can't continue it.
+    expect(await denied(call('thread_list', writer, { scope: 'family', limit: 2, cursor: first.nextCursor }))).toMatchObject({ code: 'cursor_mismatch' })
+    expect(await denied(call('thread_list', reader, { scope: 'family', limit: 2, includeArchived: true, cursor: first.nextCursor }))).toMatchObject({ code: 'cursor_mismatch' })
+    // A sibling made private is on no page, even one a cursor from before continues.
+    threads.set(writer, { ...threads.get(writer)!, localOnly: true })
+    expect(rows(await result(call('thread_list', reader, { scope: 'family', limit: 2, cursor: first.nextCursor }))).map(([id]) => id)).toEqual([nested])
+    expect(rows(await result(call('thread_list', reader, { scope: 'family' }))).map(([id]) => id)).not.toContain(writer)
+    // Called by its old name, the listing is list_subagents' rows, as it always was.
+    expect(JSON.parse((await call('list_subagents', reader, {})).text)).toEqual([{ title: 'Writer', childThreadId: nested, state: 'running', latestDelegationId: 'd-nested' }])
+  })
+
 })
