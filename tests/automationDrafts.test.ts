@@ -184,8 +184,24 @@ describe('automation drafts', () => {
     service.enableWebhook(cli.draftId)
     drafts.recheck(cli.draftId)
     expect(service.getJob(cli.draftId)!.draft!.problems).toEqual([])
-    const back = drafts.save({ draftId: cli.draftId, trigger: { kind: 'cli' } }, { managerThreadId: 'manager' })
-    expect(back.problems).toEqual([expect.stringMatching(/still has a request URL/)])
+    // Refused, and nothing of it is saved: the URL stays, with no CLI name.
+    expect(() => drafts.save({ draftId: cli.draftId, trigger: { kind: 'cli' } }, { managerThreadId: 'manager' })).toThrow(/still has a request URL/)
+    expect(service.getJob(cli.draftId)).toMatchObject({ trigger: { webhook: { scheme: 'mousse' } }, schedule: { kind: 'manual' } })
+    expect(service.getJob(cli.draftId)!.cliName).toBeUndefined()
+  })
+
+  it('a clock the person gives a request draft replaces its request: On demand afterwards is the CLI', () => {
+    const { drafts, service } = setup()
+    const { draftId } = drafts.save({ ...PR_CHECK, project: 'p1', trigger: { kind: 'webhook' } }, { managerThreadId: 'manager' })
+    // Edit details saves the schedule through the protocol, then the draft is re-checked.
+    service.updateJob(draftId, { schedule: { kind: 'interval', minutes: 60 } })
+    drafts.recheck(draftId)
+    service.updateJob(draftId, { schedule: { kind: 'manual' } })
+    drafts.recheck(draftId)
+    const job = service.getJob(draftId)!
+    expect(drafts.contract(job).trigger).toMatchObject({ kind: 'cli' })
+    expect(job.draft).toMatchObject({ problems: [] })
+    expect(job.draft!.request).toBeUndefined()
   })
 
   it('takes Who from the person, never the manager: a bot\'s draft turns on as the bot\'s own schedule', () => {

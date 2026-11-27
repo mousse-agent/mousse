@@ -360,8 +360,8 @@ export class AutomationDrafts {
       }
     }
 
-    // A request URL goes only where its secret is deleted with it: in Edit details, by the person.
-    if (trigger.kind !== 'http' && current?.trigger?.webhook) problems.push('It still has a request URL. Turn it off in Edit details › Request URL first, or keep it on request.')
+    // A request URL goes only where its secret is deleted with it: in Edit details, by the person. Refused, not saved.
+    if (trigger.kind !== 'http' && current?.trigger?.webhook) fail('It still has a request URL. Turn it off in Edit details › Request URL first, or keep it on request.')
     if (bot) {
       if (this.deps.botExists && !this.deps.botExists(bot)) problems.push('That bot is gone. Pick another Who.')
       const when = trigger.kind === 'time' ? botWhenOf(trigger.schedule) : undefined
@@ -635,8 +635,11 @@ export class AutomationDrafts {
   recheck(draftId: string): void {
     const job = this.deps.get(draftId)
     if (!job?.draft) return
-    const { problems } = this.build({}, job)
-    if (JSON.stringify(problems) !== JSON.stringify(job.draft.problems)) this.deps.update(job.id, { draft: { ...job.draft, problems } })
+    // A clock the person gave a request draft replaces its request: On demand afterwards is the CLI, not a request again.
+    const { problems, request } = this.build({}, job)
+    if (JSON.stringify(problems) === JSON.stringify(job.draft.problems) && request === Boolean(job.draft.request)) return
+    const { request: _request, ...rest } = job.draft
+    this.deps.update(job.id, { draft: { ...rest, problems, ...(request ? { request: true as const } : {}) } })
   }
 
   /** Discard: the draft is deleted. */
