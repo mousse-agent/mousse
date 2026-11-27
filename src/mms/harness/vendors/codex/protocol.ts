@@ -55,6 +55,23 @@ export interface GetAuthStatusResponse {
   authMethod?: string | null
   authToken?: string | null
 }
+/**
+ * `account/login/start` (codex-cli 0.172 v2 schema). Mousse starts only the ChatGPT browser sign-in:
+ * Codex runs its own localhost callback server and answers with the link to open.
+ */
+export interface LoginAccountParams {
+  type: 'chatgpt'
+}
+export type LoginAccountResponse =
+  | { type: 'chatgpt'; loginId: string; authUrl: string }
+  | { type: string; loginId?: string }
+/** `account/login/cancel`: ends a sign-in `account/login/start` began. */
+export interface CancelLoginAccountParams {
+  loginId: string
+}
+export interface CancelLoginAccountResponse {
+  status: 'canceled' | 'notFound'
+}
 
 export interface ModelListParams {
   cursor?: string | null
@@ -312,6 +329,8 @@ export interface CodexRequestMap {
   'config/read': { params: ConfigReadParams; result: ConfigReadResponse }
   'account/read': { params: AccountReadParams; result: AccountReadResponse }
   getAuthStatus: { params: GetAuthStatusParams; result: GetAuthStatusResponse }
+  'account/login/start': { params: LoginAccountParams; result: LoginAccountResponse }
+  'account/login/cancel': { params: CancelLoginAccountParams; result: CancelLoginAccountResponse }
   'account/rateLimits/read': { params: undefined; result: RateLimitsReadResponse }
   'account/rateLimitResetCredit/consume': { params: ConsumeResetCreditParams; result: ConsumeResetCreditResponse }
   'model/list': { params: ModelListParams; result: ModelListResponse }
@@ -427,6 +446,8 @@ export interface CodexNotificationMap {
   }
   error: { threadId: string; turnId: string; error: TurnError; willRetry: boolean }
   'account/updated': { authMode: string | null; planType?: string | null }
+  /** The end of a sign-in `account/login/start` began, for its `loginId`. */
+  'account/login/completed': { loginId?: string | null; success: boolean; error?: string | null }
   'account/rateLimits/updated': { rateLimits: RateLimitSnapshot }
   /** Broadcast to every connection, not only subscribers of the thread. */
   'thread/status/changed': { threadId: string; status: { type: string } }

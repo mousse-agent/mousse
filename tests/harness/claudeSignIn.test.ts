@@ -129,7 +129,8 @@ interface FakeTerminal {
   exit(code: number, account?: string): void
 }
 
-function terminalFactory() {
+/** `ownSignIn`: a sign-in that ends in the user's own home (no `CLAUDE_CONFIG_DIR`) signs that home in. */
+function terminalFactory(ownSignIn: () => void = () => {}) {
   const terminals: FakeTerminal[] = []
   const spawn: PtySpawn = (command, args, options) => {
     let data: (text: string) => void = () => {}
@@ -152,7 +153,10 @@ function terminalFactory() {
       exit: (code, account) => {
         if (ended) return
         const home = options.env.CLAUDE_CONFIG_DIR
-        if (code === 0 && account && home) writeSignIn(home, account)
+        // The user's own home is whatever their environment names (the test runner's isolated one here).
+        const ownHome = !home || home === process.env.CLAUDE_CONFIG_DIR
+        if (code === 0 && account && ownHome) ownSignIn()
+        else if (code === 0 && account && home) writeSignIn(home, account)
         end(code)
       }
     }
@@ -181,6 +185,8 @@ interface WorldOptions {
   /** A sign-in terminal runs (default); false: none runs here. */
   terminal?: boolean
   signInTimeoutMs?: number
+  /** The user's own Claude reads signed in (default). */
+  ownSignedIn?: boolean
 }
 
 const WORK = 'claude:work'
@@ -200,7 +206,8 @@ function world(options: WorldOptions = {}) {
   const profileHome = options.profileHome ?? tempDir('mousse-claude-signin')
   const binary = fakeClaude()
   const questions = new UserQuestionService()
-  const terminal = terminalFactory()
+  const own = { signedIn: options.ownSignedIn ?? true }
+  const terminal = terminalFactory(() => void (own.signedIn = true))
   const statusCalls: Call[] = []
   const turnEnvs: Array<{ instanceId: string; env: NodeJS.ProcessEnv }> = []
   const spawns: HarnessSpawn[] = []
@@ -208,7 +215,7 @@ function world(options: WorldOptions = {}) {
   const runAuth = (instanceId: string) => async (_binary: string, args: string[], env: NodeJS.ProcessEnv) => {
     statusCalls.push({ instanceId, args, env })
     const home = env.CLAUDE_CONFIG_DIR
-    const signedIn = instanceId === 'claude' ? true : Boolean(home && existsSync(join(home, '.claude.json')))
+    const signedIn = instanceId === 'claude' ? own.signedIn : Boolean(home && existsSync(join(home, '.claude.json')))
     return JSON.stringify(signedIn ? { loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'max' } : { loggedIn: false })
   }
   const query = (instanceId: string) => (input: { options: { env?: NodeJS.ProcessEnv } }) => {
@@ -466,6 +473,37 @@ describe('sign in from the app', () => {
     await signIn(second, 'acct-2')
     expect((await second.harness.instances.recheck(WORK)).auth).toMatchObject({ state: 'signed_in', canSignOut: true })
     expect(JSON.parse(readFileSync(join(instanceStateDir(profileHome, WORK), 'settings.json'), 'utf8')).cliDisconnected).toBeUndefined()
+  })
+
+  it('the user\'s own Claude signs in from the app too: `claude auth login` in their own home, started in a folder Mousse owns', async () => {
+    const w = world({ ownSignedIn: false })
+    const before = await w.harness.instances.recheck('claude')
+    expect(before.auth).toMatchObject({ state: 'signed_out', canSignIn: true })
+    // The command to copy stays beside the button, without a home of its own.
+    expect(before.nextStep).toMatchObject({ action: 'sign_in', command: 'claude auth login' })
+
+    const signIn = await startSignIn(w, 'claude')
+    const terminal = await signIn.terminal()
+    expect(terminal.args.slice(-2)).toEqual(['auth', 'login'])
+    // The user's own home: their environment's, never one of Mousse's.
+    expect(terminal.env.CLAUDE_CONFIG_DIR).toBe(process.env.CLAUDE_CONFIG_DIR)
+    // It starts in the entry's own folder (created for it), never a project or Mousse's own folder.
+    expect(terminal.cwd).toBe(instanceStateDir(w.profileHome, 'claude'))
+    expect(existsSync(terminal.cwd!)).toBe(true)
+
+    terminal.print(LOGIN_OUTPUT)
+    await vi.waitFor(() => expect(signIn.prompts().some((prompt) => prompt.type === 'auth_url')).toBe(true))
+    terminal.exit(0, 'acct-own')
+    expect((await signIn.settled()).phase).toBe('completed')
+    expect((await w.harness.instances.recheck('claude')).auth).toMatchObject({ state: 'signed_in' })
+  })
+
+  it('the user\'s own Claude without a sign-in terminal keeps the command to copy', async () => {
+    const w = world({ ownSignedIn: false, terminal: false })
+    const snapshot = await w.harness.instances.recheck('claude')
+    expect(snapshot.auth).toMatchObject({ state: 'signed_out' })
+    expect(snapshot.auth.canSignIn).toBeUndefined()
+    expect(snapshot.nextStep?.command).toBe('claude auth login')
   })
 
   it('the user\'s own Claude never gets `auth logout`: its sign-in is the terminal\'s', async () => {
