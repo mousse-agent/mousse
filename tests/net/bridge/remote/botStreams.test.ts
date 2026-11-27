@@ -18,6 +18,7 @@ import { NetService } from '../../../../src/mms/net/NetService'
 import { BridgeProfileService } from '../../../../src/mms/bridge/BridgeProfileService'
 import { ThreadDisplayProjection } from '../../../../src/mms/bridge/remote/ThreadDisplayProjection'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
+import type { SqliteStreamStore } from '../../../../src/mms/net/store/streams'
 import { BOT_STREAM_EVENT_TYPES } from '../../../../src/shared/net/envelope'
 import { NetError, newId, type NodeId, type StreamDescriptor, type StreamId } from '../../../../src/shared/net'
 
@@ -48,6 +49,8 @@ function profileAt(home: string) {
 
 const KEEPER = 'bot-0123456789ab'
 const WRITER = 'bot-ba9876543210'
+/** The thread the keeper's chat turns run in, where its reply is written. */
+const KEEPER_HOME = 'thr_keeper_home'
 
 /**
  * The profile's bots as the Bridge reads them, two of them. A real bot starts its first turn on the computer's own
@@ -55,7 +58,7 @@ const WRITER = 'bot-ba9876543210'
  */
 function stubBots() {
   const bots = [
-    { id: KEEPER, name: 'Server keeper', stateText: 'Idle' },
+    { id: KEEPER, name: 'Server keeper', stateText: 'Idle', homeThreadId: KEEPER_HOME },
     { id: WRITER, name: 'Writer', stateText: 'Idle' }
   ]
   const find = (botId: string) => {
@@ -100,9 +103,9 @@ async function owner() {
   // "Work on threads" off: no thread is shared with another device.
   expect(await net.request('bridge.workOnThreads', { enabled: false })).toEqual({ enabled: false })
   const self = net.runtime().identity.self()!
-  /** What a reader that opens the stream now is sent, as the owner's store holds it: its snapshot and the events after. */
-  const read = (stream: StreamId, threadId: string) => {
-    const reader = bridge!.threads.store.openSnapshot(stream)
+  /** What a device received on a stream, as its own store holds it: the newest snapshot and the events after it. */
+  const read = (store: Pick<SqliteStreamStore, 'openSnapshot'>, stream: StreamId, threadId: string) => {
+    const reader = store.openSnapshot(stream)
     const projection = new ThreadDisplayProjection(threadId, BOT_STREAM_EVENT_TYPES)
     let snapshot: any
     const events: Array<{ type: string; data: any }> = []
@@ -121,7 +124,11 @@ async function owner() {
     }
   }
   const phone = async (name: string) => {
-    const device = new NetService({ profileDir: directory('bot-streams-phone-') })
+    // A phone reads display-only deltas (`presence.v1`), as the phone app does.
+    const device = new NetService({
+      profileDir: directory('bot-streams-phone-'),
+      composeRuntime: () => ({ session: { capabilities: ['streams.v1', 'blobs.v1', 'rpc.v1', 'presence.v1'], verifyPresence: () => false } })
+    })
     cleanup.push(() => device.shutdown())
     const invite = net.runtime().enrollment.issueNodeInvite({ name, kind: 'phone' }).text
     const joined = (await device.request('bridge.join', { invite, name })) as { node: NodeId }
@@ -136,27 +143,36 @@ async function owner() {
         return { code: (error as NetError).code, ...((error as NetError).details ? { details: (error as NetError).details } : {}) }
       }
     }
-    /** Opens a bot stream and reads it until it is caught up. */
+    /**
+     * Opens a bot stream and reads it until it is caught up: what the phone stored from it, the display-only deltas it
+     * was sent, whether it caught up and the error that ended it.
+     */
     const open = async (method: 'bridge.bots.open' | 'bridge.bot.open', params: unknown) => {
       const opened = (await rpc(method, params)) as { descriptor: StreamDescriptor; subject: string }
       const { descriptor } = opened
       if (!device.runtime().streams.getStream(descriptor.id)) device.runtime().streams.createStream(descriptor, 1)
       const seen = { ready: false, error: undefined as string | undefined }
+      const deltas: Array<{ type: string; data: any }> = []
+      const offDeltas = device.session(self.node).onEphemeral((message) => {
+        if (message.t !== 'ephemeral' || message.stream !== descriptor.id) return
+        const body = message.data as { threadId: string; type: string; data: unknown }
+        if (body.threadId === opened.subject) deltas.push({ type: body.type, data: body.data })
+      })
       const subscription = device.session(self.node).subscribe(descriptor.id, {
         onRecord: () => undefined,
         onCaughtUp: () => { seen.ready = true },
         onSnapshotInstalled: () => { seen.ready = true },
         onError: (code) => { seen.error = code }
       })
-      cleanup.push(() => subscription.close())
+      cleanup.push(() => { offDeltas(); subscription.close() })
       await vi.waitFor(() => expect(seen.ready || seen.error).toBeTruthy(), { timeout: 15_000 })
       expect(seen.error).toBeUndefined()
-      return { stream: descriptor.id, subject: opened.subject, seen, read: () => read(descriptor.id, opened.subject) }
+      return { stream: descriptor.id, subject: opened.subject, seen, deltas, read: () => read(device.runtime().streams, descriptor.id, opened.subject) }
     }
     return { node: joined.node, answer, open }
   }
   const choose = (botId: string, nodes: NodeId[]) => services.botDeviceAccess.set(botId, { mode: 'chosen', nodes })
-  return { services, net, bots, phone, choose }
+  return { services, net, bots, phone, choose, bridge: () => bridge! }
 }
 
 const feedIds = (feed: { read(): { snapshot: any } }): string[] => feed.read().snapshot.bots.map((bot: { id: string }) => bot.id)
@@ -175,7 +191,7 @@ it('with thread sharing off, a Use phone and a Full phone each read the feed of 
   expect(pocketFeed.read().snapshot).toEqual({
     kind: 'mousse.bots',
     version: 1,
-    bots: [{ id: KEEPER, name: 'Server keeper', stateText: 'Idle', readSeq: 0, telling: { attention: [] } }]
+    bots: [{ id: KEEPER, name: 'Server keeper', stateText: 'Idle', homeThreadId: KEEPER_HOME, readSeq: 0, telling: { attention: [] } }]
   })
   // Full: both bots.
   expect(feedIds(await tablet.open('bridge.bots.open', {}))).toEqual([KEEPER, WRITER])
@@ -189,6 +205,23 @@ it('with thread sharing off, a Use phone and a Full phone each read the feed of 
   const message = { id: 'bm_1', seq: 1, at: new Date().toISOString(), author: 'bot', kind: 'reply', text: 'The servers are up.' }
   o.bots.events.emit('message', { botId: KEEPER, message, botName: 'Server keeper', quiet: false })
   await vi.waitFor(() => expect(chat.read().events).toContainEqual({ type: 'bots.message', data: { botId: KEEPER, message } }))
+  // Its live chip and its reply as the chat turn writes it, display-only: sent, never stored.
+  const chip = { kind: 'tool', label: 'Reading the logs' }
+  o.bots.events.emit('activity', { botId: KEEPER, activationId: 'act_1', chip })
+  await vi.waitFor(() => expect(chat.deltas).toContainEqual({ type: 'bots.activity', data: { botId: KEEPER, activationId: 'act_1', chip } }))
+  o.services.orchestrator.emit('thread-message-updated', { threadId: KEEPER_HOME, message: { id: 'msg_reply', role: 'assistant', content: 'The servers' } })
+  await vi.waitFor(() =>
+    expect(chat.deltas).toContainEqual({ type: 'bots.reply', data: { botId: KEEPER, messageId: 'msg_reply', role: 'assistant', text: 'The servers', added: false } })
+  )
+  // A reply whose text grows with escaping (20 000 quotes, 40 000 bytes encoded) is cut to fit, not dropped.
+  const quotes = '"'.repeat(20_000)
+  o.services.orchestrator.emit('thread-message-updated', { threadId: KEEPER_HOME, message: { id: 'msg_quotes', role: 'assistant', content: quotes } })
+  await vi.waitFor(() => expect(chat.deltas.some((delta) => delta.data.messageId === 'msg_quotes')).toBe(true))
+  const cut = chat.deltas.find((delta) => delta.data.messageId === 'msg_quotes')!
+  expect(cut).toMatchObject({ type: 'bots.reply', data: { botId: KEEPER, role: 'assistant', added: false } })
+  expect(cut.data.text.length).toBeGreaterThan(10_000)
+  expect(quotes.startsWith(cut.data.text)).toBe(true)
+  expect(chat.read().events.map((event) => event.type)).toEqual(['bots.message'])
   // A bot it does not reach answers as one that is not there.
   expect(await pocket.answer('bridge.bot.open', { botId: WRITER })).toMatchObject({ code: 'stream_unknown' })
 
@@ -242,6 +275,19 @@ for (const cause of causes)
       expect(await pocket.answer('bridge.bot.open', { botId: KEEPER })).toMatchObject({ code: 'stream_unknown' })
     }
   }, 120_000)
+
+it('a phone removed from the account loses its feed and every bot\'s chat', async () => {
+  const o = await owner()
+  const pocket = await o.phone('pocket')
+  o.choose(KEEPER, [pocket.node])
+  const feed = await pocket.open('bridge.bots.open', {})
+  const chat = await pocket.open('bridge.bot.open', { botId: KEEPER })
+  await o.net.request('bridge.revoke', { node: pocket.node })
+  await vi.waitFor(() => expect(chat.seen.error).toBeDefined(), { timeout: 15_000 })
+  await vi.waitFor(() => expect(feed.seen.error).toBeDefined(), { timeout: 15_000 })
+  // Nothing is kept open for it on this computer.
+  expect(o.bridge().threads.privateReaders()).not.toContain(pocket.node)
+}, 120_000)
 
 it('a phone blocked here loses its feed and every bot\'s chat', async () => {
   const o = await owner()

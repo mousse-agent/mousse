@@ -1316,6 +1316,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.dropChainHolds(botId)
       return running
     })
+    // It is gone from every list and every other device now, before its runs are stopped (up to 15 s): a device reading
+    // its chat hears at once that the bot is no longer there.
+    this.changed({ botId })
     // Its messages still waiting in its owner's threads ("use your threads") go with it, each thread saying so, as after
     // Remove. Named now: the deleted bot's definition is no longer read.
     this.withdrawThreadMessages(botId, (entry.published ?? entry.draft).name)
@@ -1334,6 +1337,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       console.warn('a deleted bot\'s browser could not be closed', { botId, error: error instanceof Error ? error.message : String(error) })
     }
     await this.archiveThreads(botId)
+    // Its runs and threads as they ended.
     this.changed({ botId })
     const deletedAt = this.store.registry(botId)?.deletedAt ?? this.store.now()
     return { purgeAt: new Date(Date.parse(deletedAt) + BOT_DELETE_PURGE_MS).toISOString() }

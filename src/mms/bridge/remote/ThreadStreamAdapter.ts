@@ -239,7 +239,8 @@ const isMessageKey = (key: string): boolean => key.startsWith('message:')
 /** The ids a note keeps when its payload is too large to send: enough to know what to fetch. */
 function omittedIds(data: unknown): Record<string, string> {
   const ids: Record<string, string> = {}
-  for (const key of ['threadId', 'parentThreadId'])
+  // A bot stream's note says which bot, message or piece of work it was about, so the reader knows what to fetch.
+  for (const key of ['threadId', 'parentThreadId', 'botId', 'messageId', 'activationId'])
     if (typeof (data as Record<string, unknown> | undefined)?.[key] === 'string')
       ids[key] = (data as Record<string, string>)[key]
   return ids

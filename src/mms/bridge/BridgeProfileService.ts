@@ -777,7 +777,17 @@ export class BridgeProfileService {
       store: this.threads.store,
       privateStreams: {
         access: (stream) => this.threads.privateAccess(stream),
-        close: (filter) => this.threads.closePrivate(filter),
+        close: (filter) => {
+          // The network layer ends what it closes on its own sessions only (a block, a disconnect). A bot stream also
+          // goes to engine pairings, which a block below Full control does not stop serving: it ends there too, as
+          // one the device may no longer read, so nothing waits on a stream that was closed under it.
+          const bots =
+            filter?.kind === undefined || isBotStreamKind(filter.kind)
+              ? this.threads.closePrivate({ ...filter, kinds: BOT_STREAM_KINDS })
+              : []
+          for (const stream of bots) void this.track(this.peers.failStream(stream, 'forbidden')).catch(() => undefined)
+          return [...bots, ...this.threads.closePrivate(filter)]
+        },
         release: (granted) => {
           // Everything held for a computer: its streams, the results it waits for and the values it staged.
           const nodes = new Set([

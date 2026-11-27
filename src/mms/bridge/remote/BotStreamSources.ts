@@ -84,8 +84,11 @@ export interface BotStreamsServices {
 
 /** Coalesces a burst (a send changes the bot, adds a row and starts a turn) into one snapshot or one row. */
 const SETTLE_MS = 40
-/** A live reply carries at most this much of its text: well inside one delta (32 KiB). */
-const REPLY_BYTES = 24 * 1024
+/**
+ * A live reply carries at most this much of its text, measured as it is sent (JSON-encoded, escapes included): with
+ * the ids around it, well inside one delta (32 KiB).
+ */
+export const REPLY_BYTES = 24 * 1024
 
 function rowOf(port: BotStreamsBotsPort, bot: BotSummary): BotFeedRow {
   const { readSeq, ...telling } = port.feedTelling(bot.id)
@@ -93,10 +96,22 @@ function rowOf(port: BotStreamsBotsPort, bot: BotSummary): BotFeedRow {
   return { ...remoteBotSummary(bot), ...(chip ? { activity: chip } : {}), readSeq, telling }
 }
 
-/** Cuts text to `REPLY_BYTES`, never through a character. */
-function clipped(text: string): string {
-  if (Buffer.byteLength(text) <= REPLY_BYTES) return text
-  return Buffer.from(text).subarray(0, REPLY_BYTES).toString().replace(/�+$/, '')
+/** A string's size as the delta encodes it (`canonicalJson` writes a string as `JSON.stringify` does). */
+const encodedBytes = (text: string): number => Buffer.byteLength(JSON.stringify(text))
+
+/** Cuts text to its longest start that encodes in `REPLY_BYTES`, never through a character. */
+export function clipped(text: string): string {
+  if (encodedBytes(text) <= REPLY_BYTES) return text
+  // Each code unit encodes in at least one byte, so the cut is within the first REPLY_BYTES of them.
+  let low = 0
+  let high = Math.min(text.length, REPLY_BYTES)
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (encodedBytes(text.slice(0, middle)) <= REPLY_BYTES) low = middle
+    else high = middle - 1
+  }
+  const last = text.charCodeAt(low - 1)
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? low - 1 : low)
 }
 
 type Source = {
