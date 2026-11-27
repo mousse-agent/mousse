@@ -58,7 +58,7 @@ const TOOL_TEXT: Record<string, AskText> = {
   bot_schedule_add: { title: 'run on a schedule', note: '' },
   bot_schedule_remove: { title: 'remove its schedules', note: '' },
   bot_schedule_list: { title: 'see its schedules', note: '' },
-  set_profile: { title: 'change its name or description', note: '' },
+  set_profile: { title: 'change its name, description or look', note: '' },
   set_depth: { title: 'change how long it thinks', note: '' },
   use_model: { title: 'switch its model', note: '' },
   permission_ask: { title: 'ask you for permissions', note: '' },

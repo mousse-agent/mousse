@@ -17,6 +17,7 @@ import {
   resetSharedFaceRenderer,
   SAMPLE_BUDGET,
   SAVED_HOLD_MS,
+  sharedFaceRenderer,
   sharedFaceRendererStatus,
   stillFrameKey,
   UNFOCUSED_LIVE_SECONDS,
@@ -615,6 +616,20 @@ describe('ready from launch', () => {
     fake.tick()
     expect(fake.draws).toHaveLength(drawn + 1)
     expect(fake.buffer.width).toBeGreaterThan(1)
+  })
+
+  it('shrinks the buffer a face picture grew, with no face on screen', () => {
+    const fake = fakeEnv()
+    resetSharedFaceRenderer(() => fake.env)
+    // The faces went off screen long ago: the buffer is already small.
+    fake.tick(IDLE_SHRINK_MS * 2)
+    const shrunk = fake.gpu.shrink.mock.calls.length
+    expect(sharedFaceRenderer()!.portrait({ colour: 'blue', accessory: 'headphones' }, 512)).not.toBeNull()
+    expect(fake.buffer.width).toBeGreaterThanOrEqual(512)
+    fake.tick(IDLE_SHRINK_MS - 1)
+    expect(fake.gpu.shrink).toHaveBeenCalledTimes(shrunk)
+    fake.tick(1)
+    expect(fake.buffer).toEqual({ width: 1, height: 1 })
   })
 
   it('has nothing to keep without WebGL', () => {

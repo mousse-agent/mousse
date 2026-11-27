@@ -447,7 +447,8 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
     case 'profile': {
       const name = str(input.name)
       if (name) return { icon: 'name', text: 'renamed itself', highlight: shortChipText(name) }
-      return str(input.description) ? { icon: 'name', text: 'updated its description' } : null
+      if (str(input.description)) return { icon: 'name', text: 'updated its description' }
+      return input.look && typeof input.look === 'object' ? { icon: 'name', text: 'changed its look' } : null
     }
     default:
       return null

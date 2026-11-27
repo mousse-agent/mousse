@@ -160,10 +160,10 @@ it('notifies an older bot own-tool permission in its plain card words, without t
     expect(prepared.authority.check({ kind: 'app', tool: 'set_profile', args: { name: 'Scout' } })).toMatchObject({ ok: false, wall: { kind: 'escalated' } })
     await finish(f, payload, 'interrupted', { text: 'I need your OK first.', outcome: { interruptedBy: 'bot_wall' } })
     const message = f.bots.service.chatList(botId).messages.find(message => message.ask?.status === 'open')!
-    expect(message.ask?.title).toBe('change its name or description')
+    expect(message.ask?.title).toBe('change its name, description or look')
     const banner = botNotificationContent('Helper', message)
     expect(botNotificationKind(message, f.clock.now)).toBe('question')
-    expect(banner).toEqual({ title: 'Helper', body: 'Wants to change its name or description' })
+    expect(banner).toEqual({ title: 'Helper', body: 'Wants to change its name, description or look' })
     for (const internal of ['set_profile', 'Scout']) expect(banner.body).not.toContain(internal)
   } finally { f.close() }
 })
