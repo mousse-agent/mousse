@@ -38,5 +38,6 @@
   { "file": "tests/bots/botNoticeQueue.test.ts", "test": "is a fast notice: its turn starts at once, with what it asks as data, and takes in what else waits", "issue": 2042, "how": "fails on master after request_answer" },
   { "file": "tests/harness/grokHeld.test.ts", "test": "runs on the held home and signs in from the entry's own: Windows: variable names in any case", "issue": 2042, "how": "fails on master" },
   { "file": "tests/harness/grokHeld.test.ts", "test": "allows a read, a listing or a search inside the folder, and the plan list; asks for everything else", "issue": 2042, "how": "fails on master" },
-  { "file": "tests/net/bridge/routed/deviceActivity.test.ts", "test": "has words for every change a routed row can make", "issue": 2042, "how": "a new routed row has no words" }
+  { "file": "tests/net/bridge/routed/deviceActivity.test.ts", "test": "has words for every change a routed row can make", "issue": 2042, "how": "a new routed row has no words" },
+  { "file": "tests/run/stopThread.test.ts", "test": "writes a child_question row into the parent's inbox, wakes the parent with the question, and is acknowledged when it is answered", "issue": 2042, "how": "the subagent question notice names request_answer, not answer_subagent" }
 ]
