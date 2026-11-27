@@ -706,7 +706,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       const names = { botName: get().bots.find(bot => bot.id === botId)?.name, serverName: card?.serverName }
       const owner = epoch
       try {
-        await bots().answerAction(actionId, digest, answer)
+        await bots().answerAction(botId, actionId, digest, answer)
         if (owner === epoch) { await get().loadChat(botId); void get().refresh() }
         return null
       } catch (cause) {

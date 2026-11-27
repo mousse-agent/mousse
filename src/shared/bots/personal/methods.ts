@@ -227,7 +227,7 @@ export interface BotsPersonalV2Api {
    * answered (`question_answered`) or no longer open (`question_closed`) is refused before anything is written. An older
    * service lacks it: the owner answers with Reply.
    */
-  'bots.actions.answer': { params: { actionId: string; digest: string; answer: 'send' | 'not_now' }; result: { status: string } }
+  'bots.actions.answer': { params: { botId: string; actionId: string; digest: string; answer: 'send' | 'not_now' }; result: { status: string } }
   /**
    * The owner's Continue or Stop on what the bot holds past the limit between bots (`BotSummary.chainHold`), named by its
    * batch (`holdId`): one already settled is refused (`hold_settled`). Only from a window on this computer.
