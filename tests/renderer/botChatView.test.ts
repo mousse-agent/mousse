@@ -2512,12 +2512,12 @@ describe('memory', () => {
     expect(box().value).toMatch(/^Why\? \u2068\u2003\u00a0“The\u00a0owner\u00a0reads\u00a0mail\u00a0at\u00a08\.”\u2069 $/)
     expect(fake.calls.some(([name]) => name === 'send')).toBe(false)
     await press('Enter')
-    expect(vi.mocked(fake.client.send).mock.calls.at(-1)?.[1]).toBe('Why?\n\n"The owner reads mail at 8."')
-    // The bubble shows the quote as a pill, not the quote marks and blank lines the bot got.
+    expect(vi.mocked(fake.client.send).mock.calls.at(-1)?.[1]).toBe('Why?\n\n> The owner reads mail at 8.')
+    // The bubble shows the quote as a pill, not the Markdown quote the bot got.
     await settle()
     const bubble = [...transcript().querySelectorAll('.bot-you-bubble')].at(-1)!
     expect(bubble.querySelector('.sent-quote-pill')?.textContent).toBe('Replying to: The owner reads mail at 8.')
-    expect(bubble.textContent).not.toContain('"The owner reads mail at 8."')
+    expect(bubble.textContent).not.toContain('> The owner')
   })
 
   it('a reply whose turn saved a memory has a "Saved to memory" tag that opens Memory at that entry', async () => {
