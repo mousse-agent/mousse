@@ -140,11 +140,11 @@ const SKIPPED = new Set(['messages', 'content', 'text', 'images', 'scrollback'])
 /**
  * A thread one of the owner's bots started names the bot (`Thread.startedByBot`, and its launcher, the bot's chat thread,
  * `createdByThreadId`). Where `hidden` says the reader may not see that bot, the thread says "a bot" instead, with no
- * bot id and no launcher, so the app shows "Started by a bot". Everything else is left as it is; a value with nothing to
- * change is returned as it was.
+ * bot id and no launcher, so the app shows "Started by a bot". A bot of another computer (`startedByBot.node`) is always
+ * "a bot": this computer cannot tell which devices may see it (its own computer names it again, `MergedLists.withBot`).
+ * Everything else is left as it is; a value with nothing to change is returned as it was.
  */
 export function withHiddenBots<T>(value: T, hidden: ((botId: string) => boolean) | undefined): T {
-  if (!hidden) return value
   const walk = (item: Json, depth: number): Json => {
     if (depth > 32 || item === null || typeof item !== 'object') return item
     if (Array.isArray(item)) {
@@ -157,8 +157,8 @@ export function withHiddenBots<T>(value: T, hidden: ((botId: string) => boolean)
     }
     const record = item as Record<string, Json>
     let copy: Record<string, Json> | undefined
-    const started = record.startedByBot as { botId?: unknown } | undefined
-    if (started && typeof started === 'object' && typeof started.botId === 'string' && started.botId !== '' && hidden(started.botId)) {
+    const started = record.startedByBot as { botId?: unknown; node?: unknown } | undefined
+    if (started && typeof started === 'object' && typeof started.botId === 'string' && started.botId !== '' && (started.node !== undefined || hidden?.(started.botId))) {
       const { createdByThreadId: _launcher, ...rest } = record
       copy = { ...rest, startedByBot: { botId: '', name: HIDDEN_BOT_NAME } }
     }

@@ -17,6 +17,7 @@ import { StartedThreadsList } from '../../src/renderer/components/sideCard/Start
 import { launchedThreadsOf } from '../../src/renderer/components/sideCard/lineageLogic'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { useBotsStore } from '../../src/renderer/stores/botsStore'
+import { NO_COMPUTERS, useComputersStore } from '../../src/renderer/lib/computers'
 import type { BotSummary } from '../../src/shared/bots/personal/chat'
 import type { ChatMessage, Thread } from '../../src/shared/types'
 
@@ -114,6 +115,35 @@ describe('above a subagent an agent on another computer started here', () => {
     useAppStore.setState({ threads: [thread('far', 'Linux tests', { startedFrom: subagent })], activeThreadId: 'far' })
     act(() => root.render(createElement(ThreadStartedByBar)))
     expect(text()).toBe('Started by an agent in «Yo» on another computer')
+  })
+})
+
+// #2004 T4: a thread an agent or a bot of one computer started on another, seen on each.
+describe('a thread started from another computer', () => {
+  const computers = (self: string) => useComputersStore.setState({ ...NO_COMPUTERS, loaded: true, routed: true, byNode: { n1: { node: 'n1', name: 'Laptop', online: true } } as never, devices: [{ node: self, self: true } as never] })
+  afterEach(() => useComputersStore.setState(NO_COMPUTERS))
+
+  it('on the computer that runs a bot\'s thread: "Started by <bot> on <computer>", with nothing to open, and Show in sidebar while hidden', () => {
+    computers('n2')
+    const started = { startedByBot: { botId: 'bot-pip', name: 'Pip', node: 'n1' }, startedFrom: { node: 'n1', agent: { thread: 'pip-chat', title: 'Pip', mode: 'auto' as const } } }
+    useAppStore.setState({ threads: [thread('far', 'Build', started)], activeThreadId: 'far' })
+    act(() => root.render(createElement(ThreadStartedByBar)))
+    expect(text()).toBe('Started by Pip on Laptop')
+    expect(host.querySelector('button')).toBeNull()
+    act(() => useAppStore.setState({ threads: [thread('far', 'Build', { ...started, hidden: true })] }))
+    expect(text()).toBe('Started by Pip on Laptop · HiddenShow in sidebar')
+  })
+
+  it('on the computer whose agent started it there: "Started by an agent in «title»", which opens the launching thread here', async () => {
+    computers('self')
+    useAppStore.setState({
+      threads: [thread('launcher', 'Plan the release'), thread('n1:far', 'Linux tests', { node: 'n1', startedFrom: { node: 'self', agent: { thread: 'launcher', title: 'Plan', mode: 'auto' } } })],
+      activeThreadId: 'n1:far'
+    })
+    act(() => root.render(createElement(ThreadStartedByBar)))
+    expect(text()).toBe('Started by an agent in «Plan the release»')
+    await click(host.querySelector('button')!)
+    expect(select).toHaveBeenCalledWith('launcher')
   })
 })
 

@@ -198,6 +198,15 @@ export function rollUpActivities(threads: readonly LineageThread[], activity: Th
 }
 
 /**
+ * The owner's bot on this computer that started `thread` (`Thread.startedByBot`). A bot of another computer (`node`) is
+ * named for display only: no bot here has its id, so it decides nothing here (computer use, supervision, its family).
+ */
+export function ownBotOf<T extends { botId: string; node?: string }>(thread: { startedByBot?: T } | undefined): T | undefined {
+  const bot = thread?.startedByBot
+  return bot && !bot.node ? bot : undefined
+}
+
+/**
  * True for a thread kept out of the owner's sidebar by one of their bots (`Thread.hidden` on a thread a bot started),
  * and for any subagent below one: a subagent takes its root's visibility. Such a thread notifies the owner only when
  * they chose `notifications.botThreads`; Show in sidebar clears the mark and it notifies like any thread again. A hidden

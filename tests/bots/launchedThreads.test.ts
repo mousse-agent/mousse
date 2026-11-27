@@ -288,6 +288,13 @@ describe('a thread the bot started on another computer', () => {
     expect(launchedActive(listed!)).toBe(true)
   })
 
+  it('marks a thread hidden there as hidden, and leaves a shown one unmarked', () => {
+    const [hidden, shown] = list([row('quiet', { hidden: true }), row('loud')])
+    expect(hidden).toMatchObject({ threadId: 'node-a:quiet', hidden: true })
+    expect(shown?.threadId).toBe('node-a:loud')
+    expect(shown?.hidden).toBeUndefined()
+  })
+
   const which: Array<[string, Thread, boolean]> = [
     ['started by the bot, working, however old', row('old-working', { updatedAt: OLD }), true],
     ['started by the bot, ended lately', row('recent'), true],

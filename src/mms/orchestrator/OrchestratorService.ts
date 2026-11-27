@@ -434,7 +434,7 @@ import {
   userMessage,
   type NativeMessageCheckpoint
 } from './nativeContext'
-import { isLocalOnlyThread, sideChatsOf, subagentDescendants } from '../../shared/threadLineage'
+import { isLocalOnlyThread, ownBotOf, sideChatsOf, subagentDescendants } from '../../shared/threadLineage'
 import { isThreadExpired } from '../../shared/threadExpiry'
 import { ComputerUseDriver } from '../computerUse/ComputerUseDriver'
 import { ComputerUseSetupRequests } from '../computerUse/ComputerUseSetupRequests'
@@ -5403,7 +5403,7 @@ export class OrchestratorService extends EventEmitter {
   supervisorOf(threadId: string, requestId: string): { botId: string; name: string } | undefined {
     try {
       const thread = this.threadStore?.getThread(threadId)
-      const botId = thread?.startedByBot?.botId
+      const botId = ownBotOf(thread)?.botId
       if (!thread || !botId || thread.runsOn || thread.lineage || this.isSubagentThread(threadId)) return undefined
       if (!this.questions.listPendingForThread(threadId).some((entry) => entry.requestId === requestId)) return undefined
       const bot = this.botSupervision?.(botId)
@@ -6635,7 +6635,7 @@ export class OrchestratorService extends EventEmitter {
     // A bot's thread that may not make the call is refused here; any other thread is no bot's.
     const bot = this.botSenderOf(options.actor, 'thread_hide')
     if (bot) {
-      if (!thread || thread.startedByBot?.botId !== bot.botId)
+      if (!thread || ownBotOf(thread)?.botId !== bot.botId)
         throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not one you started: you hide or show only threads you started.`)
     } else if (!thread || thread.startedByBot || thread.createdByThreadId !== options.actor.threadId) {
       throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not one you started: you hide or show only threads you started with thread_create.`)
