@@ -8,6 +8,7 @@ import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { LoginSession } from '../../providers/LoginSession'
 import { CURSOR_CAPABILITIES, CursorAdapter, type CursorTurnClient } from './cursor/adapter'
 import { CursorHostCallError, CursorHostClient, defaultCursorHostScript, spawnCursorHost, type CursorHostTransport } from '../cursor/hostClient'
+import { cursorOneShotRoute, cursorOneShotTransport } from '../cursor/oneShot'
 import { CURSOR_DEFAULT_MODEL, CursorSessions, type SavedCursorAgent } from '../cursor/session'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type LiveProcessHost } from '../driver'
 import type { CursorModel } from '../hosts/cursorProtocol'
@@ -123,6 +124,11 @@ function withTimeout<T>(work: Promise<T>, ms: number, signal?: AbortSignal): Pro
   })
 }
 
+/** Variables with a value, as a launch takes them. */
+function stringEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+}
+
 export function cursorDriver(options: CursorDriverOptions = {}): HarnessDriver {
   return {
     kind: 'cursor',
@@ -141,7 +147,8 @@ export function cursorDriver(options: CursorDriverOptions = {}): HarnessDriver {
     caps: () => CURSOR_CAPS,
     versionArgs: () => null,
     updateCommand: () => undefined,
-    create: (context) => createCursorRuntime(context, options)
+    create: (context) => createCursorRuntime(context, options),
+    oneShotRoute: () => cursorOneShotRoute()
   }
 }
 
@@ -402,6 +409,18 @@ function createCursorRuntime(context: DriverContext, options: CursorDriverOption
       save()
     },
     adoptApiKey: (apiKey) => saveApiKey(apiKey),
+    // A host of its own per request, in its place, never the one that runs turns (`cursor/oneShot.ts`).
+    oneShotTransport: (spec) => cursorOneShotTransport({
+      label,
+      instanceId: context.instanceId,
+      profileHome: context.profileHome,
+      hostScript,
+      execPath: process.execPath,
+      apiKey: () => (state.refused ? undefined : effective()?.key),
+      baseEnv: context.env.env,
+      ...(context.config.env ? { entryEnv: context.config.env } : {}),
+      ...(options.hostEnv ? { hostEnv: stringEnv(options.hostEnv) } : {})
+    }, spec),
     forgetConversation: (threadId) => sessions.forgetConversation(threadId),
     terminate: (ref) => sessions.terminate(ref.sessionId),
     setLiveHost: (next) => {
