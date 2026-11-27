@@ -6,7 +6,7 @@ import type { GuiMmsController } from '../mms/GuiMmsController'
 import type { AppletBundle } from '../../shared/applets'
 import type { AppletIdentity, AppletUiEvent } from '../../shared/appletRuntime'
 import { validateAppletAppearance } from '../../shared/appletAppearance'
-import { AppletRuntimeManager } from './AppletRuntimeManager'
+import { AppletRuntimeManager, AppletSlotsBusyError } from './AppletRuntimeManager'
 import { logWarn } from '../../mms/log/diag'
 
 type Register = (channel:string, handler:(event:IpcMainInvokeEvent, input:unknown)=>unknown)=>void
@@ -79,8 +79,9 @@ export function registerAppletIpc(register:Register, gui:GuiMmsController, allow
     const saved=await gui.request<{state:unknown}>('applets.state.get',{...id,profileId:own.profileId})
     if(owners.get(event.sender.id)!==own||gui.getWindowBindingForSender(event.sender.id)?.profileId!==own.profileId||gui.getWindowBindingForSender(event.sender.id)?.epoch!==own.epoch)throw new Error('Profile changed while opening applet.')
     const runtimeId=randomUUID();own.entries.set(runtimeId,id)
-    try{return{runtimeId,src:own.manager.mount({runtimeId,threadId:id.threadId,revisionId:id.revisionId,source:bundle.source,state:saved.state,appearance})}}
-    catch(error){own.entries.delete(runtimeId);throw error}
+    const host=raw.host==='panel'?'panel':'transcript'
+    try{return{runtimeId,src:own.manager.mount({runtimeId,host,threadId:id.threadId,revisionId:id.revisionId,source:bundle.source,state:saved.state,appearance})}}
+    catch(error){own.entries.delete(runtimeId);if(error instanceof AppletSlotsBusyError)return{busy:true};throw error}
   })
   register('applets:appearance',async(event,input)=>{
     const own=owner(event),raw=object(input),runtimeId=string(raw.runtimeId)

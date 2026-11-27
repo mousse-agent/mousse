@@ -15,7 +15,7 @@ export function appletFrameHeight(reported: unknown): number | null {
   return Math.max(APPLET_MIN_HEIGHT, Math.min(APPLET_MAX_HEIGHT, Math.round(reported)))
 }
 export interface AppletIdentity { threadId: string; appletId: string; revisionId: string }
-export interface AppletMountRequest extends AppletIdentity { sourceHash: string; appearance?: AppletAppearance }
+export interface AppletMountRequest extends AppletIdentity { sourceHash: string; appearance?: AppletAppearance; host?: 'transcript' | 'panel' }
 /**
  * What the window hears about one of its applets. `wheel`: a wheel turn the applet could not use (the browser chained
  * it on to the conversation); `deltaY` in CSS pixels. `escape`: the person pressed Escape in the applet, which gives the
@@ -24,8 +24,11 @@ export interface AppletMountRequest extends AppletIdentity { sourceHash: string;
 export interface AppletUiEvent { runtimeId: string; type: 'ready' | 'resize' | 'error' | 'conversation-input' | 'state-changed' | 'wheel' | 'escape' | 'released'; height?: number; message?: string; text?: string; deltaY?: number }
 export interface AppletApi {
   get(input: AppletIdentity): Promise<AppletBundle>
-  /** Prepares the applet's page; `src` is the one address the window's `<webview>` for it may load. */
-  mount(input: AppletMountRequest): Promise<{runtimeId: string; src: string}>
+  /**
+   * Prepares the applet's page; `src` is the one address the window's `<webview>` for it may load. `busy`: every slot
+   * holds an applet on screen; try again once one is unmounted or leaves the screen.
+   */
+  mount(input: AppletMountRequest): Promise<{runtimeId: string; src: string} | {busy: true}>
   /** The applet's card left the screen (it may be released for a newer applet) or came back. */
   visible(input: {runtimeId: string; visible: boolean}): Promise<void>
   appearance(input:{runtimeId:string;appearance:AppletAppearance}):Promise<void>

@@ -25,6 +25,15 @@ export interface AppletRuntimeOptions {
 const MOUNT_MARGIN = '200px 0px'
 
 /**
+ * Cards waiting for an applet slot (all three hold applets on screen). Each tries again when a slot may have come
+ * free: a page of this window was unmounted, released or stopped, or a card left the screen.
+ */
+const slotWaiters = new Set<() => void>()
+function slotMayBeFree() {
+  for (const retry of [...slotWaiters]) retry()
+}
+
+/**
  * Starts the applet when its preview comes near the screen and returns the address of its page, which the preview
  * draws in a `<webview>` (`AppletFrame`). The page runs in its own process and session that the main process owns; the
  * window's own scrolling, clipping and layering place it, so nothing here follows geometry. A card out of sight tells
@@ -58,6 +67,8 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     let mounting = false
     let failed = false
     let intersecting = false
+    // On screen, not just near it: only a card out of sight may lose its page to a newer applet.
+    let onScreen = false
     let shown = true
     let appearance = readAppletAppearance()
     let resizeTimer: ReturnType<typeof setTimeout> | undefined
@@ -72,25 +83,40 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     const remove = () => {
       const id = runtime.current
       drop()
-      if (id) void api.unmount({ runtimeId: id }).catch(() => {})
+      if (id) void api.unmount({ runtimeId: id }).then(slotMayBeFree, () => {})
     }
     const report = () => {
       const id = runtime.current
-      if (!id || shown === intersecting) return
-      shown = intersecting
-      void api.visible({ runtimeId: id, visible: intersecting }).catch(() => {})
+      if (!id || shown === onScreen) return
+      shown = onScreen
+      const sent = api.visible({ runtimeId: id, visible: onScreen })
+      if (!onScreen) void sent.then(slotMayBeFree, () => {})
+      else void sent.catch(() => {})
+    }
+    const retry = () => {
+      slotWaiters.delete(retry)
+      void start()
     }
     const start = async () => {
       if (disposed || failed || mounting || runtime.current || !intersecting) return
       mounting = true
+      slotWaiters.delete(retry)
+      let busy = false
       try {
         const result = await api.mount({
           threadId,
           appletId: reference.appletId,
           revisionId: reference.revisionId,
           sourceHash: reference.sourceHash,
-          appearance
+          appearance,
+          host
         })
+        if ('busy' in result) {
+          // Every slot holds an applet on screen: wait quietly (the card stays in its loading state) for one.
+          busy = true
+          if (!disposed) slotWaiters.add(retry)
+          return
+        }
         if (disposed) {
           await api.unmount({ runtimeId: result.runtimeId }).catch(() => {})
           return
@@ -108,7 +134,7 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
         mounting = false
       }
       // The card may have come back while a released page was still being replaced.
-      if (!disposed && !runtime.current && intersecting) void start()
+      if (!busy && !disposed && !runtime.current && intersecting) void start()
     }
     const intersection = new IntersectionObserver(
       (entries) => {
@@ -119,12 +145,21 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
       { root: scroller, rootMargin: MOUNT_MARGIN }
     )
     intersection.observe(node)
+    const sight = new IntersectionObserver(
+      (entries) => {
+        onScreen = entries.some((entry) => entry.isIntersecting)
+        report()
+      },
+      { root: scroller }
+    )
+    sight.observe(node)
     const unsubscribeAppearance = subscribeAppletAppearance((value) => {
       appearance = value
       const id = runtime.current
       if (id) void api.appearance({ runtimeId: id, appearance: value }).catch(() => {})
     })
     const receive = (event: AppletUiEvent) => {
+      if (event.type === 'released' || event.type === 'error') queueMicrotask(slotMayBeFree)
       if (event.runtimeId !== runtime.current) return
       if (event.type === 'released') {
         drop()
@@ -161,13 +196,15 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     const unsubscribe = api.onEvent(receive)
     return () => {
       disposed = true
+      slotWaiters.delete(retry)
       intersection.disconnect()
+      sight.disconnect()
       unsubscribe()
       unsubscribeAppearance()
       clearTimeout(resizeTimer)
       const id = runtime.current
       runtime.current = null
-      if (id) void api.unmount({ runtimeId: id }).catch(() => {})
+      if (id) void api.unmount({ runtimeId: id }).then(slotMayBeFree, () => {})
       // The page is gone with its runtime; its webview goes too (another thread opened, Source replaced the preview).
       setSrc(null)
       setReady(false)

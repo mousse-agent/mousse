@@ -122,6 +122,26 @@ describe('an applet card', () => {
     expect(webview()?.getAttribute('src')).toBe('mousse-applet://runtime/2')
   })
 
+  it('waits without an error while every slot holds an applet on screen, and starts once another applet is released', async () => {
+    api.mount.mockImplementationOnce(async () => ({ busy: true }))
+    await renderCard()
+    await near(true)
+    await flush()
+    expect(api.mount).toHaveBeenCalledTimes(1)
+    expect(app.querySelector('[role="alert"]')).toBeNull()
+    expect(webview()).toBeNull()
+    await emit({ type: 'released' }, 'runtime-other')
+    await flush()
+    expect(api.mount).toHaveBeenCalledTimes(2)
+    expect(webview()?.getAttribute('src')).toBe('mousse-applet://runtime/1')
+  })
+
+  it('asks for its slot as a side panel or transcript applet', async () => {
+    await renderCard()
+    await near(true)
+    expect(api.mount.mock.calls[0]![0]).toMatchObject({ host: 'transcript' })
+  })
+
   it('shows a stopped page as an error, and removes its webview', async () => {
     await renderCard()
     await near(true)

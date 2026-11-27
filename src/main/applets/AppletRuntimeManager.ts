@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { markWebContentsRole } from '../diagnostics/webContentsRoles'
 import type { AppletAppearance } from '../../shared/appletAppearance'
 import { appletFrameHeight } from '../../shared/appletRuntime'
+import { appletToRelease } from './slots'
 import { APPLET_EVENT_PREFIX, APPLET_APPLY_APPEARANCE, appletDocument, type AppletSource } from './document'
 
 /** How long a shown applet may leave a liveness probe unanswered before it is stopped. */
@@ -28,8 +29,17 @@ const denyPermissionRequest: Parameters<Session['setPermissionRequestHandler']>[
 ) => callback(false)
 const denyPermission = () => false
 
+/** Every slot holds an applet on screen; the card waits until one comes free. */
+export class AppletSlotsBusyError extends Error {
+  constructor() {
+    super('Every applet slot is in use')
+  }
+}
+
 export interface AppletMount {
   runtimeId: string
+  /** Where the page shows; the side panel may take a slot from a transcript card that is on screen. */
+  host?: 'transcript' | 'panel'
   threadId: string
   revisionId: string
   source: AppletSource
@@ -116,11 +126,10 @@ export class AppletRuntimeManager {
     this.unmount(input.runtimeId)
     if (this.owner.isDestroyed()) throw new Error('Applet owner is closed')
     if (this.runtimes.size >= 3) {
-      const oldest = [...this.runtimes.values()].filter((item) => item.parkedAt !== undefined)
-        .sort((a, b) => a.parkedAt! - b.parkedAt!)[0]
-      if (!oldest) throw new Error('Only three applets may run at once')
-      this.notify(oldest, 'released', null)
-      this.unmount(oldest.mount.runtimeId)
+      const released = appletToRelease([...this.runtimes.values()], input)
+      if (!released) throw new AppletSlotsBusyError()
+      this.notify(released, 'released', null)
+      this.unmount(released.mount.runtimeId)
     }
     const slot = [0, 1, 2].find(
       (index) => ![...this.runtimes.values()].some((runtime) => runtime.slot === index)
