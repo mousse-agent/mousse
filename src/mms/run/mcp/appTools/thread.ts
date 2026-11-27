@@ -150,7 +150,7 @@ const BOT_THREAD_TOOL_TEXT = {
   queue_remove: `Remove a message waiting in one of your owner's threads that no turn has started. Needs expectedRevision (queue_list). Every removal is recorded on the thread with the text removed, so your owner can see and recover it. ${BOT_NAMES_THREAD}`,
   queue_reorder: `Put the messages waiting in one of your owner's threads in a new order: orderedIds names every pending item once. Needs expectedRevision (queue_list). ${BOT_NAMES_THREAD}`,
   queue_promote_to_steer: `Turn a message waiting in one of your owner's threads into guidance for the turn it is running now. Refused while your owner has a question or approval waiting there. Name the run you read (expectedRunId) and the queue revision (queue_list). ${BOT_NAMES_THREAD}`,
-  thread_fork: 'Fork one of your owner\'s threads (sourceThreadId, from thread_list) into a new thread that starts after one of its finished runs (default: the latest). The fork gets the conversation up to that run and its own worktree from that run\'s code checkpoint when its first message arrives: send it one with thread_send. It shows in your owner\'s sidebar.',
+  thread_fork: 'Fork one of your owner\'s threads (sourceThreadId, from thread_list) into a new thread that starts after one of its finished runs (default: the latest). The fork gets the conversation up to that run and its own worktree from that run\'s code checkpoint when its first message arrives: send it one with thread_send. Your chat lists it, started by you; it shows in your owner\'s sidebar too unless you pass hidden: true.',
   thread_merge_back: 'Hand what a fork of your owner\'s (forkThreadId) did since its fork point back to the thread it was forked from, as Merge back in the app does: that thread receives a summary on its next turn; code is not merged. Only when the fork\'s latest run completed. Your owner allowed "use your threads", so nothing asks first.'
 } as const
 
@@ -3012,7 +3012,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     {
       name: 'thread_fork',
       botDescription: BOT_THREAD_TOOL_TEXT.thread_fork,
-      description: 'Fork a thread into a new thread that starts after one of its finished runs (default: the latest completed, failed, interrupted or cancelled run). The fork gets the conversation up to that run and its own worktree seeded from that run\'s code checkpoint when its first message arrives.',
+      description: 'Fork a thread into a new thread that starts after one of its finished runs (default: the latest completed, failed, interrupted or cancelled run). The fork gets the conversation up to that run and its own worktree seeded from that run\'s code checkpoint when its first message arrives. It is recorded as started by your thread, as a thread_create thread is: your thread\'s side panel lists it under Started threads, never nested under its source. It shows in the person\'s sidebar unless you pass hidden: true.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -3020,6 +3020,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           atRunOrdinal: { type: 'integer', minimum: 1, description: 'The source run to fork after; the latest finished run when omitted.' },
           title: { type: 'string' },
           seedFrom: { type: 'string', enum: ['checkpoint', 'current_head'], description: 'When the fork point has no code checkpoint the fork is refused (fork_point_unavailable) unless this is current_head: start from the source\'s current code.' },
+          hidden: { type: 'boolean', description: 'Defaults to false: the fork shows in the person\'s sidebar. true keeps it out of it; your thread\'s side panel (a personal bot\'s chat) lists it either way.' },
           clientRequestId: CLIENT_REQUEST_ID_SCHEMA
         }
       },
@@ -3040,17 +3041,21 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (args.title !== undefined && typeof args.title !== 'string') throw new Error('title must be a string')
         if (args.seedFrom !== undefined && args.seedFrom !== 'checkpoint' && args.seedFrom !== 'current_head')
           throw new Error("seedFrom must be 'checkpoint' or 'current_head'")
+        if (args.hidden !== undefined && typeof args.hidden !== 'boolean') throw new Error('hidden must be true or false')
+        const hidden = args.hidden === true
         const forked = await engine.forkThread({
           sourceThreadId,
           atRunOrdinal,
           title: args.title as string | undefined,
           seedFrom: args.seedFrom as 'checkpoint' | 'current_head' | undefined,
-          clientRequestId: `thread_fork:${ctx.caller.runId}:${toolRequestId(args, ctx)}`
+          clientRequestId: `thread_fork:${ctx.caller.runId}:${toolRequestId(args, ctx)}`,
+          // The calling thread made it, as it makes a `thread_create` thread: its launcher, and for a bot's thread the bot.
+          startedBy: { threadId: ctx.caller.threadId, ...(hidden ? { hidden } : {}) }
         })
         if (bot) {
           // The fork says the bot made it, and the bot's chat gets a chip that opens it.
           showAction(host, forked.threadId, actorOf(ctx), `forked this thread from «${oneLine(titleOf(sourceThreadId) ?? sourceThreadId, 80)}»`)
-          botChip(bot, 'thread_fork', forked.threadId, titleOf(forked.threadId))
+          botChip(bot, 'thread_fork', forked.threadId, titleOf(forked.threadId), undefined, hidden ? { hidden } : undefined)
           return json({ threadId: forked.threadId, link: threadLink(forked.threadId), transferId: forked.transferId, note: 'The fork starts when it gets its first message: send it one with thread_send. thread_merge_back hands its work back to the thread it came from.' })
         }
         return json({ threadId: forked.threadId, link: threadLink(forked.threadId), transferId: forked.transferId })
