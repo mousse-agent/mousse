@@ -74,7 +74,7 @@ beforeEach(() => {
     openedSurfaceKinds: ['sideChats'],
     mainView: 'sideChats',
     mainAreaOpen: true,
-    documentsTabVisible: false
+    documentTabs: []
   })
 })
 

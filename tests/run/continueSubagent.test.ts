@@ -25,7 +25,7 @@ describe('continue_subagent and the title address (issue #142)', () => {
       expect(out.first.delegationId).toBeTruthy()
       expect(out.first.title).toBe('API reviewer')
       expect(out.again).toMatchObject({ started: false, code: 'title_taken', title: 'api   REVIEWER', existing: [{ childThreadId: out.first.childThreadId, title: 'API reviewer', latestDelegationId: out.first.delegationId }] })
-      expect(out.again.message).toContain('continue_subagent')
+      expect(out.again.message).toContain('thread_send')
       expect(out.other.started).not.toBe(false)
       expect(d.engine.delegations.listForParentThread(parent.id)).toHaveLength(2)
       expect(d.store.listAllThreads().filter((thread) => thread.lineage?.parentThreadId === parent.id)).toHaveLength(2)
@@ -339,6 +339,32 @@ describe('continue_subagent and the title address (issue #142)', () => {
         expect(d.engine.getRun(out.continued.childRunId)?.status).toBe('cancelled')
         await say('cancel-again')
         expect(out.nothing).toMatchObject({ cancelled: [], note: expect.stringContaining('no open task') })
+      } finally { release() }
+    })
+
+    it('a Stop by title retried with its request id replays what it stopped, and never stops a follow-up started since', async () => {
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      const { d, adapter, steps, out, say, start } = world(async (input) => {
+        await gate
+        return `done: ${input.prompt}`
+      })
+      steps['go'] = async (tools) => { out.first = await start(tools, 'API reviewer') }
+      steps['cancel'] = async (tools) => { out.cancelled = await tools.taskCancel({ subagent: 'API reviewer' }, { toolCallId: 'mcp:stop-1' }) as Json }
+      steps['again'] = async (tools) => { out.continued = await tools.continueSubagent({ subagent: 'API reviewer', prompt: 'Newer work' }, { toolCallId: 'c1' }) as Json }
+      steps['retry'] = async (tools) => { out.retried = await tools.taskCancel({ subagent: 'API reviewer' }, { toolCallId: 'mcp:stop-1' }) as Json }
+      try {
+        await say('go')
+        await waitFor(() => adapter.turns.some((turn) => turn.threadId === out.first.childThreadId), 'the child to start')
+        await say('cancel')
+        expect(out.cancelled.cancelled).toEqual([out.first.delegationId])
+        await say('again')
+        expect(out.continued.delegationId).toBeTruthy()
+        // The reply of the first Stop was lost: the retry (another turn of the same thread) replays it.
+        await say('retry')
+        expect(out.retried).toMatchObject({ subagent: 'API reviewer', cancelled: [out.first.delegationId], replayed: true })
+        expect(d.engine.delegations.get(out.continued.delegationId)?.status).toBe('running')
+        expect(d.engine.getRun(out.continued.childRunId)?.status).not.toBe('cancelled')
       } finally { release() }
     })
   })

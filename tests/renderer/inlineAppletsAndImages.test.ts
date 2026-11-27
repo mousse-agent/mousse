@@ -46,7 +46,7 @@ beforeEach(() => {
       export: vi.fn(async () => {})
     }
   }
-  useAppStore.setState({ activeThreadId: 'thread-1', profileId: 'profile-1', documentTabs: [], activeDocumentTabId: null, documentsTabVisible: false, mainAreaOpen: false })
+  useAppStore.setState({ activeThreadId: 'thread-1', profileId: 'profile-1', documentTabs: [], activeDocumentTabByThread: {}, mainAreaOpen: false })
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
@@ -84,7 +84,7 @@ describe('inline applets', () => {
     expect(state.mainAreaOpen).toBe(true)
     expect(state.documentTabs).toHaveLength(1)
     expect(state.documentTabs[0]).toMatchObject({ title: 'Image test', applet: { threadId: 'thread-1', reference } })
-    expect(state.activeDocumentTabId).toBe(state.documentTabs[0].id)
+    expect(state.activeDocumentTabByThread['thread-1']).toBe(state.documentTabs[0].id)
 
     // A second click reuses the tab.
     act(() => name.click())

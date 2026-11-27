@@ -12,12 +12,12 @@
 export function delegationGuidanceLines(): string[] {
   return [
     'Delegate only substantial work: a bounded task that runs on its own thread, in parallel, or on another provider or model. Give every subagent a short role-like title such as "API reviewer"; the title is how you address it later.',
-    'Continue the same subagent (continue_subagent, by title) when the next step builds on what it already read or did: fixing its findings, re-checking its own change, answering its question, the next iteration of the same work. It keeps its context, so this is faster and cheaper than starting over.',
+    'Continue the same subagent (thread_send with subagent: its title) when the next step builds on what it already read or did: fixing its findings, re-checking its own change, answering its question, the next iteration of the same work. It keeps its context, so this is faster and cheaper than starting over.',
     'Start a new subagent (delegate_task) for independent work, a deliberately fresh or independent review, a different workspace, provider or model, or when the old subagent\'s context is wrong or too long. A title is unique among your subagents; delegate_task returns title_taken when one already exists, and then you continue it or choose another title.',
-    'The user cannot create subagents. When the user names one ("ask the API reviewer to ..."), use continue_subagent with that title.',
+    'The user cannot create subagents. When the user names one ("ask the API reviewer to ..."), use thread_send with that title as subagent.',
     'When the user asks for a model ("use <model> for the review"), call model_list, match the name to a model id there and pass instanceId, model and, when asked, effort. If it is not offered or not ready, tell the user why; never start it on another model instead.',
     'A subagent gets everything you have (shell, tools, MCP servers, skills, permission mode), never more. Pick workspace "isolated" for a worktree of its own, "shared" for your own folder; pass readOnly only for a deliberately narrow reader (no shell, no edits, no other MCP servers).',
-    'After delegating or continuing, end your turn. Mousse sends you a notice with the result, so do not poll; call task_status only when the notice says the result was cut off.',
+    'After delegating or continuing, end your turn. Mousse sends you a notice with the result, so do not poll; call thread_wait with its subagent or delegationId only when the notice says the result was cut off.',
     'Mousse never merges a subagent\'s work into your files. The notice of a finished task says where it worked, its base and result snapshots (SHAs kept under refs/mousse/) and the Git state it left (branch, HEAD, commits). Bring the work in yourself with git, for example `git diff --binary <base> <result> | git apply --3way` or `git cherry-pick` of its commits, and check the result.',
     'When a subagent asks a question you can answer, use request_answer; otherwise ask the user. A subagent that needs input is reported as needing it.',
     'To run a subagent on another of the user\'s computers (another operating system, a stronger machine, a job that should outlive this one), pass computer to delegate_task; computer_list shows which ones you may use. It runs there under that computer\'s agents, in its copy of this repository; its questions are answered there, and its result names the branch its work is on there, for you to fetch.'
@@ -27,7 +27,7 @@ export function delegationGuidanceLines(): string[] {
 /** The delegation bullets of the Mousse MCP server's instructions. */
 export function mcpDelegationInstructions(): string[] {
   return [
-    '- Delegation: use delegate_task for work that should run on another provider or model, or in parallel on its own thread, and continue_subagent to follow up on a subagent you already have.',
+    '- Delegation: use delegate_task for work that should run on another provider or model, or in parallel on its own thread, and thread_send with subagent to follow up on a subagent you already have.',
     ...delegationGuidanceLines().map((line) => `- ${line}`)
   ]
 }

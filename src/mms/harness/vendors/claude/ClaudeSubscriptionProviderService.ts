@@ -3096,7 +3096,7 @@ export class ClaudeSubscriptionProviderService {
                     }
                   }
                 // A delegated child's policy (no native subagents; read-only for a shared child).
-                const childDenial = event.hook_event_name === 'PreToolUse' ? claudeChildToolDenial(turn.input.child, event.tool_name) : undefined
+                const childDenial = event.hook_event_name === 'PreToolUse' ? claudeChildToolDenial(turn.input.child, event.tool_name, (event.tool_input ?? {}) as Record<string, unknown>) : undefined
                 if (childDenial)
                   return {
                     hookSpecificOutput: {
@@ -3176,7 +3176,7 @@ export class ClaudeSubscriptionProviderService {
             return { behavior: 'deny', message: 'This call could not be checked against the bot\'s permissions, so it does not run.' }
           }
         }
-        const childDenial = claudeChildToolDenial(input.child, toolName)
+        const childDenial = claudeChildToolDenial(input.child, toolName, args)
         if (childDenial) return { behavior: 'deny', message: childDenial }
         // While a person is asked about the call it does not run: a steer does not wait for it (it answers it).
         const asking = <T>(ask: () => Promise<T>): Promise<T> => {

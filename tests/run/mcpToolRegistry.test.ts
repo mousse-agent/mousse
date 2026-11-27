@@ -19,11 +19,7 @@ import { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessage } from '../../src
 /** The tools a credential lists before the app tools joined (still listed, still these classes). */
 const PHASE5_TOOLS: Record<string, string> = {
   delegate_task: 'actsAsCaller',
-  continue_subagent: 'actsAsCaller',
   request_answer: 'actsAsCaller',
-  task_status: 'actsAsCaller',
-  task_cancel: 'actsAsCaller',
-  list_subagents: 'actsAsCaller',
   question_ask: 'actsAsCaller',
   task_create: 'actsAsCaller',
   task_update: 'actsAsCaller',
