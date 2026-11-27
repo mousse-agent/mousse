@@ -52,7 +52,9 @@ export const UPDATE_IPC = {
   download: 'updates:download',
   install: 'updates:install',
   setChannel: 'updates:setChannel',
-  state: 'updates:state'
+  state: 'updates:state',
+  /** The turns a restart of this computer stops, in every profile; null when the service can't say. */
+  runningTurns: 'updates:runningTurns'
 } as const
 
 const NIGHTLY_VERSION = /^\d+\.\d+\.\d+-nightly\.\d{8}\.\d+$/

@@ -13,7 +13,8 @@
  * is linked from the new issue. Limits: the same bug once a day and at most ten reports an hour from this computer.
  *
  * The reports filed from here are kept in `<profile>/bug-reports.json`, anonymous ones too, so Settings lists them and
- * can revoke them, and an update can say which ones it fixes.
+ * can revoke them, and an update can say which ones it fixes. One sent through the prefilled page has no number until a
+ * search for its signature finds its issue; with a gh sign-in, the person's own reports on GitHub are added too.
  */
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
@@ -22,6 +23,7 @@ import { homedir, release, userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
   BUG_REPORT_BODY_MAX,
+  BUG_REPORT_ISSUES_URL,
   BUG_REPORT_REPOSITORY,
   BUG_REPORT_TITLE_MAX,
   buildBugReportDraft,
@@ -52,7 +54,16 @@ const MAX_PENDING = 5
 const AGENT_PER_DAY = 3
 /** Log lines a report may carry. */
 const LOG_LINES = 40
+/** A report sent through the prefilled page is looked for on GitHub this long, then dropped if never found. */
+const FIND_MS = 3 * 24 * 60 * 60_000
+/** An issue made up to this long before a report was sent can still be it: clocks differ. */
+const CLOCK_SLACK_MS = 10 * 60_000
+/** Signatures looked for in one search: GitHub allows five ORs in a query. */
+const SEARCH_SIGNATURES = 6
 const API = 'https://api.github.com'
+
+/** An issue as GitHub's search returns it. */
+interface SearchItem { number: number; html_url: string; title?: string; body?: string | null; created_at?: string }
 
 export type GhTokenReader = () => Promise<string | undefined>
 
@@ -90,6 +101,8 @@ export class BugReportService {
   private readonly fetcher: typeof fetch
   private readonly now: () => number
   private readonly env: NodeJS.ProcessEnv
+  /** The person's own reports on GitHub were added once already. */
+  private ownIssuesAdded = false
 
   constructor(private readonly options: BugReportServiceOptions) {
     this.listPath = join(options.profileHome, 'bug-reports.json')
@@ -162,18 +175,30 @@ export class BugReportService {
 
     const outcome = await this.send(draft, settings.anonymous)
     this.sent.push({ at: now, signature, outcome })
+    const filedAt = new Date(now).toISOString()
     if (outcome.status === 'filed' || outcome.status === 'existing') {
-      this.remember({ number: outcome.number, url: outcome.url, title, signature, filedAt: new Date(now).toISOString(), anonymous: settings.anonymous, ...(outcome.status === 'existing' ? { existing: true } : {}) })
+      this.remember({ number: outcome.number, url: outcome.url, title, signature, filedAt, anonymous: settings.anonymous, ...(outcome.status === 'existing' ? { existing: true } : {}) })
+    } else if (outcome.status === 'browser') {
+      // The person submits it on GitHub, so its number is not known here; list() finds it by its signature.
+      this.remember({ url: signatureSearchUrl(signature), title, signature, filedAt, anonymous: settings.anonymous, browser: true })
     }
     return outcome
   }
 
-  /** The reports filed from here, newest first, with their issues' state when GitHub answers. */
+  /**
+   * The reports filed from here, newest first, with their issues' state when GitHub answers. Reports sent through the
+   * prefilled page are looked up by signature first, and, with a gh sign-in, the person's own reports on GitHub that
+   * this computer does not know yet are added once.
+   */
   async list(): Promise<FiledBugReportView[]> {
     const reports = this.readList()
-    if (!reports.length) return []
     const credential = await this.credential(this.settings().anonymous).catch(() => undefined)
+    const found = await this.findSubmitted(reports, credential?.via === 'relay' ? undefined : credential?.token)
+    const added = await this.addOwnIssues(reports)
+    if (found || added) this.writeList(reports)
+    if (!reports.length) return []
     const views = await Promise.all(reports.map(async (report): Promise<FiledBugReportView> => {
+      if (report.number === undefined) return { ...report, state: 'pending' }
       try {
         const issue = await this.api<{ state: string; state_reason?: string | null }>(`/repos/${BUG_REPORT_REPOSITORY}/issues/${report.number}`, { token: credential?.via === 'relay' ? undefined : credential?.token })
         const closedBy = issue.state === 'closed' ? await this.closingPullRequests(report.number, credential).catch(() => []) : []
@@ -194,8 +219,10 @@ export class BugReportService {
     const report = reports.find((entry) => entry.number === number)
     if (!report) throw new BugReportError('not_found', 'That report is not in this computer’s list.')
     if (!report.revokedAt) {
-      const credential = await this.credential(report.anonymous)
-      if (!credential) throw new BugReportError('failed', report.anonymous ? 'Mousse’s report account is not set up on this computer, so the issue could not be closed. Close it on GitHub instead.' : 'Sign in with gh (gh auth login) to close the issue, or close it on GitHub.')
+      // A report submitted on GitHub's page is the person's own issue, so their sign-in closes it.
+      const anonymous = report.anonymous && !report.browser
+      const credential = await this.credential(anonymous)
+      if (!credential) throw new BugReportError('failed', anonymous ?'Mousse’s report account is not set up on this computer, so the issue could not be closed. Close it on GitHub instead.' : 'Sign in with gh (gh auth login) to close the issue, or close it on GitHub.')
       if (credential.via === 'relay') await this.relay({ action: 'revoke', number, signature: report.signature })
       else if (report.existing) await this.unreact(number, credential.token)
       else {
@@ -295,6 +322,75 @@ export class BugReportService {
     }
   }
 
+  /**
+   * Gives reports sent through the prefilled page their issue: one search for all their signatures (the newest few),
+   * unauthenticated when there is no token. One never found is dropped after FIND_MS. When the search fails, nothing
+   * changes. Says whether `reports` changed.
+   */
+  private async findSubmitted(reports: FiledBugReport[], token?: string): Promise<boolean> {
+    const waiting = reports.filter((report) => report.number === undefined)
+      .sort((a, b) => b.filedAt.localeCompare(a.filedAt)).slice(0, SEARCH_SIGNATURES)
+    if (!waiting.length) return false
+    let items: SearchItem[]
+    try {
+      const q = encodeURIComponent(`repo:${BUG_REPORT_REPOSITORY} is:issue in:body ${waiting.map((report) => `"${report.signature}"`).join(' OR ')}`)
+      items = (await this.api<{ items?: SearchItem[] }>(`/search/issues?q=${q}&sort=created&order=desc&per_page=100`, { token })).items ?? []
+    } catch {
+      return false
+    }
+    const taken = new Set(reports.flatMap((report) => (report.number === undefined ? [] : [report.number])))
+    let changed = false
+    for (const report of waiting) {
+      const issue = submittedIssue(report, items.filter((item) => !taken.has(item.number)))
+      if (issue) {
+        report.number = issue.number
+        report.url = issue.html_url
+        taken.add(issue.number)
+        changed = true
+      } else if (this.now() - Date.parse(report.filedAt) > FIND_MS) {
+        reports.splice(reports.indexOf(report), 1)
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  /**
+   * With a gh sign-in, adds the person's own issues in the report repository that carry a signature and are not in
+   * the list (reports sent through the prefilled page before this computer remembered them). Once per run; nothing
+   * without gh or when the search fails. Says whether `reports` changed.
+   */
+  private async addOwnIssues(reports: FiledBugReport[]): Promise<boolean> {
+    if (this.ownIssuesAdded) return false
+    const token = await this.options.ghToken?.().catch(() => undefined)
+    if (!token) return false
+    let items: SearchItem[]
+    try {
+      const q = encodeURIComponent(`repo:${BUG_REPORT_REPOSITORY} is:issue author:@me "mousse-sig-" in:body`)
+      items = (await this.api<{ items?: SearchItem[] }>(`/search/issues?q=${q}&sort=created&order=desc&per_page=100`, { token })).items ?? []
+    } catch {
+      return false
+    }
+    this.ownIssuesAdded = true
+    const known = new Set(reports.flatMap((report) => (report.number === undefined ? [] : [report.number])))
+    let changed = false
+    for (const item of [...items].reverse()) {
+      const signature = SIGNATURE_IN_BODY.exec(item.body ?? '')?.[0]
+      if (known.has(item.number) || !signature || !item.created_at) continue
+      const waiting = reports.find((report) => report.number === undefined && report.signature === signature && submittedIssue(report, [item]))
+      if (waiting) {
+        waiting.number = item.number
+        waiting.url = item.html_url
+      } else {
+        const title = String(item.title ?? '').slice(0, BUG_REPORT_TITLE_MAX) || signature
+        reports.push({ number: item.number, url: item.html_url, title, signature, filedAt: item.created_at, anonymous: false, browser: true })
+      }
+      known.add(item.number)
+      changed = true
+    }
+    return changed
+  }
+
   /** An issue that carries the signature, open first. */
   private async findSame(signature: string, token: string): Promise<{ number: number; url: string; state: string } | undefined> {
     const q = encodeURIComponent(`repo:${BUG_REPORT_REPOSITORY} is:issue "${signature}" in:body`)
@@ -387,15 +483,34 @@ export class BugReportService {
   }
 
   private remember(report: FiledBugReport): void {
-    const reports = this.readList().filter((entry) => entry.number !== report.number)
+    // One entry per issue, and one per signature among those not found on GitHub yet.
+    const reports = this.readList().filter((entry) => report.number !== undefined
+      ? entry.number !== report.number
+      : !(entry.number === undefined && entry.signature === report.signature))
     reports.push(report)
     this.writeList(reports)
   }
 }
 
+const SIGNATURE_IN_BODY = /mousse-sig-[0-9a-f]{12}/
+
+/** A GitHub search for a signature: where a report not found yet links to. */
+function signatureSearchUrl(signature: string): string {
+  return `${BUG_REPORT_ISSUES_URL}?q=${encodeURIComponent(`is:issue "${signature}"`)}`
+}
+
+/**
+ * The issue among `items` (newest first) that a report sent through the prefilled page became: the first one made
+ * after it was sent that carries its signature. An older issue with the same signature is someone else's.
+ */
+function submittedIssue(report: FiledBugReport, items: readonly SearchItem[]): SearchItem | undefined {
+  const sent = Date.parse(report.filedAt) - CLOCK_SLACK_MS
+  return items.filter((item) => (item.body ?? '').includes(report.signature) && Date.parse(item.created_at ?? '') >= sent).at(-1)
+}
+
 function isFiled(value: unknown): value is FiledBugReport {
   const entry = value as FiledBugReport
-  return Boolean(entry) && typeof entry.number === 'number' && typeof entry.url === 'string' && typeof entry.title === 'string' && typeof entry.signature === 'string' && typeof entry.filedAt === 'string'
+  return Boolean(entry) && (entry.number === undefined || typeof entry.number === 'number') && typeof entry.url === 'string' && typeof entry.title === 'string' && typeof entry.signature === 'string' && typeof entry.filedAt === 'string'
 }
 
 function osName(platform: NodeJS.Platform): string {

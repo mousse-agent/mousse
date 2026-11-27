@@ -1343,7 +1343,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
           const call = botCall(deps, ctx)
           if (isOutcome(call)) return call
           if (!call.deps.host.bots) return error(BOT_MESSAGES_OFF)
-          const bots = call.deps.host.bots.list(call.botId)
+          const bots = call.deps.host.bots.list(call.botId).map(({ botId: _botId, ...bot }) => bot)
           return json({ bots, ...(bots.length ? {} : { note: 'Your owner has no other bots.' }) })
         }
       }),

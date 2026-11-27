@@ -55,9 +55,9 @@ import { defaultEditor, loadLastEditorId, openLabel, splitEditors } from './side
 import { loadEditors, useEditorsStore } from '../stores/editorsStore'
 
 import { StartFromPullRequestDialog } from './StartFromPullRequestDialog'
-import { ThreadComputerBadge } from './ComputerBadge'
+import { AlsoOnBadge, ThreadComputerBadge } from './ComputerBadge'
 import { ThreadBranchLine, ThreadHoverCard, ThreadModelIcon } from './ThreadRowDetails'
-import { UNKNOWN_COMPUTER_NAME, useComputers } from '../lib/computers'
+import { UNKNOWN_COMPUTER_NAME, offlineLabel, threadComputerState, useComputers } from '../lib/computers'
 import { groupComputers, groupProjects } from '../lib/projectGroups'
 import { projectHueColor, projectHues } from '../lib/projectHues'
 import { ProjectIcon } from './ProjectIcon'
@@ -2019,15 +2019,18 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                         New thread. A click here opens and closes the project, as on the rest of the row. */}
                     <span className="threads-sidebar-project-computers" onClick={() => { if (!isRenaming) toggleProject(project.id) }} onContextMenu={(event) => openContextMenu(event, menuTarget)}>
                       <ThreadComputerBadge thread={project} withName of="project" className="threads-sidebar-project-computer" />
-                      {/* A project this computer has too: the other computers that hold it are marked by icon. */}
-                      {alsoOn.map((node) => (
-                        <ThreadComputerBadge
-                          key={node}
-                          thread={group.members.find((member) => member.node === node) ?? { node }}
-                          of="also"
-                          className="threads-sidebar-project-also"
-                        />
-                      ))}
+                      {/* A project this computer has too: one icon for the other computers that hold it, listed on hover. */}
+                      <AlsoOnBadge
+                        className="threads-sidebar-project-also"
+                        computers={alsoOn.map((node) => {
+                          const computer = computers[node]
+                          return {
+                            name: computer?.name ?? UNKNOWN_COMPUTER_NAME,
+                            state: threadComputerState(group.members.find((member) => member.node === node) ?? {}, computer),
+                            offline: offlineLabel(computer, Date.now())
+                          }
+                        })}
+                      />
                     </span>
 
                     <button

@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { mousseToolSubject, webSearchSites } from '../../src/renderer/chat/components/agent-elements/tools/mousse-tools'
+import { mousseToolLabels, mousseToolSubject, webSearchSites } from '../../src/renderer/chat/components/agent-elements/tools/mousse-tools'
+
+describe('a Mousse tool row in words', () => {
+  // Its verb once had no forms, so the row threw and the chat stopped rendering.
+  it.each(['question_withdraw', 'withdraw_question'])('labels %s', (tool) => {
+    expect(mousseToolLabels(tool)).toEqual({
+      running: 'Withdrawing a question',
+      done: 'Withdrew a question',
+      failed: "Couldn't withdraw a question",
+    })
+  })
+})
 
 describe('what a Mousse tool row names', () => {
   it.each([

@@ -57,12 +57,12 @@ export function resetWords(resetsAt: string, now: number): string | undefined {
     : at.toLocaleDateString([], { weekday: 'short' })
 }
 
-/** "5-hour: 72% left, resets 3:40 PM · Weekly: 41% left, resets Mon". */
+/** One line per limit: "5-hour: 72% left, resets 3:40 PM", then "Weekly: 41% left, resets Mon". */
 export function usageTooltip(limits: readonly BotUsageLimit[], now: number): string {
   return limits.map((limit) => {
     const reset = limit.resetsAt ? resetWords(limit.resetsAt, now) : undefined
     return `${limit.label}: ${Math.round(limit.left)}% left${reset ? `, resets ${reset}` : ''}`
-  }).join(' · ')
+  }).join('\n')
 }
 
 /** The ring's share left (none: nothing to measure) and the tooltip. */
@@ -98,7 +98,7 @@ export function usageReading(usage: ProviderUsage | undefined, now: number, mode
   if (usage.id === CLAUDE_USAGE_ID && !usage.proxy && !usage.accounts?.length) return { tooltip: NO_USAGE_INFO }
   const reading = shownReading(usage, now, model)
   const note = reading.tooltip === NO_USAGE_INFO ? undefined : staleNote(usage.readAt, now)
-  return note ? { ...reading, tooltip: `${reading.tooltip} · ${note}` } : reading
+  return note ? { ...reading, tooltip: `${reading.tooltip}\n${note}` } : reading
 }
 
 /**
@@ -112,7 +112,7 @@ export function nextReading(previous: ProviderUsage | undefined, next: ProviderU
 function shownReading(usage: ProviderUsage, now: number, model: string): BotUsageReading {
   const limits = usageLimits(usage, now, model)
   if (limits.length) {
-    const pooled = usage.accounts?.length ? ` · ${activeAccountsLabel(usage.accounts)}` : ''
+    const pooled = usage.accounts?.length ? `\n${activeAccountsLabel(usage.accounts)}` : ''
     return { left: Math.min(...limits.map((limit) => limit.left)), tooltip: usageTooltip(limits, now) + pooled }
   }
   if (usage.status !== 'available') return { tooltip: NO_USAGE_INFO }

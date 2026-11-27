@@ -207,6 +207,11 @@ export class RemoteUpdates {
     }
   }
 
+  /** The turns running now in every profile of the service. */
+  runningTurns(): number {
+    return this.turns()
+  }
+
   private turns(): number {
     try {
       return Math.max(0, this.activeTurns())

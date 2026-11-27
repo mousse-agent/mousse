@@ -73,7 +73,8 @@ describe('who a bot sees', () => {
     await f.bots.service.delete(gone)
     expect(JSON.parse((await tool('bot_list', turn.prepared, turn.payload.threadId, {})).text)).toEqual({ bots: [{ name: 'Alpha', does: 'Keep track of bugs.' }] })
     f.bots.pauseBot(alpha)
-    expect(f.bots.tools.bots!.list(plusy)).toEqual([{ name: 'Alpha', does: 'Keep track of bugs.', paused: true }])
+    // The seam names each bot's id too (what bot:<name> records); bot_list above never shows it.
+    expect(f.bots.tools.bots!.list(plusy)).toEqual([{ botId: alpha, name: 'Alpha', does: 'Keep track of bugs.', paused: true }])
   })
 })
 

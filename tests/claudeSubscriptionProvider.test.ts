@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -73,6 +73,17 @@ function fixture(
     settings: () => JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))
   }
 }
+/** A single request on `claude:cli`, as the runner sends it (`ClaudeSubscriptionProviderService.oneShotTransport`). */
+async function oneShot(
+  service: ClaudeSubscriptionProviderService,
+  spec: { model: string; effort?: string; task?: 'title' | 'branch_name' | 'pull_request'; namingOrigin?: 'send' | 'new_thread' | 'regenerate'; system: string; prompt: string; onActivity: () => void },
+  signal: AbortSignal,
+  events: Partial<{ text(chunk: string): void; tool(what: string): void; launching(executable: string): void; sending(): void }> = {}
+): Promise<{ text: string }> {
+  const { system, prompt, onActivity, ...rest } = spec
+  return { text: await service.oneShotTransport(rest).send({ model: spec.model, system, prompt }, { activity: onActivity, text: () => {}, tool: () => {}, launching: () => {}, sending: () => {}, ...events }, signal) }
+}
+
 /** Settings `env` variables that change what runs when Claude Code starts; a one-shot never copies them. */
 const LOADER_VARIABLES: Record<string, string> = {
   NODE_OPTIONS: '--require=/tmp/evil.js',
@@ -496,9 +507,10 @@ describe('Claude Subscription native provider', () => {
       },
       hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'echo pwned' }] }] }
     }))
-    setLaunch({ args: ['--verbose', '--plugin-dir', join(home, 'plugins')], env: { CLAUDE_CONFIG_DIR: configDir } })
+    setLaunch({ args: ['--verbose', '--plugin-dir', join(home, 'plugins')], env: { CLAUDE_CONFIG_DIR: configDir, CLAUDE_CODE_MAX_RETRIES: '10' } })
     const onActivity = vi.fn()
-    const answer = await service.oneShot({ model: 'sonnet:high', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
+    await service.status()
+    const answer = await oneShot(service, { model: 'sonnet:high', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
     expect(answer).toEqual({ text: 'Login redirect fix' })
     expect(inputs).toHaveLength(1)
     const { options, prompt } = inputs[0]!
@@ -511,6 +523,11 @@ describe('Claude Subscription native provider', () => {
     expect(options.settings).toEqual({ disableAllHooks: true })
     expect(options.hooks).toEqual({})
     expect(options.extraArgs).toEqual({})
+    // One request on the wire (counted at a stub, `claudeOneShotCount.test.ts`), set over the user's own variables.
+    expect(options.env).toMatchObject({ CLAUDE_CODE_MAX_RETRIES: '0', CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: '1' })
+    // Its folder is the `work` folder of a place of its own, gone once the request has ended.
+    expect(options.cwd).toMatch(/[\\/]one-shot[\\/][0-9a-f-]{36}[\\/]work$/)
+    expect(existsSync(dirname(options.cwd!))).toBe(false)
     // The sign-in kept in the settings' `env` still reaches Claude Code.
     expect(options.env).toMatchObject({ ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key', ANTHROPIC_CUSTOM_HEADERS: 'X-Team: titles', HTTPS_PROXY: 'http://corp-proxy.test:3128', CLAUDE_CONFIG_DIR: configDir })
     // Nothing from the settings that loads code at start-up is copied.
@@ -521,12 +538,27 @@ describe('Claude Subscription native provider', () => {
     // No thread session is recorded for it.
     expect(settings().sessions ?? {}).toEqual({})
   })
+  it('a single request reads the sign-in as last checked: it never waits for a check that is due', async () => {
+    const query = vi.fn(() => fakeQuery([{ ...result, result: 'Login redirect fix' }]))
+    const { service } = fixture(query)
+    await service.status()
+    const status = vi.spyOn(service, 'status')
+    vi.spyOn(service as unknown as { checkDue(): boolean }, 'checkDue').mockReturnValue(true)
+    await expect(oneShot(service, { model: 'sonnet', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).resolves.toEqual({ text: 'Login redirect fix' })
+    expect(status).not.toHaveBeenCalled()
+    // Never checked: refused as signed out at once, without a check.
+    const unchecked = fixture(query)
+    const never = vi.spyOn(unchecked.service, 'status')
+    await expect(oneShot(unchecked.service, { model: 'sonnet', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'signed_out' })
+    expect(never).not.toHaveBeenCalled()
+  })
   it('a one-shot reports a failed answer and needs a sign-in', async () => {
     const failed = fixture(() => fakeQuery([{ ...result, subtype: 'error_during_execution', is_error: true, errors: ['model not found'] }]))
-    await expect(failed.service.oneShot({ model: 'sonnet', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toThrow('model not found')
+    await failed.service.status()
+    await expect(oneShot(failed.service, { model: 'sonnet', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toThrow('model not found')
     const query = vi.fn(() => fakeQuery([result]))
     const signedOut = fixture(query, false)
-    await expect(signedOut.service.oneShot({ model: 'sonnet', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'claude_subscription_sign_in_required' })
+    await expect(oneShot(signedOut.service, { model: 'sonnet', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'signed_out' })
     expect(query).not.toHaveBeenCalled()
   })
   describe('titles and branch names run on a Claude Code process started ahead', () => {
@@ -540,7 +572,7 @@ describe('Claude Subscription native provider', () => {
      * until it is stopped (`hang`); or it answers once `release` is called, whatever stops it meanwhile (`late`). With
      * `child`, its process is a real one (a node process that never exits on its own), as the SDK's handle shows it.
      */
-    type Behaviour = 'answer' | 'silent' | 'hang' | 'late'
+    type Behaviour = 'answer' | 'silent' | 'hang' | 'late' | 'swallow'
     const processes = (behaviour: (index: number) => Behaviour = () => 'answer', child?: (index: number) => ChildProcess | undefined) => {
       const started: Array<{ options: Options; streamed: boolean; close: ReturnType<typeof vi.fn> }> = []
       let release!: () => void
@@ -555,6 +587,8 @@ describe('Claude Subscription native provider', () => {
           if (kind === 'silent') return
           let text = typeof prompt === 'string' ? prompt : ''
           if (typeof prompt !== 'string') for await (const message of prompt as AsyncIterable<{ message: { content: string } }>) { text = message.message.content; break }
+          // It read the request, then ended without a word: it may have sent it.
+          if (kind === 'swallow') return
           if (kind === 'hang') { await stopped; throw new Error('aborted') }
           if (kind === 'late') await released
           yield { type: 'stream_event', event: {} }
@@ -566,7 +600,7 @@ describe('Claude Subscription native provider', () => {
       return { started, query, release: () => release() }
     }
     const ask = (service: ClaudeSubscriptionProviderService, task: 'title' | 'branch_name' | 'pull_request', prompt: string, model = 'haiku') =>
-      service.oneShot({ model, task, namingOrigin: 'send', system: `Instructions for ${task}.`, prompt, onActivity: () => {} }, new AbortController().signal)
+      oneShot(service, { model, task, namingOrigin: 'send', system: `Instructions for ${task}.`, prompt, onActivity: () => {} }, new AbortController().signal)
 
     it('once a title answered, the next request takes the process started ahead and starts none of its own', async () => {
       const { started, query } = processes()
@@ -591,7 +625,8 @@ describe('Claude Subscription native provider', () => {
     it('a title regeneration starts no spare, even after using a spare left by Send', async () => {
       const { started, query } = processes()
       const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
-      const regenerate = () => service.oneShot({ model: 'haiku', task: 'title', namingOrigin: 'regenerate', system: 'Instructions for title.', prompt: 'Regenerate', onActivity: () => {} }, new AbortController().signal)
+      await service.status()
+      const regenerate = () => oneShot(service, { model: 'haiku', task: 'title', namingOrigin: 'regenerate', system: 'Instructions for title.', prompt: 'Regenerate', onActivity: () => {} }, new AbortController().signal)
       try {
         await expect(regenerate()).resolves.toMatchObject({ text: expect.stringContaining('Regenerate') })
         expect(started.map(({ streamed }) => streamed)).toEqual([false])
@@ -620,6 +655,16 @@ describe('Claude Subscription native provider', () => {
       await ask(service, 'title', 'Request: x')
       expect(await ask(service, 'title', 'Request: y')).toEqual({ text: 'answer from 2: Request: y' })
       expect(started[2]).toMatchObject({ streamed: false })
+    })
+
+    it('a process started ahead that took the request and ended without a word fails it: nothing sends it again', async () => {
+      const { started, query } = processes((index) => (index === 1 ? 'swallow' : 'answer'))
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      await service.status()
+      await ask(service, 'title', 'Request: x')
+      expect(started).toHaveLength(2)
+      await expect(ask(service, 'title', 'Request: y')).rejects.toThrow('ended without an answer')
+      expect(started).toHaveLength(2)
     })
 
     it('a sign-out while a request waits on the process started ahead ends it, and nothing is started or sent again', async () => {
@@ -689,75 +734,32 @@ describe('Claude Subscription native provider', () => {
       const { started, query } = processes()
       const { service, home, setLaunch } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
       setLaunch({ env: { CLAUDE_CONFIG_DIR: join(home, 'unknown-account') } })
+      await service.status()
       await expect(ask(service, 'title', 'Request: first')).resolves.toEqual({ text: 'answer from 0: Request: first' })
       await expect(ask(service, 'title', 'Request: second')).resolves.toEqual({ text: 'answer from 1: Request: second' })
       expect(started.map(({ streamed }) => streamed)).toEqual([false, false])
     })
 
-    it.each(['logout', 'stop'] as const)('%s waits until the waiting process tree has exited', async (method) => {
-      let releaseReap!: () => void
-      const reapDone = new Promise<void>((resolve) => { releaseReap = resolve })
-      let startedReaping!: () => void
-      const reapStarted = new Promise<void>((resolve) => { startedReaping = resolve })
-      const reap = vi.fn(async () => { startedReaping(); await reapDone; return 'exited' as const })
-      const fakeProc = { pid: 99999 } as unknown as ChildProcess
-      const { started, query } = processes(() => 'answer', (index) => (index === 1 ? fakeProc : undefined))
-      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }], { reap })
+    it.each(['logout', 'stop'] as const)('%s waits until the waiting process has ended and its place is gone', async (method) => {
+      const { started, query } = processes()
+      const { service, home } = fixture((input) => {
+        // The waiting process, as the SDK starts it: through the spawner Mousse hands it, in its place.
+        if (started.length === 1) input.options.spawnClaudeCodeProcess!({ command: nodeExecutable, args: ['-e', 'setInterval(() => {}, 1000)'], cwd: input.options.cwd!, env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot }, signal: new AbortController().signal })
+        return query(input)
+      }, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
       await service.status()
       await ask(service, 'title', 'Request: x')
       expect(started).toHaveLength(2)
-      const finishing = service[method]()
-      try {
-        await reapStarted
-        expect(reap).toHaveBeenCalledWith(99999, expect.anything())
-        const nextTick = new Promise<'waiting'>((resolve) => setImmediate(() => resolve('waiting')))
-        expect(await Promise.race([finishing.then(() => 'finished'), nextTick])).toBe('waiting')
-      } finally {
-        releaseReap()
-        await finishing
-      }
-      expect(started[1]!.close).toHaveBeenCalledOnce()
-    })
-
-    it.runIf(process.platform === 'win32').each(['logout', 'stop'] as const)('%s waits for a detached Windows descendant after the query closes its parent', async (method) => {
-      let parent: ChildProcess | undefined
-      let descendant: number | undefined
-      const realChild = (index: number) => {
-        if (index !== 1) return undefined
-        parent = spawn(nodeExecutable, ['-e', `
-          const { spawn } = require('node:child_process')
-          const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true })
-          child.once('spawn', () => { console.log(child.pid); child.unref() })
-          setInterval(() => {}, 1000)
-        `], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
-        parent.stdout!.once('data', (data: Buffer) => { descendant = Number(data.toString().trim()) })
-        return parent
-      }
-      const { started, query } = processes(() => 'answer', realChild)
-      const { service } = fixture((input) => {
-        const startedQuery = query(input)
-        if (parent && started.length === 2) {
-          started[1]!.close.mockImplementation(() => parent!.kill())
-          input.options.abortController?.signal.addEventListener('abort', () => parent!.kill(), { once: true })
-        }
-        return startedQuery
-      }, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
-      try {
-        await ask(service, 'title', 'First Send')
-        await vi.waitFor(() => expect(descendant).toBeGreaterThan(0), { timeout: 10_000 })
-        expect(process.kill(descendant!, 0)).toBe(true)
-        await service[method]()
-        expect(() => process.kill(descendant!, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }))
-      } finally {
-        if (descendant) try { process.kill(descendant, 'SIGKILL') } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
-        }
-        if (parent?.exitCode === null && parent.signalCode === null) parent.kill('SIGKILL')
-        await service.stop()
-      }
+      const place = dirname(started[1]!.options.cwd!)
+      expect(basename(started[1]!.options.cwd!)).toBe('work')
+      expect(existsSync(place)).toBe(true)
+      await service[method]()
+      // Ended with proof (its job, or its group), and its place and record removed, before logout or stop returned.
+      expect(existsSync(place)).toBe(false)
+      expect(readdirSync(join(home, 'one-shot-ledger'))).toEqual([])
     }, 30_000)
 
-    it.runIf(process.platform === 'win32').each(['logout', 'stop'] as const)('%s empties the Windows job after a late detached child outlives its parent', async (method) => {
+    it.runIf(process.platform === 'win32').each(['logout', 'stop'] as const)('%s leaves no late detached child of the waiting process: the job of its place ends it with its parent', async (method) => {
       let root: ChildProcess | undefined
       let descendant: number | undefined
       const { started, query } = processes(() => 'answer', () => root)
@@ -766,21 +768,19 @@ describe('Claude Subscription native provider', () => {
           const args = ['-e', `
             const { spawn } = require('node:child_process')
             const { existsSync, writeFileSync } = require('node:fs')
-            writeFileSync('parent-pid', String(process.pid))
+            const at = (name) => require('node:path').join(${JSON.stringify(home)}, name)
+            writeFileSync(at('parent-pid'), String(process.pid))
             const timer = setInterval(() => {
-              if (!existsSync('start-child')) return
+              if (!existsSync(at('start-child'))) return
               clearInterval(timer)
               const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true })
               child.on('spawn', () => {
-                writeFileSync('descendant-pid', String(child.pid))
+                writeFileSync(at('descendant-pid'), String(child.pid))
                 process.exit(0)
               })
             }, 10)
           `]
-          const target = { cwd: home, env: process.env }
-          root = (input.options.spawnClaudeCodeProcess
-            ? input.options.spawnClaudeCodeProcess({ command: nodeExecutable, args, ...target, signal: new AbortController().signal })
-            : spawn(nodeExecutable, args, { ...target, windowsHide: true })) as ChildProcess
+          root = input.options.spawnClaudeCodeProcess!({ command: nodeExecutable, args, cwd: input.options.cwd!, env: process.env, signal: new AbortController().signal }) as ChildProcess
         }
         return query(input)
       }, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
@@ -791,6 +791,7 @@ describe('Claude Subscription native provider', () => {
         }
       }
       try {
+        await service.status()
         await ask(service, 'title', 'First Send')
         await vi.waitFor(() => expect(existsSync(join(home, 'parent-pid'))).toBe(true), { timeout: 10_000 })
         const parent = Number(readFileSync(join(home, 'parent-pid'), 'utf8'))
@@ -798,10 +799,11 @@ describe('Claude Subscription native provider', () => {
         writeFileSync(join(home, 'start-child'), '')
         await vi.waitFor(() => expect(hasExited(parent)).toBe(true), { timeout: 10_000 })
         descendant = Number(readFileSync(join(home, 'descendant-pid'), 'utf8'))
-        expect(hasExited(descendant)).toBe(false)
+        // Started detached, it is still in the place's job, which ends with the process it belongs to.
+        await vi.waitFor(() => expect(hasExited(descendant!)).toBe(true), { timeout: 10_000 })
         await service[method]()
-        expect(hasExited(descendant)).toBe(true)
         expect(hasExited(root!.pid!)).toBe(true)
+        expect(readdirSync(join(home, 'one-shot-ledger'))).toEqual([])
       } finally {
         await service.stop()
         if (descendant && !hasExited(descendant)) {
@@ -812,30 +814,6 @@ describe('Claude Subscription native provider', () => {
           root.kill('SIGKILL')
           await vi.waitFor(() => expect(hasExited(root!.pid!)).toBe(true))
         }
-      }
-    }, 30_000)
-
-    it('stopping the provider ends the waiting process with its process tree', async () => {
-      const children: ChildProcess[] = []
-      const realChild = (index: number) => {
-        if (index !== 1) return undefined
-        const process = spawn(nodeExecutable, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
-        children.push(process)
-        return process
-      }
-      const { started, query } = processes(() => 'answer', realChild)
-      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
-      try {
-        await service.status()
-        await ask(service, 'title', 'Request: x')
-        await vi.waitFor(() => expect(started).toHaveLength(2))
-        const exited = new Promise<number | null>((resolve) => children[0]!.once('exit', (code) => resolve(code)))
-        // The query's own close is a stand-in that ends nothing: shutdown waits for the real process to end.
-        await service.stop()
-        expect(children[0]!.exitCode !== null || children[0]!.signalCode !== null).toBe(true)
-        await expect(exited).resolves.not.toBe(undefined)
-      } finally {
-        for (const process of children) if (process.exitCode === null && process.signalCode === null) process.kill('SIGKILL')
       }
     }, 30_000)
 

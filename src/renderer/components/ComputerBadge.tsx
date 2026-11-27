@@ -3,13 +3,13 @@ import { Server } from '../lib/icons'
 import { UNKNOWN_COMPUTER_NAME, offlineLabel, threadComputerState, useComputer, type ComputerState } from '../lib/computers'
 import '../styles/computers.css'
 
-/** What a badge is on: a thread, a project that is on the computer, or a project of this computer that is also there. */
-export type BadgeOf = 'thread' | 'project' | 'also'
+/** What a badge is on: a thread, or a project that is on the computer. */
+export type BadgeOf = 'thread' | 'project'
 
 /** The words a badge gives as its tooltip and accessible name. */
 export function computerBadgeTitle(name: string, state: ComputerState, offline = 'Offline', of: BadgeOf = 'thread'): string {
-  // A thread runs on a computer; a project is on it; a project of this computer can be on other computers too.
-  const lead = of === 'also' ? `Also on ${name}` : of === 'project' ? `On ${name}` : `Runs on ${name}`
+  // A thread runs on a computer; a project is on it.
+  const lead = of === 'project' ? `On ${name}` : `Runs on ${name}`
   if (state === 'online') return lead
   if (state === 'not-shared') return `${lead} · ${name} is not sharing its threads with this computer`
   return `${lead} · ${offline}`
@@ -21,7 +21,7 @@ interface ComputerBadgeViewProps {
   /** Show the name beside the icon (cards, headers); the compact row shows the icon alone. */
   withName?: boolean
   offline?: string
-  /** What the badge is on: a thread (the default), or a project, which is named "On <computer>" ("Also on" for one of this computer's). */
+  /** What the badge is on: a thread (the default), or a project, which is named "On <computer>". */
   of?: BadgeOf
   /** Give the words as a hover tooltip too; off where the row's own hover card already names the computer. */
   tooltip?: boolean
@@ -40,6 +40,37 @@ export function ComputerBadgeView({ name, state, withName = false, offline, of, 
         <Server size={withName ? 11 : 12} strokeWidth={2} aria-label={title} />
       </span>
       {withName && <span className="computer-badge-name">{name}</span>}
+    </span>
+  )
+}
+
+/** One of the other computers a project is also on. */
+export interface AlsoOnComputer {
+  name: string
+  state: ComputerState
+  offline?: string
+}
+
+/** "Also on" and one line per computer, each with its state when it cannot be reached. */
+export function alsoOnTitle(computers: readonly AlsoOnComputer[]): string {
+  const line = ({ name, state, offline = 'Offline' }: AlsoOnComputer) =>
+    state === 'online' ? name : state === 'not-shared' ? `${name} · not sharing its threads` : `${name} · ${offline}`
+  return ['Also on', ...computers.map((computer) => `• ${line(computer)}`)].join('\n')
+}
+
+/**
+ * A project of this computer that other computers hold too: one icon however many there are, listing them on hover.
+ * Struck through only when none of them can be reached.
+ */
+export function AlsoOnBadge({ computers, className }: { computers: readonly AlsoOnComputer[]; className?: string }) {
+  if (!computers.length) return null
+  const title = alsoOnTitle(computers)
+  const state: ComputerState = computers.some((computer) => computer.state === 'online') ? 'online' : 'offline'
+  return (
+    <span className={`computer-badge${className ? ` ${className}` : ''}`} data-state={state} title={title}>
+      <span className="computer-badge-icon">
+        <Server size={12} strokeWidth={2} aria-label={title} />
+      </span>
     </span>
   )
 }

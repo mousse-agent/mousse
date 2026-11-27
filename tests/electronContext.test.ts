@@ -67,6 +67,12 @@ describe('a windowless Electron run (the CLI and the daemon)', () => {
     expect(app.switches.get('enable-features')).toBe('NetworkServiceInProcess2')
   })
 
+  it('hides the Dock icon, so the daemon is not a second Mousse in the Dock', () => {
+    const hide = vi.fn()
+    configureWindowlessElectron({ ...fakeApp(), dock: { hide } })
+    expect(hide).toHaveBeenCalledOnce()
+  })
+
   it('keeps features already enabled on the command line', () => {
     const app = fakeApp('SomeFeature')
     configureWindowlessElectron(app)

@@ -77,7 +77,7 @@ describe('the Projects view with a project on several computers', () => {
     setStores({ projects, threads, threadsSidebarView: 'projects' })
     const html = render()
     // The group of this computer's project: an icon that says where else it is.
-    expect(html).toContain('title="Also on Studio"')
+    expect(html).toContain('title="Also on\n• Studio"')
     // A project that only the other computer has says it is on it.
     expect(html).toContain('title="On Studio"')
     expect(html).toContain('computer-badge-name">Studio<')
@@ -87,7 +87,7 @@ describe('the Projects view with a project on several computers', () => {
     setStores({ projects: projects.map((entry) => (entry.node ? { ...entry, offline: true as const } : entry)), threads, threadsSidebarView: 'projects' }, { online: false })
     const html = render()
     expect(groups(html)).toBe(3)
-    expect(html).toContain('title="Also on Studio · Offline"')
+    expect(html).toContain('title="Also on\n• Studio · Offline"')
     expect(html).toContain('title="On Studio · Offline"')
   })
 
