@@ -145,6 +145,22 @@
       ],
       "claimedAt": "2026-11-27T04:23:54.256Z",
       "expiresAt": "2026-11-27T06:23:54.256Z"
+    },
+    {
+      "task": "turn-retry-provider-failures",
+      "session": "Animatrix-46ee88",
+      "machine": "Animatrix",
+      "branch": "turn-retry-provider-failures",
+      "paths": [
+        "src/mms/orchestrator/turnRetry.ts",
+        "src/shared/providerRetry.ts",
+        "src/mms/harness/drivers/codex/adapter.ts",
+        "src/mms/harness/vendors/codex/CodexProviderService.ts",
+        "src/mms/harness/drivers/claudeCode/adapter.ts",
+        "src/mms/orchestrator/OrchestratorService.ts"
+      ],
+      "claimedAt": "2026-11-27T10:16:37.481Z",
+      "expiresAt": "2026-11-27T12:16:37.481Z"
     }
   ]
 }
