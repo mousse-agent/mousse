@@ -20,6 +20,7 @@
 - Before writing or changing tests for a feature or fix, and when reviewing a PR's tests, read and follow `moostack/skills/test-the-claim/SKILL.md`. It decides what to test, at which level, and what not to write.
 - When asked to build, publish or install a nightly, read and follow `moostack/skills/nightly-build-release/SKILL.md`. It keeps fixing failures until a nightly is published.
 - Before building, restyling or reviewing UI in `src/renderer`, read and follow `moostack/skills/mousse-ui/SKILL.md`.
+- When the cause of a bug or a failing test is not known after a first look, a fix did not work, or a failure comes and goes, read and follow `moostack/skills/debug/SKILL.md` before trying another fix.
 - When the user says "fixed" or "fixed it" after a long debugging session, follow `moostack/skills/debug-journal/SKILL.md`.
 - When adding, retiring or re-tiering models in `src/mms/models/models.json`, or changing its `namingProviders`, read and follow `moostack/skills/update-model-catalog/SKILL.md`.
 - To post screenshots or videos on a PR or issue, follow `moostack/skills/gh-attach-images/SKILL.md`. Never commit them to the repository.

@@ -11,6 +11,7 @@ The agent skills Mousse is built with. Each one is a folder in `skills/` with a 
 | `slice` | Work that needs more than one PR | Plans it as slices that each merge on their own within a day: the rules first, then the slices, their order and their files. |
 | `review` | Reviewing a PR, diff or plan, or answering findings | One pass: who reviews at each tier, findings that need proof, a re-check of the fix only, and when to stop. |
 | `council` | Heavy core changes, only after the human agrees | Several independent reviewers from different model families (two unless more are named) for a design or PR. Same proof rules as `review`, no scores. |
+| `debug` | A bug or failing test whose cause is not known | Reproduces it, lists the candidate causes, rules them out by halves, and fixes where it first went wrong. |
 | `retro` | After work that ran long | Finds where the time went from the record and changes a skill, script or check. |
 | `check-related-work` | Before a final plan or a substantial change | Finds open and closed PRs, issues and branches that already do part of the work or will collide with it. Read-only. |
 | `test-the-claim` | Writing, changing or reviewing tests | Decides what to test for a change, at which level, and what not to write. |
@@ -28,6 +29,7 @@ Some skills call others:
 - `design` uses `check-related-work`, then `review` for the one read of the chosen design (at level 3, `council` judges the proposals), and hands off to `slice`.
 - `slice` uses `check-related-work`, and `review` for a tier 5 plan.
 - `council` is `review` with more than one reviewer.
+- `debug` reads `journal.md` first, and `debug-journal` adds to it after a long session.
 - `retro` points back at whichever skill the lost time traces to.
 - `nightly-build-release` follows `work` for each fix it merges.
 
