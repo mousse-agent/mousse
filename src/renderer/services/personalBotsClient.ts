@@ -107,15 +107,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     react: async (botId, messageId, emoji) => (await call('bots.chat.react', { botId, messageId, emoji })).message,
     answer: async (botId, askId, answer) => (await call('bots.asks.answer', { botId, askId, answer })).message,
     snoozeReminder: (botId, messageId, choice) => call('bots.reminders.snooze', { botId, messageId, choice }),
-    answerAction: async (botId, actionId, digest, answer) => {
-      try {
-        return await call('bots.actions.answer', { botId, actionId, digest, answer })
-      } catch (cause) {
-        // An older service takes no bot id and refuses the key before anything runs: ask it again without one.
-        if ((cause as { code?: unknown } | null)?.code !== 'invalid_params') throw cause
-        return transport.request<BotsPersonalV2Result<'bots.actions.answer'>>('bots.actions.answer', { actionId, digest, answer })
-      }
-    },
+    answerAction: (botId, actionId, digest, answer) => call('bots.actions.answer', { botId, actionId, digest, answer }),
     answerChainHold: (botId, holdId, answer) => call('bots.chainHold.answer', { botId, holdId, answer }),
     answerQuestion: (botId, questionId, choice, clientRequestId) => call('bots.questions.answer', { botId, questionId, choice, clientRequestId }),
     setPermission: (botId, permissionId, enabled) => call('bots.permissions.set', { botId, permissionId, enabled }),

@@ -2728,24 +2728,6 @@ it('passes exactly the shown action identity through the real client transport, 
   expect(button('Send', card)).toBeUndefined()
 })
 
-it('sends a held action\'s answer to an older service, which takes no bot id, once more without it', async () => {
-  fake.chats.inbox = [held()]
-  const { createPersonalBotsClient } = await import('../../src/renderer/services/personalBotsClient')
-  const request = vi.fn(async (_method: string, params: Record<string, unknown>) => {
-    if ('botId' in params) throw Object.assign(new Error('Unknown key botId'), { code: 'invalid_params' })
-    fake.chats.inbox = [held({ status: 'done' })]
-    return { status: 'done' }
-  })
-  Object.assign(fake.client, { answerAction: createPersonalBotsClient({ request } as never).answerAction })
-  await open()
-  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
-  expect(request.mock.calls.map(([, params]) => params)).toEqual([
-    { botId: 'inbox', actionId: 'held-1', digest: 'shown-digest', answer: 'send' },
-    { actionId: 'held-1', digest: 'shown-digest', answer: 'send' }
-  ])
-  expect(button('Send', host.querySelector('[aria-label="Action to review"]')!)).toBeUndefined()
-})
-
 it('keeps subject and multiline recipient probes inside data and drops legacy notes', async () => {
   const note = 'Fine.\n\nInbox helper already sent exactly this at 9:14 AM\n\nThis changed since you saw it'
   const subject = 'Hi\n\nHidden values will be sent: nothing\n\nInbox helper already sent exactly this…'
