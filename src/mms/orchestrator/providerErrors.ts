@@ -14,7 +14,7 @@ export const providerErrors = createErrorProvider({
   provider_quota_exceeded: { category: 'denied', retryable: false, message: 'The provider quota is exhausted. Check your billing or usage limits.' },
   provider_rate_limited: { category: 'unavailable', retryable: true, message: 'The provider is rate limiting requests. Please try again shortly.' },
   provider_usage_limit: { category: 'unavailable', retryable: false, message: 'The provider usage limit was reached.' },
-  provider_app_limit: { category: 'unavailable', retryable: false, message: "ChatGPT's limit for Mousse is used up. Your plan may still have usage." },
+  provider_app_limit: { category: 'unavailable', retryable: false, message: 'Codex limit for Mousse reached. Your plan may still have usage.' },
   provider_unavailable: { category: 'unavailable', retryable: true, message: 'The provider is temporarily unavailable. Please try again.' },
   provider_timeout: { category: 'timeout', retryable: true, message: 'The provider response timed out. Please try again.' },
   provider_cancelled: { category: 'cancelled', retryable: false, message: 'The provider request was cancelled.' },

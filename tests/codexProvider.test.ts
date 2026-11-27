@@ -2092,7 +2092,7 @@ describe('a usage limit on a Codex turn', () => {
     const server = failingServer({ error, rateLimits: { result: { rateLimits: exhausted(inHours(2)) } } })
     const failure = await chat(create(server)).catch((caught: unknown) => caught)
     expect(failure).toMatchObject({ code: 'provider_app_limit', details: { provider: 'codex' }, errorInfo: { retryable: false } })
-    expect((failure as Error).message).toBe("ChatGPT's limit for Mousse is used up. Your plan may still have usage.")
+    expect((failure as Error).message).toBe('Codex limit for Mousse reached. Your plan may still have usage.')
     expect(server.methods()).not.toContain('account/rateLimits/read')
   })
 

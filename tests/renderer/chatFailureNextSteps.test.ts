@@ -224,14 +224,14 @@ describe('a failed turn', () => {
       failedThread[0],
       {
         id: 's1', role: 'system', timestamp: '2026-11-05T10:00:01.000Z',
-        content: "[provider_app_limit] ChatGPT's limit for Mousse is used up. Your plan may still have usage.",
-        error: { code: 'provider_app_limit', message: "ChatGPT's limit for Mousse is used up. Your plan may still have usage.", details: { provider: 'codex', retries: { attempt: 5, max: 5 } } }
+        content: '[provider_app_limit] Codex limit for Mousse reached. Your plan may still have usage.',
+        error: { code: 'provider_app_limit', message: 'Codex limit for Mousse reached. Your plan may still have usage.', details: { provider: 'codex', retries: { attempt: 5, max: 5 } } }
       }
     ]
     render(shown(limited, vi.fn()))
     expect(text()).toContain('App limit reached')
     expect(text()).not.toContain('retries')
-    expect(host.querySelector('.an-error-text')!.textContent).toBe("ChatGPT's limit for Mousse is used up. Your plan may still have usage." + 'App limits' + 'Retry' + 'Report')
+    expect(host.querySelector('.an-error-text')!.textContent).toBe('Codex limit for Mousse reached. Your plan may still have usage.' + 'App limits' + 'Retry' + 'Report')
     const appLimits = [...host.querySelectorAll('button')].find((each) => each.textContent === 'App limits')!
     expect(appLimits.title).toMatch(/App limits/)
     act(() => appLimits.click())
