@@ -50,7 +50,7 @@ describe('the chat is the front desk', () => {
     expect(workAllowed).toContain('web_fetch')
     // Of the chat's work tools, work keeps its wait tool, the list of models its subagents may run on, and (#1360)
     // reminders and background commands, detached; it hands out no work and stops none.
-    const kept = ['work_models', 'work_wait', 'remind', 'watch_start']
+    const kept = ['model_list', 'work_wait', 'remind', 'watch_start']
     for (const tool of BOT_WORK_TOOLS) if (!kept.includes(tool)) expect(workAllowed).not.toContain(tool)
     for (const tool of kept) expect(workAllowed).toContain(tool)
     expect(work.prepared.prompt).toContain('Compare three vacuums under £250.')

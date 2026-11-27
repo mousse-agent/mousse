@@ -11,7 +11,13 @@ export const MOUSSE_TOOL_ALIASES: Readonly<Record<string, string>> = Object.free
   list_tasks: 'task_list',
   create_task: 'task_create',
   update_task: 'task_update',
-  goal_status: 'goal_update'
+  goal_status: 'goal_update',
+  // The discovery family. A bot's `work_models` and a thread's `list_models` are one tool: the bot's version on a bot turn.
+  list_skills: 'skill_list',
+  load_skill: 'skill_load',
+  list_models: 'model_list',
+  work_models: 'model_list',
+  list_computers: 'computer_list'
 })
 
 /** The name a Mousse tool is registered, listed, granted and recorded under: `name` itself unless it is an old alias. */

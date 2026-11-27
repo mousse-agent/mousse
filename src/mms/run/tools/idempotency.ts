@@ -1,3 +1,5 @@
+import { canonicalToolName } from '../../../shared/toolAliases'
+
 /**
  * Tool idempotency registry (SPEC §12.6). A crash while a non-idempotent tool is `started` makes
  * the run `uncertain` instead of `interrupted`.
@@ -17,14 +19,12 @@ export const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'browser_extract',
   'browser_screenshot',
   'task_list',
-  // An old name the ledger may still hold (`MOUSSE_TOOL_ALIASES`).
-  'list_tasks',
   'list_subagents',
   'list_delegations',
   // Asks the user's other computers whether they have the repository; changes nothing anywhere.
-  'list_computers',
+  'computer_list',
   // Reads the provider entries and models offered here or on another computer; changes nothing.
-  'list_models',
+  'model_list',
   // The retired merge tools only report a finished task's result (and pin it again).
   'integrate_delegation',
   'integrate_subagent',
@@ -79,6 +79,8 @@ export function isIdempotentTool(
   mcpAnnotations?: { readOnlyHint?: boolean },
   args?: unknown
 ): boolean {
+  // A ledger row an older build wrote may name a tool by its old name.
+  name = canonicalToolName(name)
   if (IDEMPOTENT_TOOLS.has(name)) return true
   if (name === 'browser_tabs') {
     const operation = args && typeof args === 'object' ? (args as { operation?: unknown }).operation : 'new'

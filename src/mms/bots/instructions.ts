@@ -203,7 +203,7 @@ export function botAllowedText(allowed: BotAllowed, lane?: BotLane, browserOffli
     `- Use the browser (your own): ${off('browser') ? BOT_SWITCHED_OFF_ANSWER : allowed.browser && browserOffline ? "yes, but it can't open on this run" : yes(allowed.browser)}`,
     `- Use your owner's threads: ${off('threads') ? BOT_SWITCHED_OFF_ANSWER : !allowed.threads ? 'no' : lane === 'chat' ? "yes: list, search, read and wait on them, and start, message, steer, stop, fork or archive one, or change its queue, when your owner's message asks for it" : "yes: list, search, read and wait on them, and start, message, steer, stop, fork or archive one, or change its queue, when the work your owner asked for needs it"}`,
     `- Use apps on this computer: ${off('computer') ? BOT_SWITCHED_OFF_ANSWER : !allowed.computer ? 'no' : allowed.mcpNotHere ? 'not in this consult' : lane === 'chat' ? 'yes, in your work' : 'yes'}`,
-    `- Skills: ${off('skills') ? BOT_SWITCHED_OFF_ANSWER : 'yes, every skill your owner has (list_skills)'}`,
+    `- Skills: ${off('skills') ? BOT_SWITCHED_OFF_ANSWER : 'yes, every skill your owner has (skill_list)'}`,
     `- Automation tools: ${off('automation') ? BOT_SWITCHED_OFF_ANSWER : allowed.automation.length ? allowed.automation.join(', ') : 'none'}`,
     allowed.mcpNotHere
       ? `- Your owner's MCP servers: none in this consult${allowed.mcp?.length ? ` (your main work has ${allowed.mcp.join(', ')}; answer with what you have and say what needs them)` : ''}`

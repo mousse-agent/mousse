@@ -444,7 +444,7 @@ describe('the thread tools on a thread launched on another computer (issue #1160
  * Inputs listed before the cases:
  * - who asks: an ordinary thread; a private thread; a thread another device started (one computer deep); the user's
  *   switch off, or the computer not ticked;
- * - which computer: a name from list_computers; a name that is none; offline; not sharing its threads;
+ * - which computer: a name from computer_list; a name that is none; offline; not sharing its threads;
  * - what is there: a thread a person started; a private thread; a thread this thread launched; many long-named threads;
  * - what that computer lets this one's agents change: threads they started (the default), all threads, nothing;
  * - what is asked there: read, send, steer, Stop (a run an agent here started, a run a person there started).

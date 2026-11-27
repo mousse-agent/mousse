@@ -164,7 +164,7 @@ export const BOT_FILE_ASK_GONE_TEXT = 'A bot can no longer use files outside its
 const DRAFT_READ_ONLY_TOOLS = new Set([
   'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'terminal_read', 'memory_list', 'memory_search', 'memory_read', 'item_list',
   'read', 'list', 'search', 'ls', 'find', 'grep', 'Read', 'Glob', 'Grep',
-  'bot_schedule_list', 'work_list', 'work_models', 'watch_list', 'reminder_list', 'bot_list', 'running_list',
+  'bot_schedule_list', 'work_list', 'model_list', 'watch_list', 'reminder_list', 'bot_list', 'running_list',
   'mcp_servers', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'
 ])
 /** A reply can carry a picture as Markdown or as a path, without calling a tool.
@@ -436,7 +436,7 @@ export const BOT_PERMISSION_REMOVED_TEXT = 'Your owner removed this permission w
 export const BOT_NO_ASK_NEEDED_TEXT = 'Every bot has this without asking, in its chat and its work: use it. Do not ask for it again.'
 
 /** What `escalate` for a skill is answered with while skills are on for the bot: no card. */
-export const BOT_SKILLS_NO_ASK_TEXT = 'Every skill your owner has is yours without asking: list_skills lists them and load_skill loads one. Do not ask for one.'
+export const BOT_SKILLS_NO_ASK_TEXT = 'Every skill your owner has is yours without asking: skill_list lists them and skill_load loads one. Do not ask for one.'
 
 /** What an ask for an MCP tool is answered with where Mousse has no MCP servers to offer (no MCP manager): no card. */
 export const BOT_MCP_UNAVAILABLE_TEXT = 'Your owner has no MCP servers set up in Mousse here, so there is nothing to ask for. Carry on without it, and tell the owner plainly if that matters.'
@@ -6966,7 +6966,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * For `work_models`: what a subagent on each entry would run without, or why it can't run there, by the hold rule for
+   * For `model_list`: what a subagent on each entry would run without, or why it can't run there, by the hold rule for
    * what the work's turn holds now. An entry it would run on as the work does is left out.
    */
   private holdOnEntries(activationId: string, instanceIds: readonly string[]): Record<string, { lacks: string[] } | { refused: string }> {
@@ -7070,7 +7070,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * `subagent_start`: a subagent of the work, on the work's own model or the one it named (a `work_models` choice, checked
+   * `subagent_start`: a subagent of the work, on the work's own model or the one it named (a `model_list` choice, checked
    * again here for this bot), compiled for its own runtime before anything starts: one that can't hold the bot is refused
    * and nothing starts on another. It is never held less tightly than its work (`subagentHold`): what its entry holds less
    * tightly it runs without, and the work is told so; what that entry can't run without refuses the start, naming the
@@ -7297,7 +7297,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * The work's own model in plain words, as `work_models` names it ("Opus 5.5 on Claude Code, high reasoning"): always
+   * The work's own model in plain words, as `model_list` names it ("Opus 5.5 on Claude Code, high reasoning"): always
    * with its entry, so the owner sees which provider did a part of the job.
    */
   private async selectionName(row: BotActivationRow, selection: ProviderSelection): Promise<string> {
@@ -11784,7 +11784,7 @@ function subagentRunMs(run: Pick<RunRecord, 'startedAt' | 'completedAt'>, aliveU
   return Number.isFinite(started) && Number.isFinite(ended) ? Math.max(0, ended - started) : 0
 }
 
-/** A model in plain words, as `work_models` names it: "Opus 5.5 on Claude Code, high reasoning". */
+/** A model in plain words, as `model_list` names it: "Opus 5.5 on Claude Code, high reasoning". */
 function workModelText(model: { name: string; entry: string; effort?: string }): string {
   return `${model.name}${model.entry ? ` on ${model.entry}` : ''}${model.effort ? `, ${model.effort} reasoning` : ''}`
 }
@@ -11896,7 +11896,7 @@ const BOT_WEB_TOOLS: ReadonlySet<string> = new Set(['web_search', 'web_fetch'])
  */
 function subagentLacksNote(lacks: readonly string[], entry: string): string {
   const what = lacks.map((power) => `"${power}"`).join(' or ')
-  return `It can't ${lacks.length === 1 && lacks[0] === 'run commands' ? 'run commands' : `use ${what}`} there: ${entry} would hold ${lacks.length === 1 ? 'that' : 'those'} less tightly than your own entry, so it runs without. Do that part yourself, or start it on another entry (work_models says which).`
+  return `It can't ${lacks.length === 1 && lacks[0] === 'run commands' ? 'run commands' : `use ${what}`} there: ${entry} would hold ${lacks.length === 1 ? 'that' : 'those'} less tightly than your own entry, so it runs without. Do that part yourself, or start it on another entry (model_list says which).`
 }
 const SUBAGENT_STOPPED_BY_WORK_TEXT = 'You stopped it.'
 /** The errors a subagent's run is cancelled with when the work's turn or the work itself stopped it (not a refusal). */

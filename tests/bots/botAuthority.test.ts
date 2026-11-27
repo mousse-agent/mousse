@@ -90,7 +90,7 @@ describe('compileBotThread', () => {
     if (!compiled.ok) throw new Error(compiled.error.message)
     expect(compiled.policy).toEqual({
       // Granted skills bring the skill tools.
-      tools: { allow: ['edit', 'find', 'grep', 'list_skills', 'load_skill', 'ls', 'read', 'running_list', 'web_search', 'write'] },
+      tools: { allow: ['edit', 'find', 'grep', 'skill_list', 'skill_load', 'ls', 'read', 'running_list', 'web_search', 'write'] },
       approvals: 'grants',
       approve: 'host',
       budget: { maxWallMs: 600_000, maxTurns: 40 },
@@ -139,7 +139,7 @@ describe('compileBotThread', () => {
   it('every skill unless switched off for the bot, and a thread narrowed to some skills has just those', () => {
     const all = compile({ grant: manifest({ skills: [] }), allSkills: true })
     if (!all.ok) throw new Error(all.error.message)
-    expect(all.permissions).toMatchObject({ allSkills: true, skills: [], appTools: expect.arrayContaining(['list_skills', 'load_skill']) })
+    expect(all.permissions).toMatchObject({ allSkills: true, skills: [], appTools: expect.arrayContaining(['skill_list', 'skill_load']) })
     expect(authorityOf(all).check({ kind: 'skill', skill: 'any-skill' })).toEqual({ ok: true })
     const narrowed = compile({ grant: manifest({ skills: [] }), allSkills: true, thread: { narrow: { skills: ['release-notes'] } } })
     if (!narrowed.ok) throw new Error(narrowed.error.message)
@@ -148,7 +148,7 @@ describe('compileBotThread', () => {
     expect(authorityOf(narrowed).check({ kind: 'skill', skill: 'any-skill' }).ok).toBe(false)
     const off = compile({ grant: manifest({ skills: [] }), thread: { narrow: { skills: ['release-notes'] } } })
     if (!off.ok) throw new Error(off.error.message)
-    expect(off.permissions).toMatchObject({ skills: [], appTools: expect.not.arrayContaining(['list_skills']) })
+    expect(off.permissions).toMatchObject({ skills: [], appTools: expect.not.arrayContaining(['skill_list']) })
   })
 
   it('offers secret_fetch with no grant, in work and in the chat', () => {
@@ -165,8 +165,8 @@ describe('compileBotThread', () => {
     const revision = manifest({ tools: ['read'], appTools: [], budget: { maxTurns: 10 } })
     const compiled = compile({ grant, revision })
     if (!compiled.ok) throw new Error(compiled.error.message)
-    expect(compiled.policy.tools).toEqual({ allow: ['list_skills', 'load_skill', 'read', 'running_list'] })
-    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: ['list_skills', 'load_skill', 'running_list'] })
+    expect(compiled.policy.tools).toEqual({ allow: ['skill_list', 'skill_load', 'read', 'running_list'] })
+    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: ['skill_list', 'skill_load', 'running_list'] })
     // A revision can never name more than the grant: what the grant lacks is dropped.
     const wider = compile({ grant: manifest({ tools: ['read'], appTools: [] }), revision: manifest({ tools: ['read', 'edit'] }) })
     if (!wider.ok) throw new Error(wider.error.message)
@@ -364,11 +364,11 @@ describe('the check points', () => {
     const bot = authorityFor()
     expect(botAppToolRefusal(bot, 'web_search', {})).toBeUndefined()
     expect(botAppToolRefusal(bot, 'delegate_task', {})).toBe('This bot is not allowed to use delegate_task.')
-    expect(botAppToolRefusal(bot, 'load_skill', { skill: 'release-notes' })).toBeUndefined()
+    expect(botAppToolRefusal(bot, 'skill_load', { skill: 'release-notes' })).toBeUndefined()
     // Which skill loads is held by the turn's own skills (granted ids only), by id or by name.
-    expect(botAppToolRefusal(bot, 'load_skill', { skill: 'Release Notes' })).toBeUndefined()
-    expect(botAppToolRefusal(authorityFor(manifest({ skills: [] })), 'load_skill', { skill: 'release-notes' })).toBe('This bot is not allowed to use load_skill.')
-    expect(botAppToolRefusal(authorityFor(manifest({ skills: [] })), 'list_skills', {})).toBe('This bot is not allowed to use list_skills.')
+    expect(botAppToolRefusal(bot, 'skill_load', { skill: 'Release Notes' })).toBeUndefined()
+    expect(botAppToolRefusal(authorityFor(manifest({ skills: [] })), 'skill_load', { skill: 'release-notes' })).toBe('This bot is not allowed to use skill_load.')
+    expect(botAppToolRefusal(authorityFor(manifest({ skills: [] })), 'skill_list', {})).toBe('This bot is not allowed to use skill_list.')
   })
 })
 

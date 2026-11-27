@@ -298,10 +298,15 @@ function notLive(message: string): McpToolError {
   return new McpToolError('mousse_caller_not_live', message)
 }
 
-/** A tool as a personal bot's thread reads it: its `botDescription` and `botInputSchema` where it has them. */
+/** A tool as a personal bot's thread reads it: its `botDescription`, `botInputSchema` and `botClass` where it has them. */
 function asBotTool(tool: MousseTool): MousseTool {
-  return tool.botDescription || tool.botInputSchema
-    ? { ...tool, ...(tool.botDescription ? { description: tool.botDescription } : {}), ...(tool.botInputSchema ? { inputSchema: tool.botInputSchema } : {}) }
+  return tool.botDescription || tool.botInputSchema || tool.botClass
+    ? {
+      ...tool,
+      ...(tool.botDescription ? { description: tool.botDescription } : {}),
+      ...(tool.botInputSchema ? { inputSchema: tool.botInputSchema } : {}),
+      ...(tool.botClass ? { class: tool.botClass } : {})
+    }
     : tool
 }
 

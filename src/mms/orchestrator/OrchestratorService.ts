@@ -5958,7 +5958,7 @@ export class OrchestratorService extends EventEmitter {
       }
     }
     if (Boolean(input.model) !== Boolean(input.instanceId))
-      return refuse('selection_incomplete', `On another computer a model is named with its agent: pass both instanceId and model (from list_models with computer), or leave both out to use ${computer.name}'s default.`, at)
+      return refuse('selection_incomplete', `On another computer a model is named with its agent: pass both instanceId and model (from model_list with computer), or leave both out to use ${computer.name}'s default.`, at)
     if (input.model) {
       const listed = await this.remoteModelEntries(computer)
       const choice = listed.ok
@@ -9271,7 +9271,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * `list_models`: what `delegate_task` and `thread_create` may name, read as the model picker reads it
+   * `model_list`: what `delegate_task` and `thread_create` may name, read as the model picker reads it
    * (`providers.snapshots`) in this thread's project; with `computer`, that computer's, through the same
    * routed read its windows make, and only once the checks that let a subagent start there pass.
    */
@@ -9341,12 +9341,12 @@ export class OrchestratorService extends EventEmitter {
     if (byName.length === 1) return { ok: true, computer: byName[0] }
     const names = computers.map((computer) => computer.name)
     if (byName.length > 1)
-      return { ok: false, code: 'ambiguous_computer', message: `Several of the user's computers are called "${ref}"; name one by its id from list_computers.`, extra: { computers: byName.map(({ node, name }) => ({ id: node, name })) } }
+      return { ok: false, code: 'ambiguous_computer', message: `Several of the user's computers are called "${ref}"; name one by its id from computer_list.`, extra: { computers: byName.map(({ node, name }) => ({ id: node, name })) } }
     return { ok: false, code: 'unknown_computer', message: names.length ? `No computer is called "${ref}". The user's other computers: ${names.join(', ')}.` : 'This computer is not connected to any other computer of the user.', extra: {} }
   }
 
   /**
-   * `list_computers`: the user's other computers, each with what decides whether a subagent can start
+   * `computer_list`: the user's other computers, each with what decides whether a subagent can start
    * there now. The repository match is asked of each online computer that is allowed, in parallel.
    */
   private async listComputers(parentThreadId: string) {

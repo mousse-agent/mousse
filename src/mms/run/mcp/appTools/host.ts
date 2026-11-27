@@ -80,7 +80,7 @@ export interface AgentThreadRequest {
  * or in its copy of the caller's repository.
  */
 export interface AgentRemoteThreadRequest {
-  /** A computer's name or id from `list_computers`. */
+  /** A computer's name or id from `computer_list`. */
   computer: string
   /**
    * A project of that computer (plain, or qualified as `thread_list` with computer names it). Alone, the thread starts

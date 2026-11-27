@@ -139,7 +139,7 @@ export function threadWakeTools(host: AppToolHost): MousseTool[] {
 }
 
 /**
- * One tool per shared name: a personal bot's turn gets the bot's tool (its description, schema, rules and handler), any
+ * One tool per shared name: a personal bot's turn gets the bot's tool (its description, schema, class, rules and handler), any
  * other thread the thread's. The rest are the bot's tools unchanged, and with no thread version (no service here) the
  * bot's stay as they were.
  */
@@ -155,6 +155,7 @@ export function shareWakeTools(botTools: MousseTool[], threadTools: MousseTool[]
       ...plain,
       botDescription: bot.description,
       botInputSchema: bot.inputSchema,
+      ...(bot.class !== thread.class ? { botClass: bot.class } : {}),
       listed: (listing) => (listing.botRole ? bot.listed?.(listing) ?? true : thread.listed?.(listing) ?? true),
       available: (turn) => (turn.bot ? bot.available?.(turn) ?? true : thread.available?.(turn) ?? true),
       offered: (turn) => (turn.bot ? bot.offered?.(turn) ?? true : thread.offered?.(turn) ?? true),

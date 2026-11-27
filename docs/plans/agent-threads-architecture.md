@@ -117,7 +117,7 @@ Stored sender for a message from another computer: `origin.from {node, thread, r
 
 ### 4.4 Starting a thread on another computer
 
-`thread_create` takes `computer` (a name from `list_computers`) and, to choose among several checkouts, a project id of that computer.
+`thread_create` takes `computer` (a name from `computer_list`) and, to choose among several checkouts, a project id of that computer.
 
 1. Local checks: "Let agents work on your other devices" is on and the computer is ticked (the existing `agentAccess.remoteSubagents` key and list, reworded; off and empty by default, read at every call); the caller is not a private thread and was not itself started from another device; caps and hops.
 2. Project: `projects.match` (a root commit and a remote in common). No strong match, or several, refuses with the candidates and their ids. Nothing is cloned (#484).

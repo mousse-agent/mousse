@@ -33,11 +33,11 @@ export const BOT_OWN_APP_TOOLS: readonly string[] = [
  * keeps one-off reminders and wakes (its own follow-ups). Like memory they are always on and never grantable, so bots made before them have them too;
  * only a chat turn gets them, so work never starts work.
  */
-export const BOT_WORK_TOOLS: readonly string[] = ['work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel', 'wake', 'watch_start', 'watch_list', 'watch_stop']
+export const BOT_WORK_TOOLS: readonly string[] = ['work_start', 'model_list', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel', 'wake', 'watch_start', 'watch_list', 'watch_stop']
 
 /**
  * The tools a bot's work splits a job among subagents with: start one on a title and a brief (on the work's model, or one
- * from `work_models`), send it a follow-up, wait for it, read its result, stop it. Like memory they are always on and
+ * from `model_list`), send it a follow-up, wait for it, read its result, stop it. Like memory they are always on and
  * never grantable: they give no power the work lacks, since each subagent is compiled from the same grant and holds less
  * (`BOT_SUBAGENT_APP_TOOLS`). Only a run's main turn gets them, never the chat, a consult or a subagent: one level.
  */
@@ -189,7 +189,7 @@ export const BOT_THREADS_PERMISSION = 'threads'
  * and on the owner's other computers that let agents work there), read their terminals, a thread's queue, its Git status
  * and diffs, and list the owner's computers.
  */
-export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_search', 'thread_read', 'thread_wait', 'terminal_read', 'queue_list', 'git_status', 'git_diff', 'list_computers']
+export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_search', 'thread_read', 'thread_wait', 'terminal_read', 'queue_list', 'git_status', 'git_diff', 'computer_list']
 
 /**
  * What changes threads: start one, message one, steer or stop one's turn, archive or unarchive one, hide one it started
@@ -367,7 +367,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   BOT_CARD_TOOL,
   BOT_REPORT_BUG_TOOL,
   ...BOT_MESSAGE_TOOLS,
-  'list_skills', 'load_skill', 'escalate', 'consult',
+  'skill_list', 'skill_load', 'escalate', 'consult',
   // The tool catalogue (docs/plans/bot-context.md §15): looking up a group, and calling its tools on Codex and Pi.
   BOT_CATALOGUE_TOOL, BOT_USE_TOOL
 ])

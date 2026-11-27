@@ -92,9 +92,9 @@ describe('the shared checks pass a refusal back as the tool error', () => {
   })
 
   it('the skill tools pass an ask on rather than reading it as "not granted"', () => {
-    const base = runAuthority({ tools: [], asks: (call) => call.kind === 'app' && call.tool === 'load_skill' })
+    const base = runAuthority({ tools: [], asks: (call) => call.kind === 'app' && call.tool === 'skill_load' })
     const withSkill: BotAuthority = { ...base.authority, skills: new Set(['s1']) }
-    expect(botAppToolRefusal(withSkill, 'load_skill', { skill: 's1' })).toBe(ASKED)
+    expect(botAppToolRefusal(withSkill, 'skill_load', { skill: 's1' })).toBe(ASKED)
   })
 })
 

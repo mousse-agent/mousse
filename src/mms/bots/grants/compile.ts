@@ -145,7 +145,7 @@ export interface CompileInput {
     applets?: boolean
     /**
      * A run's main turn: it may split its job among subagents (`BOT_SUBAGENT_TOOLS`), and lists the models they may run on
-     * (`work_models`). Never the chat, a consult or a subagent.
+     * (`model_list`). Never the chat, a consult or a subagent.
      */
     subagents?: boolean
     /** Work (including a reminder's work) and a scheduled run may park on time or events (`BOT_TURN_KINDS`). */
@@ -283,7 +283,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(secrets ? BOT_SECRET_TOOLS.filter((tool) => tool !== 'secret_run' || manifest.tools.includes('shell')) : []),
     ...(quickActions ? BOT_QUICK_ACTION_TOOLS : []),
     ...(shared?.tasks ? BOT_TASK_TOOLS : []),
-    ...(skills.length || allSkills ? ['list_skills', 'load_skill'] : []),
+    ...(skills.length || allSkills ? ['skill_list', 'skill_load'] : []),
     ...(own?.escalate ? ['escalate'] : []),
     ...(own?.consult ? ['consult'] : []),
     ...(own?.workWaiting ? ['work_wait'] : []),
@@ -301,7 +301,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(own?.cards ? [BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL] : []),
     ...(own?.bots ? BOT_MESSAGE_TOOLS : []),
     // A run's main turn splits its job among subagents, on models from the same list the chat picks work's from.
-    ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'work_models'] : []),
+    ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'model_list'] : []),
     // The catalogue's own tools: they reach nothing themselves, and every tool called through them is held to this list.
     ...(own?.catalogue ? [BOT_CATALOGUE_TOOL, ...(own.catalogue === 'use_tool' ? [BOT_USE_TOOL] : [])] : [])
   ])].sort()

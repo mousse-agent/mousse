@@ -1,4 +1,5 @@
 import type { BotChip, BotChipIcon } from './chat'
+import { canonicalToolName } from '../../toolAliases'
 
 /**
  * Activity chips (Bot Phase 1 §5.8, bot-ui C3). Mousse makes them from the calls the authority
@@ -160,7 +161,9 @@ function classifyFile(tool: string, input: unknown, ctx: BotChipContext): Classi
 
 const DEPTH_WORDS: Record<string, string> = { deep: 'taking more time', quick: 'going quicker', normal: 'back to the usual pace' }
 
-function classify(tool: string, input: unknown, ctx: BotChipContext): Classified | null {
+function classify(name: string, input: unknown, ctx: BotChipContext): Classified | null {
+  // A call an older activation recorded under a tool's old name reads as the tool it was renamed to.
+  const tool = canonicalToolName(name)
   const args = record(input)
   if (READ_TOOLS.has(tool) || WRITE_TOOLS.has(tool)) return classifyFile(tool, input, ctx)
   if (LOOK_BACK_TOOLS.has(tool)) {
@@ -215,11 +218,11 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
       return { kind: 'consult', icon: 'think', live: 'looking into', ...(context ? { detail: shortChipText(context, 30) } : {}) }
     }
     case 'skill':
-    case 'load_skill': {
+    case 'skill_load': {
       const skill = str(args.skill)
       return { kind: 'skill', icon: 'think', live: 'using a skill', ...(skill ? { detail: shortChipText(skill, 30) } : {}) }
     }
-    case 'list_skills': return { kind: 'skill', icon: 'think', live: 'looking at its skills' }
+    case 'skill_list': return { kind: 'skill', icon: 'think', live: 'looking at its skills' }
     // One of the owner's MCP tools: the server's name ("using GitHub"), never the tool or its arguments.
     case 'mcp': {
       const server = str(args.server)
@@ -233,7 +236,7 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'work_stop': return { kind: 'work_stop', icon: 'think', live: 'stopping' }
     case 'work_note': return { kind: 'work_note', icon: 'think', live: 'noting it' }
     case 'work_list': return { kind: 'work_look', icon: 'think', live: 'checking on its work' }
-    case 'work_models': return { kind: 'work_look', icon: 'think', live: 'looking at your models' }
+    case 'model_list': return { kind: 'work_look', icon: 'think', live: 'looking at your models' }
     case 'remind': return { kind: 'remind', icon: 'schedule', live: 'setting a reminder' }
     case 'wake': return { kind: 'wake', icon: 'schedule', live: 'setting a wake-up' }
     // Messages to the owner's other bots: each one sent is a chip; a look at who they are is not.
@@ -253,7 +256,7 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'queue_list':
     case 'git_status':
     case 'git_diff':
-    case 'list_computers': return { kind: 'threads_look', icon: 'read', live: 'reading your threads' }
+    case 'computer_list': return { kind: 'threads_look', icon: 'read', live: 'reading your threads' }
     case 'terminal_read': return { kind: 'threads_look', icon: 'read', live: 'reading a terminal' }
     case 'thread_wait': return { kind: 'thread_wait', icon: 'think', live: 'waiting on a thread' }
     // Steering, forking, handing a fork back and answering an approval: each its own chip, with the thread to open.
