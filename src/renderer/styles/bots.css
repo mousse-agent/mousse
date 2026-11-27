@@ -498,9 +498,9 @@ html[data-theme] .app .bot-chat-pane::after { content: ''; position: absolute; i
 .bot-browser-tabs > button { display: inline-flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; max-width: 180px; height: 26px; padding: 0 10px; border-radius: var(--ui-row-radius); font-size: 12.5px; color: var(--text-secondary); white-space: nowrap; transition: background var(--ui-dur-fast) ease, color var(--ui-dur-fast) ease; }
 .bot-browser-tabs > button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .bot-browser-tabs > button > svg { flex: none; }
-.bot-browser-tabs > button:hover:not(.is-on) { background: var(--ui-hover); color: var(--text-primary); }
+.bot-browser-tabs > button:hover:not(.is-on) { background-color: var(--ui-hover); color: var(--text-primary); }
 .bot-browser-tabs > button.is-on { background: var(--ui-raised); color: var(--text-primary); }
-.bot-browser-tabs > button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.bot-browser-tabs > button:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 /* The panel's strip closes it: the browser's own Close is not shown here. */
 .bot-side .watched-browser-bar > button[aria-label='Close the browser view'] { display: none; }
 .bot-side .bot-file-head { border-bottom: 0; padding: 4px 4px 8px 12px; }
