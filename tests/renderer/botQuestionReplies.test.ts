@@ -161,6 +161,50 @@ describe('a question in the bot chat', () => {
     expect(fake.calls.filter(([name]) => name === 'answerQuestion')).toEqual([['answerQuestion', 'flats', 'q_1', 'Flat B']])
   })
 
+  it('a tap that sets waiting work going again says the bot is back on it until that work posts, as a typed message shows typing', async () => {
+    const work = (status: 'paused' | 'queued' | 'running') => [{ id: 'act_w1', title: 'GitHub App', status, startedAt: '2026-11-27T06:10:00.000Z', ...(status === 'paused' ? { waitsFor: 'answer' as const } : {}) }]
+    const status = () => transcript().querySelector('[data-work-id="act_w1"]')?.textContent
+    flats.work = work('paused')
+    try {
+      await open([bubble({ id: 'qr', activationId: 'act_w1' })])
+      expect(status()).toBeUndefined()
+      await click(button('Flat B'))
+      await settle()
+      expect([...transcript().querySelectorAll('.bot-system-line')].some((element) => element.textContent === 'You answered “Flat B”')).toBe(true)
+      // The service lists the work as waiting its turn, then running.
+      fake.bots = [{ ...flats, work: work('queued') }]
+      await act(async () => fake.emit.changed('flats'))
+      await settle()
+      expect(status()).toBe('Flat finder will get back to GitHub App')
+      fake.bots = [{ ...flats, work: work('running') }]
+      await act(async () => fake.emit.changed('flats'))
+      await settle()
+      expect(status()).toBe('Flat finder is back on GitHub App')
+      // The owner types meanwhile: a chat turn of its own; the work still carries on.
+      await act(async () => fake.emit.message('flats', message(2000, { id: 'typed', author: 'owner', text: 'signed in', activationId: 'act_chat' })))
+      await settle()
+      expect(status()).toBe('Flat finder is back on GitHub App')
+      // The work posts: its own message says the rest.
+      await act(async () => fake.emit.message('flats', message(2001, { id: 'report', text: 'The app is made.', activationId: 'act_w1' })))
+      await settle()
+      expect(status()).toBeUndefined()
+    } finally {
+      delete flats.work
+    }
+  })
+
+  it('a tap answering the chat (no work waits on it) shows no such line', async () => {
+    flats.work = [{ id: 'act_w1', title: 'GitHub App', status: 'running', startedAt: '2026-11-27T06:10:00.000Z' }]
+    try {
+      await open([bubble({ activationId: 'act_chat' })])
+      await click(button('Flat B'))
+      await settle()
+      expect(transcript().querySelector('[data-work-id]')).toBeNull()
+    } finally {
+      delete flats.work
+    }
+  })
+
   it('one the bot goes with a default on says what and when; once it went with it, says so and still takes a late tap; answered late, says both', async () => {
     const choices = [{ label: 'Flat A' }, { label: 'Flat B' }]
     const at = '2026-11-07T15:30:00.000Z'
