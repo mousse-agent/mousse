@@ -192,7 +192,7 @@ function DownloadsPopover({ anchorRef, placement, entries, target, onClose, onIn
 
   return (
     <FloatingPortal>
-      <div ref={contentRef} className="downloads-popover" role="dialog" aria-label="Downloads" style={style}>
+      <div ref={contentRef} className={`downloads-popover${computers.length > 1 ? ' computers' : ''}`} role="dialog" aria-label="Downloads" style={style}>
         <DownloadsList
           entries={entries}
           plan={plan}

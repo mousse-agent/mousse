@@ -349,3 +349,5 @@ html[data-theme='high-contrast'] .downloads-icon-btn.accent { color: var(--text-
 /* The update list's computers: a reason it can't update is quieter than a way it does. */
 .downloads-row-skip { color: var(--ui-faint); }
 .downloads-everywhere { flex: 1; }
+/* With computers listed, a row fits its version change and way on one line beside its action. */
+.downloads-popover.computers { width: 344px; }
