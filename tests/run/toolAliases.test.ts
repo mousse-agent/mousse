@@ -158,6 +158,11 @@ describe("the thread family's old names", () => {
     expect(canonicalToolCall('thread_send', { threadId: 't', content: 'Go', intent: 'work' })).toEqual({ name: 'thread_send', args: { threadId: 't', content: 'Go', intent: 'work' } })
   })
 
+  it('delegate_task and create_subagent are thread_create kind subagent, whatever kind the call names', () => {
+    expect(canonicalToolCall('delegate_task', { title: 'A', prompt: 'p', kind: 'thread' })).toEqual({ name: 'thread_create', args: { title: 'A', prompt: 'p', kind: 'subagent' } })
+    expect(canonicalToolCall('create_subagent', { name: 'A', task: 'p', access: 'write' })).toEqual({ name: 'thread_create', args: { kind: 'subagent', title: 'A', prompt: 'p', workspace: 'isolated', role: 'implement', wake: 'always' } })
+  })
+
   const holding = (...ids: string[]): EffectiveAgentGrants => ({ skills: [], mcpTools: [], builtinTools: ids.map((id) => ({ id, source: 'explicit' as const })), denied: [] })
 
   it("in a definition's grant hold only their own variant of the new tool, and the new name holds every variant", () => {
@@ -174,7 +179,15 @@ describe("the thread family's old names", () => {
       ['thread_hide', 'thread_stop', { threadId: 't', runId: 'r' }, false],
       ['thread_send', 'thread_send', { threadId: 't', content: 'Do this', intent: 'work' }, true],
       ['thread_send', 'thread_steer', { threadId: 't', runId: 'r', text: 'Note' }, true],
-      ['thread_interrupt', 'thread_stop', { threadId: 't', runId: 'r' }, true]
+      ['thread_interrupt', 'thread_stop', { threadId: 't', runId: 'r' }, true],
+      // A delegate_task grant starts subagents and never a thread; a thread_create grant starts both.
+      ['delegate_task', 'thread_create', { kind: 'subagent', title: 'A', prompt: 'p' }, true],
+      ['delegate_task', 'thread_create', { kind: 'thread', projectId: 'p', title: 'A' }, false],
+      ['delegate_task', 'thread_create', { projectId: 'p', title: 'A' }, false],
+      ['create_subagent', 'thread_create', { kind: 'subagent', title: 'A', prompt: 'p' }, true],
+      ['create_subagent', 'thread_create', { kind: 'thread', projectId: 'p', title: 'A' }, false],
+      ['thread_create', 'thread_create', { kind: 'subagent', title: 'A', prompt: 'p' }, true],
+      ['thread_create', 'delegate_task', { title: 'A', prompt: 'p' }, true]
     ]
     for (const [grant, called, args, held] of rows) expect(definitionToolGranted(called, holding(grant), [], args), `${grant} → ${called} ${JSON.stringify(args)}`).toBe(held)
   })

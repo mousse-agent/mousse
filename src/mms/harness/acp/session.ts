@@ -1921,7 +1921,7 @@ export class AcpSessions {
           : isCommand
             ? commandActivity(event.rawInput, event.title)
             : undefined
-        const record = subagentToolName(event.name) ? (recordSubagentCall(event.name, event.rawInput, {}) ?? undefined) : undefined
+        const record = recordSubagentCall(event.name, event.rawInput, {}) ?? undefined
         // A start with a title only names a Mousse tool by it (`computer_use_request (mousse MCP Server)`): kept as that
         // title, a form `mousseServerToolOf` reads, never made into another name.
         const name = event.name ?? (event.title !== undefined && mousseServerToolOf(event.title)?.server === 'mousse' ? event.title : undefined)
@@ -1936,7 +1936,7 @@ export class AcpSessions {
             ? activity.command
             : title
         // Any other call's row shows what it was called with (a search's query, a fetch's URL), as Claude's rows do.
-        const plain = !subagent && !isCommand && !subagentToolName(name)
+        const plain = !subagent && !isCommand && !subagentToolName(name, event.rawInput)
         const args = plain && !cua ? acpArgs(event.rawInput) : undefined
         openTools.set(event.toolCallId, {
           title,
@@ -2015,9 +2015,7 @@ export class AcpSessions {
           const toolName = tracked?.name ?? event.name
           const rawInput = tracked?.rawInput ?? event.rawInput
           const outputText = extractToolOutputText(event)
-          const record = subagentToolName(toolName)
-            ? (recordSubagentCall(toolName, rawInput, { text: outputText, isError: event.status === 'failed' }) ?? undefined)
-            : undefined
+          const record = recordSubagentCall(toolName, rawInput, { text: outputText, isError: event.status === 'failed' }) ?? undefined
           // Any other call's row keeps its result text (bounded where the row is kept), as Claude's rows do: a web
           // search's row lists the sites it found from it.
           const resultOutput = !record && outputText && (tracked?.plain ?? true) ? { output: outputText } : undefined

@@ -67,7 +67,7 @@ export type ToolClass = 'read' | 'mutation' | 'delegation'
  * child no wider than yourself) is every delegation tool's and every thread holds it, readers and Plan included;
  * `threads.start` (an independent thread or a fork) is not held under a Plan ceiling or by a read-only child.
  */
-export type ToolCapability = 'threads.start' | 'themes' | 'quick_actions'
+export type ToolCapability = 'threads.delegate' | 'threads.start' | 'themes' | 'quick_actions'
 
 export const TOOL_CLASSES: ReadonlySet<string> = new Set<ToolClass>(['read', 'mutation', 'delegation'])
 
@@ -358,6 +358,17 @@ export interface MousseTool {
    * handler checks it. Registration refuses a tool that takes such an argument without it.
    */
   authorize?: ToolAuthorize
+  /**
+   * A tool whose calls come in kinds, each held to its own declaration (docs/plans/tool-api.md §2.1: `thread_create`'s
+   * `kind: subagent | thread`). `of` reads a call's kind and the arguments that kind takes (an older caller names none),
+   * or throws why the call names no kind. The tool is listed and usable as its widest kind; every check of a call (its
+   * targets, the ceiling, a read-only child, what the turn lacks, a bot's grant, a definition's, asking first) reads its
+   * kind's declaration, and the handler gets the call with `kind` in it.
+   */
+  kinds?: {
+    of(args: Record<string, unknown>, ctx: { caller: McpCaller; turn: AppToolTurn; toolCallId: string }): { kind: string; args: Record<string, unknown> }
+    declarations: Readonly<Record<string, MousseTool>>
+  }
   handler(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> | ToolOutcome
 }
 

@@ -595,8 +595,20 @@ export class ToolRegistry {
    * (`compileTool`), step by step: the bot's grant, the targets, what the turn lacks, a definition's grants, asking
    * first, then its handler.
    */
-  private async callAdmitted(name: string, tool: MousseTool, args: Record<string, unknown>, caller: McpCaller, site: CallSite): Promise<ToolOutcome> {
+  private async callAdmitted(name: string, registered: MousseTool, args: Record<string, unknown>, caller: McpCaller, site: CallSite): Promise<ToolOutcome> {
     const { active, turn, request } = site
+    // A tool whose calls come in kinds (`kinds`): every check below holds the call to its kind's declaration, and the
+    // tool runs it with its kind named.
+    let tool = registered
+    if (registered.kinds) {
+      try {
+        const call = registered.kinds.of(args, { caller, turn, toolCallId: request.toolCallId })
+        tool = registered.kinds.declarations[call.kind]
+        args = call.args
+      } catch (error) {
+        return refused('invalid_arguments', error instanceof Error ? error.message : String(error))
+      }
+    }
     // A native helper's call holds none of what the run is offered only because it is not a subagent (asking the person,
     // goals, tasks, secrets, quick actions): availability alone would let it call them.
     if (request.helper && tool.offered && tool.offered(turn) !== true && tool.offered(hostingTurn(turn)) === true)
@@ -638,8 +650,8 @@ export class ToolRegistry {
       // so it stops at its deadline or when the owner writes.
       const quick = BOT_CHAT_QUICK_TOOLS.has(name) ? turn.bot?.quickCalls : undefined
       outcome = quick
-        ? await quick.run({ tool: name, readOnly: true, signal: ctx.signal, call: (signal) => this.runHandler(tool, args, { ...ctx, signal }, turn.toolAccess) })
-        : await this.runHandler(tool, args, ctx, turn.toolAccess)
+        ? await quick.run({ tool: name, readOnly: true, signal: ctx.signal, call: (signal) => this.runHandler(registered, args, { ...ctx, signal }, turn.toolAccess) })
+        : await this.runHandler(registered, args, ctx, turn.toolAccess)
     } catch (error) {
       if (ledgerId) ledger?.failed(ledgerId)
       if (error instanceof McpToolError) throw error

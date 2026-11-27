@@ -300,6 +300,7 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
     title: toolCall.title,
     summary: toolCall.summary,
     details: toolCall.details,
+    input: toolCall.input,
   })
   if (typed && !subagentTool) {
     return {

@@ -66,7 +66,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     expect(init.status).toBe(200)
     expect(init.body.result.serverInfo.name).toBe('mousse')
     expect(init.body.result.capabilities.tools).toBeTruthy()
-    expect(init.body.result.instructions).toMatch(/delegate_task/)
+    expect(init.body.result.instructions).toMatch(/thread_create with kind "subagent"/)
 
     const initialized = await rpc(server.url, attachment.token, { jsonrpc: '2.0', method: 'notifications/initialized' })
     expect(initialized.status).toBe(202)
@@ -76,7 +76,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     const list = await rpc(server.url, attachment.token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} })
     const names = list.body.result.tools.map((tool: { name: string }) => tool.name).sort()
     // The fake host offers no browser, skills, quick actions, web or dev GUI: only the tools it can serve are listed.
-    expect(names).toEqual(['answer_subagent', 'approval_respond', 'computer_list', 'continue_subagent', 'delegate_task', 'list_subagents', 'model_list', 'publish_applet', 'question_ask', 'question_withdraw', 'queue_enqueue',
+    expect(names).toEqual(['answer_subagent', 'approval_respond', 'computer_list', 'continue_subagent', 'list_subagents', 'model_list', 'publish_applet', 'question_ask', 'question_withdraw', 'queue_enqueue',
       'queue_list', 'queue_update', 'read_applet', 'task_cancel', 'task_create', 'task_list', 'task_status', 'task_update', 'thread_archive', 'thread_create', 'thread_fork',
       'thread_list', 'thread_read', 'thread_return', 'thread_search', 'thread_send', 'thread_stop', 'thread_update', 'thread_wait'])
 
@@ -341,7 +341,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     // The codes are the wire contract provider runtimes see, so they are pinned literally (-32601 is JSON-RPC's method-not-found).
     expect(unknown.body.error).toMatchObject({ code: -32601, data: { reason: 'mousse_unknown_tool' } })
     // A hidden (in-process only) tool is unknown over MCP.
-    expect((await rpc(server.url, attachment.token, call(3, 'create_subagent', { name: 'a', task: 'b' }))).body.error).toMatchObject({ code: -32601 })
+    expect((await rpc(server.url, attachment.token, call(3, 'recall_subagent', { agent: 'a', task: 'b' }))).body.error).toMatchObject({ code: -32601 })
     // A tool that fails on its own input is a tool result the model can read, not a protocol error.
     const invalid = await rpc(server.url, attachment.token, call(4, 'task_update', { id: '' }))
     expect(invalid.body.error).toBeUndefined()
@@ -425,7 +425,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
       await surviving
       expect(reasons.get('thread-b')).toBe('The Mousse MCP server stopped')
     })
-    it('compacts tools/list schemas for Antigravity bearers so delegate_task stays well inside its eager tool budget, while keeping full schemas for other providers', async () => {
+    it('compacts tools/list schemas for Antigravity bearers so thread_create (and its subagents) stays well inside its eager tool budget, while keeping full schemas for other providers', async () => {
       const { server, bearer } = await setup()
       const codex = bearer({ instanceId: 'codex', generation: 'codex|default|0|0' })
       const codexList = await rpc(server.url, codex.token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
@@ -438,20 +438,24 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
       const agyTools = agyList.body.result.tools as Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>
       expect(agyTools.map((t) => t.name)).toEqual(codexTools.map((t) => t.name))
 
-      const codexDelegate = codexTools.find((t) => t.name === 'delegate_task')!
-      const agyDelegate = agyTools.find((t) => t.name === 'delegate_task')!
+      const codexDelegate = codexTools.find((t) => t.name === 'thread_create')!
+      const agyDelegate = agyTools.find((t) => t.name === 'thread_create')!
+      // Listed first, where delegate_task was: a budget that runs out drops the tools after it, never this one.
+      expect(agyTools[0]!.name).toBe('thread_create')
       // Full schema stays untouched on non-Antigravity providers.
       expect(codexDelegate.description.length).toBeGreaterThan(1000)
       // Antigravity gets a compact schema that keeps every parameter, enum and required field intact.
       expect(agyDelegate.description.length).toBeLessThanOrEqual(120)
-      expect(JSON.stringify(agyDelegate).length).toBeLessThan(1000)
+      // Both kinds' arguments, each said once.
+      expect(JSON.stringify(agyDelegate).length).toBeLessThan(1600)
       expect(JSON.stringify(agyTools).length).toBeLessThan(JSON.stringify(codexTools).length * 0.5)
       const agyProps = (agyDelegate.inputSchema as { properties: Record<string, Record<string, unknown>>; required: string[] }).properties
       const codexProps = (codexDelegate.inputSchema as { properties: Record<string, Record<string, unknown>>; required: string[] }).properties
       expect(Object.keys(agyProps).sort()).toEqual(Object.keys(codexProps).sort())
       expect((agyDelegate.inputSchema as { required: string[] }).required).toEqual((codexDelegate.inputSchema as { required: string[] }).required)
-      expect(agyProps.workspace).toEqual({ type: 'string', enum: ['isolated', 'shared'] })
-      expect(agyProps.wake).toEqual({ type: 'string', enum: ['always', 'settled_only'] })
+      expect(agyProps.kind).toEqual({ type: 'string', enum: ['subagent', 'thread'] })
+      expect(agyProps.workspace).toMatchObject({ type: 'string', enum: expect.arrayContaining(['isolated', 'shared']) })
+      expect(agyProps.wake).toEqual({ type: 'string', enum: ['always', 'settled_only'], description: 'kind subagent only.' })
     })
   })
 })

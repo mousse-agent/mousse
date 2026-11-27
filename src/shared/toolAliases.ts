@@ -33,7 +33,12 @@ export const MOUSSE_TOOL_ALIASES: Readonly<Record<string, string>> = Object.free
   thread_interrupt: 'thread_stop',
   thread_merge_back: 'thread_return',
   thread_hide: 'thread_update',
-  thread_steer: 'thread_send'
+  thread_steer: 'thread_send',
+  // `thread_create kind: subagent` (§2.1). `delegate_task` adds the kind (`MOUSSE_TOOL_ALIAS_ARGUMENTS`); `create_subagent`
+  // names its child its own way (`MOUSSE_TOOL_ALIAS_TRANSLATIONS`). `create_subagents` starts several children, so it is no
+  // one call of `thread_create`: it stays a hidden tool of its own that starts each one as `delegate_task` does.
+  delegate_task: 'thread_create',
+  create_subagent: 'thread_create'
 })
 
 /**
@@ -44,7 +49,8 @@ export const MOUSSE_TOOL_ALIAS_ARGUMENTS: Readonly<Record<string, Readonly<Recor
   queue_edit: { op: 'edit' },
   queue_remove: { op: 'remove' },
   queue_reorder: { op: 'move' },
-  queue_promote_to_steer: { op: 'send_now' }
+  queue_promote_to_steer: { op: 'send_now' },
+  delegate_task: { kind: 'subagent' }
 })
 
 type ToolArgs = Record<string, unknown>
@@ -64,6 +70,16 @@ const MOUSSE_TOOL_ALIAS_TRANSLATIONS: Readonly<Record<string, { args(old: ToolAr
   thread_steer: {
     args: ({ text, ...rest }: ToolArgs) => ({ ...rest, ...(text !== undefined ? { content: text } : {}), intent: 'note' }),
     holds: (args: ToolArgs) => args.intent === 'note'
+  },
+  // `create_subagent {name, task, workspace?, access?}` is a subagent titled `name`: a reader in the caller's folder unless
+  // it asked for `access: write`, which works in a worktree of its own (as the orchestrator's named subagents always did).
+  create_subagent: {
+    args: ({ name, task, workspace, access, ...rest }: ToolArgs) => {
+      const write = access === 'write'
+      const place = write ? 'isolated' : workspace ?? 'shared'
+      return { ...rest, kind: 'subagent', title: name, prompt: task, workspace: place, role: write ? 'implement' : 'research', ...(place === 'shared' ? { readOnly: true } : {}), wake: 'always' }
+    },
+    holds: (args: ToolArgs) => args.kind === 'subagent'
   }
 })
 

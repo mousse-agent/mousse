@@ -137,8 +137,8 @@ describe('thread_create on another computer (issue #1160)', () => {
     // Auto narrowed to the limit that computer set for this one (Auto-accept edits).
     expect(far).toMatchObject({ name: 'Run the Linux tests', projectId: ownerProject, permissionMode: 'accept_edits', startedFrom: { node: t.callerNode, agent: { thread: thread.id, mode: 'accept_edits' } } })
     expect(far!.createdByThreadId).toBeUndefined()
-    // Out of that computer's sidebar: an agent started it, and not as an independent thread.
-    expect(far!.hidden).toBe(true)
+    // A handoff (#2004): an agent's thread shows in that computer's sidebar.
+    expect(far!.hidden).toBeUndefined()
     // The first message runs there as the agent's: source mcp, the sender stored, in the narrowed mode.
     const run = t.owner.runEngine.getRun(out.body.runId)!
     expect(run).toMatchObject({ threadId: far!.id, source: 'mcp', outcome: { sentByAgent: true } })
@@ -152,17 +152,15 @@ describe('thread_create on another computer (issue #1160)', () => {
       expect.objectContaining({ node: t.node, remoteThreadId: far!.id, state: 'launched', firstMessageState: 'sent', remoteMode: 'accept_edits' })
     ])
     expect(noteOf(thread.id)).toEqual([expect.objectContaining({ launchedThread: expect.objectContaining({ threadId: qualifyId(t.node, far!.id) }) })])
-    // Here too it reaches the window's list, marked hidden: the launcher's side panel (Started threads), All and search
-    // find it, and My threads in the sidebar leaves it out.
+    // Here too it reaches the window's list, shown: the launcher's side panel (Started threads), All and search find it.
     const lists = t.caller.bridge.lists
     await lists.reconcile()
-    await vi.waitFor(() => expect(lists.threads().find((row) => row.id === qualifyId(t.node, far!.id))).toMatchObject({ hidden: true }), { timeout: 20_000 })
+    await vi.waitFor(() => expect(lists.threads().find((row) => row.id === qualifyId(t.node, far!.id))).toBeDefined(), { timeout: 20_000 })
     const rows = (await t.dispatch('threads.list', {})).threads as Thread[]
     expect(launchedThreadsOf(rows, thread.id).map((row) => row.id)).toEqual([qualifyId(t.node, far!.id)])
     const row = rows.find((entry) => entry.id === qualifyId(t.node, far!.id))!
     const filter = { query: '', projectId: null, botId: null, computerIds: [], archived: false }
     const context = { groupOf: (id: string) => id, projectName: () => undefined, botName: () => undefined }
-    expect(threadInFilter(row, { ...filter, show: 'mine' }, context)).toBe(false)
     expect(threadInFilter(row, { ...filter, show: 'all' }, context)).toBe(true)
     expect(threadInFilter(row, { ...filter, show: 'all', query: 'Linux tests' }, context)).toBe(true)
 
@@ -321,7 +319,7 @@ describe('thread_create on another computer (issue #1160)', () => {
     for (const params of sent) expect(params).not.toHaveProperty('hidden')
   }, 120_000)
 
-  it('a new launch sends hidden with every attempt of its create, the same each time', async () => {
+  it('a new launch sends hidden: false with every attempt of its create, the same each time', async () => {
     const { thread, create } = await caller()
     const port = portOf()
     const real = port.call.bind(port)
@@ -340,9 +338,10 @@ describe('thread_create on another computer (issue #1160)', () => {
     const again = await create({ computer: t.node, clientRequestId: 'new-hidden' })
     expect(again.isError, JSON.stringify(again.body)).toBeUndefined()
     expect(sent.length).toBeGreaterThanOrEqual(2)
-    for (const params of sent) expect(params).toMatchObject({ hidden: true })
+    // An agent's thread is a handoff there too (#2004): shown.
+    for (const params of sent) expect(params).toMatchObject({ hidden: false })
     expect(launchedBy(thread.id)).toHaveLength(1)
-    expect(launchedBy(thread.id)[0]!.hidden).toBe(true)
+    expect(launchedBy(thread.id)[0]!.hidden).toBeUndefined()
   }, 120_000)
 
   describe('a project of that computer named with projectId needs nothing here', () => {

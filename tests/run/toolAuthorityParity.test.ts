@@ -187,9 +187,13 @@ async function snapshotOf(kind: TurnKind) {
     const tokens = binding === 'per_call' ? (turn.attemptToken ? { _mousse_attempt: turn.attemptToken } : { _mousse_turn: turn.turnToken }) : {}
     const words = (text: string) => text.split(run.runId).join('<run>')
     const dispatch: Record<string, string> = {}
-    /** Each tool called with no arguments, and each that takes `threadId` with another thread and a private one. */
+    /**
+     * Each tool called with no arguments, each of a tool's kinds (`thread_create subagent`), and each that takes
+     * `threadId` with another thread and a private one.
+     */
     const calls = registry.list().flatMap((tool) => [
       { key: tool.name, name: tool.name, args: {} },
+      ...Object.keys(tool.kinds?.declarations ?? {}).map((kind) => ({ key: `${tool.name} ${kind}`, name: tool.name, args: { kind } })),
       ...(JSON.stringify(tool.inputSchema).includes('"threadId"')
         ? ['thread-b', 'thread-private'].map((threadId) => ({ key: `${tool.name} ${threadId}`, name: tool.name, args: { threadId } }))
         : [])
