@@ -190,6 +190,23 @@ describe('a message the owner\'s bot sent', () => {
     expect(bubble!.querySelector('.chat-user-text')?.textContent).toBe(BOT_WORDS)
   })
 
+  it('a bot of another computer shows the name and face that came with its message, not the agent label, with nothing to open', async () => {
+    useBotsStore.setState({ bots: [alpha as never], loaded: true })
+    // As the routed send stores it: the sender as `from`, and the bot with its look (this computer has no record of it).
+    const letter = agentMessage('far-chat', 'Pip', BOT_WORDS, { computer: 'ANIMATRIX' })
+    const far: ChatMessage = {
+      ...typed('t1', letter.text),
+      origin: { kind: 'agent', from: { node: 'nod_far', thread: 'far-chat', run: 'run:far', title: 'Pip' }, hops: 1, body: { head: letter.head, tail: letter.tail }, bot: { id: 'far-bot', name: 'Pip', look: { colour: 'teal', accessory: 'crown' } } }
+    }
+    await show([far, reply('t1')])
+    const [bubble] = bubbles()
+    expect(header(bubble!)!.querySelector('.chat-agent-sender-kind')?.textContent).toBe('Pip')
+    expect(header(bubble!)?.textContent).not.toContain('Agent')
+    expect(header(bubble!)!.querySelector('.bot-face')).not.toBeNull()
+    expect(header(bubble!)!.querySelector('button')).toBeNull()
+    expect(bubble!.querySelector('.chat-user-text')?.textContent).toBe(BOT_WORDS)
+  })
+
   it('a bot this window does not list shows the name it had when it sent, with nothing to open', async () => {
     useBotsStore.setState({ bots: [], loaded: true })
     await show([fromBot(), reply('t1')])

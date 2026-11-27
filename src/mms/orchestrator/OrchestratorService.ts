@@ -121,7 +121,7 @@ import { botMessage } from '../run/mcp/appTools/agentMessage'
  * The owner's bot behind a start, message or Stop ("use your threads"): its id and name, the chat turn (activation) it
  * acts in, and the limit of the other device whose message started or continued that turn (absent: this computer).
  */
-type BotSender = { botId: string; name: string; activationId: string; limit?: PermissionMode }
+type BotSender = { botId: string; name: string; look?: BotLook; activationId: string; limit?: PermissionMode }
 import { createHash, randomUUID } from 'node:crypto'
 import { QueueCommands, type QueueIntent } from '../run/QueueCommands'
 import type { PlannedQueueCommand, QueueEffects } from '../queue/queueJournal'
@@ -162,7 +162,8 @@ import { remoteSubagentPreamble, subagentPreamble, withoutSubagentPreamble } fro
 import { parseQualifiedId, qualifyId } from '../../shared/threadRef'
 import { RemoteThreadLaunches, type RemoteLaunchOutcome } from './RemoteThreadLaunches'
 import { RemoteLaunchedThreads, RemoteThreadRefusal } from './RemoteLaunchedThreads'
-import type { RoutedAgentMark } from '../../shared/bridge/routed'
+import { ROUTED_AGENT_BOT_SINCE, type RoutedAgentBot, type RoutedAgentMark } from '../../shared/bridge/routed'
+import { lookFields, type BotLook } from '../../shared/bots/personal/look'
 import { REMOTE_THREAD_COMMAND, remoteThreadFingerprint, remoteThreadRefusal } from './remoteThreadRequest'
 import type { RemoteLaunchRecord } from '../run/delegation/remoteLaunches'
 import { RemoteSubagents } from './RemoteSubagents'
@@ -916,10 +917,12 @@ const QUEUE_TOOL_OF: Record<AgentQueueCommand['op'], BotThreadActTool> = {
  * `threadId`: a foreign id there would be read as, and rewritten to, a thread of this computer that does not exist.
  */
 function agentOriginOf(agent: AgentSender | AgentOrigin): AgentOrigin {
+  // A bot of another computer is named with its face: this computer has no record of it.
+  const bot = agent.bot ?? ('remote' in agent ? agent.remote?.bot : undefined)
   const extra = {
     ...(agent.hops !== undefined ? { hops: agent.hops } : {}),
     ...(agent.body ? { body: { head: agent.body.head, tail: agent.body.tail } } : {}),
-    ...(agent.bot ? { bot: { id: agent.bot.id, name: agent.bot.name } } : {})
+    ...(bot ? { bot: { id: bot.id, name: bot.name, ...(bot.look ? { look: lookFields(bot.look) } : {}) } } : {})
   }
   if ('remote' in agent && agent.remote)
     return { kind: 'agent', from: { node: agent.remote.node, thread: agent.threadId, run: agent.runId, title: agent.remote.title }, ...extra }
@@ -5977,6 +5980,8 @@ export class OrchestratorService extends EventEmitter {
     // The launcher's own mode, never looser than its run; that computer narrows it to the limit it set for this one.
     const permissionMode = bot ? bot.limit ?? 'full' : narrowPermissionMode(this.requestedPermissionMode(callerThreadId), this.runPermissionMode(options.actor.runId))
     const title = input.title?.trim() || 'New Thread'
+    // A bot's first message there shows its name and face, decided once here so every attempt sends the same message.
+    const senderBot = bot && input.firstMessage !== undefined ? await this.routedBotFor(computer.node, bot) : undefined
     engine.store.db.transaction(() => {
       engine.store.putReceipt({
         clientRequestId: key,
@@ -5995,14 +6000,17 @@ export class OrchestratorService extends EventEmitter {
         title,
         remoteProjectId: project.projectId,
         worktree: input.workspace === 'new_worktree',
-        // A bot's thread sends none, as before, and shows there; an agent's is hidden unless it asked otherwise.
-        hidden: bot ? null : input.hidden !== false,
+        // A bot's sends hidden only when it named it; none shows the thread there, as before. An agent's is hidden unless
+        // it asked otherwise.
+        hidden: bot ? input.hidden ?? null : input.hidden !== false,
         instanceId: input.instanceId ?? null,
         // That computer's `threads.setModel` reads a level packed with the model, as every computer does.
         model: input.model ? agentModelId(input.model, input.effort) : null,
         permissionMode,
         firstMessage: input.firstMessage === undefined ? null : { content: input.firstMessage, mode: input.mode ?? 'agent' },
-        mark: { thread: callerThreadId, run: options.actor.runId, title: this.titleOf(callerThreadId) ?? '', hops, mode: permissionMode }
+        // A bot is named there by its name, as its later messages are (`remoteAgentMark`), not by its chat's title.
+        mark: { thread: callerThreadId, run: options.actor.runId, title: bot ? bot.name : this.titleOf(callerThreadId) ?? '', hops, mode: permissionMode },
+        ...(senderBot ? { senderBot } : {})
       })
     })
     return this.remoteThreadResult(await launches.launch(key), false)
@@ -6065,6 +6073,24 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /** The personal bot as another computer shows it on its message (`ROUTED_AGENT_BOT_KEY`): display only, never trusted there. */
+  private routedBot(bot: BotSender): RoutedAgentBot {
+    return { id: bot.botId, name: bot.name, ...(bot.look ? { look: lookFields(bot.look) } : {}) }
+  }
+
+  /**
+   * `routedBot` for a launch's first message, when `node` takes it. A computer from before it, or one whose versions
+   * cannot be read now, gets none, so every attempt of the launch sends what the first one did.
+   */
+  private async routedBotFor(node: string, bot: BotSender): Promise<RoutedAgentBot | undefined> {
+    try {
+      const versions = await this.remoteComputers?.versions?.(node, AbortSignal.timeout(20_000))
+      return (versions?.['orchestrator.send'] ?? 0) >= ROUTED_AGENT_BOT_SINCE ? this.routedBot(bot) : undefined
+    } catch {
+      return undefined
+    }
+  }
+
   /** What the thread tools call for a thread launched on another computer: the service, with the mark built here. */
   private remoteThreadsHost(service: RemoteLaunchedThreads): RemoteThreadsHost {
     return {
@@ -6080,7 +6106,12 @@ export class OrchestratorService extends EventEmitter {
         if (denied) return Promise.reject(new RemoteThreadRefusal(denied.code, denied.message, target.computer))
         return service.follow(target, request)
       },
-      send: (target, input, options) => service.send(target, input, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, true, 'thread_send') }),
+      send: (target, input, options) => {
+        const mark = this.remoteAgentMark(options.actor, true, 'thread_send')
+        // The owner's bot is shown there by its name and face; a computer from before it drops them (`ROUTED_DROPPABLE_KEYS`).
+        const bot = options.actor.remote ? undefined : this.botSenderOf(options.actor, 'thread_send')
+        return service.send(target, input, { clientRequestId: options.clientRequestId, mark, ...(bot ? { bot: this.routedBot(bot) } : {}) })
+      },
       steer: (target, runId, text, options) => service.steer(target, runId, text, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, true, 'thread_steer') }),
       interrupt: (target, runId, options) => service.interrupt(target, runId, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, false, 'thread_interrupt') }),
       archive: (target, archived, options) => service.archive(target, archived, { idem: options.idem, mark: this.remoteAgentMark(options.actor, false, 'thread_archive') })

@@ -1,4 +1,4 @@
-import { ROUTED_AGENT_ARCHIVE_SINCE, ROUTED_AGENT_KEY, ROUTED_AGENT_READ, ROUTED_RUN_WAIT_DEADLINE_MS, ROUTED_RUN_WAIT_MAX_MS, type RoutedAgentMark } from '../../shared/bridge/routed'
+import { ROUTED_AGENT_ARCHIVE_SINCE, ROUTED_AGENT_BOT_KEY, ROUTED_AGENT_KEY, ROUTED_AGENT_READ, ROUTED_RUN_WAIT_DEADLINE_MS, ROUTED_RUN_WAIT_MAX_MS, type RoutedAgentBot, type RoutedAgentMark } from '../../shared/bridge/routed'
 import { outgoingMessageText, qualifyRoutedResult, ROUTED_THREAD_ID_KEYS } from '../../shared/bridge/routedIds'
 import { parseQualifiedId, qualifyId } from '../../shared/threadRef'
 import { DomainRpcError } from '../protocol/domainRegistry'
@@ -520,7 +520,7 @@ export class RemoteLaunchedThreads {
    * `thread_send`: a marked `orchestrator.send` there, keyed by the caller's request key, so a retry reaches the first
    * send and never makes a second run. A send that computer may or may not have taken is `uncertain`.
    */
-  async send(target: RemoteTarget, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; mark: RoutedAgentMark }): Promise<{ status: 'sent'; runId?: string; queued: boolean; replayed: boolean; mode?: string } | RemoteUncertain> {
+  async send(target: RemoteTarget, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; mark: RoutedAgentMark; bot?: RoutedAgentBot }): Promise<{ status: 'sent'; runId?: string; queued: boolean; replayed: boolean; mode?: string } | RemoteUncertain> {
     this.assertAllowed(target)
     const self = this.deps.port()?.self?.()
     // A later message from here is new work: a Stop still on its way there from before must not end it.
@@ -532,6 +532,8 @@ export class RemoteLaunchedThreads {
         content: outgoingMessageText(input.content, { node: target.node, ...(self ? { self } : {}) }),
         mode: input.mode,
         clientRequestId: options.clientRequestId,
+        // A personal bot's message: that computer shows its name and face (one from before it, the agent label).
+        ...(options.bot ? { [ROUTED_AGENT_BOT_KEY]: options.bot } : {}),
         [ROUTED_AGENT_KEY]: options.mark
       }, { idem: options.clientRequestId, what: 'the message' })).result
     } catch (error) {
