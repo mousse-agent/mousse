@@ -168,7 +168,7 @@ describe('the snapshot an owner sends', () => {
     await expect(backend.stop(bot.id)).rejects.toMatchObject({ code: 'stream_unknown' })
   })
 
-  it('lists no thread a bot keeps out of the sidebar, nor a subagent below one, on a phone or another computer, and still opens it by id', async () => {
+  it('lists a thread a bot keeps out of the sidebar on another computer, marked hidden, with its state; a phone leaves it out; both open it by id', async () => {
     const shown = row(1)
     const hidden = row(2, { hidden: true, startedByBot: { botId: 'b1', name: 'Alpha' }, name: 'Quick check' })
     const below = row(3, { lineage: { parentThreadId: hidden.id, rootThreadId: hidden.id, relationship: 'subagent' } } as Partial<Thread>)
@@ -180,11 +180,15 @@ describe('the snapshot an owner sends', () => {
       questions: { listPendingForThread: () => [] },
       platform: { chats: { snapshot: () => ({ chats: [] }), onChange: () => () => undefined } }
     } as never
-    for (const options of [{}, { private: true }]) {
-      const snapshot = new MmsListsSource(fake, undefined, options).snapshot()
-      expect(snapshot.threads.map((thread) => thread.id), JSON.stringify(options)).toEqual([shown.id])
-      expect(Object.keys(snapshot.status)).toEqual([shown.id])
-    }
+    // Another computer lists it and the subagent below it, with its lineage.
+    const own = new MmsListsSource(fake, undefined, { private: true }).snapshot()
+    expect(own.threads.map((thread) => thread.id)).toEqual([shown.id, hidden.id, below.id])
+    expect(own.threads.find((thread) => thread.id === hidden.id)).toMatchObject({ hidden: true, startedByBot: { botId: 'b1', name: 'Alpha' } })
+    expect(Object.keys(own.status)).toEqual([shown.id, hidden.id, below.id])
+    // A phone may not read the mark: its list leaves out the thread and the subagent below it, and their state.
+    const phone = new MmsListsSource(fake, undefined, {}).snapshot()
+    expect(phone.threads.map((thread) => thread.id)).toEqual([shown.id])
+    expect(Object.keys(phone.status)).toEqual([shown.id])
     // Hidden is not private: the bot's chat on any device opens it by id.
     expect(new MmsRemoteBackend(fake).snapshot(hidden.id)).toMatchObject({ thread: { id: hidden.id } })
   })
@@ -209,7 +213,7 @@ describe('the snapshot an owner sends', () => {
     // The computer that reads it keeps the mark on its row.
     expect(threadRow(own.find((thread) => thread.id === launched.id)!, 0, { node: 'n-far', offline: false })).toMatchObject({ hidden: true, startedFrom: { agent: { thread: 't-launcher' } } })
     expect(threadRow(own.find((thread) => thread.id === shown.id)!, 0, { node: 'n-far', offline: false })).not.toHaveProperty('hidden')
-    // A phone has no side panel to find it from: its list leaves it out, as a bot's.
+    // A phone may not read the mark: its list leaves it out, as a bot's.
     expect(new MmsListsSource(fake, undefined, {}).snapshot().threads.map((thread) => thread.id)).toEqual([shown.id])
   })
 

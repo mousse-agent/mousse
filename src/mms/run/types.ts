@@ -1,6 +1,7 @@
 import type { ExecutionBinding } from '../../shared/harness/types'
 import type { AgentAccessLevel } from '../../shared/settings'
 import type { PermissionMode } from '../../shared/permissionMode'
+import type { BotLook } from '../../shared/bots/personal/look'
 export type RunStatus =
   | 'queued'
   | 'starting'
@@ -440,7 +441,14 @@ export interface AgentActor {
    * cleaned title, and `mode` the most the sender may do here: the narrowest of the mode it carried and the limit this
    * computer set for that device. `hops` is already the owner's own count (the larger of the carried count and its own).
    */
-  remote?: { node: string; computer: string; title: string; mode: PermissionMode }
+  remote?: {
+    node: string
+    computer: string
+    title: string
+    mode: PermissionMode
+    /** The calling computer's personal bot that sent it (`ROUTED_AGENT_BOT_KEY`), cleaned: shown on its message, never trusted. */
+    bot?: { id: string; name: string; look: BotLook }
+  }
 }
 
 /** `pr_update` is no longer written (see `isRetiredInboxRow`). */

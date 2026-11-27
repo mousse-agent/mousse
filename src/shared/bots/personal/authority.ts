@@ -3,6 +3,7 @@ import type { SpendScope } from '../../harness/spend'
 import type { NeutralTool } from '../../harness/tools'
 import type { PermissionMode } from '../../permissionMode'
 import type { BotLane, BotModelPick, BotWorkModelName } from './definition'
+import type { BotLook } from './look'
 
 /**
  * The contracts of a personal bot's authority (PR 6 §2 and §4). A bot activation's runs are held to
@@ -25,9 +26,10 @@ export interface BotThreads {
   roleOf(threadId: string): BotThreadRole | undefined
   /**
    * The bot a thread belongs to, by id and its name now, or undefined when it is no bot's: how a thread the bot started
-   * and a message it sent are shown as the bot's ("use your threads"). Never throws.
+   * and a message it sent are shown as the bot's ("use your threads"). With its look, which another computer shows as
+   * its face. Never throws.
    */
-  botOf?(threadId: string): { botId: string; name: string } | undefined
+  botOf?(threadId: string): { botId: string; name: string; look?: BotLook } | undefined
   /**
    * The turn (activation) when it may start, message, stop or archive the owner's threads (a chat turn its owner's
    * message or tapped answer started, or a run), with `limit`: the permission limit of the other device that message came from

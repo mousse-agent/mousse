@@ -1,6 +1,5 @@
-import { isSubagentThread, visibleThreads } from '../../shared/threadLineage'
+import { isSubagentThread, remoteSubagentParentId, visibleThreads } from '../../shared/threadLineage'
 import { sortSidebarThreads } from '../../shared/threadSidebarSort'
-import { qualifyId } from '../../shared/threadRef'
 import type { Project, Thread } from '../../shared/types'
 import { openableThread } from './threadHistory'
 
@@ -40,9 +39,8 @@ function parentOf(thread: Thread, { byId, standIns }: ThreadIndex): Thread | und
   if (isSubagentThread(thread)) return byId.get(thread.lineage!.parentThreadId)
   const standIn = standIns.get(thread.id)
   if (standIn) return byId.get(standIn.lineage!.parentThreadId)
-  const from = thread.startedFrom
-  if (!from?.agent?.subagent) return undefined
-  return byId.get(qualifyId(from.node, from.agent.thread)) ?? (thread.node && thread.node !== from.node ? byId.get(from.agent.thread) : undefined)
+  const parentId = remoteSubagentParentId(thread, (id) => byId.has(id))
+  return parentId === undefined ? undefined : byId.get(parentId)
 }
 
 /**

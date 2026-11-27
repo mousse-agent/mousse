@@ -4,7 +4,7 @@
  * itself from the person reading the transcript.
  */
 import { describe, expect, it } from 'vitest'
-import { parseRoutedAgentMark } from '../../../../src/mms/bridge/routed/remoteAgent'
+import { parseRoutedAgentBot, parseRoutedAgentMark } from '../../../../src/mms/bridge/routed/remoteAgent'
 import {
   AGENT_MESSAGE_END,
   AGENT_MESSAGE_PREFIX,
@@ -76,5 +76,27 @@ describe('the mark the owner takes', () => {
   ]
   it.each(refused)('refuses %s', (_why, mark) => {
     expect(() => parseRoutedAgentMark(mark)).toThrow()
+  })
+})
+
+describe('the personal bot the owner shows on an agent\'s message (issue #2003)', () => {
+  const good = { id: 'bot-1', name: 'Pip', look: { colour: 'teal', accessory: 'crown' } }
+  it('takes a short id, a cleaned name and a look of known values, which grant nothing', () => {
+    expect(parseRoutedAgentBot(good)).toEqual(good)
+    // A value this version does not draw is the default; the name is cleaned like a sender's title.
+    expect(parseRoutedAgentBot({ ...good, name: 'Pip\n[x]', look: { colour: 'plaid', accessory: 'cape' } })).toEqual({ id: 'bot-1', name: 'Pip x', look: { colour: 'coral', accessory: 'none' } })
+  })
+  // [why it is refused, the bot]: nothing unbounded reaches the owner's transcript.
+  const refused: Array<[string, unknown]> = [
+    ['not an object', 'Pip'],
+    ['an extra field', { ...good, avatar: 'data:image/png;base64,AAAA' }],
+    ['a long id', { ...good, id: 'b'.repeat(300) }],
+    ['a long name', { ...good, name: 'P'.repeat(400) }],
+    ['an empty name', { ...good, name: ' ' }],
+    ['a look field it does not know', { ...good, look: { ...good.look, image: 'x' } }],
+    ['a long look value', { ...good, look: { ...good.look, colour: 'c'.repeat(100) } }]
+  ]
+  it.each(refused)('refuses %s', (_why, bot) => {
+    expect(() => parseRoutedAgentBot(bot)).toThrow()
   })
 })

@@ -17,6 +17,7 @@ import { BOT_THREADS_NOT_OWNER_TEXT } from '../../src/shared/bots/personal/walls
 import { botCatalogueGroup, botCoreTool } from '../../src/shared/bots/personal/catalogue'
 import type { BotAuthority, NormalisedCall } from '../../src/shared/bots/personal/authority'
 import type { ChatMessage, Thread } from '../../src/shared/types'
+import { botWorkInto, projectBotWork } from '../../src/mms/run/delegation/botWork'
 import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -725,5 +726,66 @@ describe('a bot\'s thread tools ("use your threads")', () => {
       for (const id of ['private', 'other-bot']) expect(await text('thread_read', { threadId: id, view }), `${id} ${view}`).toMatchObject({ error: true, text: expect.stringContaining('is not available to you') })
       expect((await text('thread_read', { threadId: 'subagent', view })).error, `subagent ${view}`).toBe(false)
     }
+  })
+})
+
+describe('a bot\'s chat reaching its work\'s row in the thread tree (thread_stop as thread_interrupt, thread_send)', () => {
+  let fx: DelegationFixture | undefined
+  afterEach(() => {
+    fx?.dispose()
+    fx = undefined
+  })
+
+  it('a Stop and a message go to the bots through the bot port, never to the work\'s runs or its thread\'s inbox', async () => {
+    fx = delegationFixture()
+    const engine = fx.engine
+    const homeRun = await fx.runningRun('home')
+    const workRun = await fx.runningRun('work')
+    projectBotWork(engine.store, { activationId: 'act-9', homeThreadId: 'home', threadId: 'work', status: 'running', createdAt: NOW, endedAt: null })
+    const port = { authorizeSubagent: () => ({ ok: true as const }), reserveSubagent: () => {}, onSubagentSettled: () => true, stopBotWork: vi.fn(async () => 'stopped' as const), noteBotWork: vi.fn(() => 'noted') }
+    engine.setBotPort(port)
+    const grant = { ...botStarterManifest(), appTools: [...botStarterManifest().appTools, BOT_THREADS_PERMISSION] }
+    const compiled = compileBotThread({
+      grant, digest: botManifestDigest(grant), thread: {}, scratch: fx.profileHome, profileHome: fx.profileHome,
+      nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 600_000 },
+      botTools: { escalate: true, consult: false, memory: true, threads: 'all' }
+    })
+    if (!compiled.ok) throw new Error(compiled.error.message)
+    const authority = createBotAuthority({
+      activationId: 'chat-1', role: 'activation', permissions: compiled.permissions, waiting: () => false,
+      counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null
+    })
+    const threads = new Map<string, Thread>([['home', thread('home', { botOwned: true } as Partial<Thread>)], ['work', thread('work', { botOwned: true } as Partial<Thread>)]])
+    const deps = { host: { activationOf: () => ({ botId: 'b1', activationId: 'chat-1', lane: 'chat' }) }, activity: { onAppResult: vi.fn(), onAllowed: vi.fn(), drain: () => [] } } as unknown as BotAppToolDeps
+    const fake = fakeAppToolHost({
+      threadMeta: (id) => threads.get(id),
+      listThreads: () => [...threads.values()],
+      botRole: (id) => (id === 'home' || id === 'work' ? 'activation' : undefined),
+      sendToThread: vi.fn(async () => ({ runId: 'run-x', sequence: 1, queued: false, replayed: false })),
+      stopRun: vi.fn(async (_threadId, runId) => ({ status: 'accepted' as const, runId, sequence: 1, replayed: false })),
+      showAgentAction: vi.fn(),
+      noteOnThread: vi.fn()
+    })
+    const { registry, turns, request } = appToolRegistry(engine, fake.host, { bots: () => deps })
+    turns.register(appTurn({ threadId: 'home', runId: homeRun.runId, bot: authority }))
+    const call = (name: string, args: Record<string, unknown>) => registry.call(name, args, request({ threadId: 'home', runId: homeRun.runId }))
+
+    const stopped = await call('thread_interrupt', { threadId: 'work', runId: workRun.runId })
+    expect(stopped.isError, stopped.text).toBeFalsy()
+    expect(port.stopBotWork).toHaveBeenCalledWith('act-9')
+    expect(fake.host.stopRun).not.toHaveBeenCalled()
+    expect(engine.getRun(workRun.runId)!.status).toBe('running')
+    for (const intent of [undefined, 'note']) {
+      const sent = await call('thread_send', { threadId: 'work', content: 'Only cordless ones.', ...(intent ? { intent } : {}) })
+      expect(sent.isError, intent).toBeFalsy()
+    }
+    // Credited to the bot turn that sent it, once per request.
+    const sentFrom = { from: authority.activationId, requestKey: expect.stringMatching(/^thread_send:home:/) }
+    expect(port.noteBotWork.mock.calls).toEqual([['act-9', 'Only cordless ones.', sentFrom], ['act-9', 'Only cordless ones.', sentFrom]])
+    expect(fake.host.sendToThread).not.toHaveBeenCalled()
+    expect(fake.host.noteOnThread).not.toHaveBeenCalled()
+    expect(engine.store.db.statement("SELECT COUNT(*) AS n FROM inbox WHERE thread_id = 'work'").get()!.n).toBe(0)
+    // The projection is the bots' alone: nothing here changed it.
+    expect(botWorkInto(engine.store, 'work')!.status).toBe('running')
   })
 })

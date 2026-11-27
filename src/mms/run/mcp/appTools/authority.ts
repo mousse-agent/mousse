@@ -153,8 +153,9 @@ export interface ToolAccessPolicy {
   /**
    * Where a personal bot's thread tool ("use your threads") may reach: the scope for a thread (`botThreadReach`, the
    * rule its list and search follow too) or a project, or the refusal's words. Absent: a bot reaches nothing.
+   * `botWork`: a Stop or a message, which reaches the bot's own running work too (its handler forwards it to the bots).
    */
-  botReach?(caller: McpCaller, target: { threadId?: string; projectId?: string }, options?: { read?: boolean }): { scope: ToolScope } | { refused: string }
+  botReach?(caller: McpCaller, target: { threadId?: string; projectId?: string }, options?: { read?: boolean; botWork?: boolean }): { scope: ToolScope } | { refused: string }
 }
 
 /**
@@ -383,7 +384,7 @@ function botThreadScope(tool: MousseTool, needs: ToolNeeds, args: Record<string,
   let reach: { scope: ToolScope } | { refused: string }
   try {
     // A tool that changes nothing outside the caller's own state reaches the subagents below the owner's threads too (#1365).
-    reach = policy.botReach(caller, target, { read: needs.effect === 'none' || needs.effect === 'own' })
+    reach = policy.botReach(caller, target, { read: needs.effect === 'none' || needs.effect === 'own', botWork: tool.name === 'thread_send' || tool.name === 'thread_interrupt' })
   } catch {
     reach = { refused: target.threadId ? `Thread ${target.threadId} is not available to you.` : `${tool.name} is not available for this project.` }
   }
