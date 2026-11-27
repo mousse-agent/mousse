@@ -100,6 +100,19 @@
       "expiresAt": "2026-11-27T18:53:50.780Z"
     },
     {
+      "task": "one-shots-slice-2",
+      "session": "Animatrix-10734d",
+      "machine": "Animatrix",
+      "branch": "one-shots-slice-2",
+      "paths": [
+        "src/mms/harness/oneShot",
+        "src/mms/harness/acp",
+        "src/mms/providers"
+      ],
+      "claimedAt": "2026-11-27T16:58:27.324Z",
+      "expiresAt": "2026-11-27T18:58:27.324Z"
+    },
+    {
       "task": "s7d1-thread-tool-renames",
       "session": "LAPTOP-HIEROJK7-003c84",
       "machine": "LAPTOP-HIEROJK7",
