@@ -47,6 +47,8 @@ beforeAll(async () => {
     answerAction: () => answer()
   }
   Object.defineProperty(t.owner, 'personalBots', { value: { service, events: new EventEmitter(), liveActivity: () => undefined }, configurable: true })
+  // A bot reaches only its own computer until the owner adds a device to its Devices: the calling device is added.
+  t.owner.botDeviceAccess.set(BOT, { mode: 'chosen', nodes: [t.callerNode] })
   cleanups.push(() => { if (real) Object.defineProperty(t.owner, 'personalBots', real) })
 }, 120_000)
 afterAll(async () => {
