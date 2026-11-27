@@ -484,6 +484,36 @@ describe('Settings → Devices, new networking', () => {
     expect(routes).toContainEqual(expect.stringMatching(/^Same network\s*Found automatically · Available/))
   })
 
+  it('opens a computer’s routes, or its access, from the row itself', async () => {
+    // Paired both ways: a row under Computers I use and one under Can use this computer.
+    daemon({ devices: [device({ node: 'n1', route: 'lan' })] })
+    await mount()
+    const routes = () => host.querySelector('[aria-label="Routes to Studio"]')
+    expect(routes()).toBeNull()
+    await click(button('Show routes for Studio'))
+    expect(routes()).not.toBeNull()
+    expect(button('Hide routes for Studio')?.getAttribute('aria-expanded')).toBe('true')
+    await click(button('Hide routes for Studio'))
+    expect(routes()).toBeNull()
+    await click(button('Show access for Studio'))
+    expect(button('Hide access for Studio')?.getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('lists the same network once when it has a same-network address', async () => {
+    daemon({
+      devices: [device({ node: 'n1', direction: 'out', route: 'lan', approvedAddresses: ['tcp://192.168.1.20:47100'] })]
+    })
+    await mount()
+    await menuItems('Studio', 'out')
+    await click(button('Routes'))
+    const routes = [...host.querySelectorAll<HTMLElement>('[aria-label="Routes to Studio"] [data-route-state]')].map(
+      (row) => (row.textContent ?? '').replace(/\s+/g, ' ').trim()
+    )
+    expect(routes.filter((route) => route.startsWith('Same network'))).toEqual([
+      expect.stringMatching(/^Same network\s*192\.168\.1\.20:47100 · In use/)
+    ])
+  })
+
   it('says once that profiles in this account can read each other, with the reason as its tooltip', async () => {
     const d = daemon()
     await mount()
@@ -764,12 +794,14 @@ describe('Use another computer', () => {
 describe('routes (1b §1.3, §1.5)', () => {
   const tailnet = (host: string) => ({ route: `tcp://${host}:47100`, label: `${host}:47100`, cls: 'tailnet' as const })
 
-  it('lists the ticket destinations with their class, and offers routes to share only once "Also let" is ticked', async () => {
+  it('lists the ticket destinations, says how it reaches this computer once "Also let" is ticked, and offers other ways unticked', async () => {
+    const publicRoute = { route: 'tcp://203.0.113.7:7443', label: '203.0.113.7:7443', cls: 'public' as const }
     const d = daemon({}, {
       'netEngine.join.preview': () => ({
         kind: 1,
         destinations: [{ ...tailnet('100.101.7.2'), automatic: false }],
-        shareable: [tailnet('100.101.7.9')]
+        sameWay: [tailnet('100.101.7.9')],
+        shareable: [publicRoute]
       })
     })
     await scanDialog(d.state.status)
@@ -777,10 +809,13 @@ describe('routes (1b §1.3, §1.5)', () => {
     await pasteLink(link)
     expect(document.body.textContent).toContain('100.101.7.2:47100 (Tailscale)')
     // One way: nothing of this computer's is shared.
-    expect(document.body.textContent).not.toContain('Also share')
+    expect(document.body.textContent).not.toContain('reaches this computer')
+    expect(document.body.textContent).not.toContain('Other ways to reach this computer')
     await click(ALSO_LET('Studio'))
+    // Both ways: it reaches this computer the way this one reaches it, with no box to tick.
+    expect(document.body.textContent).toContain('Studio reaches this computer the same way: Tailscale 100.101.7.9:47100')
     const box = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find(
-      (item) => item.closest('label')?.textContent === 'Tailscale 100.101.7.9:47100'
+      (item) => item.closest('label')?.textContent === 'Internet 203.0.113.7:7443'
     )!
     expect(box.checked).toBe(false)
 

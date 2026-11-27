@@ -121,7 +121,7 @@ describe('phase1b.link-app', () => {
     if (!REAL_HELPER) fabric.network.routes.set(fakeIdentity('link-host'), [LAN, TAILNET])
     else fabric.mapClass('link-host', 'tailnet')
     const host = await fabric.computer('link-host')
-    // The joiner listens on a LAN and a tailnet address too; it shares none it was not asked to.
+    // The joiner listens on a LAN and a tailnet address too; it shares the kinds the link reached the host by.
     if (!REAL_HELPER)
       fabric.network.routes.set(fakeIdentity('link-joiner'), [JOINER_LAN, JOINER_TAILNET])
     const joiner = await fabric.computer('link-joiner')
@@ -222,13 +222,14 @@ describe('phase1b.link-app', () => {
       expect(await grants(host, joiner)).toBe(1)
       expect(await grants(joiner, host)).toBe(1)
     })
-    // Pairback carried the joiner's LAN address only: its tailnet one was not ticked under "Also share".
+    // Pairback carried the joiner's LAN address and, as the link reached the host over Tailscale too, its tailnet
+    // one: the host reaches it back the way it was reached. Nothing else of the joiner's went.
     if (!REAL_HELPER)
       await step('route_leak', () => {
         const sent = fabric.crossed
           .filter((message) => message.from === joiner.endpoint && message.header.t === 'pairback')
           .map((message) => message.header.routes)
-        expect(sent).toEqual([[JOINER_LAN]])
+        expect(sent).toEqual([[JOINER_LAN, JOINER_TAILNET]])
       })
     // No approval named the joiner: the host's row takes the name its hello says.
     await step('unnamed', () =>

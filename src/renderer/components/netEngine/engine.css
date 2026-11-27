@@ -15,6 +15,27 @@
   cursor: default;
 }
 
+/* A device row opens from anywhere on it: the chevron's click area covers the row (devices.css), while the row's
+   other controls and the parts of its line with a tooltip stay above that area. */
+.settings-item:has(> .settings-item-control .devices-row-toggle) {
+  position: relative;
+  cursor: pointer;
+}
+
+.settings-item:has(> .settings-item-control .devices-row-toggle) .engine-row-line > span[title],
+.device-row-controls > :not(.devices-row-toggle) {
+  position: relative;
+  z-index: 1;
+}
+
+.devices-row-chevron {
+  transition: transform calc(120ms * var(--ui-motion-scale, 1)) ease;
+}
+
+.devices-row-chevron.open {
+  transform: rotate(180deg);
+}
+
 .engine-row-line svg {
   vertical-align: -1px;
 }
