@@ -66,6 +66,12 @@ export interface PreparedBotTurn {
   /** Skill ids the turn may list and load. */
   skills: readonly string[]
   /**
+   * Checked again right before the turn binds, after its runtime was set up: what was checked when it was prepared (its
+   * work running, its grant and revision, its delegation), with the policy compiled now. A refusal fails the turn before
+   * anything is sent. Set for a work's subagent.
+   */
+  beforeBind?(): { policy: BindPolicy } | { refused: string; code: string }
+  /**
    * `none`: the first dispatch of a run, on a new thread that must have no history.
    * `cleared`: the first dispatch of a chat activation, on the home thread, whose context the engine
    * has just cleared (`clearConversationContext`): the transcript stays, the native context is empty.

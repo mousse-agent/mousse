@@ -587,34 +587,10 @@ export class ToolRegistry {
     // goals, tasks, secrets, quick actions): availability alone would let it call them.
     if (request.helper && tool.offered && tool.offered(turn) !== true && tool.offered(hostingTurn(turn)) === true)
       return refused('unavailable', `${name} belongs to the run that hosts this helper; a helper cannot use it.`)
-    // Narrowed from above since the turn started: checked as a Plan turn's, mode facts included.
-    const compiled = this.compiled(tool, site.narrowed ? plannedFromAbove(turn) : turn, caller)
-    // A bot's thread tool ("use your threads"): its grant first, which this turn holds only in the lanes that may use the
-    // tool and only while this computer allows it (a refusal there is the bot's ask, never a scope error), then where the
-    // call may reach, decided by the bot's rules.
-    if (compiled.botThreads) {
-      const refusal = compiled.grantRefusal(args)
-      if (refusal) return refusal
-    }
-    // Targets are checked first: a refused call asks nobody anything and leaves no ledger row.
-    let scope: ReturnType<typeof compiled.authorize>
-    try {
-      scope = compiled.authorize(caller, args, this.options.access)
-    } catch (error) {
-      const outcome = refusalOutcome(error)
-      if (!outcome) throw error
-      return this.revokedIfNarrowed(outcome, tool, args, caller, site)
-    }
-    const lacks = compiled.lacks()
-    if (lacks) return this.revokedIfNarrowed(lacks, tool, args, caller, site)
-    // A variant only a turn a person started may make (§1.3 "Provenance").
-    const person = compiled.personRefusal(args)
-    if (person) return person
-    // A bot turn: every other app tool is held to the bot's grant, on every call. A thread tool was checked above.
-    if (!compiled.botThreads) {
-      const refusal = compiled.grantRefusal(args)
-      if (refusal) return refusal
-    }
+    const held = this.heldNow(tool, args, caller, site)
+    if ('refusal' in held) return held.refusal
+    const { compiled } = held
+    let { scope } = held
     // A definition run: its grants, policy and approvals hold for every call, as in the in-process loop.
     // A call the runtime's gate already authorized in full (approval included, before it was
     // charged) is revalidated without asking again; any other call is authorized here.
@@ -628,6 +604,14 @@ export class ToolRegistry {
     if (ask) {
       const refusal = await this.askFirst(tool, caller, request.signal, args, ask, request.helper)
       if (refusal) return refusal
+      // Asking took time: a thread above may have switched to Plan, or a bot's grant narrowed, while the person answered.
+      // The call runs only under what holds now, never the authority it had when it asked.
+      const ceiling = this.callCeiling(site.threadId, site.credential.modeCeiling)
+      const now = ceiling === caller.modeCeiling ? { caller, site } : this.narrowedSite(caller, site, ceiling)
+      const still = this.heldNow(tool, args, now.caller, now.site)
+      if ('refusal' in still) return still.refusal
+      caller = now.caller
+      scope = still.scope
     }
     const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', ...(scope ? { scope } : {}) }
     const ledger = this.options.toolLedger?.(active)
@@ -653,6 +637,50 @@ export class ToolRegistry {
     }
     // A handler's own error result says why in words: it is put in the refusal shape here, once for every tool.
     return asRefusal(outcome)
+  }
+
+  /**
+   * What the call holds under `caller`'s ceiling now, checked step by step: the bot's grant, the targets, what the turn
+   * lacks, a person's provenance. The refusal, or the compiled tool and its scope. Run when the call is admitted, and
+   * again once a person answered its ask (`askFirst`), so what changed while it waited holds.
+   */
+  private heldNow(tool: MousseTool, args: Record<string, unknown>, caller: McpCaller, site: CallSite): { refusal: ToolOutcome } | { compiled: CompiledTool; scope: ReturnType<CompiledTool['authorize']> } {
+    const { turn } = site
+    // Narrowed from above since the turn started: checked as a Plan turn's, mode facts included.
+    const compiled = this.compiled(tool, site.narrowed ? plannedFromAbove(turn) : turn, caller)
+    // A bot's thread tool ("use your threads"): its grant first, which this turn holds only in the lanes that may use the
+    // tool and only while this computer allows it (a refusal there is the bot's ask, never a scope error), then where the
+    // call may reach, decided by the bot's rules.
+    if (compiled.botThreads) {
+      const refusal = compiled.grantRefusal(args)
+      if (refusal) return { refusal }
+    }
+    // Targets are checked first: a refused call asks nobody anything and leaves no ledger row.
+    let scope: ReturnType<CompiledTool['authorize']>
+    try {
+      scope = compiled.authorize(caller, args, this.options.access)
+    } catch (error) {
+      const outcome = refusalOutcome(error)
+      if (!outcome) throw error
+      return { refusal: this.revokedIfNarrowed(outcome, tool, args, caller, site) }
+    }
+    const lacks = compiled.lacks()
+    if (lacks) return { refusal: this.revokedIfNarrowed(lacks, tool, args, caller, site) }
+    // A variant only a turn a person started may make (§1.3 "Provenance").
+    const person = compiled.personRefusal(args)
+    if (person) return { refusal: person }
+    // A bot turn: every other app tool is held to the bot's grant, on every call. A thread tool was checked above.
+    if (!compiled.botThreads) {
+      const refusal = compiled.grantRefusal(args)
+      if (refusal) return { refusal }
+    }
+    return { compiled, scope }
+  }
+
+  /** `site` and `caller` under the ceiling `ceiling` read now, narrowed from above as `call` marks it. */
+  private narrowedSite(caller: McpCaller, site: CallSite, ceiling: ModeCeiling): { caller: McpCaller; site: CallSite } {
+    const narrowed = ceiling === 'plan' && site.credential.modeCeiling !== 'plan' && site.turn.modeCeiling !== 'plan'
+    return { caller: { ...caller, modeCeiling: ceiling }, site: { ...site, narrowed } }
   }
 
   /**
@@ -807,6 +835,11 @@ export class ToolRegistry {
     // call even though the credential was minted before.
     const caller: McpCaller = { threadId, runId: active, provider: credential.provider, modeCeiling: this.callCeiling(threadId, credential.modeCeiling), accessLevel: credential.accessLevel }
     return { threadId, active, turn, args, caller, boundToken }
+  }
+
+  /** `callCeiling` for the relay (`RelayAdmitter.ceilingNow`), read again once an approval came back. */
+  ceilingNow(threadId: string, ceiling: ModeCeiling): ModeCeiling {
+    return this.callCeiling(threadId, ceiling)
   }
 
   /** `ceiling` narrowed by the thread's ancestors now (`liveCeiling`); one that cannot be read narrows to `plan`. */

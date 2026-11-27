@@ -31,9 +31,10 @@ export interface BotThreads {
   /**
    * The turn (activation) when it may start, message, stop or archive the owner's threads (a chat turn its owner's
    * message or tapped answer started, or a run), with `limit`: the permission limit of the other device that message came from
-   * (absent: this computer's own window). Undefined for any other turn. Never throws.
+   * (absent: this computer's own window). Undefined for any other turn. A subagent's turn on `threadId` holds no more than
+   * its delegation inherited (read-only, or the narrower limit). Never throws.
    */
-  ownerTurn?(activationId: string): { limit?: PermissionMode } | undefined
+  ownerTurn?(activationId: string, threadId?: string): { limit?: PermissionMode } | undefined
   /**
    * The bot's chat thread (its home) for any of its threads (its chat, its work, a subagent, a consult): what it owns as
    * one bot, whichever turn made it (the scheduled jobs it made, the secrets its owner gave it). Undefined when the thread

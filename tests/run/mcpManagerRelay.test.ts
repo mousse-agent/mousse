@@ -2,6 +2,14 @@ import { describe, expect, it, vi } from 'vitest'
 import type { McpServerConfig } from '../../src/shared/integrations'
 import { McpManager, type InjectedMcpClient, type McpClientFactory } from '../../src/mms/integrations/mcp/McpManager'
 import { settingsStore, testServerConfig } from '../fixtures/agent-platform/integrations/helpers'
+import { RelayHandler } from '../../src/mms/run/mcp/relay/handler'
+import type { RelayCatalog } from '../../src/mms/run/mcp/relay/catalog'
+import type { RelayTool } from '../../src/mms/run/mcp/relay/names'
+import type { McpCallRequest } from '../../src/mms/run/mcp/appTools/registry'
+import type { AppToolTurn } from '../../src/mms/run/mcp/appTools/types'
+import type { ModeCeiling } from '../../src/mms/run/types'
+import type { PermissionMode } from '../../src/shared/permissionMode'
+import { appTurn } from './appToolsFixture'
 
 // The McpManager hardening the MCP relay relies on (plan §4.9): stable tool names, reconnecting a
 // closed client, per-call timeouts, a restart only when no other call runs, per-server listing.
@@ -325,4 +333,53 @@ it('a delete stops a queued list_changed pass from reconnecting', async () => {
     await mcp.restartServer('inst-echo'); release(); await Promise.all([first, second])
     expect(connects).toBe(1); expect(mcp.getActiveCount()).toBe(0)
   } finally { release(); await mcp.shutdown() }
+})
+
+describe('a relayed call through the real manager, held to the ceiling when it is sent', () => {
+  // The server's connection went away after it was listed, so the call connects again; a thread above switches to Plan
+  // while it does (`planDuringConnect`), after any approval came back.
+  it.each([
+    ['approved after asking, then Plan lands while it connects: refused, and the server never gets it', 'accept_edits', true],
+    ['unasked (Full access), then Plan lands while it connects: refused, and the server never gets it', 'full', true],
+    ['unasked, and nothing changes above: it reaches the server', 'full', false]
+  ] as const)('%s', async (_name, mode: PermissionMode, planDuringConnect) => {
+    let above: ModeCeiling | undefined
+    const callTool = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'said' }] }))
+    const { factory, clients } = clientFactory({ callTool })
+    const mcp = manager(factory)
+    const [tool] = await mcp.getEnabledTools()
+    await clients[0]!.close()
+    await vi.waitFor(() => expect(mcp.getActiveCount()).toBe(0))
+    const connect = factory.connect.bind(factory)
+    factory.connect = async (...args) => {
+      if (planDuringConnect) above = 'plan'
+      return connect(...args)
+    }
+    const relayed: RelayTool = { name: 'echo__say', description: 'echo', inputSchema: { type: 'object' }, installationId: tool!.installationId!, serverName: 'echo', toolName: tool!.toolName, providerName: tool!.providerName, configRevision: tool!.configRevision ?? '' }
+    const turn = { ...appTurn({ threadId: 't1', runId: 'r1' }), turnToken: 'tt' } as AppToolTurn
+    const askApproval = vi.fn(async () => ({ permission: 'allow' }))
+    const handler = new RelayHandler({
+      catalog: { listing: () => [relayed], resolve: () => relayed } as unknown as RelayCatalog,
+      manager: mcp,
+      registry: {
+        admit: async () => ({ threadId: 't1', active: 'r1', turn, args: {}, caller: { threadId: 't1', runId: 'r1', provider: 'codex', modeCeiling: 'default' as const, accessLevel: 'lineage' as const }, boundToken: 'tt' }),
+        ceilingNow: (_threadId, ceiling) => above ?? ceiling
+      },
+      projectPathFor: () => undefined,
+      permissionModeFor: () => mode,
+      askApproval: askApproval as never
+    })
+    const request: McpCallRequest = {
+      credential: { threadId: 't1', runId: 'r1', provider: 'codex', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', relay: { approvals: 'mousse' }, current: () => true },
+      toolCallId: 'mcp:c1',
+      signal: new AbortController().signal
+    }
+    const call = handler.call(relayed.name, { _mousse_turn: 'tt' }, request)
+    if (planDuringConnect) await expect(call).rejects.toMatchObject({ code: 'mousse_ceiling_exceeded' })
+    else expect(await call).toEqual({ text: 'said' })
+    expect(clients).toHaveLength(2)
+    expect(askApproval).toHaveBeenCalledTimes(mode === 'full' ? 0 : 1)
+    expect(callTool).toHaveBeenCalledTimes(planDuringConnect ? 0 : 1)
+    await mcp.shutdown()
+  })
 })

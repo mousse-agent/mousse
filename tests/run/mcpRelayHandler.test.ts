@@ -34,6 +34,10 @@ function setup(options: {
   answer?: 'allow' | 'reject'
   callTool?: RelayHost['manager']['callTool']
   allowed?: { allowed: boolean; reason?: string }
+  /** The caller's ceiling as admission reads it now (what is above the thread); default: the turn's own. */
+  callerCeiling?: AppToolTurn['modeCeiling']
+  /** `ToolRegistry.ceilingNow`, read again once an approval came back. */
+  ceilingNow?: (threadId: string, ceiling: AppToolTurn['modeCeiling']) => AppToolTurn['modeCeiling']
 } = {}) {
   const turn = { ...appTurn({ threadId: 't1', runId: 'r1', projectPath: '/p' }), turnToken: 'tt', ...options.turn } as AppToolTurn
   const ledger = { start: vi.fn(() => 'l1'), commit: vi.fn(), failed: vi.fn() }
@@ -48,12 +52,12 @@ function setup(options: {
   const askApproval = vi.fn(async () => ({ permission: options.answer ?? 'allow' }))
   const admit = vi.fn(async (rawArgs: Record<string, unknown>) => {
     const { _mousse_turn: _token, ...args } = rawArgs
-    return { threadId: 't1', active: 'r1', turn, args, caller: { threadId: 't1', runId: 'r1', provider: 'codex', modeCeiling: turn.modeCeiling, accessLevel: 'lineage' as const }, boundToken: 'tt' }
+    return { threadId: 't1', active: 'r1', turn, args, caller: { threadId: 't1', runId: 'r1', provider: 'codex', modeCeiling: options.callerCeiling ?? turn.modeCeiling, accessLevel: 'lineage' as const }, boundToken: 'tt' }
   })
   const handler = new RelayHandler({
     catalog: catalog as unknown as RelayCatalog,
     manager: manager as unknown as RelayHost['manager'],
-    registry: { admit },
+    registry: { admit, ...(options.ceilingNow ? { ceilingNow: options.ceilingNow } : {}) },
     projectPathFor: (threadId) => (threadId === 't1' ? '/p' : undefined),
     readOnlyThread: () => options.readOnly === true,
     permissionModeFor: () => options.mode ?? 'accept_edits',
@@ -72,6 +76,28 @@ function setup(options: {
 }
 
 const refusal = (code: string) => expect.objectContaining({ code }) as unknown as McpToolError
+
+describe('RelayHandler: a thread above that switched to Plan', () => {
+  it('holds the call to Plan at admission, by the ceiling read now rather than the credential\'s: nothing asks or runs', async () => {
+    const { call, askApproval, manager } = setup({ relay: { approvals: 'mousse' }, callerCeiling: 'plan' })
+    await expect(call()).rejects.toEqual(refusal('mousse_ceiling_exceeded'))
+    expect(askApproval).not.toHaveBeenCalled()
+    expect(manager.callTool).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['switched to Plan while the person answered: refused after the approval, and the server never sees it', 'plan', false],
+    ['stayed as it was: the approved call runs', 'default', true]
+  ] as const)('above the thread %s', async (_name, now, runs) => {
+    const ceilingNow = vi.fn(() => now)
+    const { call, askApproval, manager } = setup({ relay: { approvals: 'mousse' }, ceilingNow })
+    if (runs) expect(await call()).toEqual({ text: 'said' })
+    else await expect(call()).rejects.toEqual(refusal('mousse_ceiling_exceeded'))
+    expect(askApproval).toHaveBeenCalledTimes(1)
+    expect(ceilingNow).toHaveBeenCalledWith('t1', 'default')
+    expect(manager.callTool).toHaveBeenCalledTimes(runs ? 1 : 0)
+  })
+})
 
 describe('RelayHandler.list', () => {
   it('lists the catalogue of the thread\'s project, names, descriptions and schemas only', () => {
@@ -94,7 +120,7 @@ describe('RelayHandler.call', () => {
     expect(admit).toHaveBeenCalledTimes(1)
     expect(manager.isToolCallAllowed).toHaveBeenCalledWith(say.providerName, '/p', { kind: 'main' })
     // The server's own `clientRequestId` argument reaches it; the turn token does not.
-    expect(manager.callTool).toHaveBeenCalledWith(say.providerName, { text: 'hi', clientRequestId: 'keep-me' }, '/p', expect.any(AbortSignal), { kind: 'main' }, undefined, { timeoutMs: RELAY_CALL_TIMEOUT_MS })
+    expect(manager.callTool).toHaveBeenCalledWith(say.providerName, { text: 'hi', clientRequestId: 'keep-me' }, '/p', expect.any(AbortSignal), { kind: 'main' }, undefined, { timeoutMs: RELAY_CALL_TIMEOUT_MS, beforeDispatch: expect.any(Function) })
     expect(ledger.start).toHaveBeenCalledWith(expect.objectContaining({ id: 'mcp:c1', name: say.name }))
     expect(ledger.commit).toHaveBeenCalledWith('l1')
     expect(askApproval).not.toHaveBeenCalled()

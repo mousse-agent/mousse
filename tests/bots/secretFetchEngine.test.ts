@@ -2,7 +2,7 @@ import { afterEach, expect, it } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { createBotActivitySink } from '../../src/mms/bots/activity/BotActivitySink'
-import { botFixture, createBot, start, type BotFixture } from './botFixture'
+import { botFixture, createBot, start, type BotFixture, startSubagent, subagentRuns } from './botFixture'
 let f: BotFixture
 afterEach(() => f?.close())
 it("supplies the ledger to work and the chat's own turns, and service reads never become held calls", async () => {
@@ -74,8 +74,7 @@ it('withholds the service ledger from a subagent of work', async () => {
   const parent = await start(f, workId)
   expect(parent.prepared.authority.secretFetch).toBeTypeOf('function')
   await parent.prepared.authority.subagents!.start({ title: 'Look', brief: 'Read models' })
-  const dispatch = f.store.dispatches(workId).find((row) => row.kind === 'subagent')!
-  expect((await start(f, workId, dispatch.n)).prepared.authority.secretFetch).toBeUndefined()
+  expect((await startSubagent(f, subagentRuns(f, workId)[0]!)).prepared.authority.secretFetch).toBeUndefined()
 })
 it('supplies the ledger and its instruction to a scheduled run', async () => {
   f = botFixture()

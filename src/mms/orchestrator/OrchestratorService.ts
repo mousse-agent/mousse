@@ -155,6 +155,7 @@ import type { McpAttachmentProvider, McpToolBoundary } from '../run/mcp/MousseMc
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
 import { cancelQueuedWakes, deliverAtToolBoundary, pendingWakeEffects, releaseToolBoundary, wakeThreads } from '../run/delegation/wake'
+import { isBotParentRow, withoutBotParentRows } from '../run/delegation/botPort'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
 import { remoteSubagentPreamble, subagentPreamble, withoutSubagentPreamble } from '../run/delegation/guidance'
 import { parseQualifiedId, qualifyId } from '../../shared/threadRef'
@@ -2264,12 +2265,25 @@ export class OrchestratorService extends EventEmitter {
   private botThreadRefusal(threadId: string | undefined): AppError | undefined {
     if (!threadId || threadId === '__unbound__') return undefined
     const bot = this.botDispatcher?.ownerOf(threadId)
-    if (bot === undefined) return undefined
+    // A bot subagent's thread, from the run database alone: refused even when the bots are not running or their
+    // records can't be read.
+    if (bot === undefined && !this.botSubagentThread(threadId)) return undefined
     return new AppError({
       code: 'bot_thread_read_only',
-      message: `This thread belongs to the bot ${bot}. Use the Bots tab to continue it.`,
+      message: bot === undefined ? 'This thread belongs to a bot. Use the Bots tab to continue it.' : `This thread belongs to the bot ${bot}. Use the Bots tab to continue it.`,
       errorInfo: { category: 'invalid', retryable: false }
     })
+  }
+
+  /** Whether the run database delegated into the thread as a bot's subagent (`bot_id`). A failed read says yes. */
+  private botSubagentThread(threadId: string): boolean {
+    const engine = this.runEngine
+    if (!engine) return false
+    try {
+      return engine.delegations.botChildOf(threadId) !== null
+    } catch {
+      return true
+    }
   }
 
   /** Whether a thread belongs to a bot (only its own dispatches run there; a chat cannot bind to it). */
@@ -4738,7 +4752,7 @@ export class OrchestratorService extends EventEmitter {
     if (turn?.bot && turn.threadId === caller.threadId) {
       let owned: { limit?: PermissionMode } | undefined
       try {
-        owned = this.botThreads?.ownerTurn?.(turn.bot.activationId)
+        owned = this.botThreads?.ownerTurn?.(turn.bot.activationId, turn.threadId)
       } catch {
         owned = undefined
       }
@@ -6722,7 +6736,7 @@ export class OrchestratorService extends EventEmitter {
     // Only a turn that may act on threads (a run, or a chat turn its owner started), as the bot's own records say.
     let owned: { limit?: PermissionMode } | undefined
     try {
-      owned = this.botThreads?.ownerTurn?.(turn.bot.activationId)
+      owned = this.botThreads?.ownerTurn?.(turn.bot.activationId, turn.threadId)
     } catch {
       owned = undefined
     }
@@ -7081,6 +7095,10 @@ export class OrchestratorService extends EventEmitter {
       dispatcher?.settle(payload, {})
     }
     if (!dispatcher) return cancel('bots_unavailable')
+    // Every bot turn runs only through the bot port (a main turn, a consult, a continuation recovered at startup, a work
+    // subagent): the port reserves, settles and delivers what the turn starts. Without one it fails closed, before the
+    // bots prepare anything.
+    if (!engine.botPort) return cancel('bot_port_missing')
     const session = this.getOrCreateSession(payload.threadId)
     // A continuation can be sent while the walled turn is still letting go of the thread: wait for
     // it (briefly) before anything is prepared, so no time is charged to a turn that cannot start.
@@ -7412,7 +7430,7 @@ export class OrchestratorService extends EventEmitter {
       engine.updatePause(runId, { resumeItemId: itemId, resumeRequested: manual ? 'user' : 'auto' })
     })
     db.checkpoint('resume.afterPrepare')
-    const pending = this.dropStaleQuestionRows(engine.inbox.listPending(threadId))
+    const pending = this.dropStaleQuestionRows(withoutBotParentRows(engine.store, engine.inbox.listPending(threadId)))
     const planned = pending.length ? planWakeNotice(pending, this.noticeContext()) : undefined
     const written = this.enqueueForThread(
       threadId,
@@ -9931,7 +9949,14 @@ export class OrchestratorService extends EventEmitter {
   private async executeWakeEffect(effect: EffectRecord, payload: WakeTurnPayload, signal: AbortSignal): Promise<void> {
     const engine = this.requireRunEngine()
     if (engine.getRun(payload.runId)?.status !== 'queued') return
-    const rows = this.dropStaleQuestionRows(this.settleRetiredRows(engine.inbox.getMany(payload.inboxIds).filter((row) => row.status !== 'acknowledged')))
+    const taken = engine.inbox.getMany(payload.inboxIds).filter((row) => row.status !== 'acknowledged')
+    // A bot subagent's end is the bot port's to deliver (`deliverBotResults`): never a wake's, never acknowledged here.
+    const botRows = taken.filter((row) => isBotParentRow(row, engine.delegations))
+    if (botRows.length) {
+      engine.inbox.markPendingAgain(botRows.map((row) => row.inboxId))
+      engine.deliverBotResults()
+    }
+    const rows = this.dropStaleQuestionRows(this.settleRetiredRows(botRows.length ? taken.filter((row) => !botRows.includes(row)) : taken))
     // A bot thread is never woken as a plain turn; its notices are settled so rule 4 does not wake it again.
     if (this.botThreadRefusal(payload.threadId)) {
       engine.store.db.transaction(() => {
@@ -16045,12 +16070,16 @@ export class OrchestratorService extends EventEmitter {
       })
       if (handoffs) this.recordHandoffMarkers(session, handoffs, switchMarker, turnId, selectedModel)
       turnTimingMark(session.threadId, 'handoffs')
+      // A bot's subagent is checked again now that its runtime is set up: a grant narrowed or a work ended meanwhile
+      // fails it before it binds, and it binds to the policy compiled now, never the one captured before.
+      const botNow = opts?.bot?.beforeBind?.()
+      if (botNow && 'refused' in botNow) throw new AppError({ code: botNow.code, message: botNow.refused, errorInfo: { category: 'unavailable', retryable: false } })
       // The attempt's immutable binding; a retry of the same run keeps the one it already has.
       const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, () => opts?.origin ?? this.turnOrigin(session.threadId, request.workflowInvocationId), {
         permissionMode: this.requestedPermissionMode(session.threadId, this.limitedByJob(this.limitedByContinuation(opts?.permissionMode, engineRunId, session.threadId), opts?.schedule)),
         cwd: opts?.bot ? opts.bot.scratch : session.projectCwd,
         ...this.turnApprovals(session.threadId, engineRunId, opts)
-      }, opts?.bot?.policy)
+      }, botNow?.policy ?? opts?.bot?.policy)
       turnTimingMark(session.threadId, 'bind')
       // Every runtime owns its loop, context and tools and receives prior turns as a prompt preamble.
       const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
@@ -16165,8 +16194,15 @@ export class OrchestratorService extends EventEmitter {
       // The runtime's own helpers are mirrored as watch-only threads as its events arrive (docs/plans/tool-api.md §2.7).
       if (engineRunId) mirroredRun = this.nativeMirrors.beginRun({ hostThreadId: session.threadId, runId: engineRunId, driver: binding.driver, instanceId: binding.instanceId, sessionEpoch: nativeSessionEpoch(binding) })
       // A bot's notes reach its turn as it works on a runtime that takes steers; on one that does not, they wait for the
-      // dispatch's end, as before.
-      if (opts?.bot?.steer && opts.externalDrainSteer && instance.caps.steer !== 'queue_only') opts.bot.steer.attached()
+      // dispatch's end, as before. Attached once the turn is set up and its runtime is called (not at its first output:
+      // a runtime that says nothing until its reply takes steers all along). A note taken while it was still being set up
+      // would be reported as sent, then lost if setting up failed.
+      let botSteerAttached = !(opts?.bot?.steer && opts.externalDrainSteer && instance.caps.steer !== 'queue_only')
+      const attachBotSteer = (): void => {
+        if (botSteerAttached) return
+        botSteerAttached = true
+        opts?.bot?.steer?.attached()
+      }
       const steerKeys = new WeakMap<SteerEntry, string>()
       let steerKeySeq = 0
       // An entry's identity in a hold: its queue item, or one it keeps for as long as it exists (a hand-back restores the
@@ -16324,6 +16360,7 @@ export class OrchestratorService extends EventEmitter {
         },
         progress: () => {
           providerProgress = true
+          attachBotSteer()
           this.setTurnStep(session.threadId, undefined)
           endRetries('recovered')
         },
@@ -16580,7 +16617,8 @@ export class OrchestratorService extends EventEmitter {
       const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId, binding.instanceId) : undefined
       const attemptOrdinal = engineRunId ? this.runEngine?.activeAttemptOrdinal(engineRunId) : undefined
       let result: Awaited<ReturnType<HarnessGateway['startTurn']>['result']>
-      // The provider is called: the turn's start is logged here.
+      // The provider is called: the turn's start is logged here, and a bot's notes reach it from now on.
+      attachBotSteer()
       turnBoundaryStarted(session.threadId, 'harness')
       turnTimingMark(session.threadId, 'harness')
       const firstRequestAt = Date.now()

@@ -815,5 +815,21 @@ CREATE INDEX remote_archive_state ON remote_archive(state);
 -- attempt, and NULL for a task from before this column: its attempts send none, so a retry repeats the very same create.
 ALTER TABLE remote_subagents ADD COLUMN subagent INTEGER CHECK(subagent IS NULL OR subagent IN (0,1));
 `
+  },
+  {
+    // A personal bot's work subagents are delegations (issues #1454, #1369): the bot, the work's activation at the root
+    // of the tree (whose counts and spend in bots.db the subagent shares), and what the subagent inherits from that
+    // turn: the limit of the device its owner wrote from, and whether it may only read the owner's threads. Written in
+    // the delegation's own transaction (`RunEngine.commitDelegation`); NULL on every thread's delegation.
+    version: 29,
+    sql: `
+ALTER TABLE delegations ADD COLUMN bot_id TEXT;
+ALTER TABLE delegations ADD COLUMN root_activation_id TEXT;
+ALTER TABLE delegations ADD COLUMN bot_access TEXT;
+ALTER TABLE delegations ADD COLUMN bot_read_only INTEGER;
+CREATE INDEX delegations_by_root_activation ON delegations(root_activation_id) WHERE root_activation_id IS NOT NULL;
+-- A run's delegation by its child run: read when any delegated run ends (whether a bot's subagent did).
+CREATE INDEX delegations_child_run ON delegations(child_run_id);
+`
   }
 ]

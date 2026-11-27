@@ -15,7 +15,7 @@ import { botFilesFolder } from '../../src/mms/bots/grants/compile'
 import { BOT_MCP_SERVER_SWITCH } from '../../src/shared/bots/personal/manifest'
 import type { McpToolDescriptor } from '../../src/shared/integrations'
 import type { BotAuthority, NormalisedCall } from '../../src/shared/bots/personal/authority'
-import { botFixture, createBot, finish, flush, payloadOf, start, type BotFixture } from './botFixture'
+import { botFixture, createBot, finish, flush, payloadOf, start, type BotFixture, startSubagent, subagentRuns } from './botFixture'
 
 let f: BotFixture
 let botId: string
@@ -121,8 +121,7 @@ describe('a consult\'s and a subagent\'s usage and calls are their activation\'s
     const activation = await f.bots.activate({ botId, input: 'Compare three vacuum cleaners.', clientRequestId: 'w1' })
     const job = await start(f, activation.id)
     await job.prepared.authority.subagents!.start({ title: 'Prices', brief: 'Find the prices.' })
-    const n = f.store.dispatches(activation.id).find((dispatch) => dispatch.kind === 'subagent')!.n
-    const child = await start(f, activation.id, n)
+    const child = await startSubagent(f, subagentRuns(f, activation.id)[0]!)
     child.prepared.usage!(report)
     child.prepared.authority.callRuns!()
     expect(f.store.counters(activation.id)).toMatchObject(once)

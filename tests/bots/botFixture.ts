@@ -79,6 +79,15 @@ export interface BotFixture {
   timers: Array<{ fn: () => void; ms: number }>
   oneShot: { answer?: string; fail?: boolean; never?: boolean; prompts: string[] }
   journalFails: { capture: boolean; append: boolean }
+  /**
+   * Mousse restarts: the bot engine closes, the run database and `bots.db` are closed and opened again, the run engine boots
+   * (`reconcileOnBoot`, a new daemon epoch) and then the bot engine (`reconcileOnStartup`), as `MmsProfileServices` does.
+   * `crashed`: the last process never shut down (its daemon epoch has no end, and its runs are cut off by the boot);
+   * otherwise it shut down cleanly first. `down`: how long Mousse was down (the clock moves on by it before the boot).
+   * `whileDown`: runs while both databases are closed (an older build's files, say), given the paths of the run database
+   * and `bots.db`.
+   */
+  restart(options?: { crashed?: boolean; down?: number; whileDown?: (paths: { runDb: string; botsDb: string }) => void }): Promise<void>
   close(): void
 }
 
@@ -87,12 +96,17 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'device
   const profile = join(base, 'profile')
   mkdirSync(profile, { recursive: true })
   const clock = { now: T0 }
-  const store = new BotStore({ profileHome: profile, clock: () => clock.now })
-  const runDb = new ProfileDatabase({ profileHome: profile, clock: () => clock.now })
-  const runStore = new RunStore(runDb)
+  let store = new BotStore({ profileHome: profile, clock: () => clock.now })
+  let runDb = new ProfileDatabase({ profileHome: profile, clock: () => clock.now })
   const now = () => new Date(clock.now).toISOString()
-  const outbox = new EffectOutbox(runStore, { now })
-  const runs = new RunEngine({ store: runStore, outbox, tools: new ToolInvocations(runStore), now, pid: 1 })
+  const openRuns = (pid: number) => {
+    const runStore = new RunStore(runDb)
+    const outbox = new EffectOutbox(runStore, { now })
+    return { outbox, runs: new RunEngine({ store: runStore, outbox, tools: new ToolInvocations(runStore), now, pid }) }
+  }
+  let { outbox, runs } = openRuns(1)
+  // This process's daemon epoch, as a profile's boot opens it.
+  runs.reconcileOnBoot()
   const fixture = {
     base, profile, clock, store, runs, outbox,
     candidates: [PI], limited: new Map<string, string>(), problem: undefined,
@@ -104,8 +118,8 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'device
     profileHome: profile,
     ...options,
     store,
-    definitions: new BotDefinitionStore(store.directory, (botId) => store.registry(botId)?.revision ?? null),
-    threads: { ensureExecutionThread: (key) => ({ id: `thread:${key}` }) },
+    definitions: new BotDefinitionStore(store.directory, (botId) => fixture.store.registry(botId)?.revision ?? null),
+    threads: { ensureExecutionThread: (key) => ({ id: `thread:${key}` }), discardUnusedThread: () => {} },
     runs: () => runs,
     launchedThreads: (creators) => fixture.launched?.(creators) ?? [],
     harness: {
@@ -190,7 +204,7 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'device
       reindex: async () => {},
       purge: async (botId) => { fixture.purged.push(botId) },
       forgetAll: () => 0,
-      wipeHistory: (botId) => options.realWipe ? new BotMemoryStore({ db: store.db }).wipe(botId, true) : 0,
+      wipeHistory: (botId) => options.realWipe ? new BotMemoryStore({ db: fixture.store.db }).wipe(botId, true) : 0,
       reset: () => {}
     },
     clearContext: (threadId) => { fixture.cleared.push(threadId) },
@@ -219,6 +233,8 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'device
   fixture.automationRuns = automationRuns
   fixture.host = host
   fixture.bots = new BotEngine(host)
+  // A work's subagents run on the run engine's delegations, through the bots' port (as `MmsProfileServices` wires it).
+  runs.setBotPort(fixture.bots)
   scheduler.on('jobRemoved', (_id: string, job: ScheduledJob) => {
     if (job.bot) fixture.bots.scheduleRemoved(job.bot.botId, job.bot.scheduleId, { tellMe: tellMeOf(job) })
   })
@@ -230,6 +246,32 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'device
     await scheduler.tickNow()
     await flush()
     return { inserted: store.listActivations().filter((row) => !before.has(row.id) && row.trigger.kind === 'schedule').map((row) => row.id) }
+  }
+  let pid = 1
+  fixture.restart = async (restart = {}) => {
+    fixture.bots.close()
+    if (!restart.crashed) {
+      // A clean shutdown interrupts what still runs (as the profile's close does), then ends the daemon's epoch.
+      for (const run of runs.store.listNonTerminalRuns())
+        runs.markTerminal(run.runId, run.status === 'queued' ? 'cancelled' : 'interrupted', run.status === 'queued' ? { error: 'daemon_restart' } : { interruptedBy: 'daemon_restart' })
+      runs.shutdown()
+    }
+    const paths = { runDb: runDb.path, botsDb: store.db.path }
+    store.close()
+    runDb.close()
+    restart.whileDown?.(paths)
+    clock.now += restart.down ?? 0
+    pid += 1
+    runDb = new ProfileDatabase({ profileHome: profile, clock: () => clock.now })
+    ;({ outbox, runs } = openRuns(pid))
+    runs.reconcileOnBoot()
+    store = new BotStore({ profileHome: profile, clock: () => clock.now })
+    Object.assign(fixture, { store, runs, outbox })
+    host.store = store
+    fixture.bots = new BotEngine(host)
+    runs.setBotPort(fixture.bots)
+    await fixture.bots.reconcileOnStartup()
+    await flush(12)
   }
   fixture.close = () => {
     scheduler.beginShutdown()
@@ -266,11 +308,34 @@ export async function start(f: BotFixture, activationId: string, n = 1): Promise
   return { payload, prepared }
 }
 
-/** The run ends and the executor settles it with its final message; then everything that follows runs. */
+/**
+ * The run ends and the executor settles it with its final message; then everything that follows runs. A work
+ * subagent's final message is its run's result, kept in the run's terminal write as the orchestrator keeps it, and the
+ * reconciler's pass hands what its delegation published to the bots (`deliverBotResults`).
+ */
 export async function finish(f: BotFixture, payload: BotTurnPayload, status: 'completed' | 'failed' | 'interrupted' = 'completed', options: { text?: string; messageId?: string; outcome?: RunOutcome; unanswered?: boolean } = {}): Promise<void> {
-  f.runs.markTerminal(payload.runId, status, options.outcome)
+  f.runs.markTerminal(payload.runId, status, options.outcome, payload.delegationId !== undefined && options.text !== undefined ? { resultText: options.text } : undefined)
   f.bots.settle(payload, { ...(options.text !== undefined ? { text: options.text } : {}), ...(options.messageId ? { messageId: options.messageId } : {}), ...(options.unanswered ? { unanswered: true } : {}) })
+  f.runs.deliverBotResults()
   await flush()
+}
+
+/** A work's subagent turns: the child runs of its delegations in the run database, oldest first. */
+export function subagentRuns(f: BotFixture, activationId: string): string[] {
+  return f.runs.delegations.listForRootActivation(activationId).map((delegation) => delegation.childRunId)
+}
+
+/** A work subagent's turn as the executor starts it: its delegation's bot `turn.start`, refreshed and prepared. */
+export async function startSubagent(f: BotFixture, childRunId: string): Promise<{ payload: BotTurnPayload; prepared: PreparedBotTurn }> {
+  const effect = f.outbox.listForRun(childRunId).find((entry) => entry.kind === 'turn.start')!
+  if (!isBotTurnPayload(effect.payload) || effect.payload.delegationId === undefined) throw new Error('not a bot subagent payload')
+  const payload = effect.payload
+  await f.bots.refresh(payload)
+  const prepared = f.bots.prepare(payload)
+  if ('refused' in prepared) throw new Error(`${prepared.code}: ${prepared.refused}`)
+  f.runs.markStarting(payload.runId)
+  f.runs.markRunning(payload.runId)
+  return { payload, prepared }
 }
 
 /** One whole dispatch: started, ended, settled. */

@@ -21,7 +21,7 @@ import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { delegationFixture } from '../run/delegationFixture'
-import { botFixture, createBot, finish, flush, PI, start, type BotFixture } from './botFixture'
+import { botFixture, createBot, finish, flush, PI, start, startSubagent, subagentRuns, type BotFixture } from './botFixture'
 
 const command: NormalisedCall = { kind: 'builtin', tool: 'shell', nativeName: 'bash', args: { command: 'ls' } }
 const app = (tool: string): NormalisedCall => ({ kind: 'app', tool, args: {} })
@@ -137,7 +137,7 @@ describe('a bot\'s work and its subagents', () => {
     return { id: activation.id, ...(await start(f, activation.id)) }
   }
 
-  const subagentNs = (activationId: string) => f.store.dispatches(activationId).filter((dispatch) => dispatch.kind === 'subagent').map((dispatch) => dispatch.n)
+  const subagentNs = (activationId: string) => subagentRuns(f, activationId)
 
   it('starts two subagents, one on another entry\'s model: each turn runs on its own model, compiled for its runtime, and the work line names them', async () => {
     const job = await work('w1')
@@ -145,8 +145,8 @@ describe('a bot\'s work and its subagents', () => {
     expect(await subagents.start({ title: 'Prices', brief: 'Find the prices.' })).toMatchObject({ started: { subagent: 'Prices', state: 'running', model: 'Some Model on OpenRouter' } })
     expect(await subagents.start({ title: 'Reviews', brief: 'Find reviews.', model: cheap })).toMatchObject({ started: { subagent: 'Reviews', model: 'Cheap Model on Cheap Router, low reasoning' } })
     const [first, second] = subagentNs(job.id)
-    const prices = await start(f, job.id, first)
-    const reviews = await start(f, job.id, second)
+    const prices = await startSubagent(f, first)
+    const reviews = await startSubagent(f, second)
     expect(prices.prepared.selection).toEqual(PI)
     expect(reviews.prepared.selection).toEqual({ ...CHEAP, effort: 'low' })
     expect(reviews.prepared.policy.tools!.allow).toContain('cheap_read')
@@ -172,7 +172,7 @@ describe('a bot\'s work and its subagents', () => {
   it('a subagent holds only what the work holds: a command runs only when the work may run commands, and nothing it lacks asks the owner', async () => {
     const plain = await work('w1')
     await plain.prepared.authority.subagents!.start({ title: 'Look', brief: 'List the folder.' })
-    const child = await start(f, plain.id, subagentNs(plain.id)[0])
+    const child = await startSubagent(f, subagentNs(plain.id)[0])
     expect(child.prepared.authority.check(command)).toMatchObject({ ok: false, refused: { askId: '' } })
     // The work's own tools, asks, threads and nesting are not its: refused, with no card.
     for (const tool of ['work_start', 'bot_schedule_add', 'remind', 'memory_save', 'set_profile', 'use_model', 'subagent_start', 'thread_list', 'escalate', 'consult'])
@@ -187,7 +187,7 @@ describe('a bot\'s work and its subagents', () => {
     // The control: work allowed commands this time runs them, and so does its subagent.
     const allowed = await work('w2', { shell: true })
     await allowed.prepared.authority.subagents!.start({ title: 'Look', brief: 'List the folder.' })
-    const runs = await start(f, allowed.id, subagentNs(allowed.id)[0])
+    const runs = await startSubagent(f, subagentNs(allowed.id)[0])
     expect(allowed.prepared.authority.check(command)).toEqual({ ok: true })
     expect(runs.prepared.authority.check(command)).toEqual({ ok: true })
     expect(runs.prepared.policy.tools!.allow).toContain('bash')
@@ -204,7 +204,7 @@ describe('a bot\'s work and its subagents', () => {
     const job = await work('w1')
     expect(job.prepared.policy.tools!.allow).toEqual(expect.arrayContaining(['subagent_start', 'work_models']))
     await job.prepared.authority.subagents!.start({ title: 'One', brief: 'Do one thing.' })
-    const child = await start(f, job.id, subagentNs(job.id)[0])
+    const child = await startSubagent(f, subagentNs(job.id)[0])
     expect(child.prepared.policy.tools!.allow).not.toContain('subagent_start')
     expect(child.prepared.authority.role).toBe('subagent')
   })
@@ -215,19 +215,20 @@ describe('a bot\'s work and its subagents', () => {
     for (let n = 1; n <= 5; n += 1) expect(await subagents.start({ title: `Part ${n}`, brief: 'Do it.' })).toHaveProperty('started')
     expect(await subagents.start({ title: 'part 1', brief: 'Again.' })).toMatchObject({ refused: expect.stringMatching(/already have a subagent called/) })
     // A repeat of one tool call starts nothing new.
-    for (const n of subagentNs(job.id)) await finish(f, (await start(f, job.id, n)).payload, 'completed', { text: 'Done.' })
+    for (const n of subagentNs(job.id)) await finish(f, (await startSubagent(f, n)).payload, 'completed', { text: 'Done.' })
     const repeated = await subagents.start({ title: 'Part X', brief: 'Do it.', toolCallId: 'call-7' })
     expect(await subagents.start({ title: 'Part X', brief: 'Do it.', toolCallId: 'call-7' })).toEqual(repeated)
-    await finish(f, (await start(f, job.id, subagentNs(job.id).at(-1)!)).payload, 'completed', { text: 'Done.' })
+    await finish(f, (await startSubagent(f, subagentNs(job.id).at(-1)!)).payload, 'completed', { text: 'Done.' })
     for (let n = subagentNs(job.id).length + 1; n <= 12; n += 1) {
       expect(await subagents.start({ title: `Part ${n}`, brief: 'Do it.' })).toHaveProperty('started')
       const last = subagentNs(job.id).at(-1)!
-      await finish(f, (await start(f, job.id, last)).payload, 'completed', { text: 'Done.' })
+      await finish(f, (await startSubagent(f, last)).payload, 'completed', { text: 'Done.' })
     }
     expect(subagentNs(job.id)).toHaveLength(12)
-    // A follow-up is no new subagent: it carries on in its own thread.
+    // A follow-up is no new subagent: it carries on in its own thread (once its work read what it returned).
+    subagents.result({ subagent: 'Part 1' })
     expect(await subagents.send({ subagent: 'Part 1', message: 'And the warranty?' })).toMatchObject({ sent: { subagent: 'Part 1', state: 'running' } })
-    const followUp = await start(f, job.id, subagentNs(job.id).at(-1)!)
+    const followUp = await startSubagent(f, subagentNs(job.id).at(-1)!)
     expect(followUp.prepared.history).toBe('thread')
   })
 
@@ -248,7 +249,7 @@ describe('a bot\'s work and its subagents', () => {
   it('ends with the work\'s turn: its report, with its words kept, stops the subagents still running', async () => {
     const job = await work('w1')
     await job.prepared.authority.subagents!.start({ title: 'Slow', brief: 'Take your time.' })
-    const slow = await start(f, job.id, subagentNs(job.id)[0])
+    const slow = await startSubagent(f, subagentNs(job.id)[0])
     await finish(f, job.payload, 'completed', { text: 'Here is what I found.' })
     expect(f.stopped).toContain(slow.payload.threadId)
     expect(slow.prepared.authority.time.signal.aborted).toBe(true)
@@ -265,7 +266,7 @@ describe('a bot\'s work and its subagents', () => {
     for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
     const job = await work('w1', { shell: true })
     await job.prepared.authority.subagents!.start({ title: 'Builder', brief: 'Run the build.' })
-    const builder = await start(f, job.id, subagentNs(job.id)[0])
+    const builder = await startSubagent(f, subagentNs(job.id)[0])
     expect(builder.prepared.authority.check(command)).toEqual({ ok: true })
     const id = f.bots.service.get(botId).permissions.find((item) => item.title === 'run commands')!.id
     f.bots.service.setPermission(botId, id, false)
@@ -277,7 +278,7 @@ describe('a bot\'s work and its subagents', () => {
   it('a restart ends a running subagent cleanly, and the work\'s next turn is told it was stopped', async () => {
     const job = await work('w1')
     await job.prepared.authority.subagents!.start({ title: 'Long', brief: 'Read everything.' })
-    const long = await start(f, job.id, subagentNs(job.id)[0])
+    const long = await startSubagent(f, subagentNs(job.id)[0])
     // Mousse stops: boot ends every run the last process left.
     f.runs.markTerminal(job.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     f.runs.markTerminal(long.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
@@ -285,7 +286,7 @@ describe('a bot\'s work and its subagents', () => {
     f.bots = new BotEngine(f.host)
     await f.bots.reconcileOnStartup()
     await flush(12)
-    expect(f.store.dispatch(job.id, subagentNs(job.id)[0]!)!.endedAt).not.toBeNull()
+    expect(f.runs.delegations.listForRootActivation(job.id)[0]!.status).not.toBe('running')
     const next = f.store.lastMainDispatch(job.id)!
     const resumed = await start(f, job.id, next.n)
     expect(resumed.prepared.prompt).toMatch(/Mousse restarted.*Your subagents "Long" were stopped when your last turn ended/s)
@@ -295,7 +296,7 @@ describe('a bot\'s work and its subagents', () => {
   it('reaches the model through the app tools: a subagent\'s calls of the bot\'s tools are refused there too, and what the work reads is framed as data', async () => {
     const job = await work('w1')
     await job.prepared.authority.subagents!.start({ title: 'Notes', brief: 'Summarise.' })
-    const child = await start(f, job.id, subagentNs(job.id)[0])
+    const child = await startSubagent(f, subagentNs(job.id)[0])
     const fx = delegationFixture()
     try {
       const parentRun = await fx.runningRun('bot-work')

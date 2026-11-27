@@ -498,6 +498,38 @@ CREATE INDEX bot_jobs_open ON bot_jobs(thread_id) WHERE ended_at IS NULL;
     sql: `
 ALTER TABLE bot_activations ADD COLUMN provenance TEXT;
 `
+  },
+  {
+    // A work's subagents are delegations in the run database, which keeps their lifecycle, lineage and results. Here is
+    // only each one's place on its work's counts and spend, keyed by (work activation, child run): reserved before its
+    // turn runs, its running time charged once (`charged_at`), and its end recorded as told to the work once
+    // (`delivered_at`), before the run database's inbox row is acknowledged. Older subagents (`bot_dispatches`) are
+    // settled at startup and never written again.
+    version: 15,
+    sql: `
+CREATE TABLE bot_subagent_runs(
+  activation_id TEXT NOT NULL,
+  child_run_id TEXT NOT NULL,
+  delegation_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  main_n INTEGER,
+  spec_json TEXT NOT NULL,
+  reserved_at TEXT NOT NULL,
+  started_at INTEGER,
+  used_ms INTEGER,
+  charged_at TEXT,
+  outcome TEXT CHECK(outcome IN ('done','failed','stopped')),
+  why TEXT,
+  delivered_at TEXT,
+  told_at TEXT,
+  child_pid INTEGER,
+  child_group INTEGER,
+  child_token TEXT,
+  exit_at INTEGER,
+  PRIMARY KEY(activation_id, child_run_id)
+) STRICT;
+CREATE INDEX bot_subagent_runs_by_run ON bot_subagent_runs(child_run_id);
+`
   }
 ]
 
@@ -1209,6 +1241,48 @@ export interface BotSubagentSpec {
   lacks?: string[]
 }
 
+/** A work subagent's turn (`bot_subagent_runs`): its lifecycle and result are the run database's delegation. */
+export interface BotSubagentRunRow {
+  activationId: string
+  childRunId: string
+  delegationId: string
+  threadId: string
+  /** The work's main dispatch it was started from. */
+  mainN: number | null
+  spec: BotSubagentSpec
+  reservedAt: string
+  startedAt: number | null
+  usedMs: number | null
+  chargedAt: string | null
+  outcome: 'done' | 'failed' | 'stopped' | null
+  why: string | null
+  deliveredAt: string | null
+  /**
+   * When its work was told it ended: its running turn took the notice in, it read it (`subagent_result`, `subagent_wait`),
+   * or a continuation of the work carried it. Null while delivered but untold, so a crash never loses the notice.
+   */
+  toldAt: string | null
+}
+
+function subagentRunOf(row: Row): BotSubagentRunRow {
+  return {
+    activationId: String(row.activation_id),
+    childRunId: String(row.child_run_id),
+    delegationId: String(row.delegation_id),
+    threadId: String(row.thread_id),
+    mainN: row.main_n === null ? null : Number(row.main_n),
+    spec: JSON.parse(String(row.spec_json)) as BotSubagentSpec,
+    reservedAt: String(row.reserved_at),
+    startedAt: row.started_at === null ? null : Number(row.started_at),
+    usedMs: row.used_ms === null ? null : Number(row.used_ms),
+    chargedAt: str(row.charged_at),
+    outcome: row.outcome === 'done' || row.outcome === 'failed' || row.outcome === 'stopped' ? row.outcome : null,
+    why: str(row.why),
+    deliveredAt: str(row.delivered_at),
+    toldAt: str(row.told_at)
+  }
+}
+
 /** A subagent's dispatch id: `<activationId>:s<n>`; a consult's is `<activationId>:c<n>`. Both are `consult` in `bots.db`. */
 const SUBAGENT_DISPATCH = /:s\d+$/
 
@@ -1640,9 +1714,85 @@ export class BotStore {
   }
 
   deleteActivation(id: string): void {
-    for (const table of ['bot_counters', 'bot_spend', 'bot_spend_reservations', 'bot_unknown_calls', 'bot_turn_usage', 'bot_dispatches'])
+    for (const table of ['bot_counters', 'bot_spend', 'bot_spend_reservations', 'bot_unknown_calls', 'bot_turn_usage', 'bot_dispatches', 'bot_subagent_runs'])
       this.run(`DELETE FROM ${table} WHERE activation_id = ?`, id)
     this.run('DELETE FROM bot_activations WHERE id = ?', id)
+  }
+
+  // -- Work subagents (v15) ----------------------------------------------------------------------
+
+  /**
+   * A work subagent's place on its work's counts and spend (`bot_subagent_runs`), written once per (work, child run):
+   * a second write, from its turn or the startup pass, changes nothing. True when this call wrote it.
+   */
+  reserveSubagentRun(row: { activationId: string; childRunId: string; delegationId: string; threadId: string; mainN: number | null; spec: BotSubagentSpec }): boolean {
+    return this.run(
+      'INSERT OR IGNORE INTO bot_subagent_runs(activation_id, child_run_id, delegation_id, thread_id, main_n, spec_json, reserved_at) VALUES(?, ?, ?, ?, ?, ?, ?)',
+      row.activationId, row.childRunId, row.delegationId, row.threadId, row.mainN, JSON.stringify(row.spec), this.now()
+    ) > 0
+  }
+
+  subagentRun(activationId: string, childRunId: string): BotSubagentRunRow | undefined {
+    const row = this.get('SELECT * FROM bot_subagent_runs WHERE activation_id = ? AND child_run_id = ?', activationId, childRunId)
+    return row ? subagentRunOf(row) : undefined
+  }
+
+  /** The work subagent a child run belongs to, whichever work. */
+  subagentRunByRun(childRunId: string): BotSubagentRunRow | undefined {
+    const row = this.get('SELECT * FROM bot_subagent_runs WHERE child_run_id = ? LIMIT 1', childRunId)
+    return row ? subagentRunOf(row) : undefined
+  }
+
+  /** Subagent turns that started and were never charged: the startup pass charges each once. */
+  unchargedSubagentRuns(): BotSubagentRunRow[] {
+    return this.all('SELECT * FROM bot_subagent_runs WHERE started_at IS NOT NULL AND charged_at IS NULL').map(subagentRunOf)
+  }
+
+  /** A work's subagent turns, oldest first. */
+  subagentRuns(activationId: string): BotSubagentRunRow[] {
+    return this.all('SELECT * FROM bot_subagent_runs WHERE activation_id = ? ORDER BY reserved_at, rowid', activationId).map(subagentRunOf)
+  }
+
+  /** Its turn began (wall-clock milliseconds): only the first start counts. */
+  markSubagentStarted(activationId: string, childRunId: string, at: number): boolean {
+    return this.run('UPDATE bot_subagent_runs SET started_at = ? WHERE activation_id = ? AND child_run_id = ? AND started_at IS NULL', at, activationId, childRunId) > 0
+  }
+
+  /**
+   * Its running time counted in its work's (`bot_counters.active_ms`), exactly once: the row and the counter move in one
+   * transaction, and only while it is not charged. A count, never a limit. True when this call charged it.
+   */
+  chargeSubagentRun(activationId: string, childRunId: string, usedMs: number): boolean {
+    const used = Math.max(0, Math.ceil(usedMs))
+    return this.db.transaction(() => {
+      if (!this.run('UPDATE bot_subagent_runs SET used_ms = ?, charged_at = ? WHERE activation_id = ? AND child_run_id = ? AND charged_at IS NULL', used, this.now(), activationId, childRunId)) return false
+      this.run('UPDATE bot_counters SET active_ms = active_ms + ? WHERE activation_id = ?', used, activationId)
+      return true
+    })
+  }
+
+  /**
+   * Its end, as its work hears it, recorded once; true when this call recorded it (a repeat is recorded already). `told`:
+   * its work needs no word of it (it stopped the subagent itself).
+   */
+  recordSubagentDelivery(activationId: string, childRunId: string, outcome: 'done' | 'failed' | 'stopped', why: string | null, told = false): boolean {
+    const now = this.now()
+    // A continuation may have told the work already, before the run database handed the end over: that stays told.
+    return this.run('UPDATE bot_subagent_runs SET outcome = ?, why = ?, delivered_at = ?, told_at = COALESCE(told_at, ?) WHERE activation_id = ? AND child_run_id = ? AND delivered_at IS NULL', outcome, why, now, told ? now : null, activationId, childRunId) > 0
+  }
+
+  /** A work's subagent turns that ended and were recorded, but that it has not been told of yet, oldest first. */
+  untoldSubagentRuns(activationId: string): BotSubagentRunRow[] {
+    return this.all('SELECT * FROM bot_subagent_runs WHERE activation_id = ? AND delivered_at IS NOT NULL AND told_at IS NULL ORDER BY delivered_at, rowid', activationId).map(subagentRunOf)
+  }
+
+  /** Its work was told these subagent turns ended (`untoldSubagentRuns`). */
+  markSubagentsTold(activationId: string, childRunIds: readonly string[]): void {
+    if (!childRunIds.length) return
+    const now = this.now()
+    this.db.transaction(() => {
+      for (const childRunId of childRunIds) this.run('UPDATE bot_subagent_runs SET told_at = ? WHERE activation_id = ? AND child_run_id = ? AND told_at IS NULL', now, activationId, childRunId)
+    })
   }
 
   // -- Dispatches ------------------------------------------------------------------------------

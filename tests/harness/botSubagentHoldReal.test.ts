@@ -32,7 +32,7 @@ import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import type { NeutralTool } from '../../src/shared/harness/tools'
-import { botFixture, createBot, start, type BotFixture } from '../bots/botFixture'
+import { botFixture, createBot, start, type BotFixture, startSubagent, subagentRuns } from '../bots/botFixture'
 
 const onPath = (name: string) => (process.env.PATH ?? '').split(':').some((dir) => dir && existsSync(join(dir, name)))
 const runtimeDir = process.env.XDG_RUNTIME_DIR
@@ -82,8 +82,7 @@ describe(`a subagent on the other runtime is held as its work is, on the real bi
     const other = work === 'claude' ? 'codex' : 'claude'
     const started = await job.prepared.authority.subagents!.start({ title: 'Build', brief: 'Run the build.', model: { pick: selection[other], name: { name: choices.find((option) => option.instanceId === other)!.label, entry: choices.find((option) => option.instanceId === other)!.entry } } })
     if ('refused' in started) throw new Error(started.refused)
-    const n = f.store.dispatches(activation.id).filter((dispatch) => dispatch.kind === 'subagent').at(-1)!.n
-    const child = await start(f, activation.id, n)
+    const child = await startSubagent(f, subagentRuns(f, activation.id).at(-1)!)
     const files = child.prepared.authority.workspace!.files!
     writeFileSync(join(files, 'own.txt'), 'own\n')
     const outside = mkdtempSync(join(tmpdir(), 'mousse-outside-'))

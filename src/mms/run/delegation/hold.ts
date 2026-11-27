@@ -228,8 +228,14 @@ export function recordRunResultText(store: RunStore, run: RunRecord, text: strin
     threadId: run.threadId,
     runId: run.runId,
     type: 'run.result',
-    payload: { runId: run.runId, text: text.slice(0, DELEGATION_RESULT_MAX_CHARS) }
+    // A bot's subagent keeps its whole text: its work pages through it (`subagent_result` with `from`), never a cut copy.
+    payload: { runId: run.runId, text: botSubagentRun(store, run.runId) ? text : text.slice(0, DELEGATION_RESULT_MAX_CHARS) }
   })
+}
+
+/** Whether the run is a bot subagent's turn (its delegation carries a bot). */
+function botSubagentRun(store: RunStore, runId: string): boolean {
+  return Boolean(store.db.statement(`SELECT 1 FROM delegations WHERE child_run_id = ? AND bot_id IS NOT NULL`).get(runId))
 }
 
 /**

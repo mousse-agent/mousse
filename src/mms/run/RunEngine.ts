@@ -8,6 +8,7 @@ import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreErro
 import { inheritedAgentHops } from './agentHops'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
+import { deliverBotResults, withoutBotParentRows, type BotExecutionPort } from './delegation/botPort'
 import { RemoteLaunchRecords } from './delegation/remoteLaunches'
 import { RemoteSubagentRecords } from './delegation/remoteSubagents'
 import { RemoteExpiryRecords } from './delegation/remoteExpiry'
@@ -38,6 +39,8 @@ import {
   leaseOwner,
   type AgentActor,
   type AttemptRecord,
+  type BotDelegation,
+  type BotTurnPayload,
   type DelegationRecord,
   type DelegationWake,
   type DelegationWorkspace,
@@ -303,6 +306,28 @@ export interface DelegationRequest {
   remote?: RemoteDelegationTarget
 }
 
+/**
+ * A personal bot's work starts a subagent, or sends more work to one that finished (`subagent_start`, `subagent_send`).
+ * The bots made the child's thread and checked the model and the grant; the engine writes the delegation, its run and
+ * its turn in one transaction, and asks the bot port before (authority) and right after (reservation).
+ */
+export interface BotDelegationRequest {
+  parentThreadId: string
+  /** The work's live main run. */
+  parentRunId: string
+  childThreadId: string
+  /** A new subagent (its lineage is written), or more work for one of this work that finished. */
+  newChild: boolean
+  /** A retry with the same id returns the first result and starts nothing. */
+  clientRequestId: string
+  prompt: string
+  instanceId: string
+  model: string
+  bot: BotDelegation
+  /** What the bots start the subagent with; carried in its `turn.start` payload, never read here. */
+  subagent: unknown
+}
+
 /** Where and how a remote subagent's task runs; the caller has already checked and narrowed all of it. */
 export interface RemoteDelegationTarget {
   node: string
@@ -517,6 +542,8 @@ un_time_limits). */
   /** Fork and merge-back transfers (SPEC §16.2). */
   readonly transfers: ContextTransfers
   private delegationHost: DelegationHost | null = null
+  /** The bots' side of a bot subagent (`BotExecutionPort`); null: no bot subagent starts or is delivered. */
+  private botExecution: BotExecutionPort | null = null
   private readonly creatingForks = new Set<string>()
   /** Aborts the local execution of a claimed effect (the effect worker's `cancelInFlight`). */
   private inFlightCanceller: ((effectId: string) => boolean) | null = null
@@ -1114,6 +1141,47 @@ un_time_limits). */
     this.delegationHost = host
   }
 
+  /** The personal bots' port for their work's subagents; null when the bots are not running. */
+  setBotPort(port: BotExecutionPort | null): void {
+    this.botExecution = port
+  }
+
+  get botPort(): BotExecutionPort | null {
+    return this.botExecution
+  }
+
+  /**
+   * Hands pending bot subagent results to the bot port (`deliverBotResults`): each is acknowledged, with its delegation,
+   * once the bots recorded it. Without a port they stay pending, and no thread's delivery takes them.
+   */
+  deliverBotResults(): string[] {
+    return deliverBotResults(this.store, this.botExecution, (delegationId) => this.acknowledgeDelegation(delegationId))
+  }
+
+  /**
+   * When the daemon that ran `run` was last known alive, for a run a restart cut off (`interruptedBy: 'daemon_restart'`, or
+   * `uncertain` with a tool in flight at a crash):
+   * its daemon's last heartbeat (a clean end writes one), or the run's own when later. The boot after a crash ends such a
+   * run at the boot's time, which counts the downtime as running; this does not. Undefined for any other run.
+   */
+  lastAliveAt(run: Pick<RunRecord, 'status' | 'outcome' | 'startedAt' | 'heartbeatAt'>): string | undefined {
+    const cutOff = (run.status === 'interrupted' && run.outcome?.interruptedBy === 'daemon_restart') || (run.status === 'uncertain' && run.outcome?.uncertainReason === 'non_idempotent_tool_in_flight')
+    if (!cutOff || !run.startedAt) return undefined
+    const row = this.store.db.statement('SELECT heartbeat_at FROM daemon_epochs WHERE started_at <= ? ORDER BY epoch DESC LIMIT 1').get(run.startedAt)
+    const daemon = row ? String(row.heartbeat_at) : undefined
+    const latest = [daemon, run.heartbeatAt ?? undefined].filter((at): at is string => Boolean(at)).sort().at(-1)
+    return latest ?? run.startedAt
+  }
+
+  /** `deliverBotResults` after a command committed: a failure leaves the rows pending for the next pass. */
+  private deliverBotResultsSafely(): void {
+    try {
+      this.deliverBotResults()
+    } catch (error) {
+      console.warn('[run-engine] bot subagent results could not be delivered now; they stay pending', { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   /**
    * The effect worker's `cancelInFlight`, so a cancel can abort a `turn.start` that is already
    * claimed (provisioning its workspace) before it reaches the provider.
@@ -1238,10 +1306,15 @@ un_time_limits). */
         this.delegations.setStatus({ delegationId: delegation.delegationId, from: 'running', to: 'cancelled', completedAt: now })
       }
 
-      // Nothing in the subtree is woken afterwards; a result already published keeps its delegation row.
+      // Nothing in the subtree is woken afterwards; a result already published keeps its delegation row. A bot
+      // subagent's end is the bot port's to deliver: it stays pending here and is handed over once this commits
+      // (`deliverBotResults`), acknowledged only after the bots recorded it.
       const acknowledgedRows: string[] = []
+      let botRows = false
       for (const id of threads) {
-        const rows = [...this.inbox.listByStatus(id, 'pending'), ...this.inbox.listByStatus(id, 'delivered')]
+        const listed = [...this.inbox.listByStatus(id, 'pending'), ...this.inbox.listByStatus(id, 'delivered')]
+        const rows = withoutBotParentRows(this.store, listed)
+        if (rows.length !== listed.length) botRows = true
         this.inbox.markAcknowledged(rows.map((row) => row.inboxId))
         acknowledgedRows.push(...rows.map((row) => row.inboxId))
         cancelAcknowledgedWakes(this.store, this.outbox, now, id)
@@ -1301,6 +1374,7 @@ un_time_limits). */
         })
       this.putStopReceipt(key, commandKind, threadId, stopped)
       for (const run of activeRuns) this.store.db.afterCommit(() => this.emit('stop-requested', run))
+      if (botRows) this.store.db.afterCommit(() => this.deliverBotResultsSafely())
       return stopped
     })
     this.cancelInFlight(claimed)
@@ -1435,6 +1509,7 @@ un_time_limits). */
       if (!parent || parent.threadId !== input.parentThreadId)
         fail('bad_request', `Run ${input.parentRunId} is not a run of thread ${input.parentThreadId}.`)
       if (!input.prompt.trim()) fail('bad_request', 'A delegated task needs a prompt.')
+      this.refuseBotNesting(input.parentThreadId)
       if (parent.outcome?.stopRequested)
         reject('parent_stopping', 'The calling run is being stopped; it cannot start subagents.')
       // Admission: a Stop of the parent's thread after this run started fences it off (nothing awaits before the commit below).
@@ -1444,11 +1519,87 @@ un_time_limits). */
       if (taken.length) throw new TitleTakenRejection(input.title!, taken)
       const { threadId: childThreadId } = host.createThread({ kind: 'delegation', request: input })
       return this.withCreatedThread(host, childThreadId, () =>
-        this.store.db.transaction(() => this.commitDelegation(host, input, childThreadId)))
+        this.store.db.transaction(() =>
+          this.commitDelegation(input, childThreadId, ({ childRunId }) =>
+            host.buildChildTurnPayload({ childThreadId, childRunId, prompt: input.prompt, request: input }))))
     })
   }
 
-  private replayDelegation(input: DelegationRequest): DelegationAccepted | null {
+  /** A bot's subagent has one level: it starts no subagent of its own, by any tool. */
+  private refuseBotNesting(parentThreadId: string): void {
+    if (this.delegations.botChildOf(parentThreadId))
+      reject('bot_subagent_nesting', "A bot's subagent can't start subagents of its own. Do this part yourself, or say in your result what would help.")
+  }
+
+  /**
+   * A bot's work starts a subagent or sends one more work (`BotDelegationRequest`), under the work's thread mutex: replay
+   * the receipt of `clientRequestId`, or ask the bot port whether the work may (`authorizeSubagent`), then write, in one
+   * transaction, the subagent lineage (a new child), the child run, the `running` delegation with the bot, its root
+   * activation and the narrowing it inherits, and the child's bot `turn.start`. Right after the commit, before anything
+   * can dispatch the turn, the port records its place on the work's counts and spend (`reserveSubagent`); a crash in
+   * between is settled by the bots at startup. No port: refused, and nothing is written.
+   */
+  requestBotDelegation(input: BotDelegationRequest): Promise<DelegationAccepted> {
+    return this.mutex.withLock(input.parentThreadId, () => {
+      const port = this.botExecution
+      if (!port) reject('bot_port_missing', 'Bots are not running here, so no subagent can start.')
+      const replayed = this.replayDelegation(input)
+      if (replayed) return replayed
+      const parent = this.store.getRun(input.parentRunId)
+      if (!parent || parent.threadId !== input.parentThreadId)
+        fail('bad_request', `Run ${input.parentRunId} is not a run of thread ${input.parentThreadId}.`)
+      if (!input.prompt.trim()) fail('bad_request', 'A delegated task needs a prompt.')
+      this.refuseBotNesting(input.parentThreadId)
+      if (TERMINAL_RUN_STATUSES.has(parent.status) || parent.outcome?.stopRequested || isRunAdmissionStale(this.store, parent.runId))
+        reject('parent_stopping', "The work's turn is ending; it can't start subagents now.")
+      const authorized = port.authorizeSubagent({ botId: input.bot.botId, rootActivationId: input.bot.rootActivationId, parentRunId: input.parentRunId })
+      if (!authorized.ok) reject(authorized.code, authorized.message)
+      if (!input.newChild) {
+        const lineage = this.delegations.getLineage(input.childThreadId)
+        const earlier = this.delegations.botChildOf(input.childThreadId)
+        if (lineage?.parentThreadId !== input.parentThreadId || earlier?.bot?.rootActivationId !== input.bot.rootActivationId)
+          fail('bad_request', `Thread ${input.childThreadId} is not a subagent of this work.`)
+        if (this.store.listRuns(input.childThreadId).some((run) => !TERMINAL_RUN_STATUSES.has(run.status)) || this.delegations.listForChildThread(input.childThreadId).some((row) => row.status === 'running'))
+          reject('subagent_busy', 'That subagent is still working.')
+      }
+      const accepted = this.store.db.transaction(() =>
+        this.commitDelegation(
+          {
+            parentThreadId: input.parentThreadId,
+            parentRunId: input.parentRunId,
+            clientRequestId: input.clientRequestId,
+            prompt: input.prompt,
+            instanceId: input.instanceId,
+            model: input.model,
+            workspace: 'shared',
+            wake: 'always',
+            bot: input.bot,
+            newChild: input.newChild
+          },
+          input.childThreadId,
+          ({ childRunId, delegationId }) => ({
+            kind: 'bot',
+            runId: childRunId,
+            threadId: input.childThreadId,
+            activationId: input.bot.rootActivationId,
+            dispatchN: 0,
+            delegationId,
+            subagent: input.subagent,
+            prompt: input.prompt
+          }) satisfies BotTurnPayload
+        ))
+      if (accepted.replayed) return accepted
+      try {
+        port.reserveSubagent({ rootActivationId: input.bot.rootActivationId, delegationId: accepted.delegationId, childRunId: accepted.childRunId, childThreadId: accepted.childThreadId, subagent: input.subagent })
+      } catch (error) {
+        // Its turn reserves again before it runs, and the bots' startup pass settles what a crash left.
+        console.warn('[run-engine] a bot subagent could not be reserved yet', { delegationId: accepted.delegationId, error: error instanceof Error ? error.message : String(error) })
+      }
+      return accepted
+    })
+  }
+
+  private replayDelegation(input: Pick<DelegationRequest, 'clientRequestId' | 'parentThreadId'>): DelegationAccepted | null {
     const receipt = this.store.getReceipt(input.clientRequestId)
     if (!receipt) return null
     if (receipt.threadId !== input.parentThreadId || receipt.commandKind !== 'delegation.request')
@@ -1478,13 +1629,23 @@ un_time_limits). */
     }
   }
 
-  private commitDelegation(host: DelegationHost, input: DelegationRequest, childThreadId: string): DelegationAccepted {
-    this.delegations.createLineage({
-      threadId: childThreadId,
-      parentThreadId: input.parentThreadId,
-      parentRunId: input.parentRunId,
-      relationship: 'subagent'
-    })
+  /**
+   * The delegation's one transaction: the child's lineage (unless it is more work for a bot subagent that has one), its
+   * run, the `running` row (with a bot subagent's bot, root activation and inherited narrowing), its `turn.start` (or a
+   * remote stand-in) and the receipt.
+   */
+  private commitDelegation(
+    input: Omit<DelegationRequest, 'readOnly' | 'title'> & { bot?: BotDelegation; newChild?: boolean },
+    childThreadId: string,
+    turnPayload: (child: { childRunId: string; delegationId: string }) => unknown
+  ): DelegationAccepted {
+    if (input.newChild !== false)
+      this.delegations.createLineage({
+        threadId: childThreadId,
+        parentThreadId: input.parentThreadId,
+        parentRunId: input.parentRunId,
+        relationship: 'subagent'
+      })
     const child = this.store.createRun({
       threadId: childThreadId,
       source: 'delegation',
@@ -1502,7 +1663,8 @@ un_time_limits). */
       modeCeiling: input.modeCeiling,
       accessLevel: input.accessLevel,
       workspace: input.workspace,
-      role: input.role
+      role: input.role,
+      bot: input.bot ?? null
     })
     // A remote subagent's run here only stands in for the run on its computer: no turn starts for it.
     if (input.remote) this.remoteSubagents.create({ delegationId: delegation.delegationId, childThreadId, childRunId: child.runId, ...input.remote })
@@ -1511,7 +1673,7 @@ un_time_limits). */
         threadId: childThreadId,
         runId: child.runId,
         kind: 'turn.start',
-        payload: host.buildChildTurnPayload({ childThreadId, childRunId: child.runId, prompt: input.prompt, request: input })
+        payload: turnPayload({ childRunId: child.runId, delegationId: delegation.delegationId })
       })
     const accepted = { delegationId: delegation.delegationId, childThreadId, childRunId: child.runId }
     this.store.putReceipt({

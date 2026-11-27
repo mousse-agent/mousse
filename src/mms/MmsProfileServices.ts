@@ -812,6 +812,8 @@ export class MmsProfileServices {
       threads: {
         // Every thread the bot engine makes is the bot's: no thread list or search shows it.
         ensureExecutionThread: (key, name, projectId, ownership) => this.threads.ensureExecutionThread(key, name, projectId, ownership, { botOwned: true }),
+        // A subagent's thread whose delegation was refused: removed while nothing has used it.
+        discardUnusedThread: (threadId, ownedBy) => this.threads.discardUnusedThread(threadId, ownedBy ? { ownedBy } : undefined),
         threadState: (threadId) => {
           const record = this.threads.lifecycleStore.get(threadId)
           if (record && record.state !== 'active') return 'trashed'
@@ -1127,9 +1129,19 @@ export class MmsProfileServices {
         }
         return
       }
+      // A bot subagent's result is published: the bot port delivers it now, not at the next reconciler pass.
+      if (event.type === 'delegation.status') {
+        if ((event.payload as { bot?: unknown; status?: unknown }).bot && (event.payload as { status?: unknown }).status !== 'running')
+          setImmediate(() => {
+            try { this.runEngine.deliverBotResults() } catch (error) { console.warn('bot subagent results could not be delivered', { error: error instanceof Error ? error.message : String(error) }) }
+          })
+        return
+      }
       if (event.type !== 'run.status') return
       const run = event.payload as RunRecord
-      if (run.source !== 'bot' || !TERMINAL_RUN_STATUSES.has(run.status)) return
+      if (!TERMINAL_RUN_STATUSES.has(run.status)) return
+      // A work's subagent runs as a delegation: the run database says which (a plain subagent never reads bots.db).
+      if (run.source !== 'bot' && !(run.source === 'delegation' && this.runEngine.delegations.getByChildRun(run.runId)?.bot)) return
       setImmediate(() => {
         try { personalBots.settleRun(run.runId) } catch (error) { console.warn('bot dispatch could not be settled', { runId: run.runId, error: error instanceof Error ? error.message : String(error) }) }
       })
@@ -1146,6 +1158,8 @@ export class MmsProfileServices {
       try { personalBots.stepStarted(threadId, () => this.orchestrator.liveMessagesForSave(threadId)) } catch { /* a status never fails the call */ }
     })
     this.orchestrator.setBotDispatcher(personalBots)
+    // The bots' side of a work's subagents: without it none starts, runs or is delivered.
+    this.runEngine.setBotPort(personalBots ?? null)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
@@ -3125,7 +3139,8 @@ export class MmsProfileServices {
       tools: engine.tools,
       capabilitiesFor: (threadId) => this.orchestrator.capabilitiesForThread(threadId),
       awaitsAnswer: (threadId) => this.orchestrator.awaitsAnswer(threadId),
-      credentials: this.mcpCredentials
+      credentials: this.mcpCredentials,
+      botResults: () => engine.deliverBotResults()
     })
     this.runEffectWorker = worker
     this.runReconciler = reconciler
@@ -3269,6 +3284,7 @@ export class MmsProfileServices {
     // keeps the profile's folder from being removed on Windows.
     const closes: Array<[string, () => void]> = [
       ['run engine detach', () => {
+        this.runEngine.setBotPort(null)
         this.orchestrator.setRunEngine(null)
         this.orchestrator.setBotDispatcher(null)
         this.orchestrator.setBotThreads(null)

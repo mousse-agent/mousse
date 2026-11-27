@@ -34,7 +34,7 @@ import { appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { toolNeeds } from '../../src/mms/run/mcp/appTools/authority'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
-import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
+import { botFixture, chatOf, createBot, finish, flush, start, startSubagent, subagentRuns, type BotFixture } from './botFixture'
 import { keepToolImages, resetToolImages } from '../../src/mms/bots/chat/toolImages'
 
 /** A one-pixel PNG, as a browser screenshot hands it over. */
@@ -906,14 +906,13 @@ it('a schedule ending at until withdraws a parked call and preserves its report'
 it('a subagent holds its call on its work and uses its own dispatch in the call key', async () => {
   const t = await setup(true)
   await t.work.prepared.authority.subagents!.start({ title: 'Sender', brief: 'Send mail', toolCallId: 'start-sender' })
-  const childDispatch = f.store.dispatches(t.workId).find(d => d.kind === 'subagent')!
-  const child = await start(f, t.workId, childDispatch.n)
+  const child = await startSubagent(f, subagentRuns(f, t.workId)[0]!)
   expect(child.prepared.instructions).toContain('Some of your tools ask your owner first')
   expect(child.prepared.instructions).toContain('If a call was not sent, say so plainly in your report.')
   expect(child.prepared.instructions).toContain('Your owner sees only your report, not what you wrote before a held call; repeat any results they need.')
   await callForBot({ bot: child.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'child-call', signal: new AbortController().signal })
   const a = f.bots.actions.forWork(t.workId)!
-  expect(JSON.parse(a.call_key)).toEqual([t.workId, childDispatch.clientRequestId, 'child-call'])
+  expect(JSON.parse(a.call_key)).toEqual([t.workId, `sub:${child.payload.runId}`, 'child-call'])
   expect(f.store.activation(t.workId)).toMatchObject({ status: 'blocked', endReason: 'approval' })
   expect(t.calls).toEqual([])
 })
@@ -1581,8 +1580,7 @@ it.each([
 it.each([true, false].flatMap(on => ['work', 'subagent'].map(caller => ({ on, caller }))))('integration thread actions after a $caller call, switch=$on', async ({ on, caller }) => {
   const t = await setup(on, false, false, true)
   await t.work.prepared.authority.subagents!.start({ title: 'Helper', brief: 'Help with mail', toolCallId: 'helper' })
-  const d = f.store.dispatches(t.workId).find(d => d.kind === 'subagent')!
-  const child = await start(f, t.workId, d.n)
+  const child = await startSubagent(f, subagentRuns(f, t.workId)[0]!)
   const authorities = [t.work.prepared.authority, child.prepared.authority]
   for (const bot of authorities) for (const name of ['thread_create', 'thread_send', 'thread_archive']) {
     expect(botAppToolRefusal(bot, name, {})).toBeUndefined()
@@ -2596,8 +2594,7 @@ it.each(['done', 'declined', 'tool_error', 'uncertain'] as const)('R4-1 forgetti
 it.each([true, false].flatMap(on => ['work', 'subagent'].map(caller => ({ on, caller }))))('R4-3 new app-tool gates after $caller holds, switch=$on', async ({ on, caller }) => {
   const t = await setup(on, false, false, true, true)
   await t.work.prepared.authority.subagents!.start({ title: 'Helper', brief: 'Help with mail', toolCallId: 'helper' })
-  const d = f.store.dispatches(t.workId).find(d => d.kind === 'subagent')!
-  const child = await start(f, t.workId, d.n)
+  const child = await startSubagent(f, subagentRuns(f, t.workId)[0]!)
   const tools = ['secret_request', 'secret_run', 'schedule_list', ...BOT_SCHEDULE_ACT_TOOLS, 'create_quick_action', 'approval_respond']
   const authorities = [t.work.prepared.authority, child.prepared.authority]
   const before = authorities.map(bot => tools.map(name => botAppToolRefusal(bot, name, {})))
@@ -2902,8 +2899,7 @@ it('C4 an older expired row does not leave work parked', async () => {
 it('C4 authority compiler fences every registered Mousse tool for held work and its live subagent', async () => {
   const t = await setup(true, false, true, true, true)
   await t.work.prepared.authority.subagents!.start({ title: 'Helper', brief: 'Help with mail', toolCallId: 'helper' })
-  const d = f.store.dispatches(t.workId).find(row => row.kind === 'subagent')!
-  const child = await start(f, t.workId, d.n)
+  const child = await startSubagent(f, subagentRuns(f, t.workId)[0]!)
   const pairs = [t.work.prepared.authority, child.prepared.authority].map((authority, index) => {
     const bot = index === 0 ? { ...authority, catalogue: 'use_tool' as const } : authority
     const threadId = `fence-${index}`
@@ -4658,8 +4654,7 @@ it('E1 only the schedule activation can act alone, never its subagent', async ()
   const id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
   const turn = await start(f, id)
   await turn.prepared.authority.subagents!.start({ title: 'Sender', brief: 'Send mail', toolCallId: 'start-sender' })
-  const dispatch = f.store.dispatches(id).find(d => d.kind === 'subagent')!
-  const child = await start(f, id, dispatch.n)
+  const child = await startSubagent(f, subagentRuns(f, id)[0]!)
   await callForBot({ bot: child.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'child-call', signal: new AbortController().signal })
   expect(f.bots.actions.forWork(id)).toMatchObject({ status: 'open', card_json: expect.any(String) })
   expect(t.calls).toHaveLength(1)

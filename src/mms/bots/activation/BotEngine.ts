@@ -40,7 +40,7 @@ import { launchedActive, type BotChatMessage, type BotChip, type BotError, type 
 import { jobAskerOf, jobStateOf, jobStep, resultLine, type JobThreadView } from '../jobs'
 import { BOT_JOB_ENDED, jobLine, jobNoticeInput, jobNoticeLabel, noticeAsData, OWNER_TURN_NOTICES_HEADING, relatedJobsLine, THREAD_MESSAGE_KEY_PREFIX, threadMessageInput, threadMessageLabel, type BotJob, type BotJobState } from '../../../shared/bots/personal/jobs'
 import { threadLink } from '../../../shared/threadLink'
-import type { PermissionMode } from '../../../shared/permissionMode'
+import { isStricter, type PermissionMode } from '../../../shared/permissionMode'
 import {
   BOT_ASK_DENY_COOLDOWN_MS,
   askProblem,
@@ -116,7 +116,10 @@ import { BOT_THREADS_READ_ONLY_TURN_NOTE, botAllowedOf, namedPowerOf, type BotAl
 import { isProviderTurnCap, type Enforceability, type HarnessError, type ProviderSelection, type RunPolicy } from '../../../shared/harness/types'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { RunEngine } from '../../run/RunEngine'
-import { TERMINAL_RUN_STATUSES, type BotTurnPayload, type RunRecord } from '../../run/types'
+import { TERMINAL_RUN_STATUSES, type BotDelegation, type BotTurnPayload, type DelegationRecord, type RunRecord } from '../../run/types'
+import type { BotSubagentOutcome } from '../../run/delegation/botPort'
+import { readRunResultText } from '../../run/delegation/hold'
+import { priceFor } from '../../usageHistory/pricing'
 import { createBotAuthority, type BotFileReadState } from '../authority/botAuthority'
 import { type BotChatImages, BotChatService, chatInput, messageInput } from '../chat/BotChatService'
 import { askFingerprintOf, BotChatProjection, clockTime, starterManifest } from '../chat/projection'
@@ -129,7 +132,7 @@ import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
 import { BOT_CHAT_TURN_END_KEY, BOT_FOLD_LINE_PREFIX, BOT_FOLD_LINE_TEXT } from '../../../shared/bots/personal/memory'
 import { rollUpChips, type BotChipCall } from '../../../shared/bots/personal/chips'
 import type { BotActivityCalls, BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkModel, BotWorkStarted } from '../seams'
-import { MERGED_END_REASON, deriveBotProvenance, workWaits, type BotActivationProvenance, type BotActivationRow, type BotDispatchRow, type BotSubagentSpec, type BotEntryLimit, type BotEscalationRow, type BotGrantRow, type BotMessageRow, type BotModelState, type BotQuestionRow, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
+import { MERGED_END_REASON, deriveBotProvenance, workWaits, type BotActivationProvenance, type BotActivationRow, type BotDispatchRow, type BotSubagentSpec, type BotSubagentRunRow, type BotEntryLimit, type BotEscalationRow, type BotGrantRow, type BotMessageRow, type BotModelState, type BotQuestionRow, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
@@ -201,6 +204,8 @@ export interface BotEngineHost {
     ensureExecutionThread(executionKey: string, name: string, projectId?: string, ownership?: { parentTaskId: string }): { id: string }
     /** Whether a thread is in use, in the trash, or gone; absent: always `active`. */
     threadState?(threadId: string): 'active' | 'trashed' | 'missing'
+    /** Removes a thread `ensureExecutionThread` made that nothing used (owned by `ownedBy`); refuses one with messages. */
+    discardUnusedThread?(threadId: string, ownedBy?: string): void
   }
   /** Deletes a thread for good (a deleted bot's home thread; its owned threads go with it). */
   trashThread?(threadId: string): Promise<unknown>
@@ -587,15 +592,24 @@ interface LiveDispatch {
    * switches it off for the bot, the turn stops (`setPermission`, `cutForSwitch`).
    */
   powers: { shell: boolean }
-  /** The same for each consult of this dispatch that has not settled, by its dispatch number: it is stopped with it. */
-  consultPowers: Map<number, { shell: boolean }>
+  /**
+   * The same for each consult (by its dispatch number) and subagent (by its child run) of this dispatch that has not
+   * settled: it is stopped with it.
+   */
+  consultPowers: Map<number | string, { shell: boolean }>
   /**
    * What the turn holds (the manifest it was compiled from): a subagent it starts holds no more, so an Allow given while
    * the turn runs reaches its subagents with its next turn, as it reaches the turn.
    */
   held: BotManifest
-  /** Its subagents running now, by dispatch number: when each started, on the monotonic clock. */
-  subagentStarts: Map<number, number>
+  /** Its subagents running now, by child run: when each started, on the monotonic clock. */
+  subagentStarts: Map<string, number>
+  /**
+   * Subagent turns whose end this turn took in (a tool result, a steer it accepted), by child run. They are marked told in
+   * `bots.db` only when this turn settles, once what it took in is part of its turn; a crash before then leaves them untold,
+   * so its continuation tells it again.
+   */
+  subagentsRead: Set<string>
 }
 
 /**
@@ -914,18 +928,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** Activations whose live turn reached the end of its window (`endWindow`): its run's end carries the work on. */
   private readonly windowEnds = new Set<string>()
   /**
-   * What each subagent turn ended with, by `<activationId>:<n>`: its final message, or why it has none. Kept in memory:
-   * after a restart the work is told its subagents were stopped, and their results are gone.
+   * Subagent turns the work stopped itself (`subagent_stop`), by child run, until their end is recorded
+   * (`onSubagentSettled`): what they returned and why they ended are the run database's and `bot_subagent_runs`'.
    */
-  private readonly subagentEnds = new Map<string, { state: 'done' | 'failed' | 'stopped'; text?: string; why?: string }>()
-  /** Subagent turns the work stopped itself (`subagent_stop`), by `<activationId>:<n>`, until they settle. */
   private readonly subagentStops = new Set<string>()
+  /** Per work, the titles of subagents being started now (lower case), until their delegation is written. */
+  private readonly startingSubagents = new Map<string, Set<string>>()
   /** A main turn's last words, held while a subagent or consult of it was still ending (`advance`), by activation. */
   private readonly heldAdvance = new Map<string, { text?: string; expectText: boolean }>()
+  /**
+   * Per running subagent turn (its child run), the work's messages waiting to go into it (`subagent_send` to one still
+   * working), and those its runtime took but the model has not read yet. Only its own work reaches it. In memory: a
+   * restart ends the turn.
+   */
+  private readonly subagentNotes = new Map<string, { attached: boolean; waiting: string[]; taken: Map<string, string[]> }>()
   /** Each work's `subagent_wait` calls waiting for one of its subagents to end. */
   private readonly subagentWaiters = new Map<string, Set<() => void>>()
-  /** Per work, the subagents that ended since it last looked, by thread: told to its running turn as a steer. */
-  private readonly subagentNotices = new Map<string, Map<string, string>>()
   /** Notice turns running when their owner wrote (`queueChatInTx`): told once to wrap up (`OWNER_WAITS_STEER`). In memory only. */
   private readonly wrapUps = new Set<string>()
   /** Each bot's next look at notices that wait to settle (`nextChat`). */
@@ -938,7 +956,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private readonly noticeOverflow = new Set<string>()
   /** Per work, the subagents still running when its turn reported (`settle`): its own end stopped them. */
-  private readonly reportStops = new Map<string, { mainN: number; dispatches: Set<number> }>()
+  private readonly reportStops = new Map<string, { mainN: number; runs: Set<string> }>()
   /** The chip a report carries for the subagents it stopped, by `<activationId>:<n>` of its dispatch (`postReply`). */
   private readonly reportChips = new Map<string, BotChip>()
 
@@ -2077,6 +2095,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private async maintainPass(now: Date): Promise<void> {
     if (this.closed) return
     this.checkOpenJobs()
+    this.releaseEndedSubagentHolds()
     this.retryCompletedScheduleRemovals()
     if (this.removedScheduleSweepPending) this.tryDropRemovedScheduleRuns()
     let endedSchedules: ReturnType<BotScheduleBook['ended']> = []
@@ -3177,6 +3196,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   prepare(payload: BotTurnPayload): PreparedBotTurn | { refused: string; code: string } {
+    // A work's subagent: a delegation in the run database, with no dispatch of its own.
+    if (payload.delegationId !== undefined) return this.prepareDelegatedSubagent(payload)
     const row = this.store.activation(payload.activationId)
     const dispatch = row ? this.store.dispatch(row.id, payload.dispatchN) : undefined
     const refuse = (code: string, refused: string) => ({ code, refused })
@@ -3192,7 +3213,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!definition || !this.holdsWithin(row.botId, definition.permissions, grant.manifest))
       return this.block(row, 'bot_grant_revoked', 'The bot\'s permissions no longer cover this revision.')
     if (dispatch.kind === 'consult') return this.prepareConsult(row, dispatch, definition, grant, payload)
-    if (dispatch.kind === 'subagent') return this.prepareSubagent(row, dispatch, definition, grant, payload)
+    // A subagent written by an older build (`bot_dispatches`): settled at startup (`settleLegacySubagentDispatches`), never run.
+    if (dispatch.kind === 'subagent') return refuse('bot_subagent_orphaned', 'The work this subagent belongs to has ended its turn.')
     const selection = row.selection
     if (!selection) return refuse('bot_model_missing', 'No model was chosen for this activation.')
     // What runs: the revision's own permissions held inside the grant, so a narrower revision
@@ -3301,7 +3323,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       controller, timer, startedMono, startedAt, checkpointMono: startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId,
       lastProgressMono: startedMono, workedMono: startedMono, offlineChecks: 0, steering: new Map(), steerSeq: 0, compactions: 0, regiven: 0,
       powers: powersOf(compiled.permissions), consultPowers: new Map(),
-      held: effective, subagentStarts: new Map(),
+      held: effective, subagentStarts: new Map(), subagentsRead: new Set(),
       ...(unattendedChatTurn(row) ? { outOfSight: true as const } : {})
     })
     this.liveRuns.set(payload.runId, row.id)
@@ -3428,9 +3450,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (!live || !taken) return
         live.steering.delete(token)
         if (taken.regiveFor !== undefined) live.regiven = Math.max(live.regiven, taken.regiveFor)
-        // The work read that these subagents ended: it is not told again.
-        const notices = this.subagentNotices.get(row.id)
-        for (const thread of taken.subagents ?? []) notices?.delete(thread)
+        // The work took in that these subagents ended: told once its turn settles (`subagentsRead`), not again before.
+        for (const childRunId of taken.subagents ?? []) live.subagentsRead.add(childRunId)
         if (taken.wrapUp) this.wrapUps.delete(row.id)
         if (!taken.ids.length) return
         if (row.lane === 'chat') this.steeredChats.set(row.id, n)
@@ -3485,15 +3506,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const notes = live.deadline - this.now() >= 2 * ACTIVE_TIME_CHUNK_MS
       ? this.store.pendingWorkNotes(row.id).filter((note) => !taken.has(note.id))
       : []
-    // Its subagents that ended since it last looked, each told once.
-    const told = new Set(outstanding.flatMap((entry) => entry.subagents ?? []))
-    const ended = [...(this.subagentNotices.get(row.id) ?? new Map<string, string>()).entries()].filter(([thread]) => !told.has(thread))
+    // Its subagents that ended since it last looked (`untoldSubagentRuns`, kept in bots.db), each told once.
+    const told = new Set([...outstanding.flatMap((entry) => entry.subagents ?? []), ...live.subagentsRead])
+    const ended = row.lane === 'run' ? this.untoldSubagents(row.id).filter((entry) => !told.has(entry.childRunId)) : []
     // A notice turn whose owner wrote meanwhile: told once to wrap up (`queueChatInTx`).
     const wrapUp = this.wrapUps.has(row.id) && !outstanding.some((entry) => entry.wrapUp)
     if (!regive && !notes.length && !ended.length && !wrapUp) return undefined
     const noteText = row.lane === 'chat' ? chatSteerText(notes.map((note) => note.text)) : noteSteerText(notes.map((note) => ({ text: note.text, fromOwner: !botAuthoredNote(note.fromMessage) })))
-    const parts = [...(regive ? [regive] : []), ...(notes.length ? [noteText] : []), ...ended.map(([, text]) => text), ...(wrapUp ? [OWNER_WAITS_STEER] : [])]
-    return { text: parts.join('\n\n'), ids: notes.map((note) => note.id), ...(regive ? { regiveFor: live.compactions } : {}), ...(ended.length ? { subagents: ended.map(([thread]) => thread) } : {}), ...(wrapUp ? { wrapUp: true as const } : {}) }
+    const parts = [...(regive ? [regive] : []), ...(notes.length ? [noteText] : []), ...ended.map(subagentNoticeText), ...(wrapUp ? [OWNER_WAITS_STEER] : [])]
+    return { text: parts.join('\n\n'), ids: notes.map((note) => note.id), ...(regive ? { regiveFor: live.compactions } : {}), ...(ended.length ? { subagents: ended.map((entry) => entry.childRunId) } : {}), ...(wrapUp ? { wrapUp: true as const } : {}) }
   }
 
   /**
@@ -4079,6 +4100,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     contexts: Array<{ key: string; title: string }>
     callDispatchId?: string
     dispatchId: string
+    /** A subagent whose delegation inherited read-only on the owner's threads (`BotDelegation.readOnly`). */
+    threadsReadOnly?: boolean
     /** What the turn's activation was allowed when the turn started (before a chat turn's front-desk narrowing). */
     startedWith: BotManifest
     /** The granted MCP tools the turn is offered (`BotMcp.offered`); none in a chat turn. */
@@ -4250,7 +4273,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (this.repeatedAsk(row.botId, permission)) return { ok: false, refused: { text: BOT_ASK_DUPLICATE_TEXT, askId: '' } }
       return { ok: false, wall: this.raiseWall(row.id, { dispatchN: input.mainN, kind: 'gate', permission, reason: wallMessage(decided.wall) }) }
     }
-    const readOnly = threadsReadOnlyOf(row)
+    const readOnly = input.threadsReadOnly ? 'not_owner' as const : threadsReadOnlyOf(row)
     const authority: BotAuthority = {
       ...base,
       // A bound service's read: work, a scheduled run, and the chat's own turns (a quick call, within the chat's budgets).
@@ -4417,7 +4440,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * MCP calls (`countsAppCalls`) are counted for it. A tool that makes a request (an image) charges the authority's
    * scope, never this one, so it says nothing about the runtime.
    */
-  private runtimeAccounting(counters: CounterScope, spend: SpendScope | null): { runtimeCounters: CounterScope; countsAppCalls(): boolean; mirror(): UsageMirror } {
+  private runtimeAccounting(counters: CounterScope, spend: SpendScope | null, reserves = spend !== null): { runtimeCounters: CounterScope; countsAppCalls(): boolean; mirror(): UsageMirror } {
     let runtimeCountsRequests = false
     return {
       runtimeCounters: {
@@ -4427,7 +4450,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
       },
       countsAppCalls: () => !runtimeCountsRequests,
-      mirror: () => ({ requests: !runtimeCountsRequests, tokens: !spend })
+      // A runtime reserves (and so commits) tokens on its spend scope only under a spend limit; otherwise they are mirrored.
+      mirror: () => ({ requests: !runtimeCountsRequests, tokens: !spend || !reserves })
     }
   }
 
@@ -6345,6 +6369,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const run = runs.getRun(runId)
       if (run && !TERMINAL_RUN_STATUSES.has(run.status)) return false
     }
+    // Its subagents' runs, from the run database.
+    for (const delegation of runs.delegations.listForRootActivation(row.id)) {
+      const run = runs.getRun(delegation.childRunId)
+      if (run && !TERMINAL_RUN_STATUSES.has(run.status)) return false
+    }
     return true
   }
 
@@ -6375,6 +6404,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const id = dispatch.runId ?? this.receiptRun(dispatch.clientRequestId)
       if (id) entryOf.set(id, dispatch.kind === 'subagent' && dispatch.prompt.subagent ? dispatch.prompt.subagent.selection.instanceId : row.selection.instanceId)
     }
+    for (const turn of this.subagentRecords(row.id).flatMap((record) => record.turns))
+      if (turn.entry?.mainN === main.n) entryOf.set(turn.delegation.childRunId, turn.spec.selection.instanceId)
     const named = new Map<string, Set<string>>()
     const namesOf = (instanceId: string, neutral: NeutralTool[]): Set<string> => {
       const key = `${instanceId}\u0000${neutral.join(',')}`
@@ -6409,15 +6440,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const unknown = this.store.unknownCalls(row.id).filter((call) => !call.acknowledged)
     const stopped: Array<{ title: string; cut?: 'command' | 'change' | 'step' }> = []
     const ids: string[] = []
-    for (const n of noted.dispatches) {
-      const dispatch = this.store.dispatch(row.id, n)
-      const spec = dispatch?.prompt.subagent
-      if (!dispatch || !spec) continue
+    const turns = new Map(this.subagentRecords(row.id).flatMap((record) => record.turns).map((turn) => [turn.delegation.childRunId, turn]))
+    for (const runId of noted.runs) {
+      const turn = turns.get(runId)
+      if (!turn) continue
+      const spec = turn.spec
       // One that finished (or failed) on its own as the work reported was not stopped.
-      const ended = this.subagentEnds.get(`${row.id}:${n}`)
+      const ended = this.subagentEnd(turn)
       if (ended && ended.state !== 'stopped') continue
-      const runId = dispatch.runId ?? this.receiptRun(dispatch.clientRequestId)
-      const cut = runId ? unknown.filter((call) => call.runId === runId) : []
+      const cut = unknown.filter((call) => call.runId === runId)
       ids.push(...cut.map((call) => call.invocationId))
       const names = (neutral: NeutralTool[]) => {
         const found = this.nativeNames(spec.selection.instanceId, neutral)
@@ -6437,12 +6468,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const runs = this.host.runs()
     if (!runs) return
     let changed = 0
+    const ended: Array<{ runId: string; role: 'main' | 'consult' }> = []
     for (const dispatch of this.store.dispatches(row.id)) {
       const runId = dispatch.runId ?? this.receiptRun(dispatch.clientRequestId)
       if (!runId) continue
       const run = runs.getRun(runId)
       if (!run || (!TERMINAL_RUN_STATUSES.has(run.status) && dispatch.exitAt === null)) continue
-      const role = sideDispatch(dispatch) ? 'consult' : 'main'
+      ended.push({ runId, role: sideDispatch(dispatch) ? 'consult' : 'main' })
+    }
+    // Its subagents' runs that ended: their calls hold the work as a consult's do.
+    for (const delegation of runs.delegations.listForRootActivation(row.id)) {
+      const run = runs.getRun(delegation.childRunId)
+      if (run && TERMINAL_RUN_STATUSES.has(run.status)) ended.push({ runId: run.runId, role: 'consult' })
+    }
+    for (const { runId, role } of ended) {
       for (const call of runs.tools.listForRun(runId)) {
         if (call.idempotent) continue
         if (call.status === 'outcome_unknown' || call.status === 'started')
@@ -6679,10 +6718,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const carryOn = input.moreRoom || input.questionAnswered
     const calls = this.store.unknownCalls(row.id)
     // A subagent's run is kept as a consult's in bots.db: it is named as what it is.
-    const roleOf = (call: { role: string; runId: string }) => call.role === 'consult' && this.store.dispatchByRun(call.runId)?.kind === 'subagent' ? 'subagent' : call.role
+    const roleOf = (call: { role: string; runId: string }) => call.role === 'consult' && (this.store.subagentRunByRun(call.runId) || this.store.dispatchByRun(call.runId)?.kind === 'subagent') ? 'subagent' : call.role
     const interrupted = (calls.length
       ? ` Interrupted tool calls (their effects are unknown; check before repeating them): ${calls.map((call) => `${call.tool} (${roleOf(call)} run ${call.runId}, call ${call.invocationId})`).join('; ')}.`
-      : '') + this.stoppedSubagentsLine(row)
+      : '') + this.untoldSubagentsLine(row)
     // A chat turn the owner wrote to again while it answered: their messages, answered as part of the same conversation.
     if (row.lane === 'chat' && updates) {
       const draft = input.afterReport ? this.chatDraft(row) : undefined
@@ -6951,14 +6990,26 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return current?.status === 'running' && current.lane === 'run' && live?.n === main.mainN && !main.controller.signal.aborted ? current : undefined
   }
 
-  /** The subagents of an activation, from its dispatches: one per thread, oldest first, each with its turns in order. */
+  /**
+   * The subagents of a work: its delegations in the run database (`root_activation_id`), one per thread, oldest first,
+   * each with its turns in order and the place each holds on the work's counts (`bot_subagent_runs`). A turn the bots
+   * have not recorded yet (a crash between the delegation and its reservation) reads its spec from its `turn.start`.
+   */
   private subagentRecords(activationId: string): SubagentRecord[] {
+    const runs = this.host.runs()
+    if (!runs) return []
+    const entries = new Map(this.store.subagentRuns(activationId).map((entry) => [entry.childRunId, entry]))
     const records = new Map<string, SubagentRecord>()
-    for (const dispatch of this.store.dispatches(activationId)) {
-      if (dispatch.kind !== 'subagent' || !dispatch.prompt.subagent) continue
-      const record = records.get(dispatch.threadId)
-      if (record) record.dispatches.push(dispatch)
-      else records.set(dispatch.threadId, { threadId: dispatch.threadId, spec: dispatch.prompt.subagent, dispatches: [dispatch] })
+    for (const delegation of runs.delegations.listForRootActivation(activationId)) {
+      const entry = entries.get(delegation.childRunId)
+      const spec = entry?.spec ?? subagentSpecOf(turnStartOf(runs, delegation.childRunId)?.subagent)
+      if (!spec) continue
+      const turn: SubagentTurn = { delegation, spec, ...(entry ? { entry } : {}) }
+      const record = records.get(delegation.childThreadId)
+      if (record) {
+        record.turns.push(turn)
+        record.spec = { ...spec, title: record.spec.title, ...(record.spec.call ? { call: record.spec.call } : {}) }
+      } else records.set(delegation.childThreadId, { threadId: delegation.childThreadId, spec, turns: [turn] })
     }
     return [...records.values()]
   }
@@ -6970,18 +7021,37 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private subagentRunning(record: SubagentRecord): boolean {
-    return record.dispatches.at(-1)!.endedAt === null
+    return record.turns.at(-1)!.delegation.status === 'running'
+  }
+
+  /**
+   * How a subagent's turn ended, as its work reads it: what was recorded when the work was told (`onSubagentSettled`),
+   * else what its delegation says. Its result is the run database's, so it survives a restart.
+   */
+  private subagentEnd(turn: SubagentTurn): SubagentEnd | undefined {
+    const { delegation, entry } = turn
+    if (delegation.status === 'running') return undefined
+    const ended = subagentEndOf(delegation, this.subagentStops.has(delegation.childRunId))
+    // The delegation's result is capped (`DELEGATION_RESULT_MAX_CHARS`); the run keeps a bot subagent's whole text.
+    const whole = ended.state === 'done' ? this.subagentWholeText(delegation) : undefined
+    const read = whole ? { ...ended, text: whole } : ended
+    if (!entry?.outcome) return read
+    return { state: entry.outcome, ...(entry.outcome === 'done' && read.text !== undefined ? { text: read.text } : {}), ...(entry.why ? { why: entry.why } : {}) }
+  }
+
+  /** The whole text a subagent's finished turn returned, as its run kept it (`recordRunResultText`). */
+  private subagentWholeText(delegation: Pick<DelegationRecord, 'childThreadId' | 'childRunId'>): string | undefined {
+    const runs = this.host.runs()
+    const text = runs ? readRunResultText(runs.store, delegation.childThreadId, delegation.childRunId)?.trim() : undefined
+    return text || undefined
   }
 
   /** A subagent as the work reads it: where it is, and, once it ended and when asked, what it returned. */
   private subagentView(record: SubagentRecord, withResult: boolean): BotSubagentView {
-    const latest = record.dispatches.at(-1)!
     const base = { subagent: record.spec.title, model: record.spec.model }
-    if (latest.endedAt === null) return { ...base, state: 'running' }
-    const ended = this.subagentEnds.get(`${latest.activationId}:${latest.n}`)
-    if (ended) return { ...base, state: ended.state, ...(withResult && ended.text !== undefined ? { result: ended.text } : {}), ...(ended.why ? { why: ended.why } : {}) }
-    // It ended in an earlier process (Mousse restarted): what it returned went with that process.
-    return { ...base, state: latest.outcome === 'completed' ? 'done' : latest.outcome === 'failed' || latest.outcome === 'not_sent' ? 'failed' : 'stopped', why: SUBAGENT_RESTARTED_TEXT }
+    const ended = this.subagentEnd(record.turns.at(-1)!)
+    if (!ended) return { ...base, state: 'running' }
+    return { ...base, state: ended.state, ...(withResult && ended.text !== undefined ? { result: ended.text } : {}), ...(ended.why ? { why: ended.why } : {}) }
   }
 
   /**
@@ -6990,7 +7060,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private subagentCapped(activationId: string, title?: string): string | undefined {
     const records = this.subagentRecords(activationId)
-    if (title !== undefined && records.some((record) => record.spec.title.toLowerCase() === title.toLowerCase()))
+    if (title !== undefined && (records.some((record) => record.spec.title.toLowerCase() === title.toLowerCase()) || this.startingSubagents.get(activationId)?.has(title.toLowerCase())))
       return `You already have a subagent called "${title}". Give this one another title, or send that one more work with subagent_send.`
     const live = this.live.get(activationId)
     if (live && live.deadline - this.now() < 2 * ACTIVE_TIME_CHUNK_MS)
@@ -7011,8 +7081,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const row = turn
     const title = cutText(request.title, MAX_SUBAGENT_TITLE_CHARS)
     if (!title) return { refused: 'subagent_start needs a short title, like "Price check".' }
-    const brief = request.brief.trim().slice(0, MAX_SUBAGENT_BRIEF_CHARS)
+    const brief = request.brief.trim()
     if (!brief) return { refused: 'subagent_start needs a brief that stands on its own: the subagent sees nothing else.' }
+    // Never cut: a brief over the limit is refused whole, so the subagent never works from part of it.
+    if (brief.length > MAX_SUBAGENT_BRIEF_CHARS) return { refused: subagentTooLongText('brief', brief.length) }
     // A repeat of the same tool call (a runtime's retry) starts nothing new.
     const again = request.toolCallId ? this.subagentRecords(row.id).find((record) => record.spec.call === request.toolCallId) : undefined
     if (again) return { started: this.subagentView(again, false), note: SUBAGENT_STARTED_NOTE, ...(again.spec.lacks?.length ? { lacks: again.spec.lacks } : {}) }
@@ -7028,8 +7100,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!current) return { refused: SUBAGENT_TURN_ENDED_TEXT }
     const recheck = this.subagentCapped(row.id, title)
     if (recheck) return { refused: recheck }
+    // The run engine and its bot port are asked before the subagent's thread is made: with no port, or a turn the port
+    // would not let start one, nothing is written (no thread without a delegation).
+    const unstartable = this.subagentUnstartable(current)
+    if (unstartable) return { refused: unstartable }
     const definition = this.host.definitions.revision(row.botId, row.revision)
-    const k = this.subagentRecords(row.id).length + 1
+    // Numbered by the work's subagent threads, older subagents' included: a start that runs beside this one (the same
+    // step's other call) is counted from its thread, written below before anything waits.
+    const k = this.store.botThreads(row.botId).filter((entry) => entry.role === 'subagent' && entry.activationId === row.id).length + 1
     const parent = current.threadId ?? this.store.registry(row.botId)?.homeThreadId
     const thread = this.host.threads.ensureExecutionThread(`bot:${row.botId}:act:${row.id}:sub:${k}`, `${definition?.name ?? 'Bot'}: ${title}`.slice(0, 120), undefined, parent ? { parentTaskId: parent } : undefined)
     this.putThread({ threadId: thread.id, botId: row.botId, role: 'subagent', key: `${row.id}:${k}`, activationId: row.id })
@@ -7038,8 +7116,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       title, model: model.name, selection: model.selection, at: this.now(),
       ...(model.pick ? { pick: model.pick } : {}), ...(request.toolCallId ? { call: request.toolCallId } : {}), ...(lacks.length ? { lacks } : {})
     }
-    const sent = await this.sendSubagentTurn(current, main.mainN, thread.id, `${brief}\n\n${SUBAGENT_RESULT_LINE}`, spec)
-    if ('refused' in sent) return sent
+    // Its title is held until its delegation is written: a start beside it can't take it meanwhile.
+    const starting = this.startingSubagents.get(row.id) ?? new Set<string>()
+    this.startingSubagents.set(row.id, starting)
+    starting.add(title.toLowerCase())
+    let sent: { delegationId: string } | { refused: string }
+    try {
+      sent = await this.delegateSubagent(current, { threadId: thread.id, newChild: true, turn: 1, text: `${brief}\n\n${SUBAGENT_RESULT_LINE}`, spec })
+    } finally {
+      starting.delete(title.toLowerCase())
+      if (!starting.size && this.startingSubagents.get(row.id) === starting) this.startingSubagents.delete(row.id)
+    }
+    if ('refused' in sent) {
+      // Refused or failed (a Stop meanwhile, its transaction threw): no thread without a delegation.
+      this.discardSubagentThread(thread.id, parent ?? undefined)
+      return sent
+    }
     const entry = await this.entryName(model.selection.instanceId)
     return {
       started: { subagent: title, model: model.name, state: 'running' },
@@ -7059,9 +7151,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const row = turn
     const record = this.subagentNamed(row.id, request.subagent)
     if (!record) return { refused: this.unknownSubagent(row.id, request.subagent) }
-    if (this.subagentRunning(record)) return { refused: `"${record.spec.title}" is still working. Wait for it (subagent_wait), or stop it first.` }
-    const message = request.message.trim().slice(0, MAX_SUBAGENT_BRIEF_CHARS)
+    const message = request.message.trim()
     if (!message) return { refused: 'subagent_send needs the message.' }
+    if (message.length > MAX_SUBAGENT_BRIEF_CHARS) return { refused: subagentTooLongText('message', message.length) }
+    // One still working takes it in at its next step, as a correction to what it does.
+    if (this.subagentRunning(record)) return this.noteSubagent(record, message)
     const capped = this.subagentCapped(row.id)
     if (capped) return { refused: capped }
     const model = await this.subagentModel(row, record.spec.pick ? { pick: record.spec.pick, name: { name: record.spec.model, entry: '' } } : undefined)
@@ -7071,18 +7165,73 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const current = this.subagentTurn(main)
     if (!current) return { refused: SUBAGENT_TURN_ENDED_TEXT }
     const fresh = this.subagentNamed(row.id, request.subagent)
-    if (!fresh || this.subagentRunning(fresh)) return { refused: `"${record.spec.title}" is still working. Wait for it (subagent_wait), or stop it first.` }
+    if (!fresh) return { refused: this.unknownSubagent(row.id, request.subagent) }
+    if (this.subagentRunning(fresh)) return this.noteSubagent(fresh, message)
+    // `subagent_result` reads a subagent's last turn: more work before the work read what the last one returned would
+    // leave that result where nothing reads it, and its notice pointing at the next one's.
+    if (this.subagentResultUnread(row.id, fresh)) return { refused: `Read what "${fresh.spec.title}" returned first (subagent_result): more work replaces that result.` }
     const recheck = this.subagentCapped(row.id)
     if (recheck) return { refused: recheck }
     const lacks = held.hold.withheld.map((power) => BOT_HELD_POWER_TEXT[power])
-    const { lacks: _before, ...kept } = record.spec
-    const sent = await this.sendSubagentTurn(current, main.mainN, record.threadId, `${message}\n\n${SUBAGENT_RESULT_LINE}`, { ...kept, model: model.name, selection: model.selection, ...(lacks.length ? { lacks } : {}) })
+    const { lacks: _before, ...kept } = fresh.spec
+    const sent = await this.delegateSubagent(current, {
+      threadId: fresh.threadId, newChild: false, turn: fresh.turns.length + 1, text: `${message}\n\n${SUBAGENT_RESULT_LINE}`,
+      spec: { ...kept, model: model.name, selection: model.selection, ...(lacks.length ? { lacks } : {}) }
+    })
     if ('refused' in sent) return sent
     const entry = await this.entryName(model.selection.instanceId)
     return {
       sent: { subagent: record.spec.title, model: model.name, state: 'running' },
       note: lacks.length ? `${SUBAGENT_STARTED_NOTE} ${subagentLacksNote(lacks, entry)}` : SUBAGENT_STARTED_NOTE,
       ...(lacks.length ? { lacks } : {})
+    }
+  }
+
+  /**
+   * `subagent_send` to one of the work's own subagents still working: the message waits for its turn's next step
+   * (`subagentSteer`). Refused when its runtime takes nothing in while it works, or its turn has not started here.
+   */
+  private noteSubagent(record: SubagentRecord, message: string): { sent: BotSubagentView; note: string } | { refused: string } {
+    const notes = this.subagentNotes.get(record.turns.at(-1)!.delegation.childRunId)
+    if (!notes?.attached) return { refused: `"${record.spec.title}" is still working and can't take a message until it finishes. Wait for it (subagent_wait), or stop it and send it what changed.` }
+    notes.waiting.push(message)
+    return { sent: { subagent: record.spec.title, model: record.spec.model, state: 'running' }, note: SUBAGENT_NOTE_SENT }
+  }
+
+  /**
+   * A subagent turn's steer: the messages its work sent it while it works (`noteSubagent`), taken in at its next step and
+   * delivered once; one its runtime hands back waits again.
+   */
+  private subagentSteer(childRunId: string): BotTurnSteer {
+    const notes = () => this.subagentNotes.get(childRunId)
+    return {
+      attached: () => {
+        const own = notes()
+        if (own) own.attached = true
+      },
+      peek: () => {
+        const own = notes()
+        return own?.waiting.length ? subagentNoteText(own.waiting) : undefined
+      },
+      take: () => {
+        const own = notes()
+        if (!own?.waiting.length) return undefined
+        const token = randomUUID()
+        const taken = own.waiting.splice(0)
+        own.taken.set(token, taken)
+        return { text: subagentNoteText(taken), token }
+      },
+      accepted: (token) => {
+        notes()?.taken.delete(token)
+      },
+      handedBack: (token) => {
+        const own = notes()
+        const back = own?.taken.get(token)
+        if (!own || !back) return
+        own.taken.delete(token)
+        own.waiting.unshift(...back)
+      },
+      compacted: () => {}
     }
   }
 
@@ -7249,86 +7398,251 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { compiled, effective, definition, grant, hold }
   }
 
-  /** A subagent's running time, counted in its work's time once (`used_ms` of its dispatch): a count, never a limit. */
-  private chargeSubagent(activationId: string, n: number, ms: number): void {
-    const used = Math.max(0, Math.ceil(ms))
+  /**
+   * Starts a subagent's turn, or more work for one that finished, as a delegation of the work's live main run
+   * (`RunEngine.requestBotDelegation`): the run database writes it, its run and its turn in one transaction, and asks
+   * this engine first (`authorizeSubagent`) and right after (`reserveSubagent`). The child inherits the work's narrowing
+   * on the owner's threads (`ownerTurn`): read-only, or no wider than the device its owner wrote from.
+   */
+  private async delegateSubagent(current: BotActivationRow, input: { threadId: string; newChild: boolean; turn: number; text: string; spec: BotSubagentSpec }): Promise<{ delegationId: string } | { refused: string }> {
+    const runs = this.host.runs()
+    const main = this.liveMain(current.id)
+    if (!runs || !main) return { refused: SUBAGENT_TURN_ENDED_TEXT }
+    const { dispatch, parentRunId } = main
+    const owned = this.ownerTurn(current.id)
     try {
-      this.store.db.transaction(() => {
-        if (this.store.run("UPDATE bot_dispatches SET used_ms = ?, settled_by = 'run' WHERE activation_id = ? AND n = ? AND settled_by IS NULL", used, activationId, n))
-          this.store.run('UPDATE bot_counters SET active_ms = active_ms + ? WHERE activation_id = ?', used, activationId)
+      const accepted = await runs.requestBotDelegation({
+        parentThreadId: dispatch.threadId,
+        parentRunId,
+        childThreadId: input.threadId,
+        newChild: input.newChild,
+        clientRequestId: `botsub:${current.id}:${input.threadId}:${input.turn}`,
+        prompt: input.text,
+        instanceId: input.spec.selection.instanceId,
+        model: input.spec.selection.model,
+        bot: { botId: current.botId, rootActivationId: current.id, access: owned?.limit ?? null, readOnly: owned === undefined },
+        subagent: input.spec
       })
+      this.changed({ botId: current.botId, activationId: current.id })
+      return { delegationId: accepted.delegationId }
     } catch (error) {
-      console.warn('a subagent\'s time could not be charged', { activationId, error: error instanceof Error ? error.message : String(error) })
+      return { refused: `The subagent could not be started: ${error instanceof Error ? error.message : String(error)}` }
     }
-  }
-
-  /** Writes one turn of a subagent, attached to the work's main dispatch `mainN`, and sends it. */
-  private async sendSubagentTurn(row: BotActivationRow, mainN: number, threadId: string, text: string, spec: BotSubagentSpec): Promise<{ n: number } | { refused: string }> {
-    const written = this.store.db.transaction(() => {
-      const current = this.store.activation(row.id)
-      if (current?.status !== 'running') return undefined
-      const n = this.store.nextDispatchN(row.id)
-      this.store.insertDispatch({ activationId: row.id, n, kind: 'subagent', mainN, clientRequestId: `${row.id}:s${n}`, threadId, prompt: { text, subagent: spec }, policyDigest: current.grantDigest })
-      return this.store.dispatch(row.id, n)
-    })
-    if (!written) return { refused: SUBAGENT_TURN_ENDED_TEXT }
-    this.changed({ botId: row.botId, activationId: row.id })
-    try {
-      await this.sendOnly(row, written)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      this.store.run('UPDATE bot_dispatches SET ended_at = ?, outcome = ? WHERE activation_id = ? AND n = ? AND ended_at IS NULL', this.store.now(), 'not_sent', row.id, written.n)
-      this.subagentEnds.set(`${row.id}:${written.n}`, { state: 'failed', why: `It could not be started: ${message}` })
-      this.changed({ botId: row.botId, activationId: row.id })
-      return { refused: `The subagent could not be started: ${message}` }
-    }
-    return { n: written.n }
   }
 
   /**
-   * A subagent's turn (`prepare`): compiled from what the work's turn holds now, for its own runtime, less what that
-   * runtime holds less tightly than the work's, with none of the bot's own tools; under the work's
-   * main dispatch's counts, spend, deadline and stop, which it shares. It attaches only while that dispatch is unsettled,
-   * and its running time is counted in the work's (`chargeSubagent`).
+   * A new subagent's thread whose delegation was refused or failed: its ownership row, then the thread, go. One the run
+   * database wrote a delegation for is kept. Its row goes first: a thread left by a failed removal has no row, and the
+   * work's next start, numbered by its rows, takes that same thread again.
    */
-  private prepareSubagent(row: BotActivationRow, dispatch: BotDispatchRow, definition: BotDefinition, grant: { digest: string; manifest: BotManifest }, payload: BotTurnPayload): PreparedBotTurn | { refused: string; code: string } {
+  private discardSubagentThread(threadId: string, ownedBy: string | undefined): void {
+    try {
+      if (this.host.runs()?.delegations.listForChildThread(threadId).length) return
+      this.store.dropThread(threadId)
+      this.host.threads.discardUnusedThread?.(threadId, ownedBy)
+    } catch (error) {
+      console.warn("a refused subagent's thread could not be removed", { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** The work's live main dispatch and its run, which a subagent's delegation hangs from. */
+  private liveMain(activationId: string): { dispatch: BotDispatchRow; parentRunId: string } | undefined {
+    const live = this.live.get(activationId)
+    const dispatch = live ? this.store.dispatch(activationId, live.n) : undefined
+    const parentRunId = dispatch ? dispatch.runId ?? this.receiptRun(dispatch.clientRequestId) : undefined
+    return dispatch && parentRunId ? { dispatch, parentRunId } : undefined
+  }
+
+  /** Why no subagent of the work can start now as far as the run engine and its bot port say, or undefined. */
+  private subagentUnstartable(current: BotActivationRow): string | undefined {
+    const runs = this.host.runs()
+    if (!runs?.botPort) return SUBAGENT_NO_PORT_TEXT
+    const main = this.liveMain(current.id)
+    if (!main) return SUBAGENT_TURN_ENDED_TEXT
+    const allowed = this.authorizeSubagent({ botId: current.botId, rootActivationId: current.id, parentRunId: main.parentRunId })
+    return allowed.ok ? undefined : allowed.message
+  }
+
+  // -- The bot port (`BotExecutionPort`) -----------------------------------------------------------
+
+  /**
+   * Whether the work may start or message a subagent now (`BotExecutionPort.authorizeSubagent`): it is running, on its
+   * main turn `parentRunId`, which may split its job. A read that fails refuses.
+   */
+  authorizeSubagent(input: { botId: string; rootActivationId: string; parentRunId: string }): { ok: true } | { ok: false; code: string; message: string } {
+    const refused = { ok: false as const, code: 'bot_subagent_refused', message: SUBAGENT_TURN_ENDED_TEXT }
+    try {
+      const row = this.store.activation(input.rootActivationId)
+      const live = this.live.get(input.rootActivationId)
+      if (!row || row.botId !== input.botId || row.status !== 'running' || row.lane !== 'run' || !live || live.controller.signal.aborted) return refused
+      const main = this.store.dispatch(row.id, live.n)
+      if (!main || main.endedAt !== null || (main.runId ?? this.receiptRun(main.clientRequestId)) !== input.parentRunId) return refused
+      if (!turnRightsOf(row).subagents) return { ok: false, code: 'bot_subagent_refused', message: 'This work can\'t start subagents.' }
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, code: 'bots_unavailable', message: `The bot's records could not be read: ${error instanceof Error ? error.message : String(error)}` }
+    }
+  }
+
+  /**
+   * The subagent's place on its work's counts (`BotExecutionPort.reserveSubagent`), written right after its delegation
+   * commits and before its turn can run; its turn writes it again if this one failed (`prepareDelegatedSubagent`).
+   */
+  reserveSubagent(input: { rootActivationId: string; delegationId: string; childRunId: string; childThreadId: string; subagent: unknown }): void {
+    const spec = subagentSpecOf(input.subagent)
+    if (!spec) throw new BotEngineError('bot_subagent_unknown', 'This is not a subagent of a bot\'s work.')
+    this.store.reserveSubagentRun({ activationId: input.rootActivationId, childRunId: input.childRunId, delegationId: input.delegationId, threadId: input.childThreadId, mainN: this.live.get(input.rootActivationId)?.n ?? null, spec })
+    // Room on the work's spend, held before its turn can run so siblings started together share the work's caps; its turn
+    // holds it again if this was refused, and starts only with it (`prepareDelegatedSubagent`).
+    this.holdSubagentSpend(input.rootActivationId, input.childRunId, spec)
+  }
+
+  /**
+   * Holds room for a subagent's first request on its work's spend (`BotSpendScope.hold`, under the id of the work and its
+   * child run), so a sibling started meanwhile sees it. Made once; released when the subagent's turn ends
+   * (`releaseSubagentSpend`).
+   */
+  private holdSubagentSpend(activationId: string, childRunId: string, spec: BotSubagentSpec): ReserveResult {
+    const price = priceFor(spec.selection.model)
+    return new BotSpendScope(this.store, activationId, childRunId).hold(subagentSpendHoldId(childRunId), {
+      ...SUBAGENT_SPEND_HOLD,
+      price: price ? { input: Math.max(price.input, price.cacheRead, price.cacheWrite) / 1e6, output: price.output / 1e6 } : { input: 0, output: 0 }
+    })
+  }
+
+  /**
+   * A subagent's hold still open after its run ended: its release failed (`bots.db` was locked). The open hold is its
+   * own marker, so every upkeep pass tries again until it is gone; it is never charged (startup's P4 skips holds).
+   */
+  private releaseEndedSubagentHolds(): void {
+    const runs = this.host.runs()
+    if (!runs) return
+    try {
+      for (const held of this.store.all("SELECT activation_id, run_id FROM bot_spend_reservations WHERE settled_at IS NULL AND id LIKE 'subagent:%'")) {
+        const run = runs.getRun(String(held.run_id))
+        if (run && !TERMINAL_RUN_STATUSES.has(run.status)) continue
+        this.releaseSubagentSpend(String(held.activation_id), String(held.run_id))
+      }
+    } catch (error) {
+      console.warn("bot subagents' spend holds could not be checked; the next pass tries again", { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** Lets go of the room `holdSubagentSpend` held for a subagent: nothing of it was spent (its requests reserve their own). Idempotent. */
+  private releaseSubagentSpend(activationId: string, childRunId: string): void {
+    try {
+      new BotSpendScope(this.store, activationId).settle(subagentSpendHoldId(childRunId), { kind: 'released' })
+    } catch (error) {
+      console.warn("a bot subagent's spend hold could not be released", { activationId, childRunId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * A subagent's result, from the run database (`BotExecutionPort.onSubagentSettled`): its end is recorded once in
+   * `bot_subagent_runs`, and only then is the work told: at its next step while its turn runs (`subagentNotices`, and a
+   * `subagent_wait` wakes), or by moving it on (`advance`) when its turn has ended. True once recorded (or recorded
+   * already, or no one is left to hear it); a throw or false leaves the inbox row for the next pass.
+   */
+  onSubagentSettled(rootActivationId: string, childThreadId: string, outcome: BotSubagentOutcome): boolean {
+    const runs = this.host.runs()
+    const delegation = runs?.delegations.get(outcome.delegationId)
+    if (!runs || !delegation?.bot || delegation.bot.rootActivationId !== rootActivationId || delegation.childThreadId !== childThreadId) return false
+    const row = this.store.activation(rootActivationId)
+    // Its work is gone: no one is left to hear it.
+    if (!row) return true
+    if (!this.store.subagentRun(rootActivationId, outcome.childRunId)) {
+      const spec = subagentSpecOf(turnStartOf(runs, outcome.childRunId)?.subagent)
+      if (!spec) return true
+      this.store.reserveSubagentRun({ activationId: rootActivationId, childRunId: outcome.childRunId, delegationId: delegation.delegationId, threadId: childThreadId, mainN: null, spec })
+    }
+    this.recordSubagentEnd(row, outcome.childRunId, { status: delegation.status, result: outcome.result })
+    return true
+  }
+
+  /** Records how a subagent's turn ended, once, and tells its work (`onSubagentSettled`). */
+  private recordSubagentEnd(row: BotActivationRow, childRunId: string, delegation: Pick<DelegationRecord, 'status' | 'result'>): void {
+    const stoppedByWork = this.subagentStops.has(childRunId)
+    const end = subagentEndOf(delegation, stoppedByWork)
+    // Recorded once, untold (one it stopped itself needs no word): its running turn hears of it at its next step
+    // (`steerNext`), or the work's next continuation carries it (`untoldSubagentsLine`). A repeat (the run database
+    // delivers again after a crash right after this) still wakes and moves the work on below: the notice is in bots.db.
+    this.store.recordSubagentDelivery(row.id, childRunId, end.state, end.why ?? null, stoppedByWork)
+    this.subagentStops.delete(childRunId)
+    this.wakeSubagentWaiters(row.id)
+    this.changed({ botId: row.botId, activationId: row.id })
+    // While the work's own turn is still being recorded, its settle moves it on, with its last words.
+    if (!this.settling.has(row.id)) void this.advance(row.id).catch(() => {})
+  }
+
+  /**
+   * A subagent's turn (`prepare`), from its delegation: compiled from what the work's turn holds now, for its own
+   * runtime, less what that runtime holds less tightly than the work's, with none of the bot's own tools; under the work's
+   * main dispatch's counts, deadline and stop, which it shares, with its own spend reservations on the work's ledger. It
+   * holds its place on the work's counts before it runs (`reserveSubagentRun`), attaches only while that dispatch is
+   * unsettled, and its running time is counted in the work's (`chargeSubagentRun`). It inherits the work's narrowing on
+   * the owner's threads (`BotDelegation`).
+   */
+  private prepareDelegatedSubagent(payload: BotTurnPayload): PreparedBotTurn | { refused: string; code: string } {
     const refuse = (code: string, refused: string) => ({ code, refused })
+    const runs = this.host.runs()
+    const delegation = runs?.delegations.get(payload.delegationId!)
+    const spec = subagentSpecOf(payload.subagent)
+    const row = this.store.activation(payload.activationId)
+    if (!runs || !delegation?.bot || !spec || !row || row.lane !== 'run' || delegation.childRunId !== payload.runId || delegation.childThreadId !== payload.threadId || delegation.bot.rootActivationId !== row.id || delegation.bot.botId !== row.botId)
+      return refuse('bot_subagent_unknown', 'This is not a subagent of a bot\'s work.')
+    if (row.status !== 'running') return refuse('bot_activation_not_running', 'The activation is not running.')
+    const orphaned = () => refuse('bot_subagent_orphaned', 'The work this subagent belongs to has ended its turn.')
+    if (delegation.status !== 'running') return orphaned()
+    const grant = this.store.activeGrant(row.botId)
+    if (!grant || grant.digest !== row.grantDigest) return this.block(row, 'bot_grant_revoked', 'The bot\'s permissions were revoked or changed.')
+    const definition = this.host.definitions.revision(row.botId, row.revision)
+    if (!definition || !this.holdsWithin(row.botId, definition.permissions, grant.manifest))
+      return this.block(row, 'bot_grant_revoked', 'The bot\'s permissions no longer cover this revision.')
     const main = this.live.get(row.id)
-    const spec = dispatch.prompt.subagent
-    if (row.lane !== 'run' || !spec) return refuse('bot_subagent_unknown', 'This is not a subagent of a bot\'s work.')
-    if (!main || main.n !== dispatch.mainN || main.controller.signal.aborted) return refuse('bot_subagent_orphaned', 'The work this subagent belongs to has ended its turn.')
-    if (main.deadline - this.now() <= 0) return refuse('bot_subagent_orphaned', 'The work this subagent belongs to has ended its turn.')
+    const entry = this.store.subagentRun(row.id, payload.runId)
+    if (!main || main.controller.signal.aborted || main.deadline - this.now() <= 0 || (entry?.mainN != null && entry.mainN !== main.n)) return orphaned()
     const held = this.compileSubagent(row, spec.selection, main.deadline)
     if ('refused' in held) return refuse('policy_unenforceable', held.hold ? 'Its entry would now hold it less tightly than its work, and it can\'t run without that there.' : held.refused)
     const { compiled, effective } = held
     const withheld = held.hold.withheld.map((power) => BOT_HELD_POWER_TEXT[power])
-    // The start marker, only while the main dispatch is unsettled: it attaches before the settlement, or starts nothing.
+    // Its place on the work's counts, then its start, only while the main dispatch is unsettled: it attaches before the
+    // settlement, or starts nothing.
     const attached = this.store.db.transaction(() => {
-      const open = this.store.get('SELECT 1 AS open FROM bot_dispatches WHERE activation_id = ? AND n = ? AND settled_by IS NULL', row.id, main.n)
-      if (!open) return false
-      return this.store.run('UPDATE bot_dispatches SET started_at = ?, run_id = COALESCE(run_id, ?) WHERE activation_id = ? AND n = ? AND started_at IS NULL', this.now(), payload.runId, row.id, dispatch.n) > 0
+      if (!this.store.get('SELECT 1 AS open FROM bot_dispatches WHERE activation_id = ? AND n = ? AND settled_by IS NULL', row.id, main.n)) return false
+      this.store.reserveSubagentRun({ activationId: row.id, childRunId: payload.runId, delegationId: delegation.delegationId, threadId: delegation.childThreadId, mainN: main.n, spec })
+      return this.store.markSubagentStarted(row.id, payload.runId, this.now())
     })
-    if (!attached) return refuse('bot_subagent_orphaned', 'The work this subagent belongs to has ended its turn.')
+    if (!attached) return orphaned()
+    // Its room on the work's spend, held when its delegation committed: held again here if that failed, and it starts
+    // only with it (its run never started, so nothing is charged for it).
+    if (!this.holdSubagentSpend(row.id, payload.runId, spec).ok) return refuse('bot_spend_exhausted', SUBAGENT_NO_SPEND_TEXT)
+    const dispatchId = subagentDispatchId(payload.runId)
     try {
-      this.host.supervision?.arm({ dispatchId: dispatch.clientRequestId, activationId: row.id, deadlineAt: main.deadline })
+      this.host.supervision?.arm({ dispatchId, activationId: row.id, deadlineAt: main.deadline })
     } catch (error) {
       console.warn('the bot supervisor could not be armed', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
     }
-    this.executing.add(`${row.id}:${dispatch.n}`)
+    this.executing.add(dispatchId)
     this.liveRuns.set(payload.runId, row.id)
+    this.subagentNotes.set(payload.runId, { attached: false, waiting: [], taken: new Map() })
     // What it holds for the whole of its turn, like a consult's: a switch turned off stops the work and its subagents.
-    main.consultPowers.set(dispatch.n, powersOf(compiled.permissions))
+    main.consultPowers.set(payload.runId, powersOf(compiled.permissions))
     // Its running time is counted in the work's from now.
-    main.subagentStarts.set(dispatch.n, this.monotonic())
-    // Its requests, tokens, cost and calls are the work's, on the work's counters and ledger.
-    const accounting = this.runtimeAccounting(main.counters, main.spend)
+    main.subagentStarts.set(payload.runId, this.monotonic())
+    // Its requests, tokens and calls are the work's, on the work's counters; its spend is reserved on the work's ledger
+    // under its own run, so siblings and the work share every cap. Every subagent has the scope; its runtime reserves on
+    // it under a spend limit, and its tokens are mirrored otherwise (`runtimeAccounting`).
+    // Its requests draw on the room held for it (`holdSubagentSpend`): only its siblings' holds count against them.
+    const spend = this.wallingSpend(new BotSpendScope(this.store, row.id, payload.runId, subagentSpendHoldId(payload.runId)), row.id, main.n)
+    const accounting = this.runtimeAccounting(main.counters, spend, Object.keys(spendLimits(effective)).length > 0)
     const authority = this.authorityFor({
       row, mainN: main.n, role: 'subagent', permissions: compiled.permissions, grantDigest: grant.digest, startedWith: effective,
-      controller: main.controller, deadline: main.deadline, counters: main.counters, spend: main.spend, contexts: [],
+      controller: main.controller, deadline: main.deadline, counters: main.counters, spend, contexts: [],
       // Its calls are chips of the work's message.
-      dispatchId: main.dispatchId, callDispatchId: dispatch.clientRequestId,
+      dispatchId: main.dispatchId, callDispatchId: dispatchId,
       mcpTools: this.offeredMcp(compiled.permissions.mcp),
       countsAppCalls: accounting.countsAppCalls,
+      threadsReadOnly: delegation.bot.readOnly,
       // Compiled as it started, against the grant now (`compileSubagent` reads it).
       permissionsNow: () => {
         const now = this.compileSubagent(row, spec.selection, main.deadline)
@@ -7336,11 +7650,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
     })
     const browser = compiled.permissions.browser ? this.browserTurn(row, payload.runId, main.controller.signal) : undefined
-    const first = this.store.dispatches(row.id).find((entry) => entry.kind === 'subagent' && entry.threadId === dispatch.threadId)?.n === dispatch.n
+    const first = runs.delegations.listForChildThread(delegation.childThreadId)[0]?.delegationId === delegation.delegationId
+    const prompt = payload.prompt ?? ''
     return {
       activationId: row.id,
-      dispatchN: dispatch.n,
-      prompt: dispatch.prompt.text.startsWith('/') ? ` ${dispatch.prompt.text}` : dispatch.prompt.text,
+      dispatchN: 0,
+      prompt: prompt.startsWith('/') ? ` ${prompt}` : prompt,
       ...this.instructionsOf(definition, definition.main, 'run', {
         allowed: { ...botAllowedOf(subagentManifest(narrowManifest(effective, definition.main.narrow)), (ids) => this.mcpServerNames(ids)) },
         subagent: true,
@@ -7356,58 +7671,58 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       skills: compiled.permissions.skills,
       history: first ? 'none' : 'thread',
       lane: 'run',
-      ...(browser ? { browser } : {})
+      // Its work's messages while it works (`subagent_send`), and nobody else's.
+      steer: this.subagentSteer(payload.runId),
+      ...(browser ? { browser } : {}),
+      // Its runtime is set up (that awaits) between this and its binding: what was checked above is checked again right
+      // before it binds, and it binds to the policy compiled then.
+      beforeBind: () => {
+        const now = this.store.activation(row.id)
+        if (now?.status !== 'running') return refuse('bot_activation_not_running', 'The activation is not running.')
+        if (runs.delegations.get(delegation.delegationId)?.status !== 'running') return orphaned()
+        const grantNow = this.store.activeGrant(row.botId)
+        if (!grantNow || grantNow.digest !== now.grantDigest || grantNow.digest !== grant.digest) return this.block(now, 'bot_grant_revoked', "The bot's permissions were revoked or changed.")
+        const revision = this.host.definitions.revision(now.botId, now.revision)
+        if (now.revision !== row.revision || !revision || !this.holdsWithin(now.botId, revision.permissions, grantNow.manifest))
+          return this.block(now, 'bot_grant_revoked', "The bot's permissions no longer cover this revision.")
+        if (this.live.get(row.id) !== main || main.controller.signal.aborted || main.deadline - this.now() <= 0) return orphaned()
+        const again = this.compileSubagent(now, spec.selection, main.deadline)
+        if ('refused' in again) return refuse('policy_unenforceable', again.hold ? "Its entry would now hold it less tightly than its work, and it can't run without that there." : again.refused)
+        return { policy: again.compiled.policy }
+      }
     }
   }
 
   /**
-   * A subagent's turn ended: what it returned (its final message) or why it ended without, for the work to read; the
-   * work is told at its next step if its turn still runs, and a `subagent_wait` wakes. Idempotent, like a consult's.
+   * A subagent's turn ended (its executor's settle, or its run's terminal event): its running time is counted in its
+   * work's, once (`chargeSubagentRun`), and its processes are let go. What it returned is its delegation's, which the run
+   * database publishes and hands to `onSubagentSettled`; a turn whose delegation was cancelled (the work stopped it, or
+   * the work's end or a Stop did) publishes nothing, so its end is recorded here. Idempotent.
    */
-  private settleSubagent(row: BotActivationRow, dispatch: BotDispatchRow, run: RunRecord, outcome: { text?: string }, fromExecutor: boolean): void {
-    const key = `${row.id}:${dispatch.n}`
-    this.liveRuns.delete(run.runId)
-    const main = this.live.get(row.id)
-    if (main?.n === dispatch.mainN) {
-      main.consultPowers.delete(dispatch.n)
-      // Its running time is counted in the work's.
-      const startedMono = main.subagentStarts.get(dispatch.n)
-      if (startedMono !== undefined) {
-        main.subagentStarts.delete(dispatch.n)
-        this.chargeSubagent(row.id, dispatch.n, Math.max(0, this.monotonic() - startedMono))
-      }
-    }
-    // The executor's settle carries the final message; the terminal event settles one it never ran.
-    if (!fromExecutor && this.executing.has(key)) return
-    this.executing.delete(key)
-    const ended = this.store.run('UPDATE bot_dispatches SET ended_at = ?, outcome = ?, run_id = COALESCE(run_id, ?) WHERE activation_id = ? AND n = ? AND ended_at IS NULL', this.store.now(), run.status, run.runId, row.id, dispatch.n) > 0
-    const stopped = this.subagentStops.delete(key)
-    if (!this.subagentEnds.has(key) || fromExecutor) {
-      const error = typeof run.outcome?.error === 'string' ? run.outcome.error : undefined
-      // A turn its runtime refused before it ran (the work's grant changed, its runtime can't hold the bot now) failed;
-      // one ended with the work's turn, or by the work, was stopped.
-      const refused = run.status === 'cancelled' && error !== undefined && !SUBAGENT_STOP_ERRORS.has(error)
-      this.subagentEnds.set(key, run.status === 'completed'
-        ? { state: 'done', text: outcome.text?.trim() || '(It returned nothing.)' }
-        : stopped ? { state: 'stopped', why: SUBAGENT_STOPPED_BY_WORK_TEXT }
-          : run.status === 'failed' ? { state: 'failed', why: error && isCodexBotRefusal(error) ? error : `It failed${error ? `: ${cutText(error, 200)}` : '.'}` }
-            : refused ? { state: 'failed', why: `It could not start (${cutText(error!, 80)}).` }
-              : { state: 'stopped', why: SUBAGENT_STOPPED_WITH_TURN_TEXT })
-    }
-    // The work hears of it at its next step while its turn runs (one it stopped itself needs no word).
-    const title = dispatch.prompt.subagent?.title
-    if (ended && !stopped && title && main?.n === dispatch.mainN && !main.controller.signal.aborted) {
-      const state = this.subagentEnds.get(key)!.state
-      const notices = this.subagentNotices.get(row.id) ?? new Map<string, string>()
-      notices.set(dispatch.threadId, mousseNotice({ kind: 'bot_subagent' }, [`Your subagent "${title}" ${state === 'done' ? 'finished' : state === 'failed' ? 'ended without a result' : 'was stopped'}. Read what it returned with subagent_result.`]))
-      this.subagentNotices.set(row.id, notices)
-    }
-    this.wakeSubagentWaiters(row.id)
-    this.settleProcesses(dispatch)
-    if (!fromExecutor && this.host.journal) this.needsSync.set(dispatch.threadId, { botId: row.botId, threadId: dispatch.threadId, lane: row.lane, activationId: row.id })
-    if (this.host.context) void this.afterDispatch(row, dispatch.threadId, dispatch.clientRequestId, run.status === 'completed' ? 'settled' : run.status === 'failed' ? 'failed' : 'stopped').catch(() => false)
+  private settleDelegatedSubagent(runId: string): void {
+    const runs = this.host.runs()
+    const run = runs?.getRun(runId)
+    if (!runs || !run || !TERMINAL_RUN_STATUSES.has(run.status)) return
+    const entry = this.store.subagentRunByRun(runId)
+    if (!entry) return
+    this.liveRuns.delete(runId)
+    this.subagentNotes.delete(runId)
+    const main = this.live.get(entry.activationId)
+    main?.consultPowers.delete(runId)
+    const startedMono = main?.subagentStarts.get(runId)
+    main?.subagentStarts.delete(runId)
+    this.releaseSubagentSpend(entry.activationId, runId)
+    // Measured on the monotonic clock of the process that ran it; otherwise from the run's own times.
+    if (entry.chargedAt === null && entry.startedAt !== null) this.store.chargeSubagentRun(entry.activationId, runId, startedMono !== undefined ? this.monotonic() - startedMono : subagentRunMs(run, runs.lastAliveAt(run)))
+    if (this.executing.delete(subagentDispatchId(runId)) && this.host.supervision)
+      void this.host.supervision.settled(subagentDispatchId(runId)).catch((error: unknown) => console.warn('a bot subagent\'s processes could not be confirmed gone', { runId, error: error instanceof Error ? error.message : String(error) }))
+    const row = this.store.activation(entry.activationId)
+    if (!row) return
+    const delegation = runs.delegations.get(entry.delegationId)
+    if (delegation?.status === 'cancelled') this.recordSubagentEnd(row, runId, delegation)
+    if (this.host.journal) this.needsSync.set(entry.threadId, { botId: row.botId, threadId: entry.threadId, lane: row.lane, activationId: row.id })
+    if (this.host.context) void this.afterDispatch(row, entry.threadId, subagentDispatchId(runId), run.status === 'completed' ? 'settled' : run.status === 'failed' ? 'failed' : 'stopped').catch(() => false)
     this.changed({ botId: row.botId, activationId: row.id })
-    // While the work's own turn is still being recorded, its settle moves it on, with its last words.
     if (!this.settling.has(row.id)) void this.advance(row.id).catch(() => {})
   }
 
@@ -7438,38 +7753,73 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { subagents: this.readSubagents(activationId, [record]) }
   }
 
-  /** The subagents' views with what they returned; the work has read them, so their notices are dropped. */
+  /**
+   * The subagents' views with what they returned. A view carries its last turn's result only: that turn, once ended, is
+   * what the work read (an earlier turn it never read stays untold). It is marked told when the work's turn settles
+   * (`subagentsRead`), not now: a crash before then loses the reply, and its continuation tells it again.
+   */
   private readSubagents(activationId: string, records: readonly SubagentRecord[]): BotSubagentView[] {
-    const notices = this.subagentNotices.get(activationId)
+    const live = this.live.get(activationId)
     return records.map((record) => {
       const view = this.subagentView(record, true)
-      if (view.state !== 'running') notices?.delete(record.threadId)
+      const last = record.turns.at(-1)
+      if (view.state !== 'running' && last) live?.subagentsRead.add(last.delegation.childRunId)
       return view
     })
+  }
+
+  /**
+   * Whether the subagent's last turn returned a result its work has neither read in this turn (`subagentsRead`) nor been
+   * told of (`told_at`). A bots.db that can't be read counts as read: the follow-up is not refused for it.
+   */
+  private subagentResultUnread(activationId: string, record: SubagentRecord): boolean {
+    const last = record.turns.at(-1)
+    if (!last || this.subagentEnd(last)?.state !== 'done') return false
+    const childRunId = last.delegation.childRunId
+    if (this.live.get(activationId)?.subagentsRead.has(childRunId)) return false
+    try {
+      return !this.store.subagentRunByRun(childRunId)?.toldAt
+    } catch {
+      return false
+    }
+  }
+
+  /** `BotStore.untoldSubagentRuns`; none when bots.db can't be read (the next step tries again). */
+  private untoldSubagents(activationId: string): BotSubagentRunRow[] {
+    try {
+      return this.store.untoldSubagentRuns(activationId)
+    } catch (error) {
+      console.warn("a work's subagent notices could not be read", { activationId, error: error instanceof Error ? error.message : String(error) })
+      return []
+    }
+  }
+
+  /** `BotStore.markSubagentsTold`; a failure leaves them untold, so the work is told again rather than never. */
+  private markSubagentsTold(activationId: string, childRunIds: readonly string[]): void {
+    try {
+      this.store.markSubagentsTold(activationId, childRunIds)
+    } catch (error) {
+      console.warn("a work's subagent notices could not be marked told", { activationId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /** `subagent_stop`: the subagent's turn ends now (a queued one never starts). */
   private stopSubagent(activationId: string, request: { subagent: string }): { stopped: BotSubagentView } | { refused: string } {
     const record = this.subagentNamed(activationId, request.subagent)
     if (!record) return { refused: this.unknownSubagent(activationId, request.subagent) }
-    const latest = record.dispatches.at(-1)!
-    if (latest.endedAt !== null) return { stopped: this.subagentView(record, false) }
-    const key = `${activationId}:${latest.n}`
-    this.subagentStops.add(key)
+    if (!this.subagentRunning(record)) return { stopped: this.subagentView(record, false) }
+    const { delegation } = record.turns.at(-1)!
+    this.subagentStops.add(delegation.childRunId)
     const runs = this.host.runs()
-    const runId = latest.runId ?? this.receiptRun(latest.clientRequestId)
-    const run = runId ? runs?.getRun(runId) : undefined
-    const row = this.store.activation(activationId)
-    if (run?.status === 'queued' && runs && row) {
+    if (runs?.getRun(delegation.childRunId)?.status === 'queued') {
       try {
-        runs.markTerminal(run.runId, 'cancelled', { error: 'bot_subagent_stopped' })
+        runs.markTerminal(delegation.childRunId, 'cancelled', { error: 'bot_subagent_stopped' })
       } catch {
         // It started meanwhile: stopped below.
       }
-      const ended = runs.getRun(run.runId)
-      if (ended && TERMINAL_RUN_STATUSES.has(ended.status)) this.settleSubagent(row, latest, ended, {}, false)
-      else void Promise.resolve(this.host.stopThread?.(record.threadId)).catch(() => {})
-    } else void Promise.resolve(this.host.stopThread?.(record.threadId)).catch(() => {})
+    }
+    if (!runs || !TERMINAL_RUN_STATUSES.has(runs.getRun(delegation.childRunId)?.status ?? 'queued'))
+      void Promise.resolve(this.host.stopThread?.(record.threadId)).catch(() => {})
     return { stopped: { subagent: record.spec.title, model: record.spec.model, state: 'stopped' } }
   }
 
@@ -7505,18 +7855,103 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * The line a continuation of the work carries for the subagents its last turn's end stopped (a restart, the turn cap,
-   * the owner's switch, an answered ask): they never report, so the work hears it once and may start them again.
+   * The line a continuation of the work carries for its subagents that ended untold (`untoldSubagentRuns`): those its last
+   * turn's end stopped (a restart, the turn cap, the owner's switch, an answered ask), which never report, and those that
+   * finished after its turn ended or before it took the notice in. Written with the continuation (in its transaction),
+   * they are told then, once.
    */
-  private stoppedSubagentsLine(row: BotActivationRow): string {
-    const previous = this.store.lastMainDispatch(row.id)
-    if (!previous || row.lane !== 'run') return ''
-    const titles = this.subagentRecords(row.id).filter((record) => {
-      const latest = record.dispatches.at(-1)!
-      const view = this.subagentView(record, false)
-      return latest.mainN === previous.n && latest.endedAt !== null && view.state === 'stopped' && view.why !== SUBAGENT_STOPPED_BY_WORK_TEXT
-    }).map((record) => `"${record.spec.title}"`)
-    return titles.length ? ` Your subagents ${titles.join(', ')} were stopped when your last turn ended; subagent_result shows each one, and you may start them again.` : ''
+  private untoldSubagentsLine(row: BotActivationRow): string {
+    if (row.lane !== 'run') return ''
+    // Recorded and untold, or ended in the run database before it handed the end over (the boot after a restart ends
+    // them before the bots are told): either way the work has not heard of it.
+    const untold = this.subagentRecords(row.id).flatMap((record) => record.turns.flatMap((turn) => {
+      if (!turn.entry || turn.entry.toldAt !== null) return []
+      const end = this.subagentEnd(turn)
+      return end && end.why !== SUBAGENT_STOPPED_BY_WORK_TEXT ? [{ title: `"${record.spec.title}"`, childRunId: turn.delegation.childRunId, stopped: end.state === 'stopped' }] : []
+    }))
+    if (!untold.length) return ''
+    const titles = (entries: typeof untold) => [...new Set(entries.map((entry) => entry.title))].join(', ')
+    const stopped = untold.filter((entry) => entry.stopped)
+    const ended = untold.filter((entry) => !entry.stopped)
+    this.store.markSubagentsTold(row.id, untold.map((entry) => entry.childRunId))
+    return (stopped.length ? ` Your subagents ${titles(stopped)} were stopped when your last turn ended; subagent_result shows each one, and you may start them again.` : '')
+      + (ended.length ? ` Your subagents ${titles(ended)} ended since you last looked; read what each returned with subagent_result.` : '')
+  }
+
+  /**
+   * A subagent an older build wrote as a dispatch (`bot_dispatches`, `<activation>:s<n>`) whose run ended: it ends, its
+   * time is counted in its work's once (from its run's own times), and its work moves on unless `quiet` (the startup
+   * pass, which moves every work on itself).
+   */
+  private settleLegacySubagent(row: BotActivationRow, dispatch: BotDispatchRow, run: RunRecord, quiet = false): void {
+    this.liveRuns.delete(run.runId)
+    const used = dispatch.startedAt === null ? 0 : subagentRunMs(run, this.host.runs()?.lastAliveAt(run))
+    this.store.db.transaction(() => {
+      if (this.store.run("UPDATE bot_dispatches SET used_ms = ?, settled_by = 'run' WHERE activation_id = ? AND n = ? AND settled_by IS NULL", used, row.id, dispatch.n))
+        this.store.run('UPDATE bot_counters SET active_ms = active_ms + ? WHERE activation_id = ?', used, row.id)
+      this.store.run('UPDATE bot_dispatches SET ended_at = ?, outcome = ?, run_id = COALESCE(run_id, ?) WHERE activation_id = ? AND n = ? AND ended_at IS NULL', this.store.now(), run.status, run.runId, row.id, dispatch.n)
+    })
+    this.settleProcesses(dispatch)
+    if (quiet) return
+    this.changed({ botId: row.botId, activationId: row.id })
+    if (!this.settling.has(row.id)) void this.advance(row.id).catch(() => {})
+  }
+
+  /**
+   * At startup, the subagents an older build wrote as dispatches that have not ended: a run still live is ended (its
+   * work's turn ended with the restart), and each is settled (`settleLegacySubagent`); one never sent ends `not_sent`.
+   * None is run, counted or waited on again. Returns how many were settled.
+   */
+  private settleLegacySubagentDispatches(runs: RunEngine): number {
+    let settled = 0
+    for (const found of this.store.all("SELECT activation_id, n FROM bot_dispatches WHERE kind = 'consult' AND ended_at IS NULL")) {
+      const dispatch = this.store.dispatch(String(found.activation_id), Number(found.n))
+      if (dispatch?.kind !== 'subagent') continue
+      const row = this.store.activation(dispatch.activationId)
+      const runId = dispatch.runId ?? this.receiptRun(dispatch.clientRequestId)
+      let run = runId ? runs.getRun(runId) : undefined
+      if (run && !TERMINAL_RUN_STATUSES.has(run.status)) {
+        try {
+          runs.markTerminal(run.runId, run.status === 'queued' ? 'cancelled' : 'interrupted', run.status === 'queued' ? { error: 'bot_dispatch_restarted' } : { interruptedBy: 'daemon_restart' })
+        } catch (error) {
+          console.warn('an older bot subagent could not be ended at startup', { runId: run.runId, error: error instanceof Error ? error.message : String(error) })
+        }
+        run = runs.getRun(run.runId)
+      }
+      if (row && run && TERMINAL_RUN_STATUSES.has(run.status)) this.settleLegacySubagent(row, dispatch, run, true)
+      else this.store.run("UPDATE bot_dispatches SET ended_at = ?, outcome = 'not_sent' WHERE activation_id = ? AND n = ? AND ended_at IS NULL", this.store.now(), dispatch.activationId, dispatch.n)
+      settled++
+    }
+    return settled
+  }
+
+  /**
+   * At startup, the work subagents of the run database against `bot_subagent_runs`. A running delegation whose
+   * reservation a crash lost (between the run database's commit and the bots') is reserved from its `turn.start`; its
+   * run, queued for a work's turn that ended with the restart, never starts. A turn that started but was never charged
+   * (a crash between its end and its charge) is charged once, from its run's own times. Nothing is charged twice
+   * (`charged_at`), and nothing started goes uncharged.
+   */
+  private reconcileSubagentRuns(runs: RunEngine): void {
+    for (const delegation of runs.delegations.listRunningBot()) {
+      try {
+        const root = delegation.bot!.rootActivationId
+        if (!this.store.subagentRun(root, delegation.childRunId)) {
+          const spec = subagentSpecOf(turnStartOf(runs, delegation.childRunId)?.subagent)
+          if (spec) this.store.reserveSubagentRun({ activationId: root, childRunId: delegation.childRunId, delegationId: delegation.delegationId, threadId: delegation.childThreadId, mainN: null, spec })
+        }
+        if (runs.getRun(delegation.childRunId)?.status === 'queued') runs.markTerminal(delegation.childRunId, 'cancelled', { error: 'bot_dispatch_restarted' })
+      } catch (error) {
+        console.warn('a bot subagent could not be reconciled at startup', { delegationId: delegation.delegationId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    // No subagent runs on after a restart: the room each held on its work's spend is let go (P4 does too).
+    for (const held of this.store.all("SELECT activation_id, run_id FROM bot_spend_reservations WHERE settled_at IS NULL AND id LIKE 'subagent:%'"))
+      this.releaseSubagentSpend(String(held.activation_id), String(held.run_id))
+    for (const entry of this.store.unchargedSubagentRuns()) {
+      const run = runs.getRun(entry.childRunId)
+      if (run && TERMINAL_RUN_STATUSES.has(run.status)) this.store.chargeSubagentRun(entry.activationId, entry.childRunId, subagentRunMs(run, runs.lastAliveAt(run)))
+    }
   }
 
   /**
@@ -7527,6 +7962,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * executor's final message may come after the run's terminal event settled the dispatch.
    */
   settle(payload: BotTurnPayload, outcome: { text?: string; messageId?: string; unanswered?: boolean }): void {
+    // A work's subagent: what it returned is its run's result, which its delegation publishes.
+    if (payload.delegationId !== undefined) return this.settleDelegatedSubagent(payload.runId)
     const runs = this.host.runs()
     const run = runs?.getRun(payload.runId)
     if (!runs || !run || !TERMINAL_RUN_STATUSES.has(run.status)) return
@@ -7534,7 +7971,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const dispatch = row ? this.store.dispatch(row.id, payload.dispatchN) : undefined
     if (!row || !dispatch) return
     if (dispatch.kind === 'consult') return this.settleConsult(row, dispatch, run, outcome, true)
-    if (dispatch.kind === 'subagent') return this.settleSubagent(row, dispatch, run, outcome, true)
+    if (dispatch.kind === 'subagent') return this.settleLegacySubagent(row, dispatch, run)
     if (run.status === 'completed') this.confirmWorkDelivery(row.id, dispatch.n, 'completed')
     if (outcome.unanswered) this.cutReplies.set(row.id, dispatch.n)
     const key = `${row.id}:${dispatch.n}`
@@ -7569,17 +8006,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       live.timer?.clear()
       live.watch?.clear()
       live.controller.abort(new Error('dispatch_ended'))
-      // What its subagents had to tell this turn goes with it: a continuation says which of them were stopped.
-      this.subagentNotices.delete(row.id)
+      // What this turn took in of its subagents' ends is part of it now: told, once.
+      this.markSubagentsTold(row.id, [...live.subagentsRead])
+      // What its subagents had to tell this turn and it never took in stays untold in bots.db: a continuation carries it.
       // Its subagents still running are stopped with it: their time so far counts against the work's, as theirs.
-      for (const [n, startedMono] of live.subagentStarts) this.chargeSubagent(row.id, n, this.monotonic() - startedMono)
+      for (const [childRunId, startedMono] of live.subagentStarts) {
+        try {
+          this.store.chargeSubagentRun(row.id, childRunId, this.monotonic() - startedMono)
+        } catch (error) {
+          console.warn('a subagent\'s time could not be charged', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
       live.subagentStarts.clear()
     }
     // The work reported while subagents still ran: its own end stops them, and what they had in flight then holds
     // nothing for the owner (`acknowledgeReportStops`). Any other end keeps the rule of an interruption.
     if (run.status === 'completed') {
-      const running = this.store.dispatches(row.id).filter((side) => side.kind === 'subagent' && side.mainN === dispatch.n && side.endedAt === null).map((side) => side.n)
-      if (running.length) this.reportStops.set(row.id, { mainN: dispatch.n, dispatches: new Set(running) })
+      const running = this.subagentRecords(row.id).flatMap((record) => record.turns).filter((turn) => turn.entry?.mainN === dispatch.n && turn.delegation.status === 'running').map((turn) => turn.delegation.childRunId)
+      if (running.length) this.reportStops.set(row.id, { mainN: dispatch.n, runs: new Set(running) })
     }
     // Measured on the monotonic clock of the process that ran the dispatch. Without that measure
     // (another process started it), nothing is refunded: the whole prepaid allowance stays charged.
@@ -7784,6 +8228,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       void Promise.resolve(this.host.stopThread?.(consult.threadId)).catch(() => {})
     }
+    if (!runs) return
+    for (const turn of this.subagentRecords(row.id).flatMap((record) => record.turns)) {
+      if (turn.delegation.status !== 'running' || (turn.entry?.mainN != null && turn.entry.mainN !== mainN)) continue
+      const run = runs.getRun(turn.delegation.childRunId)
+      if (!run || TERMINAL_RUN_STATUSES.has(run.status)) continue
+      if (run.status === 'queued') {
+        try { runs.markTerminal(run.runId, 'cancelled', { error: 'bot_dispatch_ended' }) } catch { /* it started meanwhile */ }
+        continue
+      }
+      void Promise.resolve(this.host.stopThread?.(turn.delegation.childThreadId)).catch(() => {})
+    }
   }
 
   /**
@@ -7791,6 +8246,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * event): whatever path the turn took, no activation is left running after its run ended.
    */
   settleRun(runId: string): void {
+    if (this.store.subagentRunByRun(runId)) return this.settleDelegatedSubagent(runId)
     const dispatch = this.store.dispatchByRun(runId)
     if (!dispatch || dispatch.endedAt !== null) return
     // A run the last process left, ended by the boot, is the startup pass's: it charges the dispatch up to its last
@@ -7801,7 +8257,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const row = this.store.activation(dispatch.activationId)
       const run = this.host.runs()?.getRun(runId)
       if (row && run && TERMINAL_RUN_STATUSES.has(run.status)) {
-        if (dispatch.kind === 'subagent') this.settleSubagent(row, dispatch, run, {}, false)
+        if (dispatch.kind === 'subagent') this.settleLegacySubagent(row, dispatch, run)
         else this.settleConsult(row, dispatch, run, {}, false)
       }
       return
@@ -7851,11 +8307,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.switchCuts.delete(row.id)
     // Its subagents ended with it: what they returned is no one's to read any more.
     this.heldAdvance.delete(row.id)
-    this.subagentNotices.delete(row.id)
     this.wrapUps.delete(row.id)
     this.reportStops.delete(row.id)
     for (const key of this.reportChips.keys()) if (key.startsWith(`${row.id}:`)) this.reportChips.delete(key)
-    for (const key of this.subagentEnds.keys()) if (key.startsWith(`${row.id}:`)) this.subagentEnds.delete(key)
     this.roomKeys.delete(row.id)
     this.carried.delete(row.id)
     for (const key of this.drainedCalls.keys()) if (key.startsWith(`${row.id}:`)) this.drainedCalls.delete(key)
@@ -8070,6 +8524,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const runs = this.host.runs()
     if (!runs) return
     this.reconcilePhaseOne(runs)
+    // Subagents: an older build's dispatches end here; the run database's are reserved and charged once.
+    try {
+      this.settleLegacySubagentDispatches(runs)
+      this.reconcileSubagentRuns(runs)
+    } catch (error) {
+      console.warn('bot subagents could not be reconciled at startup', { error: error instanceof Error ? error.message : String(error) })
+    }
     for (const row of this.store.activationsWith([...NOT_ENDED])) {
       try {
         await this.reconcileActivation(row, runs)
@@ -8095,6 +8556,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (message) await this.admitWallMessage(message).catch((error: unknown) => {
         console.warn('an owner message could not be answered at startup', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
       })
+    }
+    // Subagent results that wait in the run database reach their work (each acknowledged once recorded).
+    try {
+      runs.deliverBotResults()
+    } catch (error) {
+      console.warn('bot subagent results could not be delivered at startup', { error: error instanceof Error ? error.message : String(error) })
     }
     // Waiting work whose answer was lost (Mousse stopped between it and the work's own update) ends with a line.
     this.settleStrandedWork()
@@ -8173,8 +8640,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           this.store.run('UPDATE bot_counters SET active_ms = active_ms + ? WHERE activation_id = ?', charge - prepaid, main.activationId)
       })
     }
-    // P4: a reservation open at the crash stays charged at its full amount.
-    for (const held of this.store.all('SELECT * FROM bot_spend_reservations WHERE settled_at IS NULL')) {
+    // P4: a reservation open at the crash stays charged at its full amount. A subagent's hold (`holdSubagentSpend`) was
+    // never spent: its requests reserved their own, so it is let go, and never charged, even when letting go fails (upkeep
+    // tries again, `releaseEndedSubagentHolds`).
+    for (const held of this.store.all("SELECT * FROM bot_spend_reservations WHERE settled_at IS NULL AND id LIKE 'subagent:%'"))
+      this.releaseSubagentSpend(String(held.activation_id), String(held.run_id))
+    for (const held of this.store.all("SELECT * FROM bot_spend_reservations WHERE settled_at IS NULL AND id NOT LIKE 'subagent:%'")) {
       this.store.db.transaction(() => {
         if (!this.store.run('UPDATE bot_spend_reservations SET settled_at = ? WHERE id = ? AND settled_at IS NULL', this.store.now(), held.id as string)) return
         this.store.run(
@@ -8677,7 +9148,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * The turn `activationId` when it may act on the owner's threads (`threadsActOf`, `BotThreads.ownerTurn`), with the
    * limit of the other device its owner's message came from; undefined for any other turn, or when it can't be read.
    */
-  ownerTurn(activationId: string): { limit?: PermissionMode } | undefined {
+  ownerTurn(activationId: string, threadId?: string): { limit?: PermissionMode } | undefined {
     let row: BotActivationRow | undefined
     try {
       row = this.store.activation(activationId)
@@ -8685,7 +9156,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return undefined
     }
     if (!row || !threadsActOf(row)) return undefined
-    const limit = row.trigger.kind === 'manual' ? row.trigger.owner?.limit : undefined
+    const own = row.trigger.kind === 'manual' ? row.trigger.owner?.limit : undefined
+    // A subagent's turn holds no more than its delegation inherited when it started (`BotDelegation`), whatever its work
+    // may do now: read-only stays read-only, and a device's limit stays the narrower one. A read that fails refuses.
+    let inherited: BotDelegation | undefined
+    if (threadId !== undefined) {
+      try {
+        inherited = this.host.runs()?.delegations.botChildOf(threadId)?.bot
+      } catch {
+        return undefined
+      }
+      if (inherited && (inherited.rootActivationId !== row.id || inherited.readOnly)) return undefined
+    }
+    const limit = own && inherited?.access ? (isStricter(inherited.access, own) ? inherited.access : own) : own ?? inherited?.access ?? undefined
     return limit ? { limit } : {}
   }
 
@@ -11202,10 +11685,74 @@ function sideDispatch(dispatch: Pick<BotDispatchRow, 'kind'>): boolean {
 }
 
 /** One subagent of a work: its thread, what it runs as, and its turns there, oldest first. */
+/** One turn of a work's subagent: its delegation in the run database, and its place on the work's counts once recorded. */
+interface SubagentTurn {
+  delegation: DelegationRecord
+  spec: BotSubagentSpec
+  entry?: BotSubagentRunRow
+}
+
+/** A subagent of a work: its thread, its spec (its title as it started, its model now) and its turns, oldest first. */
 interface SubagentRecord {
   threadId: string
   spec: BotSubagentSpec
-  dispatches: BotDispatchRow[]
+  turns: SubagentTurn[]
+}
+
+/** How a subagent's turn ended, as its work reads it. */
+interface SubagentEnd {
+  state: 'done' | 'failed' | 'stopped'
+  text?: string
+  why?: string
+}
+
+/**
+ * How a subagent's turn ended, from its delegation: done with what it returned, failed, or stopped (by its work, or with
+ * the work's turn). A turn its runtime refused before it ran (the work's grant changed, its runtime can't hold the bot
+ * now) failed.
+ */
+export function subagentEndOf(delegation: Pick<DelegationRecord, 'status' | 'result'>, stoppedByWork: boolean): SubagentEnd {
+  const result = delegation.result
+  if (result?.runStatus === 'completed') return { state: 'done', text: result.text?.trim() || '(It returned nothing.)' }
+  if (stoppedByWork) return { state: 'stopped', why: SUBAGENT_STOPPED_BY_WORK_TEXT }
+  const error = result?.error
+  if (result?.runStatus === 'failed') return { state: 'failed', why: error && isCodexBotRefusal(error) ? error : `It failed${error ? `: ${cutText(error, 200)}` : '.'}` }
+  if (result?.runStatus === 'cancelled' && error !== undefined && !SUBAGENT_STOP_ERRORS.has(error)) return { state: 'failed', why: `It could not start (${cutText(error, 80)}).` }
+  return { state: 'stopped', why: SUBAGENT_STOPPED_WITH_TURN_TEXT }
+}
+
+/** A subagent's spec as its turn carries it (`BotTurnPayload.subagent`), or undefined when it isn't one. */
+function subagentSpecOf(value: unknown): BotSubagentSpec | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const spec = value as Partial<BotSubagentSpec>
+  const selection = spec.selection as Partial<ProviderSelection> | undefined
+  if (typeof spec.title !== 'string' || !spec.title || typeof spec.model !== 'string' || !selection || typeof selection.instanceId !== 'string' || typeof selection.model !== 'string') return undefined
+  return spec as BotSubagentSpec
+}
+
+/** The bot `turn.start` payload of a child run, as the run database wrote it with its delegation. */
+function turnStartOf(runs: RunEngine, childRunId: string): Partial<BotTurnPayload> | undefined {
+  const effect = runs.outbox.listForRun(childRunId).find((candidate) => candidate.kind === 'turn.start')
+  const payload = effect?.payload as Partial<BotTurnPayload> | undefined
+  return payload?.kind === 'bot' ? payload : undefined
+}
+
+/** The process supervisor's id for a subagent's turn (`bot_subagent_runs`, by its child run). */
+function subagentDispatchId(childRunId: string): string {
+  return `sub:${childRunId}`
+}
+
+/**
+ * A run's running time from its own times (another process ran it): from its start to its end, else nothing. A run a
+ * restart cut off is counted only to when its daemon was last known alive (`RunEngine.lastAliveAt`), never through the
+ * downtime to the boot that ended it.
+ */
+function subagentRunMs(run: Pick<RunRecord, 'startedAt' | 'completedAt'>, aliveUntil?: string): number {
+  const started = run.startedAt ? Date.parse(run.startedAt) : NaN
+  const completed = run.completedAt ? Date.parse(run.completedAt) : NaN
+  const alive = aliveUntil ? Date.parse(aliveUntil) : NaN
+  const ended = Number.isFinite(alive) ? Math.min(completed, alive) : completed
+  return Number.isFinite(started) && Number.isFinite(ended) ? Math.max(0, ended - started) : 0
 }
 
 /** A model in plain words, as `work_models` names it: "Opus 5.5 on Claude Code, high reasoning". */
@@ -11275,6 +11822,37 @@ export const BOT_SUBAGENT_WAIT_MS = 10 * 60_000
 /** A subagent's title, and its brief or a follow-up, at most. */
 const MAX_SUBAGENT_TITLE_CHARS = 60
 const MAX_SUBAGENT_BRIEF_CHARS = 32 * 1024
+/** A brief or message for a subagent over `MAX_SUBAGENT_BRIEF_CHARS`: refused whole, never cut. */
+function subagentTooLongText(what: 'brief' | 'message', length: number): string {
+  return `Your ${what} is ${length.toLocaleString('en-US')} characters; a subagent's ${what} can be at most ${MAX_SUBAGENT_BRIEF_CHARS.toLocaleString('en-US')}. Shorten it, or write the long part to a file and name the file in it. Nothing was sent.`
+}
+
+/** What `subagent_send` answers when a running subagent will take the message in at its next step. */
+const SUBAGENT_NOTE_SENT = 'It takes your message in at its next step and carries on with it. If it finishes first, it never reads it: send it again then, as more work.'
+
+/** The work's messages to a subagent still working, as its turn takes them in. */
+function subagentNoteText(messages: readonly string[]): string {
+  return mousseNotice({ kind: 'work_note' }, ['The work that started you sent this while you work; take it into account as you carry on:', ...messages.map((message) => quoted('work', message))])
+}
+
+/** The notice a work's running turn takes in at its next step when one of its subagents ended (`steerNext`). */
+function subagentNoticeText(entry: Pick<BotSubagentRunRow, 'spec' | 'outcome'>): string {
+  const how = entry.outcome === 'done' ? 'finished' : entry.outcome === 'failed' ? 'ended without a result' : 'was stopped'
+  return mousseNotice({ kind: 'bot_subagent' }, [`Your subagent "${entry.spec.title}" ${how}. Read what it returned with subagent_result.`])
+}
+
+/** The room a subagent holds on its work's spend before it runs (`holdSubagentSpend`): about one small first request. */
+const SUBAGENT_SPEND_HOLD = { inputBound: 4_096, wireCap: 256, floor: 256 } as const
+/** Why a subagent did not start: its work's spending limit has no room left for it. */
+const SUBAGENT_NO_SPEND_TEXT = 'Your spending limit has no room left for this subagent, so it did not start.'
+
+/** The id of a subagent's hold on its work's spend: one per child run. */
+function subagentSpendHoldId(childRunId: string): string {
+  return `subagent:${childRunId}`
+}
+
+/** Why no subagent starts while the bots run without their port (`RunEngine.setBotPort`). */
+const SUBAGENT_NO_PORT_TEXT = 'Bots are not running here, so no subagent can start. Nothing was started.'
 /** What each turn of a subagent ends with: its last message is its result, for the work, never the owner. */
 const SUBAGENT_RESULT_LINE = 'End with your result for the work that started you: what you found or did, in plain words. Your last message is your result.'
 const SUBAGENT_NOTHING_STARTED = 'Nothing was started.'
@@ -11295,7 +11873,6 @@ const SUBAGENT_STOPPED_BY_WORK_TEXT = 'You stopped it.'
 /** The errors a subagent's run is cancelled with when the work's turn or the work itself stopped it (not a refusal). */
 const SUBAGENT_STOP_ERRORS: ReadonlySet<string> = new Set(['bot_dispatch_ended', 'bot_subagent_stopped', 'shutdown', 'bot_dispatch_restarted'])
 const SUBAGENT_STOPPED_WITH_TURN_TEXT = 'It was stopped when your turn ended (or was stopped) before it finished.'
-const SUBAGENT_RESTARTED_TEXT = 'Mousse restarted, so what it returned is gone. Start it again if you still need it.'
 
 /** A new activation's id. */
 export function newActivationId(): string {

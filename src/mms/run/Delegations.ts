@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { isPermissionMode } from '../../shared/permissionMode'
 import { isAgentAccessLevel, type AgentAccessLevel } from '../../shared/settings'
 import { json, str, type Row } from './db/rows'
 import { fail } from './db/RunStoreError'
@@ -6,6 +7,7 @@ import { Inbox } from './Inbox'
 import { stableStringify } from './json'
 import type { RunStore } from './RunStore'
 import type {
+  BotDelegation,
   ChildResultPayload,
   DelegationRecord,
   DelegationResult,
@@ -105,6 +107,8 @@ export class Delegations {
     accessLevel?: AgentAccessLevel | null
     workspace?: DelegationWorkspace | null
     role?: string | null
+    /** A bot's work subagent: written with the row, never later. */
+    bot?: BotDelegation | null
   }): DelegationRecord {
     return this.db.transaction(() => {
       const record: DelegationRecord = {
@@ -124,14 +128,15 @@ export class Delegations {
         modeCeiling: input.modeCeiling ?? null,
         accessLevel: input.accessLevel ?? null,
         workspace: input.workspace ?? null,
-        role: input.role ?? null
+        role: input.role ?? null,
+        ...(input.bot ? { bot: { ...input.bot } } : {})
       }
       this.db
         .statement(
           `INSERT INTO delegations(delegation_id, parent_run_id, parent_thread_id, child_thread_id,
              child_run_id, provider, model, prompt_digest, wake, status, result, created_at, completed_at,
-             mode_ceiling, workspace, role, access_level)
-           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             mode_ceiling, workspace, role, access_level, bot_id, root_activation_id, bot_access, bot_read_only)
+           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           record.delegationId,
@@ -150,7 +155,11 @@ export class Delegations {
           record.modeCeiling,
           record.workspace,
           record.role,
-          record.accessLevel
+          record.accessLevel,
+          record.bot?.botId ?? null,
+          record.bot?.rootActivationId ?? null,
+          record.bot?.access ?? null,
+          record.bot ? (record.bot.readOnly ? 1 : 0) : null
         )
       this.recorded(record)
       return record
@@ -175,6 +184,30 @@ export class Delegations {
   /** Oldest first. */
   listForChildThread(childThreadId: string): DelegationRecord[] {
     return this.list('child_thread_id', childThreadId)
+  }
+
+  /** A bot work's subagents (`root_activation_id`), oldest first. */
+  listForRootActivation(rootActivationId: string): DelegationRecord[] {
+    return this.db
+      .statement('SELECT * FROM delegations WHERE root_activation_id = ? ORDER BY created_at, rowid')
+      .all(rootActivationId)
+      .map(toDelegation)
+  }
+
+  /** Every bot subagent delegation (`bot_id` set) that is `running`, oldest first: the bots' startup pass reads them. */
+  listRunningBot(): DelegationRecord[] {
+    return this.db
+      .statement("SELECT * FROM delegations WHERE bot_id IS NOT NULL AND status = 'running' ORDER BY created_at, rowid")
+      .all()
+      .map(toDelegation)
+  }
+
+  /** The bot subagent delegation into `childThreadId`, when the thread is one: a bot's thread, never a plain turn's. */
+  botChildOf(childThreadId: string): DelegationRecord | null {
+    const row = this.db
+      .statement('SELECT * FROM delegations WHERE child_thread_id = ? AND bot_id IS NOT NULL ORDER BY rowid DESC LIMIT 1')
+      .get(childThreadId)
+    return row ? toDelegation(row) : null
   }
 
   getByChildRun(childRunId: string): DelegationRecord | null {
@@ -328,6 +361,10 @@ function toDelegation(row: Row): DelegationRecord {
     modeCeiling: row.mode_ceiling === 'plan' || row.mode_ceiling === 'default' ? row.mode_ceiling : null,
     accessLevel: isAgentAccessLevel(row.access_level) ? row.access_level : null,
     workspace: row.workspace === 'isolated' || row.workspace === 'shared' ? row.workspace : null,
-    role: str(row.role)
+    role: str(row.role),
+    // A limit this build doesn't know reads as the strictest: never looser.
+    ...(typeof row.bot_id === 'string' && typeof row.root_activation_id === 'string'
+      ? { bot: { botId: row.bot_id, rootActivationId: row.root_activation_id, access: row.bot_access === null || row.bot_access === undefined ? null : isPermissionMode(row.bot_access) ? row.bot_access : 'ask', readOnly: Number(row.bot_read_only) === 1 } }
+      : {})
   }
 }

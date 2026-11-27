@@ -138,6 +138,21 @@ describe('failed creation of a subagent', () => {
     expect(threads.getThread(sub.id)).toBeDefined()
   })
 
+  it('an unused bot execution thread (no lineage yet) is discarded only by naming the owner that made it', () => {
+    const { threads } = fixture()
+    const parent = threads.createThread('Parent')
+    const other = threads.createThread('Other')
+    const sub = threads.ensureExecutionThread('bot:b:act:a:sub:1', 'Bot: Prices', undefined, { parentTaskId: parent.id }, { botOwned: true })
+    const dir = threads.getThreadDir(sub.id)
+    expect(() => threads.discardUnusedThread(sub.id)).toThrow(/owned by/)
+    expect(() => threads.discardUnusedThread(sub.id, { ownedBy: other.id })).toThrow(/owned by/)
+    expect(existsSync(dir)).toBe(true)
+    threads.discardUnusedThread(sub.id, { ownedBy: parent.id })
+    expect(existsSync(dir)).toBe(false)
+    expect(threads.lifecycleStore.get(sub.id)).toBeUndefined()
+    expect(threads.getThread(sub.id)).toBeUndefined()
+  })
+
   describe('forgetCreatedTask on an owned task', () => {
     it.each([
       ['without naming the owner', undefined],
