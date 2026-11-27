@@ -27,6 +27,8 @@ Read the sessions and PRs themselves. A summary written during the work describe
 | The same unrelated test failure looked into twice | It was never recorded | "Verify" in [work](../work/SKILL.md) |
 | Each fix round rebuilt a checkout and reread the code | A new subagent per round | [subagents](../work/subagents.md) |
 | Committed work lost to a restart | It was not pushed | [subagents](../work/subagents.md) |
+| A test that fails some runs, or tests that take most of the time | Test trouble nobody dealt with | [test-trouble](../work/test-trouble.md) |
+| Several fixes for one bug | The cause was never found | [debug](../debug/SKILL.md) |
 | Waiting on hosted CI | The local run is the gate | [merge-and-sync](../work/merge-and-sync.md) |
 | One session carrying days of work | State kept in the conversation | [slice](../slice/SKILL.md) section 4 |
 
