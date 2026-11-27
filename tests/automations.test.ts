@@ -185,6 +185,17 @@ describe('the automation index', () => {
     expect(index.items.map((item) => item.key)).toEqual(['job:j1'])
   })
 
+  it('a bot\'s automation with a request URL carries its address and log, as any automation that takes requests', () => {
+    const botJob = job({ id: 'b--s', schedule: { kind: 'manual' }, trigger: { webhook: { scheme: 'mousse', secretRef: 'scheduled-webhook-b--s', createdAt: PAST } }, bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' } })
+    const pip: BotAutomationFacts = { botName: 'Pip', look: { colour: 'cream', accessory: 'none' }, paused: false, runs: [] }
+    const index = buildAutomationIndex({
+      ...sources({ jobs: [botJob], bots: { b: pip } }),
+      requestUrl: (id) => `http://127.0.0.1:4000/hooks/${id}`,
+      deliveries: () => [{ occurrenceId: 'd1', receivedAt: PAST, outcome: 'completed', bodyBytes: 2 }]
+    })
+    expect(index.items[0]).toMatchObject({ trigger: 'request', request: { url: 'http://127.0.0.1:4000/hooks/b--s', deliveries: [{ occurrenceId: 'd1', outcome: 'completed' }] } })
+  })
+
   it('a bot paused by itself shows its rows paused, resumed from the bot; a deleted bot takes its rows away', () => {
     const botJob = job({ id: 'b--s', bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' } })
     const paused: BotAutomationFacts = { botName: 'Pip', look: { colour: 'cream', accessory: 'none' }, paused: true, pausedText: 'Paused until 14:00', runs: [] }

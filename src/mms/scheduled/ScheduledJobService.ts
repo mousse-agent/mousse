@@ -121,6 +121,12 @@ export interface ScheduledOccurrenceSettled {
   permissionMode?: ScheduledRunDetails['permissionMode']
 }
 
+/**
+ * Skips that only mean the bot's previous run of this automation still goes (`BotEngine.runScheduledOccurrence`): a
+ * timed occurrence is skipped, but a request delivery waits until the bot can take it.
+ */
+const BOT_BUSY_SKIPS: ReadonlySet<string> = new Set(['previous_run_still_queued', 'previous_run_still_running', 'previous_run_waiting', 'bot_waiting_for_owner', 'waiting_for_internet'])
+
 /** Why a bot's schedule is paused when every occurrence would be skipped the same way: no bots here, or its bot is deleted. */
 const LASTING_BOT_SKIPS: Record<string, string | undefined> = {
   bots_unavailable: 'Bots could not be opened in this profile. Resume it once they are back.',
@@ -937,7 +943,10 @@ export class ScheduledJobService extends EventEmitter {
       outcome = { kind: 'skipped', reason: 'bot_unavailable' }
       console.warn('a bot occurrence could not start', { jobId: job.id, error: error instanceof Error ? error.message : String(error) })
     }
-    if (outcome.kind === 'not_ready') {
+    // A request the bot can't take yet (its previous run of this automation still goes) waits in its pending slot, as a
+    // request does while any automation's run goes on; meanwhile further requests are answered busy, not dropped.
+    const busyDelivery = Boolean(claim.webhookOccurrenceId) && outcome.kind === 'skipped' && BOT_BUSY_SKIPS.has(outcome.reason)
+    if (outcome.kind === 'not_ready' || busyDelivery) {
       if (this.store.releaseClaim(job.id, claim.token)) this.ownedRunClaims.delete(job.id)
       return
     }

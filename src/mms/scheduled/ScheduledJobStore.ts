@@ -259,10 +259,18 @@ function keptFieldsOf(job: ScheduledJob): KeptJobFields {
  * The fields that pause a job. A running job keeps its running state and claim: the run in flight must be able to
  * finish. It settles as paused when it ends (`saveJobs`), and no further occurrence is claimed meanwhile.
  */
+/**
+ * A bot's one-time automation that has run (at its time, or earlier with Run now) is spent: Pause and Resume keep it
+ * ended, so its original time never runs it a second time. Run now or a new time starts it again.
+ */
+function spentBotOnce(job: ScheduledJob): boolean {
+  return Boolean(job.bot) && job.schedule.kind === 'once' && job.state === 'completed'
+}
+
 function pauseFields(job: ScheduledJob, reason?: string, resumeAt?: string): Partial<ScheduledJob> {
   return {
     enabled: false,
-    ...(job.state === 'running' ? {} : { state: 'paused' as const }),
+    ...(job.state === 'running' || spentBotOnce(job) ? {} : { state: 'paused' as const }),
     pausedAt: new Date().toISOString(),
     pausedReason: reason,
     // A pause with an end resumes on its own then; a pause without one clears an earlier end.
@@ -273,6 +281,7 @@ function pauseFields(job: ScheduledJob, reason?: string, resumeAt?: string): Par
 /** The fields that resume a job from its schedule. A running job stays running until its claim is finalized. */
 function resumeFields(job: ScheduledJob): Partial<ScheduledJob> {
   if (job.state === 'running') return { enabled: true, pausedAt: undefined, pausedReason: undefined, resumeAt: undefined }
+  if (spentBotOnce(job)) return { enabled: true, pausedAt: undefined, pausedReason: undefined, resumeAt: undefined, nextRunAt: null }
   const nextRunAt = computeNextRun(job.schedule)
   return {
     enabled: true,
@@ -1478,12 +1487,18 @@ export class ScheduledJobStore {
     })
   }
 
-  /** A claim that could not be handled yet (the bots are still starting) goes back as it was: the same occurrence stays due. */
+  /**
+   * A claim that could not be handled yet (the bots are still starting, a page is being fetched, the bot's previous run
+   * of it is still going) goes back as it was: the same occurrence stays due. A request delivery goes back to its
+   * pending slot, so the same delivery is taken again.
+   */
   releaseClaim(id: string, claimToken: string): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const job = jobs.find((entry) => entry.id === id)
       if (!job || job.state !== 'running' || job.runClaim?.token !== claimToken || job.runClaim.runId) return null
+      const delivery = job.runClaim.webhookOccurrenceId
+      if (delivery) job.pendingTrigger = { occurrenceId: delivery, receivedAt: new Date().toISOString() }
       job.runClaim = undefined
       job.state = 'scheduled'
       job.updatedAt = new Date().toISOString()

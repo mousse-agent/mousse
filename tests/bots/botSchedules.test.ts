@@ -484,3 +484,61 @@ describe('a bot automation that does not repeat', () => {
     expect(() => f.book.update(f.scheduler.getJob(own.jobId)!, { schedule: { kind: 'manual' } })).toThrow(/A bot repeats/)
   })
 })
+
+describe('a bot automation\'s request URL and one-time run, held until the bot can take them', () => {
+  const ownerAdds = (when: BotJobWhen, prompt = 'Look at {{body.title}}.') => f.book.add(botId, { when, prompt }, 'owner')
+  const hooked = () => {
+    const added = ownerAdds({ kind: 'manual' })
+    f.jobStore.setWebhookTrigger(added.jobId, { scheme: 'mousse', secretRef: `scheduled-webhook-${added.jobId}`, createdAt: iso(T0) })
+    return added
+  }
+  let signed = 0
+  const send = (jobId: string, title: string) => {
+    signed += 1
+    return f.jobStore.triggerFromWebhook(jobId, { ts: Math.floor(f.clock.now / 1000), sig: String(signed % 10).repeat(64), body: Buffer.from(JSON.stringify({ title })), now: f.clock.now })
+  }
+  beforeEach(() => { f.clock.now = Date.now() })
+
+  it('a request that comes before the bots are ready runs once they are', async () => {
+    const added = hooked()
+    expect(send(added.jobId, 'First')).toMatchObject({ kind: 'accepted' })
+    expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
+    expect(f.scheduler.getJob(added.jobId)!.pendingTrigger).toBeDefined()
+    await f.bots.reconcileOnStartup()
+    const { inserted } = await f.tickSchedules(new Date(f.clock.now + 1000))
+    expect(inserted).toHaveLength(1)
+    expect(f.store.activation(inserted[0]!)!.trigger).toMatchObject({ input: expect.stringContaining('First') })
+  })
+
+  it('a request while the bot\'s previous run still goes waits for it, and the next one is answered busy', async () => {
+    await f.bots.reconcileOnStartup()
+    const added = hooked()
+    expect(send(added.jobId, 'First')).toMatchObject({ kind: 'accepted' })
+    const [first] = (await f.tickSchedules(new Date(f.clock.now))).inserted
+    expect(first).toBeDefined()
+    const second = send(added.jobId, 'Second')
+    expect(second).toMatchObject({ kind: 'accepted' })
+    expect((await f.tickSchedules(new Date(f.clock.now + 1000))).inserted).toEqual([])
+    expect(f.scheduler.getJob(added.jobId)!.pendingTrigger).toMatchObject({ occurrenceId: second.kind === 'accepted' ? second.occurrenceId : '' })
+    expect(send(added.jobId, 'Third').kind).toBe('pending')
+    await runDispatch(f, first!, 1, { text: 'Looked.' })
+    const { inserted } = await f.tickSchedules(new Date(f.clock.now + 2000))
+    expect(inserted).toHaveLength(1)
+    expect(f.store.activation(inserted[0]!)!.trigger).toMatchObject({ input: expect.stringContaining('Second') })
+  })
+
+  it('a one-time automation run early with Run now stays spent through Pause and Resume', async () => {
+    await f.bots.reconcileOnStartup()
+    const runAt = f.clock.now + 60 * MIN
+    const added = ownerAdds({ kind: 'once', runAt: iso(runAt) }, 'Tidy the site.')
+    f.scheduler.triggerJob(added.jobId)
+    const [early] = (await f.tickSchedules(new Date(Date.now() + 1000))).inserted
+    expect(early).toBeDefined()
+    await runDispatch(f, early!, 1, { text: 'Tidied.' })
+    expect(f.scheduler.getJob(added.jobId)).toMatchObject({ state: 'completed', nextRunAt: null })
+    f.scheduler.pauseJob(added.jobId)
+    f.scheduler.resumeJob(added.jobId)
+    expect(f.scheduler.getJob(added.jobId)).toMatchObject({ state: 'completed', nextRunAt: null, enabled: true })
+    expect((await f.tickSchedules(new Date(runAt + MIN))).inserted).toEqual([])
+  })
+})
