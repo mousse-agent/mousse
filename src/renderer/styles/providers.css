@@ -337,9 +337,9 @@
 /* An email scrambled and blurred until clicked (ui/HiddenEmail). */
 .hidden-email {
   max-width: 100%;
-  padding: 2px 4px;
+  padding: 2px 8px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 999px;
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
