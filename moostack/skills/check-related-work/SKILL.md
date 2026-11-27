@@ -28,7 +28,7 @@ It fetches and then covers four things:
 
 ## 2. Read only what overlaps
 
-Start one background Sonnet subagent, or do this yourself when none is available. Brief:
+Start one background explorer subagent, or do this yourself when none is available. Brief:
 
 > Read-only check of overlap between a plan and open work in `<repo>`. Plan: `<two or three sentences and the planned paths>`. Candidates: `<PR numbers with their overlapping files; issue numbers with titles>`. For each PR, read only the hunks of the overlapping files (`gh api repos/<repo>/pulls/<n>/files --paginate`, use each file's `patch`), not the rest of the diff, and read its body or comments only when a hunk is unclear. For an issue, read the body only when its title looks like the same problem. Return, per candidate: number, overlapping files, one sentence on what it changes there, its owner (author or assignee), and one label: duplicate, conflicts, will collide, already done, or unrelated. No narration.
 
