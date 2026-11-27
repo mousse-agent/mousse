@@ -1,4 +1,4 @@
-import { canonicalToolName, grantedVariants } from '../toolAliases'
+import { canonicalGrantName } from '../toolAliases'
 import type { AgentIntegrationLookup } from './types'
 import type {
   AgentBuiltinToolsSettings,
@@ -130,8 +130,9 @@ export function resolveBuiltinToolGrants(
   const profileTools = lookup.listProfileBuiltinToolIds()
   const grants: EffectiveAgentGrantEntry[] = []
   const denied: DeniedAgentGrant[] = []
-  // A definition saved before a tool was renamed names its old name; it grants the new one.
-  const allowlist = [...new Set(settings.allowlist.map(canonicalToolName))]
+  // A definition saved before a tool was renamed names its old name; it grants the new one. An old name that became one
+  // variant of its tool stays as it is: it grants only that variant (`grantHoldsCall`).
+  const allowlist = [...new Set(settings.allowlist.map(canonicalGrantName))]
   const allow = new Set(allowlist)
 
   const candidates = settings.mode === 'inherit' ? profileTools : allowlist
@@ -144,12 +145,9 @@ export function resolveBuiltinToolGrants(
       denied.push({ kind: 'tool', id: toolId, reason: 'Built-in tool is not granted by the profile.' })
       continue
     }
-    // An old name that is one variant of its new tool grants that variant only, unless the allowlist names more of it.
-    const variants = grantedVariants(settings.allowlist, toolId)
     grants.push({
       id: toolId,
-      source: settings.mode === 'inherit' && !allowlist.includes(toolId) ? 'inherited' : settings.mode === 'inherit' ? 'inherited' : 'explicit',
-      ...(variants ? { variants } : {})
+      source: settings.mode === 'inherit' && !allowlist.includes(toolId) ? 'inherited' : settings.mode === 'inherit' ? 'inherited' : 'explicit'
     })
   }
   return { grants, denied }

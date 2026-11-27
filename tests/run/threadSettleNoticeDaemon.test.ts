@@ -22,6 +22,7 @@ import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { SETTLE_NOTICE_RESULT_CHARS } from '../../src/shared/settleNotice'
 import type { ChatMessage, QueuedMessage } from '../../src/shared/types'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
+import { spendChain } from './chainFixture'
 
 vi.setConfig({ testTimeout: 60_000 })
 
@@ -310,23 +311,69 @@ describe('the settle notice: an agent that sends with notify is told when the wo
     expect(w.d.engine.listRuns(w.parent.id)[0]!.outcome?.agentHops).toBe(1)
   })
 
-  it('a sender and a target go back and forth three times by notices before a person must step in', async () => {
-    const results: Array<Awaited<ReturnType<typeof rpc>>> = []
-    const w = world(async (input, mcp) => {
-      if (input.threadId === w.parent.id) results.push(await call(mcp!, 'thread_send', { threadId: w.other.id, content: `round ${results.length + 1}`, notify: true }))
+  it('a sender and a target go back and forth by notices in one chain: each notice turn stays in it, and the message past its budget is held', async () => {
+    const results: Array<Record<string, unknown>> = []
+    const w = world(async (input, mcp, d) => {
+      if (input.threadId === w.parent.id) {
+        // Three messages are left in the chain the person's message started.
+        if (input.prompt === GO) spendChain(d.engine, `chain:${input.runId}`, w.parent.id, w.other.id, 3)
+        results.push(parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content: `round ${results.length + 1}`, notify: true })))
+      }
       return 'ok'
     })
     await w.attach()
     await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-    await waitFor(() => results.length === 4, 'the fourth send')
-    expect(results.slice(0, 3).map((result) => parse(result).runId)).toHaveLength(3)
-    expect(JSON.stringify(results[3])).toContain('agent_hops_exceeded')
-    // The target's runs count the chain; each notice turn carries the count of the run it reports on.
-    expect(w.d.engine.listRuns(w.other.id).map((run) => run.outcome?.agentHops).reverse()).toEqual([1, 2, 3])
-    expect(w.d.engine.listRuns(w.parent.id).filter((run) => run.source === 'thread-notice').map((run) => run.outcome?.agentHops).reverse()).toEqual([1, 2, 3])
+    await waitFor(() => results.length === 4, 'the fourth send', 60_000)
+    const chainId = `chain:${w.d.engine.listRuns(w.parent.id).at(-1)!.runId}`
+    expect(results.slice(0, 3).every((result) => typeof result.runId === 'string')).toBe(true)
+    expect(results[3]).toMatchObject({ status: 'held', delivery: 'held_for_person', chainId })
+    // Each notice turn is in the chain of the work it reports on, so the person's one message is what the budget counts from.
+    expect(w.d.engine.listRuns(w.parent.id).filter((run) => run.source === 'thread-notice').map((run) => run.outcome?.agentChain)).toEqual([chainId, chainId, chainId])
+    expect(w.d.engine.listRuns(w.other.id).map((run) => run.outcome?.agentChain)).toEqual([chainId, chainId, chainId])
     await settle()
-    // The refused send made no watch, so nothing more starts.
+    // The held send made no watch, so nothing more starts.
     expect(w.noticeTurns(w.parent.id)).toHaveLength(3)
+  }, 90_000)
+
+  it('a notice turn stays in the chain of the message sent with notify, though the sender has run in another chain since', async () => {
+    const otherGate = deferred()
+    const sent: Array<Record<string, unknown>> = []
+    const w = world(async (input, mcp, _d, adapter) => {
+      if (input.threadId === w.other.id) {
+        await adapter.hold(input, otherGate.promise)
+        return 'done'
+      }
+      if (input.threadId === w.parent.id && input.prompt === GO) sent.push(parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'work', notify: true })))
+      return 'ok'
+    })
+    await w.attach()
+    await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+    await waitFor(() => sent.length === 1 && w.d.engine.listRuns(w.parent.id).every((run) => run.status === 'completed'), 'the send')
+    const chainId = `chain:${w.d.engine.listRuns(w.parent.id)[0]!.runId}`
+    // A person writes in the sender meanwhile: its latest run starts a chain of its own.
+    await w.d.orch.send('something else', false, { threadId: w.parent.id, clientRequestId: 'person' })
+    await waitFor(() => w.d.engine.listRuns(w.parent.id).length === 2 && w.d.engine.listRuns(w.parent.id).every((run) => run.status === 'completed'), 'the person\'s turn')
+    otherGate.resolve()
+    await waitFor(() => w.noticeTurns(w.parent.id).length === 1, 'the notice turn')
+    expect(w.d.engine.listRuns(w.parent.id).find((run) => run.source === 'thread-notice')?.outcome?.agentChain).toBe(chainId)
+  })
+
+  it('a message held at its chain\'s budget keeps its notify: when the person\'s Continue sends it, the sender is told when it settles', async () => {
+    const held: Array<Record<string, unknown>> = []
+    const w = world(async (input, mcp, d) => {
+      if (input.threadId === w.parent.id && input.prompt === GO) {
+        spendChain(d.engine, `chain:${input.runId}`, w.parent.id, w.other.id)
+        held.push(parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'held work', notify: true })))
+      }
+      return 'ok'
+    })
+    await w.attach()
+    await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+    await waitFor(() => held.length === 1 && w.d.engine.listRuns(w.parent.id).every((run) => run.status === 'completed'), 'the held send')
+    expect(held[0]).toMatchObject({ status: 'held', delivery: 'held_for_person' })
+    expect(await w.d.orch.answerChainHold(w.parent.id, String(held[0]!.chainId), 'continue')).toMatchObject({ sent: 1 })
+    await waitFor(() => w.noticeTurns(w.parent.id).length === 1, 'the notice turn', 30_000)
+    expect(w.noticeTurns(w.parent.id)[0]!.prompt).toContain(`mousse://thread/${w.other.id}`)
   })
 
   describe('it never starts a turn where the sender must not be woken; it waits in the sender\'s queue', () => {

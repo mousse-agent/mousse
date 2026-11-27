@@ -86,10 +86,7 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   // A thread's queue
   queue_list: ["read", "a thread's queue in Mousse"],
   queue_enqueue: ["queue", "a message in Mousse"],
-  queue_edit: ["edit", "a queued message in Mousse"],
-  queue_remove: ["remove", "a queued message in Mousse"],
-  queue_reorder: ["reorder", "queued messages in Mousse"],
-  queue_promote_to_steer: ["steer", "with a queued message in Mousse"],
+  queue_update: ["change", "a queued message in Mousse"],
   approval_respond: ["answer", "an approval in Mousse"],
   // Memory
   memory_save: ["save", "to memory"],

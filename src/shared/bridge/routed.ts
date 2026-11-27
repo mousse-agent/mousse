@@ -1133,6 +1133,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'A goal is set and changed from the desktop composer of the computer that runs the thread (issue #1207).'
   },
   {
+    methods: ['threads.chainHold'],
+    reason: 'A held chain of agent messages is answered on the computer that runs it, where its holds are kept (issue #1443).'
+  },
+  {
     methods: ['threads.setHidden'],
     reason: "Show in sidebar is offered on the computer that runs a hidden thread: in its bot's chat, or in the top bar of a thread an agent started there (issue #1217)."
   },

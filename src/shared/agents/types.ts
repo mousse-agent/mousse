@@ -327,11 +327,6 @@ export interface EffectiveAgentGrantEntry {
   source: AgentGrantSource
   revision?: string
   hash?: string
-  /**
-   * A built-in tool granted only as the old names here, each one variant of it (`thread_steer` is `thread_send` with intent
-   * note): a call of any other variant is not granted (`variantsHold`).
-   */
-  variants?: string[]
 }
 
 export interface DeniedAgentGrant {

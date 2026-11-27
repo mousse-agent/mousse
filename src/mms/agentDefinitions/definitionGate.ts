@@ -2,7 +2,7 @@ import type { AgentRuntimePolicy, AgentRuntimeToolApprovalCallback } from '../..
 import type { EffectiveAgentGrants } from '../../shared/agents/types'
 import type { McpToolDescriptor } from '../../shared/integrations'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
-import { canonicalToolCall, variantsHold } from '../../shared/toolAliases'
+import { canonicalToolCall, grantHoldsCall, isVariantAlias } from '../../shared/toolAliases'
 import { authorizeTrustedToolDispatch, canonicalizeBuiltinToolName, digestToolArguments, prepareTrustedToolDispatch } from './runtimePolicy'
 
 /**
@@ -34,17 +34,16 @@ export function definitionAuthorityDigest(authority: Pick<DefinitionAuthority, '
 
 export type DefinitionDecision = { allowed: true } | { allowed: false; message: string }
 
-/**
- * Whether `toolName` is in the definition's effective grants (a user MCP tool by server and tool). With `args`, a tool
- * granted only as an old name's variant holds just that variant (`variantsHold`); a listing passes none.
- */
+/** Whether `toolName` is in the definition's effective grants (a user MCP tool by server and tool). */
 export function definitionToolGranted(toolName: string, grants: EffectiveAgentGrants, mcpTools: readonly McpToolDescriptor[] = [], args?: Record<string, unknown>): boolean {
   const mcp = mcpTools.find((tool) => tool.providerName === toolName)
   if (mcp)
     return grants.mcpTools.some((grant) => (grant.serverId === mcp.serverId || grant.serverId === mcp.installationId) && grant.toolName === mcp.toolName)
   const canonical = canonicalizeBuiltinToolName(toolName)
-  const called = args && canonicalToolCall(toolName, args).args
-  return grants.builtinTools.some((grant) => (grant.id === toolName || grant.id === canonical || canonicalizeBuiltinToolName(grant.id) === canonical) && variantsHold(grant.variants, called))
+  // A grant under an old name that became one variant of its tool holds that variant only, judged by the call's arguments.
+  return grants.builtinTools.some((grant) => isVariantAlias(grant.id)
+    ? grantHoldsCall(grant.id, toolName, args)
+    : grant.id === toolName || grant.id === canonical || canonicalizeBuiltinToolName(grant.id) === canonical)
 }
 
 /**
@@ -108,7 +107,12 @@ function authorizedKey(authority: DefinitionAuthority, call: AuthorizedCall): st
 export function recordAuthorizedCall(authority: DefinitionAuthority, call: AuthorizedCall): void {
   let calls = AUTHORIZED.get(authority)
   if (!calls) AUTHORIZED.set(authority, (calls = new Map()))
-  calls.set(authorizedKey(authority, call), digestToolArguments(withoutTransportFields(call.args)))
+  calls.set(authorizedKey(authority, call), authorizedDigest(call))
+}
+
+/** The digest of a call's arguments as its canonical tool takes them: the gate may see an old variant name without the `op` it adds. */
+function authorizedDigest(call: AuthorizedCall): string {
+  return digestToolArguments(withoutTransportFields(canonicalToolCall(call.toolName, call.args).args))
 }
 
 /**
@@ -121,7 +125,7 @@ export function takeAuthorizedCall(authority: DefinitionAuthority, call: Authori
   const digest = calls?.get(key)
   if (digest === undefined) return false
   calls!.delete(key)
-  return digest === digestToolArguments(withoutTransportFields(call.args))
+  return digest === authorizedDigest(call)
 }
 
 /**

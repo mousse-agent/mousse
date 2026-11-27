@@ -36,10 +36,7 @@ const PHASE5_TOOLS: Record<string, string> = {
   approval_respond: 'managesOthers',
   queue_list: 'readsOthers',
   queue_enqueue: 'managesOthers',
-  queue_edit: 'managesOthers',
-  queue_remove: 'managesOthers',
-  queue_reorder: 'managesOthers',
-  queue_promote_to_steer: 'managesOthers',
+  queue_update: 'managesOthers',
   // Phase 6 (SPEC §16.2).
   thread_fork: 'startsThreads',
   thread_return: 'editsWorkspace'

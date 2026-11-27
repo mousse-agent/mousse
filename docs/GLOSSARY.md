@@ -17,6 +17,8 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Run:** the saved record of a turn in the Run Engine, with its own ID. Stop, Steer, and Undo act on a run.
 - **Steer:** a message sent to a turn that is still running, to change its direction.
 - **Note:** a message one agent sends another thread with `thread_send` intent `note`: information that grants nothing. It arrives labelled with the sender, never as the user's words, and never answers a question or approval.
+- **Chain:** the agent messages that follow from one run a person or a schedule started: every message, settle notice, wake and delegation it led to carries the chain's id. A chain may send 12 counted messages (work, a first message, a note that asks for attention) before a person decides whether it goes on; a person's message in the thread gives it a new budget.
+- **Held message:** an agent's message past its chain's budget. It is kept, not dropped, until the person chooses Continue (it is sent, in order) or Stop (it is dropped and its sender told).
 - **Stop:** ends what a thread is doing and everything its subagents are doing, at every depth. The Stop button, the CLI, Nest's Stop and Stop all, `task_cancel`, deleting a thread and archiving it are all the same Stop. A subagent's result that is already waiting to be read is kept.
 - **Provider:** the agent backend a thread uses, such as Claude or Codex. Each provider has an adapter that translates its protocol.
 - **Provider instance (instance):** one configured provider a profile can pick, with a stable id such as `claude`, `codex`, `pi:openai` or `claude:work`. Every caller chooses an agent by instance id and model. Settings → Providers shows each instance as an entry.
