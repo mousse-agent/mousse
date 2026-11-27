@@ -4,7 +4,7 @@ GitHub records work intended for the shared codebase: meaningful tasks, ownershi
 
 ## Using the skills
 
-The repository keeps its agent skills in `moostack/skills/<name>/`, listed in `moostack/README.md`. The shared workflow ones are `work`, `check-related-work` and `end-session`. Simply describe what to implement or resume; `work` automatically handles coordination, checkpoints, verification, and PR preparation. Skill names are optional. `check-related-work` runs before a plan is presented as final or a substantial implementation starts, and reports open and merged work that overlaps it. `test-the-claim` applies whenever tests are written, changed or reviewed: it decides what to test for a change and at which level. Only an explicit request to end the session triggers `end-session`; normal task completion and casual goodbyes do not. No client discovers that folder on its own, so `AGENTS.md` routes each request to its file. The work skill drives small scripts (see "Work helpers") instead of having agents read and list everything by hand.
+The repository keeps its agent skills in `moostack/skills/<name>/`, listed in `moostack/README.md`. The shared workflow ones are `work`, `check-related-work` and `end-session`. Simply describe what to implement or resume; `work` automatically handles coordination, checkpoints, verification, and PR preparation. Skill names are optional. `check-related-work` runs before a plan is presented as final or a substantial implementation starts, and reports open and merged work that overlaps it. `test-the-claim` applies whenever tests are written, changed or reviewed: it decides what to test for a change and at which level. `slice` plans work that needs more than one PR, `review` sets the rules for the one review pass a PR gets, and `retro` looks back at work that ran long. Only an explicit request to end the session triggers `end-session`; normal task completion and casual goodbyes do not. No client discovers that folder on its own, so `AGENTS.md` routes each request to its file. The work skill drives small scripts (see "Work helpers") instead of having agents read and list everything by hand.
 
 Clients must load this checkout's project instructions. OpenCode discovery has been verified; Grok's inspector suppresses project instructions and skills in an untrusted checkout, so its discovery must be checked after the user trusts the project through the normal client UI.
 
@@ -60,6 +60,8 @@ The description describes the PR as it is now. When the scope or approach change
 
 One PR delivers one goal, at any size. A large feature such as the Run Engine belongs in one PR when its parts only make sense together. Split out work that does not serve the goal, such as an unrelated bug fix, an adjacent cleanup, or a second feature. Size alone is not a reason to split.
 
+Work that needs several PRs is planned as slices that each merge on their own, not as a chain of PRs built on each other. The `slice` skill has the rules.
+
 For a large PR:
 
 - Add a **How to review** section listing the parts, the order to read them, and where the risk is.
@@ -88,6 +90,8 @@ Hosted CI runs basic checks on every PR and push to the default branch: the work
 Changes intended for the shared default branch go through a PR. Local-only testing does not require a PR and does not authorize a remote merge. The relevant local tests must have passed on the current code, focused verification must cover the current changes, and actual GitHub-required checks and reviews must be satisfied. Passing tests do not by themselves prove the requested behavior works; include direct verification evidence. The manual full-suite CI run is not an additional merge requirement.
 
 For routine changes, the present human may authorize a merge after verification, including when they authored the PR, if GitHub rules permit it. This is permission to merge, not a self-approval review. No additional teammate approval is imposed by these skills for routine work.
+
+A PR gets one review pass, by the reviewer its tier names in the `review` skill. Only a wrong intended case, lost data or a skipped permission check blocks the merge, and only with proof. Other findings are listed in the PR's Notes or a follow-up issue. A fix is re-checked alone; the PR is not reviewed again.
 
 For small, low-risk documentation and communication-guidance changes, review the complete diff, run checks appropriate to the change, and merge promptly without another confirmation or an arbitrary waiting period. This standing authorization still requires a PR, current-head verification, resolution of review conversations, and any required GitHub checks or reviews. It does not cover application behavior changes or sensitive changes listed below. A direct instruction to document and apply a specific workflow preference authorizes that exact procedural update; do not expand it into broader permission changes.
 

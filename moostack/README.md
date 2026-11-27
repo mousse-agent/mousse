@@ -7,6 +7,9 @@ The agent skills Mousse is built with. Each one is a folder in `skills/` with a 
 | Skill | When | What it does |
 |---|---|---|
 | `work` | Any authorized implementation | Takes a change from branch to merged PR: related-work check, claim, focused tests, PR text, merge and sync. |
+| `slice` | Work that needs more than one PR | Plans it as slices that each merge on their own within a day: the rules first, then the slices, their order and their files. |
+| `review` | Reviewing a PR, diff or plan, or answering findings | One pass: who reviews at each tier, findings that need proof, a re-check of the fix only, and when to stop. |
+| `retro` | After work that ran long | Finds where the time went from the record and changes a skill, script or check. |
 | `check-related-work` | Before a final plan or a substantial change | Finds open and closed PRs, issues and branches that already do part of the work or will collide with it. Read-only. |
 | `test-the-claim` | Writing, changing or reviewing tests | Decides what to test for a change, at which level, and what not to write. |
 | `check-on-real-data` | Storage, sync, size-limit and performance changes | Proves the change against copies of the real threads on this machine. Read-only on `~/.mousse`. |
@@ -19,10 +22,24 @@ The agent skills Mousse is built with. Each one is a folder in `skills/` with a 
 
 Some skills call others:
 
-- `work` uses `check-related-work`, `test-the-claim` and `check-on-real-data`, and hands off to `nightly-build-release` and `end-session`.
+- `work` uses `slice`, `check-related-work`, `test-the-claim`, `check-on-real-data` and `review`, and hands off to `nightly-build-release` and `end-session`.
+- `slice` uses `check-related-work`, and `review` for a tier 5 plan.
+- `retro` points back at whichever skill the lost time traces to.
 - `nightly-build-release` follows `work` for each fix it merges.
 
 They share [the team workflow](../docs/team-workflow.md); each reads only the section a step names.
+
+## The loop
+
+The skills are built for speed: a change should merge the day it starts.
+
+1. **Plan.** One PR's worth of work goes straight to `work`. Anything larger goes through `slice` first.
+2. **Build.** `work` sizes the change into a tier, which sets how much to check. Each check runs once.
+3. **Review.** One pass by the reviewer the tier names. A finding needs proof. Only a wrong intended case, lost data or a skipped permission check blocks the merge; the rest become notes.
+4. **Merge.** On the local test results, without waiting for hosted CI, and without merging the default branch in unless there is a conflict.
+5. **Look back.** After long work, `retro` turns the lost time into a change here.
+
+What the loop leaves out on purpose: review rounds that run until a score is reached, panels of reviewers, PRs built on unmerged PRs, and repeat test runs with no new change.
 
 ## Using them
 
