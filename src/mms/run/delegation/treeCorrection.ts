@@ -49,13 +49,16 @@ export function isCorrectionRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boo
   return isAgentNoteRow(row) && (row.payload as AgentNotePayload).from === 'person'
 }
 
-/** Subagents with a running delegation below `threadId`, at every depth, nearest first. */
+/**
+ * Subagents with a running delegation below `threadId`, at every depth, nearest first. A bot's work subagents are not
+ * among them: the bot port corrects those (`BotEngine.noteSubagents`), never this.
+ */
 export function liveDescendants(delegations: Delegations, threadId: string): Array<{ threadId: string; direct: boolean }> {
   const found: Array<{ threadId: string; direct: boolean }> = []
   const seen = new Set([threadId])
   const walk = (parent: string, direct: boolean): void => {
     for (const row of delegations.listForParentThread(parent)) {
-      if (row.status !== 'running' || seen.has(row.childThreadId)) continue
+      if (row.status !== 'running' || row.bot || seen.has(row.childThreadId)) continue
       seen.add(row.childThreadId)
       found.push({ threadId: row.childThreadId, direct })
     }
@@ -122,27 +125,50 @@ export function correctionsStartingWith(store: RunStore, effectId: string): stri
   })
 }
 
+/** The revisions of `threadIds` recorded since `since` (a run's start), oldest first. */
+function revisionsSince(store: RunStore, threadIds: readonly string[], since: string): TreeRevision[] {
+  return store.db
+    .statement(`SELECT * FROM tree_revisions WHERE thread_id IN (${threadIds.map(() => '?').join(',')}) AND created_at >= ? ORDER BY created_at, rowid`)
+    .all(...threadIds, since)
+    .map(toRevision)
+}
+
+/** Records that a subagent started after the revision inherited it, unless its delivery is recorded already. */
+function recordInherited(store: RunStore, revision: TreeRevision, childThreadId: string): void {
+  if (revision.deliveries.some((entry) => entry.threadId === childThreadId)) return
+  saveDeliveries(store, revision.revisionId, [...revision.deliveries, { threadId: childThreadId, title: null, state: 'pending', how: 'inherited' }])
+}
+
 /**
  * A subagent started later from a run older than a revision of its parent or of a thread above it inherits that revision
- * (§2.5): it starts with the correction. Called in the delegation's transaction, with the child's new `turn.start`.
+ * (§2.5): it starts with the correction. Only parent-to-subagent edges lead up: a fork's subagents inherit nothing of its
+ * source. Called in the delegation's transaction, with the child's new `turn.start`.
  */
 export function inheritRevisions(store: RunStore, input: { parentThreadId: string; parentRun: RunRecord; childThreadId: string; startEffectId: string }): void {
   const above = [input.parentThreadId]
   const delegations = new Delegations(store)
-  for (let lineage = delegations.getLineage(input.parentThreadId); lineage && !above.includes(lineage.parentThreadId); lineage = delegations.getLineage(lineage.parentThreadId))
+  for (let lineage = delegations.getLineage(input.parentThreadId); lineage?.relationship === 'subagent' && !above.includes(lineage.parentThreadId); lineage = delegations.getLineage(lineage.parentThreadId))
     above.push(lineage.parentThreadId)
-  const revisions = store.db
-    .statement(`SELECT * FROM tree_revisions WHERE thread_id IN (${above.map(() => '?').join(',')}) AND created_at >= ? ORDER BY created_at, rowid`)
-    .all(...above, input.parentRun.requestedAt)
-    .map(toRevision)
   const inbox = new Inbox(store)
-  for (const revision of revisions) {
+  for (const revision of revisionsSince(store, above, input.parentRun.requestedAt)) {
     const posted = postCorrection(store, revision, { threadId: input.childThreadId, direct: revision.threadId === input.parentThreadId })
     if (!posted) continue
     if (!posted.startsWith) inbox.markDelivered([posted.row.inboxId], input.startEffectId)
-    const deliveries = revision.deliveries.filter((entry) => entry.threadId !== input.childThreadId)
-    saveDeliveries(store, revision.revisionId, [...deliveries, { threadId: input.childThreadId, title: null, state: 'pending', how: 'inherited' }])
+    recordInherited(store, revision, input.childThreadId)
   }
+}
+
+/**
+ * A bot work's subagent as its turn starts (`BotEngine.prepareDelegatedSubagent`): the owner's corrections of the work
+ * since the run that started it, which it could not take in while it waited, as its work's messages to start with.
+ */
+export function botSubagentStartsWith(store: RunStore, input: { workThreadId: string; parentRun: RunRecord; childThreadId: string }): string[] {
+  return revisionsSince(store, [input.workThreadId], input.parentRun.requestedAt)
+    .filter((revision) => !revision.deliveries.some((entry) => entry.threadId === input.childThreadId && entry.how === 'next_step'))
+    .map((revision) => {
+      recordInherited(store, revision, input.childThreadId)
+      return revision.text
+    })
 }
 
 /** What the thread's own agent, and the person in its chat, read of where the correction went. */

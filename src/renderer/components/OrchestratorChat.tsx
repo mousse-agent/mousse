@@ -1935,13 +1935,14 @@ export function OrchestratorChat() {
       const shownId = firstPrompt.id
       setFirstSendIds((current) => new Set([...current].filter((id) => id !== shownId)))
     }
-    if (options?.alsoSubagents && !startingBlank) tellSubagents(targetThreadId, text)
     const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound,
       steerShown ? { row: steerShown } : steerQueued, firstPrompt, {
         runId: hasAdmittedTurn ? turnRunId ?? undefined : undefined,
         retry: retrySteer
       })
     // Refused: nothing runs, so the goal set for it goes too. (An unconfirmed send may have arrived; it keeps the goal.)
+    // Only a message the thread took reaches its subagents (§2.5).
+    if (options?.alsoSubagents && !startingBlank && sent === true) tellSubagents(targetThreadId, text)
     if (goalThread && sent === false) void window.mousse.platformRequest.request('threads.goal', { threadId: goalThread, action: 'clear' }).catch(() => undefined)
     if (sent === false) {
       restoreUnsent()

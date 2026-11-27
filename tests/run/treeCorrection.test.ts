@@ -124,6 +124,18 @@ describe('a person\'s correction reaches the subagents', () => {
     expect(correction(fresh.childThreadId)).toBeUndefined()
   })
 
+  it('a fork\'s subagents inherit nothing of its source\'s corrections', async () => {
+    f = delegationFixture()
+    const source = await f.runningRun('source')
+    await revise('source', 'Keep the public API stable.')
+    f.finish(source.runId, 'done')
+    // Same clock: the fork's run is no newer than the source's revision.
+    const { threadId: fork } = await f.engine.forkThread({ sourceThreadId: 'source', atRunOrdinal: 1, clientRequestId: 'fork-1' })
+    const forkRun = await f.runningRun(fork)
+    const sub = await f.delegate(forkRun.runId, 'sub', { title: 'Sub' })
+    expect(correction(sub.childThreadId)).toBeUndefined()
+  })
+
   it('carries no person authority: a subagent waiting on an approval keeps it waiting, and the correction waits for the answer', async () => {
     const { running } = await tree()
     f.engine.approvals.create({ requestId: 'approval-1', threadId: running.childThreadId, instanceId: 'pi', provider: 'pi', action: 'command', permissionKey: 'pi:command', questions: [{ id: 'permission', prompt: 'Run it?', options: [{ id: 'allow', label: 'Allow once', decision: 'allow', scope: 'once' }, { id: 'reject', label: 'Reject', decision: 'reject' }] }] } as never)

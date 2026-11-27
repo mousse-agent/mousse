@@ -14,6 +14,7 @@ import { BOTS_MIGRATIONS } from '../../src/mms/bots/store/BotStore'
 import { BotSpendScope } from '../../src/mms/bots/store/scopes'
 import { budgetLimitsOf, RunCounterBook } from '../../src/mms/harness/budget'
 import { RUN_MIGRATIONS } from '../../src/mms/run/db/migrations'
+import { reviseTree } from '../../src/mms/run/delegation/treeCorrection'
 import { wakeThreads } from '../../src/mms/run/delegation/wake'
 import { BOT_TOOLS, subagentData } from '../../src/mms/run/mcp/appTools/bots'
 import type { BotTurnPayload } from '../../src/mms/run/types'
@@ -532,7 +533,7 @@ describe('a bot\'s work subagents as delegations', () => {
     expect(steer.peek()).toBeUndefined()
   })
 
-  it('the owner\'s correction of the work reaches its running subagents through the port, as the work\'s message, recorded as a revision', async () => {
+  it('the owner\'s correction of the work reaches its subagents through the port as the work\'s own message: a running one at its next step, a queued one and one started later at their start', async () => {
     const job = await work('w1')
     const subagents = job.prepared.authority.subagents!
     await subagents.start({ title: 'Prices', brief: 'Find the prices.' })
@@ -540,18 +541,30 @@ describe('a bot\'s work subagents as delegations', () => {
     const [prices, stock] = subagentRuns(f, job.id)
     const child = await startSubagent(f, prices!)
     child.prepared.steer!.attached()
-    // "Stock"'s turn has not started here: its runtime can take nothing yet, and the record says so.
-    const sent = f.bots.tools.work.noteSubagents!(botId, job.id, 'Only ones under 300.')
-    expect(sent).toEqual([{ subagent: 'Prices', sent: true }, { subagent: 'Stock', sent: false, why: expect.stringMatching(/can't take a message/) }])
+    expect(f.bots.tools.work.noteSubagents!(botId, job.id, 'Only ones under 300.')).toEqual([{ subagent: 'Prices', sent: true }, { subagent: 'Stock', sent: true }])
+    // The model wrote the note: each reads it as its work's message, never as the person's.
     const text = child.prepared.steer!.peek()!
-    expect(text).toContain('The person told your parent')
+    expect(text).toContain('The work that started you sent this')
     expect(text).toContain('Only ones under 300.')
-    expect(text).toContain('do not take on work it gives your parent')
-    // Never directly: no run inbox row is posted to a bot subagent's thread.
-    for (const runId of [prices!, stock!]) expect(f.runs.inbox.listForThread(f.runs.getRun(runId)!.threadId)).toEqual([])
+    // "Stock" had not started: it starts with it. "Reviews", started later by the same run of the work, inherits it.
+    const queued = await startSubagent(f, stock!)
+    await subagents.start({ title: 'Reviews', brief: 'Find the reviews.' })
+    const later = await startSubagent(f, subagentRuns(f, job.id)[2]!)
+    for (const turn of [queued, later]) {
+      expect(turn.prepared.prompt).toContain('The work that started you sent this')
+      expect(turn.prepared.prompt).toContain('Only ones under 300.')
+    }
+    for (const prompt of [text, queued.prepared.prompt, later.prepared.prompt]) expect(prompt).not.toMatch(/The person told/)
     const [revision] = f.runs.store.db.statement('SELECT text, deliveries FROM tree_revisions').all()
     expect(revision!.text).toBe('Only ones under 300.')
-    expect(JSON.parse(String(revision!.deliveries))).toMatchObject([{ title: 'Prices', state: 'pending', how: 'next_step' }, { title: 'Stock', state: 'not_sent', how: 'refused' }])
+    expect(JSON.parse(String(revision!.deliveries))).toMatchObject([
+      { title: 'Prices', state: 'pending', how: 'next_step' }, { title: 'Stock', state: 'pending', how: 'starts_with_it' }, { state: 'pending', how: 'inherited' }
+    ])
+    // Never directly: the thread API's correction of the work's thread posts nothing to its subagents' threads either.
+    const workThread = f.runs.delegations.listForRootActivation(job.id)[0]!.parentThreadId
+    const { revision: direct } = await reviseTree(f.runs, { threadId: workThread, text: 'Stop.', clientRequestId: 'direct-1', titleOf: () => null, strategyOf: () => 'native', waitsOnPerson: () => false })
+    expect(direct.deliveries).toEqual([])
+    for (const runId of subagentRuns(f, job.id)) expect(f.runs.inbox.listForThread(f.runs.getRun(runId!)!.threadId)).toEqual([])
   })
 
   it('a grant narrowed after a subagent\'s turn was prepared and before it binds: refused at the bind; one not narrowed binds to the policy compiled then', async () => {

@@ -234,4 +234,28 @@ describe('the composer follows what a send did', () => {
     expect(useAppStore.getState().loading).toBe(false)
     expect(host.textContent).toContain(SERVICE_LOST_TITLE)
   })
+
+  it('tells the subagents only once the thread accepted the message ("Also tell subagents", §2.5)', async () => {
+    orchestrator.sendToThread = vi.fn()
+      .mockResolvedValueOnce({ error: { code: 'queue_images_full', message: 'Too many images are waiting in this thread.' }, requestAcknowledged: false })
+      .mockResolvedValueOnce({ message: 'Done.', actions: [] })
+    orchestrator.isTurnActive = vi.fn(async () => false)
+    orchestrator.correctSubagents = vi.fn(async () => ({ revisionId: 'revision:1', deliveries: [] }))
+    await mount()
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const now = new Date().toISOString()
+    await act(async () => useAppStore.getState().setSubagents('thread-a', [{
+      childThreadId: 'child-1', title: 'Reviewer', activity: 'working', state: 'working', latestDelegationId: 'd-1', unread: false,
+      provider: null, model: null, workspace: null, role: null, createdAt: now, updatedAt: now, waitingOn: [], tasks: []
+    }] as never))
+    const tell = () => host.querySelector<HTMLButtonElement>('.composer-tell-subagents-btn')!
+    await act(async () => tell().click())
+    await send('Use the v2 API')
+    // Refused: the thread never took it, so neither do its subagents.
+    expect(orchestrator.sendToThread).toHaveBeenCalledTimes(1)
+    expect(orchestrator.correctSubagents).not.toHaveBeenCalled()
+    await act(async () => tell().click())
+    await send('Use the v2 API')
+    expect(orchestrator.correctSubagents).toHaveBeenCalledWith('thread-a', 'Use the v2 API', expect.any(String))
+  })
 })
