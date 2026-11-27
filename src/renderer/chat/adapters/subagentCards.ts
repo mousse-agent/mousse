@@ -11,7 +11,7 @@ import { isRefusedSubagentResult, isSubagentStartTool, readSubagentResult, toolR
 
 /**
  * The task a finished `thread_send` or `thread_update` row gave the caller's own subagent, read from its result:
- * `thread_send` to one's own subagent (`subagent: true`) and `thread_update` with `apply: now` that restarted a
+ * `thread_send` to one's own subagent (`subagent: true`, or by title: `childThreadId`) and `thread_update` with `apply: now` that restarted a
  * subagent's turn both start a follow-up task and name it. Null for any other row, and for these tools when they
  * started no task.
  */
@@ -23,10 +23,13 @@ export function subagentFollowUpTask(part: { type?: unknown; state?: unknown; ou
   const text = typeof output === 'string' ? output : Array.isArray(output) ? toolResultText(output) : toolResultText(output ? [output] : undefined)
   const result = readSubagentResult(text ?? output)
   if (!result || typeof result.delegationId !== 'string' || !result.delegationId) return null
-  if (tool === 'thread_send' ? result.subagent !== true : result.applied !== 'now') return null
+  // A follow-up sent by the subagent's title (or an old continue_subagent's arguments) returns that tool's result,
+  // which names the subagent's thread as childThreadId.
+  const childThreadId = typeof result.threadId === 'string' ? result.threadId : typeof result.childThreadId === 'string' ? result.childThreadId : null
+  if (tool === 'thread_send' ? result.subagent !== true && typeof result.childThreadId !== 'string' : result.applied !== 'now') return null
   return {
     delegationId: result.delegationId,
-    childThreadId: typeof result.threadId === 'string' ? result.threadId : null,
+    childThreadId,
     title: typeof result.title === 'string' && result.title.trim() ? result.title : null
   }
 }

@@ -31,6 +31,7 @@ import {
   CLIENT_REQUEST_ID_SCHEMA,
   json,
   McpToolError,
+  type JsonSchema,
   type McpCaller,
   type MousseTool,
   type ToolCallContext,
@@ -892,7 +893,15 @@ function remoteWaitView(threadId: string, computer: string, result: RemoteWaitRe
 const REMOTE_REACH = 'A thread on another of the user\'s computers is reached by its qualified id (<computer id>:<thread id>, from thread_create, thread_list or thread_search with computer), when the user lets agents work on that computer (or your thread launched it there). Reading it works as that computer shares it with this one; a change there (send, steer, Stop) is decided by that computer: its person chose which threads this computer\'s agents may change there (only the threads they started, by default; all threads; or none), and a refusal of that (outside_agent_reach) is final: tell the user, never try again. A refusal there names its reason in code: computer_offline, computer_not_shared, computer_outdated, computer_not_allowed, outside_agent_reach, remote_from_remote, private_thread, unknown_computer or remote_thread_gone.'
 
 /** What `thread_list` and `thread_search` say about `computer`. */
-const REMOTE_LISTS = 'computer (a name or id from computer_list) lists or searches another of the user\'s computers instead, when the user lets agents work there (Settings → Agents → Agent access) and your thread is not private nor started from another device: its threads come with qualified ids (<computer id>:<thread id>) and links, and never a private thread of that computer.'
+/** One of the caller's subagents named the way `task_status` and `task_cancel` named it (`toolVariant`). */
+const SUBAGENT_SCHEMA: JsonSchema = { type: 'string', description: 'Instead of threadId: one of your subagents, by its title (or childThreadId, or delegationId).' }
+const DELEGATION_ID_SCHEMA: JsonSchema = { type: 'string', description: 'Instead of threadId: one task of your subagents\', by the delegationId it started with.' }
+/** `thread_wait` with `subagent` or `delegationId`: today's `task_status`. */
+const SUBAGENT_STATUS = 'With subagent or delegationId instead of threadId it does not wait: it returns that subagent task\'s status now (a subagent\'s latest task), with its result once finished (bounded) and, for a task that changed files, workspaceResult: its base and result snapshots, where it worked and the Git state it left. Reading a result acknowledges it. Use it only when a result notice says the result was cut off; Mousse sends you each result.'
+/** `thread_stop` with `subagent` or `delegationId`: today's `task_cancel`. */
+const SUBAGENT_CANCEL = 'With subagent or delegationId instead of threadId (no runId: your own subagents need none) it cancels that task and everything that subagent delegated, deepest first; a subagent by title cancels all of its open tasks.'
+
+const REMOTE_LISTS ='computer (a name or id from computer_list) lists or searches another of the user\'s computers instead, when the user lets agents work there (Settings → Agents → Agent access) and your thread is not private nor started from another device: its threads come with qualified ids (<computer id>:<thread id>) and links, and never a private thread of that computer.'
 
 /** How a `thread_wait` ended before its result was read. */
 type WaitEnd = { kind: 'finished' } | { kind: 'timeout' } | { kind: 'needs_input' } | { kind: 'caller_ended' } | { kind: 'refused'; text: string }
@@ -1922,10 +1931,11 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_list',
-      description: `List the profile's threads with their project, activity and what is waiting on them. Subagent threads are folded under their parents unless includeSubagents. Threads you launched are listed even before they start; archived threads, launched by you or not, only with includeArchived. A row says archived: true (with archivedAt) when the thread is archived, and hidden: true when it is out of the sidebar; an open, shown thread has neither. ${REMOTE_LISTS} It is read there at this call; a response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB (capped: true says rows were left out).`,
+      description: `List the profile's threads with their project, activity and what is waiting on them. Subagent threads are folded under their parents unless includeSubagents. Threads you launched are listed even before they start; archived threads, launched by you or not, only with includeArchived. A row says archived: true (with archivedAt) when the thread is archived, and hidden: true when it is out of the sidebar; an open, shown thread has neither. ${REMOTE_LISTS} It is read there at this call; a response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB (capped: true says rows were left out). scope "family" lists your subagents instead, one row per subagent: title, childThreadId, state, latest delegationId, whether a result is unread, workspace, provider and model, and for one on another computer, that computer and remoteThreadId, its thread there (the id thread_read and the other thread tools take).`,
       inputSchema: {
         type: 'object',
         properties: {
+          scope: { type: 'string', enum: ['all', 'family'], description: 'all (default): the profile\'s threads. family: your subagents; the other filters do not apply.' },
           computer: { type: 'string', description: 'List another of the user\'s computers: a name or id from computer_list.' },
           projectId: { type: 'string', description: 'Only this project (with computer: a project id from that computer\'s list).' },
           status: { type: 'string', enum: ['active', 'idle', 'awaiting_input'], description: 'active: a run of it or of a subagent below it is going; awaiting_input: a question in it or below it waits for an answer; idle: neither. A row whose own turn ended while its subagents still work or ask says waitingOnSubagents.' },
@@ -1941,6 +1951,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       // computer's projects are not this computer's.
       target: (args) => ({ projectId: args.computer === undefined && typeof args.projectId === 'string' && args.projectId ? args.projectId : undefined }),
       handler: (args, ctx) => {
+        // A thread's turn lists its subagents as list_subagents did (`toolVariant`); no other turn has that list here.
+        if (args.scope !== undefined && args.scope !== 'all') throw new Error('scope is all, or family for the subagents of a thread\'s own turn.')
         if (args.computer !== undefined) return listOnComputer(args, ctx)
         if (!host.listThreads || !host.listProjects) return notAvailable('thread_list')
         if (args.projectId !== undefined && (typeof args.projectId !== 'string' || !args.projectId)) throw new Error('projectId must be a non-empty string')
@@ -2106,7 +2118,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_send',
-      description: `Send a message to another thread, as work (the default) or as a note. A note (intent "note") is information that grants nothing: you may send one to any thread of your family (your parent, siblings, your subagents and those below them), from a read-only subagent too. It arrives labelled with your thread and what you may do, never as the user's words, and returns delivery: presented (it reached the running turn), waiting_on_command (the runtime injects it when the running command ends), waiting_for_boundary (it arrives with that turn's next Mousse tool call, otherwise at its next turn), started (an idle thread got a turn for it), queued (attention "none": it waits for the thread's next turn) or after_answer (the thread waits on a question or approval; a note never answers one). interrupt: true restarts your own subagent's running reply with the note on a runtime that cannot inject it; it is refused (waiting_on_request) while that thread waits on a person. A note to a thread outside your family joins the running turn you name with runId. Work is a new assignment: within your family only a thread's direct parent sends it; send a note to anyone else there. To a thread that mirrors a helper its runtime started, nothing is sent: delivery runtime_owned names the agent id and the runtime's own message tool. Work runs as follows. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, and when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes; each refusal names its limit (data.conflict). When the agent messages that followed one person\'s message reach their limit, the next is kept for the person to Continue or Stop and returns status held (delivery held_for_person): end your turn and do not send it again. Set notify when you need the result: Mousse then tells you when the work settles (and once before that if it waits for a person), and you end your turn instead of waiting. Returns the run it created and delivery: started (a turn began with it) or queued (it waits behind the running turn). Sent to your own subagent, it is a follow-up task as continue_subagent starts (the same clientRequestId never starts it twice under either name, and Mousse sends you the result without notify); another thread's subagent is reached only through its parent. ${REMOTE_REACH} A message there is at most ${ROUTED_AGENT_BODY_MAX.toLocaleString('en-US')} characters; status uncertain means that computer did not confirm it (call again with the same clientRequestId: it is never sent twice); notify works there too: Mousse follows that computer's run and tells you when it settles.`,
+      description: `Send a message to another thread, as work (the default) or as a note. A note (intent "note") is information that grants nothing: you may send one to any thread of your family (your parent, siblings, your subagents and those below them), from a read-only subagent too. It arrives labelled with your thread and what you may do, never as the user's words, and returns delivery: presented (it reached the running turn), waiting_on_command (the runtime injects it when the running command ends), waiting_for_boundary (it arrives with that turn's next Mousse tool call, otherwise at its next turn), started (an idle thread got a turn for it), queued (attention "none": it waits for the thread's next turn) or after_answer (the thread waits on a question or approval; a note never answers one). interrupt: true restarts your own subagent's running reply with the note on a runtime that cannot inject it; it is refused (waiting_on_request) while that thread waits on a person. A note to a thread outside your family joins the running turn you name with runId. Work is a new assignment: within your family only a thread's direct parent sends it; send a note to anyone else there. To a thread that mirrors a helper its runtime started, nothing is sent: delivery runtime_owned names the agent id and the runtime's own message tool. Work runs as follows. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, and when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes; each refusal names its limit (data.conflict). When the agent messages that followed one person\'s message reach their limit, the next is kept for the person to Continue or Stop and returns status held (delivery held_for_person): end your turn and do not send it again. Set notify when you need the result: Mousse then tells you when the work settles (and once before that if it waits for a person), and you end your turn instead of waiting. Returns the run it created and delivery: started (a turn began with it) or queued (it waits behind the running turn). Sent to your own subagent (threadId, or subagent: its title), it is a follow-up task on its thread, which keeps its context (the same clientRequestId never starts it twice, under this name or continue_subagent, and Mousse sends you the result without notify); another thread's subagent is reached only through its parent. ${REMOTE_REACH} A message there is at most ${ROUTED_AGENT_BODY_MAX.toLocaleString('en-US')} characters; status uncertain means that computer did not confirm it (call again with the same clientRequestId: it is never sent twice); notify works there too: Mousse follows that computer's run and tells you when it settles.`,
       botDescription: `Send a message to one of your owner's threads. Its model receives it labelled as a message from you, not from your owner, in that thread's own mode; its questions and approvals come to you in a thread you started, else they wait for your owner. When the thread is running a turn, the message joins that turn now, as Steer in the app does (delivery presented); pass queue: true to have it wait behind that turn instead (delivery queued). When the thread is idle it starts a turn (delivery started). If the running turn can't take it (it just ended or has not started yet, or it runs in a looser mode than your turn allows), it starts or waits for a turn instead and notJoined says why. mode plan always starts or waits for a plan turn. A thread on another computer: the message waits behind its running turn. Refused while the thread waits for your owner to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from you or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, and when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes; each refusal says why (data.conflict). Send as many messages as the work needs: there is no count per turn, per run or per day, and no limit on messages in a row. Each message you send is a job in your ledger (or joins the job the thread still works on): you are told here in your chat when the thread finishes or waits for a person, with its report and link, so end your turn instead of waiting; use thread_wait only when this turn can't go on without the answer. intent "note" is information rather than a task: it joins the running turn the same way; a thread you started also takes one while idle (attention needed starts a turn for it, none waits for its next turn).`,
       botInputSchema: {
         type: 'object',
@@ -2126,6 +2138,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         type: 'object',
         properties: {
           threadId: { type: 'string', description: 'The thread to send to; not your own (use queue_enqueue for that).' },
+          subagent: { type: 'string', description: 'Instead of threadId: work for one of your subagents, by its title (or childThreadId, or delegationId). It continues on the same thread with the context it has; one that is busy runs it after its current task (status queued), and one waiting for an answer returns needs_answer with its question.' },
           content: { type: 'string' },
           intent: { type: 'string', enum: ['work', 'note'], description: 'work (default): a new assignment, which starts a turn or queues behind the running one. note: information for the thread, delivered into its running turn.' },
           attention: { type: 'string', enum: ['needed', 'none'], description: 'Notes only. needed (default): an idle thread gets a turn for it. none: it waits for the thread\'s next turn.' },
@@ -2135,7 +2148,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           notify: NOTIFY_SCHEMA,
           clientRequestId: CLIENT_REQUEST_ID_SCHEMA
         },
-        required: ['threadId', 'content']
+        required: ['content']
       },
       access: 'managesOthers',
       class: 'mutation',
@@ -2236,15 +2249,16 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_wait',
-      description: `Wait for a run of another thread to finish, for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it, cut to ${THREAD_RESULT_MAX_CHARS} characters with resultTruncated when longer), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for), needs_input (the run waits on a question or an approval: it returns at once with the requests and who answers them; your own subagent's you answer with answer_subagent) or caller_ended (your own run ended). Use it only when this turn cannot continue without the answer; to hear about the result later, send with notify instead and end your turn. ${REMOTE_REACH} There the wait runs on that computer; status needs_input (needsInput: true) says the run waits on a person there (a question, an approval or an MCP request), which no agent answers from here.`,
+      description: `Wait for a run of another thread to finish, for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it, cut to ${THREAD_RESULT_MAX_CHARS} characters with resultTruncated when longer), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for), needs_input (the run waits on a question or an approval: it returns at once with the requests and who answers them; your own subagent's you answer with answer_subagent) or caller_ended (your own run ended). Use it only when this turn cannot continue without the answer; to hear about the result later, send with notify instead and end your turn. ${REMOTE_REACH} There the wait runs on that computer; status needs_input (needsInput: true) says the run waits on a person there (a question, an approval or an MCP request), which no agent answers from here. ${SUBAGENT_STATUS}`,
       inputSchema: {
         type: 'object',
         properties: {
           threadId: { type: 'string', description: 'The thread to wait on; not your own.' },
           runId: { type: 'string', description: 'The run to wait for; the active run when omitted.' },
-          timeoutMs: { type: 'integer', minimum: 1, maximum: THREAD_WAIT_MAX_MS, description: `Default ${THREAD_WAIT_DEFAULT_MS}.` }
-        },
-        required: ['threadId']
+          timeoutMs: { type: 'integer', minimum: 1, maximum: THREAD_WAIT_MAX_MS, description: `Default ${THREAD_WAIT_DEFAULT_MS}.` },
+          subagent: SUBAGENT_SCHEMA,
+          delegationId: DELEGATION_ID_SCHEMA
+        }
       },
       access: 'readsOthers',
       class: 'read',
@@ -2407,15 +2421,16 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     {
       // Was `thread_interrupt`, which still calls it (`MOUSSE_TOOL_ALIASES`).
       name: 'thread_stop',
-      description: 'Stop a run of another thread: the run you name, which must still be the thread\'s active (or paused) run, and the subagents below it, as a Stop in the app does. Queued messages a person sent stay. Name the run you read; if it has ended or another run started, nothing is stopped and you are told which run is active. A paused run is ended too. ' + REMOTE_REACH + ' There it stops only a run an agent of this computer started (yours, or one a message from an agent here started): a run a person there started is left running, whatever that computer lets this one\'s agents change, and only a person there stops it.',
+      description: 'Stop a run of another thread: the run you name, which must still be the thread\'s active (or paused) run, and the subagents below it, as a Stop in the app does. Queued messages a person sent stay. Name the run you read; if it has ended or another run started, nothing is stopped and you are told which run is active. A paused run is ended too. ' + REMOTE_REACH + ' There it stops only a run an agent of this computer started (yours, or one a message from an agent here started): a run a person there started is left running, whatever that computer lets this one\'s agents change, and only a person there stops it. ' + SUBAGENT_CANCEL,
       inputSchema: {
         type: 'object',
         properties: {
           threadId: { type: 'string' },
           runId: { type: 'string', description: 'The run to stop, as you last read it.' },
+          subagent: SUBAGENT_SCHEMA,
+          delegationId: DELEGATION_ID_SCHEMA,
           clientRequestId: CLIENT_REQUEST_ID_SCHEMA
-        },
-        required: ['threadId', 'runId']
+        }
       },
       access: 'managesOthers',
       class: 'mutation',
@@ -2575,7 +2590,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         },
         required: ['threadId', 'hidden']
       },
-      description: 'Change a thread. One change per call. hidden (threads you started with thread_create, on this computer): hide one from the person\'s sidebar or show it there again with hidden: false. A thread you start is hidden by default; show it when it becomes work the person will follow, answer or continue themselves. Nothing in the thread changes. access (your own subagent only): access {readOnly: false} lifts the read-only narrowing you gave a subagent that works in your folder, so it edits files and runs commands there with your tools, never more than you hold; you need to hold that yourself (not read-only, not under Plan). apply next_turn (the default) takes effect at its next turn; apply now stops its running turn and continues it on the same thread, with its history, under the new access (a follow-up task, as continue_subagent starts, whose result Mousse sends you). apply now is refused while the subagent waits on a person or has subagents of its own working. Returns its access and revision; pass that revision as expectedRevision to refuse a change if its access changed meanwhile.',
+      description: 'Change a thread. One change per call. hidden (threads you started with thread_create, on this computer): hide one from the person\'s sidebar or show it there again with hidden: false. A thread you start is hidden by default; show it when it becomes work the person will follow, answer or continue themselves. Nothing in the thread changes. access (your own subagent only): access {readOnly: false} lifts the read-only narrowing you gave a subagent that works in your folder, so it edits files and runs commands there with your tools, never more than you hold; you need to hold that yourself (not read-only, not under Plan). apply next_turn (the default) takes effect at its next turn; apply now stops its running turn and continues it on the same thread, with its history, under the new access (a follow-up task, as thread_send starts, whose result Mousse sends you). apply now is refused while the subagent waits on a person or has subagents of its own working. Returns its access and revision; pass that revision as expectedRevision to refuse a change if its access changed meanwhile.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -2607,7 +2622,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         const access = args.access as Record<string, unknown> | null
         if (!access || typeof access !== 'object' || Array.isArray(access) || Object.keys(access).some((key) => key !== 'readOnly') || typeof access.readOnly !== 'boolean')
           throw new Error('access must be {readOnly: false}')
-        if (access.readOnly !== false) throw new Error('access {readOnly: true} is not available: a subagent is made read-only when it starts (delegate_task readOnly: true).')
+        if (access.readOnly !== false) throw new Error('access {readOnly: true} is not available: a subagent is made read-only when it starts (thread_create kind "subagent" with readOnly: true).')
         return updateAccess(threadId, (args.apply as 'next_turn' | 'now' | undefined) ?? 'next_turn', args.expectedRevision as string | undefined, args, ctx)
       }
     },
@@ -2874,7 +2889,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     {
       name: 'queue_enqueue',
       botDescription: BOT_THREAD_TOOL_TEXT.queue_enqueue,
-      description: 'Queue a message on a thread (default: yours); it runs as a new turn after the current one. It is stored as an agent\'s message wherever it goes: it carries your run\'s count of agent messages in a row and your permission mode as its limit, counts toward the few agent messages a thread keeps waiting, waits behind a usage pause or a question the user has not answered, and a person\'s Stop clears it. On another thread it is labelled as a message from an agent in your thread, not from the user, runs under your permission mode when that is stricter than the thread\'s own, counts toward the few agent messages a thread keeps waiting and toward the limit on agent messages in a row, and needs expectedRevision (from queue_list). Subagents are reached with continue_subagent.',
+      description: 'Queue a message on a thread (default: yours); it runs as a new turn after the current one. It is stored as an agent\'s message wherever it goes: it carries your run\'s count of agent messages in a row and your permission mode as its limit, counts toward the few agent messages a thread keeps waiting, waits behind a usage pause or a question the user has not answered, and a person\'s Stop clears it. On another thread it is labelled as a message from an agent in your thread, not from the user, runs under your permission mode when that is stricter than the thread\'s own, counts toward the few agent messages a thread keeps waiting and toward the limit on agent messages in a row, and needs expectedRevision (from queue_list). Subagents are reached with thread_send.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -2903,7 +2918,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           assertNotBotThread(host, threadId, 'queue_enqueue')
           // A message to a subagent would run without its parent hearing the result.
           if (engine.delegations.getLineage(threadId)?.relationship === 'subagent')
-            throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is a subagent; its parent reaches it with continue_subagent.`)
+            throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is a subagent; its parent reaches it with thread_send.`)
           assertTakesWork(host, threadId)
         }
         return queueCommand('queue_enqueue', args, ctx, threadId, { op: 'enqueue', content: args.content, mode, ...(expectedRevision !== undefined ? { expectedRevision } : {}) }, 'queued a message')

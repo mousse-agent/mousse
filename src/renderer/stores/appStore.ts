@@ -461,9 +461,10 @@ interface AppState {
   closeSurfaceKind: (kind: MainView) => void
   projectTerminalTabs: ProjectTerminalTab[]
   activeProjectTerminalTabByThread: Record<string, string>
+  /** Every thread's Documents tabs; a thread's panel shows only its own (`documentTabsForThread`). Not persisted. */
   documentTabs: DocumentTab[]
-  activeDocumentTabId: string | null
-  documentsTabVisible: boolean
+  /** The Documents tab last selected in each thread (`'__standalone__'` without one). */
+  activeDocumentTabByThread: Record<string, string>
   chatMode: ChatMode
   browserTabs: BrowserTabState[]
   browserActiveTabByThread: Record<string, string>
@@ -617,7 +618,8 @@ interface AppState {
   /** Shows a file a thread's agent wrote as a diff in the Documents tab, reusing its tab when it is already open. */
   openTurnFileDiff: (threadId: string, path: string, title: string) => string
   closeDocumentTab: (tabId: string) => void
-  setActiveDocumentTab: (tabId: string | null) => void
+  /** Selects a Documents tab in the active thread. */
+  setActiveDocumentTab: (tabId: string) => void
   setChatMode: (mode: ChatMode) => void
   activateProfile: (profileId: string) => void
   addBrowserTab: (ownerThreadId: string | null) => string
@@ -771,6 +773,28 @@ const workspaceStorage = createJSONStorage(() =>
         removeItem: () => undefined
       }
 )
+
+const STANDALONE_KEY = '__standalone__'
+
+/** The thread a Documents tab belongs to: the thread of its applet or changed file, or none for plain Markdown. */
+export function documentTabThread(tab: DocumentTab): string | null {
+  return tab.applet?.threadId ?? tab.turnFile?.threadId ?? null
+}
+
+/** The Documents tabs a thread's panel shows: its own, and those of no thread. */
+export function documentTabsForThread(tabs: DocumentTab[], threadId: string | null): DocumentTab[] {
+  return tabs.filter((tab) => {
+    const owner = documentTabThread(tab)
+    return owner === null || owner === threadId
+  })
+}
+
+/** The Documents tab a thread's panel shows in front: the one it last selected, else its first. */
+export function shownDocumentTab(state: Pick<AppState, 'documentTabs' | 'activeDocumentTabByThread' | 'activeThreadId'>): DocumentTab | undefined {
+  const tabs = documentTabsForThread(state.documentTabs, state.activeThreadId)
+  const selected = state.activeDocumentTabByThread[state.activeThreadId ?? STANDALONE_KEY]
+  return tabs.find((tab) => tab.id === selected) ?? tabs[0]
+}
 
 const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
@@ -1090,8 +1114,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   projectTerminalTabs: [],
   activeProjectTerminalTabByThread: {},
   documentTabs: [],
-  activeDocumentTabId: null,
-  documentsTabVisible: false,
+  activeDocumentTabByThread: {},
   chatMode: DEFAULT_CHAT_MODE,
   browserTabs: [],
   browserActiveTabByThread: {},
@@ -1450,8 +1473,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
     const id = crypto.randomUUID()
     set((s) => ({
       documentTabs: [...s.documentTabs, { id, title, markdown }],
-      activeDocumentTabId: id,
-      documentsTabVisible: true,
+      activeDocumentTabByThread: { ...s.activeDocumentTabByThread, [s.activeThreadId ?? STANDALONE_KEY]: id },
       mainView: 'documents'
     }))
     return id
@@ -1467,8 +1489,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       documentTabs: open
         ? s.documentTabs
         : [...s.documentTabs, { id, title: reference.title, markdown: '', applet: { threadId, profileId: s.profileId, reference } }],
-      activeDocumentTabId: id,
-      documentsTabVisible: true,
+      activeDocumentTabByThread: { ...s.activeDocumentTabByThread, [threadId]: id },
       mainView: 'documents',
       mainAreaOpen: true
     }))
@@ -1483,8 +1504,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       documentTabs: open
         ? s.documentTabs
         : [...s.documentTabs, { id, title, markdown: '', turnFile: { threadId, profileId: s.profileId, path } }],
-      activeDocumentTabId: id,
-      documentsTabVisible: true,
+      activeDocumentTabByThread: { ...s.activeDocumentTabByThread, [threadId]: id },
       mainView: 'documents',
       mainAreaOpen: true
     }))
@@ -1492,23 +1512,31 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   },
   closeDocumentTab: (tabId) =>
     set((s) => {
-      const index = s.documentTabs.findIndex((tab) => tab.id === tabId)
-      if (index === -1) return s
+      if (!s.documentTabs.some((tab) => tab.id === tabId)) return s
+      // The next tab comes from the same thread's tabs, as the panel shows them.
+      const shown = documentTabsForThread(s.documentTabs, s.activeThreadId)
+      const index = shown.findIndex((tab) => tab.id === tabId)
       const documentTabs = s.documentTabs.filter((tab) => tab.id !== tabId)
-      let activeDocumentTabId = s.activeDocumentTabId
-      if (s.activeDocumentTabId === tabId) {
-        activeDocumentTabId = documentTabs[Math.min(index, documentTabs.length - 1)]?.id ?? null
+      const remaining = shown.filter((tab) => tab.id !== tabId)
+      const key = s.activeThreadId ?? STANDALONE_KEY
+      const activeDocumentTabByThread = Object.fromEntries(
+        Object.entries(s.activeDocumentTabByThread).filter(([, id]) => id !== tabId)
+      )
+      if (s.activeDocumentTabByThread[key] === tabId && index !== -1) {
+        const next = remaining[Math.min(index, remaining.length - 1)]
+        if (next) activeDocumentTabByThread[key] = next.id
       }
       return {
         documentTabs,
-        activeDocumentTabId,
-        documentsTabVisible: documentTabs.length > 0,
-        mainView: documentTabs.length === 0 && s.mainView === 'documents'
+        activeDocumentTabByThread,
+        mainView: remaining.length === 0 && s.mainView === 'documents'
           ? s.openedSurfaceKinds[0] ?? DEFAULT_MAIN_VIEW
           : s.mainView
       }
     }),
-  setActiveDocumentTab: (activeDocumentTabId) => set({ activeDocumentTabId }),
+  setActiveDocumentTab: (tabId) => set((s) => ({
+    activeDocumentTabByThread: { ...s.activeDocumentTabByThread, [s.activeThreadId ?? STANDALONE_KEY]: tabId }
+  })),
   setChatMode: (chatMode) => set({ chatMode }),
   activateProfile: (profileId) => set((state) => {
     if (!profileId) return state
@@ -1567,8 +1595,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       turnStates: {},
       stopRequests: {},
       documentTabs: [],
-      activeDocumentTabId: null,
-      documentsTabVisible: false,
+      activeDocumentTabByThread: {},
       loading: false
     }
   }),

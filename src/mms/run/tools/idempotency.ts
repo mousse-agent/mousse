@@ -28,8 +28,9 @@ export const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   // The retired merge tools only report a finished task's result (and pin it again).
   'integrate_delegation',
   'integrate_subagent',
-  // Phase 5 Mousse MCP server (SPEC §15.1).
+  // Phase 5 Mousse MCP server (SPEC §15.1). `thread_list` reads only; a ledger row of `list_subagents` names it now.
   'thread_read',
+  'thread_list',
   'queue_list',
   // Reads a thread's terminals from memory; never writes to them.
   'terminal_read',

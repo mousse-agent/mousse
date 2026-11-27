@@ -287,7 +287,7 @@ describe('Documents', () => {
   ]
 
   it('says one muted line when nothing is open', async () => {
-    useAppStore.setState({ documentTabs: [], activeDocumentTabId: null })
+    useAppStore.setState({ activeThreadId: null, documentTabs: [], activeDocumentTabByThread: {} })
     await act(async () => root.render(createElement(DocumentPanel)))
     expect(host.textContent).toBe('No documents open')
     expect(host.querySelector('svg')).toBeNull()
@@ -296,7 +296,7 @@ describe('Documents', () => {
   it('copies the active document’s exact Markdown and announces it', async () => {
     const writeText = vi.fn(async (_text: string) => undefined)
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
-    useAppStore.setState({ documentTabs: docs as never, activeDocumentTabId: 'd2' })
+    useAppStore.setState({ documentTabs: docs as never, activeThreadId: null, activeDocumentTabByThread: { __standalone__: 'd2' } })
     await act(async () => root.render(createElement(DocumentPanel)))
     await click(host.querySelector('button[aria-label="Copy Markdown"]'))
     await flush()
@@ -306,7 +306,7 @@ describe('Documents', () => {
 
   it('shows a copy failure', async () => {
     Object.defineProperty(navigator, 'clipboard', { value: { writeText: async () => { throw new Error('denied') } }, configurable: true })
-    useAppStore.setState({ documentTabs: docs as never, activeDocumentTabId: 'd1' })
+    useAppStore.setState({ documentTabs: docs as never, activeThreadId: null, activeDocumentTabByThread: { __standalone__: 'd1' } })
     await act(async () => root.render(createElement(DocumentPanel)))
     await click(host.querySelector('button[aria-label="Copy Markdown"]'))
     await flush()
@@ -314,11 +314,11 @@ describe('Documents', () => {
   })
 
   it('switches and closes the exact document from the keyboard', async () => {
-    useAppStore.setState({ documentTabs: [...docs, { id: 'd3', title: 'Spec', markdown: 'spec' }] as never, activeDocumentTabId: 'd1' })
+    useAppStore.setState({ documentTabs: [...docs, { id: 'd3', title: 'Spec', markdown: 'spec' }] as never, activeThreadId: null, activeDocumentTabByThread: { __standalone__: 'd1' } })
     await act(async () => root.render(createElement(DocumentPanel)))
     tabButtons()[0].focus()
     await press(tabButtons()[0], 'ArrowRight')
-    expect(useAppStore.getState().activeDocumentTabId).toBe('d2')
+    expect(useAppStore.getState().activeDocumentTabByThread.__standalone__).toBe('d2')
     await press(tabButtons()[1], 'Delete')
     await flush()
     expect(useAppStore.getState().documentTabs.map((tab) => tab.id)).toEqual(['d1', 'd3'])

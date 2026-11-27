@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Check, Copy, FileText, GitCompare, LayoutGrid } from '../lib/icons'
-import { useAppStore } from '../stores/appStore'
+import { documentTabsForThread, shownDocumentTab, useAppStore } from '../stores/appStore'
 import { TabBar } from './ui/TabBar'
 import '../styles/chat-markdown.css'
 import { AppletPanelView } from './applets/AppletPanelView'
@@ -10,14 +10,17 @@ import { TurnFileDiff } from './changes/TurnFileDiff'
 const COPIED_MS = 1600
 
 export function DocumentPanel() {
-  const documentTabs = useAppStore((s) => s.documentTabs)
-  const activeDocumentTabId = useAppStore((s) => s.activeDocumentTabId)
+  const allDocumentTabs = useAppStore((s) => s.documentTabs)
+  const activeThreadId = useAppStore((s) => s.activeThreadId)
+  const activeDocumentTabId = useAppStore((s) => shownDocumentTab(s)?.id)
   const setActiveDocumentTab = useAppStore((s) => s.setActiveDocumentTab)
   const closeDocumentTab = useAppStore((s) => s.closeDocumentTab)
   const [copy, setCopy] = useState<{ tabId: string; result: 'copied' | 'failed' } | null>(null)
   const copiedTimer = useRef<number | null>(null)
 
-  const activeTab = documentTabs.find((tab) => tab.id === activeDocumentTabId) ?? documentTabs[0]
+  // Only this thread's documents (and those of no thread); another thread's stay open for it.
+  const documentTabs = documentTabsForThread(allDocumentTabs, activeThreadId)
+  const activeTab = documentTabs.find((tab) => tab.id === activeDocumentTabId)
   const copyResult = copy && copy.tabId === activeTab?.id ? copy.result : null
 
   useEffect(() => () => {

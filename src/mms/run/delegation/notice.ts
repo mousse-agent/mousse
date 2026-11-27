@@ -59,7 +59,7 @@ export function planWakeNotice(rows: readonly InboxRecord[], context: NoticeCont
       : `${who} ended its task (${result.runStatus}${result.error && result.text ? `: ${head(result.error)}` : ''}).`]
     if (shown.trim()) parts.push(quoted('subagent result', shown))
     else if (fullyShown) parts.push('It left no message.')
-    if (!fullyShown) parts.push(`The result is cut at ${shown.length} of ${body.length} characters; call task_status with ${payload.delegationId} for the rest.`)
+    if (!fullyShown) parts.push(`The result is cut at ${shown.length} of ${body.length} characters; call thread_wait with delegationId ${payload.delegationId} for the rest.`)
     // The files and Git state it left, outside the text budget: Mousse merges nothing, the parent brings them in.
     const workspace = context.resultReport?.(payload)
     if (workspace) parts.push(workspace)

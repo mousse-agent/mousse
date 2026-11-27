@@ -23,18 +23,18 @@ describe('subagent guidance', () => {
     expect(mousseOrchestrationInstructions()).toMatchInlineSnapshot(`
       "You are running inside Mousse, which exposes its orchestration tools through the "mousse" MCP server.
 
-      - Delegation: use thread_create with kind "subagent" for work that should run on another provider or model, or in parallel on its own thread, and continue_subagent to follow up on a subagent you already have.
+      - Delegation: use thread_create with kind "subagent" for work that should run on another provider or model, or in parallel on its own thread, and thread_send with subagent to follow up on a subagent you already have.
       - Delegate only substantial work: a bounded task that runs on its own thread, in parallel, or on another provider or model. Give every subagent a short role-like title such as "API reviewer"; the title is how you address it later.
-      - Continue the same subagent (continue_subagent, by title) when the next step builds on what it already read or did: fixing its findings, re-checking its own change, answering its question, the next iteration of the same work. It keeps its context, so this is faster and cheaper than starting over.
+      - Continue the same subagent (thread_send with subagent: its title) when the next step builds on what it already read or did: fixing its findings, re-checking its own change, answering its question, the next iteration of the same work. It keeps its context, so this is faster and cheaper than starting over.
       - Start a new subagent (thread_create with kind "subagent") for independent work, a deliberately fresh or independent review, a different workspace, provider or model, or when the old subagent's context is wrong or too long. A title is unique among your subagents; thread_create returns title_taken when one already exists, and then you continue it or choose another title.
-      - The user cannot create subagents. When the user names one ("ask the API reviewer to ..."), use continue_subagent with that title.
+      - The user cannot create subagents. When the user names one ("ask the API reviewer to ..."), use thread_send with that title as subagent.
       - When the user asks for a model ("use <model> for the review"), call model_list, match the name to a model id there and pass instanceId, model and, when asked, effort. If it is not offered or not ready, tell the user why; never start it on another model instead.
       - A subagent gets everything you have (shell, tools, MCP servers, skills, permission mode), never more. Pick workspace "isolated" for a worktree of its own, "shared" for your own folder; pass readOnly only for a deliberately narrow reader (no shell, no edits, no other MCP servers).
-      - After delegating or continuing, end your turn. Mousse sends you a notice with the result, so do not poll; call task_status only when the notice says the result was cut off.
+      - After delegating or continuing, end your turn. Mousse sends you a notice with the result, so do not poll; call thread_wait with its subagent or delegationId only when the notice says the result was cut off.
       - Mousse never merges a subagent's work into your files. The notice of a finished task says where it worked, its base and result snapshots (SHAs kept under refs/mousse/) and the Git state it left (branch, HEAD, commits). Bring the work in yourself with git, for example \`git diff --binary <base> <result> | git apply --3way\` or \`git cherry-pick\` of its commits, and check the result.
       - When a subagent asks a question you can answer, use answer_subagent; otherwise ask the user. A subagent that needs input is reported as needing it.
       - To run a subagent on another of the user's computers (another operating system, a stronger machine, a job that should outlive this one), pass computer to thread_create (kind "subagent"); computer_list shows which ones you may use. It runs there under that computer's agents, in its copy of this repository; its questions are answered there, and its result names the branch its work is on there, for you to fetch.
-      - clientRequestId: pass a fresh clientRequestId for every new action that changes state (thread_create, continue_subagent, answer_subagent). Reuse the same value only when retrying the same call after an error or timeout; Mousse then returns the first result instead of acting twice.
+      - clientRequestId: pass a fresh clientRequestId for every new action that changes state (thread_create, thread_send, answer_subagent). Reuse the same value only when retrying the same call after an error or timeout; Mousse then returns the first result instead of acting twice.
       - A delegated task can never exceed your own mode ceiling: a planning turn may only start planning children.
       - Use question_ask for clarifying questions; use thread_read to read your thread's run events (and those of your parent or children).
       - message_parent (a subagent, or a thread a personal bot started) messages your parent while you work. Use it only when you need its input (a question, a blocker) or it must know something now; not for progress updates, which your final answer covers.
@@ -92,8 +92,9 @@ describe('subagent guidance', () => {
 
   it('every listed tool is named by the guidance the models read', () => {
     const text = mousseOrchestrationInstructions()
-    // task_cancel is named only by its own tool description (the deleted pi loop's prompt also named it).
-    for (const name of ['thread_create', 'kind "subagent"', 'continue_subagent', 'answer_subagent', 'task_status']) expect(text).toContain(name)
+    // Following a subagent up and reading a cut result are thread_send and thread_wait with its subagent (S7d3); stopping it,
+    // thread_stop with subagent, is named only by that tool's description.
+    for (const name of ['thread_create', 'kind "subagent"', 'thread_send', 'answer_subagent', 'thread_wait']) expect(text).toContain(name)
     // `delegate_task` is an old name of `thread_create kind: subagent`: never listed, so never what a model is told to call.
     expect(text).not.toContain('delegate_task')
     // Results are never merged: the parent brings them in itself.
@@ -112,7 +113,7 @@ describe('the delegation tools models are offered', () => {
     }))).toMatchInlineSnapshot(`
       [
         {
-          "description": "Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. A subagent has everything you have: your shell, your tools, your MCP servers, your skills and your permission mode, never more. workspace isolated gives it a worktree of its own; shared runs it in your own folder, where its edits land in your files as it makes them. readOnly true starts the narrow kind instead (an explorer, a read-only reviewer or researcher): it works in your folder and can only read files and the web and use Mousse's read-only tools, with no shell, no edits and no other MCP servers. role is a label and changes nothing. Mousse never merges a subagent's files into yours: the notice gives the base and result snapshots (pinned under refs/mousse/), where it worked and the Git state it left, and you bring the work in with git. instanceId (the agent to run, such as "claude" or "pi:openai"), model and effort (its reasoning level) default to yours; take them from model_list, and pass effort only with model. A model or agent that is not offered, or is signed out, is refused with the reason and nothing starts: tell the user, never pick another yourself. provider is the older name form of instanceId. computer runs the subagent on another of the user's computers (a name from computer_list), in its copy of this repository and under its own agents; there instanceId and model default to that computer's. It runs there until it ends or is stopped; maxMinutes, when you give it, stops it after that many minutes of running time (time it waits for a person's answer does not count). It expires with your thread. Its result names the branch its work is on there.",
+          "description": "Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (subagent in thread_send, thread_wait and thread_stop); when it is taken the call returns title_taken and starts nothing. A subagent has everything you have: your shell, your tools, your MCP servers, your skills and your permission mode, never more. workspace isolated gives it a worktree of its own; shared runs it in your own folder, where its edits land in your files as it makes them. readOnly true starts the narrow kind instead (an explorer, a read-only reviewer or researcher): it works in your folder and can only read files and the web and use Mousse's read-only tools, with no shell, no edits and no other MCP servers. role is a label and changes nothing. Mousse never merges a subagent's files into yours: the notice gives the base and result snapshots (pinned under refs/mousse/), where it worked and the Git state it left, and you bring the work in with git. instanceId (the agent to run, such as "claude" or "pi:openai"), model and effort (its reasoning level) default to yours; take them from model_list, and pass effort only with model. A model or agent that is not offered, or is signed out, is refused with the reason and nothing starts: tell the user, never pick another yourself. provider is the older name form of instanceId. computer runs the subagent on another of the user's computers (a name from computer_list), in its copy of this repository and under its own agents; there instanceId and model default to that computer's. It runs there until it ends or is stopped; maxMinutes, when you give it, stops it after that many minutes of running time (time it waits for a person's answer does not count). It expires with your thread. Its result names the branch its work is on there.",
           "name": "delegate_task",
           "parameters": [
             "prompt",
@@ -135,18 +136,6 @@ describe('the delegation tools models are offered', () => {
           ],
         },
         {
-          "description": "Send a follow-up to a subagent you already started, by title (or childThreadId, or delegationId). It continues on the same thread with the context it has, so use it when the next step builds on what it read or did. Starts a new task, returns at once with its delegationId, and Mousse sends you a notice with the result. A subagent that is busy runs the follow-up after its current task (status queued). A subagent waiting for an answer returns needs_answer with its question; answer it with answer_subagent. It cannot change workspace, provider or model; start a new subagent for that.",
-          "name": "continue_subagent",
-          "parameters": [
-            "subagent",
-            "prompt",
-          ],
-          "required": [
-            "subagent",
-            "prompt",
-          ],
-        },
-        {
           "description": "Answer a question one of your subagents asked (question_ask), using the requestId from continue_subagent (needs_answer) or from the question notice. answers maps each question id to the chosen option id (an array when several are allowed) or free text.",
           "name": "answer_subagent",
           "parameters": [
@@ -161,37 +150,13 @@ describe('the delegation tools models are offered', () => {
           ],
         },
         {
-          "description": "Status of a subagent task, with its result once finished (bounded) and, for a task that changed files, workspaceResult: its base and result snapshots, where it worked and the Git state it left. Pass the delegationId, or the subagent title for its latest task. Reading a result acknowledges it.",
-          "name": "task_status",
-          "parameters": [
-            "delegationId",
-            "subagent",
-          ],
-          "required": [],
-        },
-        {
-          "description": "Cancel a subagent task and everything that subagent delegated, deepest first. Pass the delegationId, or the subagent title to cancel all of its open tasks.",
-          "name": "task_cancel",
-          "parameters": [
-            "delegationId",
-            "subagent",
-          ],
-          "required": [],
-        },
-        {
-          "description": "List your subagents, one row per subagent: title, childThreadId, state, latest delegationId, whether a result is unread, workspace, provider and model, and for one on another computer, that computer and remoteThreadId, its thread there (the id thread_read and the other thread tools take).",
-          "name": "list_subagents",
-          "parameters": [],
-          "required": [],
-        },
-        {
           "description": "List the user's other computers you may start subagents or threads on (thread_create with computer): name, whether it is online, whether the user allowed it, and whether it has this repository. The threads of a computer the user allowed can also be listed and searched (thread_list and thread_search with computer) and read by their ids. Starts nothing.",
           "name": "computer_list",
           "parameters": [],
           "required": [],
         },
         {
-          "description": "List the agents and models you can start a subagent or a thread (thread_create) on, as the model picker offers them: each entry's instanceId and name, whether it is ready (else why not), whether it can run subagents, and its models with their reasoning levels (effort). current is what you run on. Match the model the user names to a model id here; never guess ids. computer (a name from computer_list) lists that computer's instead, for delegate_task computer. Starts nothing.",
+          "description": "List the agents and models you can start a subagent or a thread (thread_create) on, as the model picker offers them: each entry's instanceId and name, whether it is ready (else why not), whether it can run subagents, and its models with their reasoning levels (effort). current is what you run on. Match the model the user names to a model id here; never guess ids. computer (a name from computer_list) lists that computer's instead, for thread_create computer. Starts nothing.",
           "name": "model_list",
           "parameters": [
             "computer",

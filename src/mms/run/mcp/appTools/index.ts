@@ -1,4 +1,4 @@
-import { isToolAlias } from '../../../../shared/toolAliases'
+import { isRunningVariant, isToolAlias } from '../../../../shared/toolAliases'
 import type { RunEngine } from '../../RunEngine'
 import { appearanceTools } from './appearance'
 import { appletTools } from './applets'
@@ -141,7 +141,7 @@ export function createAppToolRegistry(input: {
   // `delegate_task` and `create_subagent` are old names of its subagent kind.
   const threads = engine ? threadTools(host, engine, input.bots) : []
   const threadCreate = threadCreateTool({ subagent: delegation.find((tool) => tool.name === 'delegate_task')!, thread: threads.find((tool) => tool.name === 'thread_create') }, host, engine)
-  add('delegation', delegation.flatMap((tool) => (tool.name === MODEL_LIST_TOOL ? models : tool.name === 'delegate_task' ? [threadCreate] : isToolAlias(tool.name) ? [] : [tool])))
+  add('delegation', delegation.flatMap((tool) => (tool.name === MODEL_LIST_TOOL ? models : tool.name === 'delegate_task' ? [threadCreate] : isToolAlias(tool.name) && !isRunningVariant(tool.name) ? [] : [tool])))
   add('questions', [...shareWakeTools(bots.filter((tool) => QUESTION_TOOLS.includes(tool.name)), askUserTools(host)), ...secretTools(host), ...bugReportTools(host)])
   add('tasks', [...taskTools(host), ...goalTools(host)])
   add('thread', threads.filter((tool) => tool.name !== 'thread_create'))

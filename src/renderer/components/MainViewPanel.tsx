@@ -6,7 +6,7 @@ import { BrowserPanel, ChangesPanel, DocumentPanel, FilesPanel, ProjectTerminalP
 // Shared markdown rules, once loaded here with the Documents panel: kept in place so the stylesheet's order holds.
 import '../styles/chat-markdown.css'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
-import { useAppStore } from '../stores/appStore'
+import { documentTabsForThread, useAppStore } from '../stores/appStore'
 import { onFileLinkHeld } from '../services/fileLinks'
 import { surfaceTabItems } from '../lib/surfaces'
 import { OpenSurfacePicker } from './OpenSurfaceMenu'
@@ -32,8 +32,7 @@ export function MainViewPanel({ open = true }: { open?: boolean }) {
   const terminals = useAppStore((s) => s.projectTerminalTabs)
   const browsers = useAppStore((s) => s.browserTabs)
   const documentTabs = useAppStore((s) => s.documentTabs)
-  const documentsTabVisible = useAppStore((s) => s.documentsTabVisible)
-  const documents = documentsTabVisible ? documentTabs : []
+  const documents = documentTabsForThread(documentTabs, activeThreadId)
   const { workspace } = useActiveFileWorkspace()
   const items = surfaceTabItems({
     files: workspace?.openPaths,
