@@ -15,6 +15,10 @@ const device = (node: string, name: string, extra: Partial<Device> = {}): Device
   ({ node, name, caps: [], keyEpoch: 1, expiresAt: 0, self: false, revoked: false, state: 'open', kind: 'computer', ...extra }) as Device
 
 const MAC = 'nod_mac'
+/** Where browsing the Mac mini starts: its home folder and its disk. */
+const places = { path: null, parent: null, folders: [{ name: 'Home', path: '/Users/me' }, { name: 'Macintosh HD', path: '/' }] }
+const home = { path: '/Users/me', parent: '/Users', folders: [{ name: 'dev', path: '/Users/me/dev' }] }
+const dev = { path: '/Users/me/dev', parent: '/Users/me', folders: [{ name: 'api', path: '/Users/me/dev/api' }] }
 /** What the Mac mini answers: its GitHub account, its folders, and a clone. */
 const mac: { github: Record<string, unknown>; folders: Record<string, unknown>; clone: () => Promise<unknown> } = { github: {}, folders: {}, clone: async () => ({}) }
 const platform = vi.fn(async (method: string, params?: { node?: string; path?: string }): Promise<unknown> => {
@@ -25,7 +29,11 @@ const platform = vi.fn(async (method: string, params?: { node?: string; path?: s
     mac.github = { ...mac.github, operation: { id: 'op1', phase: 'code', code: 'AB12-CD34', url: 'https://github.com/login/device' } }
     return mac.github
   }
-  if (method === 'folders.browse') return mac.folders[params.path ?? '']
+  if (method === 'folders.browse') {
+    const view = mac.folders[params.path ?? '']
+    if (!view) throw Object.assign(new Error('That folder does not exist on this computer.'), { code: 'not_found' })
+    return view
+  }
   if (method === 'sourceControl.clone') return await mac.clone()
   throw new Error(`unexpected ${method}`)
 })
@@ -37,7 +45,7 @@ beforeEach(() => {
   Object.assign(window, { mousse: { platformRequest: { request: platform } } })
   useSourceControl.setState({ computers: {} })
   mac.github = { id: 'github', name: 'GitHub', state: 'connected', account: 'me' }
-  mac.folders = {}
+  mac.folders = { '': places, '/Users/me': home, '/Users/me/dev': dev }
   mac.clone = async () => ({ project: project('p9', '/Users/me/dev/web-app') })
   host = document.createElement('div')
   document.body.append(host)
@@ -67,7 +75,18 @@ const show = async (extra: Project[] = []) => {
 }
 const dialog = () => host.querySelector<HTMLElement>('[role="dialog"]')!
 const button = (label: string) => [...dialog().querySelectorAll<HTMLButtonElement>('button')].find((entry) => entry.textContent?.trim() === label)!
+const labelled = (label: string) => dialog().querySelector<HTMLElement>(`[aria-label="${label}"]`)!
 const click = async (element: HTMLElement) => { await act(async () => element.click()) }
+/** Lets that computer's answers about the folder picked come in. */
+const settle = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) }) }
+const type = async (input: HTMLInputElement, value: string) => {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+}
+const press = async (input: HTMLElement, key: string) => { await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true })) }) }
+const hint = () => dialog().querySelector('[role="status"]')?.textContent ?? ''
 
 it('clones the project on a computer without it, on the branch here, into its projects folder; the composer gets that project', async () => {
   const { onAdded } = await show()
@@ -75,9 +94,11 @@ it('clones the project on a computer without it, on the branch here, into its pr
   expect(dialog().querySelector('[aria-label="Computer"]')!.textContent).toContain('Mac mini')
   expect(dialog().textContent).toContain('acme/web-app')
   expect(dialog().textContent).toContain('feature/login')
-  expect(dialog().textContent).toMatch(/\/Users\/me\/dev\/web-app|~\/dev\/web-app/)
+  // The path bar: the folders down to the clone's own, each one to go to.
+  expect(button('dev')).toBeTruthy()
+  expect(button('web-app')).toBeTruthy()
   expect(dialog().textContent).toContain('Connected · me')
-  await click(button('Add'))
+  await click(button('Clone'))
   expect(platform).toHaveBeenCalledWith('sourceControl.clone', { node: MAC, provider: 'github', repository: 'acme/web-app', path: '/Users/me/dev/web-app', branch: 'feature/login' })
   expect(onAdded).toHaveBeenCalledWith(MAC, expect.objectContaining({ id: qualifyId(MAC, 'p9'), node: MAC, sameAs: 'web-app' }))
 })
@@ -92,22 +113,61 @@ it("offers that computer's checkout of it first, and uses it without cloning", a
 
 it('picks where the clone goes by browsing that computer', async () => {
   mac.folders = {
+    ...mac.folders,
     '/Users/me/dev': { path: '/Users/me/dev', parent: '/Users/me', folders: [{ name: 'work', path: '/Users/me/dev/work' }] },
     '/Users/me/dev/work': { path: '/Users/me/dev/work', parent: '/Users/me/dev', folders: [] }
   }
   await show()
-  await click(button('Browse'))
-  expect(platform).toHaveBeenCalledWith('folders.browse', { node: MAC, path: '/Users/me/dev' })
+  await click(labelled('Browse Mac mini'))
+  await settle()
   await click(button('work'))
-  await click(button('Use this folder'))
-  await click(button('Add'))
+  await settle()
+  expect(hint()).toBe('')
+  await click(button('Clone'))
   expect(platform).toHaveBeenCalledWith('sourceControl.clone', expect.objectContaining({ path: '/Users/me/dev/work/web-app' }))
 })
 
+it('clones into a typed path, saying which folders the clone makes there', async () => {
+  await show()
+  await click(labelled('Type a path'))
+  const field = labelled('Folder on Mac mini') as HTMLInputElement
+  // "~" is that computer's home folder, and a trailing "/" means "in this folder".
+  await type(field, '~/code/new/')
+  await press(field, 'Enter')
+  await settle()
+  expect(hint()).toContain('code/new')
+  await click(button('Clone'))
+  expect(platform).toHaveBeenCalledWith('sourceControl.clone', expect.objectContaining({ path: '/Users/me/code/new/web-app' }))
+})
+
+it('makes a new folder while browsing, which the clone creates', async () => {
+  mac.folders = { ...mac.folders, '/Users/me/dev': { path: '/Users/me/dev', parent: '/Users/me', folders: [] } }
+  await show()
+  await click(labelled('Browse Mac mini'))
+  await settle()
+  await click(button('New folder'))
+  const name = labelled('New folder name') as HTMLInputElement
+  await type(name, 'scratch')
+  await press(name, 'Enter')
+  await settle()
+  expect(hint()).toContain('scratch')
+  await click(button('Clone'))
+  expect(platform).toHaveBeenCalledWith('sourceControl.clone', expect.objectContaining({ path: '/Users/me/dev/scratch/web-app' }))
+})
+
+it('keeps the path when typing is dropped with Escape', async () => {
+  await show()
+  await click(labelled('Type a path'))
+  const field = labelled('Folder on Mac mini') as HTMLInputElement
+  await type(field, '/elsewhere/web-app')
+  await press(field, 'Escape')
+  await click(button('Clone'))
+  expect(platform).toHaveBeenCalledWith('sourceControl.clone', expect.objectContaining({ path: '/Users/me/dev/web-app' }))
+})
 it('connects GitHub on that computer from here when it is not, showing the code it relays, before Add is possible', async () => {
   mac.github = { id: 'github', name: 'GitHub', state: 'signed-out' }
   await show()
-  expect(button('Add').disabled).toBe(true)
+  expect(button('Clone').disabled).toBe(true)
   await click(button('Connect'))
   expect(platform).toHaveBeenCalledWith('sourceControl.connect', { node: MAC, provider: 'github' })
   expect(dialog().querySelector('[aria-label="One-time code"]')!.textContent).toBe('AB12-CD34')
@@ -116,7 +176,7 @@ it('connects GitHub on that computer from here when it is not, showing the code 
 it("shows that computer's refusal and changes nothing; Close does nothing else", async () => {
   mac.clone = async () => { throw Object.assign(new Error('That folder is not empty. Choose a new or empty folder.'), { code: 'project_refused' }) }
   const { onAdded, onClose } = await show()
-  await click(button('Add'))
+  await click(button('Clone'))
   expect(dialog().querySelector('[role="alert"]')!.textContent).toBe('That folder is not empty. Choose a new or empty folder.')
   expect(onAdded).not.toHaveBeenCalled()
   await click(dialog().querySelector<HTMLButtonElement>('button[aria-label="Close"]')!)
