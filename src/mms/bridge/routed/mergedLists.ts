@@ -106,7 +106,11 @@ interface Computer {
   refused: boolean
   /** Threads placed on first sight and not moved by a person since: they are placed again once their project's match is known. */
   seeded: Set<string>
-  matchRetryAt: number
+  /**
+   * When the computer is next asked which of its projects match: a minute after a match that did not finish (a call
+   * failed, or a repository here could not be read), once the answers held are stale after one that did.
+   */
+  matchAgainAt: number
   online: boolean
   /** A snapshot of the current stream has arrived: what follows are changes, not a first look. */
   live: boolean
@@ -321,7 +325,7 @@ export class MergedLists implements RemoteListsPort {
         matches: new Map(),
         refused: false,
         seeded: new Set(),
-        matchRetryAt: 0
+        matchAgainAt: 0
       }
       this.computersByNode.set(ref.node, c)
       this.loadCache(c)
@@ -923,7 +927,7 @@ export class MergedLists implements RemoteListsPort {
     )
     this.botLaunchers(c, transitions.map((transition) => transition.id), launchers)
     this.noteBotRows(launchers)
-    if (projectsChanged || (!c.matches.size && this.now() >= c.matchRetryAt)) this.matchProjects(c)
+    if (projectsChanged || this.now() >= c.matchAgainAt) this.matchProjects(c)
   }
 
   /**
@@ -1377,12 +1381,18 @@ export class MergedLists implements RemoteListsPort {
   }
 
   private async runMatch(c: Computer): Promise<void> {
-    const { services, client } = this.options
+    const { services } = this.options
     const identities = repositoryIdentitiesFor(services)
     const byRoot = new Map<string, { id: string; identity: RepositoryIdentity; atTop: boolean }>()
+    // Repositories here whose history could not be read now (too slow, say): what was known of them is kept.
+    const unread = new Set<string>()
     for (const project of services.projects.listProjects()) {
       const identity = await identities.of(project.path)
-      if (!identity) continue
+      if (!identity) {
+        // A folder that is no repository never matches; a repository not read this time is tried again.
+        if (await identities.rootOf(project.path)) unread.add(project.id)
+        continue
+      }
       const atTop = await identities.isTop(project.path, identity.root)
       const known = byRoot.get(identity.root)
       if (!known || (atTop && !known.atTop))
@@ -1390,39 +1400,32 @@ export class MergedLists implements RemoteListsPort {
     }
     const sameAs = new Map<string, string>()
     const similar = new Map<string, string>()
+    // A match that did not finish keeps the answers it did get, and the earlier ones for the rest, so a group does not
+    // come apart (here, and in the copy on disk read while the computer is out of reach) and is completed later.
+    let failed = false
+    const keepEarlier = (id: string): void => {
+      for (const [remote, local] of c.sameAs) if (local === id && !sameAs.has(remote)) sameAs.set(remote, id)
+      for (const [remote, local] of c.similar) if (local === id && !similar.has(remote)) similar.set(remote, id)
+    }
+    for (const id of unread) keepEarlier(id)
     for (const { id, identity } of byRoot.values()) {
       const key = `${identity.root}|${identity.roots.join(',')}|${identity.remotes.join(',')}`
       let held = c.matches.get(key)
-      if (!held || this.now() - held.at > SAME_AS_TTL_MS) {
-        let remote: string | null = null
-        let weak = false
-        try {
-          const raw = await client.call(
-            c.node,
-            'projects.match',
-            { roots: identity.roots, remotes: identity.remotes },
-            { signal: AbortSignal.timeout(30_000) }
-          )
-          const found = qualifyRoutedResult('projects.match', raw, {
-            node: c.node,
-            self: this.options.self()
-          })
-          remote = isRecord(found) && typeof found.projectId === 'string' ? found.projectId : null
-          weak = isRecord(found) && found.weak === true
-        } catch (error) {
-          // A computer that is older has no way to say; one that cannot answer now is asked again in a minute.
-          if (!(error instanceof DomainRpcError && error.code === 'computer_outdated')) {
-            c.matchRetryAt = this.now() + MATCH_RETRY_MS
-            return
-          }
-        }
-        held = { remote, weak, at: this.now() }
-        c.matches.set(key, held)
+      // After a failure the rest wait for the next try: the computer is likely out of reach or busy.
+      if ((!held || this.now() - held.at > SAME_AS_TTL_MS) && !failed) {
+        const asked = await this.askMatch(c, identity)
+        if (asked) c.matches.set(key, (held = asked))
+        else failed = true
+      }
+      if (!held) {
+        keepEarlier(id)
+        continue
       }
       // A project of the computer that several of this one's match goes to the first; the top folder came first.
       if (held.remote && !held.weak && !sameAs.has(held.remote)) sameAs.set(held.remote, id)
       else if (held.remote && held.weak && !similar.has(held.remote)) similar.set(held.remote, id)
     }
+    c.matchAgainAt = this.now() + (failed || unread.size ? MATCH_RETRY_MS : SAME_AS_TTL_MS)
     if (sameMapValues(c.sameAs, sameAs) && sameMapValues(c.similar, similar)) return
     const arrived = new Set<string>()
     for (const [remote, local] of sameAs) if (c.sameAs.get(remote) !== local) arrived.add(remote)
@@ -1446,6 +1449,32 @@ export class MergedLists implements RemoteListsPort {
     if (c.snapshot !== undefined) this.scheduleCache(c)
     // Rows placed before their project's match was known sort with this computer's rows of that project now.
     if (arrived.size) this.replaceSeeded(c, arrived)
+  }
+
+  /** Which project of `c` is the repository `identity`, or undefined when the computer could not answer now. */
+  private async askMatch(
+    c: Computer,
+    identity: RepositoryIdentity
+  ): Promise<{ remote: string | null; weak: boolean; at: number } | undefined> {
+    try {
+      const raw = await this.options.client.call(
+        c.node,
+        'projects.match',
+        { roots: identity.roots, remotes: identity.remotes },
+        { signal: AbortSignal.timeout(30_000) }
+      )
+      const found = qualifyRoutedResult('projects.match', raw, { node: c.node, self: this.options.self() })
+      return {
+        remote: isRecord(found) && typeof found.projectId === 'string' ? found.projectId : null,
+        weak: isRecord(found) && found.weak === true,
+        at: this.now()
+      }
+    } catch (error) {
+      // A computer that is older has no way to say: no match, asked again when the answer is stale.
+      if (error instanceof DomainRpcError && error.code === 'computer_outdated')
+        return { remote: null, weak: false, at: this.now() }
+      return undefined
+    }
   }
 
   /** Places again the rows of the projects that just matched one of this computer's, if no person has moved them. */

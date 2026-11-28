@@ -1440,6 +1440,64 @@ describe('how projects are matched', () => {
     })
   }, 60_000)
 
+  it('keeps the matches it got when another one fails, asks again for the failed one, and keeps them out of reach', async () => {
+    const h = harness({ cacheSettleMs: 20 })
+    const one = repository(),
+      two = repository()
+    h.state.projects = [
+      { id: 'a', name: 'a', path: one.path, createdAt: iso(0), order: 0 },
+      { id: 'b', name: 'b', path: two.path, createdAt: iso(0), order: 1 }
+    ]
+    const answers: Record<string, string> = { [one.root]: 'ra', [two.root]: 'rb' }
+    let twoFails = true
+    h.client.call.mockImplementation(async (_node: NodeId, method: string, params: unknown) => {
+      if (method !== 'projects.match') return {}
+      const roots = (params as { roots: string[] }).roots
+      if (twoFails && roots.includes(two.root)) throw new DomainRpcError('deadline_exceeded', 'slow')
+      const projectId = roots.map((root) => answers[root]).find(Boolean)
+      return projectId ? { projectId } : {}
+    })
+    const projects = [
+      { id: 'ra', name: 'a', path: '/a', order: 0 },
+      { id: 'rb', name: 'b', path: '/b', order: 1 }
+    ]
+    const sameAs = (lists = h.lists) =>
+      Object.fromEntries(lists.projects().map((project) => [project.id, project.sameAs]))
+    await h.feed(snapshot([{ id: 't', projectId: 'ra', updatedAt: iso(1) }], { projects }))
+    // The answer that came is used, and written with the copy on disk, though the other call failed.
+    await vi.waitFor(() => expect(sameAs()[h.q('ra')]).toBe('a'), { timeout: 20_000 })
+    expect(sameAs()[h.q('rb')]).toBeUndefined()
+    await vi.waitFor(
+      () => {
+        const [copy] = h.store.snapshots()
+        expect(copy && JSON.parse(copy.snapshot).matches.sameAs).toEqual([[h.q('ra'), 'a']])
+      },
+      { timeout: 5000 }
+    )
+    // A minute later the failed one is asked again, and only that one.
+    twoFails = false
+    h.client.call.mockClear()
+    h.now.at += 61_000
+    await h.feed(snapshot([{ id: 't', projectId: 'ra', updatedAt: iso(2) }], { projects }))
+    await vi.waitFor(() => expect(sameAs()[h.q('rb')]).toBe('b'), { timeout: 20_000 })
+    expect(sameAs()[h.q('ra')]).toBe('a')
+    const asked = h.client.call.mock.calls.filter((call) => call[1] === 'projects.match')
+    expect(asked.map((call) => (call[2] as { roots: string[] }).roots)).toEqual([[two.root]])
+    // Out of reach after a restart, both projects stay in this computer's groups.
+    await vi.waitFor(
+      () => {
+        const [copy] = h.store.snapshots()
+        expect(copy && JSON.parse(copy.snapshot).matches.sameAs).toHaveLength(2)
+      },
+      { timeout: 5000 }
+    )
+    h.online.delete(h.node)
+    const lists = h.restart()
+    await lists.reconcile()
+    expect(sameAs(lists)).toEqual({ [h.q('ra')]: 'a', [h.q('rb')]: 'b' })
+    expect(lists.projects().every((project) => project.offline)).toBe(true)
+  }, 60_000)
+
   it('sorts rows with this computer’s project once its match is known, unless a person moved them', async () => {
     const h = harness()
     const repo = repository()
