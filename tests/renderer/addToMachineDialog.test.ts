@@ -155,15 +155,23 @@ it('makes a new folder while browsing, which the clone creates', async () => {
   expect(platform).toHaveBeenCalledWith('sourceControl.clone', expect.objectContaining({ path: '/Users/me/dev/scratch/web-app' }))
 })
 
-it('keeps the path when typing is dropped with Escape', async () => {
-  await show()
+it('holds Clone back while the typed path is not a full one, keeps it on leaving the field, and Escape goes back', async () => {
+  const { onClose } = await show()
   await click(labelled('Type a path'))
   const field = labelled('Folder on Mac mini') as HTMLInputElement
-  await type(field, '/elsewhere/web-app')
+  await type(field, 'code/web-app')
+  expect(button('Clone').disabled).toBe(true)
+  // Leaving the field (as pressing Clone does) keeps the text to be fixed, and Clone held back.
+  await act(async () => { field.dispatchEvent(new FocusEvent('focusout', { bubbles: true })) })
+  expect((labelled('Folder on Mac mini') as HTMLInputElement).value).toBe('code/web-app')
+  expect(button('Clone').disabled).toBe(true)
   await press(field, 'Escape')
+  expect(dialog().querySelector('input[aria-label="Folder on Mac mini"]')).toBeNull()
+  expect(onClose).not.toHaveBeenCalled()
   await click(button('Clone'))
   expect(platform).toHaveBeenCalledWith('sourceControl.clone', expect.objectContaining({ path: '/Users/me/dev/web-app' }))
 })
+
 it('connects GitHub on that computer from here when it is not, showing the code it relays, before Add is possible', async () => {
   mac.github = { id: 'github', name: 'GitHub', state: 'signed-out' }
   await show()

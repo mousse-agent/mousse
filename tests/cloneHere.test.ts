@@ -103,6 +103,8 @@ describe('a clone for another computer', () => {
     mkdirSync(join(root, 'mousse-home'), { recursive: true })
     const clone = vi.fn(async () => '')
     const refused = [full, join(root, 'mousse-home', 'new', 'web-app'), join(root, 'a-file', 'new', 'web-app'), join(root, 'out', '.hidden', 'web-app')]
+    // Windows: the folder "streamed" by its stream's spelling, which name checks would not know.
+    if (process.platform === 'win32') refused.push(join(root, 'streamed::$INDEX_ALLOCATION', 'web-app'))
     for (const path of refused) {
       await expect(cloneHere({ repository: 'acme/web-app', path }, services({ clone }), action), path).rejects.toThrow()
     }
@@ -110,5 +112,6 @@ describe('a clone for another computer', () => {
     expect(readdirSync(full)).toEqual(['mine.txt'])
     expect(existsSync(join(root, 'mousse-home', 'new'))).toBe(false)
     expect(existsSync(join(root, 'out'))).toBe(false)
+    expect(existsSync(join(root, 'streamed'))).toBe(false)
   })
 })

@@ -80,7 +80,9 @@ export function CloneFolderField({ computer, destination, cloneName, disabled = 
   }, [target, typing, browse, computer])
 
   const current = check?.path === target ? check : null
-  const problem = !destination || !isFullPath(destination) ? 'Pick a folder there'
+  // A typed path that is not a full path stays in the field (leaving it does not drop it), and holds Clone back.
+  const problem = editing && editing.text.trim() && !isFullPath(target) ? 'Type a full path'
+    : !destination || !isFullPath(destination) ? 'Pick a folder there'
     : goesThroughHidden(destination) ? 'Hidden folders can’t be used from another computer'
     : check?.path === destination && check.error ? check.error
     : undefined
@@ -97,12 +99,12 @@ export function CloneFolderField({ computer, destination, cloneName, disabled = 
     const text = destination
     setEditing({ text, select: select === 'leaf' && text ? [text.length - leaf.length, text.length] : [0, text.length] })
   }
-  /** Takes the typed path; one that is not a full path stays to be fixed (Enter), or is dropped (leaving the field). */
-  const commit = (leaving: boolean) => {
+  /** Takes the typed path. One that is not a full path stays to be fixed, or dropped with Escape; an empty one is dropped. */
+  const commit = () => {
     if (!editing) return
     const next = typedDestination(editing.text, cloneName, home)
     if (!isFullPath(next)) {
-      if (leaving || !next) setEditing(null)
+      if (!next) setEditing(null)
       return
     }
     setEditing(null)
@@ -118,7 +120,7 @@ export function CloneFolderField({ computer, destination, cloneName, disabled = 
   }, [editing?.select])
 
   const onTyping = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Enter') { event.preventDefault(); commit(false) }
+    if (event.key === 'Enter') { event.preventDefault(); commit() }
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); dropped.current = true; setEditing(null) }
   }
 
@@ -150,7 +152,7 @@ export function CloneFolderField({ computer, destination, cloneName, disabled = 
             autoFocus
             onChange={(event) => setEditing({ text: event.target.value })}
             onKeyDown={onTyping}
-            onBlur={() => { if (!dropped.current) commit(true) }}
+            onBlur={() => { if (!dropped.current) commit() }}
           />
         ) : (
           <Crumbs onEmptyClick={() => startEditing()}>

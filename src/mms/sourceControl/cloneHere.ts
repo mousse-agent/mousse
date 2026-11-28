@@ -66,6 +66,9 @@ export async function cloneHere(
   if (isNetworkOrDevicePath(path)) throw refuse('Network and device paths cannot be used from another computer.')
   if (!isAbsolute(path)) throw refuse('Choose a folder for the clone, by its full path.')
   const lexical = resolve(path)
+  // On Windows a ":" past the drive names a stream: `gcloud::$INDEX_ALLOCATION` is the folder `gcloud`, spelled so the
+  // checks below, which compare names, would not know it.
+  if (process.platform === 'win32' && lexical.slice(2).includes(':')) throw refuse('A folder name cannot have ":" in it.')
   const parent = dirname(lexical)
   if (parent === lexical) throw refuse('Pick a folder, not the root of the disk.')
   const { real: realBase, missing } = existingAncestor(parent)
