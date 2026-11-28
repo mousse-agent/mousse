@@ -87,6 +87,19 @@
       "expiresAt": "2026-11-28T07:47:14.062Z"
     },
     {
+      "task": "daemon-stall-watchdog",
+      "session": "Animatrix-d73b7c",
+      "machine": "Animatrix",
+      "branch": "daemon-stall-watchdog",
+      "paths": [
+        "src/mms/lifecycle/LifecycleClaims.ts",
+        "src/cli/daemonExitWatchdog.ts",
+        "src/cli/commands/service.ts"
+      ],
+      "claimedAt": "2026-11-28T05:53:17.592Z",
+      "expiresAt": "2026-11-28T07:53:17.592Z"
+    },
+    {
       "task": "first-send-shown-mode",
       "session": "Animatrix-94a771",
       "machine": "Animatrix",
