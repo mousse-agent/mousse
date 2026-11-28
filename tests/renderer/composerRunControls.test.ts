@@ -535,7 +535,7 @@ describe('composer model picker', () => {
     const visibleAtFocus: boolean[] = []
     const spy = vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
       const menu = this.closest<HTMLElement>('.composer-permission-menu')
-      if (menu) visibleAtFocus.push(menu.style.visibility === 'visible')
+      if (menu) visibleAtFocus.push(menu.style.visibility !== 'hidden')
       focus.call(this, options)
     })
     act(() => { permissionButton().dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })) })
@@ -589,11 +589,16 @@ describe('composer model picker', () => {
     expect(permissionMenu()).toBeNull()
   })
 
-  it('opens the permission menu above the composer, not over the draft', () => {
+  it('pins the permission menu just above its chip, left-aligned to it, as the model picker sits above its button', () => {
+    // The composer (top 500) has room above it, but the menu still sits by the chip that opened it.
     asComposer()
     render({ open: false })
+    permissionButton().getBoundingClientRect = () => ({ x: 12, y: 560, top: 560, left: 12, right: 38, bottom: 586, width: 26, height: 26, toJSON: () => ({}) })
     openPermissions()
-    expect(permissionMenu()!.style.getPropertyValue('--floating-anchor-width')).toBe('640px')
+    const menu = permissionMenu()!
+    expect(menu.style.left).toBe('12px')
+    expect(menu.style.bottom).toBe(`${window.innerHeight - 560 + 6}px`)
+    expect(menu.style.top).toBe('')
   })
 
   it('hides Auto on an agent without an auto mode and shows a thread set to Auto as Auto-accept edits', () => {
