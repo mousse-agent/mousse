@@ -139,6 +139,20 @@
       "expiresAt": "2026-11-28T06:59:58.693Z"
     },
     {
+      "task": "one-shots-slice-6",
+      "session": "Animatrix-f79f6e",
+      "machine": "Animatrix",
+      "branch": "one-shots-slice-6",
+      "paths": [
+        "src/mms/harness/oneShot",
+        "src/mms/harness/drivers/grok.ts",
+        "src/mms/harness/grok",
+        "src/mms/models/models.json"
+      ],
+      "claimedAt": "2026-11-28T09:21:31.613Z",
+      "expiresAt": "2026-11-28T11:21:31.613Z"
+    },
+    {
       "task": "ownership-pass-yields",
       "session": "Animatrix-303787",
       "machine": "Animatrix",
