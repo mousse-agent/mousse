@@ -132,6 +132,21 @@
       "expiresAt": "2026-11-27T22:03:26.729Z"
     },
     {
+      "task": "remote-bots-marks",
+      "session": "Avarnics-Mac-mini.local-87ddf3",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "remote-bots-marks",
+      "paths": [
+        "src/renderer/components/chats/ChatsSidebar.tsx",
+        "src/renderer/stores/botsStore.ts",
+        "src/mms/bots/marks",
+        "src/mms/bridge/routed/RemoteBotRegistry.ts",
+        "src/shared/bots/personal"
+      ],
+      "claimedAt": "2026-11-28T01:23:13.677Z",
+      "expiresAt": "2026-11-28T03:23:13.677Z"
+    },
+    {
       "task": "remote-bots-method-table",
       "session": "Avarnics-Mac-mini.local-f3dadc",
       "machine": "Avarnics-Mac-mini.local",
