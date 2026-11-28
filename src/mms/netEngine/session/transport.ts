@@ -10,9 +10,18 @@ export const ENGINE_LABELS = [
   'mousse.blob',
   'mousse.put',
   // Phase 1b: one editor tunnel per stream, opened by the caller (§9.2).
-  'mousse.tunnel'
+  'mousse.tunnel',
+  // Bot traffic, in stream places and credit of its own (mousse-net `BOT_LABELS`): the bots feed and bot chats, bot
+  // calls, and the pictures of a bot's live browser view. Threads never ride on these, nor bots on the thread labels.
+  'mousse.botsub',
+  'mousse.botrpc',
+  'mousse.botview'
 ] as const
 export type EngineLabel = (typeof ENGINE_LABELS)[number]
+
+/** The labels that take the bot places of a connection (mousse-net `BOT_LABELS`), apart from the thread ones. */
+export const BOT_ENGINE_LABELS: ReadonlySet<EngineLabel> = new Set(['mousse.botsub', 'mousse.botrpc', 'mousse.botview'])
+export const isBotLabel = (label: EngineLabel): boolean => BOT_ENGINE_LABELS.has(label)
 
 /**
  * What this app understands beyond protocol 1, said in `mousse.hello` both ways. `one-way`: a computer it let in

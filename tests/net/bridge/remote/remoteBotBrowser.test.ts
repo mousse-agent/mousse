@@ -1,0 +1,222 @@
+/**
+ * A bot's browser watched from another computer (`docs/plans/remote-bots.md`, live view): one `mousse.botview` stream
+ * per view on screen, pictures under the stream's credit with stale ones dropped, the view gone at once when the device
+ * loses its reach, and takeover kept for Full.
+ */
+import { describe, expect, it, vi } from 'vitest'
+import { newId, NetError, type NodeId } from '../../../../src/shared/net'
+import type { BotLevel } from '../../../../src/shared/net/local'
+import type { BotBrowserFrameEvent, BotBrowserView } from '../../../../src/shared/bots/personal/browser'
+import { RemoteBotBrowsers, REMOTE_VIEW_MAX_FPS, REMOTE_VIEW_MAX_WIDTH, type RemoteBrowsersPort } from '../../../../src/mms/bridge/remote/RemoteBotBrowsers'
+import { remoteBotMethods, type RemoteBotsPort } from '../../../../src/mms/bridge/remote/RemoteBots'
+import { RemoteBotViews } from '../../../../src/mms/bridge/routed/remoteBotViews'
+import type { EngineStream } from '../../../../src/mms/netEngine/session/transport'
+import type { RpcContext, RpcMethod } from '../../../../src/mms/net/contracts'
+import { fakeLink } from '../../../netEngine/fakeLink'
+
+const BOT = 'helper'
+const VIEW = { open: true, control: 'bot', holder: 'bot', activations: [] } as unknown as BotBrowserView
+
+/** The bots' browsers on the bot's computer: each watch's input and its `emit`, and a slot that holds the latest update. */
+function browsers() {
+  const watches: Array<{ botId: string; watchId: string; width: number; fps: number; connectionId: string; emit(event: BotBrowserFrameEvent): Promise<void> }> = []
+  const unwatched: string[] = []
+  const holds: string[] = []
+  const ended: string[] = []
+  /**
+   * What `WatchedBrowser` does for each view: one update in flight, and while it is, only the newest waits (latest
+   * wins). Each picture is numbered by its `at`.
+   */
+  const slot = { busy: false, next: undefined as BotBrowserFrameEvent | undefined }
+  const push = (event: BotBrowserFrameEvent): void => {
+    const watch = watches.at(-1)!
+    if (slot.busy) {
+      slot.next = event
+      return
+    }
+    slot.busy = true
+    void watch.emit(event).catch(() => undefined).finally(() => {
+      slot.busy = false
+      const next = slot.next
+      slot.next = undefined
+      if (next) push(next)
+    })
+  }
+  const port: RemoteBrowsersPort = {
+    view: async () => VIEW,
+    watch: async (botId, watchId, input) => {
+      watches.push({ botId, watchId, width: input.width, fps: input.fps, connectionId: input.connectionId, emit: input.emit })
+      return VIEW
+    },
+    unwatch: (botId, watchId) => void unwatched.push(`${botId}/${watchId}`),
+    hold: async (botId, _viewId, request, connectionId) => {
+      holds.push(`${botId} ${request.op} ${connectionId}`)
+      return { browser: VIEW, hold: { id: 'hold_1', lastSeq: 0, computer: 'Owner' } }
+    },
+    send: async () => ({ acks: [], lastSeq: 0 }),
+    open: async () => ({ browser: VIEW }),
+    endHoldsOf: async (botId, connectionId) => void ended.push(`${botId} ${connectionId}`)
+  }
+  return { port, watches, unwatched, holds, ended, push }
+}
+
+/** A picture of `bytes` bytes, numbered `at`. */
+const picture = (at: number, bytes = 1000): BotBrowserFrameEvent => ({
+  botId: BOT,
+  watchId: 'w1',
+  frame: { data: Buffer.alloc(bytes, at % 251).toString('base64'), mimeType: 'image/jpeg', width: 480, height: 300, at }
+})
+
+/**
+ * The bot's computer and a viewer, over one link. `credit`: the stream the bot's computer writes pictures on takes
+ * more only once it is let (`release`), as a stream out of the helper's credit does.
+ */
+function setup(options: { level?: BotLevel; credit?: boolean } = {}) {
+  const viewerNode = newId('node') as NodeId
+  const ownerNode = newId('node') as NodeId
+  const link = fakeLink({ ownerOnCaller: ownerNode, callerOnOwner: viewerNode, grant: '1', endpoint: 'e' })
+  const access = { level: options.level ?? 'full' as BotLevel, reach: true }
+  const listeners = new Set<() => void>()
+  const reach = {
+    level: () => access.level,
+    canReach: () => access.reach,
+    onChange: (listener: () => void) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    }
+  }
+  const owner = browsers()
+  const host = new RemoteBotBrowsers({ browsers: () => owner.port, bot: (botId) => { if (botId !== BOT) throw new Error('gone') }, reach })
+  let gate: { promise: Promise<void>; release(): void } | undefined
+  const credit = () => {
+    let release!: () => void
+    const promise = new Promise<void>((resolve) => (release = resolve))
+    gate = { promise, release: () => { release(); gate = credit() } }
+    return gate
+  }
+  if (options.credit) credit()
+  link.inbound.onStream((stream) => {
+    const paced: EngineStream = options.credit
+      ? {
+          label: stream.label,
+          write: (bytes) => stream.write(bytes),
+          end: () => stream.end(),
+          reset: (reason) => stream.reset(reason),
+          ready: () => gate!.promise,
+          onData: (listener) => stream.onData(listener),
+          onEnd: (listener) => stream.onEnd(listener)
+        }
+      : stream
+    host.accept(viewerNode, paced)
+  })
+  const shown: BotBrowserFrameEvent[] = []
+  const window = { id: 'window-1', emit: (_type: string, data: unknown) => void shown.push(data as BotBrowserFrameEvent) }
+  const viewer = new RemoteBotViews({
+    open: () => link.outbound.open('mousse.botview'),
+    online: () => link.outbound.isOpen(),
+    computer: (node) => ({ node, name: 'Owner' })
+  })
+  return {
+    link, host, viewer, owner, window, shown, ownerNode, viewerNode,
+    lose: (change: Partial<typeof access>) => {
+      Object.assign(access, change)
+      for (const listener of listeners) listener()
+    },
+    release: () => gate?.release()
+  }
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+describe('a bot’s browser watched from another computer', () => {
+  it('opens a view’s stream while it is shown, sends its pictures whole within the remote size and rate, and closes it when hidden', async () => {
+    const { link, host, viewer, owner, window, shown, ownerNode } = setup()
+    expect(link.crossed.filter((row) => row.label === 'mousse.botview')).toEqual([])
+    const answer = await viewer.watch(window, ownerNode, BOT, { watchId: 'w1', width: 3840, fps: 15 })
+    expect(answer.browser).toMatchObject({ open: true })
+    expect(owner.watches).toEqual([expect.objectContaining({ botId: BOT, watchId: 'w1', width: REMOTE_VIEW_MAX_WIDTH, fps: REMOTE_VIEW_MAX_FPS })])
+    expect([viewer.viewCount, host.viewCount]).toEqual([1, 1])
+    // A renewal goes on the same stream.
+    await viewer.watch(window, ownerNode, BOT, { watchId: 'w1', width: 480, fps: 5 })
+    expect(link.crossed.filter((row) => row.label === 'mousse.botview' && row.header.t === 'watch')).toHaveLength(2)
+    expect(host.viewCount).toBe(1)
+
+    // A picture larger than one message crosses in parts and shows whole, under the bot's id here.
+    const big = picture(1, 120 * 1024)
+    await owner.watches[0]!.emit(big)
+    await vi.waitFor(() => expect(shown).toHaveLength(1))
+    expect(shown[0]).toMatchObject({ botId: `${ownerNode}:${BOT}`, watchId: 'w1', frame: { width: 480, height: 300, at: 1 } })
+    expect(shown[0]!.frame!.data).toBe(big.frame!.data)
+    expect(link.crossed.filter((row) => row.label === 'mousse.botview' && row.header.t === 'part').length).toBeGreaterThan(0)
+
+    // Hidden: the stream closes on both sides, and the browser stops picturing for it.
+    viewer.unwatch(window.id, ownerNode, BOT, 'w1')
+    await vi.waitFor(() => expect(owner.unwatched).toEqual([`${BOT}/w1`]))
+    expect([viewer.viewCount, host.viewCount]).toEqual([0, 0])
+    // Nothing tells the window it stalled: it asked for this.
+    expect(shown.filter((event) => event.stalled)).toEqual([])
+  })
+
+  it('writes the next picture only once the last one left, so stale pictures are dropped under low credit', async () => {
+    const { viewer, owner, window, shown, ownerNode, release } = setup({ credit: true })
+    await viewer.watch(window, ownerNode, BOT, { watchId: 'w1', width: 480, fps: 5 })
+    // Five pictures while the stream takes nothing more: the first is on its way, only the newest waits.
+    for (let at = 1; at <= 5; at += 1) {
+      owner.push(picture(at))
+      await settle()
+    }
+    expect(shown.map((event) => event.frame?.at)).toEqual([1])
+    release()
+    await vi.waitFor(() => expect(shown.map((event) => event.frame?.at)).toEqual([1, 5]))
+    release()
+    await settle()
+    expect(shown.map((event) => event.frame?.at)).toEqual([1, 5])
+  })
+
+  it('ends the view at once when the device loses its reach, and refuses watching it again', async () => {
+    const { host, viewer, owner, window, shown, ownerNode, lose } = setup({ level: 'use' })
+    await viewer.watch(window, ownerNode, BOT, { watchId: 'w1', width: 480, fps: 5 })
+    lose({ reach: false })
+    await vi.waitFor(() => expect(shown.at(-1)).toMatchObject({ botId: `${ownerNode}:${BOT}`, watchId: 'w1', stalled: 'forbidden' }))
+    expect([viewer.viewCount, host.viewCount]).toEqual([0, 0])
+    expect(owner.unwatched).toEqual([`${BOT}/w1`])
+    // Its next renewal opens a stream that is refused as for a bot that is not there.
+    await expect(viewer.watch(window, ownerNode, BOT, { watchId: 'w1', width: 480, fps: 5 })).rejects.toMatchObject({ code: 'stream_unknown' })
+    // A device at Off is refused for its level.
+    lose({ reach: true, level: 'off' })
+    await expect(viewer.watch(window, ownerNode, BOT, { watchId: 'w1', width: 480, fps: 5 })).rejects.toMatchObject({ code: 'forbidden' })
+    expect(owner.watches).toHaveLength(1)
+  })
+
+  it('refuses taking over below Full before the browser is asked, and ends a hold at once when Full goes', async () => {
+    const owner = browsers()
+    const access = { level: 'use' as BotLevel }
+    const listeners = new Set<() => void>()
+    const reach = { level: () => access.level, canReach: () => true, onChange: (listener: () => void) => (listeners.add(listener), () => listeners.delete(listener)) }
+    const host = new RemoteBotBrowsers({ browsers: () => owner.port, bot: () => undefined, reach })
+    const bots = { get: () => ({}) } as unknown as RemoteBotsPort
+    const methods = remoteBotMethods({ bots: () => bots, reach, browsers: host })
+    const context = { caller: { node: 'viewer', user: 'u' } } as unknown as RpcContext
+    const call = async (name: string, params: unknown): Promise<unknown> => {
+      const method = methods.find((entry) => entry.method === name) as RpcMethod
+      const valid = method.validate ? method.validate(params) : params
+      method.authorize?.(valid, context)
+      return method.handle(valid, context)
+    }
+    const take = { botId: BOT, viewId: 'v1', request: { op: 'take' } }
+    await expect(call('bots.browser.hold', take)).rejects.toMatchObject({ code: 'forbidden', details: { reason: 'bots_full_needed' } })
+    await expect(call('bots.browser.send', { botId: BOT, viewId: 'v1', holdId: 'hold_1', inputs: [{ seq: 1, input: { kind: 'back' } }] })).rejects.toBeInstanceOf(NetError)
+    await expect(call('bots.browser.open', { botId: BOT })).rejects.toMatchObject({ code: 'forbidden', details: { reason: 'bots_full_needed' } })
+    expect(owner.holds).toEqual([])
+    // Its state is read at Use.
+    await expect(call('bots.browser.get', { botId: BOT })).resolves.toMatchObject({ browser: { open: true } })
+
+    access.level = 'full'
+    await expect(call('bots.browser.hold', take)).resolves.toMatchObject({ hold: { id: 'hold_1' } })
+    expect(owner.holds).toEqual([`${BOT} take remote:viewer`])
+    // Down to Use: the hold ends as if its lease ran out.
+    access.level = 'use'
+    for (const listener of listeners) listener()
+    await vi.waitFor(() => expect(owner.ended).toEqual([`${BOT} remote:viewer`]))
+  })
+})

@@ -74,7 +74,11 @@ function paramsFor(botId: string): Record<Named, Record<string, unknown>> {
     'bots.model.setSlots': { botId, oneWork: true },
     'bots.model.setImage': { botId, pick: null },
     'bots.devices.get': { botId },
-    'bots.devices.set': { botId, access: { mode: 'this_computer' } }
+    'bots.devices.set': { botId, access: { mode: 'this_computer' } },
+    'bots.browser.get': { botId },
+    'bots.browser.open': { botId },
+    'bots.browser.hold': { botId, viewId: 'v1', request: { op: 'take' } },
+    'bots.browser.send': { botId, viewId: 'v1', holdId: 'hold_1', inputs: [{ seq: 1, input: { kind: 'back' } }] }
   }
 }
 const NAMED = Object.keys(REMOTE_BOT_METHODS).filter((name) => name !== 'bots.create' && name !== 'bots.model.choices') as Named[]

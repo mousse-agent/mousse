@@ -273,17 +273,19 @@ function BrowserMenu({ at, anchor, onClose, children }: { at: { x: number; y: nu
  * Who has the browser, beside the address (`BrowserAgentStatus`'s look): the agent's icon, or the person's once
  * this window holds it. Pressed, it takes the browser over, or gives it back.
  */
-function ControlToggle({ user, held, elsewhere, busy, take, giveBack }: { user: string; held: boolean; elsewhere: boolean; busy: boolean; take(): void; giveBack(): void }) {
+function ControlToggle({ user, held, elsewhere, busy, blocked, take, giveBack }: { user: string; held: boolean; elsewhere: boolean; busy: boolean; blocked?: string; take(): void; giveBack(): void }) {
   const owner = held ? 'human' : 'agent'
   const Icon = held ? User : Bot
-  const title = held ? 'You have it. Give it back' : elsewhere ? 'Held in another window. Take it over here' : `${user} has it. Take it over`
+  // Taking over is refused here (`blocked`, its reason): greyed, with the reason as its tooltip. A hold it has is still given back.
+  const refused = !held && blocked !== undefined
+  const title = held ? 'You have it. Give it back' : refused ? blocked : elsewhere ? 'Held in another window. Take it over here' : `${user} has it. Take it over`
   return <button type="button" className={`browser-toolbar-btn browser-access browser-access-${owner} watched-browser-control`} data-state={owner}
-    aria-label={held ? 'Give back' : 'Take over'} aria-pressed={held} title={title} disabled={busy} onClick={held ? giveBack : take}>
+    aria-label={held ? 'Give back' : 'Take over'} aria-pressed={held} title={title} disabled={busy || refused} onClick={held ? giveBack : take}>
     <Icon size={14} className="browser-access-icon" aria-hidden="true" />
   </button>
 }
 
-export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { percent?: number } }>({ kit, browserKey, label, user, view: given, line, lineDetail, closed, open, fullScreen, className }: {
+export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { percent?: number } }>({ kit, browserKey, label, user, view: given, line, lineDetail, closed, open, fullScreen, className, blocked }: {
   kit: WatchedBrowserKit<V>
   /** The browser's key in its store (a bot's id, a thread's id). */
   browserKey: string
@@ -303,6 +305,11 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   /** Full screen over the whole centre pane, and back (a bot's browser). */
   fullScreen?: WatchedBrowserFullScreen
   className?: string
+  /**
+   * Why this window can only watch (a bot of another computer at Use, or that computer offline): taking over, the page
+   * and the address are refused, and Take over says this as its tooltip.
+   */
+  blocked?: string
 }) {
   // The picture and cursor as they are now: whoever passed `view` may keep it still between pictures.
   const view = (kit.useStore((state) => state.views[browserKey]) as V | undefined) ?? given
@@ -366,7 +373,7 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   const said = drives ? inputLine(health, note, computer, now) : undefined
   const send = (entry: WatchedBrowserInput) => { input.send(entry) }
   // The agent has it (not another window): using the page takes it over first, as in the thread browser.
-  const takes = view.open && !windowed && !owner && !elsewhere
+  const takes = view.open && !windowed && !owner && !elsewhere && blocked === undefined
   const usable = drives || takes
   /** Takes the browser over when this window does not hold it yet; then `then`, once it does. */
   const using = async (then: () => void) => {
@@ -419,7 +426,7 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
     if (!text) return
     const target = /^https?:\/\//i.test(text) ? text : `https://${text}`
     if (usable) act({ kind: 'navigate', url: target })
-    else if (!view.open) open?.(target)
+    else if (!view.open && blocked === undefined) open?.(target)
   }
 
   // The page's edit menu: what a right click opens, as a browser's own menu would.
@@ -463,11 +470,11 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
       <button type="button" className="browser-toolbar-btn" aria-label="Reload" title="Reload" disabled={!usable || busy} onClick={() => act({ kind: 'reload' })}><RefreshCw size={16} className={view.open && view.loading ? 'spin' : undefined} /></button>
       <form className={`browser-url-form watched-browser-address${view.open && view.loading ? ' is-loading' : ''}`} onSubmit={(event) => { event.preventDefault(); go() }}
         aria-busy={view.open && view.loading ? true : undefined}>
-        <input className="browser-url-input" aria-label={`${label} address`} value={address} readOnly={view.open ? !usable : !open} placeholder="Search or enter URL"
+        <input className="browser-url-input" aria-label={`${label} address`} value={address} readOnly={view.open ? !usable : !open || blocked !== undefined} placeholder="Search or enter URL"
           onFocus={() => { editing.current = true }} onBlur={() => { editing.current = false }} onChange={(event) => setAddress(event.target.value)} spellCheck={false} />
       </form>
       {/* Give back also closes a window an older app opened it in. */}
-      {view.open && <ControlToggle user={user} held={owner} elsewhere={elsewhere} busy={busy}
+      {view.open && <ControlToggle user={user} held={owner} elsewhere={elsewhere} busy={busy} {...(blocked !== undefined ? { blocked } : {})}
         take={() => void store().takeOver(browserKey, elsewhere)} giveBack={() => void store().giveBack(browserKey)} />}
       <button ref={menuButton} type="button" className={`browser-toolbar-btn${menuAt === 'bar' ? ' active' : ''}`} aria-label="Browser menu" title="More"
         aria-haspopup="menu" aria-expanded={menuAt === 'bar'} onClick={() => setMenuAt(menuAt === 'bar' ? null : 'bar')}><MoreVertical size={16} /></button>

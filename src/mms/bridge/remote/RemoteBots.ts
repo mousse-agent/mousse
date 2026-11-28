@@ -34,6 +34,10 @@ import {
   type RemoteAppletStatePage
 } from '../../../shared/bots/personal/remoteApplets'
 import { createHash } from 'node:crypto'
+import { holdRequest, isHoldId, isWatchId, sentInputs, viewPlatform } from '../../browser/viewer/watchedParams'
+import { browserNavigationUrl } from '../../../shared/browser/validation'
+import type { BotBrowserHoldRequest, BotBrowserSent } from '../../../shared/bots/personal/browser'
+import type { RemoteBotBrowsers } from './RemoteBotBrowsers'
 
 /**
  * The personal-bot methods of the user's other devices (phones and other computers): a bot's chat and its files both
@@ -138,6 +142,15 @@ const imagePickOf = (value: unknown): boolean =>
   modelPickProblem(value, { client: true }) === undefined && (value as { effort?: unknown }).effort === undefined
 
 /** Exact keys and bounded values; anything else is `bad_request`. */
+/** A check that throws its own error: any refusal is `bad_request`. */
+function checked(check: () => void): void {
+  try {
+    check()
+  } catch {
+    throw new NetError('bad_request')
+  }
+}
+
 export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown): Record<string, unknown> {
   if (
     !value ||
@@ -272,6 +285,28 @@ export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown)
       break
     case 'bots.memory.edit':
       ok(typeof p.id === 'string' && MEMORY_REF.test(p.id) && text(p.text, MAX_MEMORY_EDIT))
+      break
+    // The bot's browser: the same checks as this computer's own window's (`registerBotBrowserMethods`).
+    case 'bots.browser.get':
+      ok(p.viewId === undefined || isWatchId(p.viewId))
+      break
+    case 'bots.browser.open':
+      ok(p.viewId === undefined || isWatchId(p.viewId))
+      checked(() => {
+        if (p.url !== undefined) p.url = browserNavigationUrl(p.url)
+        p.platform = viewPlatform(p.platform)
+        if (p.platform === undefined) delete p.platform
+      })
+      break
+    case 'bots.browser.hold':
+      ok(isWatchId(p.viewId))
+      checked(() => { p.request = holdRequest(p.request) })
+      break
+    case 'bots.browser.send':
+      ok(isWatchId(p.viewId) && isHoldId(p.holdId))
+      checked(() => { p.inputs = sentInputs(p.inputs) })
+      // Files come from this computer's own file dialog alone.
+      ok((p.inputs as Array<{ input?: { kind?: unknown } }>).every((sent) => sent.input?.kind !== 'files'))
       break
     default:
       break
@@ -553,6 +588,11 @@ export function remoteBotMethods(options: {
    * only for an applet a message of the named bot shows. Absent: those rows answer as for an applet that is not there.
    */
   applets?: RemoteBotAppletStore
+  /**
+   * The bots' browsers as another device reads, takes over and opens them (`RemoteBotBrowsers`), after this gate: Use
+   * to read, Full for the rest. Absent: those rows answer that the browser is unavailable.
+   */
+  browsers?: Pick<RemoteBotBrowsers, 'view' | 'hold' | 'send' | 'open'>
 }): RpcMethod[] {
   const limitOf = (context: RpcContext): PermissionMode => {
     try {
@@ -821,8 +861,24 @@ export function remoteBotMethods(options: {
   const streams = options.openStream
     ? [streamMethod('bridge.bots.open', options.openStream), streamMethod('bridge.bot.open', options.openStream)]
     : []
+  const browsers = (): NonNullable<typeof options.browsers> => {
+    if (!options.browsers) throw new NetError('conflict', 'The browser is unavailable on this computer.')
+    return options.browsers
+  }
   return [
     ...streams,
+    method('bots.browser.get', async (p, _port, context) => browsers().view(context.caller.node, botId(p), p.viewId as string | undefined)),
+    method('bots.browser.open', async (p, _port, context) =>
+      browsers().open(context.caller.node, botId(p), {
+        ...(p.url ? { url: p.url as string } : {}),
+        ...(p.viewId ? { viewId: p.viewId as string } : {}),
+        ...(p.platform ? { platform: p.platform as 'mac' | 'other' } : {})
+      })
+    ),
+    method('bots.browser.hold', async (p, _port, context) => browsers().hold(context.caller.node, botId(p), p.viewId as string, p.request as BotBrowserHoldRequest)),
+    method('bots.browser.send', async (p, _port, context) =>
+      browsers().send(context.caller.node, botId(p), p.viewId as string, p.holdId as string, p.inputs as BotBrowserSent[])
+    ),
     method('bots.get', async (p, port) => remoteBotDetail(port.get(botId(p)))),
     method('bots.chat.list', async (p, port) =>
       fittedPage(

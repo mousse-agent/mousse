@@ -26,6 +26,8 @@ import { MmsThreadSource } from './remote/MmsThreadSource'
 import { LISTS_STREAM_THREAD_ID, MmsListsSource, readerListsKey, readerOfListsKey } from './remote/MmsListsSource'
 import { copyLimits } from './copyLimits'
 import { createBotReach, keepMakerInReach } from './remote/botReach'
+import { RemoteBotBrowsers } from './remote/RemoteBotBrowsers'
+import { RemoteBotViews } from './routed/remoteBotViews'
 import type { BotReachPort } from '../protocol/botReachPort'
 import type { BotDeviceChoice } from '../../shared/bots/personal/deviceAccess'
 import { remoteListMethods } from './remote/RemoteLists'
@@ -78,6 +80,8 @@ export class BridgeProfileService {
   /** Notifications here for those bots, as this computer's own bots notify. */
   readonly remoteTellings: RemoteBotTellings
   readonly botRouter: BotRouter
+  /** This computer's bots' browsers as the user's other computers watch, take over and open them (`mousse.botview`). */
+  readonly botViews: RemoteBotBrowsers
   private readonly routerStop = new AbortController()
   readonly dispatch: DispatchService
   private readonly remote: RemoteApi
@@ -557,8 +561,30 @@ export class BridgeProfileService {
       stopStagingSweep()
       botStaging.close()
     })
+    // Their browsers: watched on a stream of each view's own at Use, taken over at Full; a device that loses either
+    // loses its view and its hold at once, as does every device of a bot that is gone.
+    this.botViews = new RemoteBotBrowsers({
+      browsers: () => (services.personalBots ? services.botBrowsers : undefined),
+      bot: (botId) => {
+        const port = services.personalBots?.service
+        if (!port) throw new Error('Bots are unavailable')
+        port.get(botId)
+      },
+      reach,
+      counted: (count) => {
+        if (count.frames) console.info('a bot browser view ended', { frames: count.frames, bytes: count.bytes, ms: count.ms })
+      }
+    })
+    const botViews = this.botViews
+    const reconcileViews = (): void => botViews.reconcile()
+    services.personalBots?.events.on('changed', reconcileViews)
+    this.disposers.add(() => {
+      services.personalBots?.events.off('changed', reconcileViews)
+      botViews.close()
+    })
     // The owner's personal bots, from a phone or another computer: their chats, asks and pause, and a new bot.
     for (const method of remoteBotMethods({
+      browsers: this.botViews,
       staging: botStaging,
       // Each bot's applets, kept where its thread published them; read and saved only through a message of that bot.
       applets: services.applets,
@@ -781,7 +807,22 @@ export class BridgeProfileService {
     const offBotPeers = this.peers.onChange(() => void this.remoteBots.reconcile())
     this.remoteBots.start()
     // A window's calls about those bots go to the computer each lives on, and their chats stream while shown.
+    // The live views of those bots' browsers, each on a stream of its own, while a window shows one.
+    const botViewsHere = new RemoteBotViews({
+      open: (node) => this.peers.openBotView(node),
+      online: (node) => this.router.isOnline(node),
+      computer: (node) => this.router.computer(node),
+      counted: (count) => {
+        if (count.frames) console.info('a remote bot browser view ended', { frames: count.frames, bytes: count.bytes, ms: count.ms })
+      }
+    })
+    const offViewWindows = services.domains?.onConnectionClosed((id) => botViewsHere.endWindow(id))
+    this.disposers.add(() => {
+      offViewWindows?.()
+      botViewsHere.close()
+    })
     this.botRouter = new BotRouter({
+      views: botViewsHere,
       client: this.router.client,
       registry: this.remoteBots,
       files: remoteBotFiles,

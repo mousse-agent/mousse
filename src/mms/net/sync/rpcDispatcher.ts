@@ -356,6 +356,10 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     if (!record) throw new NetError('outcome_uncertain')
     return this.terminal(record)
   }
+  /** The method an earlier request of `peer`'s named, by its id; undefined for one never admitted here. */
+  methodOf(id: RpcId, peer: RpcCaller): string | undefined {
+    return this.alias(id, peer)?.method
+  }
   async cancel(id: RpcId, peer: RpcCaller): Promise<void> {
     const alias = this.alias(id, peer)
     // A cancelled unsent request may never have been admitted. Cancel is idempotent.

@@ -85,7 +85,12 @@ describe('the bot method table', () => {
       'bots.permissions.set': 'full',
       'bots.permissions.revoke': 'full',
       'bots.memory.forget': 'full',
-      'bots.memory.edit': 'full'
+      'bots.memory.edit': 'full',
+      // A bot's browser: watched (and its state read) at Use; taken over, used and opened at Full.
+      'bots.browser.get': 'use',
+      'bots.browser.open': 'full',
+      'bots.browser.hold': 'full',
+      'bots.browser.send': 'full'
     })
   })
 

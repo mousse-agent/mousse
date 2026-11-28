@@ -45,7 +45,7 @@ describe('a window’s calls about a bot of another computer', () => {
   const sent = (from: number): string[] =>
     fabric.crossed
       .slice(from)
-      .filter((row) => row.from === viewer.endpoint && row.label === 'mousse.rpc' && row.header.t === 'call' && String(row.header.method).startsWith('bots.'))
+      .filter((row) => row.from === viewer.endpoint && row.label === 'mousse.botrpc' && row.header.t === 'call' && String(row.header.method).startsWith('bots.'))
       .map((row) => String(row.header.method))
   /** A call from this computer's command line. */
   const fromCli = (method: string, params: unknown) =>
@@ -188,7 +188,7 @@ describe('a window’s calls about a bot of another computer', () => {
       // Its result was asked for by the same request id; the call was not sent again.
       const asked = fabric.crossed
         .slice(from)
-        .filter((row) => row.from === viewer.endpoint && row.label === 'mousse.rpc')
+        .filter((row) => row.from === viewer.endpoint && row.label === 'mousse.botrpc')
         .map((row) => (row.header.t === 'call' ? `call ${String(row.header.method)}` : String(row.header.t)))
         .filter((line) => line === 'result.get' || line === 'call bots.chat.send')
       expect(asked[0]).toBe('result.get')
@@ -235,7 +235,7 @@ describe('a window’s calls about a bot of another computer', () => {
     options.readWaitMs = 500
     // The call never reaches the owner, and the link stays up: the viewer hears nothing back, as from a slow owner.
     fabric.decide = (row) =>
-      row.from === viewer.endpoint && row.label === 'mousse.rpc' && row.header.t === 'call' && row.header.method === 'bots.chat.list' ? 'drop' : undefined
+      row.from === viewer.endpoint && row.label === 'mousse.botrpc' && row.header.t === 'call' && row.header.method === 'bots.chat.list' ? 'drop' : undefined
     try {
       expect(registry().row(ownerOnViewer, keeper)?.offline).toBeUndefined()
       const started = Date.now()

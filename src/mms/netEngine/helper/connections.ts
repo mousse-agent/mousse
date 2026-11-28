@@ -6,6 +6,7 @@ import { engineLimits } from '../limits'
 import {
   ENGINE_LABELS,
   GRANT_ROLE,
+  isBotLabel,
   type EngineConnection,
   type EngineRoute,
   type EngineLabel,
@@ -14,9 +15,12 @@ import {
 import type { AppChannel, HandleSink, StreamClass } from './appChannel'
 import { ENGINE_FEATURES, type EngineFeature } from '../../../shared/netEngine/local'
 
-/** The class a stream travels in (§3.2): bulk for blobs, staged writes and the large reads, else interactive. */
+/**
+ * The class a stream travels in (§3.2): bulk for blobs, staged writes, the large reads and a bot's browser pictures
+ * (which the helper counts as bulk whatever it is told), else interactive.
+ */
 export function classOf(label: EngineLabel, method?: string): StreamClass {
-  if (label === 'mousse.blob' || label === 'mousse.put') return 'bulk'
+  if (label === 'mousse.blob' || label === 'mousse.put' || label === 'mousse.botview') return 'bulk'
   if (label === 'mousse.rpc' && method && LARGE.has(method)) return 'bulk'
   return 'interactive'
 }
@@ -195,39 +199,57 @@ class HelperStream implements EngineStream {
   }
 }
 
+/** The places of one pool of a connection: the thread labels', or the bot labels' (`isBotLabel`). */
+class SlotPool {
+  live = 0
+  readonly started = new Set<HelperStream>()
+  readonly waiting: Array<{ stream: HelperStream; start: () => void }> = []
+  constructor(private readonly cap: () => number) {}
+  hasRoom(): boolean {
+    return this.live < this.cap()
+  }
+}
+
 /**
  * Shared stream-slot accounting for one physical helper connection (`STREAMS_PER_CONNECTION` counts both directions
- * together, so a both-ways connection and its reverse view share one slot pool).
+ * together, so a both-ways connection and its reverse view share one slot pool). The bot labels have places of their
+ * own (`botStreamsPerConnection`), as the helper keeps them: a bot open never waits behind thread opens, and a thread
+ * stream never takes a bot place.
  */
 class ConnectionSlots {
-  private live = 0
-  private readonly started = new Set<HelperStream>()
-  private readonly waiting: Array<{ stream: HelperStream; start: () => void }> = []
+  private readonly app = new SlotPool(() => engineLimits().appStreamsPerConnection)
+  private readonly bot = new SlotPool(() => engineLimits().botStreamsPerConnection)
+  private pool(label: EngineLabel): SlotPool {
+    return isBotLabel(label) ? this.bot : this.app
+  }
 
-  hasRoom(): boolean {
-    return this.live < engineLimits().appStreamsPerConnection
+  hasRoom(label: EngineLabel): boolean {
+    return this.pool(label).hasRoom()
   }
   admit(stream: HelperStream): void {
-    this.started.add(stream)
-    this.live += 1
+    const pool = this.pool(stream.label)
+    pool.started.add(stream)
+    pool.live += 1
   }
   enqueue(stream: HelperStream, start: () => void): void {
-    this.waiting.push({ stream, start })
+    this.pool(stream.label).waiting.push({ stream, start })
   }
   release(stream: HelperStream): void {
-    if (!this.started.delete(stream)) {
-      const at = this.waiting.findIndex((entry) => entry.stream === stream)
-      if (at >= 0) this.waiting.splice(at, 1)
+    const pool = this.pool(stream.label)
+    if (!pool.started.delete(stream)) {
+      const at = pool.waiting.findIndex((entry) => entry.stream === stream)
+      if (at >= 0) pool.waiting.splice(at, 1)
       return
     }
-    this.live = Math.max(0, this.live - 1)
-    const next = this.waiting.shift()
+    pool.live = Math.max(0, pool.live - 1)
+    const next = pool.waiting.shift()
     next?.start()
   }
   clearWaitingFor(streams: Set<HelperStream>): void {
-    for (let i = this.waiting.length - 1; i >= 0; i -= 1) {
-      if (streams.has(this.waiting[i]!.stream)) this.waiting.splice(i, 1)
-    }
+    for (const pool of [this.app, this.bot])
+      for (let i = pool.waiting.length - 1; i >= 0; i -= 1) {
+        if (streams.has(pool.waiting[i]!.stream)) pool.waiting.splice(i, 1)
+      }
   }
 }
 
@@ -280,14 +302,14 @@ export class HelperConnection implements EngineConnection {
         })
         .catch((error) => stream.failed(error instanceof NetError ? error.code : 'peer_offline'))
     }
-    if (this.slots.hasRoom()) start()
+    if (this.slots.hasRoom(label)) start()
     else this.slots.enqueue(stream, start)
     return stream
   }
 
   /** A stream the other side opened (`stream.incoming`), accepted, with the role of the grant it is served under. */
   incoming(handle: number, label: EngineLabel, cls: StreamClass, role?: string): void {
-    if (!this.open_ || !this.slots.hasRoom()) {
+    if (!this.open_ || !this.slots.hasRoom(label)) {
       this.channel.reset(handle, 'refused')
       return
     }

@@ -14,6 +14,7 @@ import { FileTree } from '../FileTree'
 import { PanelPicker, PanelPickerRow } from '../OpenSurfaceMenu'
 import { BotAboutPanel } from './BotAboutPanel'
 import { BotBrowserPane } from './BotBrowser'
+import { botSetupBlock } from './botSetup'
 import { ThreadBrowserPane } from '../browser/ThreadBrowserView'
 import { BotFilePane, fileActions, useBotFiles } from './BotFiles'
 import type { WatchedBrowserFullScreen } from '../browser/WatchedBrowserPane'
@@ -272,6 +273,8 @@ function BrowserView({ bot, view, fullScreen, tabs, shown, threadView, onChoose 
   onChoose(threadId: string | null): void
 }) {
   const busy = useBotBrowserStore((state) => state.busy)
+  // A bot of another computer opens its browser from here only with Full bot access there, while it is reached.
+  const blocked = botSetupBlock(bot)
   const thread = shown === null ? undefined : tabs.find((tab) => tab.threadId === shown)
   let pane: ReactNode
   if (thread && threadView) pane = <ThreadBrowserPane threadId={thread.threadId} view={threadView} label={`${thread.title}: the agent's browser`} fullScreen={fullScreen} />
@@ -279,10 +282,11 @@ function BrowserView({ bot, view, fullScreen, tabs, shown, threadView, onChoose 
   else pane = <div className="bot-side-empty">
     <Globe size={20} strokeWidth={1.6} aria-hidden />
     <p>{bot.name} hasn’t used its browser yet.</p>
-    <button type="button" className="settings-btn" disabled={busy} onClick={() => void useBotBrowserStore.getState().open(bot.id, undefined)}>Open it</button>
+    <button type="button" className="settings-btn" disabled={busy || Boolean(blocked)} title={blocked} onClick={() => void useBotBrowserStore.getState().open(bot.id, undefined)}>Open it</button>
   </div>
   return <>
-    {(bot.threads ?? []).map((item) => <ThreadBrowserProbe key={item.threadId} threadId={item.threadId} />)}
+    {/* The browsers of the threads it started are this computer's alone to show. */}
+    {!bot.lives && (bot.threads ?? []).map((item) => <ThreadBrowserProbe key={item.threadId} threadId={item.threadId} />)}
     {tabs.length > 0 && !fullScreen.on && <BrowserTabs bot={bot} tabs={tabs} shown={shown} onChoose={onChoose} />}
     {pane}
   </>
@@ -299,7 +303,7 @@ export function BotSidePanel({ bot, state, browser, folder, file, onFile, views 
   folder: string | null
   file: string | null
   onFile(path: string | null): void
-  /** The views the picker offers; all of them when absent (a bot of another computer has Agent settings alone). */
+  /** The views the picker offers; all of them when absent (a bot of another computer: its browser, and Agent settings at Full). */
   views?: readonly BotSideView[]
 }) {
   const { open, view } = state
@@ -380,7 +384,9 @@ export function BotSidePanel({ bot, state, browser, folder, file, onFile, views 
 
   if (!mounted) return null
   let body: ReactNode
-  if (view === 'settings') body = <BotAboutPanel bot={bot} inPanel />
+  // A view no longer offered (a bot of another computer down to Use) shows nothing until another is picked.
+  if (view !== null && views && !views.includes(view)) body = null
+  else if (view === 'settings') body = <BotAboutPanel bot={bot} inPanel />
   // The browser is watched only while the panel is open: sliding out, it asks for no more pictures.
   else if (view === 'browser') body = open ? <BrowserView bot={bot} view={browser} fullScreen={{ on: fullScreen, toggle: () => setFull(!fullScreen) }}
     tabs={tabs} shown={shownThread} threadView={threadView} onChoose={setChosen} /> : null

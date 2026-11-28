@@ -1114,3 +1114,48 @@ describe('the chat while pictures arrive', () => {
     act(() => pictures.unmount())
   })
 })
+
+describe('the browser of a bot on another computer', () => {
+  const STUDIO = { node: 'n_studio', name: 'Studio' }
+  const showRemote = async (lives: { node: string; name: string; level?: 'full'; offline?: true }) => {
+    const helper = summary('n_studio:b_art', { name: 'Art helper', lives })
+    fake.bots = [helper]
+    fake.chats[helper.id] = [message(1, { text: 'Here it is.', activationId: 'act1' })]
+    await act(async () => useChatsStore.getState().activate('p1'))
+    await act(async () => root.render(createElement(ChatWorkspace)))
+    await act(async () => useChatsStore.getState().openBot(helper.id))
+    await act(async () => {})
+    await click(button('Expand Art helper\'s browser'))
+    return helper
+  }
+
+  it('is watched at Use, with Take over and the page greyed and the reason as the tooltip', async () => {
+    const helper = await showRemote({ ...STUDIO })
+    // Watched under the bot's id here, which names its computer.
+    expect(watches().at(-1)).toMatchObject({ botId: helper.id })
+    const take = button('Take over')!
+    expect(take.disabled).toBe(true)
+    expect(take.title).toBe('Needs Full bot access on Studio')
+    // A press on the picture takes nothing over either.
+    const picture = host.querySelector<HTMLElement>('.watched-browser-pane .watched-browser-frame')!
+    expect(picture.classList.contains('is-takeable')).toBe(false)
+    await act(async () => { picture.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 })) })
+    expect(calls.filter(([method]) => method === 'bots.browser.hold')).toEqual([])
+    expect(host.querySelector<HTMLInputElement>('.watched-browser-pane .browser-url-input')!.readOnly).toBe(true)
+  })
+
+  it('is taken over at Full, and greyed with "<computer> is offline" while that computer is away', async () => {
+    await showRemote({ ...STUDIO, level: 'full' })
+    expect(button('Take over')!.disabled).toBe(false)
+    await click(button('Take over'))
+    expect(calls.some(([method, params]) => method === 'bots.browser.hold' && params.botId === 'n_studio:b_art')).toBe(true)
+    act(() => root.unmount())
+    root = createRoot(host)
+    useBotBrowserStore.setState(browserInitial)
+    browser = { ...browser, control: 'bot', holder: 'bot' }
+    delete browser.hold
+    await showRemote({ ...STUDIO, level: 'full', offline: true })
+    expect(button('Take over')!.title).toBe('Studio is offline')
+    expect(button('Take over')!.disabled).toBe(true)
+  })
+})

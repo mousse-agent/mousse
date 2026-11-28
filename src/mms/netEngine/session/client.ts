@@ -16,6 +16,7 @@ import type {
 } from '../../net/contracts'
 import { SubscriptionReceiver } from '../../net/sync/subscription'
 import { engineLimits } from '../limits'
+import { isBotNetMethod } from '../../../shared/bots/personal/methodTable'
 import type { EngineMessage } from './frame'
 import {
   Channel,
@@ -51,6 +52,10 @@ export interface EngineClientPort {
   /** The session features said in `hello` (`SESSION_FEATURES` without it). */
   features?(): readonly string[]
 }
+
+/** The label a call rides on: a bot's on the bot label (its own places and credit), every other on the thread one. */
+const rpcLabel = (method: string | undefined): EngineLabel =>
+  method !== undefined && isBotNetMethod(method) ? 'mousse.botrpc' : 'mousse.rpc'
 
 const recordsOf = (message: EngineMessage): StoredRecord[] => {
   const rows = message.header.records
@@ -185,7 +190,7 @@ export class EngineClient implements BridgeClient {
     }
   ): Promise<unknown> {
     return this.exchange(
-      'mousse.rpc',
+      rpcLabel(method),
       {
         t: 'call',
         id: options.id,
@@ -199,18 +204,19 @@ export class EngineClient implements BridgeClient {
     ).then((reply) => reply.header.result)
   }
 
-  rpcResult(id: RpcId, options: { deadlineMs: number; signal?: AbortSignal }): Promise<unknown> {
+  /** `method`: the call's, so a bot call's result is asked for on the bot label, where it was made. */
+  rpcResult(id: RpcId, options: { deadlineMs: number; signal?: AbortSignal; method?: string }): Promise<unknown> {
     return this.exchange(
-      'mousse.rpc',
+      rpcLabel(options.method),
       { t: 'result.get', id, deadline: options.deadlineMs },
       [],
       options
     ).then((reply) => reply.header.result)
   }
 
-  async rpcCancel(id: RpcId): Promise<void> {
+  async rpcCancel(id: RpcId, method?: string): Promise<void> {
     const deadlineMs = engineLimits().cancelDeadlineMs
-    await this.exchange('mousse.rpc', { t: 'cancel', id, deadline: deadlineMs }, [], { deadlineMs })
+    await this.exchange(rpcLabel(method), { t: 'cancel', id, deadline: deadlineMs }, [], { deadlineMs })
   }
 
   async getBlob(
@@ -476,12 +482,14 @@ class LiveSubscription {
   private snapshotHead?: StreamHead
   private readonly offClosed: () => void
   private readonly receiver: SubscriptionReceiver
+  private readonly lane?: 'bot'
   constructor(
     private readonly client: EngineClient,
     readonly stream: StreamId,
     handlers: SubscriptionHandlers,
     private readonly gone: () => void
   ) {
+    if (handlers.lane === 'bot') this.lane = 'bot'
     const { port } = client
     this.offClosed = client.onClosed(() => this.fail('peer_offline'))
     this.receiver = new SubscriptionReceiver(
@@ -493,8 +501,13 @@ class LiveSubscription {
     )
   }
 
+  /** A bot stream (the bots feed, a bot's chat) rides on the bot label; every other on the thread one. */
+  private get label(): EngineLabel {
+    return this.lane === 'bot' ? 'mousse.botsub' : 'mousse.sub'
+  }
+
   start(): void {
-    const channel = new Channel(this.client.connection.open('mousse.sub'))
+    const channel = new Channel(this.client.connection.open(this.label))
     this.channel = channel
     channel.onEnd((reason) => this.ended(channel, reason))
     channel.onMessage((message) => {
@@ -510,7 +523,7 @@ class LiveSubscription {
   prepare(next: EngineConnection, deadlineMs: number): Promise<Prepared | undefined> {
     if (this.stopped) return Promise.resolve(undefined)
     return new Promise<Prepared | undefined>((resolve, reject) => {
-      const channel = new Channel(next.open('mousse.sub'))
+      const channel = new Channel(next.open(this.label))
       const early: EngineMessage[] = []
       let phase: 'waiting' | 'ready' | 'moved' | 'dropped' = 'waiting'
       let endedWith: { reason?: string } | undefined

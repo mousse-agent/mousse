@@ -189,7 +189,7 @@ describe('bot method params', () => {
     const methods = remoteBotMethods({ bots: () => undefined })
     expect(methods.map((entry) => entry.method).sort()).toEqual(Object.keys(REMOTE_BOT_METHODS).sort())
     // A read's result (the chat, the model rows, the devices) is never kept in the request ledger.
-    expect(methods.filter((entry) => entry.ephemeral).map((entry) => entry.method).sort()).toEqual(['bots.applets.get', 'bots.applets.state.get', 'bots.chat.attachment', 'bots.chat.file', 'bots.chat.list', 'bots.devices.get', 'bots.get', 'bots.memory.list', 'bots.model.choices', 'bots.model.get'])
+    expect(methods.filter((entry) => entry.ephemeral).map((entry) => entry.method).sort()).toEqual(['bots.applets.get', 'bots.applets.state.get', 'bots.browser.get', 'bots.browser.hold', 'bots.browser.open', 'bots.browser.send', 'bots.chat.attachment', 'bots.chat.file', 'bots.chat.list', 'bots.devices.get', 'bots.get', 'bots.memory.list', 'bots.model.choices', 'bots.model.get'])
     expect(REMOTE_BOT_METHODS).toMatchObject({
       'bots.chat.attachment': { capability: 'read', mutating: false },
       'bots.chat.file': { capability: 'read', mutating: false },
@@ -215,6 +215,13 @@ describe('bot method params', () => {
       'bots.model.setImage': { capability: 'write', mutating: true },
       'bots.devices.get': { capability: 'read', mutating: false },
       'bots.devices.set': { capability: 'write', mutating: true }
+    })
+    // A bot's browser: its state read at Use; taking over, input and opening at Full, none of them kept.
+    expect(REMOTE_BOT_METHODS).toMatchObject({
+      'bots.browser.get': { capability: 'read', mutating: false },
+      'bots.browser.open': { capability: 'write', mutating: false },
+      'bots.browser.hold': { capability: 'write', mutating: false },
+      'bots.browser.send': { capability: 'write', mutating: false }
     })
     // What stays on the bot's own computer: the old single model, memory export, a new schedule, and its own list.
     for (const name of ['bots.model.set', 'bots.memory.export', 'bots.schedules.add', 'bots.personal.list'])
@@ -571,11 +578,15 @@ describe('the bot level of the calling device', () => {
       'bots.model.setSlots': { botId: BOT, oneWork: true },
       'bots.model.setImage': { botId: BOT, pick: null },
       'bots.devices.get': { botId: BOT },
-      'bots.devices.set': { botId: BOT, access: { mode: 'this_computer' } }
+    'bots.devices.set': { botId: BOT, access: { mode: 'this_computer' } },
+    'bots.browser.get': { botId: BOT },
+    'bots.browser.open': { botId: BOT },
+    'bots.browser.hold': { botId: BOT, viewId: 'v1', request: { op: 'take' } },
+    'bots.browser.send': { botId: BOT, viewId: 'v1', holdId: 'hold_1', inputs: [{ seq: 1, input: { kind: 'back' } }] }
   }
   const names = Object.keys(REMOTE_BOT_METHODS) as RemoteBotMethod[]
   /** The rows another device may call at Use; every other remote row needs Full. */
-  const USE_ROWS = ['bots.get', 'bots.chat.list', 'bots.chat.attachment', 'bots.chat.file', 'bots.stage', 'bots.applets.get', 'bots.applets.state.get', 'bots.applets.state.save', 'bots.memory.list', 'bots.chat.send', 'bots.chat.stop', 'bots.work.stop', 'bots.chat.markRead', 'bots.questions.answer', 'bots.reminders.snooze', 'bots.actions.answer']
+  const USE_ROWS = ['bots.get', 'bots.chat.list', 'bots.chat.attachment', 'bots.chat.file', 'bots.stage', 'bots.applets.get', 'bots.applets.state.get', 'bots.applets.state.save', 'bots.memory.list', 'bots.chat.send', 'bots.chat.stop', 'bots.work.stop', 'bots.chat.markRead', 'bots.questions.answer', 'bots.reminders.snooze', 'bots.actions.answer', 'bots.browser.get']
   /** Methods over a port that counts every read, for a device at `level`. */
   const counted = (level: BotLevel) => {
     const seen = { reads: 0 }

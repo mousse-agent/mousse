@@ -10,6 +10,7 @@ import type {
 import type { AppendOutcome, BlobStore, EngineCaller, StreamStore } from '../../net/contracts'
 import type { DurableRpcDispatcher } from '../../net/sync/rpcDispatcher'
 import { engineControl, engineLimits } from '../limits'
+import { isBotNetMethod } from '../../../shared/bots/personal/methodTable'
 import type { EngineMessage } from './frame'
 import {
   Channel,
@@ -49,6 +50,15 @@ export interface EngineHostPort {
   pairback?(caller: EngineCaller, request: { routes: string[]; receipt?: string }): Promise<void>
   /** A `mousse.tunnel` stream from a caller this connection serves: one editor tunnel (Phase 1b §9.2). */
   tunnel?(connection: EngineConnection, stream: EngineStream): void
+  /**
+   * Whether `stream` is a bot stream (the bots feed, a bot's chat): those are served on `mousse.botsub` alone, and every
+   * other on `mousse.sub` alone. Absent: no stream is a bot's.
+   */
+  botStream?(stream: StreamId): boolean
+  /** The method of an earlier call of `caller`'s, by its id, so its result is asked for on the label it rode on. */
+  callMethod?(id: RpcId, caller: EngineCaller): string | undefined
+  /** A `mousse.botview` stream from a caller this connection serves: one live view of a bot's browser. */
+  botview?(connection: EngineConnection, stream: EngineStream): void
   /** The caller said its name in `hello` (`<computer> (<profile>)`, or empty) and its app's session features. */
   calledBy?(caller: EngineCaller, name: string, features: string[]): void
   /** The session features said in the hello reply (`SESSION_FEATURES` without it). */
@@ -107,8 +117,9 @@ export class EngineHost {
   }
 
   private accept(stream: EngineStream): void {
-    if (stream.label === 'mousse.tunnel') {
-      // The tunnels read their own stream; the caller is checked here first, and the editor refusal for each open.
+    if (stream.label === 'mousse.tunnel' || stream.label === 'mousse.botview') {
+      // The tunnels and the browser views read their own stream; the caller is checked here first, and each one's own
+      // refusal as it opens (the editor's; the bot level and the bot's Devices).
       try {
         if (this.closed) throw new NetError('peer_offline')
         this.port.caller(this.connection)
@@ -116,7 +127,8 @@ export class EngineHost {
         stream.reset('forbidden')
         return
       }
-      if (this.port.tunnel) this.port.tunnel(this.connection, stream)
+      const serve = stream.label === 'mousse.tunnel' ? this.port.tunnel : this.port.botview
+      if (serve) serve(this.connection, stream)
       else stream.reset('not_supported')
       return
     }
@@ -140,9 +152,12 @@ export class EngineHost {
         if (this.closed) throw new NetError('peer_offline')
         // Read for every message: a pairing removed or a grant replaced serves nothing more.
         const caller = this.port.caller(this.connection)
-        if (stream.label === 'mousse.sub') {
+        if (stream.label === 'mousse.sub' || stream.label === 'mousse.botsub') {
           if (first) {
             if (message.header.t !== 'subscribe') throw new NetError('bad_request')
+            // A bot stream only on the bot label, and every other stream only on the thread one.
+            const bot = this.port.botStream?.(message.header.stream as StreamId) === true
+            if (bot !== (stream.label === 'mousse.botsub')) throw new NetError('forbidden')
             const created = new HostSubscription(
               message.header.stream as StreamId,
               channel,
@@ -216,9 +231,12 @@ export class EngineHost {
         } else throw new NetError('bad_request')
         return
       case 'mousse.rpc':
+      case 'mousse.botrpc':
         if (!first) throw new NetError('bad_request')
-        return this.rpc(channel, h, caller)
+        return this.rpc(channel, h, caller, label === 'mousse.botrpc')
       case 'mousse.sub':
+      case 'mousse.botsub':
+      case 'mousse.botview':
         return
       case 'mousse.blob':
         if (!first || h.t !== 'get') throw new NetError('bad_request')
@@ -230,11 +248,17 @@ export class EngineHost {
     }
   }
 
-  private async rpc(channel: Channel, h: EngineMessage['header'], caller: EngineCaller): Promise<void> {
+  /** `bot`: the call came on the bot label, which carries bot calls alone; the thread label carries no bot call. */
+  private async rpc(channel: Channel, h: EngineMessage['header'], caller: EngineCaller, bot: boolean): Promise<void> {
     const deadlineMs = Number(h.deadline)
     if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0 || deadlineMs > engineLimits().maxCallDeadlineMs)
       throw new NetError('bad_request')
     const id = h.id as RpcId
+    if (h.t === 'cancel' || h.t === 'result.get') {
+      const method = this.port.callMethod?.(id, caller)
+      if (method !== undefined && isBotNetMethod(method) !== bot) throw new NetError('forbidden')
+    } else if (h.t === 'call' && typeof h.method === 'string' && isBotNetMethod(h.method) !== bot)
+      throw new NetError('forbidden')
     if (h.t === 'cancel') {
       await this.port.rpc.cancel(id, caller)
       channel.send({ t: 'result', result: null })

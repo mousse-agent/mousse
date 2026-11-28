@@ -581,6 +581,14 @@ export class WatchedBrowser {
     return { browser: await this.viewAfterChange(viewId, connectionId) }
   }
 
+  /** Ends the hold `connectionId` has, if any, as if its lease ran out (`expired`): its caller may no longer have it. */
+  endHoldOf(connectionId: string): Promise<void> {
+    return this.inTurn(async () => {
+      const hold = this.hold
+      if (hold && hold.connectionId === connectionId) await this.endHold(hold, 'expired')
+    })
+  }
+
   /**
    * Whether a call is the hold's: its view, its id, and its connection. A call on another connection
    * with the right view and id is the window back on a new connection (its old one dropped): the hold

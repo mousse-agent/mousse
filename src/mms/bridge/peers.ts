@@ -5,6 +5,7 @@ import type { SelfUpdateReport } from '../../shared/updates'
 import type { NetService } from '../net/NetService'
 import { engineControl } from '../netEngine/limits'
 import type { BridgeClient } from '../netEngine/session/client'
+import type { EngineStream } from '../netEngine/session/transport'
 import { accountDevices } from './remote/botReach'
 import type { ComputerRef } from './routed/computerErrors'
 import { deviceNameOf } from './routed/deviceName'
@@ -60,6 +61,8 @@ export interface EngineDirectoryPort {
   cutOff?(node: NodeId): 'there' | 'here' | undefined
   name(node: NodeId): string | undefined
   client(node: NodeId): BridgeClient
+  /** Opens one live view of a bot's browser there (`mousse.botview`); throws `peer_offline` when not connected. */
+  openBotView?(node: NodeId): EngineStream
   online(node: NodeId): boolean
   bind(stream: StreamId, node: NodeId): void
   verifyStream(stream: StreamId): void
@@ -221,6 +224,17 @@ export class PeerDirectory {
   cutOff(node: NodeId): 'there' | 'here' | undefined {
     const engine = this.options.engine()
     return engine?.isEngine(node) ? engine.cutOff?.(node) : undefined
+  }
+
+  /**
+   * One live view of a bot's browser on `node` (`mousse.botview`): an engine pairing's alone; `peer_offline` when it is
+   * not connected, `incompatible_peer` for a pairing of the older transport, which has no such stream.
+   */
+  openBotView(node: NodeId): EngineStream {
+    const engine = this.options.engine()
+    if (!engine?.isEngine(node) || !engine.openBotView) throw new NetError('incompatible_peer')
+    if (!engine.on()) throw new NetError('peer_offline')
+    return engine.openBotView(node)
   }
 
   /** A client for calls to `node`; `peer_offline` when none is open. */

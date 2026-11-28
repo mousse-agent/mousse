@@ -22,6 +22,8 @@ import { computerOffline, notAvailableRemotely, type ComputerRef } from './compu
 import type { RemoteBotRegistry, RemoteBotRow } from './RemoteBotRegistry'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import type { RoutedClient } from './RoutedClient'
+import type { RemoteBotViews } from './remoteBotViews'
+import { isCount, isWatchId } from '../../browser/viewer/watchedParams'
 
 /** How long a read that has a copy here waits for the bot's computer before it answers from the copy, marked stale. */
 const READ_WAIT_MS = 4_000
@@ -93,6 +95,11 @@ export interface BotRouterOptions {
   onConnectionClosed?(listener: (id: string) => void): () => void
   /** Tests make the wait for a read shorter. */
   readWaitMs?: number
+  /**
+   * The live views of those bots' browsers (`bots.browser.watch` and `unwatch`), each on a stream of its own to the bot's
+   * computer. Absent: they are not offered for a bot of another computer.
+   */
+  views?: Pick<RemoteBotViews, 'watch' | 'unwatch'>
 }
 
 /**
@@ -187,6 +194,7 @@ export class BotRouter implements BotRouterPort {
     if (node === this.selfNode())
       throw new DomainRpcError('invalid_params', 'That bot is on this computer. Use its own id.')
     // Kept to the bot's own computer (a `local` row has no `remote`), or not offered to other devices yet: never asked.
+    if ((method === 'bots.browser.watch' || method === 'bots.browser.unwatch') && ref) return { result: await this.view(ctx, node, ref.id, method, params) }
     if (!row.remote) throw notAvailableRemotely(computer, method)
     // A message's files go ahead of it (`bots.stage`); the message names what they became there.
     const sending = method === 'bots.chat.send'
@@ -217,6 +225,31 @@ export class BotRouter implements BotRouterPort {
       throw error
     }
     return { result: qualifyBotResult(node, raw) }
+  }
+
+  /**
+   * A window's watch of the browser of a bot there, or its end: pictures come on a stream of the view's own
+   * (`RemoteBotViews`), never in a call. It never lays the bot's page out at the window's size (`page` is left out).
+   */
+  private async view(ctx: HandlerContext, node: NodeId, botId: string, method: 'bots.browser.watch' | 'bots.browser.unwatch', params: Record<string, unknown>): Promise<unknown> {
+    const views = this.options.views
+    const connection = ctx.connection
+    if (!views || !connection?.emitConnectionEvent) throw notAvailableRemotely(this.computer(node), method)
+    if (!isWatchId(params.watchId)) throw new DomainRpcError('invalid_params', 'A watch id is required')
+    if (method === 'bots.browser.unwatch') {
+      views.unwatch(connection.id, node, botId, params.watchId)
+      return { ok: true }
+    }
+    if (!isCount(params.width, 1, 10_000)) throw new DomainRpcError('invalid_params', 'width must be a number of pixels')
+    if (!isCount(params.fps, 1, 60)) throw new DomainRpcError('invalid_params', 'fps must be a number of pictures a second')
+    if (params.viewId !== undefined && !isWatchId(params.viewId)) throw new DomainRpcError('invalid_params', 'viewId must be an id')
+    const emit = connection.emitConnectionEvent
+    return views.watch(
+      { id: connection.id, emit: (type, data) => emit(type as never, data as never), ...(connection.lifetime ? { lifetime: connection.lifetime } : {}) },
+      node,
+      botId,
+      { watchId: params.watchId, width: params.width, fps: params.fps, ...(params.viewId ? { viewId: params.viewId as string } : {}) }
+    )
   }
 
   /** What the bot's computer is asked: its own bot id, and only the keys its row takes from another device. */

@@ -5,6 +5,7 @@ import { BOT_BROWSER_PREVIEW_WATCH, type BotBrowserView } from '../../../shared/
 import { botBrowserKit, useBotBrowserStore, useBotBrowserStream, useBotBrowserWatch, type BotBrowserStream } from '../../stores/botBrowserStore'
 import { WatchedBrowserFrame } from '../browser/WatchedBrowserFrame'
 import { WatchedBrowserPane, sinceText, useNow, watchedBrowserStatus, type WatchedBrowserFullScreen, type WatchedBrowserStatus } from '../browser/WatchedBrowserPane'
+import { botSetupBlock } from './botSetup'
 import './botBrowser.css'
 
 export { filesAskText } from '../browser/WatchedBrowserPane'
@@ -73,12 +74,15 @@ export function BotBrowserPreview({ bot, view: given }: { bot: BotSummary; view:
 export function BotBrowserPane({ bot, view, fullScreen }: { bot: BotSummary; view: BotBrowserView; fullScreen?: WatchedBrowserFullScreen }) {
   const busy = useBotBrowserStore((state) => state.busy)
   const open = (url: string | undefined) => void useBotBrowserStore.getState().open(bot.id, url)
+  // A bot of another computer is watched at Use; taking it over and opening it need Full there, while it is reached.
+  const blocked = botSetupBlock(bot)
   // One view per browser: another bot's never inherits this one's pending input or menu.
   return <WatchedBrowserPane key={bot.id} kit={botBrowserKit} browserKey={bot.id} label={`${bot.name}'s browser`} user={bot.name} view={view} open={open}
     {...(fullScreen ? { fullScreen } : {})}
+    {...(blocked ? { blocked } : {})}
     closed={(typed) => <>
       <p>{view.stopped ? 'The browser stopped.' : `${bot.name}'s browser is closed.`}</p>
-      <button type="button" disabled={busy} onClick={() => open(/^https?:\/\//i.test(typed) ? typed : undefined)}>Open it</button>
+      <button type="button" disabled={busy || Boolean(blocked)} title={blocked} onClick={() => open(/^https?:\/\//i.test(typed) ? typed : undefined)}>Open it</button>
     </>}
     line={(holding) => holding === 'window' ? `${bot.name} waits until you give it back.`
       : holding === 'this-window' ? ''
