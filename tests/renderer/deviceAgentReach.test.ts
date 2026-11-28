@@ -50,7 +50,7 @@ const activity = (): DeviceActivity => ({
 const request = vi.fn(async (method: string, params?: Record<string, unknown>) => {
   switch (method) {
     case 'netEngine.status': return { enabled: false, on: false, helper: { state: 'off' }, devices: [], approvals: [] }
-    case 'net.status': return { enabled: true, keystore: 'unlocked', protected: true, self: { node: 'nod_self', isAuthority: true }, transports: [], peers: [], routes: [], workOnThreads: true, shareBots: true }
+    case 'net.status': return { enabled: true, keystore: 'unlocked', protected: true, self: { node: 'nod_self', isAuthority: true }, transports: [], peers: [], routes: [], workOnThreads: true }
     case 'net.transport.list': return { manifests: [], records: {}, settings: {} }
     case 'net.ssh.list': return { records: [] }
     case 'bridge.nodes': return {
@@ -74,7 +74,7 @@ beforeEach(() => {
   document.body.append(host)
   root = createRoot(host)
   request.mockClear()
-  policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: true, agentReach: 'launched' }
+  policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: 'use', agentReach: 'launched' }
   ;(window as unknown as { mousse: unknown }).mousse = {
     platformRequest: { request },
     app: { getInfo: async () => ({ deviceName: 'Desk' }) },
@@ -86,12 +86,9 @@ afterEach(() => {
   host.remove()
 })
 
-/** Opens a device's Access from its Can use this computer row's menu (Hide access closes it). */
+/** Chooses a device in the list; its detail, with its Access, shows beside the list. */
 const openAccess = async (name: string) => {
-  const actions = document.querySelector<HTMLElement>(`[data-device-side="in"] [aria-label="Actions for ${name}"]`)!
-  await act(async () => actions.click())
-  const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((entry) => /^(Hide access|Access)$/.test(entry.textContent?.trim() ?? ''))!
-  await act(async () => item.click())
+  await act(async () => document.querySelector<HTMLElement>(`[data-device-node] button[aria-label="${name}"]`)!.click())
   for (let i = 0; i < 5; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
 }
 

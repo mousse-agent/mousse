@@ -103,7 +103,8 @@ export interface ComposerPermissionProps {
 export interface ComposerFooterProps {
   /** The model picker and context ring; without it the footer has neither (a bot's composer). */
   run?: ComposerRunProps
-  onAttachClick: () => void
+  /** Without it there is no Attach button: the chat takes words only. */
+  onAttachClick?: () => void
   loading?: boolean
   /** A run Stop can end, including one waiting on an approval or an answer; defaults to `loading`. */
   stoppable?: boolean
@@ -512,7 +513,7 @@ export function ComposerFooter({
 
         {extraActions}
 
-        <button
+        {onAttachClick && <button
           type="button"
           className="composer-icon-btn"
           title="Attach files"
@@ -521,7 +522,7 @@ export function ComposerFooter({
           disabled={disabled || (loading && !allowAttachWhileLoading)}
         >
           <Paperclip size={16} strokeWidth={2} />
-        </button>
+        </button>}
 
         {/* Offered while a run goes too, so a message to steer or queue can be dictated. */}
         {onStartRecording ? (

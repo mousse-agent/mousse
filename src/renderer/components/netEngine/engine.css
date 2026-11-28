@@ -6,27 +6,116 @@
   gap: var(--space-8);
 }
 
-/* The row whose Access is open: a background mark only, never an edge bar. */
-.engine-row-selected {
-  background: var(--ui-hover);
-}
-
 .engine-row-line > span[title] {
   cursor: default;
+}
+
+/* Settings → Devices: the devices on the left, the chosen one's detail on the right, on Providers' pane
+   (providers.css), as wide as Providers. Selection is the list row's background fill, never an edge bar. */
+.settings-content:has(> #connections .engine-devices-pane) {
+  --settings-content-w: var(--settings-content-wide-w);
+}
+
+.engine-devices .prov-toolbar {
+  margin-bottom: var(--space-4);
+}
+
+.engine-toolbar-end {
+  margin-left: auto;
+}
+
+.engine-devices > .devices-group {
+  margin-bottom: var(--space-8);
+}
+
+/* The state and the direction under a name: a dot, words only when it is not simply connected. */
+.engine-device-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+  font-size: var(--settings-fs-small);
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.engine-device-line > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.engine-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--text-secondary);
+}
+
+.engine-dot.is-ok { background: var(--success); }
+.engine-dot.is-warn { background: var(--warning); }
+.engine-dot.is-off { background: transparent; box-shadow: inset 0 0 0 1px var(--text-secondary); }
+
+/* "⇄ Both ways": the icon only adds to the words. */
+.engine-direction {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  white-space: nowrap;
+}
+
+.engine-direction svg {
+  flex-shrink: 0;
+}
+
+.engine-device-icon {
+  display: inline-flex;
+  color: var(--text-secondary);
+}
+
+.engine-device-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  padding-bottom: var(--space-8);
+}
+
+.engine-device-title {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.engine-device-name {
+  overflow-wrap: anywhere;
+  font-size: var(--settings-fs-heading);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* The detail's panels sit on its sections' cards as Providers' rows do: lined up with the card's edge, with no line
+   between rows (nor above a panel's first row). */
+.engine-device-detail .settings-group-rows > .settings-item.indent {
+  padding-left: var(--settings-surface-x);
+}
+
+.engine-device-detail .settings-group-rows > :not(.settings-item) .settings-item.indent {
+  padding-left: 0;
+}
+
+.engine-device-detail .settings-group-rows .settings-item {
+  border-top: 0;
 }
 
 .engine-row-line svg {
   vertical-align: -1px;
 }
 
-/* A computer behind: Update (or Check again) sits beside the row menu, as one control group (rule 7). */
-.device-row-controls {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-8);
-}
-
-/* Where to update a computer behind when not from here: one more muted line of the row description (rule 12). */
+/* Where to update a computer behind when not from here: one more muted line under its version (rule 12). */
 .device-update-hint {
   display: block;
 }

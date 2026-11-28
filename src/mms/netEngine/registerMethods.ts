@@ -2,7 +2,7 @@ import { AppError } from '../../shared/errors'
 import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
 import { NET_ERRORS, NetError } from '../../shared/net'
 import type { AccessPresetFields } from '../../shared/net/accessPresets'
-import { isAgentReach } from '../../shared/net/local'
+import { isAgentReach, isBotLevel } from '../../shared/net/local'
 import { isPermissionMode } from '../../shared/permissionMode'
 import {
   isNetEngineWay,
@@ -47,7 +47,8 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.access.ask': ['node'],
   'netEngine.access.cancel': ['node'],
   'netEngine.access.answer': ['node', 'request'],
-  'netEngine.access.let': ['node']
+  'netEngine.access.let': ['node'],
+  'netEngine.versionNotice.claim': ['node']
 }
 
 const text = (value: unknown): string | undefined =>
@@ -60,9 +61,10 @@ const strings = (value: unknown): value is string[] =>
 function accessFields(value: unknown): value is AccessPresetFields {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const fields = value as Record<string, unknown>
-  const keys: Array<keyof AccessPresetFields> = ['work', 'terminal', 'editor', 'maxPermissionMode', 'agentReach']
+  const keys: Array<keyof AccessPresetFields> = ['work', 'terminal', 'editor', 'maxPermissionMode', 'agentReach', 'bots']
   return (
     Object.keys(fields).every((key) => (keys as string[]).includes(key)) &&
+    isBotLevel(fields.bots) &&
     typeof fields.work === 'boolean' &&
     typeof fields.terminal === 'boolean' &&
     typeof fields.editor === 'boolean' &&
@@ -344,6 +346,7 @@ export function registerNetEngineMethods(
               engine.dismissRelay(p.node, p.destination)
               return engine.status()
             case 'netEngine.access.ask':
+              engine.refuseCutOff(p.node)
               engine.access().ask(p.node)
               return engine.status()
             case 'netEngine.access.cancel':
@@ -353,8 +356,13 @@ export function registerNetEngineMethods(
               await engine.access().answer(p.node, p.request, p.yes, p.access)
               return engine.status()
             case 'netEngine.access.let':
+              engine.refuseCutOff(p.node)
               await engine.access().let(p.node, p.access)
               return engine.status()
+            case 'netEngine.versionNotice.claim':
+              if (typeof p.since !== 'number' || !Number.isFinite(p.since))
+                throw new NetError('bad_request', 'since must be a number.')
+              return engine.claimVersionNotice(p.node, p.since)
           }
         } catch (error) {
           if (error instanceof NetError) {

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ComponentType } from 'react'
+import { Fragment, useEffect, useState, type ComponentType, type ReactNode } from 'react'
 import { Activity, Bell, ChevronDown, ChevronRight, Clock, Stop, Terminal, X } from '../lib/icons'
 import { isRunningSubagent, type SubagentSummary } from '../../shared/subagents'
 import {
@@ -11,6 +11,9 @@ import {
 } from '../../shared/backgroundWork'
 import type { SubagentCardModel } from '../chat/adapters/subagentCards'
 import { formatElapsed, isCardRunning } from '../chat/components/agent-elements/tools/subagent-card-logic'
+import { CopyIconButton } from '../chat/components/agent-elements/tools/copy-icon-button'
+import { codeHighlighter } from '../chat/components/agent-elements/code-highlighter'
+import { linePieces } from '../chat/components/agent-elements/code-colours'
 import { lineageModelLabel, lineageSubagentName, nativeSubagentLabel } from './sideCard/lineageLogic'
 import { subagentBadgeTone, subagentIconId, type SubagentBadgeTone } from './subagentStatus'
 import { SubagentAvatar, useThreadProviderId } from './SubagentAvatar'
@@ -33,6 +36,8 @@ export interface BackgroundLine {
   mark: BackgroundLineMark
   /** Where it runs (a subagent's model, a native subagent's kind of agent), next to its title. */
   detail?: string
+  /** The command or script it runs, shown in full under its title. Only work items have one; none of them opens. */
+  command?: string
   /** When it started (ms), for the running time a subagent line shows. */
   since?: number
   /** Opens its own view: a subagent's thread, a native subagent's page. */
@@ -138,7 +143,8 @@ export function backgroundLines(
       mark: { kind: KIND_MARKS[item.kind] },
       tooltip: item.kind === 'wake'
         ? (item.waitsFor ? `Wakes ${item.waitsFor}, or at ${when(item.until)} at the latest` : `Wakes at ${when(item.until)}`)
-        : [item.command ?? item.url, item.latest, `Ends by ${clock(item.until)} at the latest`].filter(Boolean).join('\n'),
+        : [item.url, `Ends by ${clock(item.until)} at the latest`].filter(Boolean).join('\n'),
+      ...(item.command ? { command: item.command } : {}),
       stop: () => actions.stopItem(item.id)
     })),
     ...(work?.providerWork && !native.length
@@ -163,6 +169,15 @@ export function stripCounts(work: ThreadBackgroundWork | undefined, runningSubag
   return runningNative && work?.providerWork ? { ...counts, commands: Math.max(0, counts.commands - 1) } : counts
 }
 
+/**
+ * What the closed row names after its count: the work that reported last, by its description (never the line it
+ * printed), or the one thing that runs; nothing when several run and none has reported.
+ */
+export function rowNames(lines: readonly BackgroundLine[], work: ThreadBackgroundWork | undefined): string | undefined {
+  const reported = work?.latest ? work.items.find((item) => item.id === work.latest!.id) : undefined
+  return reported?.description || (lines.length === 1 ? lines[0]!.title : undefined)
+}
+
 /** Most provider circles stacked at the start of the closed row. */
 const STACK_LIMIT = 3
 
@@ -172,6 +187,43 @@ function LineMark({ mark }: { mark: BackgroundLineMark }) {
   return (
     <span className="background-work-mark" data-kind={mark.kind} aria-hidden="true">
       <Icon size={13} aria-hidden="true" />
+    </span>
+  )
+}
+
+type CommandTokens = ReturnType<typeof codeHighlighter.highlight>
+
+/** One line of a command: its text in the chat's code colours once they are known, plain until then. */
+function commandLine(text: string, tokens: NonNullable<CommandTokens>['tokens'][number] | undefined): ReactNode {
+  const pieces = tokens ? linePieces(tokens, text) : null
+  if (!pieces) return text
+  return pieces.map((piece, index) => (piece.colour ? <span key={index} className={piece.colour}>{piece.text}</span> : piece.text))
+}
+
+/** A command as the terminal panel shows one: on its background, after a prompt, in the chat's code colours, with Copy. */
+function CommandBlock({ command }: { command: string }) {
+  const [tokens, setTokens] = useState<CommandTokens>(null)
+  useEffect(() => {
+    let current = true
+    setTokens(codeHighlighter.highlight({ code: command, language: 'shellscript' as never, themes: codeHighlighter.getThemes() }, (later) => {
+      if (current) setTokens(later)
+    }))
+    return () => {
+      current = false
+    }
+  }, [command])
+  return (
+    <span className="background-work-command">
+      <span className="background-work-prompt" aria-hidden="true">$</span>
+      <span className="background-work-command-text">
+        {command.split('\n').map((text, index) => (
+          <Fragment key={index}>
+            {index > 0 && '\n'}
+            {commandLine(text, tokens?.tokens[index])}
+          </Fragment>
+        ))}
+      </span>
+      <CopyIconButton text={command} label="Copy command" />
     </span>
   )
 }
@@ -190,7 +242,8 @@ function useNow(enabled: boolean): number {
 
 interface BackgroundWorkRowViewProps {
   headline: string
-  latest?: string
+  /** The work the line names after its count (`rowNames`). */
+  names?: string
   lines: readonly BackgroundLine[]
   open: boolean
   onToggle: () => void
@@ -201,11 +254,11 @@ interface BackgroundWorkRowViewProps {
 
 /**
  * Top of the composer while the thread waits on background work: the provider circles of its subagents (or a mark for
- * what runs), one line naming what it waits on and the latest thing any of it reported, Details (the list: subagents
- * open their thread or page, everything else has its own Stop) and Stop (all of it, as the thread's Stop). Nothing on
- * the closed row moves; it changes only when the work does.
+ * what runs), one line counting what it waits on and naming the work that reported last, Details (the list: subagents
+ * open their thread or page, commands show in full, everything else has its own Stop) and Stop (all of it, as the
+ * thread's Stop). Nothing on the closed row moves; it changes only when the work does.
  */
-export function BackgroundWorkRowView({ headline, latest, lines, open, onToggle, onStopAll, now }: BackgroundWorkRowViewProps) {
+export function BackgroundWorkRowView({ headline, names, lines, open, onToggle, onStopAll, now }: BackgroundWorkRowViewProps) {
   const avatars = lines.filter((line) => line.mark.kind === 'avatar')
   const shown = avatars.slice(0, STACK_LIMIT)
   const extra = avatars.length - shown.length
@@ -222,9 +275,9 @@ export function BackgroundWorkRowView({ headline, latest, lines, open, onToggle,
           ) : (
             <span className="background-work-pulse" data-idle={onlyWakes || undefined} aria-hidden="true" />
           )}
-          <span className="background-work-text" title={latest ? `${headline}\n${latest}` : headline}>
+          <span className="background-work-text" title={names ? `${headline}\n${names}` : headline}>
             {headline}
-            {latest && <span className="background-work-latest"> · {latest}</span>}
+            {names && <span className="background-work-latest"> · {names}</span>}
           </span>
           <span className="background-work-toggle" aria-hidden="true">
             <span className="background-work-toggle-word">Details</span>
@@ -243,14 +296,17 @@ export function BackgroundWorkRowView({ headline, latest, lines, open, onToggle,
               <>
                 <LineMark mark={line.mark} />
                 <span className="background-work-body">
-                  <span className="background-work-title">{line.title}</span>
-                  {line.detail && <span className="background-work-detail">{line.detail}</span>}
+                  <span className="background-work-heading">
+                    <span className="background-work-title">{line.title}</span>
+                    {line.detail && <span className="background-work-detail">{line.detail}</span>}
+                  </span>
+                  {line.command && <CommandBlock command={line.command} />}
                 </span>
                 {elapsed ? <span className="background-work-elapsed">{elapsed}</span> : <span className="background-work-kind">{line.kind}</span>}
               </>
             )
             return (
-              <li key={line.key} className="background-work-line" data-mark={line.mark.kind} title={line.tooltip}>
+              <li key={line.key} className="background-work-line" data-mark={line.mark.kind} data-command={line.command ? '' : undefined} title={line.tooltip}>
                 {line.open ? (
                   <button type="button" className="background-work-open" aria-label={line.tooltip} onClick={line.open}>
                     {body}
@@ -303,10 +359,11 @@ export function BackgroundWorkRow({ threadId, subagents, work, onStopAll }: {
     : []
   const now = useNow(open && lines.some((line) => line.since !== undefined))
   if (!headline) return null
+  const names = rowNames(lines, work)
   return (
     <BackgroundWorkRowView
       headline={headline}
-      {...(work?.latest ? { latest: work.latest.line } : {})}
+      {...(names ? { names } : {})}
       lines={lines}
       open={open}
       onToggle={() => setOpen((value) => !value)}

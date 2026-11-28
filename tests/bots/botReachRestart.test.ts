@@ -17,6 +17,7 @@ import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import { ProviderAuthService } from '../../src/mms/providers/ProviderAuthService'
 
 const PHONE = newId('node')
+const TABLET = newId('node')
 const cleanup: Array<() => unknown> = []
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close()
@@ -44,7 +45,7 @@ describe('a crash after a new bot\'s choice is saved and before the bot is publi
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-reach-')))
     cleanup.push(() => rmSync(home, { recursive: true, force: true }))
     const profileId = randomUUID()
-    const request = { look: { colour: 'teal', accessory: 'cap' }, name: 'Diary', description: 'Keep my diary', clientRequestId: 'desk-1', access: { mode: 'this_computer' } as const }
+    const request = { look: { colour: 'teal', accessory: 'cap' }, name: 'Diary', description: 'Keep my diary', clientRequestId: 'desk-1', access: { mode: 'chosen', nodes: [TABLET] } as BotDeviceAccess }
 
     const first = profile(home, profileId)
     // The process dies between the two writes: the bot is never published, and nothing tidies up after it.
@@ -64,21 +65,22 @@ describe('a crash after a new bot\'s choice is saved and before the bot is publi
     const bots = reopened.personalBots!.service
     const made = (await bots.create(request)).bot
     expect(made.id).not.toBe(orphan)
-    expect(made.reach).toBe('this_computer')
-    expect(saved(reopened)).toEqual({ [made.id]: { mode: 'this_computer' } })
+    expect(made.reach).toBe('chosen')
+    expect(saved(reopened)).toEqual({ [made.id]: { mode: 'chosen', nodes: [TABLET] } })
     // The same request again names the same bot and saves nothing more.
     expect((await bots.create({ ...request, access: { mode: 'all' } as never })).bot.id).toBe(made.id)
     expect(bots.list().bots.map((bot) => bot.id)).toEqual([made.id])
-    expect(saved(reopened)).toEqual({ [made.id]: { mode: 'this_computer' } })
+    expect(saved(reopened)).toEqual({ [made.id]: { mode: 'chosen', nodes: [TABLET] } })
     const store = reopened.botDeviceAccess
     const reach = createBotReach({
       access: (botId) => store.get(botId).access,
       choices: () => store.choices(),
-      deviceOn: () => true,
-      devices: () => [PHONE],
+      level: () => 'use',
+      devices: () => [PHONE, TABLET],
       changes: [(listener) => store.onChange(listener)]
     })
     expect(reach.canReach(made.id, PHONE)).toBe(false)
+    expect(reach.canReach(made.id, TABLET)).toBe(true)
     expect(reach.hiddenFor(PHONE)?.(made.id)).toBe(true)
   }, 60_000)
 })

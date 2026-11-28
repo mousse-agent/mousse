@@ -1,4 +1,5 @@
 import type { AppletReference } from '../../../shared/applets'
+import type { AppletBotRef } from '../../../shared/appletRuntime'
 import { useAppStore } from '../../stores/appStore'
 import { readAppletAppearance } from './appearance'
 
@@ -9,6 +10,17 @@ import { readAppletAppearance } from './appearance'
 export interface AppletConversation {
   threadId: string
   addToDraft(text: string): boolean
+  /**
+   * A bot of another computer's applet: read from that computer through the bot, by the message that shows it, and
+   * saved there (`threadId` is then only a key here). `computer`: its name; `offline` while it is not reached, when the
+   * copy kept here shows, read only.
+   */
+  bot?: AppletBotRef & { computer: string; offline: boolean }
+}
+
+/** The bot and message a remote bot's applet is read through, as main takes them. */
+export function appletBot(conversation: AppletConversation | undefined): { bot: AppletBotRef } | Record<string, never> {
+  return conversation?.bot ? { bot: { botId: conversation.bot.botId, messageId: conversation.bot.messageId } } : {}
 }
 
 /** Applies `change` to the thread's composer draft, only while that thread and profile are still the open ones. */
@@ -45,10 +57,12 @@ export async function exportApplet(
   threadId: string,
   reference: AppletReference,
   format: 'html' | 'source' | 'png',
-  runtimeId: string | null
+  runtimeId: string | null,
+  conversation?: AppletConversation
 ): Promise<void> {
   await window.mousse.applets.export({
     threadId,
+    ...appletBot(conversation),
     appletId: reference.appletId,
     revisionId: reference.revisionId,
     format,

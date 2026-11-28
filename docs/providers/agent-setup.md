@@ -44,6 +44,10 @@ Cursor entry. There is nothing to install or find on PATH.
 - Each Cursor entry keeps its own key in Mousse's vault and its agents in its own store. Mousse
   never reads `~/.cursor/sdk/auth.json` or an ambient `CURSOR_API_KEY`.
 - Cursor approves its tools itself (Auto-review on), so it runs only chats a person drives.
+- **Single requests** (titles, branch names, pull request drafts, commit messages, a bot's name and
+  digest) run on a Cursor host of their own, started for the request in an empty place and ended
+  with it, never the host that runs chats. Its agent is offered no tool, loads no rule, skill, hook
+  or MCP server, and has the SDK's retries off: one model request each. They are held.
 - Signing out forgets the key in Mousse. A key minted by an account sign-in stays valid on Cursor's
   side until it expires (90 days) unless revoked at cursor.com/dashboard.
 - A model API entry `pi:cursor` keeps working on the Mousse agent until the user moves it to a
@@ -326,6 +330,16 @@ with it, see [Claude's client name](claude-native-proxy.md).
   Settings, Skills & MCP, Advanced, and switch that agent off under "Share with other agents".
   Codex and Cursor relayed tools ask in the thread before they run unless the thread is in Full
   access; Claude Code and ACP agents use their own approvals.
+- **Amazon Bedrock single requests.** Titles, branch names, pull request drafts, commit messages
+  and a bot's name and digest on a Bedrock model run in a worker process of their own, started for
+  the request in an empty place and ended with it. It is offered no tool, the AWS SDK sends a failed
+  request once (`AWS_MAX_ATTEMPTS=1`), and none of your AWS files or Pi's setup loads: the worker
+  gets only the keys the entry signs in with, read at the time of each request. A bearer token and
+  static keys are passed as they are. Every other sign-in (IAM Identity Center (SSO), a credential
+  process, an assumed role, web identity, `aws login`, a container's role) is resolved by Mousse
+  first, with the AWS SDK's own credential chain in the entry's environment as Pi's turns use it
+  and one attempt per sign-in call; the worker gets only the temporary keys, never your AWS files,
+  SSO cache or credential program. They are held.
 - **Agent telemetry.** Each provider has a Telemetry setting, Off or Agent's own setting. Off starts the
   agent with its documented switch (Claude Code, Codex and the Mousse agent have one); the agent's files
   are never edited. See [Privacy and agent telemetry](../CONFIGURATION.md#privacy-and-agent-telemetry).

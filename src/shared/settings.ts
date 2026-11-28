@@ -1010,7 +1010,7 @@ export function getDefaultSettings(): MousseSettings {
       replyPacing: true,
       interfaceFont: { ...DEFAULT_FONT_CHOICE },
       codeFont: { ...DEFAULT_FONT_CHOICE },
-      threadProjectColors: 'fill',
+      threadProjectColors: 'off',
       replyPreviews: false,
       threadPathInTitleBar: true,
       animationSpeed: 'normal',

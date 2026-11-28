@@ -2,9 +2,10 @@ import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../share
 import type { BotLook } from '../../shared/bots/personal/look'
 import type { BotMemoryEntry, BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { BotModelPick, BotModelSlots, BotSchedule } from '../../shared/bots/personal/definition'
-import type { BotChatAttachment, BotsPersonalV2EventData, BotsPersonalV2Method, BotsPersonalV2Params, BotsPersonalV2Result } from '../../shared/bots/personal/methods'
+import type { BotChatAttachment, BotElsewhereComputer, BotReplyEvent, BotsElsewhereApi, BotsElsewhereMethod, BotsPersonalV2EventData, BotsPersonalV2Method, BotsPersonalV2Params, BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { PlatformRequestApi } from '../../shared/platform'
 import type { BotDeviceAccess, BotDevicesView, NewBotAccess } from '../../shared/bots/personal/deviceAccess'
+import type { BotMark, BotMarksApi, BotMarksByRef } from '../../shared/bots/personal/marks'
 
 /**
  * The Bot UI's methods (`bots.personal.v2`, Bot Phase 1 §5.11) over the host's profile-bound
@@ -13,12 +14,29 @@ import type { BotDeviceAccess, BotDevicesView, NewBotAccess } from '../../shared
 export interface PersonalBotsClient {
   list(): Promise<BotSummary[]>
   /**
+   * The bots of the owner's other computers, as this computer lists them (`bots.remote.list`): qualified ids, each with
+   * the computer it lives on (`lives`). Read from what this computer keeps; never waits on another one.
+   */
+  remoteList(): Promise<{ bots: BotSummary[]; computers?: BotElsewhereComputer[] }>
+  /** This window shows (or no longer shows) the chat of a bot of another computer: its chat streams here while it does. */
+  focus(botId: string, focused: boolean): Promise<void>
+  /**
+   * A file a bot of another computer's chat shows, by its place in that bot's files folder: its copy on this computer
+   * (`bots.remote.file`), read from there when there is none or it changed.
+   */
+  remoteFile(botId: string, path: string): Promise<{ path: string; name: string; size: number }>
+  /** What this computer marks on the bots it lists (pin, hide, mute, marked unread), by bot ref. An older service lacks it. */
+  marks(): Promise<BotMarksByRef>
+  /** Sets or clears one mark on one bot, on this computer only; every bot's marks as they are now. */
+  setMark(botId: string, mark: BotMark, on: boolean): Promise<BotMarksByRef>
+  /**
    * `slots`: the rows picked on New bot (#673), all four, sent only to a service whose choices carry `providers`;
    * `model`: one model on every row (the single picker of an older service). An older service refuses the keys.
    * `image`: the Images row (#1088), sent only to a service whose choices carry `imageProviders`. `access`: the Devices
-   * row, sent only to a service whose choices carry `reachOnCreate`.
+   * step (this computer alone when it is not shown), sent only to a service whose choices carry `reachOnCreate`.
+   * `node`: made on that other computer (New bot's "Lives on"); its answer names the bot by a qualified id.
    */
-  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }): Promise<BotSummary>
+  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess; node?: string }): Promise<BotSummary>
   get(botId: string): Promise<BotDetail>
   /** `description`: the bot's prompt, as the owner edits it in About; null resets it. An older service refuses it. */
   update(botId: string, change: { name?: string; look?: BotLook; description?: string | null }): Promise<BotSummary>
@@ -40,7 +58,7 @@ export interface PersonalBotsClient {
    * The owner taps one of a question's answers: their reply, and the question's bubble as it is now. An older service
    * lacks it and rejects; the owner answers with Reply there.
    */
-  answerAction(actionId: string, digest: string, answer: 'send' | 'not_now'): Promise<BotsPersonalV2Result<'bots.actions.answer'>>
+  answerAction(botId: string, actionId: string, digest: string, answer: 'send' | 'not_now'): Promise<BotsPersonalV2Result<'bots.actions.answer'>>
   /** The owner's Continue or Stop on what the bot holds past the limit between bots, by its batch (`BotSummary.chainHold`). */
   answerChainHold(botId: string, holdId: string, answer: 'continue' | 'stop'): Promise<BotsPersonalV2Result<'bots.chainHold.answer'>>
   answerQuestion(botId: string, questionId: string, choice: string, clientRequestId: string): Promise<BotsPersonalV2Result<'bots.questions.answer'>>
@@ -68,8 +86,11 @@ export interface PersonalBotsClient {
   reset(botId: string): Promise<BotSummary>
   /** Saves the bot's face picture (a PNG in base64) drawn from `key`. Only a service whose summaries carry `facePicture` has it. */
   saveFacePicture(botId: string, key: string, png: string): Promise<{ path: string }>
-  /** What New bot's Runs on line offers before the bot exists; an older service lacks it and rejects. */
-  modelChoices(): Promise<BotsPersonalV2Result<'bots.model.choices'>>
+  /**
+   * What New bot's Runs on line offers before the bot exists; an older service lacks it and rejects. `node`: what that
+   * other computer offers, for a bot made there ("Lives on").
+   */
+  modelChoices(node?: string): Promise<BotsPersonalV2Result<'bots.model.choices'>>
   removeSchedule(botId: string, scheduleId: string): Promise<BotDetail>
   /** Cancels a waiting reminder; it never fires. */
   cancelReminder(botId: string, reminderId: string): Promise<BotDetail>
@@ -89,10 +110,17 @@ export interface PersonalBotsClient {
 export function createPersonalBotsClient(transport: PlatformRequestApi): PersonalBotsClient {
   const call = <M extends BotsPersonalV2Method>(method: M, params: BotsPersonalV2Params<M>) =>
     transport.request<BotsPersonalV2Result<M>>(method, params)
+  const elsewhere = <M extends BotsElsewhereMethod>(method: M, params: BotsElsewhereApi[M]['params']) =>
+    transport.request<BotsElsewhereApi[M]['result']>(method, params)
   return {
     list: async () => (await call('bots.personal.list', {})).bots,
-    create: async ({ look, name, description, clientRequestId, model, slots, image, access }) =>
-      (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}), ...(access ? { access } : {}) })).bot,
+    remoteList: () => elsewhere('bots.remote.list', {}),
+    focus: async (botId, focused) => { await elsewhere('bots.focus', { botId, focused }) },
+    remoteFile: (botId, path) => elsewhere('bots.remote.file', { botId, path }),
+    marks: async () => (await transport.request<BotMarksApi['bots.marks.list']['result']>('bots.marks.list', {})).marks,
+    setMark: async (botId, mark, on) => (await transport.request<BotMarksApi['bots.marks.set']['result']>('bots.marks.set', { botId, mark, on })).marks,
+    create: async ({ look, name, description, clientRequestId, model, slots, image, access, node }) =>
+      (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}), ...(access ? { access } : {}), ...(node ? { node } : {}) })).bot,
     get: (botId) => call('bots.get', { botId }),
     update: async (botId, change) => (await call('bots.update', { botId, ...change })).bot,
     pause: async (botId) => (await call('bots.personal.pause', { botId })).bot,
@@ -107,7 +135,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     react: async (botId, messageId, emoji) => (await call('bots.chat.react', { botId, messageId, emoji })).message,
     answer: async (botId, askId, answer) => (await call('bots.asks.answer', { botId, askId, answer })).message,
     snoozeReminder: (botId, messageId, choice) => call('bots.reminders.snooze', { botId, messageId, choice }),
-    answerAction: (actionId, digest, answer) => call('bots.actions.answer', { actionId, digest, answer }),
+    answerAction: (botId, actionId, digest, answer) => call('bots.actions.answer', { botId, actionId, digest, answer }),
     answerChainHold: (botId, holdId, answer) => call('bots.chainHold.answer', { botId, holdId, answer }),
     answerQuestion: (botId, questionId, choice, clientRequestId) => call('bots.questions.answer', { botId, questionId, choice, clientRequestId }),
     setPermission: (botId, permissionId, enabled) => call('bots.permissions.set', { botId, permissionId, enabled }),
@@ -123,7 +151,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     wipeMemory: (botId, keep) => call('bots.memory.wipe', { botId, ...(keep ? { keep } : {}) }),
     reset: async (botId) => (await call('bots.reset', { botId })).bot,
     saveFacePicture: (botId, key, png) => call('bots.facePicture.save', { botId, key, png }),
-    modelChoices: () => call('bots.model.choices', {}),
+    modelChoices: (node) => call('bots.model.choices', node ? { node } : {}),
     removeSchedule: (botId, scheduleId) => call('bots.schedules.remove', { botId, scheduleId }),
     cancelReminder: (botId, reminderId) => call('bots.reminders.cancel', { botId, reminderId }),
     exportMemory: (botId, dir) => call('bots.memory.export', { botId, dir }),
@@ -135,10 +163,16 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
   }
 }
 
-/** The preload's bot group: the events it forwards (`bots:changed`, `bots:message`, `bots:activity`) and a file's path. */
+/** The preload's bot group: the events it forwards (`bots:changed`, `bots:message`, `bots:activity`, `bots:reply`) and a file's path. */
 export interface PersonalBotsEvents {
-  /** `reread`: the window's service connection was opened again; chats it holds may have missed rows. */
-  onChanged?(cb: (event: { botId?: string; reread?: boolean }) => void): () => void
+  /**
+   * `reread`: the window's service connection was opened again, so chats it holds may have missed rows; with `botId`,
+   * that one bot's chat stream opened again (a bot of another computer). `remote`: the other computers' bots changed.
+   */
+  /** `marks`: only what this computer marks on bots changed (`bots.marks.set`, from any of its windows). */
+  onChanged?(cb: (event: { botId?: string; reread?: boolean; remote?: boolean; marks?: boolean }) => void): () => void
+  /** A bot of another computer writing its reply, while this window shows its chat. */
+  onReply?(cb: (event: BotReplyEvent) => void): () => void
   onMessage?(cb: (event: BotsPersonalV2EventData['bots.message']) => void): () => void
   onActivity?(cb: (event: { botId: string; activationId: string; chip: BotChip | null; status?: string }) => void): () => void
   /** A composer file's path on this computer (see `attachmentPath`). */
@@ -159,8 +193,13 @@ export function attachmentPath(file: File): Promise<string> {
   return bridge.attachmentPath ? bridge.attachmentPath(file) : Promise.reject(new Error('Restart Mousse to attach files to a bot message.'))
 }
 
-/** The plain message of a failed request (RPC errors carry a code and a message). */
+/**
+ * The plain message of a failed request (RPC errors carry a code and a message). A refusal that crossed from another
+ * computer can arrive with only its code's general wording; its `details.reason` says what it was, so that is shown.
+ */
 export function errorText(cause: unknown): string {
+  const reason = (cause as { details?: { reason?: unknown } } | null)?.details?.reason
+  if (reason === 'svg') return 'SVG files can’t be sent to another computer.'
   if (cause && typeof cause === 'object' && 'message' in cause) return String((cause as { message: unknown }).message)
   return String(cause)
 }

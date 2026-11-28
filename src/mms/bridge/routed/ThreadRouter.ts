@@ -27,6 +27,7 @@ import type { BridgeHub } from '../hub'
 import { isListedComputer } from './listRows'
 import type { MergedLists } from './mergedLists'
 import {
+  computerNeedsUpdate,
   computerOffline,
   mixedComputers,
   notAvailableRemotely,
@@ -83,7 +84,7 @@ export interface ThreadRouterOptions {
   services: MmsProfileServices
   net: Pick<NetService, 'runtime'>
   /** The other computers and a client for each, over v1 or an engine pairing. */
-  peers: Pick<PeerDirectory, 'client' | 'computers' | 'online' | 'name'>
+  peers: Pick<PeerDirectory, 'client' | 'computers' | 'online' | 'name'> & Partial<Pick<PeerDirectory, 'cutOff'>>
   /** Whether threads route to other computers (`bridgeThreadsOn`). */
   enabled(): boolean
   hub: BridgeHub
@@ -180,6 +181,11 @@ export class ThreadRouter implements ThreadRouterPort {
     return this.options.peers.online(node)
   }
 
+  /** Which computer needs a Mousse update while `node` is cut off for its version: nothing of it is used then. */
+  cutOff(node: NodeId): 'there' | 'here' | undefined {
+    return this.options.peers.cutOff?.(node)
+  }
+
   private nameOf(node: NodeId): string {
     return this.options.peers.name(node, 'the other computer')
   }
@@ -199,7 +205,9 @@ export class ThreadRouter implements ThreadRouterPort {
   ): Promise<{ result: unknown } | undefined> {
     // `threads.focus` is the router's own method: the handler calls `focus` below. Reordering is an overlay
     // this computer keeps for itself: the handler places the rows of other computers among its own.
-    if (method === 'threads.focus' || !isRecord(params)) return undefined
+    // `bots.focus`, `bots.remote.file` and the applet calls are the bot router's (`BotRouter.focus`, `BotRouter.file`,
+    // `BotRouter.applet`, `BotRouter.appletSave`); an applet's state is its own words, never ids to route.
+    if (method === 'threads.focus' || method === 'bots.focus' || method === 'bots.remote.file' || method === 'bots.remote.applet' || method === 'bots.remote.appletState' || !isRecord(params)) return undefined
     // A CLI that names a qualified id is still refused below; a window's drag is the handler's to place.
     if ((method === 'threads.reorder' || method === 'projects.reorder') && ctx.connection?.clientType === 'gui')
       return undefined
@@ -225,6 +233,9 @@ export class ThreadRouter implements ThreadRouterPort {
     if (node === this.selfNode())
       throw new DomainRpcError('invalid_params', 'That thread is on this computer. Use its own id.')
     const computer = this.computer(node)
+    // Cut off for its version: no call, read or copy of its threads until a connection agrees a version.
+    const cutOff = this.cutOff(node)
+    if (cutOff) throw computerNeedsUpdate(computer, cutOff)
     if (!row) throw notAvailableRemotely(computer, method)
     const context: QualifyContext = { node, self: this.selfNode() }
     const owner = this.ownerParams(method, row, split.params, context)
@@ -488,6 +499,8 @@ export class ThreadRouter implements ThreadRouterPort {
         lifetime.addEventListener('abort', () => this.attached.dropLeases(lease), { once: true })
       }
     }
+    const cutOff = this.cutOff(ref.node as NodeId)
+    if (cutOff) throw computerNeedsUpdate(this.computer(ref.node as NodeId), cutOff)
     // A thread opened here notifies for the next seven days.
     this.lists?.noteOpened(threadId)
     await this.attached.focus(lease, ref.node as NodeId, ref.id)

@@ -153,7 +153,7 @@ import type {
   RemoveInstallResult,
   SignInResponse
 } from '../shared/harness/types'
-import type { BotsPersonalV2EventData } from '../shared/bots/personal/methods'
+import type { BotReplyEvent, BotsPersonalV2EventData } from '../shared/bots/personal/methods'
 import type { BotBrowserFrameEvent, BotBrowserView } from '../shared/bots/personal/browser'
 import type { ThreadBrowserFrameEvent } from '../shared/browser/threadView'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
@@ -926,6 +926,12 @@ const api = {
       ipcRenderer.on('bots:activity', handler)
       return () => ipcRenderer.removeListener('bots:activity', handler)
     },
+    /** A bot of another computer writing its reply, while this window shows its chat (`bots.reply`). */
+    onReply: (cb: (event: BotReplyEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: BotReplyEvent) => cb(event)
+      ipcRenderer.on('bots:reply', handler)
+      return () => ipcRenderer.removeListener('bots:reply', handler)
+    },
     /** A picture of a bot's browser this window watches (`bots.browser.watch`), pushed as the page paints. */
     onBrowserFrame: (cb: (event: BotBrowserFrameEvent) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, event: BotBrowserFrameEvent) => cb(event)
@@ -1213,6 +1219,12 @@ const api = {
       ) => cb(payload)
       ipcRenderer.on('thread:view', handler)
       return () => ipcRenderer.removeListener('thread:view', handler)
+    },
+    /** The thread a window opened on at load could not be read (its computer cannot be reached); no view follows. */
+    onViewFailed: (cb: (payload: { threadId: string; reason?: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, payload: { threadId: string; reason?: string }) => cb(payload)
+      ipcRenderer.on('thread:view-failed', handler)
+      return () => ipcRenderer.removeListener('thread:view-failed', handler)
     },
     onActivity: (cb: (activity: ThreadActivitySnapshot) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, activity: ThreadActivitySnapshot) =>

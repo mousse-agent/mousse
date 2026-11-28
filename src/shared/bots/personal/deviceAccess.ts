@@ -2,37 +2,56 @@ import { isId } from '../../net/ids'
 
 /**
  * Which of the owner's devices can reach a personal bot (`docs/bots.md`, Which devices reach a bot). It is kept with the
- * bot on its home computer and set there: on New bot or in the bot's About, from this computer's own window. A device
- * that makes a bot may ask for it to reach that device alone (`RemoteBotReach`). A device that is left out finds no such
- * bot: it is in none of its lists, and every call about it answers as for a bot that is not there.
+ * bot on its home computer and set there: on New bot or in the bot's About, from this computer's own window. The list is
+ * explicit and starts at the bot's own computer: a new bot reaches no other device until the owner ticks it, and a device
+ * linked later reaches no existing bot. A bot made from another device also reaches that device (`home_and_maker`). A
+ * device that is left out finds no such bot: it is in none of its lists, and every call about it answers as for a bot
+ * that is not there.
  */
 
-/** Every one of the owner's devices (the default), this computer alone, or the devices picked by their Net node id. */
+/** This computer alone (the default), or this computer and the devices picked by their Net node id. */
 export type BotDeviceAccess =
-  | { mode: 'all' }
   | { mode: 'this_computer' }
   | { mode: 'chosen'; nodes: string[] }
 
 export type BotDeviceAccessMode = BotDeviceAccess['mode']
 
-/** What a bot that has no choice stored reaches: every device, as before this setting existed. */
-export const DEFAULT_BOT_DEVICE_ACCESS: BotDeviceAccess = Object.freeze({ mode: 'all' }) as BotDeviceAccess
+/**
+ * Every device, as a bot reached before the lists were explicit: what an older file says ("All my devices", or a bot
+ * with no choice stored). It is read only until the one-time snapshot turns it into the devices linked at that moment
+ * (`BotDeviceAccessStore.snapshot`), and never written again.
+ */
+export type LegacyEveryDevice = { mode: 'all' }
+/** A choice as the store reads it: before the snapshot, an older file's every device too. */
+export type StoredBotDeviceAccess = BotDeviceAccess | LegacyEveryDevice
+
+/** What a bot that has no choice stored reaches: this computer alone. */
+export const DEFAULT_BOT_DEVICE_ACCESS: BotDeviceAccess = Object.freeze({ mode: 'this_computer' }) as BotDeviceAccess
 /** What a choice that can't be read means: this computer alone, so no device reaches the bot by mistake. */
 export const UNREADABLE_BOT_DEVICE_ACCESS: BotDeviceAccess = Object.freeze({ mode: 'this_computer' }) as BotDeviceAccess
 
-/** What New bot offers (`bots.create`'s `access`): every device (the default), or this computer alone. */
-export type NewBotAccess = { mode: 'all' } | { mode: 'this_computer' }
+/**
+ * What New bot sends (`bots.create`'s `access`): a device choice. `{ mode: 'all' }`, which an app from before the lists
+ * sends for its Everywhere, is taken as this computer alone (`newBotAccessOf`).
+ */
+export type NewBotAccess = BotDeviceAccess | LegacyEveryDevice
 
 /** Whether `value` is a choice New bot may send. */
 export function isNewBotAccess(value: unknown): value is NewBotAccess {
-  return !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 &&
-    ((value as { mode?: unknown }).mode === 'all' || (value as { mode?: unknown }).mode === 'this_computer')
+  if (!!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 && (value as { mode?: unknown }).mode === 'all') return true
+  return botDeviceAccessProblem(value) === undefined
+}
+
+/** The choice a new bot is saved with: an older app's Everywhere is this computer alone, as every new bot starts. */
+export function newBotAccessOf(access: NewBotAccess): BotDeviceAccess {
+  if (access.mode === 'all') return { mode: 'this_computer' }
+  return access.mode === 'chosen' ? { mode: 'chosen', nodes: [...access.nodes] } : { mode: 'this_computer' }
 }
 
 /**
- * What a device that makes a bot on another computer may ask for (`bots.create`'s `reach` there): every device, or the
- * bot's home computer and the device that made it (`chosen`, with that device alone). Changing it later stays on the
- * home computer.
+ * What a device that makes a bot on another computer may ask for (`bots.create`'s `reach` there). Either way the bot
+ * reaches its home computer and the device that made it (`home_and_maker`): `all`, which a phone from before the lists
+ * sends, is taken as `home_and_maker`. Changing it later stays on the home computer.
  */
 export const REMOTE_BOT_REACH = ['all', 'home_and_maker'] as const
 export type RemoteBotReach = (typeof REMOTE_BOT_REACH)[number]
@@ -40,14 +59,25 @@ export type RemoteBotReach = (typeof REMOTE_BOT_REACH)[number]
 /** Most devices one bot's list holds. */
 export const MAX_BOT_DEVICES = 64
 
+/**
+ * Why another device's device choice was refused by the bot's computer before anything ran there. Only the reason
+ * crosses the wire; the device that sent it says it in these words.
+ */
+export const BOT_DEVICES_REFUSALS = {
+  bot_devices_unknown: 'One of those devices is no longer on your account.',
+  bot_devices_unread: "Your devices can't be checked right now. Try again in a moment.",
+  bot_devices_too_many: `Chosen devices are up to ${MAX_BOT_DEVICES}, this device included.`
+} as const
+export type BotDevicesRefusal = keyof typeof BOT_DEVICES_REFUSALS
+
 /** Why `value` is not a device choice, or undefined when it is one. */
 export function botDeviceAccessProblem(value: unknown): string | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'A device choice is all, this_computer or chosen.'
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'A device choice is this_computer or chosen.'
   const access = value as { mode?: unknown; nodes?: unknown }
   const keys = Object.keys(access)
-  if (access.mode === 'all' || access.mode === 'this_computer')
+  if (access.mode === 'this_computer')
     return keys.every((key) => key === 'mode') ? undefined : 'Only chosen takes a list of devices.'
-  if (access.mode !== 'chosen') return 'A device choice is all, this_computer or chosen.'
+  if (access.mode !== 'chosen') return 'A device choice is this_computer or chosen.'
   if (!keys.every((key) => key === 'mode' || key === 'nodes')) return 'A device choice is a mode and its devices.'
   const nodes = access.nodes
   if (!Array.isArray(nodes) || nodes.length > MAX_BOT_DEVICES || new Set(nodes).size !== nodes.length || nodes.some((node) => !isId('node', node)))
@@ -56,7 +86,7 @@ export function botDeviceAccessProblem(value: unknown): string | undefined {
 }
 
 /** Whether `node`, one of the owner's other devices, may reach a bot with this choice (the device's own switch aside). */
-export function botDeviceAllowed(access: BotDeviceAccess, node: string): boolean {
+export function botDeviceAllowed(access: StoredBotDeviceAccess, node: string): boolean {
   if (access.mode === 'all') return true
   if (access.mode === 'chosen') return access.nodes.includes(node)
   return false
@@ -67,8 +97,13 @@ export interface BotDeviceChoice {
   node: string
   name: string
   kind: 'computer' | 'phone' | 'unknown'
-  /** Its switch for bots on this computer (Settings, Devices) is off: it reaches no bot here, whatever is picked. */
+  /** Its bot level on this computer (Settings, Devices) is Off: it reaches no bot here, whatever is picked. */
   botsOff?: true
+  /**
+   * The device that asked, from another computer: the bot always reaches it (a choice it sends keeps it), so its window
+   * shows it as "This computer", locked on.
+   */
+  caller?: true
 }
 
 /**
@@ -82,9 +117,9 @@ export interface BotDevicesView {
 }
 
 /**
- * The methods of About's Devices row. Only this computer's own window and command line call them: they are not in the
- * table of methods another device may call (`REMOTE_BOT_METHODS`), never routed (`bots.` stays local), and refused
- * for a call that came through Bridge.
+ * The methods of About's Devices row. This computer's own window and command line call them locally, refused for a call
+ * that came through Bridge; another device calls them only as its remote rows at Full bot access (`REMOTE_BOT_METHODS`),
+ * where the calling device is always kept among the devices that reach the bot.
  */
 export const BOT_DEVICE_METHODS = ['bots.devices.get', 'bots.devices.set'] as const
 export type BotDeviceMethod = (typeof BOT_DEVICE_METHODS)[number]

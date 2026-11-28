@@ -1,10 +1,13 @@
 import type { BotChatMessage } from '../../../shared/bots/personal/chat'
 import { MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_TEXT, type BotChatAttachment } from '../../../shared/bots/personal/methods'
 
-/** What Retry on a failed chat turn sends again: the owner's words and files of the turn that failed. */
+/**
+ * What Retry on a failed chat turn sends again: the owner's words and files of the turn that failed. A file of a bot of
+ * another computer is named by its place there (`remote`) and sent from its copy here.
+ */
 export interface BotRetry {
   text: string
-  attachments: BotChatAttachment[]
+  attachments: Array<BotChatAttachment & { remote?: string }>
   replyTo?: string
 }
 
@@ -22,7 +25,8 @@ export function botRetryOf(messages: readonly BotChatMessage[], failed: BotChatM
   if (!asked.length) return null
   // As much as one message carries: a turn that joined several sends their first words and files, never a refused send.
   const text = asked.map((message) => message.text.trim()).filter(Boolean).join('\n\n').slice(0, MAX_BOT_CHAT_TEXT)
-  const attachments = asked.flatMap((message) => message.attachments ?? []).filter((file) => file.path).slice(0, MAX_BOT_CHAT_ATTACHMENTS)
+  const attachments = asked.flatMap((message) => message.attachments ?? []).filter((file) => file.path || file.remote).slice(0, MAX_BOT_CHAT_ATTACHMENTS)
+    .map(({ name, path, remote }) => ({ name, path, ...(remote ? { remote } : {}) }))
   if (!text && !attachments.length) return null
   const replyTo = asked[0]!.replyTo?.id
   return { text, attachments, ...(replyTo ? { replyTo } : {}) }

@@ -11,9 +11,10 @@ import type { BridgeHubLocalMethod } from './bridge/types'
 import type { BridgeActivityMethod } from './bridge/deviceActivity'
 import type { SpacesLocalMethod } from './spaces/local'
 import type { BotsLocalMethod } from './bots/space/local'
-import type { BotsPersonalV2Method } from './bots/personal/methods'
+import type { BotsElsewhereMethod, BotsPersonalV2Method } from './bots/personal/methods'
 import type { BotsBrowserMethod } from './bots/personal/browser'
 import type { BotDeviceMethod } from './bots/personal/deviceAccess'
+import type { BotMarkMethod } from './bots/personal/marks'
 import type { BrowserViewMethod } from './browser/threadView'
 import type { AutomationsMethod } from './automations'
 import type { SpaceArchiveMethod } from './spaces/archive'
@@ -26,7 +27,7 @@ import type { RolloutMethod } from './updateRollout'
 
 export type PlatformRequestMethod = ChatMethod | ChatResourceMethod | WorkflowRunMethod | BrowserGuiMethod | BrowserSetupMethod | BrowserAccessMethod
   | ChatNetworkMethod | NetLocalMethod | NetEngineLocalMethod | BridgeHubLocalMethod | BridgeActivityMethod | SpacesLocalMethod | BotsLocalMethod | SpaceArchiveMethod | SpeechHostMethod
-  | BotsPersonalV2Method | BotDeviceMethod | BotsBrowserMethod | BrowserViewMethod
+  | BotsPersonalV2Method | BotsElsewhereMethod | BotMarkMethod | BotDeviceMethod | BotsBrowserMethod | BrowserViewMethod
   | AutomationsMethod
   | RolloutMethod
   | SecretMethod

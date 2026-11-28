@@ -66,72 +66,296 @@
   font-size: 12.5px;
 }
 
-.add-machine-browser {
+.add-machine-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+/* Clone into: the title over a full-width path bar, then its folders and one hint line. */
+.add-machine-rows .add-machine-folder {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: var(--space-8);
+}
+
+.clone-folder {
   display: flex;
   flex-direction: column;
-  gap: var(--space-8);
+  min-width: 0;
 }
 
-.add-machine-browser-head {
+/* The path bar: soft-filled like a search field, the crumbs left, type and browse on the right. */
+.clone-folder-bar {
   display: flex;
   align-items: center;
-  gap: var(--space-8);
+  gap: 2px;
+  height: 32px;
+  padding: 0 2px 0 var(--space-4);
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-hover);
+  transition: background 0.15s, box-shadow 0.15s;
 }
 
-.add-machine-browser-path {
+.clone-folder-bar:hover {
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+.clone-folder-bar.editing {
+  background: var(--ui-hover);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+/* Open: the bar and its folders read as one control. */
+.clone-folder-bar.open {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.clone-folder-bar .settings-icon-btn[aria-expanded='true'] {
+  color: var(--text-primary);
+  background: var(--ui-hover);
+}
+
+/* One line that scrolls to its end (the clone's folder); the start fades out when it is cut. */
+.clone-folder-crumbs {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  min-width: 0;
+  height: 100%;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+  cursor: text;
+}
+
+.clone-folder-crumbs::-webkit-scrollbar {
+  display: none;
+}
+
+.clone-folder-crumbs.cut {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 32px);
+  mask-image: linear-gradient(to right, transparent, #000 32px);
+}
+
+.clone-folder-crumb {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--settings-fs-small, 12.5px);
+  cursor: pointer;
+}
+
+.clone-folder-crumb:hover:not(:disabled),
+.clone-folder-crumb:focus-visible,
+.clone-folder-crumb.current {
+  outline: none;
+  color: var(--text-primary);
+  background: var(--ui-hover);
+}
+
+.clone-folder-crumb:disabled {
+  cursor: default;
+}
+
+/* Folders the clone makes: the accent says "new"; the clone's own folder leads. */
+.clone-folder-crumb.new {
+  color: var(--accent);
+}
+
+.clone-folder-crumb.leaf {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.clone-folder-crumb.taken {
+  color: var(--warning);
+}
+
+.clone-folder-sep {
+  flex-shrink: 0;
+  color: var(--ui-faint);
+}
+
+.clone-folder-placeholder {
+  padding: 0 6px;
+  color: var(--ui-faint);
+  font-size: var(--settings-fs-small, 12.5px);
+}
+
+/* Over the app's own input look (fill, border, padding, focus fill): the bar is the field. */
+.clone-folder-bar .clone-folder-input {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
-  color: var(--text-secondary);
+  height: 100%;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--settings-fs-small, 12.5px);
 }
 
-/* Back and Use this folder: the same 28px controls as the rest of the dialog. */
-.add-machine-browser-head .settings-btn {
-  height: var(--settings-control-h);
-  border-radius: var(--ui-control-radius);
-  font-size: var(--settings-fs-small);
+.clone-folder-input::placeholder {
+  color: var(--ui-faint);
 }
 
-/* As tall as the rows it replaces, so the dialog does not jump when browsing starts. */
-.add-machine-browser-list {
+/* The folders under the bar, on the same soft fill, a hairline between. */
+.clone-folder-list {
   display: flex;
   flex-direction: column;
-  min-height: 160px;
-  max-height: 260px;
+  max-height: 220px;
+  padding: var(--space-4);
   overflow-y: auto;
+  border-top: 1px solid var(--ui-line);
+  border-radius: 0 0 var(--ui-control-radius) var(--ui-control-radius);
+  background: color-mix(in srgb, var(--text-primary) 3.5%, transparent);
 }
 
-/* A line in place of the list (it could not be read, or it is empty), on the dialog's left edge. */
-.add-machine-browser-note {
-  display: flex;
-  align-items: center;
-  gap: var(--space-8);
-  height: 28px;
-  color: var(--text-secondary);
-  font-size: 12.5px;
+/* While the next folder is read, the last one stays, dimmed, so the list does not jump. */
+.clone-folder-list[aria-busy='true'] > .clone-folder-row:not(.create) {
+  opacity: 0.5;
 }
 
-.add-machine-browser-row {
+.clone-folder-row {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: var(--space-8);
   height: 28px;
   padding: 0 var(--space-8);
   border: 0;
-  border-radius: 7px;
+  border-radius: 6px;
   background: transparent;
   color: inherit;
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--settings-fs-small, 12.5px);
   text-align: left;
   cursor: pointer;
 }
 
-button.add-machine-browser-row:hover,
-button.add-machine-browser-row:focus-visible {
+.clone-folder-row > svg:first-child {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+button.clone-folder-row:hover:not(:disabled),
+button.clone-folder-row:focus-visible {
   outline: none;
   background: var(--ui-hover);
+}
+
+button.clone-folder-row:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.clone-folder-row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clone-folder-row-go {
+  flex-shrink: 0;
+  color: var(--ui-faint);
+  opacity: 0;
+}
+
+.clone-folder-row:hover .clone-folder-row-go,
+.clone-folder-row:focus-visible .clone-folder-row-go {
+  opacity: 1;
+}
+
+/* New folder leads the list: its icon in the accent, the one touch of colour here. */
+.clone-folder-row.create {
+  color: var(--text-secondary);
+}
+
+.clone-folder-row.create > svg:first-child,
+.clone-folder-row.naming > svg:first-child {
+  color: var(--accent);
+}
+
+.clone-folder-row.create:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.clone-folder-row.naming {
+  background: var(--ui-hover);
+  cursor: default;
+}
+
+.clone-folder-row.naming input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.clone-folder-row.naming input::placeholder {
+  color: var(--ui-faint);
+}
+
+.clone-folder-row.invalid > svg:first-child,
+.clone-folder-row-note {
+  color: var(--warning);
+}
+
+.clone-folder-row-note {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.clone-folder-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  height: 28px;
+  padding: 0 var(--space-8);
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-small, 12.5px);
+}
+
+/* One line under the bar, only when it matters: the folders the clone makes, or what is wrong. */
+.clone-folder-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: var(--space-8) 0 0;
+  padding: 0 var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-small, 12.5px);
+}
+
+.clone-folder-hint > svg {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.clone-folder-hint.warn {
+  color: var(--warning);
 }

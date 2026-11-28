@@ -128,6 +128,24 @@ describe('ChatGPT store', () => {
     expect(store.read().active).toBe('oaiapp_b')
   })
 
+  it('reads a store saved through the old keychain item as empty under a signed Mac build, keeping it aside unless the keychain is locked', () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'codex:managed')
+    const oldItem = {
+      encryptionRequired: true,
+      canEncrypt: () => true,
+      encrypt: (plain: string) => Buffer.from(plain).reverse(),
+      decrypt: (stored: Buffer) => Buffer.from(stored).reverse().toString()
+    }
+    new ChatGptStore(path, oldItem).write(SAMPLE())
+    const before = row(path)!
+    expect(() => new ChatGptStore(path, { ...fakeVault({ available: false }), ownKeychainItem: true }).read()).toThrow(expect.objectContaining({ failure: 'storage_locked' }))
+    expect(existsSync(`${path}.keychain-1`)).toBe(false)
+    const store = new ChatGptStore(path, { ...fakeVault(), ownKeychainItem: true })
+    expect(store.read()).toMatchObject({ active: null, sessions: [], revision: 1 })
+    expect(readFileSync(`${path}.keychain-1`, 'utf8')).toBe(before.payload)
+  })
+
   it('refuses to save when the required vault is unavailable, and saves nothing', () => {
     const { profileHome } = homes()
     const path = chatgptStorePath(profileHome, 'codex:managed')

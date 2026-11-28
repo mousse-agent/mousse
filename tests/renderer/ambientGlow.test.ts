@@ -186,6 +186,19 @@ describe('the idle start page costs no layout or paint', () => {
     expect(glowCss).toContain('url("../assets/ambient-glow-b.png")')
   })
 
+  it('dithers the waves with a bitmap grain cut to the glow, so the faint slope shows no rings', () => {
+    const wave = block(glowCss, '.app .chat--empty .ambient-glow-wave {')
+    expect(wave).toContain('url("../assets/ambient-glow-grain.png") 0 0 / 64px 64px repeat')
+    // Top to bottom: the mask, the grain cut to the layers below it, then four copies of the mask as its footprint.
+    expect(wave).toContain('mask-composite: add, intersect, add, add, add, add;')
+    expect(wave).toContain('-webkit-mask-composite: source-over, source-in, source-over, source-over, source-over, source-over;')
+    for (const property of ['-webkit-mask:', '\n  mask:']) {
+      const layers = wave.slice(wave.indexOf(property)).split(';')[0]
+      expect(layers.match(/var\(--ambient-glow-shape\)/g)).toHaveLength(5)
+      expect(layers.match(/var\(--ambient-glow-grain\)/g)).toHaveLength(1)
+    }
+  })
+
   it('moves in steps: no loop eases on every screen refresh', () => {
     const loops = [
       block(glowCss, '.app .chat--empty .ambient-glow-wave {'),

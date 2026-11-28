@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ThreadsSidebar } from '../../src/renderer/components/ThreadsSidebar'
 import { projectHueColor, projectHues } from '../../src/renderer/lib/projectHues'
+import { setThreadProjectColors } from '../../src/renderer/lib/threadProjectColorsSetting'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import type { Project, Thread } from '../../src/shared/types'
 
@@ -37,6 +38,7 @@ function setApp(app: AppPatch) {
   Object.assign(appInitial, app)
 }
 afterEach(() => {
+  setThreadProjectColors('off')
   useAppStore.setState(appOriginal)
   Object.assign(appInitial, appOriginal)
 })
@@ -66,6 +68,8 @@ describe('a project’s color', () => {
   ]
 
   it('is the same in Projects, Threads and Archived, from the project and not its place in the list', () => {
+    // Project colors on threads are off by default; turned on here.
+    setThreadProjectColors('fill')
     setApp({ projects, threads, threadsSidebarView: 'threads' })
     const html = renderToStaticMarkup(createElement(ThreadsSidebar))
     const hues = projectHues(projects.map((entry) => ({ id: entry.id, createdAt: entry.createdAt })))

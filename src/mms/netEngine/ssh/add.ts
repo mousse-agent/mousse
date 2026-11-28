@@ -29,6 +29,16 @@ export interface SshProfiles {
   os: string
   startsAtLogin: boolean
   profiles: Array<{ selector: string; label: string; networking: boolean; identity?: string }>
+  /** The shell B's SSH server ran the session in, as the helper learned it (§3.3). */
+  shell: SshShell
+}
+
+/** The remote shells the helper reaches B through (§3.3): POSIX `sh`, or Windows OpenSSH's `cmd` or PowerShell. */
+export type SshShell = 'sh' | 'cmd' | 'powershell'
+
+/** The shell an `ssh.run` answer names; none (a helper from before Windows remotes) means `sh`. */
+export function shellOf(answer: { shell?: unknown }): SshShell {
+  return answer.shell === 'cmd' || answer.shell === 'powershell' ? answer.shell : 'sh'
 }
 
 /** The SSH add's limits (1b §13.3), app side. */
@@ -64,7 +74,7 @@ export function sshErrorText(reason: string, host = 'the other computer', user =
     case 'probe_again':
       return `Check ${host}'s SSH key first.`
     case 'remote_not_installed':
-      return `Mousse isn't installed for ${user} on ${host}.`
+      return `Mousse isn't installed for ${user} on ${host}, or needs an update. Install or update it there, then open it once.`
     case 'remote_not_running':
       return `Mousse isn't running for ${user} on ${host}. Sign in there and open it once.`
     case 'remote_no_endpoint':
@@ -83,10 +93,34 @@ export function sshErrorText(reason: string, host = 'the other computer', user =
   }
 }
 
-/** A helper's or B's refusal, as a NetError carrying its §3.5 reason. */
+/** The §3.5 reasons the helper's `ssh.*` replies name, each with its own line in `sshErrorText`. */
+const SSH_REASONS = new Set([
+  'auth_denied',
+  'host_key_changed',
+  'host_key_unknown',
+  'probe_again',
+  'remote_not_installed',
+  'remote_not_running',
+  'remote_no_endpoint',
+  'remote_failed',
+  'removed',
+  'ssh_proxy_unsupported',
+  'windows_remote_unsupported',
+  'unreachable',
+  'timeout'
+])
+
+/**
+ * A helper's or B's refusal, as a NetError carrying its §3.5 reason. A helper reply names its reason as its code and
+ * the remote's own output as its text (`'exec' is not recognized…` from a Windows remote): the code decides the line
+ * shown, never the raw output, and an unknown code never reads as an internal error.
+ */
 export function sshError(error: unknown, host?: string, user?: string): NetError {
+  const code = helperCode(error)
+  if (code && SSH_REASONS.has(code))
+    return new NetError('bad_request', sshErrorText(code, host, user), { details: { reason: code } })
   if (error instanceof NetError && typeof reasonOf(error) === 'string') return error
-  const reason = helperCode(error) ?? 'remote_failed'
+  const reason = code ?? 'remote_failed'
   return new NetError('bad_request', sshErrorText(reason, host, user), { details: { reason } })
 }
 
@@ -155,17 +189,26 @@ export class SshAdd {
     return this.listed.get(routeId)
   }
 
+  /** The shell an `ssh.run` of this add last answered for `routeId`. */
+  private readonly shells = new Map<string, SshShell>()
+
+  /** The shell this add learned for `routeId`, `sh` when no session ran yet. */
+  shellFor(routeId: string): SshShell {
+    return this.shells.get(routeId) ?? 'sh'
+  }
+
   /** Session 1: B's profiles. */
   async profiles(routeId: string, host?: string, user?: string): Promise<SshProfiles> {
-    const reply = await this.run(routeId, { op: 'profiles' }, host, user)
+    const { reply, shell } = await this.run(routeId, { op: 'profiles' }, host, user)
     const list = Array.isArray(reply.profiles) ? reply.profiles : []
-    const answer = this.readProfiles(reply, list, host)
+    const answer = this.readProfiles(reply, list, shell, host)
     this.listed.set(routeId, answer)
     return answer
   }
 
-  private readProfiles(reply: Record<string, any>, list: unknown[], host?: string): SshProfiles {
+  private readProfiles(reply: Record<string, any>, list: unknown[], shell: SshShell, host?: string): SshProfiles {
     return {
+      shell,
       computer: String(reply.computer ?? host ?? ''),
       os: String(reply.os ?? ''),
       startsAtLogin: reply.starts_at_login === true,
@@ -188,8 +231,10 @@ export class SshAdd {
     request: Record<string, unknown>,
     host?: string,
     user?: string
-  ): Promise<Record<string, any>> {
+  ): Promise<{ reply: Record<string, any>; shell: SshShell }> {
     const answer = await this.ask('ssh.run', { route_id: routeId, request }, host, user)
+    const shell = shellOf(answer)
+    this.shells.set(routeId, shell)
     const reply = answer.reply as Record<string, any> | undefined
     if (!reply || typeof reply !== 'object') {
       const reason = typeof answer.error === 'string' ? answer.error : 'remote_failed'
@@ -199,7 +244,7 @@ export class SshAdd {
       throw new NetError('bad_request', sshErrorText(reply.error, host, user), {
         details: { reason: reply.error }
       })
-    return reply
+    return { reply, shell }
   }
 
   /**
@@ -213,7 +258,8 @@ export class SshAdd {
     user: string
     selector?: string
     newLabel?: string
-    shell?: string
+    /** The shell session 1 learned; this add's own when not given. */
+    shell?: SshShell
   }): Promise<EnginePeerRow> {
     if (!choice.selector === !choice.newLabel)
       throw new NetError('bad_request', 'Pick a profile.', { details: { reason: 'bad_request' } })
@@ -226,7 +272,7 @@ export class SshAdd {
       target: choice.target,
       host: choice.host,
       user: choice.user,
-      shell: choice.shell ?? 'sh'
+      shell: choice.shell ?? this.shellFor(choice.routeId)
     }
     // Until B answers, the row knows B only by this request.
     const row = this.port.peers.add({
@@ -261,8 +307,9 @@ export class SshAdd {
         details: { reason: 'expired' }
       })
     let reply: Record<string, any>
+    let shell: SshShell
     try {
-      reply = await this.run(
+      ;({ reply, shell } = await this.run(
         ssh.routeId,
         {
           op: 'prepare',
@@ -274,7 +321,7 @@ export class SshAdd {
         },
         ssh.host,
         ssh.user
-      )
+      ))
     } catch (error) {
       if (error instanceof NetError && reasonOf(error) === 'removed') {
         this.port.peers.update(row.localId, { ssh: { ...ssh, removed: true } })
@@ -292,6 +339,7 @@ export class SshAdd {
     const journal: EngineSshJournal = {
       ...ssh,
       ...(selector ? { selector } : {}),
+      shell,
       startsAtLogin: reply.starts_at_login === true
     }
     // The owner removed this row here while B answered: nothing is recorded over the removal.
@@ -317,7 +365,7 @@ export class SshAdd {
         // The `route-leak` control: what B offered beyond its SSH route goes first.
         ...(engineControl('route-leak') ? leaked(reply.routes) : []),
         ...(row.addresses ?? []),
-        { route_id: journal.routeId, selector: journal.selector, shell: journal.shell ?? 'sh' }
+        { route_id: journal.routeId, selector: journal.selector, shell }
       ])
     })
     const saved = this.port.peers.advance(row.localId, ['ssh_requested'], {

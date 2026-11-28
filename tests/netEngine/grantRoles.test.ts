@@ -192,6 +192,12 @@ describe("a grant's role follows the device's level", () => {
 
     await setLevel(host, node, 'full')
     expect(await roleOn(host, caller)).toBe('owner')
+    // The bot level alone is not part of Full control: lowering it leaves the grant as it is.
+    const owner = await grantOf(host, caller)
+    for (const bots of ['use', 'off', 'full']) {
+      await host.dispatch('bridge.policy', { node, bots }, true)
+      expect(await grantOf(host, caller), bots).toEqual(owner)
+    }
     // Blocked is not an owner, whatever its rights.
     await host.dispatch('bridge.policy', { node, blocked: true }, true)
     expect(await roleOn(host, caller)).not.toBe('owner')

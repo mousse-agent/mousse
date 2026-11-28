@@ -7,8 +7,12 @@ import { DeviceBotsRow } from '../devices/DeviceBotsRow'
 import { DevicePresetRow } from '../devices/DevicePresetRow'
 import { SettingsRow } from '../settings/SettingsRow'
 
+/** The panel shows the device's access level itself (its preset row): only a connected computer that works on threads. */
+export const showsLevel = (device: Device | undefined): boolean =>
+  !!device && connectedHere(device) && !!device.policy && isComputer(device) && worksOnThreads(device) && !device.policy.blocked
+
 /**
- * One device's access, opened from its row: how it is connected, what it can see and do here, then Block and
+ * One device's access, in its detail: how it is connected, what it can see and do here, then Block and
  * Remove. The same panel serves engine pairings and pairings from the old networking: both are served by
  * `bridge.policy`. `device` is its `bridge.nodes` row; without one (an older service) only Remove shows.
  */
@@ -40,7 +44,7 @@ export function AccessPanel({
   const blocked = !!policy?.blocked
   const connected = !!device && connectedHere(device)
   const computer = !!device && isComputer(device)
-  const works = connected && !!policy && computer && !!device && worksOnThreads(device) && !blocked
+  const works = showsLevel(device)
   return (
     <>
       <SettingsRow

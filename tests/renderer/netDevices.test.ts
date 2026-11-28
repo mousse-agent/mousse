@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  accessHere,
   bindSettings,
   canWorkOnThreads,
   capabilityLabel,
@@ -254,5 +255,21 @@ describe('passLapsed', () => {
 
   it('never shows the raw code', () => {
     expect(netErrorWords('bad_delegation')).toBe('waiting for your other computer to reconnect this one')
+  })
+})
+
+describe('the bot level shown under Access here', () => {
+  const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, work: true, agentReach: 'launched', bots: 'full' } as const
+  const bots = (caps: Device['caps'], kind?: Device['kind']) => {
+    const access = accessHere(device({ caps, kind, policy }), { workOnThreads: true })
+    return typeof access === 'object' ? access.bots : access
+  }
+  it('is what the gate lets through: Full needs write in the grant, any level needs read', () => {
+    for (const kind of [undefined, 'phone'] as const) {
+      expect(bots(['read', 'chat', 'write', 'settings'], kind)).toBe('full')
+      expect(bots(['read', 'chat'], kind)).toBe('use')
+      expect(bots(['read'], kind)).toBe('use')
+      expect(bots(['chat', 'write'], kind)).toBe('off')
+    }
   })
 })

@@ -1116,6 +1116,16 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   background: var(--ui-hover);
 }
 
+/* Greyed out, yet still reached by the arrow keys so its tooltip can say why. */
+html .threads-context-menu-item[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+html .threads-context-menu-item[aria-disabled='true']:hover:not(:focus-visible) {
+  background: transparent;
+}
+
 /* "Git ›": its menu opens beside the row, or on the left when the window has no room on the right. */
 .threads-context-submenu-anchor {
   position: relative;

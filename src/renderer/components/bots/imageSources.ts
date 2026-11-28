@@ -90,7 +90,7 @@ export const isImageAttachment = (file: BotFile): boolean => isImageFile(file.pa
  * image is in the set once it has been read (`fileUrl`); the same image twice is in it once, where it first shows.
  * An image's id is its path, or its `data:` URL, as its tile opens it.
  */
-export function botChatImages(messages: readonly BotChatMessage[], fileUrl: (path: string) => string | undefined): LightboxImage[] {
+export function botChatImages(messages: readonly BotChatMessage[], fileUrl: (path: string) => string | undefined, remote = false): LightboxImage[] {
   const images: LightboxImage[] = []
   const fromFiles = (message: BotChatMessage) => {
     for (const file of message.attachments ?? []) {
@@ -103,7 +103,8 @@ export function botChatImages(messages: readonly BotChatMessage[], fileUrl: (pat
     for (const { src, alt } of markdownImages(message.text)) {
       const source = botImageSource(src)
       if (source.kind === 'data') images.push({ id: source.url, url: source.url, filename: alt })
-      else if (source.kind === 'file') {
+      // A bot of another computer names files there, never here.
+      else if (source.kind === 'file' && !remote) {
         const url = fileUrl(source.path)
         if (url) images.push({ id: source.path, url, filename: alt ?? fileNameOf(source.path) })
       }

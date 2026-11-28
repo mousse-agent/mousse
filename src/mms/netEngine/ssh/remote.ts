@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname } from 'node:os'
-import { join } from 'node:path'
+import { join, posix, win32 } from 'node:path'
 import { NetError } from '../../../shared/net/errors'
 import type { NetEngineService } from '../NetEngineService'
 import { findNetHelper } from '../helper/process'
@@ -135,14 +135,36 @@ export class SshRemote {
   }
 
   /**
-   * Stable launchers in `$MOUSSE_HOME/bin/` (§3.3): `mousse-helper` and `mousse-cli`, small `sh` scripts that set
-   * `MOUSSE_HOME` and run this build's binaries, so an update never changes the SSH command. Windows remotes are not
-   * reached over SSH in 1b, so none is written there.
+   * Stable launchers in `$MOUSSE_HOME/bin/` (§3.3): `mousse-helper` and `mousse-cli`, small scripts that set
+   * `MOUSSE_HOME` and run this build's binaries, so an update never changes the SSH command. `sh` scripts on macOS
+   * and Linux; `.cmd` files on Windows, which another computer's SSH session runs as `.\.mousse\bin\<name>.cmd`
+   * from the profile folder (`windowsLauncherText`). A `.cmd` launcher that cannot be written safely is not written,
+   * and the console says why.
    */
   writeLaunchers(): void {
-    if (process.platform === 'win32') return
     const bin = join(this.host.home, 'bin')
     mkdirSync(bin, { recursive: true })
+    if (process.platform === 'win32') {
+      const helper = findNetHelper()
+      const targets: Array<[string, string[] | undefined]> = [
+        ['mousse-helper', helper ? [helper] : undefined],
+        ['mousse-cli', cliCommand()]
+      ]
+      for (const [name, target] of targets) {
+        if (!target) continue
+        const path = join(bin, `${name}.cmd`)
+        const text = windowsLauncherText(this.host.home, target, process.env)
+        if (text) writeLauncher(path, text)
+        else {
+          // A launcher left from an earlier install would run that install.
+          rmSync(path, { force: true })
+          console.warn(
+            `ssh launcher ${name}.cmd not written: ${[this.host.home, ...target].join(' ')} has characters a .cmd file can't hold outside %USERPROFILE% and %LOCALAPPDATA%`
+          )
+        }
+      }
+      return
+    }
     const quote = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`
     const home = `MOUSSE_HOME=${quote(this.host.home)}; export MOUSSE_HOME`
     const helper = findNetHelper()
@@ -282,11 +304,70 @@ function writeLauncher(path: string, text: string): void {
 
 /**
  * How this build's `mousse-cli` runs: `MOUSSE_NET_ENGINE_CLI` (a check's own command line, words split on spaces),
- * else the launcher an installed app ships beside its binary.
+ * else the launcher an installed app ships beside its binary (`mousse-cli.cmd` on Windows).
  */
-function cliCommand(): string[] | undefined {
-  const given = process.env.MOUSSE_NET_ENGINE_CLI?.trim()
+export function cliCommand(
+  env: NodeJS.ProcessEnv = process.env,
+  execPath = process.execPath,
+  platform: NodeJS.Platform = process.platform,
+  exists: (path: string) => boolean = existsSync
+): string[] | undefined {
+  const given = env.MOUSSE_NET_ENGINE_CLI?.trim()
   if (given) return given.split(/\s+/)
-  const beside = join(process.execPath, '..', process.platform === 'darwin' ? '../Resources/mousse-cli' : 'mousse-cli')
-  return existsSync(beside) ? [beside] : undefined
+  const name = platform === 'darwin' ? '../Resources/mousse-cli' : platform === 'win32' ? 'mousse-cli.cmd' : 'mousse-cli'
+  const beside = (platform === 'win32' ? win32 : posix).join(execPath, '..', name)
+  return exists(beside) ? [beside] : undefined
+}
+
+/**
+ * A path as `.cmd` text inside double quotes. `cmd` reads a `.cmd` file in the console's OEM code page, so only
+ * printable ASCII is written as it is: a path under `%LOCALAPPDATA%` or `%USERPROFILE%` (exactly as this process
+ * sees them; an SSH session of the same account gets the same values) is written relative to it, so a non-ASCII
+ * user name is no problem. `%` is written `%%`, and `%%%%` on a `call` line, which expands it once more; `call` also
+ * doubles `^`, so a `^` there cannot be written. Undefined when the path cannot be written.
+ */
+export function cmdPath(
+  path: string,
+  env: { USERPROFILE?: string; LOCALAPPDATA?: string },
+  call = false
+): string | undefined {
+  const percent = call ? '%%%%' : '%%'
+  const plain = (text: string) =>
+    /^[\x20-\x7e]*$/.test(text) && !text.includes('"') && !(call && text.includes('^'))
+      ? text.replace(/%/g, percent)
+      : undefined
+  for (const name of ['LOCALAPPDATA', 'USERPROFILE'] as const) {
+    const base = env[name]
+    // A `%` in the value itself would be expanded again by `call`.
+    if (!base || (call && base.includes('%')) || !path.startsWith(`${base}\\`)) continue
+    const rest = plain(path.slice(base.length))
+    if (rest !== undefined) return `%${name}%${rest}`
+  }
+  return plain(path)
+}
+
+/**
+ * A Windows launcher in `%MOUSSE_HOME%\bin` (1b §3.3): sets `MOUSSE_HOME` to exactly `home` (the daemon's pipe name
+ * is a digest of it) and runs `target` with the session's arguments, passing its exit code on. A `.cmd` target (the
+ * app's own `mousse-cli.cmd`) is run with `call`, so control comes back. No label or parenthesized block, so `%*` is
+ * expanded whatever the arguments are. Undefined when a path cannot be written (`cmdPath`).
+ */
+export function windowsLauncherText(
+  home: string,
+  target: readonly string[],
+  env: { USERPROFILE?: string; LOCALAPPDATA?: string }
+): string | undefined {
+  if (!target.length) return undefined
+  const call = /\.(?:cmd|bat)$/i.test(target[0]!)
+  const homeText = cmdPath(home, env)
+  const words = target.map((word) => cmdPath(word, env, call))
+  if (homeText === undefined || words.some((word) => word === undefined)) return undefined
+  return [
+    '@echo off',
+    'setlocal DisableDelayedExpansion',
+    `set "MOUSSE_HOME=${homeText}"`,
+    `${call ? 'call ' : ''}${words.map((word) => `"${word}"`).join(' ')} %*`,
+    'exit /b %ERRORLEVEL%',
+    ''
+  ].join('\r\n')
 }

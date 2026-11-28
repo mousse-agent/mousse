@@ -122,8 +122,12 @@ export interface BotChatMessage {
   error?: BotError
   activationId?: string
   /** Files: the owner's attachments, and pictures a tool handed the bot (kept in its files folder). */
-  /** `previewUrl`: the composer's picture of an image still being sent (this window only; never stored or sent). */
-  attachments?: Array<{ name: string; path: string; previewUrl?: string }>
+  /**
+   * `previewUrl`: the composer's picture of an image still being sent (this window only; never stored or sent).
+   * `remote`: a file of a bot of another computer, by its place in that bot's files folder; `path` is then its copy on
+   * this computer, empty until read (this window only, `stores/remoteBotFiles.ts`).
+   */
+  attachments?: Array<{ name: string; path: string; previewUrl?: string; remote?: string }>
   /** Applets the reply shows under its words, as a thread's reply does (`publish_applet`). Absent from older services. */
   applets?: BotChatApplet[]
   /** The message this one answers, as a short quote: a bot's reply to the owner's message, or the owner's reply to the bot's. */
@@ -154,10 +158,11 @@ export interface BotChatMessage {
 
 /**
  * An applet a bot made: the bot's thread it was published in (the app reads and runs it from there, in the same sandbox
- * as a thread's) and its reference.
+ * as a thread's) and its reference. A bot of another computer's applet has no thread here: the app opens it through
+ * that bot (`bots.remote.applet`), by the message that shows it.
  */
 export interface BotChatApplet {
-  threadId: string
+  threadId?: string
   reference: AppletReference
 }
 
@@ -229,8 +234,8 @@ export interface BotSummary {
    */
   tasks?: BotTaskItem[]
   /**
-   * Which devices reach it (About's Devices), on its own computer's window only: anything but `all` shows a lock in the
-   * Bots list. Absent from older services and from what other devices get.
+   * Which devices reach it (About's Devices), on its own computer's window only: this computer alone, or other devices
+   * too, when the bot's menu offers Make private. Absent from older services and from what other devices get.
    */
   reach?: BotDeviceAccessMode
   /**
@@ -239,6 +244,14 @@ export interface BotSummary {
    * services, which save none.
    */
   facePicture?: { key?: string }
+  /**
+   * The computer it lives on, when that is another of the owner's computers: the viewing computer adds it to the bots
+   * it lists from there (`bots.remote.list`), whose ids are qualified (`<node>:<botId>`). `offline`: that computer
+   * can't be reached now, and the row and chat are its last copy. `level`: `full` where that computer lets this one set
+   * its bots up (About, the menu's setup items), absent where it lets this one only use them. Absent for this computer's
+   * own bots.
+   */
+  lives?: { node: string; name: string; level?: 'full'; offline?: true }
 }
 
 /** How many of a bot's tasks its summary carries. */

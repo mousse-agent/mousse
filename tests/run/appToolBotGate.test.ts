@@ -37,8 +37,10 @@ describe('app tools under a bot’s authority (MCP)', () => {
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, bot: bot(['task_create']) }))
     const ctx = () => request({ threadId: 'thread-a', runId: run.runId })
-    expect(await registry.call('task_status', { taskId: 'd1' }, ctx())).toEqual(refused('not_granted', 'This bot is not allowed to use thread_wait.'))
-    expect(fake.host.delegation).not.toHaveBeenCalled()
+    // A call that names a thread is the thread tool's own, never one of the bot's (its subagents' `subagent_wait`).
+    const handler = vi.spyOn(registry.list().find((tool) => tool.name === 'thread_wait')!, 'handler')
+    expect(await registry.call('thread_wait', { threadId: 'thread-b' }, ctx())).toEqual(refused('not_granted', 'This bot is not allowed to use thread_wait.'))
+    expect(handler).not.toHaveBeenCalled()
     expect((await registry.call('task_create', { description: 'fine' }, ctx())).isError).toBe(false)
   })
 
@@ -50,7 +52,7 @@ describe('app tools under a bot’s authority (MCP)', () => {
     const callRuns = vi.fn()
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, bot: { ...bot(['task_create']), callRuns } }))
     const ctx = () => request({ threadId: 'thread-a', runId: run.runId })
-    await registry.call('task_status', { taskId: 'd1' }, ctx())
+    expect((await registry.call('thread_wait', { threadId: 'thread-b' }, ctx())).isError).toBe(true)
     expect(callRuns).not.toHaveBeenCalled()
     // The same call twice is two calls.
     expect((await registry.call('task_create', { description: 'fine' }, ctx())).isError).toBe(false)

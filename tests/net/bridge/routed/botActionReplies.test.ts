@@ -12,6 +12,7 @@ import { validateWireMessage } from '../../../../src/shared/net/schemas'
 import type { BotChatMessage } from '../../../../src/shared/bots/personal/chat'
 import { botFixture, createBot, type BotFixture } from '../../../bots/botFixture'
 import { cleanupAll, cleanups, linked } from './routerFixture'
+import type { SqliteNodePolicy } from '../../../../src/mms/net/store/nodePolicy'
 
 const BOT = 'bot-0123456789ab'
 const ACTION = 'ba_00000000-0000-0000-0000-000000000000'
@@ -47,6 +48,8 @@ beforeAll(async () => {
     answerAction: () => answer()
   }
   Object.defineProperty(t.owner, 'personalBots', { value: { service, events: new EventEmitter(), liveActivity: () => undefined }, configurable: true })
+  // A bot reaches only its own computer until the owner adds a device to its Devices: the calling device is added.
+  t.owner.botDeviceAccess.set(BOT, { mode: 'chosen', nodes: [t.callerNode] })
   cleanups.push(() => { if (real) Object.defineProperty(t.owner, 'personalBots', real) })
 }, 120_000)
 afterAll(async () => {
@@ -69,7 +72,7 @@ it('keeps a tool error outcome without its answer text when a device receives an
   expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(48 * 1024)
 }, 60_000)
 
-// Inputs: every definite held-action refusal, size, Work off, and a change after preflight.
+// Inputs: every definite held-action refusal, size, bot access Off, and a change after preflight.
 const refusals = [
   ['changed', 'This changed since you saw it. Check it again before sending.'],
   ['paused', 'Resume Mail to send this.'],
@@ -129,16 +132,20 @@ it('refuses oversized Send before effects but allows Not now', async () => {
   expect(answer).toHaveBeenCalledTimes(1)
 }, 60_000)
 
-it('keeps Work off ahead of preflight for Send and Not now', async () => {
+// Bot calls follow the device's bot level, not "Work on threads" (#2093): Off is refused before the bot is asked anything.
+it('keeps bot access Off ahead of preflight for Send and Not now', async () => {
   let checked = 0
   check = () => { checked++ }
   answer.mockClear()
-  await t.owner.net.request('bridge.policy', { node: t.callerNode, work: false })
+  const policy = (t.insideOwner.routes as unknown as { options: { policy: SqliteNodePolicy } }).options.policy
+  const level = policy.get(t.callerNode).bots
+  expect(level).not.toBe('off')
+  await t.owner.net.request('bridge.policy', { node: t.callerNode, bots: 'off' })
   try {
-    for (const choice of ['send', 'not_now']) await expect(rpcAnswer(choice)).rejects.toMatchObject({ code: 'forbidden', details: { reason: 'work_off' } })
+    for (const choice of ['send', 'not_now']) await expect(rpcAnswer(choice)).rejects.toMatchObject({ code: 'forbidden', details: { reason: 'bots_off' } })
     expect(checked).toBe(0)
     expect(answer).not.toHaveBeenCalled()
-  } finally { await t.owner.net.request('bridge.policy', { node: t.callerNode, work: true }) }
+  } finally { await t.owner.net.request('bridge.policy', { node: t.callerNode, bots: level }) }
 }, 60_000)
 
 it('keeps a failure after preflight uncertain', async () => {

@@ -2,6 +2,7 @@
 import Ajv, { type AnySchema, type ValidateFunction } from 'ajv'
 import { BOT_PROFILES, NODE_CAPABILITIES, SPACE_ROLES } from './capabilities'
 import {
+  BOT_STREAM_EVENT_TYPES,
   BRIDGE_ROUTED_EVENT_TYPES,
   BRIDGE_THREAD_EVENT_TYPES,
   CONTENT_EVENT_TYPES,
@@ -233,7 +234,7 @@ export const eventBodySchemas = {
   'thread.snapshot.end': object({ threadId: text(256, 1), snapshot: snapshotId, sha256: key }),
   'thread.event': object({
     threadId: text(256, 1),
-    type: enumeration([...BRIDGE_THREAD_EVENT_TYPES, ...BRIDGE_ROUTED_EVENT_TYPES]),
+    type: enumeration([...BRIDGE_THREAD_EVENT_TYPES, ...BRIDGE_ROUTED_EVENT_TYPES, ...BOT_STREAM_EVENT_TYPES]),
     data: json
   }),
   'artifact.published': object({ rpc: id('rpc'), purpose: enumeration(['input', 'result']) }),

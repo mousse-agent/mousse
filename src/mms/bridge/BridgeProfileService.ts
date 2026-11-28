@@ -30,7 +30,7 @@ import type { BotReachPort } from '../protocol/botReachPort'
 import type { BotDeviceChoice } from '../../shared/bots/personal/deviceAccess'
 import { remoteListMethods } from './remote/RemoteLists'
 import { botDeviceLimitFrom, remoteBotMethods } from './remote/RemoteBots'
-import type { BotsSharingPort } from '../protocol/botsSharingPort'
+import { BotStaging, stagedFileLost } from './remote/botStaging'
 import { cleanDeviceName } from '../../shared/bridge/editorAsk'
 import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
@@ -41,11 +41,19 @@ import { PeerDirectory } from './peers'
 import { EditorAsks } from './routed/editorAsks'
 import { ThreadRouter } from './routed/ThreadRouter'
 import { MergedLists } from './routed/mergedLists'
+import { RemoteBotRegistry } from './routed/RemoteBotRegistry'
+import { RemoteBotFiles, type RemoteFilePage } from './routed/remoteBotFiles'
+import { RemoteBotApplets } from './routed/remoteBotApplets'
+import { RemoteBotTellings } from './routed/RemoteBotTellings'
+import type { RemoteBotMessage } from './remote/RemoteBots'
+import { BotRouter } from './routed/BotRouter'
+import { REMOTE_BOTS_DB, SqliteRemoteBots } from './routed/remoteBotStore'
 import { RemoteAutomations } from './routed/remoteAutomations'
 import { PrivateSources, raiseStreamListenerLimits } from './routed/privateSources'
 import { RoutedStaging } from './routed/staging'
 import { routedStreamsPort } from './routed/streamsPort'
-import { isPrivateKey } from './remote/privateStreams'
+import { isPrivateKey, privateRecordSubject, type PrivateSpec } from './remote/privateStreams'
+import { BOT_STREAM_KINDS, isBotStreamKind, ROUTED_STREAM_KINDS } from '../../shared/bridge/routed'
 import { deviceLabelOf, deviceNameOf } from './routed/deviceName'
 import { clearDeviceRules, deviceActivityOf, messageSendersOf, validateActivityParams } from './deviceActivity'
 import type { BridgeActivityMethod, BridgeActivityParams } from '../../shared/bridge/deviceActivity'
@@ -65,6 +73,11 @@ export class BridgeProfileService {
   readonly router: ThreadRouter
   /** The other computers' threads, projects and statuses as one list with this computer's (behind `netBridgeThreads`). */
   readonly lists: MergedLists
+  /** The bots of the other computers this one reaches, and the copies of their chats (not used by a window yet). */
+  readonly remoteBots: RemoteBotRegistry
+  /** Notifications here for those bots, as this computer's own bots notify. */
+  readonly remoteTellings: RemoteBotTellings
+  readonly botRouter: BotRouter
   private readonly routerStop = new AbortController()
   readonly dispatch: DispatchService
   private readonly remote: RemoteApi
@@ -81,6 +94,8 @@ export class BridgeProfileService {
   private presenceBytes = 0
   private readonly domain: NetDomainComposition
   private stopped = false
+  /** Whether a private stream may still be read: a bot stream only while its reader reaches it (the constructor). */
+  private readonly botStreamReadable: (spec: PrivateSpec) => boolean
   private activated = false
   private disableDrains: Promise<unknown>[] = []
   private closing?: Promise<void>
@@ -103,27 +118,13 @@ export class BridgeProfileService {
     const { services, runtime: rt, net } = options
     this.peers = options.peers ?? new PeerDirectory({ net, engine: () => undefined })
     raiseStreamListenerLimits(services)
-    // "Share bots with other devices": the lists and the bot methods ask on every push and call.
-    const botsSharing: BotsSharingPort = {
-      refusal: () => {
-        if (net.sharesBots?.() !== false) return undefined
-        const self = rt.identity.self()?.node
-        const name = cleanDeviceName(self ? deviceNameOf(rt.identity, self, 'This computer') : 'This computer')
-        return `${name} doesn't share its bots with other devices.`
-      },
-      onChange: (listener) => net.onShareBotsChanged?.(listener) ?? (() => undefined)
-    }
-    services.botsSharing = botsSharing
-    this.disposers.add(() => {
-      if (services.botsSharing === botsSharing) services.botsSharing = undefined
-    })
-    // Which of the owner's devices reach which bot here: each device's switch (Settings, Devices) and each bot's Devices
-    // (About), both kept on this computer. Every path that shows a bot to another device asks it.
+    // Which of the owner's devices reach which bot here, and at what level: each device's bot level (Settings, Devices)
+    // and each bot's Devices (About), both kept on this computer. Every path that shows a bot to another device asks it.
     const access = services.botDeviceAccess
     const reach = createBotReach({
       access: (botId) => access.get(botId).access,
       choices: () => access.choices(),
-      deviceOn: (node) => rt.policy.get(node as NodeId).bots,
+      level: (node) => rt.policy.get(node as NodeId).bots,
       // A blocked device, or one not connected here, reads nothing here, so it does not hold a bot back from the
       // streams every device may read.
       devices: () =>
@@ -149,24 +150,27 @@ export class BridgeProfileService {
             self?: boolean
             revoked?: boolean
             connection?: string
-            policy?: { bots?: boolean }
+            policy?: { bots?: string }
           }>
         }
-        // Only the devices connected here are offered.
+        // Every device of the account, connected now or not: a paired computer that is only offline is still offered,
+        // so saving Devices never drops it.
         return view.nodes
-          .filter((entry) => !entry.self && !entry.revoked && entry.connection === 'connected')
+          .filter((entry) => !entry.self && !entry.revoked)
           .map((entry): BotDeviceChoice => ({
             node: entry.node,
             name: cleanDeviceName(entry.name || 'Unnamed device'),
             kind: entry.kind === 'phone' || entry.kind === 'computer' ? entry.kind : 'unknown',
-            ...(entry.policy?.bots === false ? { botsOff: true as const } : {})
+            ...(entry.policy?.bots === 'off' ? { botsOff: true as const } : {})
           }))
       }
     }
     services.botReach = botReach
     // A device that leaves the account leaves every bot's list of chosen devices; read once now for any that left while
-    // this computer was off.
+    // this computer was off. The first time the devices can be read after an update, every bot that reached every
+    // device gets the devices linked then (`snapshotBotDevices`); until then such a bot reaches this computer alone.
     const dropRemoved = (): void => {
+      services.snapshotBotDevices?.(() => this.peers.accountDevices())
       const present = this.peers.accountDevices()
       if (!present) return
       try {
@@ -321,7 +325,20 @@ export class BridgeProfileService {
             : threadSource.onThread(threadId, listener, onError)
         }
       }
+    // A device's bot streams are its own and need no thread switch, only that it reaches them now: it is on the account
+    // and not blocked here, its bot level is not Off, and (one bot's chat) that bot is there and its Devices include it.
+    // Asked on every read; when it says no, the stream ends (`endLostBotStreams` below).
+    const botStreamReadable = (spec: PrivateSpec): boolean => {
+      if (!isBotStreamKind(spec.kind)) return true
+      if (rt.policy.isBlocked(spec.reader as NodeId) || reach.level(spec.reader) === 'off') return false
+      const present = this.peers.accountDevices()
+      if (present && !present.includes(spec.reader as NodeId)) return false
+      if (spec.kind === 'bots') return true
+      return !!services.personalBots?.botIds().includes(spec.subject) && reach.canReach(spec.subject, spec.reader)
+    }
+    this.botStreamReadable = botStreamReadable
     this.threads = new ThreadStreamAdapter({
+      privateReadable: botStreamReadable,
       db: rt.db,
       store: this.spaces.store,
       generations: rt.streams,
@@ -518,20 +535,77 @@ export class BridgeProfileService {
         ...method,
         handle: (params, context) => this.track(method.handle(params, context))
       })
+    // Files another device sends a bot ahead of its message: kept apart from the bot's files folder until one takes them,
+    // and dropped once the device no longer reaches that bot (its level Off, left out of the bot's Devices, the bot gone,
+    // the device blocked here or gone from the account), as a queued message of that device is (`offWithdraw`).
+    const botStaging = new BotStaging({ folder: join(services.getProfileHomeDir(), 'bots', 'staging'), clock: this.clock })
+    const stopStagingSweep = botStaging.start()
+    const dropLostStaging = (): void => {
+      const present = this.peers.accountDevices()
+      botStaging.dropWhere(stagedFileLost({
+        bots: services.personalBots?.botIds(),
+        canReach: (botId, node) => reach.canReach(botId, node),
+        blocked: (node) => rt.policy.isBlocked(node as NodeId),
+        ...(present ? { present } : {})
+      }))
+    }
+    const offStagingReach = reach.onChange(dropLostStaging)
+    services.personalBots?.events.on('changed', dropLostStaging)
+    this.disposers.add(() => {
+      offStagingReach()
+      services.personalBots?.events.off('changed', dropLostStaging)
+      stopStagingSweep()
+      botStaging.close()
+    })
     // The owner's personal bots, from a phone or another computer: their chats, asks and pause, and a new bot.
     for (const method of remoteBotMethods({
+      staging: botStaging,
+      // Each bot's applets, kept where its thread published them; read and saved only through a message of that bot.
+      applets: services.applets,
       bots: () => services.personalBots?.service ?? undefined,
-      refusal: () => botsSharing.refusal(),
       // The device's own limit here: what a bot does with threads in a turn its message started is held to it.
       deviceLimit: botDeviceLimitFrom(rt.policy),
       // Which bots the calling device reaches; a bot it made stays within its reach, unless a choice was saved for it.
       reach,
-      madeBy: keepMakerInReach(access, reach, (botId) => services.personalBots?.reachChanged(botId))
+      madeBy: keepMakerInReach(access, reach, (botId) => services.personalBots?.reachChanged(botId)),
+      // About's Devices row from a device at Full: the same choice this computer's own About sets.
+      devices: {
+        store: access,
+        devices: () => botReach.devices(),
+        // The account's devices whether connected now or not: a choice sent from another device may name only these.
+        known: () => this.peers.accountDevices(),
+        changed: (botId) => services.personalBots?.reachChanged(botId)
+      },
+      // The bots feed and one bot's chat, read by the device that opened them alone.
+      openStream: async (reader, stream) => {
+        const spec: PrivateSpec = { reader, kind: stream.kind, subject: stream.kind === 'bot' ? stream.botId : '' }
+        const descriptor = this.threads.openPrivate(spec)
+        return { descriptor, head: this.threads.store.head(descriptor.id), kind: stream.kind, subject: privateRecordSubject(spec) }
+      }
     }))
       rt.rpc.register({
         ...method,
         handle: (params, context) => this.track(method.handle(params, context))
       })
+    // A device that no longer reaches a bot (its level set to Off, left out of the bot's Devices, blocked here or gone
+    // from the account, the bot deleted or kept to this computer) loses that bot's chat at once on both transports, and
+    // its whole feed with Off; the feed itself drops a bot it no longer reaches.
+    const endLostBotStreams = (): void => {
+      if (this.stopped) return
+      const bots = services.personalBots?.botIds() ?? []
+      // A deleted bot's chat ends as a stream that is not there; one the device lost ends as one it may not read.
+      const deleted = this.threads.closePrivate({ kind: 'bot', where: (spec) => !bots.includes(spec.subject) })
+      const refused = this.threads.closePrivate({ kinds: BOT_STREAM_KINDS, where: (spec) => !botStreamReadable(spec) })
+      for (const stream of deleted) void this.track(this.peers.failStream(stream, 'stream_unknown')).catch(() => undefined)
+      for (const stream of refused) void this.track(this.peers.failStream(stream, 'forbidden')).catch(() => undefined)
+    }
+    const offLostReach = reach.onChange(endLostBotStreams)
+    const botEvents = services.personalBots?.events
+    botEvents?.on('changed', endLostBotStreams)
+    this.disposers.add(() => {
+      offLostReach()
+      botEvents?.off('changed', endLostBotStreams)
+    })
     this.hub = new BridgeHub({
       db: rt.db,
       identity: rt.identity,
@@ -602,6 +676,7 @@ export class BridgeProfileService {
       self: () => rt.identity.self()?.node,
       computers: () => this.router.pairedComputers(),
       online: (node) => this.router.isOnline(node),
+      cutOff: (node) => !!this.router.cutOff(node),
       enabled: () => this.router.enabled(),
       clock: this.clock,
       // A thread a bot here started there names the bot, and its status changes reach the bot's header and list.
@@ -649,6 +724,91 @@ export class BridgeProfileService {
     const offPolicy = rt.policy.onChange(() => void this.lists.reconcile())
     const offConnections = rt.connections.onChange(() => void this.lists.reconcile())
     this.lists.start()
+    // The bots of the other computers: each one's bots feed, kept with a copy on disk for when it is out of reach. Its
+    // first look runs in the background; the copy is opened then, never on a start.
+    // Their notifications follow each feed's live changes, unless the bot is muted or hidden here.
+    this.remoteTellings = new RemoteBotTellings({
+      emit: (telling) => services.events.emit({ channel: 'protocol:event', data: { type: 'bots.tell', data: telling } }),
+      quiet: (ref) => {
+        const marks = services.botMarks.get(ref)
+        return marks.muted === true || marks.hidden === true
+      },
+      sounds: () => services.personalBots?.tellings.sounds,
+      cached: (node, botId) => this.remoteBots.chats.messages(node, botId),
+      messages: async (node, botId, limit) => {
+        const page = await this.router.client.callBot(node, 'bots.chat.list', { botId, limit }, { write: false, signal: AbortSignal.timeout(10_000) })
+        const messages = (page as { messages?: unknown } | null)?.messages
+        return Array.isArray(messages) ? (messages as RemoteBotMessage[]) : []
+      },
+      clock: this.clock
+    })
+    this.remoteTellings.attach(services.tellingWindows)
+    // The pictures and files their chats show, copied here a page at a time when a window first shows them.
+    const remoteBotFiles = new RemoteBotFiles({
+      folder: join(services.getProfileHomeDir(), 'bots', 'remote-files'),
+      read: async (node, botId, path, offset, signal) =>
+        (await this.router.client.callBot(node, 'bots.chat.file', { botId, path, ...(offset ? { offset } : {}) }, { write: false, ...(signal ? { signal } : {}) })) as RemoteFilePage,
+      online: (node) => this.router.isOnline(node) && this.bridgeOn()
+    })
+    // Their applets, read from the bot's computer when a window opens one, with a copy kept here for when it is away.
+    const remoteBotApplets = new RemoteBotApplets({
+      folder: join(services.getProfileHomeDir(), 'bots', 'remote-applets'),
+      call: (node, method, params, { write, signal }) => this.router.client.callBot(node, method, params, { write, ...(signal ? { signal } : {}) }),
+      online: (node) => this.router.isOnline(node) && this.bridgeOn()
+    })
+    this.remoteBots = new RemoteBotRegistry({
+      hub: this.hub,
+      client: (node) => this.peers.client(node),
+      store: new SqliteRemoteBots(join(services.getProfileHomeDir(), 'bots', REMOTE_BOTS_DB), this.clock),
+      marks: services.botMarks,
+      files: remoteBotFiles,
+      applets: remoteBotApplets,
+      tellings: this.remoteTellings,
+      // While the engine is still starting (or the roster can't be read) the computers are not known: none is forgotten.
+      // With the engine on and the v1 roster unreadable, the v1 devices are neither listed nor forgotten.
+      computers: () => {
+        const known = this.peers.botComputers()
+        if (!known) return undefined
+        return { computers: known.computers, ...(known.v1Unknown ? { unsure: (node: NodeId) => !this.peers.isEngine(node) } : {}) }
+      },
+      online: (node) => this.router.isOnline(node),
+      enabled: () => this.bridgeOn(),
+      clock: this.clock
+    })
+    const offBotPolicy = rt.policy.onChange(() => void this.remoteBots.reconcile())
+    const offBotConnections = rt.connections.onChange(() => void this.remoteBots.reconcile())
+    // An engine pairing removed or released: its bots go at once.
+    const offBotPeers = this.peers.onChange(() => void this.remoteBots.reconcile())
+    this.remoteBots.start()
+    // A window's calls about those bots go to the computer each lives on, and their chats stream while shown.
+    this.botRouter = new BotRouter({
+      client: this.router.client,
+      registry: this.remoteBots,
+      files: remoteBotFiles,
+      applets: remoteBotApplets,
+      online: (node) => this.router.isOnline(node),
+      name: (node) => this.router.computer(node).name,
+      self: () => rt.identity.self()?.node,
+      enabled: () => this.bridgeOn(),
+      emit: (type, data) => services.events.emit({ channel: 'protocol:event', data: { type, data } }),
+      onConnectionClosed: (listener) => services.domains?.onConnectionClosed(listener) ?? (() => undefined)
+    })
+    services.botRouter = this.botRouter
+    // The windows list those bots beside this computer's own: a feed that arrived, a computer that went or came back,
+    // a bot lost, each has them read the list again (`bots.remote.list`).
+    const offBotRows = this.remoteBots.onChange(() =>
+      services.events.emit({ channel: 'protocol:event', data: { type: 'bots.changed', data: { remote: true } } })
+    )
+    this.disposers.add(() => {
+      offBotRows()
+      if (services.botRouter === this.botRouter) services.botRouter = undefined
+      offBotPolicy()
+      offBotConnections()
+      offBotPeers()
+      this.botRouter.close()
+      this.remoteBots.close()
+      this.remoteTellings.close()
+    })
     this.disposers.add(() => {
       offPolicy()
       offConnections()
@@ -750,7 +910,17 @@ export class BridgeProfileService {
       store: this.threads.store,
       privateStreams: {
         access: (stream) => this.threads.privateAccess(stream),
-        close: (filter) => this.threads.closePrivate(filter),
+        close: (filter) => {
+          // The network layer ends what it closes on its own sessions only (a block, a disconnect). A bot stream also
+          // goes to engine pairings, which a block below Full control does not stop serving: it ends there too, as
+          // one the device may no longer read, so nothing waits on a stream that was closed under it.
+          const bots =
+            filter?.kind === undefined || isBotStreamKind(filter.kind)
+              ? this.threads.closePrivate({ ...filter, kinds: BOT_STREAM_KINDS })
+              : []
+          for (const stream of bots) void this.track(this.peers.failStream(stream, 'forbidden')).catch(() => undefined)
+          return [...bots, ...this.threads.closePrivate(filter)]
+        },
         release: (granted) => {
           // Everything held for a computer: its streams, the results it waits for and the values it staged.
           const nodes = new Set([
@@ -762,8 +932,11 @@ export class BridgeProfileService {
           // Engine pairings are never on the v1 roster: one that is serving keeps what it holds.
           const keeps = granted && ((node: NodeId) => granted(node) || this.peers.serving(node))
           for (const node of nodes) {
+            // A device's bot streams are not thread work: they stay while it still reaches the bots (bot level, the
+            // bots' Devices), with thread sharing off or its "Works on threads" gone (`endLostBotStreams`).
+            closed.push(...this.threads.closePrivate({ reader: node, kinds: BOT_STREAM_KINDS, where: (spec) => !this.botStreamReadable(spec) }))
             if (keeps?.(node)) continue
-            closed.push(...this.threads.closePrivate({ reader: node }))
+            closed.push(...this.threads.closePrivate({ reader: node, kinds: ROUTED_STREAM_KINDS }))
             this.routes.pages.dropCaller(node)
             this.staging.dropCaller(node)
           }
@@ -832,6 +1005,7 @@ export class BridgeProfileService {
               .then(() => {
                 this.router.nodeOnline(node)
                 this.lists.nodeOnline(node)
+                this.remoteBots.nodeOnline(node)
               })
           )
         }
@@ -840,6 +1014,7 @@ export class BridgeProfileService {
         if (this.stopped) return
         try {
           this.lists.nodeOffline(session.peer.node)
+          this.remoteBots.nodeOffline(session.peer.node)
         } catch {
           // The session never authenticated: it never listed anything.
         }
@@ -887,6 +1062,7 @@ export class BridgeProfileService {
         .then(() => {
           this.router.nodeOnline(node)
           this.lists.nodeOnline(node)
+          this.remoteBots.nodeOnline(node)
           this.peers.changed()
         })
     )
@@ -895,6 +1071,7 @@ export class BridgeProfileService {
   peerOffline(node: NodeId): void {
     if (this.stopped) return
     this.lists.nodeOffline(node)
+    this.remoteBots.nodeOffline(node)
     this.peers.changed()
   }
   /** Everything held here for one computer ends: its private streams, pages, staged values and terminals. */

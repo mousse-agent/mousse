@@ -1504,7 +1504,7 @@ export function ChatComposer({
     if (own?.kind === 'ignore') return
     if (own?.kind === 'reference') {
       const parsed = parseChatReference({ ...own.reference, id: own.reference.id ?? `${own.reference.kind}:${crypto.randomUUID()}` })
-      if (parsed) dropReference(parsed, at)
+      if (parsed && onAddReference) dropReference(parsed, at)
       return
     }
     // Dropped on the text among words, each file also gets its chip at the drop point.

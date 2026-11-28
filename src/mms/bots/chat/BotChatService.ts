@@ -21,7 +21,14 @@ import { BotEngineError, type BotEngine } from '../activation/BotEngine'
 import type { BotMemoryAdmin } from '../seams'
 import type { BotQuestionRow, BotStore } from '../store/BotStore'
 import type { BotDeviceAccessStore } from '../definitions/BotDeviceAccessStore'
-import { botDeviceAccessProblem, type BotDeviceAccess } from '../../../shared/bots/personal/deviceAccess'
+import {
+  DEFAULT_BOT_DEVICE_ACCESS,
+  botDeviceAccessProblem,
+  newBotAccessOf,
+  type BotDeviceAccess,
+  type BotDeviceChoice,
+  type NewBotAccess
+} from '../../../shared/bots/personal/deviceAccess'
 import { lateAnsweringLine, plainChoices, type BotQuestionLateAnswer, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { grantedPermissions, permissionId, starterManifest, withoutPermission } from './projection'
 import { turnTimingBegin, turnTimingBotMark, turnTimingForget } from '../../diagnostics/turnTiming'
@@ -248,7 +255,9 @@ export class BotChatService {
     /** The person's other computers, online or not. */
     otherComputers?(): Array<{ node: string; name: string; online: boolean }>
     /** Which devices reach each bot (`BotEngineHost.deviceAccess`). */
-    deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget'>
+    deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget' | 'needsSnapshot'>
+    /** The owner's other devices New bot's Devices step lists (`BotReachPort.devices`); undefined while Bridge is off. */
+    devices?(): Promise<BotDeviceChoice[] | undefined>
   }) {}
 
   private get store(): BotStore {
@@ -265,13 +274,15 @@ export class BotChatService {
   }
 
   /**
-   * The summary with which devices reach the bot, for the Bots list's lock, and the key its face picture was drawn from,
-   * so the app draws it again only when that changes (`bots.facePicture.save`).
+   * The summary with which devices reach the bot, for the menu's Make private (this computer alone, or other devices
+   * too), and the key its face picture was drawn from, so the app draws it again only when that changes
+   * (`bots.facePicture.save`).
    */
   private withReach(summary: BotSummary): BotSummary {
-    const access = this.options.deviceAccess
+    const access = this.options.deviceAccess?.get(summary.id).access
+    const alone = access && (access.mode === 'this_computer' || (access.mode === 'chosen' && access.nodes.length === 0))
     const key = this.engine.facePictureKey(summary.id)
-    return { ...summary, ...(access ? { reach: access.get(summary.id).access.mode } : {}), facePicture: key ? { key } : {} }
+    return { ...summary, ...(access ? { reach: alone ? 'this_computer' as const : 'chosen' as const } : {}), facePicture: key ? { key } : {} }
   }
 
   /** `bots.facePicture.save`: the app's picture of the bot's face, written into its files folder as `face.png`. */
@@ -294,6 +305,11 @@ export class BotChatService {
     return this.detailOf(botId)
   }
 
+  /** One bot's summary, as `list` has it. */
+  summary(botId: string): BotSummary {
+    return this.summaryOf(botId)
+  }
+
   /**
    * The local vault resolves its recipient here, never from a window's thread id. Every bot may be given secrets: one
    * with an approved grant may keep a pasted key.
@@ -312,16 +328,17 @@ export class BotChatService {
    * The models (#673, `slots`) are the owner's picks on every row, each offered now: one that is not is refused in plain
    * words, never swapped for another. The bot names itself and says its first message on its Talk pick. An app from
    * before rows sends one `model` by name (on every row), and one from before picks none (by usage).
-   * `access`: which devices reach it (New bot's Devices row, or what the device that made it asked for). It is saved
-   * before the bot is published, so a device outside it never lists the bot, not even for a moment; a repeat that finds
-   * the bot made changes nothing.
+   * `access`: which devices reach it (New bot's Devices step, or the device that made it). Absent, this computer alone;
+   * an older app's Everywhere (`all`) is this computer alone too. It is saved before the bot is published, so a device
+   * outside it never lists the bot, not even for a moment; a repeat that finds the bot made changes nothing.
    */
-  async create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: BotDeviceAccess }): Promise<{ bot: BotSummary }> {
+  async create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }): Promise<{ bot: BotSummary }> {
+    const access = input.access ? newBotAccessOf(input.access) : DEFAULT_BOT_DEVICE_ACCESS
     if (input.access) {
-      const problem = botDeviceAccessProblem(input.access)
+      const problem = botDeviceAccessProblem(access)
       if (problem) throw new BotEngineError('invalid_params', problem)
-      // Without a place to keep the choice, a bot that should be held from some devices is not made at all.
-      if (!this.options.deviceAccess && input.access.mode !== 'all') throw new BotEngineError('invalid_params', 'Which devices reach a bot can only be set on its own computer.')
+      // Without a place to keep the choice, a bot that should reach other devices is not made at all.
+      if (!this.options.deviceAccess && access.mode !== 'this_computer') throw new BotEngineError('invalid_params', 'Which devices reach a bot can only be set on its own computer.')
     }
     const description = input.description.trim()
     if (!description || description.length > MAX_BOT_DESCRIPTION_CHARS) throw new BotEngineError('invalid_params', `Say what the bot should do in 1 to ${MAX_BOT_DESCRIPTION_CHARS} characters.`)
@@ -380,7 +397,7 @@ export class BotChatService {
     // Which devices reach it is saved first: the bot is listed nowhere until `createBot` publishes it, and from then on
     // every list and call reads this choice. A crash between the two leaves only a choice for a bot that does not exist,
     // which the next start takes off (`BotDeviceAccessStore.dropBots`); a retry makes the bot under a new id.
-    const held = this.holdNewBot(botId, input.access)
+    const held = this.holdNewBot(botId, access)
     try {
       this.engine.createBot(definition, { key, input: firstMessagePrompt(description, !named.chosen) })
     } catch (error) {
@@ -395,14 +412,16 @@ export class BotChatService {
   }
 
   /**
-   * Saves which devices reach a bot about to be made; true when something was written. Every device (the default) is
-   * written only when the stored default is something else (a file that can't be read), so a bot made the usual way
-   * leaves the file as it is. A choice that can't be saved refuses the create.
+   * Saves which devices reach a bot about to be made; true when something was written. This computer alone (the default)
+   * is written only when what a bot without a choice reads is something else (an earlier build's every device, before
+   * the snapshot), so a bot made the usual way leaves the file as it is, and the snapshot never widens a new bot. A
+   * choice that can't be saved refuses the create.
    */
-  private holdNewBot(botId: string, access: BotDeviceAccess | undefined): boolean {
+  private holdNewBot(botId: string, access: BotDeviceAccess): boolean {
     const store = this.options.deviceAccess
-    if (!access || !store) return false
-    if (access.mode === 'all' && store.get(botId).access.mode === 'all') return false
+    if (!store) return false
+    const stored = store.get(botId)
+    if (access.mode === 'this_computer' && !store.needsSnapshot() && stored.access.mode === 'this_computer' && !stored.unreadable) return false
     try {
       store.set(botId, access)
     } catch {
@@ -494,9 +513,15 @@ export class BotChatService {
     }
   }
 
-  async answerAction(input: { actionId: string; digest: string; answer: 'send' | 'not_now'; botId?: string }): Promise<{ status: string }> {
+  /**
+   * `botId` (another device): the action must be there and that bot's, else `not_found`. `forBot` (this computer's app,
+   * which names the bot whose chat shows the card): an action of another bot can't be sent from it; one that is gone is
+   * refused as it is without a bot.
+   */
+  async answerAction({ forBot, ...input }: { actionId: string; digest: string; answer: 'send' | 'not_now'; botId?: string; forBot?: string }): Promise<{ status: string }> {
     const action = this.engine.actions.get(input.actionId)
     if (input.botId && action?.bot_id !== input.botId) throw new BotEngineError('not_found', 'No held action here.')
+    if (forBot && action && action.bot_id !== forBot) throw new BotEngineError('bot_action_gone', "This can't be sent any more.")
     try { return await this.engine.actions.answer(input) } catch (error) {
       if (error instanceof BotActionChanged) throw new BotEngineError(error.code, error.message)
       throw error
@@ -878,9 +903,11 @@ export class BotChatService {
 
   /**
    * One file a chat message carries, for a device that can't open this computer's files (a phone): only the copy in
-   * the bot's own files folder, where every attachment is kept, never a path anywhere else.
+   * the bot's own files folder, where every attachment is kept, never a path anywhere else. `path` and `folder` are real
+   * paths (links read as the system reads them, Windows junctions too); the reader opens the file only as the one
+   * checked here (`openInside`).
    */
-  attachmentFile(botId: string, messageId: string, index: number): { name: string; path: string } {
+  attachmentFile(botId: string, messageId: string, index: number): { name: string; path: string; folder: string } {
     this.engine.definitionOf(botId)
     const folder = this.engine.filesFolder(botId)
     const row = this.store.message(messageId)
@@ -890,13 +917,36 @@ export class BotChatService {
     let real: string
     let root: string
     try {
-      real = realpathSync(file.path)
-      root = realpathSync(folder)
+      real = realpathSync.native(file.path)
+      root = realpathSync.native(folder)
     } catch {
       throw new BotEngineError('attachment_not_found', `${file.name} is no longer on the computer.`)
     }
     if (!real.startsWith(root + sep)) throw new BotEngineError('attachment_not_found', `${file.name} is not in the bot's files.`)
-    return { name: file.name, path: real }
+    return { name: file.name, path: real, folder: root }
+  }
+
+  /**
+   * The thread an applet of the bot's chat was published in, for a device that opens it (`bots.applets.*`): the applet
+   * must be one `messageId`, a message of `botId`, shows, at exactly that revision. Another bot's message, an applet the
+   * message doesn't show, or a revision it doesn't show, is refused as not there.
+   */
+  appletThread(botId: string, messageId: string, appletId: string, revisionId: string): string {
+    this.engine.definitionOf(botId)
+    const row = this.store.message(messageId)
+    if (!row || row.botId !== botId) throw new BotEngineError('message_not_found', 'No such message.')
+    const applet = (row.attachments ?? []).find((file) => file.applet?.reference.appletId === appletId && file.applet.reference.revisionId === revisionId)?.applet
+    if (!applet?.threadId) throw new BotEngineError('applet_not_found', 'This applet is no longer in the chat.')
+    return applet.threadId
+  }
+
+  /**
+   * The bot's files folder, for a device that can't open this computer's files (`bots.chat.file`), which reads only
+   * inside it. Refuses a bot that is not there.
+   */
+  filesFolderOf(botId: string): string {
+    this.engine.definitionOf(botId)
+    return this.engine.filesFolder(botId)
   }
 
   /** `bots.permissions.revoke`: About → Can use → Remove narrows the grant (no consent needed). */
@@ -1002,7 +1052,7 @@ export class BotChatService {
       const pick = slots[row]
       return pick && !isPinned(pick) ? [[row, pick.model]] : []
     })) as Partial<Record<BotModelSlotKey, string>>
-    const { last: _last, reachOnCreate: _reach, ...offered } = choices
+    const { last: _last, reachOnCreate: _reach, devices: _devices, ...offered } = choices
     const images = this.options.images ? { image: shownPick(this.engine.imagePick(botId)), images: this.options.images.usage(botId) } : {}
     // The custom slots, their picks shown as the rows' are: never what the sign-in was.
     const custom = this.engine.customSlots(botId).map((slot) => ({ name: slot.name, pick: shownPick(slot.pick)!, ...(slot.description ? { description: slot.description } : {}) }))
@@ -1038,6 +1088,8 @@ export class BotChatService {
     } catch {
       // The device list cannot be read now: this computer is the one listed.
     }
+    // New bot's Devices step: the owner's other devices (phones too), offered only where the choice can be saved.
+    const devices = this.options.deviceAccess ? ((await this.options.devices?.().catch(() => undefined)) ?? []) : []
     // Said once in Runs on for an entry a bot's work won't run on (a Codex not checked for bots), before work is sent.
     const notes: Record<string, { text: string; title: string }> = {}
     for (const instanceId of new Set(options.map((option) => option.instanceId))) {
@@ -1069,6 +1121,7 @@ export class BotChatService {
       ...(Object.keys(notes).length ? { notes } : {}),
       ...(last ? { last: { talk: offeredNow(last.talk), light: offeredNow(last.light), medium: offeredNow(last.medium), hard: offeredNow(last.hard) } } : {}),
       ...(this.options.deviceAccess ? { reachOnCreate: true as const } : {}),
+      ...(devices.length ? { devices } : {}),
       computer: 'this_computer',
       computers: [
         { id: 'this_computer', name: computer },

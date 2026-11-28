@@ -107,3 +107,19 @@ Enrollment and route records are rejected when they are dated in the future, wit
 To undo without the app, on the machine: `mousse-cli net transport configure ssh --disable --settings-file <file>`, `mousse-cli service uninstall`, `rm ~/.local/bin/mousse-cli`, `rm -rf ~/.local/share/mousse/cli`. Then on this computer, revoke the device under Devices and remove its entry from `approvals.json`.
 
 The reverse tunnel for the join also applies any `LocalForward`, `RemoteForward` or `DynamicForward` you configured for that host in `~/.ssh/config` (this is your own configuration for a host you typed, like the `ProxyCommand` note above); `ExitOnForwardFailure` makes a conflicting one fail loudly.
+
+## Connect over SSH (new networking)
+
+**Use another computer → Connect over SSH** adds a computer that already runs Mousse and that you can `ssh` into with a key or agent. This computer's network helper signs in with your system `ssh`, runs `mousse-cli net-engine ssh` there to list its profiles and ask for access, then reaches that computer's helper through `mousse-helper pipe`. Mousse must be open there, for the account you sign in as. The design is mousse-net `docs/phase1b-design.md` §3.
+
+Mousse writes the two programs SSH runs into `~/.mousse/bin` each time it starts: `mousse-helper` and `mousse-cli` as `sh` scripts on macOS and Linux, and `mousse-helper.cmd` and `mousse-cli.cmd` on Windows. Each sets `MOUSSE_HOME` and runs the installed app, so an update never changes what SSH runs.
+
+### Windows computers
+
+A Windows computer can be added when it runs Windows OpenSSH Server with its default shell left as `cmd`, or set to Windows PowerShell or PowerShell 7.
+
+- The first sign-in tries the Unix form; Windows answers that it doesn't know `exec`, and its words say whether that was `cmd` or PowerShell. The helper keeps that for the route and runs `.\.mousse\bin\mousse-cli.cmd net-engine ssh` (PowerShell: followed by `; exit $LASTEXITCODE`) from the profile folder, where Windows OpenSSH starts every session. This costs one more SSH sign-in, once per route, which still fits the five per 30 seconds a server allows. Later sign-ins and the connection itself run `.\.mousse\bin\mousse-helper.cmd pipe --profile <selector>` directly.
+- The `.cmd` files name paths relative to `%USERPROFILE%` and `%LOCALAPPDATA%` (the usual install), so a user name with accents works. A Mousse installed elsewhere in a folder with non-ASCII characters gets no `.cmd` files, and the daemon's log says why.
+- "Mousse isn't installed for <user> on <host>, or needs an update" on a Windows computer means the `.cmd` files are not there: install or update Mousse on it, then open it once.
+- For an account in the Administrators group, Windows OpenSSH reads keys from `%ProgramData%\ssh\administrators_authorized_keys`, not `~\.ssh\authorized_keys`.
+- Not supported: bash (Git Bash, WSL) as the Windows default shell, and a Windows display language other than English, where the shell's answer can't be read. Both show "Adding a Windows computer over SSH isn't supported yet."

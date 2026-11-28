@@ -31,6 +31,7 @@ import type { BotChatMessage } from '../../src/shared/bots/personal/chat'
 import { QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_END_TURN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText } from '../../src/shared/bots/personal/questions'
 import { capturedRows } from '../../src/mms/bots/memory/capture'
 import { keepToolImages, resetToolImages } from '../../src/mms/bots/chat/toolImages'
+import { remoteBotMessage } from '../../src/mms/bridge/remote/RemoteBots'
 import type { ChatMessage } from '../../src/shared/types'
 import { botFixture, chatOf, createBot, finish, flush, payloadOf, start, type BotFixture } from './botFixture'
 
@@ -646,6 +647,8 @@ describe("the bot's browser", () => {
     const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === workId)!
     expect(bubble.attachments).toEqual([expect.objectContaining({ name: expect.stringMatching(/^browser-screenshot-.+\.png$/) })])
     expect(f.bots.service.attachmentFile(botId, bubble.id, 0).name).toBe(bubble.attachments![0]!.name)
+    // In the bot's files folder, so another device reads it there.
+    expect(remoteBotMessage(bubble, botId).attachments?.[0]?.path).toMatch(/\/browser-screenshot-.+\.png$/)
     await endTurn(work)
     await tap(bubble.question!.questionId, 'Flat B')
     await flush()

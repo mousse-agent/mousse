@@ -7,18 +7,31 @@ import type { ProviderAdapter } from '../../adapter'
 import type { DriverRuntime } from '../../driver'
 import { PI_AMBIENT_MARKER, piAmbientProvider } from '../../pi/envKeys'
 import { piImageModels, runPiImage } from './images'
-import { runPiOneShot } from './oneShot'
+import { PI_WORKER_APIS, piOneShotModel, runPiOneShot } from './oneShot'
+import { getCacheSessionId } from './stream'
+import { piWorkerTransport, type StoredBedrockCredential } from './workerOneShot'
 
 export type PiCredentials = Partial<Pick<ProviderAuthService,
   'getConfiguredProviders' | 'getConfiguredLlmProviders' | 'has' | 'logout' | 'runOAuthLogin' | 'runApiKeyLogin' | 'refreshDynamicModels' | 'getProviderDisplayName' | 'storedApiKey' | 'models'
-  | 'setApiKey' | 'verifyAmbientProvider' | 'getLoginOptions' | 'getAmbientProviderInfo' | 'local' | 'localChanged'
+  | 'setApiKey' | 'verifyAmbientProvider' | 'getLoginOptions' | 'getAmbientProviderInfo' | 'local' | 'localChanged' | 'credentials'
 >>
+
+/** What a single request in Pi's worker (`pi:worker`) is started with: the entry's place, environment and worker entry. */
+export interface PiWorkerContext {
+  profileHome: string
+  /** Mousse's environment for the entry. */
+  env: NodeJS.ProcessEnv
+  /** The built worker entry; undefined in a build without one. */
+  script: string | undefined
+  /** Test seam: variables for the worker. */
+  workerEnv?: Readonly<Record<string, string>>
+}
 
 /**
  * What a `pi:<provider>` instance shares with Pi's agent: its provider's sign-in and models, as the
  * profile's credentials report them. The engine supplies the turn runtime.
  */
-export function piInstanceRuntime(instanceId: string, providerId: string, credentials: () => PiCredentials | undefined, adapter: ProviderAdapter): DriverRuntime {
+export function piInstanceRuntime(instanceId: string, providerId: string, credentials: () => PiCredentials | undefined, adapter: ProviderAdapter, worker?: PiWorkerContext): DriverRuntime {
   const configuredProvider = (): ConfiguredProvider | undefined =>
     credentials()?.getConfiguredProviders?.().find((provider) => provider.id === providerId)
   const llmProvider = (): LlmProviderOption | undefined =>
@@ -93,11 +106,32 @@ export function piInstanceRuntime(instanceId: string, providerId: string, creden
       await auth.refreshDynamicModels?.().catch(() => undefined)
     },
     exportApiKey: async () => credentials()?.storedApiKey?.(providerId),
-    // `pi:direct`: one pi-ai request in Mousse's process (`runPiOneShot`), carrying the runner's request once.
+    // `pi:direct`: one pi-ai request in Mousse's process (`runPiOneShot`), carrying the runner's request once; a Bedrock
+    // model's in Pi's worker (`pi:worker`), never in Mousse's process.
     oneShotTransport: (spec) => ({
       send: async (wire, events, signal) => {
         const models = credentials()?.models
         if (!models) throw harnessAppError({ code: 'signed_out', message: 'Mousse has no provider credentials loaded yet.', instanceId })
+        const { model, effort } = piOneShotModel(models, providerId, spec)
+        if (PI_WORKER_APIS.has(model.api)) {
+          if (!worker) throw harnessAppError({ code: 'unsupported', reason: 'not_admitted', message: 'This build of Mousse has no Pi worker, so it cannot run single requests on this model.', instanceId })
+          const level = spec.effort ?? effort
+          const transport = piWorkerTransport({
+            label: credentials()?.getProviderDisplayName?.(providerId) ?? providerId,
+            instanceId,
+            profileHome: worker.profileHome,
+            script: worker.script,
+            execPath: process.execPath,
+            baseEnv: worker.env,
+            credential: () => storedCredential(credentials(), providerId),
+            ...(worker.workerEnv ? { workerEnv: worker.workerEnv } : {})
+          }, () => ({
+            model,
+            ...(level && level !== 'off' && model.reasoning ? { reasoning: level } : {}),
+            ...(spec.sessionKey ? { sessionId: getCacheSessionId(spec.sessionKey) } : {})
+          }))
+          return transport.send(wire, events, signal)
+        }
         const { text } = await runPiOneShot(models, providerId, { ...spec, system: wire.system, prompt: wire.prompt, onActivity: () => events.activity(), onText: (chunk) => events.text(chunk), beforeSend: () => events.sending() }, signal)
         return text
       }
@@ -114,4 +148,14 @@ export function piInstanceRuntime(instanceId: string, providerId: string, creden
     },
     stop: () => {}
   }
+}
+
+/** The entry's stored credential as pi-ai's store keeps it: its key and its scoped variables. */
+function storedCredential(auth: PiCredentials | undefined, providerId: string): StoredBedrockCredential | undefined {
+  const stored = auth?.credentials?.get(providerId) as { type?: unknown; key?: unknown; env?: unknown } | undefined
+  if (!stored || stored.type !== 'api_key') return undefined
+  const env = stored.env && typeof stored.env === 'object'
+    ? Object.fromEntries(Object.entries(stored.env as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+    : undefined
+  return { ...(typeof stored.key === 'string' && stored.key ? { key: stored.key } : {}), ...(env ? { env } : {}) }
 }

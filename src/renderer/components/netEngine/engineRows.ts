@@ -3,8 +3,11 @@ import type { RouteClass } from '../../../shared/netEngine/routes'
 import { parseRoute, relayText, routeClass, routeText } from '../../../shared/netEngine/routes'
 import { WAY_LABEL } from './ways'
 
-/** What a device's row offers (design §5.2): Access opens the preset control under it. */
-export type EngineRowAction = 'access' | 'address' | 'retry' | 'remove'
+/**
+ * What a device's row offers (design §5.2): Access opens the preset control under it; Check again dials a device cut
+ * off for its version at once.
+ */
+export type EngineRowAction = 'access' | 'address' | 'retry' | 'check' | 'remove'
 
 export interface EngineRowView {
   /** The state, one short line. */
@@ -83,10 +86,43 @@ export function unreachableDetail(device: NetEngineDevice, way: 'in' | 'out'): s
     : `This computer can't reach ${name}. Let Mousse through the firewall on ${name}, then Retry.`
 }
 
+/** The row of a device cut off for its version (pair-with-IP design §5). */
+export const NEEDS_UPDATE_LINE = 'Needs update'
+
+/** Which computer to update, in one line: the device (`there`) or this computer (`here`). */
+export const needsUpdateHint = (name: string, who: 'there' | 'here'): string =>
+  who === 'here' ? `Update Mousse here to use ${name}.` : `Update Mousse on ${name} to use it from here.`
+
+/** Why it is disabled, for the row's tooltip. */
+export const needsUpdateDetail = (name: string, who: 'there' | 'here'): string =>
+  who === 'here'
+    ? `${name} runs a newer Mousse that this one can't connect to. It stays disabled here until this computer is updated.`
+    : `${name} runs an older Mousse that can't connect to this one. It stays disabled here until it's updated.`
+
+/** The one notice the first time a device is found cut off. */
+export const needsUpdateNotice = (name: string, who: 'there' | 'here'): string =>
+  who === 'here'
+    ? `Update Mousse here to use ${name}. It stays disabled until then.`
+    : `${name} needs a Mousse update. It stays disabled here until it's updated.`
+
+/**
+ * A device cut off for its version is disabled: Remove, and Check again where this computer dials it (one that only
+ * uses this computer dials it itself once updated).
+ */
+const cutOffActions = (device: NetEngineDevice, side?: EngineSide): EngineRowAction[] =>
+  device.direction === 'in' || side === 'in' ? ['remove'] : ['check', 'remove']
+
 /** A device's row as Settings → Devices shows it (design §5.2, with the clock case of §8). */
 export function engineRow(device: NetEngineDevice): EngineRowView {
   const name = device.name
   if (device.state === 'removing') return { line: 'Removing…', actions: [] }
+  if (device.needsUpdate)
+    return {
+      line: NEEDS_UPDATE_LINE,
+      detail: needsUpdateDetail(name, device.needsUpdate.who),
+      warn: true,
+      actions: cutOffActions(device)
+    }
   // A Send link it consented to that did not finish (design 1b §5.4).
   if (device.unfinished)
     return device.linkValid
@@ -189,14 +225,27 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
 export type EngineSide = 'out' | 'in'
 
 /**
- * The lists a pairing shows in: one direction in its own list, both in both. A pairing still being made shows only
- * under Computers I use, where it was started.
+ * The directions a pairing works in: one way, or both. A pairing still being made counts as this computer using it,
+ * where it was started.
  */
 export function engineSides(device: NetEngineDevice): EngineSide[] {
   if (device.direction) return [device.direction]
   if (device.state === 'finishing' || device.unfinished) return ['out']
   return ['out', 'in']
 }
+
+/** Which way a pairing works, as the devices list says it: `both`, `out` (this computer uses it), `in` (it uses this one). */
+export type EngineDirection = 'both' | EngineSide
+
+export const directionOf = (sides: readonly EngineSide[]): EngineDirection =>
+  sides.includes('out') && sides.includes('in') ? 'both' : sides.includes('in') ? 'in' : 'out'
+
+/** The direction's words in the list, and its tooltip. */
+export const DIRECTION_WORDS: Readonly<Record<EngineDirection, { label: string; detail: string }>> = Object.freeze({
+  both: { label: 'Both ways', detail: 'You use it, and it uses this computer' },
+  out: { label: 'I use it', detail: 'This computer uses it; it can’t use this one' },
+  in: { label: 'Uses this computer', detail: 'It uses this computer; this one doesn’t use it' }
+})
 
 /**
  * One direction's row: the pairing's own problem where it belongs to this direction, else that direction's state.
@@ -205,6 +254,8 @@ export function engineSides(device: NetEngineDevice): EngineSide[] {
 export function engineSideRow(device: NetEngineDevice, side: EngineSide): EngineRowView {
   const whole = engineRow(device)
   const name = device.name
+  // Cut off for its version: neither direction connects.
+  if (device.needsUpdate && device.state !== 'removing') return { ...whole, actions: cutOffActions(device, side) }
   // A problem of the other direction leaves this one working.
   if (device.unreachable && device.unreachable !== side) return sideActions({ line: 'Connected', actions: [] }, side)
   if (device.unreachable || device.state === 'removing' || device.state === 'finishing') return whole
@@ -282,8 +333,8 @@ export function engineWay(device: NetEngineDevice): string {
 }
 
 /**
- * The menu item for the missing direction of a pairing made one way, on the row of the list that holds it: "Use
- * <name> from here…" under Can use this computer (it asks), "Let <name> use this computer…" under Computers I use
+ * The menu item for the missing direction of a pairing made one way, for the direction it holds: "Use <name> from
+ * here…" for a computer that uses this one (it asks), "Let <name> use this computer…" for one this computer uses
  * (this owner decides). Disabled, with why, while it can't be done; absent where the pairing can't.
  */
 export function otherWayItem(
@@ -398,7 +449,11 @@ const shown = (text: string): { address: string; full?: string } =>
 export function deviceRoutes(device: NetEngineDevice): DeviceRoute[] {
   const routes: DeviceRoute[] = []
   // This computer looks for it on the same network whenever it dials it, one way or both, added over SSH or not.
-  if (device.direction !== 'in')
+  // A same-network address it has already is that route: one row, not a second "Found automatically".
+  const lanListed = [...(device.addresses ?? []), ...(device.approvedAddresses ?? [])].some(
+    (address) => classOf(address) === 'lan'
+  )
+  if (device.direction !== 'in' && !lanListed)
     routes.push({ key: 'local', cls: 'lan', address: 'Found automatically', state: 'available' })
   for (const address of device.addresses ?? []) {
     routes.push({

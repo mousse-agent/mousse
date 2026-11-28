@@ -3,7 +3,9 @@ import { piInstanceId, piProviderIdOf } from '../../../../shared/providerInstanc
 import { foldedInto } from '../../../../shared/harness/move'
 import type { ProviderAdapter } from '../../adapter'
 import { decodeInstanceConfig, type DriverAddOption, type DriverContext, type DriverRuntime, type HarnessDriver } from '../../driver'
-import { piInstanceRuntime, type PiCredentials } from './instance'
+import { piInstanceRuntime, type PiCredentials, type PiWorkerContext } from './instance'
+import { PI_WORKER_APIS, piModelApi } from './oneShot'
+import { defaultPiWorkerScript, piWorkerRoute } from './workerOneShot'
 import { createRpcRuntime, markLoopConnections, PI_RPC_CAPS, piRpcCaps, piRpcEvidenceOf, type PiRpcDriverOptions } from './engines/rpc'
 import { PI_NATIVE_TOOLS } from '../../pi/nativeTools'
 import { piRetiredOf, piRetiredPrompt } from './retired'
@@ -106,8 +108,18 @@ function piProviderKnown(credentials: PiCredentials | undefined, providerId: str
  *
  * A stored `engine` (the removed Advanced → Engine setting) is ignored and dropped on the next write.
  */
-export function piDriver(options: { credentials?: () => PiCredentials | undefined; rpc?: PiRpcDriverOptions } = {}): HarnessDriver {
+export function piDriver(options: { credentials?: () => PiCredentials | undefined; rpc?: PiRpcDriverOptions; worker?: { script?: string; env?: Readonly<Record<string, string>> } } = {}): HarnessDriver {
   const credentials = () => options.credentials?.()
+  const workerScript = () => options.worker?.script ?? defaultPiWorkerScript()
+  /** The API a model runs on, from the cached catalogue; undefined when it cannot be read. */
+  const modelApi = (providerId: string, model: string): string | undefined => {
+    const models = credentials()?.models
+    try {
+      return models ? piModelApi(models, providerId, model) : undefined
+    } catch {
+      return undefined
+    }
+  }
   const caps = () => (options.rpc ? piRpcCaps(piRpcEvidenceOf(options.rpc)) : PI_RPC_CAPS)
   return {
     kind: 'pi',
@@ -137,9 +149,13 @@ export function piDriver(options: { credentials?: () => PiCredentials | undefine
     canInstall: false,
     // A custom model runs with its provider's transport (`customModelDefinition`).
     customModels: true,
-    // Chat titles and other single requests: one pi-ai request in Mousse's process (`runPiOneShot`), on the runner. A
-    // local server's model names only its own threads.
-    oneShotRoute: ({ listed }) => ({ route: { id: 'pi:direct', facts: listed?.local ? PI_LOCAL_FACTS : PI_DIRECT_FACTS } }),
+    // Chat titles and other single requests: one pi-ai request in Mousse's process (`runPiOneShot`), on the runner; a
+    // Bedrock model's in Pi's worker (`pi:worker`). A local server's model names only its own threads.
+    oneShotRoute: ({ listed, instanceId, model }) => {
+      const api = modelApi(piProviderIdOf(instanceId) ?? '', model)
+      if (api && PI_WORKER_APIS.has(api)) return piWorkerRoute()
+      return { route: { id: 'pi:direct', facts: listed?.local ? PI_LOCAL_FACTS : PI_DIRECT_FACTS } }
+    },
     methodLabel: 'API key or sign-in',
     // The engine's extension stamps the attempt token on every Mousse call.
     mcpTurnBinding: 'per_call',
@@ -170,9 +186,10 @@ export function piDriver(options: { credentials?: () => PiCredentials | undefine
     nativeToolNames: (neutral) => (options.rpc ? PI_NATIVE_TOOLS[neutral] ?? [] : []),
     create(context: DriverContext): DriverRuntime {
       const providerId = piProviderIdOf(context.instanceId) ?? ''
+      const worker: PiWorkerContext = { profileHome: context.profileHome, env: context.env.env, script: workerScript(), ...(options.worker?.env ? { workerEnv: options.worker.env } : {}) }
       if (providerId && options.rpc)
-        return createRpcRuntime(context, providerId, context.config.displayName ?? credentials()?.getProviderDisplayName?.(providerId) ?? providerId, credentials, options.rpc)
-      return piInstanceRuntime(context.instanceId, providerId, credentials, noRuntimeAdapter())
+        return createRpcRuntime(context, providerId, context.config.displayName ?? credentials()?.getProviderDisplayName?.(providerId) ?? providerId, credentials, options.rpc, worker)
+      return piInstanceRuntime(context.instanceId, providerId, credentials, noRuntimeAdapter(), worker)
     }
   }
 }

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ThreadsContextMenu } from '../../src/renderer/components/ThreadsContextMenu'
 import { ThreadsSidebar } from '../../src/renderer/components/ThreadsSidebar'
 import { useComputersStore } from '../../src/renderer/lib/computers'
+import { setThreadProjectColors } from '../../src/renderer/lib/threadProjectColorsSetting'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import type { Project, Thread } from '../../src/shared/types'
 
@@ -42,6 +43,7 @@ function setStores(app: AppPatch, computers: { online: boolean } | null = { onli
   Object.assign(computersInitial, next)
 }
 afterEach(() => {
+  setThreadProjectColors('off')
   useAppStore.setState(appOriginal)
   Object.assign(appInitial, appOriginal)
   const none = { loaded: false, routed: false, byNode: {}, devices: [] }
@@ -107,6 +109,8 @@ describe('the Projects view with a project on several computers', () => {
   })
 
   it('tints each thread card in the Threads view by its project group, and leaves a standalone thread untinted', () => {
+    // Project colors on threads are off by default; turned on here.
+    setThreadProjectColors('fill')
     const standalone = thread('t3', 'Standalone thread')
     setStores({ projects, threads: [...threads, thread('t2', 'Notes thread', { projectId: 'p2' }), standalone], threadsSidebarView: 'threads' })
     const html = render()

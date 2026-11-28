@@ -1,5 +1,5 @@
 import type { NodeId } from '../../shared/net'
-import { accessPresetOf, type AccessPresetFields } from '../../shared/net/accessPresets'
+import { accessPresetOf, type ControlFields } from '../../shared/net/accessPresets'
 import {
   DEFAULT_AGENT_REACH,
   DEFAULT_EDITOR_ACCESS,
@@ -20,8 +20,8 @@ import type { EnginePeerStore } from './store'
 export type EngineGrantRole = 'owner' | 'work' | 'view'
 export const OWNER_ROLE: EngineGrantRole = 'owner'
 
-/** A device's level here, as far as its role depends on it. */
-export type EngineLevel = AccessPresetFields & { blocked?: boolean }
+/** A device's level here, as far as its role depends on it: the control fields, never its bot level. */
+export type EngineLevel = ControlFields & { blocked?: boolean }
 
 /** The level of a device with no saved policy (`SqliteNodePolicy`'s defaults): Work on threads. */
 export const DEFAULT_LEVEL: EngineLevel = Object.freeze({

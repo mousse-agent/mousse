@@ -1,11 +1,12 @@
 /**
  * Owner check `phase1b.routes-app`, its own cases (1b §14): over the route under test (`--route`; `tcp` when run
- * alone), the join dialog lists the ticket's destination with its class and offers this computer's route under
- * "Also share", unticked. Then, with the reverse direction over that route too (E12, M8):
+ * alone), the join dialog lists the ticket's destination with its class. Joining both ways, the joiner's own routes
+ * of the link's kind go back with the pairback without a tick (the way it reached the owner is the way the owner
+ * reaches it); then, with the reverse direction over that route too (E12, M8):
  *
- *   1. nothing is disclosed before the joiner ticks "Also share": a pairback without it carries none of its routes;
- *   2. nothing is dialled before the receiving owner taps Use: a ticked route waits on the owner's row as
- *      "Addresses <B> offered";
+ *   1. the pairback carries the joiner's routes of the link's kind and nothing off the route;
+ *   2. on the owner, a tailnet route is dialled at once; any other kind waits on the owner's row as
+ *      "Addresses <B> offered", and nothing is dialled before the owner taps Use;
  *   3. then the reverse connection works, and each row names the class it is connected on.
  *
  * Every connection must come up on the route under test (`conn.up.route`), else the run fails with
@@ -24,7 +25,7 @@ vi.hoisted(() => {
   process.env.MOUSSE_NET_ENGINE_PAIRING_RETRY_MS ||= '500'
 })
 
-import { parseRoute } from '../../../src/shared/netEngine/routes'
+import { parseRoute, routeClass } from '../../../src/shared/netEngine/routes'
 import { loopbackClass } from '../../../src/mms/netEngine/routes'
 import {
   approveAll,
@@ -68,6 +69,7 @@ describe.skipIf(CHECK_ROUTE === 'ssh')('phase1b.routes-app', () => {
     }
     return preview as {
       destinations: Array<{ route: string; automatic: boolean }>
+      sameWay?: Array<{ route: string }>
       shareable: Array<{ route: string }>
     }
   }
@@ -77,7 +79,16 @@ describe.skipIf(CHECK_ROUTE === 'ssh')('phase1b.routes-app', () => {
     const expected = expectedRoute()!
     const kind = parseRoute(route)?.kind
     if ((kind === 'wss' ? 'ws' : kind) !== expected.kind) return true
-    return kind === 'tcp' && (loopbackClass(route) ?? 'lan') !== expected.class
+    if (kind !== 'tcp') return false
+    // The fake network's class for one of its routes; a loopback route the class its port maps to.
+    const mapped = fabric.network?.classMap?.[route] ?? loopbackClass(route)
+    return (mapped ?? 'lan') !== expected.class
+  }
+
+  /** The class this computer's app reads a route as: a loopback one by its mapped port, else by its address. */
+  const appClass = (route: string): string | undefined => {
+    const parsed = parseRoute(route)
+    return parsed ? (loopbackClass(route) ?? routeClass(parsed)) : undefined
   }
 
   /** The routes of the pairbacks `from` sent so far. */
@@ -86,61 +97,60 @@ describe.skipIf(CHECK_ROUTE === 'ssh')('phase1b.routes-app', () => {
       .filter((row) => row.from === from.endpoint && row.header.t === 'pairback')
       .map((row) => (row.header.routes as string[] | undefined) ?? [])
 
-  it(`lists destinations, keeps routes back until shared and used, then connects both ways over ${CHECK_ROUTE}`, async () => {
-    // 1. Without "Also share", the pairback carries none of the joiner's routes.
-    const quiet = await fabric.computer('quiet')
-    const preview = await join(quiet, [])
-    const own = quiet.mms.netEngine.status().routes ?? []
-    // The destination Connect approved, and the joiner's own route offered unticked.
+  it(`shares the way it was reached, holds other kinds until used, then connects both ways over ${CHECK_ROUTE}`, async () => {
+    const expected = expectedRoute()!
+    // 1. Both ways with nothing ticked: the joiner's own routes of the link's kind go back, nothing off the route.
+    const joiner = await fabric.computer('joiner')
+    const own = joiner.mms.netEngine.status().routes ?? []
+    const preview = await join(joiner, [])
     await step('no_destinations', () => {
       expect(preview.destinations.length).toBeGreaterThan(0)
-      if (CHECK_ROUTE !== 'ssh') {
-        expect(preview.destinations.some((item) => !item.automatic)).toBe(true)
-        expect(preview.shareable.map((item) => item.route)).toEqual(expect.arrayContaining(own))
-      }
+      expect(preview.destinations.some((item) => !item.automatic)).toBe(true)
+      expect(preview.sameWay?.map((item) => item.route)).toEqual(expect.arrayContaining(own))
+      for (const route of own) expect(preview.shareable.map((item) => item.route)).not.toContain(route)
     })
     // A route of another kind or class carried back (the `route-leak` control's listener) is off the route.
     await step('route_mismatch', async () => {
-      await eventually(() => expect(pairbacks(quiet).length).toBeGreaterThan(0), 30_000)
-      for (const routes of pairbacks(quiet)) expect(routes.filter(offRoute)).toEqual([])
+      await eventually(() => expect(pairbacks(joiner).length).toBeGreaterThan(0), 30_000)
+      for (const routes of pairbacks(joiner)) expect(routes.filter(offRoute)).toEqual([])
     })
-    await step('disclosed', async () => {
-      await eventually(() => expect(pairbacks(quiet).length).toBeGreaterThan(0), 30_000)
-      for (const routes of pairbacks(quiet))
-        for (const route of own) expect(routes).not.toContain(route)
+    await step('not_shared', async () => {
+      await eventually(() => expect(pairbacks(joiner).length).toBeGreaterThan(0), 30_000)
+      for (const routes of pairbacks(joiner)) expect(routes).toEqual(expect.arrayContaining(own))
     })
 
-    // 2. Ticked, the route waits on the owner's row until Use.
-    const sharer = await fabric.computer('sharer')
-    const share = sharer.mms.netEngine.shareable()
-    await join(sharer, share)
+    // 2. A tailnet route is used at once; another kind waits on the owner's row until Use. The owner's app decides
+    // by the address (a fake network's "public" one is still a tailnet address to it).
+    const atOnce = own.every((route) => appClass(route) === 'tailnet')
     const onOwner = await step('not_offered', async () => {
       let node = ''
       await eventually(() => {
-        const row = rowFor(owner, sharer)
-        expect(row?.offered).toEqual(share)
+        const row = rowFor(owner, joiner)
+        if (atOnce) expect(row?.addresses).toEqual(expect.arrayContaining(own))
+        else expect(row?.offered).toEqual(own)
         node = row!.localId
       }, 30_000)
       return node
     })
-    await step('dialled_before_use', async () => {
-      await new Promise((resolve) => setTimeout(resolve, 1_500))
-      expect(owner.mms.netEngine.online(onOwner as never)).toBe(false)
-      expect(deviceState(owner, onOwner as never)).not.toBe('connected')
-    })
+    if (!atOnce) {
+      await step('dialled_before_use', async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1_500))
+        expect(owner.mms.netEngine.online(onOwner as never)).toBe(false)
+        expect(deviceState(owner, onOwner as never)).not.toBe('connected')
+      })
+      await step(undefined, () => owner.dispatch('netEngine.address.use', { node: onOwner }, true))
+    }
 
-    // 3. Use: the reverse connection comes up on the route, and each row names its class.
-    await step(undefined, () => owner.dispatch('netEngine.address.use', { node: onOwner }, true))
-    await step('unreachable', () => connectedBothWays(owner, sharer))
-    const expected = expectedRoute()!
+    // 3. The reverse connection comes up on the route, and each row names its class.
+    await step('unreachable', () => connectedBothWays(owner, joiner))
     await step('route_mismatch', () => {
       const ownerRow = owner.mms.netEngine.status().devices.find((row) => row.node === onOwner)
       expect(ownerRow?.offered).toBeUndefined()
       expect(ownerRow?.route).toBe(expected.class)
-      const sharerRow = sharer.mms.netEngine
+      const joinerRow = joiner.mms.netEngine
         .status()
-        .devices.find((row) => row.node === rowFor(sharer, owner)!.localId)
-      expect(sharerRow?.route).toBe(expected.class)
+        .devices.find((row) => row.node === rowFor(joiner, owner)!.localId)
+      expect(joinerRow?.route).toBe(expected.class)
     })
     // Every connection reported came up on the route under test (the watch records a mismatch as it comes).
     expect(fabric.routesSeen.length).toBeGreaterThan(0)

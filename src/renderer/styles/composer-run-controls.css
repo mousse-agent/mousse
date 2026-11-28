@@ -272,7 +272,7 @@
    which also takes the neutral fill. No mode takes a colour of its own. */
 .composer-mode-menu.composer-permission-menu {
   width: min(340px, calc(100vw - 16px));
-  max-height: calc(100vh - 16px);
+  max-height: var(--floating-max-height, calc(100vh - 16px));
 }
 
 .composer-permission-modes {

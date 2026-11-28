@@ -13,6 +13,7 @@ import { BOT_CHAT_ACTION_MS, BotActions, BotActionChanged, actionContinuation, r
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
 import { settingCompactionPoint } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
+import type { BotAttention } from '../../../shared/bots/personal/telling'
 import type { SettingsStore } from '../../settings/SettingsStore'
 import { type TellMe } from '../../../shared/types'
 import { tellingClass } from '../chat/telling'
@@ -104,6 +105,7 @@ import { addedPermissions, BOT_FULL_TRUST_PERMISSION, intersectManifest, manifes
 import { allPinned, copyPick, customSlotsOf, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withCustomSlot, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import type { BotDeviceAccessStore } from '../definitions/BotDeviceAccessStore'
+import type { BotDeviceChoice } from '../../../shared/bots/personal/deviceAccess'
 import { defaultChatInput, defaultWorkLine, lateWorkNote, DEFAULT_NUDGE_AFTER_MINUTES, MAX_NUDGES_PER_QUESTION, MAX_QUESTIONS_PER_CALL, QUESTION_DUPLICATE_TEXT, questionIdentity, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, keepsWorking, openQuestionAnswerNote, questionWorkKeepsWorkingText, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionAsk, type BotQuestionFollow, type BotQuestionSpec, type BotQuestionStatus } from '../../../shared/bots/personal/questions'
 import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
 import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../chat/replyCards'
@@ -370,9 +372,11 @@ export interface BotEngineHost {
   otherComputers?(): Array<{ node: string; name: string; online: boolean }>
   /**
    * Which devices reach each bot (`BotDeviceAccessStore`): a new bot's choice is saved here before the bot is published,
-   * and the Bots list shows it. Absent: no bot is given a choice when it is made, and none is listed with one.
+   * and the bot's menu reads it (Make private). Absent: no bot is given a choice when it is made, and none is listed with one.
    */
-  deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget'>
+  deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget' | 'needsSnapshot'>
+  /** The owner's other devices, for New bot's Devices step (`BotReachPort.devices`); undefined while Bridge is off. */
+  devices?(): Promise<BotDeviceChoice[] | undefined>
   /** The secrets a thread's agents may use (the bot's home thread: the bot's), by name and label, never a value. */
   secretsHeld?(threadId: string): Array<{ name: string; label?: string }>
   /**
@@ -1082,7 +1086,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...(host.images ? { images: host.images } : {}),
       ...(host.computerName ? { computerName: host.computerName } : {}),
       ...(host.otherComputers ? { otherComputers: host.otherComputers } : {}),
-      ...(host.deviceAccess ? { deviceAccess: host.deviceAccess } : {})
+      ...(host.deviceAccess ? { deviceAccess: host.deviceAccess } : {}),
+      ...(host.devices ? { devices: host.devices } : {})
     })
     try {
       for (const thread of host.store.allThreads()) this.known.set(thread.threadId, { botId: thread.botId, role: thread.role })
@@ -1312,6 +1317,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.dropChainHolds(botId)
       return running
     })
+    // It is gone from every list and every other device now, before its runs are stopped (up to 15 s): a device reading
+    // its chat hears at once that the bot is no longer there.
+    this.changed({ botId })
     // Its messages still waiting in its owner's threads ("use your threads") go with it, each thread saying so, as after
     // Remove. Named now: the deleted bot's definition is no longer read.
     this.withdrawThreadMessages(botId, (entry.published ?? entry.draft).name)
@@ -1330,6 +1338,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       console.warn('a deleted bot\'s browser could not be closed', { botId, error: error instanceof Error ? error.message : String(error) })
     }
     await this.archiveThreads(botId)
+    // Its runs and threads as they ended.
     this.changed({ botId })
     const deletedAt = this.store.registry(botId)?.deletedAt ?? this.store.now()
     return { purgeAt: new Date(Date.parse(deletedAt) + BOT_DELETE_PURGE_MS).toISOString() }
@@ -8458,6 +8467,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { activationId: working.id, ...(chip ? { chip } : {}), ...(status ? { status } : {}) }
   }
 
+  /**
+   * What another device needs to tell of a bot and to take it back (`BotStreamSources`): how far its chat is read, its
+   * newest message and how loudly it asked to be told, and the messages past the read mark that still want the owner.
+   */
+  feedTelling(botId: string): { readSeq: number; latest?: { id: string; seq: number; author: 'owner' | 'bot'; tell?: 'now' | 'soon' | 'later' }; attention: BotAttention[] } {
+    const readSeq = this.store.registry(botId)?.readSeq ?? 0
+    const last = this.store.lastMessage(botId)
+    const latest = last ? { id: last.id, seq: last.seq, author: last.author, ...(last.tell ? { tell: last.tell } : {}) } : undefined
+    return { readSeq, ...(latest ? { latest } : {}), attention: this.tellings.attention(botId, readSeq) }
+  }
+
   private settleConsult(row: BotActivationRow, dispatch: BotDispatchRow, run: RunRecord, outcome: { text?: string }, fromExecutor: boolean): void {
     const key = `${row.id}:${dispatch.n}`
     this.liveRuns.delete(run.runId)
@@ -9593,7 +9613,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return Promise.race([call, timedOut])
   }
 
-  /** Which devices reach the bot changed (About's Devices, Make private): the Bots list reads it again for its lock. */
+  /** Which devices reach the bot changed (About's Devices, Make private): the bot's menu reads it again. */
   reachChanged(botId: string): void {
     this.changed({ botId })
   }

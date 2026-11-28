@@ -81,14 +81,6 @@ describe('the editor switch in net_node_policy', () => {
     )
   })
 
-  it('leaves the schema version where it was, so an older build can still open the database', () => {
-    const dir = profile()
-    writeOldDatabase(dir, [[newId('node'), 0, 'accept_edits', 0]])
-    const db = new NetDatabase({ profileDir: dir })
-    cleanups.push(() => db.close())
-    expect(userVersion(db)).toBe(1)
-  })
-
   it('can be turned on for one device, kept across a restart, and does not touch the other switches', () => {
     const dir = profile()
     const node = newId('node'),
@@ -193,65 +185,143 @@ describe('the editor switch in net_node_policy', () => {
   })
 })
 
-describe('the bots switch in net_node_policy', () => {
-  it('adds the column with every device on, as before the switch, and leaves the schema version', () => {
+/** The table as the last build with the on/off bots switch made it (schema 1). */
+const SWITCH_TABLE =
+  "CREATE TABLE net_node_policy(node TEXT PRIMARY KEY, blocked INTEGER NOT NULL CHECK(blocked IN (0,1)), max_permission_mode TEXT NOT NULL, terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), editor INTEGER NOT NULL DEFAULT 0 CHECK(editor IN (0,1)), bots INTEGER NOT NULL DEFAULT 1 CHECK(bots IN (0,1)), agent_reach TEXT NOT NULL DEFAULT 'launched', work INTEGER NOT NULL DEFAULT 1 CHECK(work IN (0,1)), created_at INTEGER NOT NULL) STRICT"
+
+interface SwitchRow {
+  node: NodeId
+  bots: 0 | 1
+  blocked?: 0 | 1
+  mode?: string
+  terminal?: 0 | 1
+  editor?: 0 | 1
+  reach?: string
+  work?: 0 | 1
+}
+
+function writeSwitchDatabase(profileDir: string, rows: SwitchRow[]): void {
+  const directory = join(profileDir, 'net')
+  mkdirSync(directory, { recursive: true })
+  const old = new DatabaseSync(join(directory, 'net.db'))
+  old.exec(SWITCH_TABLE)
+  for (const row of rows)
+    old
+      .prepare('INSERT INTO net_node_policy VALUES(?,?,?,?,?,?,?,?,?)')
+      .run(row.node, row.blocked ?? 0, row.mode ?? 'accept_edits', row.terminal ?? 0, row.editor ?? 0, row.bots, row.reach ?? 'launched', row.work ?? 1, 1_700_000_000_000)
+  old.exec('PRAGMA user_version=1')
+  old.close()
+}
+
+/** Full control's switches, as the last build with the bots switch stored them. */
+const FULL_CONTROL = { mode: 'full', terminal: 1, editor: 1, reach: 'all', work: 1 } as const
+
+describe('bot levels in net_node_policy (schema 2)', () => {
+  it('turns the switch into a level: off stays off, on is Full only for a Full control device, Use for any other', () => {
     const dir = profile()
-    const blocked = newId('node'),
-      plain = newId('node')
-    writeOldDatabase(dir, [
-      [blocked, 1, 'full', 1],
-      [plain, 0, 'ask', 0]
+    const off = newId('node'),
+      offFull = newId('node'),
+      full = newId('node'),
+      blockedFull = newId('node'),
+      work = newId('node'),
+      view = newId('node'),
+      nearlyFull = newId('node')
+    writeSwitchDatabase(dir, [
+      { node: off, bots: 0 },
+      { node: offFull, bots: 0, ...FULL_CONTROL },
+      { node: full, bots: 1, ...FULL_CONTROL },
+      // Blocked is not one of the preset's fields: unblocking gives back what it had.
+      { node: blockedFull, bots: 1, blocked: 1, ...FULL_CONTROL },
+      { node: work, bots: 1 },
+      { node: view, bots: 1, work: 0, mode: 'ask', reach: 'none' },
+      { node: nearlyFull, bots: 1, ...FULL_CONTROL, reach: 'launched' }
     ])
     const db = new NetDatabase({ profileDir: dir })
     cleanups.push(() => db.close())
     const policy = new SqliteNodePolicy(db, systemClock)
-    expect(columns(db).find((column) => column.name === 'bots')).toMatchObject({ notnull: 1, dflt_value: '1' })
-    expect(policy.get(blocked)).toMatchObject({ blocked: true, maxPermissionMode: 'full', terminal: true, bots: true })
-    expect(policy.get(plain)).toMatchObject({ blocked: false, maxPermissionMode: 'ask', terminal: false, bots: true })
-    // A device with no row at all is on too.
-    expect(policy.get(newId('node')).bots).toBe(true)
-    expect(userVersion(db)).toBe(1)
+    expect(Object.fromEntries([off, offFull, full, blockedFull, work, view, nearlyFull].map((node) => [node, policy.get(node).bots]))).toEqual({
+      [off]: 'off',
+      [offFull]: 'off',
+      [full]: 'full',
+      [blockedFull]: 'full',
+      [work]: 'use',
+      [view]: 'use',
+      [nearlyFull]: 'use'
+    })
+    // Every other field comes across as it was.
+    expect(policy.get(full)).toMatchObject({ blocked: false, maxPermissionMode: 'full', terminal: true, editor: true, agentReach: 'all', work: true, createdAt: 1_700_000_000_000 })
+    expect(policy.get(blockedFull).blocked).toBe(true)
+    expect(policy.get(view)).toMatchObject({ work: false, maxPermissionMode: 'ask', agentReach: 'none' })
+    // A device with no row starts at Use.
+    expect(policy.get(newId('node')).bots).toBe('use')
+    expect(columns(db).find((column) => column.name === 'bots')).toMatchObject({ notnull: 1, dflt_value: "'use'" })
+    expect(userVersion(db)).toBe(2)
+    expect(db.database.prepare('SELECT version FROM net_schema_migrations ORDER BY version').all().map((row) => row.version)).toEqual([1, 2])
   })
 
-  it('turned off for one device, is kept across a restart, touches no other switch, and reads off for anything but 1', () => {
+  it('runs once: a level set afterwards survives opening the database again', () => {
     const dir = profile()
-    const node = newId('node'),
-      other = newId('node')
-    writeOldDatabase(dir, [[node, 0, 'full', 1], [other, 0, 'ask', 0]])
+    const node = newId('node')
+    writeSwitchDatabase(dir, [{ node, bots: 1 }])
+    for (let round = 0; round < 3; round++) {
+      const db = new NetDatabase({ profileDir: dir })
+      const policy = new SqliteNodePolicy(db, systemClock)
+      expect(policy.get(node).bots).toBe(round === 0 ? 'use' : 'full')
+      if (round === 0) policy.set(node, { bots: 'full' })
+      db.close()
+    }
+  })
+
+  it('takes a database from before the bots switch: every device had its bots, so each gets Use or Full', () => {
+    const dir = profile()
+    const plain = newId('node')
+    writeOldDatabase(dir, [[plain, 0, 'full', 1]])
+    const db = new NetDatabase({ profileDir: dir })
+    cleanups.push(() => db.close())
+    // Editor and agent reach take their defaults there, so it is not Full control.
+    expect(new SqliteNodePolicy(db, systemClock).get(plain).bots).toBe('use')
+    expect(userVersion(db)).toBe(2)
+  })
+
+  it('stores nothing but off, use or full, refuses any other level, and reads an unknown stored one as off', () => {
+    const dir = profile()
+    const node = newId('node')
     let db = new NetDatabase({ profileDir: dir })
-    const seen: Array<[boolean, boolean]> = []
+    const seen: Array<[string, string]> = []
     const first = new SqliteNodePolicy(db, systemClock)
     first.onChange((event) => seen.push([event.before.bots, event.after.bots]))
-    expect(first.set(node, { bots: false })).toMatchObject({ bots: false, terminal: true, maxPermissionMode: 'full', editor: false })
-    expect(seen).toEqual([[true, false]])
+    expect(first.set(node, { bots: 'off' })).toMatchObject({ bots: 'off', work: true, terminal: false })
+    expect(seen).toEqual([['use', 'off']])
     db.close()
     db = new NetDatabase({ profileDir: dir })
     cleanups.push(() => db.close())
     const policy = new SqliteNodePolicy(db, systemClock)
-    expect(policy.get(node).bots).toBe(false)
-    expect(policy.get(other).bots).toBe(true)
-    // An earlier build's write leaves the switch as it is.
-    db.database
-      .prepare(
-        'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,created_at) VALUES(?,?,?,?,?,?) ' +
-          'ON CONFLICT(node) DO UPDATE SET blocked=excluded.blocked,max_permission_mode=excluded.max_permission_mode,terminal=excluded.terminal,editor=excluded.editor'
-      )
-      .run(node, 0, 'ask', 0, 1, 5)
-    expect(new SqliteNodePolicy(db, systemClock).get(node)).toMatchObject({ bots: false, editor: true, maxPermissionMode: 'ask' })
-    expect(() => db.database.prepare('UPDATE net_node_policy SET bots=2 WHERE node=?').run(node)).toThrow()
-    expect(() => policy.set(node, { bots: 'no' as never })).toThrow()
+    expect(policy.get(node).bots).toBe('off')
+    for (const bad of [true, false, 1, 'on', 'manage'])
+      expect(() => policy.set(node, { bots: bad as never }), String(bad)).toThrow()
+    expect(() => db.database.prepare('UPDATE net_node_policy SET bots=1 WHERE node=?').run(node)).toThrow()
+    expect(() => db.database.prepare("UPDATE net_node_policy SET bots='on' WHERE node=?").run(node)).toThrow()
+    expect(policy.get(node).bots).toBe('off')
+  })
+
+  it('a database a newer build moved past schema 2 is refused, not misread', () => {
+    const dir = profile()
+    new NetDatabase({ profileDir: dir }).close()
+    const raw = new DatabaseSync(join(dir, 'net', 'net.db'))
+    raw.exec('PRAGMA user_version=3')
+    raw.close()
+    expect(() => new NetDatabase({ profileDir: dir })).toThrow(expect.objectContaining({ code: 'downgrade_unsupported' }))
   })
 })
 
 describe('agent reach in net_node_policy (issue #1160)', () => {
-  it('adds the column with every device at "launched" and leaves the schema version', () => {
+  it('adds the column with every device at "launched"', () => {
     const dir = profile()
     const node = newId('node')
     writeOldDatabase(dir, [[node, 0, 'full', 1]])
     const db = new NetDatabase({ profileDir: dir })
     cleanups.push(() => db.close())
     expect(columns(db).find((column) => column.name === 'agent_reach')).toMatchObject({ notnull: 1, dflt_value: "'launched'" })
-    expect(userVersion(db)).toBe(1)
     const policy = new SqliteNodePolicy(db, systemClock)
     expect(policy.get(node)).toMatchObject({ agentReach: 'launched', maxPermissionMode: 'full', terminal: true })
     expect(policy.get(newId('node')).agentReach).toBe('launched')
@@ -280,7 +350,6 @@ describe('"Work on threads from this device" in net_node_policy', () => {
     writeOldDatabase(dir, [[node, 0, 'full', 1]])
     let db = new NetDatabase({ profileDir: dir })
     expect(columns(db).find((column) => column.name === 'work')).toMatchObject({ notnull: 1, dflt_value: '1' })
-    expect(userVersion(db)).toBe(1)
     const first = new SqliteNodePolicy(db, systemClock)
     expect(first.get(node)).toMatchObject({ work: true, maxPermissionMode: 'full', terminal: true })
     expect(first.get(newId('node')).work).toBe(true)
@@ -293,10 +362,10 @@ describe('"Work on threads from this device" in net_node_policy', () => {
     // An earlier build's write names only its own columns: the switch stays off.
     db.database
       .prepare(
-        'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,created_at) VALUES(?,?,?,?,?,?,?,?) ' +
+        'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,agent_reach,created_at) VALUES(?,?,?,?,?,?,?) ' +
           'ON CONFLICT(node) DO UPDATE SET blocked=excluded.blocked,max_permission_mode=excluded.max_permission_mode,terminal=excluded.terminal'
       )
-      .run(node, 0, 'ask', 0, 0, 1, 'launched', 5)
+      .run(node, 0, 'ask', 0, 0, 'launched', 5)
     expect(policy.get(node)).toMatchObject({ work: false, maxPermissionMode: 'ask' })
     expect(() => db.database.prepare('UPDATE net_node_policy SET work=2 WHERE node=?').run(node)).toThrow()
     expect(() => policy.set(node, { work: 'no' as never })).toThrow()

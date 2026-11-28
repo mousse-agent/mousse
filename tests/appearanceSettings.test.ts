@@ -56,9 +56,9 @@ describe('appearance settings', () => {
   })
 
   it.each([
-    [undefined, 'fill'], [true, 'fill'], [false, 'off'],
+    [undefined, 'off'], [true, 'fill'], [false, 'off'],
     ['off', 'off'], ['outline', 'outline'], ['fill', 'fill'], ['gradient', 'gradient'],
-    ['unknown', 'fill'], [null, 'fill']
+    ['unknown', 'off'], [null, 'off']
   ])('normalizes project color style %s to %s', (value, expected) => {
     expect(normalizeAppearance({ threadProjectColors: value } as never).threadProjectColors).toBe(expected)
   })

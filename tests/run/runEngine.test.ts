@@ -397,7 +397,9 @@ describe('RunEngine.runLocalAction (SPEC §16.3)', () => {
   }
 
   it('heartbeats through an action three heartbeat intervals long and completes', async () => {
-    const heartbeatMs = 40
+    // Long enough that a loaded machine's timer delay stays inside the stale window (2 intervals); the action still
+    // outlasts that window, so only the heartbeat keeps it alive.
+    const heartbeatMs = 200
     const { engine, reconciler } = setup(heartbeatMs)
     const stale: string[] = []
     const pass = setInterval(() => stale.push(...reconciler.runOnce().staleRuns), 10)
@@ -858,7 +860,8 @@ describe('RunEngine pause (SPEC §5)', () => {
       const run = await paused()
       const sent = await sendFrom('t1', 'queue:resume:now', 'resume_now', run.runId)
       if (sent.status !== 'accepted') throw new Error(`rejected: ${sent.reason}`)
-      expect(f!.store.getRun(sent.runId)!.outcome).toEqual({ continuationOf: run.runId, resumedFromPause: 'user' })
+      // The resume carries on the paused run's work, so it stays in that run's chain (#2018).
+      expect(f!.store.getRun(sent.runId)!.outcome).toEqual({ continuationOf: run.runId, resumedFromPause: 'user', agentChain: `chain:${run.runId}` })
       expect(f!.store.getRun(run.runId)!.outcome!.pause!.endedBy).toBe('resume_now')
     })
 

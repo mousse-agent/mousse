@@ -8,6 +8,8 @@ import type {
   StoredRecord
 } from '../../../shared/net'
 import {
+  BOT_STREAM_DELTA_TYPES,
+  BOT_STREAM_EVENT_TYPES,
   BRIDGE_ROUTED_EVENT_TYPES,
   BRIDGE_THREAD_EVENT_TYPES,
   NetError,
@@ -16,17 +18,19 @@ import {
   STORE_TXN_MAX_ROWS,
   type NodeId
 } from '../../../shared/net'
-import type { RoutedStreamKind } from '../../../shared/bridge/routed'
+import { isBotStreamKind, type PrivateStreamKind } from '../../../shared/bridge/routed'
 import type { Clock, IdentityService, KeyStore, StreamStore } from '../../net/contracts'
 import type { NetDatabase } from '../../net/store/database'
 import { canonicalJson, encodeEnvelope, MAX_DISPLAY_JSON_NODES } from '../../net/sync/codec'
 import { engineLimits } from '../../netEngine/limits'
 import {
+  PRIVATE_BOT_STREAMS_TOTAL,
   PRIVATE_STREAM_QUOTA,
   PRIVATE_TERMINAL_RING_BYTES,
   PRIVATE_TERMINAL_RING_ROWS,
   PRIVATE_STREAMS_TOTAL,
   PRIVATE_THREAD_STREAMS_TOTAL,
+  sameRoom,
   isPrivateKey,
   parsePrivateKey,
   privateKey,
@@ -58,10 +62,15 @@ export const PRIVATE_DELTA_TYPES = [
   'git.selectionChanged',
   'thread.title-generation-failed',
   // A Send now click's outcome (`applied` or `stale`): the window that clicked leaves "Sending…". Phones cannot Send now.
-  'steer.now'
+  'steer.now',
+  // A bot's live chip (one per activation) and its reply as its chat turn writes it, on that bot's own stream.
+  ...BOT_STREAM_DELTA_TYPES
 ] as const
 export interface ThreadDisplayEvent {
-  type: (typeof THREAD_EVENT_TYPES)[number] | (typeof BRIDGE_ROUTED_EVENT_TYPES)[number]
+  type:
+    | (typeof THREAD_EVENT_TYPES)[number]
+    | (typeof BRIDGE_ROUTED_EVENT_TYPES)[number]
+    | (typeof BOT_STREAM_EVENT_TYPES)[number]
   data: unknown
   ephemeral?: boolean
 }
@@ -144,6 +153,12 @@ export interface ThreadStreamOptions {
    */
   boundReader?(threadId: string): { reader: NodeId; subject: string } | undefined
   /**
+   * Whether the reader of an open private stream may still read it, asked on every read (`privateAccess`): a bot stream
+   * is read only while its reader's bot level is not Off and, for one bot's chat, while it reaches that bot. Without
+   * it, an open private stream stays readable until it is closed.
+   */
+  privateReadable?(spec: PrivateSpec): boolean
+  /**
    * Whether a session (of `holder`, when given) is being served the stream. Without it, no stream
    * is ever released for being idle.
    */
@@ -203,7 +218,7 @@ function wireSize(body: unknown): number | undefined {
     throw error
   }
 }
-const PRIVATE_DURABLE_SET: readonly string[] = BRIDGE_ROUTED_EVENT_TYPES
+const PRIVATE_DURABLE_SET: readonly string[] = [...BRIDGE_ROUTED_EVENT_TYPES, ...BOT_STREAM_EVENT_TYPES]
 
 /**
  * Streaming message deltas coalesce per message; question updates per thread; the notes only a
@@ -212,8 +227,9 @@ const PRIVATE_DURABLE_SET: readonly string[] = BRIDGE_ROUTED_EVENT_TYPES
 function deltaKey(event: ThreadDisplayEvent | ThreadDeltaEvent): string | undefined {
   if (event.type === 'questions.updated') return 'questions'
   if (PRIVATE_DELTA_SET.includes(event.type)) {
-    const data = (event.data ?? {}) as { parentThreadId?: unknown; action?: { id?: unknown } }
-    const part = data.parentThreadId ?? data.action?.id
+    const data = (event.data ?? {}) as { parentThreadId?: unknown; action?: { id?: unknown }; activationId?: unknown }
+    // A bot's chip: one per activation, so its chat turn's and its work's do not replace each other.
+    const part = data.parentThreadId ?? data.action?.id ?? (event.type === 'bots.activity' ? data.activationId : undefined)
     return `${event.type}:${typeof part === 'string' ? part : ''}`
   }
   const message = (event.data as { message?: { id?: unknown } } | undefined)?.message
@@ -223,7 +239,8 @@ const isMessageKey = (key: string): boolean => key.startsWith('message:')
 /** The ids a note keeps when its payload is too large to send: enough to know what to fetch. */
 function omittedIds(data: unknown): Record<string, string> {
   const ids: Record<string, string> = {}
-  for (const key of ['threadId', 'parentThreadId'])
+  // A bot stream's note says which bot, message or piece of work it was about, so the reader knows what to fetch.
+  for (const key of ['threadId', 'parentThreadId', 'botId', 'messageId', 'activationId'])
     if (typeof (data as Record<string, unknown> | undefined)?.[key] === 'string')
       ids[key] = (data as Record<string, string>)[key]
   return ids
@@ -237,7 +254,7 @@ export class ThreadStreamAdapter {
   /** Which streams are private to a reader, kept so the check that runs for every record is not a query. */
   private readonly privateBindings = new Map<
     StreamId,
-    { reader: NodeId; kind: RoutedStreamKind } | undefined
+    { reader: NodeId; kind: PrivateStreamKind } | undefined
   >()
   /**
    * Private thread streams whose source is reading ahead (`openPrivateWarm`). A close that matches one (the reader
@@ -381,13 +398,14 @@ export class ThreadStreamAdapter {
 
   /**
    * The node a private stream is bound to, what it carries, and whether it is open now. Undefined for
-   * any other stream. A stream that was closed or released is not read until its computer opens it again.
+   * any other stream. A stream that was closed or released is not read until its computer opens it again, and an open
+   * one its reader may no longer read (`ThreadStreamOptions.privateReadable`) counts as closed.
    */
   privateAccess(
     stream: StreamId
-  ): { reader: NodeId; kind: RoutedStreamKind; open: boolean } | undefined {
+  ): { reader: NodeId; kind: PrivateStreamKind; open: boolean } | undefined {
     const live = this.active.get(stream)
-    if (live) return live.spec && { reader: live.spec.reader, kind: live.spec.kind, open: true }
+    if (live) return live.spec && { reader: live.spec.reader, kind: live.spec.kind, open: this.readable(live.spec) }
     if (!this.privateBindings.has(stream)) {
       const row = this.options.db.database
         .prepare('SELECT thread_id FROM bridge_thread_streams WHERE stream=?')
@@ -417,6 +435,15 @@ export class ThreadStreamAdapter {
     return this.readerBindings.get(stream)
   }
 
+  private readable(spec: PrivateSpec): boolean {
+    if (!this.options.privateReadable) return true
+    try {
+      return this.options.privateReadable(spec)
+    } catch {
+      return false
+    }
+  }
+
   /** The computers that have a private stream open, or one opening. */
   privateReaders(): NodeId[] {
     return [
@@ -433,12 +460,22 @@ export class ThreadStreamAdapter {
    * that serve them can be told.
    */
   closePrivate(
-    filter: { reader?: NodeId; kind?: RoutedStreamKind; subject?: string } = {}
+    filter: {
+      reader?: NodeId
+      kind?: PrivateStreamKind
+      /** Only streams of these kinds. */
+      kinds?: readonly PrivateStreamKind[]
+      subject?: string
+      /** Only the streams this says yes to. */
+      where?: (spec: PrivateSpec) => boolean
+    } = {}
   ): StreamId[] {
     const matches = (spec: PrivateSpec): boolean =>
       (!filter.reader || spec.reader === filter.reader) &&
       (!filter.kind || spec.kind === filter.kind) &&
-      (filter.subject === undefined || spec.subject === filter.subject)
+      (!filter.kinds || filter.kinds.includes(spec.kind)) &&
+      (filter.subject === undefined || spec.subject === filter.subject) &&
+      (!filter.where || filter.where(spec))
     // A stream still reading ahead is not opened when it is done.
     for (const pending of this.opening) if (matches(pending.spec)) pending.cancelled = true
     const closed: StreamId[] = []
@@ -491,12 +528,14 @@ export class ThreadStreamAdapter {
   private assertPrivateRoom(spec: PrivateSpec): void {
     const count = (match: (other: PrivateSpec) => boolean): number =>
       [...this.active.values()].filter((thread) => thread.spec && match(thread.spec)).length
+    // Bot streams have a room of their own: thread streams never fill what a bot's chat needs, nor the other way.
     const full = (): boolean =>
       count((other) => other.reader === spec.reader && other.kind === spec.kind) >=
         PRIVATE_STREAM_QUOTA[spec.kind] ||
       (spec.kind === 'thread' &&
         count((other) => other.kind === 'thread') >= PRIVATE_THREAD_STREAMS_TOTAL) ||
-      count(() => true) >= PRIVATE_STREAMS_TOTAL
+      count((other) => sameRoom(other.kind, spec.kind)) >=
+        (isBotStreamKind(spec.kind) ? PRIVATE_BOT_STREAMS_TOTAL : PRIVATE_STREAMS_TOTAL)
     if (!full()) return
     // Streams no one reads any more give way before the computer is refused.
     this.releaseIdle()

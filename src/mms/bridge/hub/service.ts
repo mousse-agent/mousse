@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
+  BOT_STREAM_EVENT_TYPES,
   BRIDGE_ROUTED_EVENT_TYPES,
   NetError,
   isId,
@@ -92,9 +93,10 @@ export interface HubAttachOptions {
   open?: () => Promise<{ descriptor: StreamDescriptor; head: { epoch: number; seq: number } }>
   /**
    * Which room a private attachment counts against: threads in view, the channel for Git progress, a terminal's
-   * output, or the lists of a computer (one each).
+   * output, the lists of a computer (one each), or the bot streams (each computer's bots feed and the bot chats open
+   * here), so a bot's chat never waits for room behind thread traffic.
    */
-  room?: 'thread' | 'channel' | 'terminal' | 'lists'
+  room?: 'thread' | 'channel' | 'terminal' | 'lists' | 'bots'
 }
 interface Attachment {
   ref: BridgeEntityRef
@@ -192,9 +194,12 @@ function dropStagedData(request: { method: string; params: unknown }): void {
   if (request.method === 'attachments.stage' && request.params && typeof request.params === 'object')
     request.params = { ...(request.params as object), data: '' } as typeof request.params
 }
-/** A private attachment also takes the records only a private stream has (Git progress, terminal output). */
+/**
+ * A private attachment also takes the records only a private stream has (Git progress, terminal output); a bot stream
+ * (the bots feed, one bot's chat) takes the bot records instead.
+ */
 const projectionTypes = (options?: HubAttachOptions): readonly string[] =>
-  options?.open ? BRIDGE_ROUTED_EVENT_TYPES : []
+  options?.open ? (options.room === 'bots' ? BOT_STREAM_EVENT_TYPES : BRIDGE_ROUTED_EVENT_TYPES) : []
 /** Lets other work run between two steps of background work. */
 const pause = (ms: number): Promise<void> =>
   new Promise<void>((resolve) => (ms > 0 ? setTimeout(resolve, ms) : setImmediate(resolve)))
@@ -1148,10 +1153,10 @@ export class BridgeHub {
     if (this.attaching.has(key)) return fail('conflict')
     this.detach(ref, options)
     // Streams that read the shared display, the threads this computer reads, its Git progress, its terminals'
-    // output and the lists of other computers each have a room of their own, so none crowds out the others.
+    // output, the lists of other computers and their bots each have a room of their own, so none crowds out the others.
     const roomOf = (other?: HubAttachOptions): string =>
       other?.open
-        ? other.room === 'channel' || other.room === 'terminal' || other.room === 'lists'
+        ? other.room === 'channel' || other.room === 'terminal' || other.room === 'lists' || other.room === 'bots'
           ? other.room
           : 'thread'
         : 'shared'

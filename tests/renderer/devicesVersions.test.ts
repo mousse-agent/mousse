@@ -16,7 +16,7 @@ const { useUpdateStore } = await import('../../src/renderer/stores/updateStore')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { NO_COMPUTERS, useComputersStore } = await import('../../src/renderer/lib/computers')
 
-const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: true, agentReach: 'launched', work: true }
+const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: 'use', agentReach: 'launched', work: true }
 const row = (node: string, name: string, extra: Record<string, unknown>) => ({
   node,
   name,
@@ -82,8 +82,12 @@ const mount = async () => {
   await act(async () => root.render(createElement(EngineDevicesSection)))
   await flush()
 }
-/** A device's first row (Computers I use comes first), its text with spaces collapsed. */
-const rowText = (node: string) => (host.querySelector(`[data-device-node="${node}"]`)?.textContent ?? '').replace(/\s+/g, ' ')
+/** Chooses a device in the list and reads its detail, spaces collapsed. */
+const rowText = async (node: string) => {
+  await act(async () => host.querySelector<HTMLElement>(`[data-device-node="${node}"] button`)!.click())
+  await flush()
+  return (host.querySelector(`[data-device-detail="${node}"]`)?.textContent ?? '').replace(/\s+/g, ' ')
+}
 const titled = (text: string) => [...host.querySelectorAll<HTMLElement>('[title]')].find((item) => item.textContent?.trim() === text)
 const button = (name: string) => [...document.querySelectorAll<HTMLButtonElement>('button')].find((item) => item.textContent?.trim() === name)
 
@@ -100,16 +104,20 @@ describe('Settings → Devices, versions', () => {
       ]
     }
     await mount()
-    expect(rowText('node_b')).toMatch(/· Behind/)
+    // Behind shows on its row too, and the page opens on it.
+    expect(host.querySelector('[data-device-node="node_b"] [data-device-needs]')?.textContent).toBe('Behind')
+    expect(host.querySelector<HTMLElement>('[data-device-detail]')?.dataset.deviceDetail).toBe('node_b')
+    expect(host.querySelector('[data-device-node="node_c"] [data-device-needs]')).toBeNull()
+    expect(await rowText('node_b')).toMatch(/· Behind/)
     expect(titled('Behind')?.title).toBe(
       "Laptop runs 0.9.0 (stable), this computer 0.9.2. It can't update itself: Updates on macOS need a signed build."
     )
-    expect(rowText('node_c')).toMatch(/· Newer/)
+    expect(await rowText('node_c')).toMatch(/· Newer/)
     expect(titled('Newer')?.title).toBe('Desk PC runs 0.9.3 (nightly), this computer 0.9.2. It updates itself.')
-    for (const node of ['node_d', 'node_e']) expect(rowText(node)).not.toMatch(/Behind|Newer/)
+    for (const node of ['node_d', 'node_e']) expect(await rowText(node)).not.toMatch(/Behind|Newer/)
     // Only the computer behind says how to update it; it can't update itself, so it's updated there, with no button.
-    expect(rowText('node_b')).toContain("It can't update itself: Updates on macOS need a signed build. Update it on Laptop.")
-    expect(rowText('node_c')).not.toContain('Update')
+    expect(await rowText('node_b')).toContain("It can't update itself: Updates on macOS need a signed build. Update it on Laptop.")
+    expect(await rowText('node_c')).not.toContain('Update')
     expect(button('Update')).toBeUndefined()
   })
 
@@ -122,7 +130,7 @@ describe('Settings → Devices, versions', () => {
     }
     answers['net.ssh.update'] = { ok: true, version: '0.9.2' }
     await mount()
-    expect(rowText('node_b')).not.toContain('Update it on Laptop')
+    expect(await rowText('node_b')).not.toContain('Update it on Laptop')
     await act(async () => button('Update…')!.click())
     await flush()
     await act(async () => button('Update')!.click())
@@ -144,7 +152,7 @@ describe('Settings → Devices, versions', () => {
       nodes: [row('n1', 'Studio', { source: 'engine', version: '0.9.0', update: unsigned, olderThanThis: true, newerThanThis: false })]
     }
     await mount()
-    expect(rowText('n1')).toMatch(/Connected.*· Behind/)
+    expect(await rowText('n1')).toMatch(/Connected.*· Behind/)
     expect(titled("It can't update itself: Updates on macOS need a signed build. Update it on Studio.")?.title).toContain("Studio runs 0.9.0 (stable), this computer 0.9.2. It can't update itself")
   })
   it('updates a computer whose app takes requests from here: its running turns, Install with that count, and Close cancels', async () => {
@@ -166,7 +174,8 @@ describe('Settings → Devices, versions', () => {
     }
     await mount()
     expect(asks).toEqual([{ node: 'node_c', step: 'refresh' }])
-    expect(rowText('node_c')).toContain('Open Mousse on Desk PC to update it from here.')
+    expect(await rowText('node_c')).toContain('Open Mousse on Desk PC to update it from here.')
+    expect(await rowText('node_b')).toContain('Behind')
     expect([...host.querySelectorAll('button')].filter((item) => item.textContent?.trim() === 'Update')).toHaveLength(1)
     expect(host.textContent).not.toMatch(/Update all/i)
 
@@ -215,7 +224,7 @@ describe('Settings → Devices, versions', () => {
     await mount()
     // Nothing is asked on its own for a computer that never said it updates itself, and no button pretends to update it.
     expect(asks).toEqual([])
-    expect(rowText('node_b')).toContain('Its Mousse is too old to update from here. Update it on Laptop once.')
+    expect(await rowText('node_b')).toContain('Its Mousse is too old to update from here. Update it on Laptop once.')
     expect(button('Update')).toBeUndefined()
 
     // Updated there since: asked again, it now takes requests, and its row offers Update.
@@ -225,7 +234,7 @@ describe('Settings → Devices, versions', () => {
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Check again whether Laptop can be updated from here"]')!.click())
     await flush()
     expect(asks).toEqual([{ node: 'node_b', step: 'version' }])
-    expect(rowText('node_b')).not.toContain('too old')
+    expect(await rowText('node_b')).not.toContain('too old')
     await act(async () => button('Update')!.click())
     await flush()
     expect(asks.at(-1)).toEqual({ node: 'node_b', step: 'prepare', version: '0.9.2' })
@@ -243,10 +252,10 @@ describe('Settings → Devices, versions', () => {
     const check = () => document.querySelector<HTMLButtonElement>('[aria-label="Check again whether Laptop can be updated from here"]')!
     await act(async () => check().click())
     await flush()
-    expect(rowText('node_b')).toContain('Same answer just now.')
+    expect(await rowText('node_b')).toContain('Same answer just now.')
     reachable = false
     await act(async () => check().click())
     await flush()
-    expect(rowText('node_b')).toContain("Laptop didn't answer.")
+    expect(await rowText('node_b')).toContain("Laptop didn't answer.")
   })
 })

@@ -686,15 +686,20 @@ html[data-theme='high-contrast'] .settings-title-icon-btn {
   width: 72px;
 }
 
+/* Every control has one height, radius and text size (UI rule 55), also outside a settings group.
+   Buttons take the select's soft fill, so a button beside a select reads as the same set, not hollow. */
 .settings-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-4);
   padding: 0 var(--space-12);
+  height: var(--settings-control-h);
   border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small);
   color: var(--text-primary);
-  background: transparent;
+  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
   white-space: nowrap;
 }
 

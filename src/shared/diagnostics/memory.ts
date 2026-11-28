@@ -688,7 +688,7 @@ export function memoryIssueText(input: MemoryReportInput): { title: string; body
   lines.push(`**OS:** ${plain(input.os.platform, 16)} ${plain(input.os.release)} ${plain(input.os.arch, 16)}, ${Math.round(input.os.totalMemMb / 1024)} GB RAM`)
   lines.push(`**Service uptime:** ${sample.up < 3600 ? `${Math.round(sample.up / 60)} min` : `${round1(sample.up / 3600)} h`}`)
   if (breaches.length) {
-    lines.push('', '**Out of bounds:**')
+    lines.push('', '**Above target:**')
     for (const breach of breaches) lines.push(`- ${breach.kind}${breach.severe ? ' (severe)' : ''}: ${breach.summary}`)
   }
   const table = memoryTable(sample)

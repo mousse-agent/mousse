@@ -157,7 +157,7 @@ function ProfilerAdvancedRows({ profiler, set, notices, setNotices }: {
         title="Memory notices"
         anchor="labs-memory-notices"
         htmlFor="labs-memory-notices"
-        description={<span title="At most once a day, with Report. The numbers are logged either way.">When memory goes out of bounds.</span>}
+        description={<span title="At most once a day, with Report. The numbers are logged either way.">When memory goes above target.</span>}
         control={<Switch id="labs-memory-notices" label="Memory notices" checked={notices} onChange={(on) => void setNotices(on)} />}
       />
       <HeapSnapshotRow />

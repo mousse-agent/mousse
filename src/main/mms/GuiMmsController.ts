@@ -27,6 +27,7 @@ import { resolveDaemonHostInvocation } from '../../cli/daemonHost'
 import { endDaemonProcess } from '../../cli/daemonExitWatchdog'
 import { rotateStartupLogSync, STARTUP_LOG_CAP_ENV, STARTUP_LOG_FILE, STARTUP_LOG_MAX_BYTES } from '../../cli/startupLog'
 import { daemonCommand } from './daemonCommand'
+import { prepareOwnMacKeychainItem } from '../../mms/providers/secretCodec'
 import { ensureWindowsGit, withWindowsGitPath } from './windowsGit'
 import { nativeGitEnvironment, nativeGitInstaller, installNativeGit, type NativeGitInstaller } from './nativeGit'
 import type { GitSetup } from '../../shared/gitSetup'
@@ -693,10 +694,12 @@ export class GuiMmsController extends EventEmitter {
       this.profileTransitions.set(sender.id, (this.profileTransitions.get(sender.id) ?? 0) + 1)
       this.emit('window-profile-changing', {senderId: sender.id})
     }
+    let result: T
+    let rebound = false
     try {
       const client = await this.clientForCurrentSender()
       if (transition) await this.attachedBrowserHost?.releaseWindow(sender)
-      const result = await client.request<T>(method, params, timeoutMs, options)
+      result = await client.request<T>(method, params, timeoutMs, options)
       if (transition) {
         const session = this.windowSessions.get(sender.id)
         const bound = result as unknown as {profile?:{id?:string};epoch?:number}
@@ -704,12 +707,14 @@ export class GuiMmsController extends EventEmitter {
           session.binding = {profileId:bound.profile.id,epoch:bound.epoch}
           const subscribed = await session.client.subscribe(0)
           this.afterWindowSubscribe(sender.id, session.client, subscribed, 'profile-bound')
-          await this.attachedBrowserHost?.acknowledgeClosed(sender)
-          // Only a switch that finished: after a failed one the window still shows the profile it had.
+          // Only a switch that finished: after a failed one the window keeps the profile the service has it on.
           this.rememberWindowProfile(sender, bound.profile.id)
+          rebound = true
         }
       }
-      return result
+    } catch (error) {
+      if (transition) await this.followServiceBinding(sender)
+      throw error
     } finally {
       if (transition) {
         this.emit('window-profile-changing', {senderId:sender.id})
@@ -717,6 +722,37 @@ export class GuiMmsController extends EventEmitter {
         if (remaining > 0) this.profileTransitions.set(sender.id, remaining)
         else this.profileTransitions.delete(sender.id)
       }
+    }
+    // The browser host reads the window's binding, which stays hidden until the switch has ended; a switch that
+    // overlaps another leaves this to the last one. The window is bound by now, so a closure proof that cannot be
+    // acknowledged stays for the next binding of that profile instead of failing a switch that already happened.
+    if (rebound && sender && this.getWindowBindingForSender(sender.id)) {
+      await this.attachedBrowserHost?.acknowledgeClosed(sender).catch((error: unknown) => {
+        this.log('window.browser-ack-failed', { window: sender.id, error: describeLinkError(error) })
+      })
+    }
+    return result
+  }
+
+  /**
+   * A switch failed here, but the service may still have bound the window (its answer timed out, or a step after it
+   * failed). The service answers a later request on that connection only once the bind is done, so its status says
+   * where the window really is; the window follows it, and a connection opened again binds that profile.
+   */
+  private async followServiceBinding(sender: WebContents): Promise<void> {
+    const session = this.windowSessions.get(sender.id)
+    if (!session?.client.connected || session.closing) return
+    try {
+      const status = await session.client.request<{ binding?: { profileId?: unknown; epoch?: unknown } | null }>('profiles.status')
+      const profileId = status.binding?.profileId, epoch = status.binding?.epoch
+      if (typeof profileId !== 'string' || typeof epoch !== 'number' || !Number.isSafeInteger(epoch)) return
+      if (this.windowSessions.get(sender.id) !== session || (session.binding?.profileId === profileId && session.binding.epoch === epoch)) return
+      session.binding = { profileId, epoch }
+      this.rememberWindowProfile(sender, profileId)
+      const subscribed = await session.client.subscribe(0)
+      this.afterWindowSubscribe(sender.id, session.client, subscribed, 'profile-bound')
+    } catch (error) {
+      this.log('window.binding-check-failed', { window: sender.id, error: describeLinkError(error) })
     }
   }
 
@@ -1521,6 +1557,8 @@ export class GuiMmsController extends EventEmitter {
 
   private async spawnDaemon(): Promise<ChildProcess> {
     this.assertMayConnect()
+    // The service must find a signed Mac build's keychain item already made, rather than race to make it.
+    prepareOwnMacKeychainItem()
     // Prefer the CLI entry packaged next to main; fall back to source-layout path in dev.
     const candidates = [
       join(__dirname, '../cli/index.js'),

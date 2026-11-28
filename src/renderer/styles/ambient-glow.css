@@ -5,6 +5,16 @@
  * a pre-blurred mask whose shapes are wavy blobs with turbulence-displaced edges. The masks are PNGs
  * (../assets/ambient-glow-a.png and -b.png, 800x400), drawn once from SVGs with turbulence, displacement
  * and blur filters, so those filters never run in the app.
+ *
+ * Grain: the glow is faint, so from the page to its brightest point it climbs only about 20 to 30 of the
+ * screen's 256 levels per channel, over hundreds of pixels. Drawn smooth, that shows as rings, one per level,
+ * most plainly on a black (OLED) page. Each layer's mask therefore adds a little fine grain
+ * (../assets/ambient-glow-grain.png: a 64x64 tile of random alpha, about 7% on average, used at one tile
+ * pixel per CSS pixel), which dithers those steps so the eye sees a smooth slope. The grain is cut to a
+ * footprint made of four copies of the mask added together (1 - (1 - mask)^4), so it reaches the faint
+ * outer edge where the rings are easiest to see, and leaves the page around the glow untouched. It adds
+ * less than one level on average. To remake the tile: alpha = clamp(N(0.5, 0.117) - 0.45, 0, 1), black.
+ *
  * The layers fill .ambient-glow, a box anchored to the composer (CSS anchor positioning), so the composer's
  * top edge always sits on the same line of each layer, centred on it horizontally and spanning the middle
  * 1/2.1 of its width. The box itself never animates: an anchored box is styled during layout, so an
@@ -58,8 +68,26 @@
   inset: 0;
   transform-origin: 50% calc(var(--ambient-glow-edge) * 100%);
   background-color: rgba(var(--accent-rgb), calc(var(--ui-aura-strength) * 1.25));
-  -webkit-mask: var(--ambient-glow-mask) center / 100% 100% no-repeat;
-  mask: var(--ambient-glow-mask) center / 100% 100% no-repeat;
+  --ambient-glow-shape: var(--ambient-glow-mask) center / 100% 100% no-repeat;
+  --ambient-glow-grain: url("../assets/ambient-glow-grain.png") 0 0 / 64px 64px repeat;
+  /* Read bottom up: four copies of the mask add up to the grain's footprint, the grain is cut to it, and
+     the mask goes on top (see Grain above). */
+  -webkit-mask:
+    var(--ambient-glow-shape),
+    var(--ambient-glow-grain),
+    var(--ambient-glow-shape),
+    var(--ambient-glow-shape),
+    var(--ambient-glow-shape),
+    var(--ambient-glow-shape);
+  -webkit-mask-composite: source-over, source-in, source-over, source-over, source-over, source-over;
+  mask:
+    var(--ambient-glow-shape),
+    var(--ambient-glow-grain),
+    var(--ambient-glow-shape),
+    var(--ambient-glow-shape),
+    var(--ambient-glow-shape),
+    var(--ambient-glow-shape);
+  mask-composite: add, intersect, add, add, add, add;
   animation: var(--ambient-glow-anim) var(--ambient-glow-loop) var(--ambient-glow-ease) infinite;
   /* A glow that takes another's place carries on its loop (AmbientGlow's `since`). */
   animation-delay: var(--ambient-glow-delay, 0s);

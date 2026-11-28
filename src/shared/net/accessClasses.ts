@@ -1,5 +1,6 @@
-import type { RoutedStreamKind } from '../bridge/routed'
+import type { PrivateStreamKind } from '../bridge/routed'
 import type { StreamKind } from './streams'
+import { botMethodAccess } from '../bots/personal/methodTable'
 
 /**
  * What a call or stream from another device of the user's list does on this computer, as the receiver's per-device
@@ -10,9 +11,12 @@ import type { StreamKind } from './streams'
  *
  * - `view`: reads threads, lists and what a transcript already shows, and the connection's own traffic. Passes for
  *   every device this computer serves.
- * - `bots_chat`: a bot's chat, its replies, asks and pictures, and dictation; held to the device's Bots switch and each
- *   bot's Devices choice, and runs within the bot's own permissions.
- * - `bots_manage`: makes a bot or changes one (its name, look, permissions, memory, schedules, pause).
+ * - `bots_use`: a bot's chat, its replies, questions, held actions and pictures, its memory read; runs within the bot's
+ *   own permissions. `bots_full`: makes a bot or sets one up (its name, look, permissions and asks, memory edits,
+ *   schedules, pause). Both are the `level` of their `BOT_METHODS` row, held to the device's bot level here and each
+ *   bot's Devices choice in `remoteBotMethods`' one wrapper; no thread switch governs them.
+ * - `speech`: dictation and read-aloud for any message, on this computer's speech models. Passes for every device this
+ *   computer serves, View and chat included; it never follows bot access.
  * - `work`: starts, sends to, steers, stops or changes threads, their queue, settings, files and Git, projects,
  *   automations and agent chats; and reads that expose the computer's files (Files, Git, review).
  * - `terminal`: opens, reads or types into a terminal (the device's terminal switch governs it).
@@ -20,10 +24,10 @@ import type { StreamKind } from './streams'
  * - `update`: installs an update of Mousse here, which stops every turn and the service. Only a device with Full
  *   control that is not blocked reaches it (`checkNodePolicy`), whatever its grant says.
  *
- * "Work on threads from this device" off (`net_node_policy.work`) refuses `work` and `bots_manage` in every family,
- * with the reason `work_off`. Kept apart from the rows of `ROUTED_METHODS` and keyed by the Net method name.
+ * "Work on threads from this device" off (`net_node_policy.work`) refuses `work` in every family, with the reason
+ * `work_off`. Kept apart from the rows of `ROUTED_METHODS` and keyed by the Net method name.
  */
-export const ACCESS_CLASSES = ['view', 'bots_chat', 'bots_manage', 'work', 'terminal', 'editor', 'update'] as const
+export const ACCESS_CLASSES = ['view', 'bots_use', 'bots_full', 'speech', 'work', 'terminal', 'editor', 'update'] as const
 export type AccessClass = (typeof ACCESS_CLASSES)[number]
 
 const routed = (classes: Record<string, AccessClass>): Record<string, AccessClass> =>
@@ -87,12 +91,12 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
   'queue.reorder': 'work',
   'queue.promoteToSteer': 'work',
   // Dictation and read-aloud for any message, a bot's included: runs nothing on a thread.
-  'speech.options': 'bots_chat',
-  'speech.choose': 'bots_chat',
-  'speech.download': 'bots_chat',
-  'speech.upload': 'bots_chat',
-  'speech.transcribe': 'bots_chat',
-  'speech.speak': 'bots_chat',
+  'speech.options': 'speech',
+  'speech.choose': 'speech',
+  'speech.download': 'speech',
+  'speech.upload': 'speech',
+  'speech.transcribe': 'speech',
+  'speech.speak': 'speech',
 
   // ---------------------------------------------------------------- Bridge: streams, lists, agent chats, hub
   'bridge.thread.open': 'view',
@@ -103,30 +107,11 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
   'chats.cancel': 'work',
   'bridge.dispatch': 'work',
 
-  // ---------------------------------------------------------------- personal bots
-  'bots.get': 'bots_chat',
-  'bots.chat.list': 'bots_chat',
-  'bots.chat.attachment': 'bots_chat',
-  'bots.memory.list': 'bots_chat',
-  'bots.chat.send': 'bots_chat',
-  'bots.chat.stop': 'bots_chat',
-  'bots.work.stop': 'bots_chat',
-  'bots.chat.markRead': 'bots_chat',
-  'bots.actions.answer': 'bots_manage',
-  'bots.questions.answer': 'bots_chat',
-  'bots.reminders.snooze': 'bots_chat',
-  // Both choices on a permission ask or held external action require Work; reading the cards stays bots_chat.
-  'bots.asks.answer': 'bots_manage',
-  'bots.personal.pause': 'bots_manage',
-  'bots.personal.resume': 'bots_manage',
-  'bots.create': 'bots_manage',
-  'bots.update': 'bots_manage',
-  'bots.reminders.cancel': 'bots_manage',
-  'bots.schedules.remove': 'bots_manage',
-  'bots.permissions.set': 'bots_manage',
-  'bots.permissions.revoke': 'bots_manage',
-  'bots.memory.forget': 'bots_manage',
-  'bots.memory.edit': 'bots_manage',
+  // ---------------------------------------------------------------- personal bots: `BOT_METHODS`' remote rows
+  ...botMethodAccess(),
+  // The bots feed and one bot's chat stream, opened by each device for itself (`remoteBotMethods`' one gate).
+  'bridge.bots.open': 'bots_use',
+  'bridge.bot.open': 'bots_use',
 
   // ---------------------------------------------------------------- routed: the transport
   ...routed({
@@ -374,19 +359,21 @@ export const STREAM_ACCESS: Readonly<Record<StreamKind, AccessClass>> = Object.f
   'space.private': 'view'
 })
 
-/** Every kind of private stream one computer opens on another (`routed.stream.open`). */
-export const ROUTED_STREAM_ACCESS: Readonly<Record<RoutedStreamKind, AccessClass>> = Object.freeze({
+/** Every kind of private stream one device opens on another (`routed.stream.open`, and the bot streams). */
+export const ROUTED_STREAM_ACCESS: Readonly<Record<PrivateStreamKind, AccessClass>> = Object.freeze({
   thread: 'view',
   lists: 'view',
   // A Git action's progress, for the computer that started it.
   channel: 'view',
-  terminal: 'terminal'
+  terminal: 'terminal',
+  // The bots feed and a bot's chat: held to the bot level and each bot's Devices, never to thread sharing.
+  bots: 'bots_use',
+  bot: 'bots_use'
 })
 
-/** A method with no class counts as work: a device that may only view and chat with bots never reaches it. */
+/** A method with no class counts as work: a device that may only view threads never reaches it. */
 export const methodAccess = (method: string): AccessClass =>
   Object.hasOwn(METHOD_ACCESS, method) ? METHOD_ACCESS[method]! : 'work'
 
-/** The classes "Work on threads from this device" governs: off, each is refused. */
-export const needsWork = (access: AccessClass): boolean =>
-  access === 'work' || access === 'bots_manage'
+/** The classes "Work on threads from this device" governs: off, each is refused. Bot access is not among them. */
+export const needsWork = (access: AccessClass): boolean => access === 'work'

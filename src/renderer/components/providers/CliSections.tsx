@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
-import { accountEmail, updateAvailableDetail, type InstanceSnapshot, type StatusDescription } from '../../../shared/harness/status'
+import { accountEmail, INSTALL_OWNER_LABELS, updateAvailableDetail, type InstanceSnapshot, type StatusDescription, type UpdateAffordance } from '../../../shared/harness/status'
 import type { InstanceConfigPatch, ProviderOperationEvent, RemoveInstallResult, TelemetrySetting } from '../../../shared/harness/types'
 import { Select } from '../ui/Select'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
@@ -230,6 +230,19 @@ function OlderSettingsRow({ notice, actions }: { notice: NonNullable<InstanceSna
   )
 }
 
+/** The card's line above the command: who installed this copy, and what Mousse can do about it. */
+export function updateNote(update: UpdateAffordance): string {
+  if (update.kind === 'one_click') return 'Mousse updates it the way it was installed.'
+  const owner = update.owner ? INSTALL_OWNER_LABELS[update.owner] : undefined
+  const installed = owner ? `Installed with ${owner}. ` : ''
+  if (update.kind === 'advisory')
+    return `${installed}${update.manual ? 'Needs administrator rights. Run it yourself in a terminal:' : 'Mousse runs this, or run it yourself in a terminal:'}`
+  if (update.owner === 'nix') return 'Installed with Nix. Update it in your Nix configuration.'
+  if (update.owner === 'mise') return 'Installed with mise. Update the version in your mise config.'
+  if (owner) return `${installed}Update it there.`
+  return "Mousse can't tell how this copy was installed. Update it the way you installed it."
+}
+
 /**
  * An available update, as a small chip beside the version in the editor's heading. Mousse's own
  * install and an owner's command update in one click; pointing at the chip (or focusing it) opens a
@@ -262,15 +275,7 @@ export function UpdateChip({ snapshot, operation, actions }: { snapshot: Instanc
   const updating = operation?.kind === 'update' && (operation.phase === 'progress' || operation.phase === 'prompt')
   const canRun = update.kind === 'one_click' || (update.kind === 'advisory' && !update.manual)
   const command = update.kind === 'advisory' ? update.command : undefined
-  const note = updating && operation?.phase === 'progress'
-    ? operation.message
-    : update.kind === 'notice'
-      ? "Mousse can't tell how this copy was installed. Update it the way you installed it."
-      : update.kind === 'advisory' && update.manual
-        ? 'Needs administrator rights. Run it yourself in a terminal:'
-        : command
-          ? 'Mousse runs this, or run it yourself in a terminal:'
-          : 'Mousse updates it the way it was installed.'
+  const note = updating && operation?.phase === 'progress' ? operation.message : updateNote(update)
   const label = updating ? 'Updating…' : canRun ? 'Update now' : 'Update available'
   const title = target ? `Update to ${target}` : 'Update available'
   return (

@@ -90,6 +90,8 @@ function harness(
   /** What the roster says now: a test changes it, or makes it unreadable (undefined). */
   const roster: { list: Array<{ node: NodeId; name: string }> | undefined } = { list: computers }
   const online = new Set<NodeId>(computers.map((computer) => computer.node))
+  /** The computers cut off for their version now. */
+  const cut = new Set<NodeId>()
   const state = {
     threads: [] as Thread[],
     projects: [] as Project[],
@@ -157,6 +159,7 @@ function harness(
       self: () => self,
       computers: () => roster.list,
       online: (node) => online.has(node),
+      cutOff: (node) => cut.has(node),
       enabled: () => state.enabled,
       clock,
       fanOutDeadlineMs: options.deadline ?? 2_000,
@@ -179,6 +182,7 @@ function harness(
     client,
     attachments,
     online,
+    cut,
     now,
     node,
     self,
@@ -798,6 +802,32 @@ describe('a computer that is out of reach', () => {
     expect(h.lists.projects()[0]).toMatchObject({ offline: true })
     // The last lists were written to disk once they settled.
     await vi.waitFor(() => expect(h.restartSnapshots()).toBe(1), { timeout: 5000 })
+  })
+
+  it('hides its rows while it is cut off for its version, keeping its copy, and lists them again once it is not', async () => {
+    const h = harness()
+    await h.feed(
+      snapshot([{ id: 'a', updatedAt: iso(20) }], { projects: [{ id: 'p', name: 'P', path: '/p', order: 0 }] })
+    )
+    await vi.waitFor(() => expect(h.restartSnapshots()).toBe(1), { timeout: 5000 })
+    expect(h.lists.row(h.q('a'))).toBeTruthy()
+    // Cut off: the bridge sees it offline, and nothing of it is listed, even its copy.
+    const before = h.events.length
+    h.cut.add(h.node)
+    h.online.delete(h.node)
+    h.lists.nodeOffline(h.node)
+    expect(h.lists.threads()).toEqual([])
+    expect(h.lists.projects()).toEqual([])
+    expect(h.lists.row(h.q('a'))).toBeUndefined()
+    expect(h.ofType('threads.updated', before).length).toBeGreaterThan(0)
+    await h.lists.reconcile()
+    expect(h.lists.threads()).toEqual([])
+    // Its copy stays for when it is back.
+    expect(h.restartSnapshots()).toBe(1)
+    // Updated: a connection agreed a version, and its rows come back from the copy at once.
+    h.cut.delete(h.node)
+    await h.lists.reconcile()
+    expect(h.lists.threads().map((row) => row.id)).toEqual([h.q('a')])
   })
 
   it('is read from disk at start, so its threads are listed before it connects', async () => {
@@ -1438,6 +1468,64 @@ describe('how projects are matched', () => {
     await vi.waitFor(() => expect(h.client.call).toHaveBeenCalledTimes(calls + 1), {
       timeout: 20_000
     })
+  }, 60_000)
+
+  it('keeps the matches it got when another one fails, asks again for the failed one, and keeps them out of reach', async () => {
+    const h = harness({ cacheSettleMs: 20 })
+    const one = repository(),
+      two = repository()
+    h.state.projects = [
+      { id: 'a', name: 'a', path: one.path, createdAt: iso(0), order: 0 },
+      { id: 'b', name: 'b', path: two.path, createdAt: iso(0), order: 1 }
+    ]
+    const answers: Record<string, string> = { [one.root]: 'ra', [two.root]: 'rb' }
+    let twoFails = true
+    h.client.call.mockImplementation(async (_node: NodeId, method: string, params: unknown) => {
+      if (method !== 'projects.match') return {}
+      const roots = (params as { roots: string[] }).roots
+      if (twoFails && roots.includes(two.root)) throw new DomainRpcError('deadline_exceeded', 'slow')
+      const projectId = roots.map((root) => answers[root]).find(Boolean)
+      return projectId ? { projectId } : {}
+    })
+    const projects = [
+      { id: 'ra', name: 'a', path: '/a', order: 0 },
+      { id: 'rb', name: 'b', path: '/b', order: 1 }
+    ]
+    const sameAs = (lists = h.lists) =>
+      Object.fromEntries(lists.projects().map((project) => [project.id, project.sameAs]))
+    await h.feed(snapshot([{ id: 't', projectId: 'ra', updatedAt: iso(1) }], { projects }))
+    // The answer that came is used, and written with the copy on disk, though the other call failed.
+    await vi.waitFor(() => expect(sameAs()[h.q('ra')]).toBe('a'), { timeout: 20_000 })
+    expect(sameAs()[h.q('rb')]).toBeUndefined()
+    await vi.waitFor(
+      () => {
+        const [copy] = h.store.snapshots()
+        expect(copy && JSON.parse(copy.snapshot).matches.sameAs).toEqual([[h.q('ra'), 'a']])
+      },
+      { timeout: 5000 }
+    )
+    // A minute later the failed one is asked again, and only that one.
+    twoFails = false
+    h.client.call.mockClear()
+    h.now.at += 61_000
+    await h.feed(snapshot([{ id: 't', projectId: 'ra', updatedAt: iso(2) }], { projects }))
+    await vi.waitFor(() => expect(sameAs()[h.q('rb')]).toBe('b'), { timeout: 20_000 })
+    expect(sameAs()[h.q('ra')]).toBe('a')
+    const asked = h.client.call.mock.calls.filter((call) => call[1] === 'projects.match')
+    expect(asked.map((call) => (call[2] as { roots: string[] }).roots)).toEqual([[two.root]])
+    // Out of reach after a restart, both projects stay in this computer's groups.
+    await vi.waitFor(
+      () => {
+        const [copy] = h.store.snapshots()
+        expect(copy && JSON.parse(copy.snapshot).matches.sameAs).toHaveLength(2)
+      },
+      { timeout: 5000 }
+    )
+    h.online.delete(h.node)
+    const lists = h.restart()
+    await lists.reconcile()
+    expect(sameAs(lists)).toEqual({ [h.q('ra')]: 'a', [h.q('rb')]: 'b' })
+    expect(lists.projects().every((project) => project.offline)).toBe(true)
   }, 60_000)
 
   it('sorts rows with this computer’s project once its match is known, unless a person moved them', async () => {

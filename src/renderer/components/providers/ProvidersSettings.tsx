@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
 import { describeStatus, type InstanceSnapshot } from '../../../shared/harness/status'
 import type { AddOptionMethod, HarnessDriverKind, InstanceConfigPatch, ProviderAddOption } from '../../../shared/harness/types'
-import { Plus, RefreshCw, Sparkles } from '../../lib/icons'
+import { Plus, RefreshCw } from '../../lib/icons'
 import { saveModelPrefs, useLegacyFavoritesImport } from '../../lib/modelFavorites'
 import {
   DEVICE_SCOPE,
@@ -226,7 +226,6 @@ function ProvidersPage({
   /** Something a finished action wants the user to know (files kept after a remove). */
   const [pageNotice, setPageNotice] = useState<string | null>(null)
   const refreshing = useAsyncAction()
-  const refreshingModels = useAsyncAction()
 
   // What Add provider offers for model APIs, and how each one signs in; a change to any entry may change `added`.
   const loadAddOptions = useCallback(async () => {
@@ -369,25 +368,21 @@ function ProvidersPage({
 
   const refreshModels = (snapshot: InstanceSnapshot) => async () => apply(await api.instances.refreshModels(snapshot.instanceId))
 
-  /** The header's refresh: checks every instance again. */
-  const refreshStatus = () =>
+  /**
+   * The header's refresh, the page's only one: checks every provider again (its status and newest version), then
+   * refreshes every enabled provider's models. A provider that is not signed in or has a chat running keeps its
+   * models; one that fails is named with the reason.
+   */
+  const refreshAll = () =>
     void refreshing.run('refresh', async () => {
       if (!snapshots) return reload()
-      const results = await Promise.allSettled(sorted.map((snapshot) => api.instances.recheck(snapshot.instanceId)))
-      for (const result of results) if (result.status === 'fulfilled') apply(result.value)
-      const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
-      if (failed) throw failed.reason
-    })
-
-  /**
-   * The header's "Refresh models": every enabled provider's list, in one call. A provider that is
-   * not signed in or has a chat running is left alone; one that fails is named with the reason.
-   */
-  const refreshAllModels = () =>
-    void refreshingModels.run('models', async () => {
-      const results = await api.instances.refreshAllModels()
-      for (const result of results) apply(result.snapshot)
-      const failed = results.filter((result) => result.outcome === 'failed')
+      const checks = await Promise.allSettled(sorted.map((snapshot) => api.instances.recheck(snapshot.instanceId)))
+      for (const result of checks) if (result.status === 'fulfilled') apply(result.value)
+      const models = await api.instances.refreshAllModels()
+      for (const result of models) apply(result.snapshot)
+      const unchecked = checks.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+      if (unchecked) throw unchecked.reason
+      const failed = models.filter((result) => result.outcome === 'failed')
       if (failed.length)
         throw new Error(`Could not refresh models: ${failed.map((result) => `${result.snapshot.displayName} (${result.message ?? 'failed'})`).join('; ')}`)
     })
@@ -545,29 +540,19 @@ function ProvidersPage({
           <button
             type="button"
             className="settings-icon-btn"
-            title={refreshing.busy ? 'Refreshing providers' : checkedLabel ? `Refresh provider status (checked ${checkedLabel})` : 'Refresh provider status'}
-            aria-label="Refresh provider status"
+            title={refreshing.busy ? 'Refreshing providers and models' : checkedLabel ? `Refresh providers and models (checked ${checkedLabel})` : 'Refresh providers and models'}
+            aria-label="Refresh providers and models"
             aria-busy={refreshing.busy !== null}
             disabled={refreshing.busy !== null}
-            onClick={refreshStatus}
+            onClick={refreshAll}
           >
             <RefreshCw size={14} className={refreshing.busy ? 'icon-spin' : undefined} />
-          </button>
-          <button
-            type="button"
-            className="settings-btn"
-            aria-busy={refreshingModels.busy !== null}
-            disabled={refreshingModels.busy !== null}
-            onClick={refreshAllModels}
-          >
-            {refreshingModels.busy ? <RefreshCw size={14} className="icon-spin" /> : <Sparkles size={14} />}
-            {refreshingModels.busy ? 'Refreshing models' : 'Refresh models'}
           </button>
         </span>
       </div>
       {/* Another computer that refuses or does not answer a read says so above the list it showed last. */}
-      {(pageError ?? refreshing.error ?? refreshingModels.error ?? (remote && snapshots ? loadError : undefined)) && (
-        <p className="prov-error">{pageError ?? refreshing.error ?? refreshingModels.error ?? loadError}</p>
+      {(pageError ?? refreshing.error ?? (remote && snapshots ? loadError : undefined)) && (
+        <p className="prov-error">{pageError ?? refreshing.error ?? loadError}</p>
       )}
       {pageNotice && <p className="prov-notice">{pageNotice}</p>}
 

@@ -30,6 +30,7 @@ const { ThreadsSidebar } = await import('../../src/renderer/components/ThreadsSi
 const { TitleBar } = await import('../../src/renderer/components/TitleBar')
 const { ToastHost, TOAST_MS, dismissToast } = await import('../../src/renderer/components/ui/Toast')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
+const { useSidebarOpenStore } = await import('../../src/renderer/lib/sidebarOpen')
 
 const at = '2026-11-05T10:00:00.000Z'
 const project = (id: string, name: string): Project => ({ id, name, path: `/p/${name}`, createdAt: at, order: 0 })
@@ -82,6 +83,7 @@ function setStore(patch: Partial<ReturnType<typeof useAppStore.getState>>) {
 }
 
 afterEach(() => {
+  useSidebarOpenStore.setState({ groups: new Set(), archived: false })
   act(() => root.unmount())
   host.remove()
   act(() => dismissToast())

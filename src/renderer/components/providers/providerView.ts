@@ -1,5 +1,5 @@
 import { nextEntryName } from '../../../shared/providerInstances'
-import type { BinarySource, InstallOwner, InstanceSnapshot } from '../../../shared/harness/status'
+import { INSTALL_OWNER_LABELS, type BinarySource, type InstanceSnapshot } from '../../../shared/harness/status'
 import type {
   HarnessDriverKind,
   RegistryAgentView,
@@ -213,18 +213,9 @@ const SOURCE_LABELS: Record<BinarySource, string> = {
   bundled: 'Bundled with Mousse'
 }
 
-const OWNER_LABELS: Partial<Record<InstallOwner, string>> = {
-  npm: 'npm',
-  pnpm: 'pnpm',
-  bun: 'Bun',
-  brew: 'Homebrew',
-  winget: 'winget',
-  standalone: 'its own installer'
-}
-
 /** "Found on PATH · installed with npm": where the executable came from. */
 export function binarySourceLabel(binary: NonNullable<InstanceSnapshot['binary']>): string {
-  const owner = binary.owner ? OWNER_LABELS[binary.owner] : undefined
+  const owner = binary.owner ? INSTALL_OWNER_LABELS[binary.owner] : undefined
   return owner ? `${SOURCE_LABELS[binary.source]} · installed with ${owner}` : SOURCE_LABELS[binary.source]
 }
 

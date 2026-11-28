@@ -20,6 +20,7 @@ import {
   BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest
 } from '../../src/shared/bots/personal/manifest'
 import { BOT_SCHEDULES_NOT_OWNER_TEXT } from '../../src/shared/bots/personal/walls'
+import { botVariantSays, canonicalToolName } from '../../src/shared/toolAliases'
 import type { ScheduledJob, Thread } from '../../src/shared/types'
 import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
@@ -45,7 +46,7 @@ describe('a bot uses what a thread\'s agent can', () => {
    * adds permissions to the starter grant (default: use your threads); `tools` adds built-ins; `botTools` is what the turn
    * is compiled with (default: work, which may act); `role` is the calling thread's.
    */
-  const world = async (options: { grant?: string[]; tools?: Array<'shell'>; botTools?: CompileInput['botTools']; role?: 'activation' | 'subagent'; host?: Partial<AppToolHost> } = {}) => {
+  const world = async (options: { grant?: string[]; tools?: Array<'shell'>; botTools?: CompileInput['botTools']; role?: 'activation' | 'subagent' | 'context'; host?: Partial<AppToolHost> } = {}) => {
     fx = delegationFixture()
     base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-parity-')))
     const profile = join(base, 'profile')
@@ -106,29 +107,44 @@ describe('a bot uses what a thread\'s agent can', () => {
         return { error: true, text: error instanceof Error ? error.message : String(error) }
       }
     }
-    const listed = () => registry.listForThread('work', workRun.runId).map((tool) => tool.name)
+    const listed = () => registry.listForThread('work', workRun.runId)
     return { compiled, call, listed, asked, host: fake.host, queueCommands: fake.queueCommands, onAppResult, files, base: base!, registry }
   }
 
-  // What each kind of turn holds of the tools this PR adds.
-  const lanes: Array<[string, Parameters<typeof world>[0], { has: readonly string[]; lacks: readonly string[] }]> = [
+  /**
+   * The bot's own work tools a main turn lists under a thread tool's name (S7d4a), whether or not its turn holds them:
+   * a call is held to the bot's grant. The listing then says only what each does ("With <its arguments>: …").
+   */
+  const WORK_UNDER_THREAD_NAMES = ['work_start', 'work_list', 'work_note', 'work_stop']
+  // What each kind of turn holds of the tools this PR adds. `asWork`: the lacked thread tools it may list only as those.
+  const lanes: Array<[string, Parameters<typeof world>[0], { has: readonly string[]; lacks: readonly string[]; asWork?: readonly string[] }]> = [
     ['work holds every thread control, scheduled jobs, secrets with "run commands", quick actions and its task list', { tools: ['shell'] },
       { has: [...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS, 'schedule_list', ...BOT_SCHEDULE_ACT_TOOLS, 'secret_request', 'secret_run', 'create_quick_action', ...BOT_TASK_TOOLS], lacks: [] }],
     ['without "run commands", secrets are asked for and never run', {}, { has: ['secret_request'], lacks: ['secret_run'] }],
     ['a turn that may only read lists its jobs and reads threads, and changes nothing', { botTools: { escalate: true, consult: false, threads: 'read', owner: true, tasks: true } },
-      { has: [...BOT_THREAD_READ_TOOLS, 'schedule_list'], lacks: [...BOT_THREAD_ACT_TOOLS, ...BOT_SCHEDULE_ACT_TOOLS] }],
-    ['a bot without "use your threads" keeps its jobs, secrets, quick actions and task list', { grant: [] }, { has: [...BOT_TASK_TOOLS, 'schedule_list', ...BOT_SCHEDULE_ACT_TOOLS, 'secret_request', 'create_quick_action'], lacks: BOT_THREAD_READ_TOOLS }],
-    ['a consult has none', { botTools: { escalate: false, consult: false } }, { has: [], lacks: [...BOT_THREAD_READ_TOOLS, 'schedule_list', 'secret_request', 'create_quick_action', ...BOT_TASK_TOOLS] }],
+      { has: [...BOT_THREAD_READ_TOOLS, 'schedule_list'], lacks: [...BOT_THREAD_ACT_TOOLS, ...BOT_SCHEDULE_ACT_TOOLS], asWork: ['thread_create', 'thread_send', 'thread_stop'] }],
+    ['a bot without "use your threads" keeps its jobs, secrets, quick actions and task list', { grant: [] }, { has: [...BOT_TASK_TOOLS, 'schedule_list', ...BOT_SCHEDULE_ACT_TOOLS, 'secret_request', 'create_quick_action'], lacks: BOT_THREAD_READ_TOOLS, asWork: ['thread_list'] }],
+    ['a consult has none', { role: 'context', botTools: { escalate: false, consult: false } }, { has: [], lacks: [...BOT_THREAD_READ_TOOLS, 'schedule_list', 'secret_request', 'create_quick_action', ...BOT_TASK_TOOLS] }],
     ['a subagent of the work: what a thread\'s subagent may use', { tools: ['shell'], role: 'subagent', botTools: { escalate: false, consult: false, subagent: true, threads: 'all', profiler: true, tasks: true } },
       { has: [...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS, ...BOT_TASK_TOOLS], lacks: ['schedule_list', ...BOT_SCHEDULE_ACT_TOOLS, 'secret_request', 'secret_run', 'create_quick_action', 'theme_set'] }]
   ]
-  it.each(lanes)('%s', async (_name, options, { has, lacks }) => {
+  it.each(lanes)('%s', async (_name, options, { has, lacks, asWork = [] }) => {
     const { compiled, listed } = await world(options)
     for (const tool of has) expect(compiled.permissions.appTools, tool).toContain(tool)
     for (const tool of lacks) expect(compiled.permissions.appTools, tool).not.toContain(tool)
-    // The thread lists what its turn holds of the tools this registry has, and nothing it lacks.
-    const shown = listed()
-    for (const tool of lacks) expect(shown, tool).not.toContain(tool)
+    // The thread lists what its turn holds of the tools this registry has, and nothing it lacks: a lacked thread tool is
+    // listed only as the bot's own work tools it carries (`asWork`), and then says only what those do.
+    const shown = new Map(listed().map((tool) => [tool.name, tool]))
+    for (const tool of lacks) {
+      const entry = shown.get(tool)
+      if (!asWork.includes(tool)) {
+        expect(entry, tool).toBeUndefined()
+        continue
+      }
+      if (!entry) continue
+      const says = WORK_UNDER_THREAD_NAMES.filter((old) => canonicalToolName(old) === tool).map((old) => `With ${botVariantSays(old)!.says}: `)
+      expect(entry.description.split('\n\n').every((part) => says.some((prefix) => part.startsWith(prefix))), `${tool}: ${entry.description}`).toBe(true)
+    }
   })
 
   describe('the thread controls ("use your threads")', () => {

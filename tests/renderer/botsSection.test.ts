@@ -169,33 +169,18 @@ describe('the Bots section', () => {
     expect(button('Message Flight deals')?.title).toBe('Flight deals: Paused')
   })
 
-  it('puts a lock before a bot that some of the owner\'s devices don\'t reach, and none before one every device does', async () => {
-    await show([
-      summary('a', { name: 'Diary', reach: 'this_computer' }),
-      summary('b', { name: 'Notes', reach: 'chosen' }),
-      summary('c', { name: 'Shopping', reach: 'all' }),
-      // A service that does not say: no lock, as before.
-      summary('d', { name: 'Flights' })
-    ])
-    const lock = (name: string) => button(`Message ${name}`)!.querySelector('.bot-row-head [aria-label="Private"]')
-    expect(lock('Diary')?.getAttribute('title')).toBe('Only this computer reaches this bot. Change it in About.')
-    expect(lock('Notes')?.getAttribute('title')).toBe('Only the devices picked in About reach this bot.')
-    expect(lock('Shopping')).toBeNull()
-    expect(lock('Flights')).toBeNull()
-  })
-
   it('a right-click on a bot opens its menu, which hides its checklist and shows it again', async () => {
     await show([summary('a', { name: 'Inbox helper' })], [], false)
     const menuItems = () => [...document.querySelectorAll('[role="menu"][aria-label="Inbox helper menu"] [role="menuitem"]')].map((item) => item.textContent)
     const rightClick = async () => { await act(async () => { button('Message Inbox helper')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 60 })) }) }
     try {
       await rightClick()
-      expect(menuItems()).toEqual(['Hide checklist'])
+      expect(menuItems()).toEqual(['Pin', 'Mark as unread', 'Mute notifications', 'Hide', 'Hide checklist', 'About this bot', 'Rename', 'Change look', 'Pause', 'Delete bot'])
       await click([...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === 'Hide checklist'))
       expect(menuItems()).toEqual([])
       expect(JSON.parse(localStorage.getItem('mousse-bot-checklist-hidden')!)).toEqual(['a'])
       await rightClick()
-      expect(menuItems()).toEqual(['Show checklist'])
+      expect(menuItems()).toContain('Show checklist')
     } finally {
       setBotChecklistHidden('a', false)
     }

@@ -120,7 +120,7 @@ Opening the app or the Chats tab reads only memory and the copy on disk; it neve
 
 - **Offline.** The registry keeps the last feed snapshot and marks the computer offline; the rows grey, chats open from `RemoteBotChats`, and actions that need the bot's computer are disabled. On reconnect the feed and any open bot stream reattach and the chat reloads.
 - **Losing access.** The bot's computer pushes the reader's bots feed without the bot, ends its bot and browser streams, and withdraws queued messages (`withdrawQueued`). The viewing computer drops the row, the chat copy, the marks and any notification shown. A refusal of the whole feed (level Off) drops every bot of that computer, not a row marked "not shared". If the bot's computer is offline when access is lost, the viewing computer learns when it returns; what a device already received can't be taken back (as today).
-- **Notifications.** `RemoteBotTellings` reacts only to live feed changes, never to a start, a reconnect or a copy loaded from disk, and applies mute and hide here. A `readSeq` that passes a notified message withdraws it.
+- **Notifications.** `RemoteBotTellings` tells a message once: when its sequence passes the highest this computer has seen of that bot while it runs. What a computer's feed sends until it first catches up after a start, and the first row of a bot newly in reach, only set what is known, so a start tells nothing and a restart repeats nothing. What came while a computer was away arrives as its feed catches up after a reconnect, and is told then as one fold without a sound; so is what came while no window was open, once one opens (less than a day old), as `BotTellings` tells what came while Mousse was closed. It applies mute and hide here. A `readSeq` that passes a notified message withdraws it.
 - **New bot elsewhere.** `bots.model.choices` and `bots.create` take a target computer; the model list and the device list are that computer's own, and the maker is always included.
 
 ## What goes away
@@ -131,7 +131,7 @@ Opening the app or the Chats tab reads only memory and the copy on disk; it neve
 - The `bots_chat` and `bots_manage` access classes (replaced by the levels; `speech.*` gets a class of its own).
 - The refusal of every remote caller in `bots.devices.*` and `bots.permissions.set` (replaced by the Full level; local callers other than the window are still refused).
 - `bots` in the threads lists stream (replaced by the bots feed).
-- `bots.chat.attachment` (replaced by `bots.chat.file`).
+- `bots.chat.attachment` (replaced by `bots.chat.file`; it stays until the phone app moves to `bots.chat.file`, #2023).
 - Polling for remote rows; local bots keep `useBotsPolling` until it is replaced separately.
 
 `withHiddenBots` stays as it is: a computer serving a thread can't know whether the reader reaches a bot that lives on a third computer, so it keeps naming such a bot "a bot".
@@ -179,7 +179,7 @@ Each slice ends with one check. What needs two computers is checked on the PC an
 1. **Access.** The bot level per device in place of the two switches, set by the presets; each bot's Devices as an explicit list starting at its own computer, with the update rule above; the Devices step in New bot. `BOT_METHODS` with levels, a bot named on every row (`botId` on `bots.actions.answer`), the thread-ceiling rule for Full-access grants and the `local` rows, generating the local and remote registrations and `METHOD_ACCESS`; `speech.*` on its own class; phones follow it. *Check:* the table test, and gate tests for Off, Use and Full against every row, including a Full device with a lower thread ceiling.
 2. **Thin slice, end to end.** The bots feed; `RemoteBotRegistry` with its copy; `BotRouter` with fast failure when offline; `bridge.bot.open` with `AttachedBots`; bot streams admitted apart from thread sharing; read state through `bots.chat.markRead`; `RemoteBotChats`; the merged list with the badge and offline state; a remote chat in text, read-only when offline. The engine allowlist entries. *Check:* tests that a lost reach drops the row and the copy; the PC opens and chats with a Mac bot.
 3. **Marks, filter and menu.** `bot-marks.json`, pin, hide, mute, marked unread, the filter and the right-click menu. *Check:* store tests for order and filter.
-4. **Notifications.** Telling metadata on the feed and `RemoteBotTellings`. *Check:* tests that a start or reconnect tells nothing and mute holds.
+4. **Notifications.** Telling metadata on the feed and `RemoteBotTellings`. *Check:* tests that a start tells nothing, a reconnect or a closed window tells what came meanwhile once, and mute holds.
 5. **Files and images.** `bots.stage` and staged sends, and `bots.chat.file` in place of `bots.chat.attachment`. *Check:* a picture sent from the PC shows on the Mac and back.
 6. **Setup from another computer.** The Full rows, About and the menu from a remote device, and New bot "Lives on". *Check:* gate tests; making a bot on the Mac from the PC.
 7. **Applets.** The bot-scoped applet rows. *Check:* a bot's applet opens on the PC.

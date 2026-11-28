@@ -5,7 +5,7 @@ import { accessPresetOf } from '../../shared/net/accessPresets'
 import type { RpcMethod } from './contracts'
 import type { NodePolicy } from './store/nodePolicy'
 
-/** The refusal of a device this computer lets view threads and chat with bots only. */
+/** The refusal of a device this computer lets view threads only (its bot level is separate). */
 export const workOff = (): NetError =>
   new NetError('forbidden', undefined, { details: { reason: 'work_off' } })
 
@@ -40,7 +40,7 @@ export function checkNodePolicy(
     if (method.needsTerminal && !policy.get(node).terminal)
       throw new NetError('forbidden', undefined, { details: { reason: 'terminal_off' } })
   }
-  // "Work on threads from this device" off: the device views threads and chats with bots, and every call
-  // that would start, change or stop work is refused, in every family, a saved result's lookup included.
+  // "Work on threads from this device" off: the device views threads, and every call that would start, change or
+  // stop work is refused, in every family, a saved result's lookup included. Bot calls follow the bot level instead.
   if (needsWork(methodAccess(method.method)) && !policy.get(node).work) throw workOff()
 }

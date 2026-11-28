@@ -12,18 +12,46 @@
 .bot-row-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .bot-row-head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .bot-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; line-height: 1.3; }
-.bot-row-lock { display: inline-flex; flex: none; align-self: center; margin-right: -2px; color: var(--text-secondary); }
 .bot-row-time { flex: none; font-size: 11px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .bot-row-unread { flex: none; align-self: center; min-width: 16px; padding: 0 5px; border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; color: var(--ui-on-accent, #141218); background: var(--accent); }
 .bot-row-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.35; color: var(--text-secondary); }
 .bot-row-state[data-tone='working'] { color: var(--bot-state-working, #b49cf0); }
 .bot-row-state[data-tone='needs'] { color: var(--warning, #d4b06a); }
+/* A bot of another computer: the computer's icon beside its name; faded while that computer is offline. */
+.bot-row-computer { flex: none; align-self: center; color: var(--text-secondary); }
+.bot-row[data-away] > * { opacity: 0.55; }
+/* Marks kept on this computer: pinned, muted, and hidden (shown by Filter → Show hidden, faded). */
+.bot-row-mark { flex: none; align-self: center; display: inline-flex; color: var(--text-secondary); }
+.bot-row[data-hidden] > * { opacity: 0.55; }
+/* Marked unread with no count: a dot where the count goes. */
+.bot-row-unread.bot-row-unread-dot { min-width: 8px; width: 8px; height: 8px; padding: 0; border-radius: 50%; }
+/* A row's pin, over its time while the pointer is on the row or the keyboard is in it, as thread rows have it. */
+.bot-hover-anchor { position: relative; }
+.bot-row-actions { position: absolute; top: 4px; right: 5px; display: inline-flex; opacity: 0; pointer-events: none; transition: opacity 0.15s; }
+.bot-hover-anchor:hover .bot-row-actions,
+.bot-hover-anchor:has(:focus-visible) .bot-row-actions { opacity: 1; pointer-events: auto; }
+.bot-hover-anchor:hover .bot-row-time,
+.bot-hover-anchor:has(:focus-visible) .bot-row-time { visibility: hidden; }
+.bot-row-action { display: inline-flex; align-items: center; justify-content: center; width: 23px; height: 23px; border-radius: 4px; color: var(--text-secondary); transition: background 0.15s, color 0.15s; }
+.bot-row-action:hover, .bot-row-action:focus-visible { background: rgba(var(--accent-rgb), 0.18); color: var(--text-primary); }
+.bot-row-action.active { color: var(--text-primary); }
+@media (prefers-reduced-motion: reduce) { .bot-row-actions { transition: none; } }
+/* The Bots filter: a dot on its button while it narrows the list or shows hidden bots. */
+.chat-section-heading button.bots-filter-button { position: relative; }
+.chat-section-heading button.bots-filter-button[aria-expanded='true'] { background: rgba(var(--accent-rgb), .12); color: var(--text-primary); }
+.bots-filter-button[data-set]::after { content: ''; position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
 /* Header: the face with its activity sticker, the name with its presence under it (what it does is in About); one menu. */
 .bot-header-about { position: relative; flex: none; display: grid; place-items: center; color: inherit; border-radius: 9px; }
 .bot-header-who { display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 2px; height: 36px; min-width: 0; flex: 1; margin-left: 6px; }
 .bot-header-name { display: block; max-width: 100%; height: 18px; min-height: 0; padding: 0; border: 0; background: none; color: inherit; text-align: left; }
 .app .bot-header-name h1 { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 18px; font-weight: 600; margin: 0; }
+/* A bot of another computer: its name and the computer it lives on, which has no About here. */
+span.bot-header-name { display: flex; align-items: center; gap: 6px; }
+.app span.bot-header-name h1 { flex: 0 1 auto; min-width: 0; }
+.bot-header-computer { flex: none; color: var(--text-secondary); }
+/* Its computer is offline: one quiet line where the composer was. */
+.bot-away-note { margin: 0; padding: 10px 4px 4px; font-size: 12px; color: var(--text-secondary); text-align: center; }
 /* What it does now, on the face's corner: one of the app's icons on a round tile. It never moves. */
 .bot-sticker { position: absolute; right: -7px; bottom: -5px; display: grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; color: var(--text-primary); background: var(--surface-elevated, #2e2f38); box-shadow: 0 0 0 2px var(--bg-primary, #000); pointer-events: none; }
 .bot-sticker[data-kind='typing'] { color: var(--success, #7ec99a); }
@@ -68,6 +96,9 @@
 .bot-menu button { display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 9px; border-radius: 7px; font-size: 12px; color: var(--text-primary); text-align: left; }
 .bot-menu button:hover, .bot-menu button:focus-visible { background: color-mix(in srgb, var(--text-secondary) 11%, transparent); outline: none; }
 .bot-menu button.is-danger { color: var(--error, #e79090); }
+/* Greyed out, yet still reached by the arrow keys so its tooltip can say why. */
+.bot-menu button[aria-disabled='true'] { opacity: .5; cursor: default; }
+.bot-menu button[aria-disabled='true']:hover:not(:focus-visible) { background: transparent; }
 .bot-menu hr { border: 0; border-top: 1px solid rgba(var(--accent-pale-rgb), .1); margin: 4px 2px; }
 
 /* The transcript and the composer share one centred column: nearly the full pane on a narrow one (95% at 1000px),
@@ -499,9 +530,9 @@ html[data-theme] .app .bot-chat-pane::after { content: ''; position: absolute; i
 .bot-browser-tabs > button { display: inline-flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; max-width: 180px; height: 26px; padding: 0 10px; border-radius: var(--ui-row-radius); font-size: 12.5px; color: var(--text-secondary); white-space: nowrap; transition: background var(--ui-dur-fast) ease, color var(--ui-dur-fast) ease; }
 .bot-browser-tabs > button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .bot-browser-tabs > button > svg { flex: none; }
-.bot-browser-tabs > button:hover:not(.is-on) { background: var(--ui-hover); color: var(--text-primary); }
+.bot-browser-tabs > button:hover:not(.is-on) { background-color: var(--ui-hover); color: var(--text-primary); }
 .bot-browser-tabs > button.is-on { background: var(--ui-raised); color: var(--text-primary); }
-.bot-browser-tabs > button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.bot-browser-tabs > button:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 /* The panel's strip closes it: the browser's own Close is not shown here. */
 .bot-side .watched-browser-bar > button[aria-label='Close the browser view'] { display: none; }
 .bot-side .bot-file-head { border-bottom: 0; padding: 4px 4px 8px 12px; }

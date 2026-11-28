@@ -2,8 +2,7 @@ import type { StorageCleanupRule } from '../../shared/storage'
 
 /**
  * The words next to each cleanup rule. A rule row shows its title, one short line and its control; what it
- * deletes and never deletes is in the tooltip (and in full in the recommended-rules dialog). Kept in one place
- * so the page and its tests read the same text.
+ * deletes and never deletes is in the tooltip. Kept in one place so the page and its tests read the same text.
  */
 export type StorageRuleId = 'inactive' | 'merged' | 'captures'
 
@@ -97,9 +96,8 @@ export function retiredWorktreeNote(at: string): string {
 
 /** The notice for a profile that was already in use when the recommended rules arrived. */
 export const RECOMMENDED_COPY = {
-  title: 'Recommended cleanup rules are available',
-  body: 'Nothing has changed: only the worktrees of deleted threads are removed automatically. Turning on more rules is up to you.',
-  modalIntro: 'These rules are off for you now. Turning them on lets Mousse remove these things on a schedule, and Preview cleanup shows you what before it removes anything.',
+  title: 'Recommended cleanup rules',
+  body: 'Off for now; only worktrees of deleted threads are removed.',
   rules: {
     inactive: 'Remove worktrees inactive for 30 days',
     merged: 'Remove merged worktrees',

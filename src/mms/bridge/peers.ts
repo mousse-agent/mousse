@@ -48,6 +48,16 @@ export interface EngineDirectoryPort {
   /** Whether `node` is one of this profile's engine pairings (in any state). */
   isEngine(node: NodeId): boolean
   serving(node: NodeId): boolean
+  /**
+   * False while the other computer no longer accepts this one (it removed the pairing, revoked the grant or refused
+   * this device), until it connects again.
+   */
+  accepted?(node: NodeId): boolean
+  /**
+   * Its last connection was refused for version (pair-with-IP design §5): `there`, it runs the older Mousse;
+   * `here`, this computer does. While it is, nothing of it is used: no client, no threads. Undefined otherwise.
+   */
+  cutOff?(node: NodeId): 'there' | 'here' | undefined
   name(node: NodeId): string | undefined
   client(node: NodeId): BridgeClient
   online(node: NodeId): boolean
@@ -169,6 +179,25 @@ export class PeerDirectory {
     return [...(v1 ?? []), ...paired]
   }
 
+  /**
+   * The other computers whose bots are listed. Like `computers`, but a roster device that is away stays (its bots are
+   * listed offline from their copy), and an engine pairing that no longer accepts this one is left out, so its bots go.
+   * `v1Unknown` when v1 is on and its roster can't be read while the engine's pairings are known: the v1 devices are
+   * then neither listed nor forgotten. `undefined` when nothing can be known now (the engine still starting, or v1 the
+   * only source and its roster unreadable).
+   */
+  botComputers(): { computers: ComputerRef[]; v1Unknown: boolean } | undefined {
+    if (!engineControl('roster-only-directory') && this.options.engine()?.settled() === false) return undefined
+    const engine = this.engine()
+    const v1 = this.v1On() ? v1Computers(this.options.net, { away: true }) : []
+    if (!v1 && !engine) return undefined
+    const rt = engine ? this.options.net.runtime() : undefined
+    const paired = (engine?.rows() ?? [])
+      .filter((row) => !rt!.policy.get(row.node).blocked && engine!.accepted?.(row.node) !== false)
+      .map((row) => ({ node: row.node, name: row.name || 'the other computer' }))
+    return { computers: [...(v1 ?? []), ...paired], v1Unknown: !v1 }
+  }
+
   name(node: NodeId, fallback = 'the other computer'): string {
     const engine = this.options.engine()
     if (engine?.isEngine(node)) return engine.name(node) || fallback
@@ -186,6 +215,12 @@ export class PeerDirectory {
   /** Whether `node` is an engine pairing; the Hub's engine branch and `bridge.hub.*` read it. */
   isEngine(node: NodeId): boolean {
     return !!this.options.engine()?.isEngine(node)
+  }
+
+  /** Which computer needs a Mousse update while `node` is cut off for its version; undefined while it is not. */
+  cutOff(node: NodeId): 'there' | 'here' | undefined {
+    const engine = this.options.engine()
+    return engine?.isEngine(node) ? engine.cutOff?.(node) : undefined
   }
 
   /** A client for calls to `node`; `peer_offline` when none is open. */
@@ -254,8 +289,8 @@ export class PeerDirectory {
   }
 }
 
-/** The v1 half of `computers()`, from the signed roster. */
-function v1Computers(net: Pick<NetService, 'runtime'>): ComputerRef[] | undefined {
+/** The v1 half of `computers()`, from the signed roster; with `away`, the devices not connected now too. */
+function v1Computers(net: Pick<NetService, 'runtime'>, options: { away?: boolean } = {}): ComputerRef[] | undefined {
   try {
     const rt = net.runtime()
     const identity = rt.identity
@@ -282,7 +317,7 @@ function v1Computers(net: Pick<NetService, 'runtime'>): ComputerRef[] | undefine
           !roster.revoked.some(
             (row) => row.subject === found.subject && row.throughKeyEpoch >= found.keyEpoch
           ) &&
-          rt.connections.connected(found.subject as NodeId) &&
+          (options.away || rt.connections.connected(found.subject as NodeId)) &&
           !rt.policy.get(found.subject as NodeId).blocked &&
           isListedComputer(rt.enrollment.nodeKind(found.subject as NodeId), found.caps)
       )

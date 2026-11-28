@@ -24,14 +24,14 @@ const click = async (element: Element | null | undefined) => {
 }
 const button = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('button')].find((entry) => entry.textContent === label)
 
-const DEFAULTS: BridgeNodePolicy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: true, agentReach: 'launched', work: true }
+const DEFAULTS: BridgeNodePolicy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: 'use', agentReach: 'launched', work: true }
 let policy: BridgeNodePolicy
 const computer = (node: string, name: string, extra: Record<string, unknown>) =>
   ({ node, name, caps: ['read', 'chat', 'write', 'settings'], keyEpoch: 1, expiresAt: 0, kind: 'computer', self: false, revoked: false, state: 'open', ...extra })
 const request = vi.fn(async (method: string, params?: Record<string, unknown>) => {
   switch (method) {
     case 'netEngine.status': return { enabled: false, on: false, helper: { state: 'off' }, devices: [], approvals: [] }
-    case 'net.status': return { enabled: true, keystore: 'unlocked', protected: true, self: { node: 'nod_self', isAuthority: true }, transports: [], peers: [], routes: [], workOnThreads: true, shareBots: true }
+    case 'net.status': return { enabled: true, keystore: 'unlocked', protected: true, self: { node: 'nod_self', isAuthority: true }, transports: [], peers: [], routes: [], workOnThreads: true }
     case 'net.transport.list': return { manifests: [], records: {}, settings: {} }
     case 'net.ssh.list': return { records: [] }
     case 'bridge.nodes': return {
@@ -68,15 +68,12 @@ afterEach(() => {
   host.remove()
 })
 
-/** Opens a device's Access from its Can use this computer row's menu (Hide access closes it). */
+/** Chooses a device in the list; its detail, with its Access, shows beside the list. */
 const openAccess = async (name: string) => {
-  const actions = document.querySelector<HTMLElement>(`[data-device-side="in"] [aria-label="Actions for ${name}"]`)!
-  await act(async () => actions.click())
-  const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((entry) => /^(Hide access|Access)$/.test(entry.textContent?.trim() ?? ''))!
-  await act(async () => item.click())
+  await act(async () => document.querySelector<HTMLElement>(`[data-device-node] button[aria-label="${name}"]`)!.click())
   for (let i = 0; i < 5; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
 }
-/** Opens one device's Access; only one is open at a time. */
+/** Chooses one device; only its detail shows. */
 const openDetail = openAccess
 const showDevices = async () => {
   await act(async () => root.render(createElement(EngineDevicesSection)))
@@ -97,16 +94,29 @@ it('a computer with the defaults works on threads; each preset sets its fields a
   expect(picked()).toBe('Work on threads')
 
   await click(button('View and chat'))
-  expect(policyCalls()).toEqual([{ node: 'nod_mac', work: false, terminal: false, editor: false, maxPermissionMode: 'accept_edits', agentReach: 'launched' }])
+  expect(policyCalls()).toEqual([{ node: 'nod_mac', work: false, terminal: false, editor: false, maxPermissionMode: 'accept_edits', agentReach: 'launched', bots: 'use' }])
   expect(picked()).toBe('View and chat')
 
   await click(button('Full control'))
-  expect(policyCalls()[1]).toEqual({ node: 'nod_mac', work: true, terminal: true, editor: true, maxPermissionMode: 'full', agentReach: 'all' })
+  expect(policyCalls()[1]).toEqual({ node: 'nod_mac', work: true, terminal: true, editor: true, maxPermissionMode: 'full', agentReach: 'all', bots: 'full' })
   expect(picked()).toBe('Full control')
 
   await click(button('Work on threads'))
   expect(policy).toMatchObject({ ...DEFAULTS })
   expect(picked()).toBe('Work on threads')
+})
+
+it('a bot level changed on its own shows the preset as Custom, and the bot level as picked', async () => {
+  policy = { ...DEFAULTS, work: true, terminal: true, editor: true, maxPermissionMode: 'full', agentReach: 'all', bots: 'use' }
+  await showDevices()
+  expect(picked()).toBeUndefined()
+  expect(presets()[0]!.closest('.settings-item')!.textContent).toContain('Custom')
+  const bots = document.querySelector('[role="radiogroup"][aria-label="Bots on this computer for Mac"]')!
+  expect(bots.querySelector('[aria-checked="true"]')?.textContent).toBe('Use')
+  // Picking Full control again sets the bot level with the rest.
+  await click(button('Full control'))
+  expect(policyCalls()).toEqual([{ node: 'nod_mac', work: true, terminal: true, editor: true, maxPermissionMode: 'full', agentReach: 'all', bots: 'full' }])
+  expect(picked()).toBe('Full control')
 })
 
 it('fields that match no preset show Custom, with no preset picked and the single switches still there', async () => {

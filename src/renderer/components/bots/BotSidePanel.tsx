@@ -292,13 +292,15 @@ function BrowserView({ bot, view, fullScreen, tabs, shown, threadView, onChoose 
  * The panel itself: the tab strip, the view (each switch fades and slides in from the side of its tab), and the left
  * edge that drags the width. It mounts while open and for the slide out.
  */
-export function BotSidePanel({ bot, state, browser, folder, file, onFile }: {
+export function BotSidePanel({ bot, state, browser, folder, file, onFile, views }: {
   bot: BotSummary
   state: BotSidePanelState
   browser: BotBrowserView | undefined
   folder: string | null
   file: string | null
   onFile(path: string | null): void
+  /** The views the picker offers; all of them when absent (a bot of another computer has Agent settings alone). */
+  views?: readonly BotSideView[]
 }) {
   const { open, view } = state
   const profileId = useAppStore((s) => s.profileId)
@@ -384,7 +386,7 @@ export function BotSidePanel({ bot, state, browser, folder, file, onFile }: {
     tabs={tabs} shown={shownThread} threadView={threadView} onChoose={setChosen} /> : null
   else if (view === 'files') body = <FilesView bot={bot} folder={folder} file={file} onFile={onFile} />
   else body = <PanelPicker>
-    {VIEWS.map(({ view: entry, label, icon }) => <li key={entry}><PanelPickerRow icon={icon} label={label} onPick={() => state.show(entry)} /></li>)}
+    {VIEWS.filter((entry) => !views || views.includes(entry.view)).map(({ view: entry, label, icon }) => <li key={entry}><PanelPickerRow icon={icon} label={label} onPick={() => state.show(entry)} /></li>)}
   </PanelPicker>
   // The picker alone has no tab: as the app panel's, it shows by itself.
   const strip = state.tabs.length === 1 && view === null ? [] : state.tabs

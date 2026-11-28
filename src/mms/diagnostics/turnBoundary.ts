@@ -1,9 +1,11 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { ChildProcess } from 'node:child_process'
+import { logMeasurement } from '../log/diag'
 
 /**
  * Where every thread's turn boundaries spend their time: the turn's start, from `executeTurn` to its provider call, and
- * its end, from the provider's reply to the turn's settle. Each is logged once, as one line in the service log:
+ * its end, from the provider's reply to the turn's settle. Each is logged once, as one line in the daemon log
+ * (`logs/daemon.log` in Mousse's home) and on the service's standard output:
  *
  * `[turn-boundary] {"threadId":…,"runId":…,"edge":"start","ms":…,"waitedMs":…,"phases":{"folders":{"ms":…},"lease":{"ms":…,"git":4,…},…}}`
  *
@@ -50,7 +52,7 @@ const scope = new AsyncLocalStorage<TurnScope>()
 /** Phases past this many are folded into the last one: a boundary's line stays bounded whatever marks it meets. */
 const MAX_PHASES = 24
 
-const defaultLog = (line: string): void => console.info(line)
+const defaultLog = (line: string): void => logMeasurement(line)
 
 /**
  * Runs one turn under its boundary scope. Its start boundary begins now. Whichever boundary is still open when `work`

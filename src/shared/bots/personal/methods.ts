@@ -5,7 +5,7 @@ import type { BotLook } from './look'
 import type { BotPickReason } from './modelSlots'
 import type { BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from './memory'
 import type { LlmProviderOption } from '../../settings'
-import type { NewBotAccess } from './deviceAccess'
+import type { BotDeviceChoice, NewBotAccess } from './deviceAccess'
 
 /** A computer on a bot's About and create row: this one (`this_computer`), or another of the person's computers by node. */
 export interface BotComputerChoice {
@@ -71,10 +71,16 @@ export interface BotRunsOnChoices {
   /** What the owner can add for the Images row to offer a model, while it offers none (its tooltip). */
   imagesMissing?: string
   /**
-   * New bot's Devices row: the service takes `access` on `bots.create`, saved before the bot is listed anywhere. Absent
-   * from an older service, which refuses the key, so the app shows no such row there.
+   * The service takes `access` on `bots.create`, saved before the bot is listed anywhere. Absent from an older service,
+   * which refuses the key, so the app sends none there.
    */
   reachOnCreate?: true
+  /**
+   * The owner's other devices (phones too), for New bot's Devices step, which shows only when there is at least one: a
+   * new bot reaches this computer alone plus the ones ticked there. Absent when there are none, from `bots.model.get`,
+   * and from an older service.
+   */
+  devices?: BotDeviceChoice[]
 }
 
 /** The pictures a bot made today against its caps (#1088), for the Images row's tooltip. */
@@ -184,11 +190,12 @@ export interface BotsPersonalV2Api {
    * from before rows): one model by name on every row; neither, by usage (an app from before picks). Older services
    * refuse these keys, so the app sends `model` only to a service that has `bots.model.choices`, and `slots` only to one
    * whose choices carry `providers`. `image`: the Images row (#1088), one of `imageProviders`' models; sent only to a
-   * service whose choices carry `imageProviders`. `access`: which devices reach the new bot (New bot's Devices row),
-   * saved before the bot is listed anywhere; sent only to a service whose choices carry `reachOnCreate`. Absent, every
-   * device, as before.
+   * service whose choices carry `imageProviders`. `access`: which devices reach the new bot (New bot's Devices step),
+   * saved before the bot is listed anywhere; sent only to a service whose choices carry `reachOnCreate`. Absent, or
+   * `all` from an older app, this computer alone. `node` (a window only): made on that other computer of the owner's,
+   * New bot's "Lives on", routed there; it always reaches this computer too.
    */
-  'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }; result: { bot: BotSummary } }
+  'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess; node?: string }; result: { bot: BotSummary } }
   'bots.get': { params: { botId: string }; result: BotDetail }
   /**
    * Renames the bot, changes its look, or (`description`) edits its prompt in About: the description it works under from
@@ -221,7 +228,7 @@ export interface BotsPersonalV2Api {
    * answered (`question_answered`) or no longer open (`question_closed`) is refused before anything is written. An older
    * service lacks it: the owner answers with Reply.
    */
-  'bots.actions.answer': { params: { actionId: string; digest: string; answer: 'send' | 'not_now' }; result: { status: string } }
+  'bots.actions.answer': { params: { botId: string; actionId: string; digest: string; answer: 'send' | 'not_now' }; result: { status: string } }
   /**
    * The owner's Continue or Stop on what the bot holds past the limit between bots (`BotSummary.chainHold`), named by its
    * batch (`holdId`): one already settled is refused (`hold_settled`). Only from a window on this computer.
@@ -248,9 +255,10 @@ export interface BotsPersonalV2Api {
   'bots.model.get': { params: { botId: string }; result: { model: string | null; slots?: BotShownRows; named?: Partial<Record<BotModelSlotKey, string>>; image?: BotModelPick | null; images?: BotImageUsage; custom?: BotCustomSlot[] } & BotRunsOnChoices }
   /**
    * What New bot's Runs on offers before the bot exists (#673): the same choices as `bots.model.get`, and `last`, the
-   * rows of the owner's newest bot with picks, which a new bot starts from (null where it had none).
+   * rows of the owner's newest bot with picks, which a new bot starts from (null where it had none). `node` (a window
+   * only): what that other computer offers, for New bot's "Lives on" there; its devices mark this one `caller`.
    */
-  'bots.model.choices': { params: Record<string, never>; result: BotRunsOnChoices & { last?: BotShownRows } }
+  'bots.model.choices': { params: { node?: string }; result: BotRunsOnChoices & { last?: BotShownRows } }
   /**
    * The single picker before rows: one model by name on every row, on the entry that offers it now, or null, which
    * leaves a bot from before picks by usage. A picked bot is never set back to by usage.
@@ -330,4 +338,55 @@ export interface BotsPersonalV2EventData {
    * before a step ("Checking prices at Indian stores now"); absent when it said none. Absent from older services.
    */
   'bots.activity': { botId: string; activationId: string; chip: BotChip | null; status?: string }
+}
+
+/**
+ * The window's view of the bots of the owner's other computers, served by the viewing computer alone and never offered
+ * to another device: `bots.remote.list`, those bots as this computer lists them (from memory and its copy on disk, never
+ * waiting on another computer), and `bots.focus`, a window keeps a bot's chat in view (its chat stream is open while one
+ * does), and `bots.remote.file`, the copy on this computer of a file such a bot's chat shows (`path`, its place in the
+ * bot's files folder there). Calls about one of those bots are the usual bot methods with its qualified id, routed to
+ * its computer.
+ */
+export const BOTS_ELSEWHERE_METHODS = ['bots.remote.list', 'bots.focus', 'bots.remote.file'] as const
+/**
+ * An applet such a bot's message shows (`bots.remote.applet`), read there for the app's main process to run in its
+ * applet frame (or the copy here, read-only, while that computer is away), and its state saved there
+ * (`bots.remote.appletState`). The main process's alone, as `applets.*` are: the window's request bridge does not offer them.
+ */
+export const BOTS_ELSEWHERE_APPLET_METHODS = ['bots.remote.applet', 'bots.remote.appletState'] as const
+/** Another computer a new bot can live on: one where this computer has Full bot access. */
+export interface BotElsewhereComputer {
+  node: string
+  name: string
+  offline?: true
+}
+export type BotsElsewhereMethod = (typeof BOTS_ELSEWHERE_METHODS)[number] | (typeof BOTS_ELSEWHERE_APPLET_METHODS)[number]
+export interface BotsElsewhereApi {
+  /**
+   * `computers`: the other computers where this one has Full bot access, for New bot's "Lives on" (offline ones marked,
+   * not offered). Absent from an older service.
+   */
+  'bots.remote.list': { params: Record<string, never>; result: { bots: BotSummary[]; computers?: BotElsewhereComputer[] } }
+  'bots.focus': { params: { botId: string; focused: boolean }; result: { routed: boolean; focused: boolean } }
+  'bots.remote.file': { params: { botId: string; path: string }; result: { path: string; name: string; size: number } }
+  'bots.remote.applet': {
+    params: { botId: string; messageId: string; appletId: string; revisionId: string }
+    result: { bundle: import('../../applets').AppletReference & { source: import('../../applets').AppletSubmission }; state: unknown; readOnly?: true }
+  }
+  'bots.remote.appletState': { params: { botId: string; messageId: string; appletId: string; revisionId: string; state: unknown }; result: { saved: true } }
+}
+
+/**
+ * A bot of another computer writing its chat turn's reply, while a window shows its chat (`bots.reply`): the reply's
+ * text so far (`text`, assistant rows only), or a new message or step in its home thread (`added`) that ends the reply
+ * shown. Display only, never stored; the posted message replaces it.
+ */
+export interface BotReplyEvent {
+  botId: string
+  messageId: string
+  role: string
+  kind?: string
+  text?: string
+  added: boolean
 }

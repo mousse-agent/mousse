@@ -156,11 +156,12 @@ import { threadFolderExpired, threadFolderRoot } from './data/expiredThreads'
 import { isThreadExpired } from '../shared/threadExpiry'
 import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry'
 import type { ThreadRouterPort } from './protocol/threadRouterPort'
+import type { BotRouterPort } from './protocol/botRouterPort'
 import type { RoutedTerminalsPort } from './protocol/routedTerminalsPort'
 import type { EditorAsksPort } from './protocol/editorAsksPort'
-import type { BotsSharingPort } from './protocol/botsSharingPort'
 import type { BotReachPort } from './protocol/botReachPort'
 import { BotDeviceAccessStore } from './bots/definitions/BotDeviceAccessStore'
+import { BotMarksStore } from './bots/marks/BotMarksStore'
 import type { RemoteListsPort } from './protocol/remoteListsPort'
 import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
@@ -351,12 +352,15 @@ export class MmsProfileServices {
    * the Bridge service while it is composed and cleared when it closes; the handlers consult it first.
    */
   threadRouter?: ThreadRouterPort
+  /**
+   * Sends a window's calls about a bot of another of the user's computers to that computer. Set by the Bridge service
+   * with `threadRouter`; the handlers consult it before the thread router.
+   */
+  botRouter?: BotRouterPort
   /** The terminals other computers opened here, set while Bridge is on. */
   routedTerminals?: RoutedTerminalsPort
   /** The asks other computers made for editor connections, set while Bridge is on. */
   editorAsks?: EditorAsksPort
-  /** "Share bots with other devices" on this computer, set while Bridge is on. */
-  botsSharing?: BotsSharingPort
   /** Which of the owner's devices reach which bot here (each device's switch, each bot's Devices), set while Bridge is on. */
   botReach?: BotReachPort
   /**
@@ -382,6 +386,30 @@ export class MmsProfileServices {
     return this.speechRelayInstance
   }
 
+  /**
+   * The one-time move to explicit Devices lists (`BotDeviceAccessStore.snapshot`): every bot that reached every device
+   * ("All my devices", or no choice stored) gets the owner's other devices linked now, so nobody loses a bot they reached
+   * and a device linked later reaches none. Until then such a bot reaches this computer alone. A profile with no
+   * networking set up (no `net.db`) has no other device: it runs when the bots open, so a device linked later is in no
+   * list. Otherwise it waits until the account's devices can be read, tried whenever Bridge reads them (with its own
+   * directory). Once written, it never runs again.
+   */
+  snapshotBotDevices(
+    // `peers` is set later in construction than the bots open: until then, the devices are not known.
+    linked: () => readonly string[] | undefined = () =>
+      existsSync(join(this.homeDir, 'net', 'net.db')) ? (this.peers as PeerDirectory | undefined)?.accountDevices() : []
+  ): void {
+    const store = this.botStore
+    if (!store || !this.botDeviceAccess.needsSnapshot()) return
+    const devices = linked()
+    if (!devices) return
+    try {
+      this.botDeviceAccess.snapshot(store.listRegistry().map((row) => row.botId), devices)
+    } catch (error) {
+      console.warn('bot device lists could not be written', error instanceof Error ? error.message : String(error))
+    }
+  }
+
   private domainService(): BridgeProfileService {
     this.net.runtime()
     if (!this.bridgeService) throw new Error('Bridge profile composition is unavailable')
@@ -391,6 +419,16 @@ export class MmsProfileServices {
     // Bridge is on with v1's Bridge feature or with the engine.
     if (!this.netEngine.on()) this.net.assertFeature('netBridge')
     return this.domainService()
+  }
+  /** Windows that show bot notifications attached or left: what came while none was open is told once one is. */
+  setTellingWindows(count: number): void {
+    this.tellingWindows = count
+    this.personalBots?.setTellingWindows(count)
+    this.bridgeService?.remoteTellings.attach(count)
+  }
+  /** A bot was marked here (`bots.marks.set`): what is held of another computer's bot now muted or hidden goes. */
+  botMarksChanged(): void {
+    this.bridgeService?.remoteTellings.marksChanged()
   }
   get spaces(): SpaceProfileService {
     this.net.assertFeature('netSpaces')
@@ -420,6 +458,8 @@ export class MmsProfileServices {
   /** Personal bots (PR 6 §4). */
   /** Null when `bots.db` could not be opened: bots are unavailable, every other thread works. */
   readonly personalBots: BotEngine | null
+  /** How many windows show bot notifications (`bots.telling.v1`): this computer's own bots and other computers' bots. */
+  tellingWindows = 0
   /** The bots' hidden model choice; also lists the Settings bot model choices (`holdable`). */
   readonly botModels: BotModelChooser
   /** Usage limits met by any of the profile's requests, shared by bots' model choice and Automatic thread naming. */
@@ -428,6 +468,8 @@ export class MmsProfileServices {
   readonly botBrowsers: BotBrowsers
   /** Which devices reach each bot (About → Devices), in `<profile>/bots/device-access.json`. */
   readonly botDeviceAccess: BotDeviceAccessStore
+  /** Pin, hide, mute and marked unread on every bot this computer lists, in `<profile>/bots/bot-marks.json`. */
+  readonly botMarks: BotMarksStore
   /** Bots' schedules: automations whose Who is the bot, in the shared scheduled-job store. */
   readonly botSchedules: BotScheduleBook
   private readonly botStore: BotStore | null
@@ -805,6 +847,8 @@ export class MmsProfileServices {
     })
     this.botBrowsers = botBrowsers
     this.botDeviceAccess = new BotDeviceAccessStore(join(homeDir, 'bots'))
+    // Read on first use (the Bots list asks once it shows), never here.
+    this.botMarks = new BotMarksStore(join(homeDir, 'bots'))
     this.platform.onDispose(() => botBrowsers.dispose())
     // Looked up now, so a bot's Runs on has this computer's name when it is first opened.
     computerNameIfKnown()
@@ -944,6 +988,8 @@ export class MmsProfileServices {
       otherComputers: () => this.remoteAutomations?.computers() ?? [],
       // Which devices reach each bot: a new bot's choice is saved before the bot is published.
       deviceAccess: this.botDeviceAccess,
+      // New bot's Devices step lists the owner's other devices, as About's Devices does.
+      devices: async () => this.botReach?.devices(),
       // The secrets a bot's home thread may use, for its profile: names and labels only, read when it asks.
       secretsHeld: (threadId) => {
         const vault = this.secretVault
@@ -1018,6 +1064,7 @@ export class MmsProfileServices {
       } catch (error) {
         console.warn('bot device choices could not be tidied', error instanceof Error ? error.message : String(error))
       }
+      this.snapshotBotDevices()
     }
     // A bot's thread from an earlier build, or of a bot that never runs again, is marked as well.
     if (opened) {
@@ -1028,6 +1075,11 @@ export class MmsProfileServices {
       }
     }
     this.personalBots = opened?.engine ?? null
+    // A bot muted or hidden on this computer tells nothing here (`bot-marks.json`); the marks are read once a row is due.
+    this.personalBots?.tellings.setQuiet((botId) => {
+      const marks = this.botMarks.get(botId)
+      return marks.muted === true || marks.hidden === true
+    })
     this.platform.onDispose(onSettingsSaved(() => this.personalBots?.settingsChanged()))
     // A bot's browser that comes back to it on its own (the window that held it went away) says so in its chat.
     const chat = opened?.engine.chat

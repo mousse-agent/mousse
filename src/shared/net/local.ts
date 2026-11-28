@@ -77,7 +77,6 @@ export const NET_LOCAL_METHODS = [
   // One step of updating another computer (#476): `update.*` asked of it, or its version asked again.
   'net.update.there',
   'bridge.workOnThreads',
-  'bridge.shareBots',
   'bridge.editorServer',
   'net.authority.transfer',
   'net.authority.status',
@@ -191,10 +190,10 @@ export interface BridgeNodePolicy {
    */
   editor: boolean
   /**
-   * The device may reach this computer's personal bots, each within its own Devices choice. On until the owner turns
-   * it off. Absent from a service from before the switch.
+   * What the device may do with this computer's personal bots, each within its own Devices choice (`BotLevel`). Use
+   * until the owner changes it. Absent from a service from before the setting.
    */
-  bots?: boolean
+  bots?: BotLevel
   /**
    * Which threads here the device's agents may change with calls marked as an agent's: none, the threads its agents
    * started here (the default), or all. Absent from a service from before the setting.
@@ -202,8 +201,8 @@ export interface BridgeNodePolicy {
   agentReach?: AgentReach
   /**
    * The device may work on threads here ("Work on threads from this device"): start, send, steer, stop, change
-   * settings, files and Git, and make or change bots. Off, it reads threads and chats with bots only. On until the
-   * owner turns it off. Absent from a service from before the switch.
+   * settings, files and Git. Off, it reads threads only. Bots follow `bots` alone. On until the owner turns it off.
+   * Absent from a service from before the switch.
    */
   work?: boolean
 }
@@ -211,7 +210,7 @@ export interface BridgeNodePolicy {
 /**
  * `bridge.access.mine`, a call one computer makes on another of its user's: what the computer that answers lets the
  * caller do there now. Each field is the result of the same checks a real call from the caller meets there (connected
- * there, the block, the grant, "Let my other computers work here", the per-device switches, Share bots). A caller that
+ * there, the block, the grant, "Let my other computers work here", the per-device switches). A caller that
  * is not connected there is refused (`forbidden`, reason `not_connected`).
  */
 export interface BridgeAccessMine {
@@ -224,8 +223,8 @@ export interface BridgeAccessMine {
   work: boolean
   terminal: boolean
   editor: boolean
-  /** Reaches that computer's bots (each bot's own Devices choice still applies). */
-  bots: boolean
+  /** What it may do with that computer's bots (each bot's own Devices choice still applies); `off` when it reaches none. */
+  bots: BotLevel
   maxPermissionMode: PermissionMode
   agentReach: AgentReach
 }
@@ -245,13 +244,25 @@ export type AgentReach = 'none' | 'launched' | 'all'
 export const AGENT_REACHES: readonly AgentReach[] = ['none', 'launched', 'all']
 export const isAgentReach = (value: unknown): value is AgentReach =>
   (AGENT_REACHES as readonly unknown[]).includes(value)
+
+/**
+ * What another device may do with this computer's personal bots (`net_node_policy.bots`), set per device on this
+ * computer and apart from thread access: `off`, none of them; `use`, chat with them and answer them, read their chat,
+ * memory and browser, but change nothing about how they are set up; `full`, set them up too (rename, look, pause,
+ * permissions, memory edits, delete, make new ones here). Each bot's Devices choice still decides which bots it reaches.
+ */
+export type BotLevel = 'off' | 'use' | 'full'
+export const BOT_LEVELS: readonly BotLevel[] = ['off', 'use', 'full']
+export const isBotLevel = (value: unknown): value is BotLevel =>
+  (BOT_LEVELS as readonly unknown[]).includes(value)
+/** Whether a device at `level` may call a bot method that needs `needed`. */
+export const botLevelReaches = (level: BotLevel, needed: 'use' | 'full'): boolean =>
+  level === 'full' || (level === 'use' && needed === 'use')
 export interface NetStatus {
   enabled: boolean
   features?: import('../featureFlags').NetFeatureFlags
   /** Whether other computers of the user may work on this computer's threads (`bridge.workOnThreads`). On by default. */
   workOnThreads?: boolean
-  /** Whether this computer shares its personal bots with the user's other devices (`bridge.shareBots`). On by default. */
-  shareBots?: boolean
   /**
    * Which SSH server answers editor connections from other computers (`bridge.editorServer`): `system` is the
    * owner's choice "Use this computer's SSH server", and `available` says whether Mousse's own endpoint can

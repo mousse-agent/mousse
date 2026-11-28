@@ -1,4 +1,5 @@
-import { Children, createContext, memo, useContext, useEffect, useState, type ReactNode } from 'react'
+import { Children, memo, useContext, useEffect, useState, type ReactNode } from 'react'
+import { BotFilesContext, type BotFilesHost } from './botFilesHost'
 import type { Components } from 'streamdown'
 import { FileText, FolderOpen, Image as ImageIcon, X } from '../../lib/icons'
 import { Markdown, restoreMousseHref, type MarkdownImages } from '../../chat/components/agent-elements/markdown'
@@ -17,20 +18,10 @@ import { readMathClass } from '../../markdown/math/math-markup'
  * in the Files pane beside the chat; Show in folder opens its folder in the computer's file manager.
  */
 
-/**
- * The chat a chip or picture is in: its bot (for short names in its files folder), how it opens a file, and how it
- * says that an action on a file failed (above the composer).
- */
-interface BotFilesHost { botId: string; open(path: string): void; failed?(message: string): void }
-const BotFilesContext = createContext<BotFilesHost | null>(null)
+export { useBotFiles } from './botFilesHost'
 
-export function BotFilesProvider({ botId, open, failed, children }: BotFilesHost & { children: ReactNode }) {
-  return <BotFilesContext.Provider value={{ botId, open, ...(failed ? { failed } : {}) }}>{children}</BotFilesContext.Provider>
-}
-
-/** The chat's files host, or null outside a bot's chat. */
-export function useBotFiles(): BotFilesHost | null {
-  return useContext(BotFilesContext)
+export function BotFilesProvider({ botId, open, failed, remote, children }: BotFilesHost & { children: ReactNode }) {
+  return <BotFilesContext.Provider value={{ botId, open, ...(failed ? { failed } : {}), ...(remote ? { remote } : {}) }}>{children}</BotFilesContext.Provider>
 }
 
 const IMAGE_FILE = /\.(?:png|jpe?g|gif|webp)$/i
@@ -59,6 +50,8 @@ export const fileActions = {
 export function BotPathChip({ path }: { path: string }) {
   const host = useContext(BotFilesContext)
   const label = botPathLabel(path, host?.botId)
+  // A path of another computer: its words only, never opened or shown in a folder here.
+  if (host?.remote) return <span className="bot-path-text" title={path}>{label}</span>
   const Icon = IMAGE_FILE.test(path) ? ImageIcon : FileText
   const open = () => (host ? host.open(path) : routeLink(`mousse-file://open?path=${encodeURIComponent(path)}`))
   return <span className="bot-path">
@@ -111,11 +104,14 @@ export const BOT_IMAGES: MarkdownImages = { Image: BotMarkdownImage }
  * plain text.
  */
 export function BotLink({ href: written, children, ...props }: { href?: string; children?: ReactNode } & Record<string, unknown>) {
+  const host = useContext(BotFilesContext)
   const path = linkedPath(written)
   if (path) return <BotPathChip path={path} />
   const href = written && restoreMousseHref(written)
   const route = href ? classifyLink(href) : undefined
   if (!href || !route || route.kind === 'reject') return <span>{children}</span>
+  // A bot of another computer links no file here.
+  if (host?.remote && (route.kind === 'file' || route.kind === 'relative-file')) return <span>{children}</span>
   // A thread link is the same chip a thread's reply shows: the thread's title and live status.
   if (route.kind === 'thread') return <ThreadChip threadId={route.threadId} label={threadLinkLabel(href, children)} />
   return <a {...props} href={href} className="an-md-link" onClick={(event) => { event.preventDefault(); routeLink(href) }}>

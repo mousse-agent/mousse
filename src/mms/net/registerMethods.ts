@@ -1,6 +1,7 @@
 import { isIP } from 'node:net'
 import {
   isAgentReach,
+  isBotLevel,
   NET_LOCAL_CAPABILITY,
   NET_LOCAL_METHODS,
   type NetLocalMethod
@@ -107,7 +108,6 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'bridge.access.there': ['node'],
   'net.update.there': ['node', 'step', 'version', 'rollout', 'job', 'runningTurns'],
   'bridge.workOnThreads': ['enabled'],
-  'bridge.shareBots': ['enabled'],
   'bridge.editorServer': ['system']
 }
 const SSH_ID = /^[A-Za-z0-9_-]{1,64}$/u
@@ -292,7 +292,7 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
   if (method === 'bridge.setCaps' && params.caps === undefined)
     throw new DomainRpcError('invalid_params', 'A capability list is required')
   if (
-    (method === 'bridge.workOnThreads' || method === 'bridge.shareBots') &&
+    method === 'bridge.workOnThreads' &&
     params.enabled !== undefined &&
     typeof params.enabled !== 'boolean'
   )
@@ -322,8 +322,8 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       throw new DomainRpcError('invalid_params', 'terminal must be boolean')
     if (params.editor !== undefined && typeof params.editor !== 'boolean')
       throw new DomainRpcError('invalid_params', 'editor must be boolean')
-    if (params.bots !== undefined && typeof params.bots !== 'boolean')
-      throw new DomainRpcError('invalid_params', 'bots must be boolean')
+    if (params.bots !== undefined && !isBotLevel(params.bots))
+      throw new DomainRpcError('invalid_params', 'bots must be off, use or full')
     if (params.maxPermissionMode !== undefined && !isPermissionMode(params.maxPermissionMode))
       throw new DomainRpcError('invalid_params', 'Unknown permission mode')
     if (params.agentReach !== undefined && !isAgentReach(params.agentReach))
