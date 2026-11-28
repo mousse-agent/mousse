@@ -104,6 +104,10 @@ export function addressedArgs(call: AddressedCall): AddressedArgs {
   const { addresses, tool, args, callerThreadId, toolCallId, record } = call
   const spec = ADDRESSED_TOOLS[tool]
   if (!spec) return { args }
+  // A bot is named only by address (`bot:<name>`), so what the call names is resolved and recorded under its key; `bot`
+  // is what that resolving gives the call, never an argument.
+  if (tool === 'thread_send' && args.bot !== undefined)
+    return { refused: refused('invalid_arguments', 'Name the bot as thread "bot:<name>", not with bot.') }
   const key = addresses && toolCallId ? addressReceiptKey(callerThreadId, tool, toolCallId) : undefined
   const earlier = key ? addresses!.recorded(key) : undefined
   if (args.thread === undefined) {

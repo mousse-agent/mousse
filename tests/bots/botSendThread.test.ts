@@ -6,7 +6,9 @@
  * - a retry: `bot_send` and `thread_send` to `bot:<name>` with the same clientRequestId are one message, in either order
  * - a retry of a held message: the same hold, never a second; Continue sends it once; a retry after that is that message
  * - a retry of a message the owner stopped: refused again, nothing held or sent
- * - who reaches a bot: a turn without bot messaging is told so; a thread's agent is refused, and reads no bot nor sends
+ * - one key, one message: two turns on their own threads never share one; a key never sends a second bot a message
+ * - who reaches a bot: only by address (never a bot field); a turn without bot messaging is told so; a thread's agent is
+ *   refused, and reads no bot nor sends
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defaultIntegrationActor } from '../../src/shared/integrations/actor'
@@ -80,6 +82,33 @@ describe('a retry is one message', () => {
     expect(received(alpha)).toHaveLength(2)
   })
 
+  it('the same clientRequestId from two turns of one bot, on their own threads, is two messages, each to the bot it named', async () => {
+    const beta = (await createBot(f, { name: 'Beta', description: 'Watch the website.', reply: 'Hello.' })).botId
+    const chatTurn = await chat(plusy, 'Tell Alpha, then look into it.', 'm1')
+    expect(await registryFor(chatTurn)('thread_send', { thread: 'bot:Alpha', content: 'The login page returns a 500.' }, 'mcp:send-1')).toMatchObject({ sent: true, to: 'Alpha' })
+    const { workId } = await f.bots.tools.work.start(plusy, chatTurn.payload.activationId, { title: 'Login', brief: 'Look into the login page; tell Beta what you find.', key: 'w1' })
+    await finish(f, chatTurn.payload, 'completed', { text: 'On it.' })
+    const work = await start(f, workId)
+    expect(work.payload.threadId).not.toBe(chatTurn.payload.threadId)
+    // Its own thread's receipt resolves bot:Beta under this key; the message is its own too, not the chat's to Alpha.
+    expect(await registryFor(work)('thread_send', { thread: 'bot:Beta', content: 'Signup is down as well.' }, 'mcp:send-1')).toEqual(expect.objectContaining({ sent: true, to: 'Beta' }))
+    expect(received(beta)).toEqual([expect.stringContaining('Signup is down as well.')])
+    expect(received(alpha)).toHaveLength(1)
+  })
+
+  it('a key that sent one bot a message sends no other bot one: that is a key conflict, not a replay', async () => {
+    const beta = (await createBot(f, { name: 'Beta', description: 'Watch the website.', reply: 'Hello.' })).botId
+    const turn = await chat(plusy, 'Tell Alpha.', 'm1')
+    const send = (to: string, message: string) => f.bots.tools.bots!.send(plusy, turn.payload.activationId, { to, message, requestKey: 'mcp:send-1' })
+    expect(await send(alpha, 'The login page returns a 500.')).toEqual({ to: 'Alpha' })
+    await expect(send(beta, 'Signup is down as well.')).rejects.toMatchObject({ code: 'client_request_id_conflict' })
+    await expect(send('Beta', 'Signup is down as well.')).rejects.toMatchObject({ code: 'client_request_id_conflict' })
+    // By its name or its id, the same bot under that key is the retry.
+    expect(await send('alpha', 'The login page returns a 500.')).toEqual({ to: 'Alpha', replayed: true })
+    expect(received(beta)).toEqual([])
+    expect(received(alpha)).toHaveLength(1)
+  })
+
   it('a held message retried is the same hold; Continue sends it once, and a retry after that is that message', async () => {
     const call = registryFor(await plusyPastItsLimit())
     const held = await call('bot_send', { bot: 'Alpha', message: 'First: the login page returns a 500.' }, 'mcp:held-1')
@@ -130,6 +159,16 @@ describe('what a bot is shown and granted', () => {
 })
 
 describe('who reaches a bot', () => {
+  it('a bot is named only by address: thread_send with a bot field is refused, and nothing reads the bots or sends', async () => {
+    const call = registryFor(await chat(plusy, 'Tell Alpha.', 'm1'))
+    const list = vi.spyOn(f.bots.tools.bots!, 'list')
+    const send = vi.spyOn(f.bots.tools.bots!, 'send')
+    expect(await call('thread_send', { bot: 'Alpha', content: 'The login page returns a 500.' }, 'mcp:raw-1')).toMatchObject({ refused: { code: 'invalid_arguments', message: expect.stringContaining('bot:<name>') } })
+    expect(list).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+    expect(received(alpha)).toEqual([])
+  })
+
   it('a turn without bot messaging is told so, and nothing reads the bots or sends', async () => {
     const manual = await f.bots.activate({ botId: plusy, input: 'Check the site.', clientRequestId: 'by-hand' })
     await flush()

@@ -200,8 +200,10 @@ type HeldChatDraft = { n: number; text: string; replyTo?: string; chips: BotChip
 interface HeldBotMessage { to: string; toName: string; message: string; sender: BotMessageSender; messageId?: string }
 
 /**
- * The id of a message sent under a request key (`sendBotMessage`): a UUID derived from who sends it (`bot:<id>`) and the
- * call's key, so a retry under either tool name is the same message, delivered or held under one id.
+ * The id of a message sent under a request key (`sendBotMessage`): a UUID derived from who sends it and the call's key,
+ * so a retry under either tool name is the same message, delivered or held under one id. Who sends it is the caller as
+ * an address receipt names it (`bot:<id>:thread:<the thread its turn runs in>`): two turns of one bot on different
+ * threads never share a message under one key.
  */
 function requestedMessageId(sender: string, requestKey: string): string {
   const hex = createHash('sha256').update(`${sender}\n${requestKey}`).digest('hex')
@@ -10930,16 +10932,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER` messages from bots since its owner last wrote (ping-pong). There is no count of
    * messages in a day, and none on what the owner asked it to send.
    *
-   * `requestKey` (the call's key): the message is delivered, or held, under an id derived from the sender and the key,
-   * and a send under a key used before returns what that one did (`replayed`) before any guard: a retry, under
-   * `bot_send` or `thread_send` to `bot:<name>`, sends and holds nothing more and counts against no limit.
+   * `requestKey` (the call's key): the message is delivered, or held, under an id derived from the sender, the thread its
+   * turn runs in and the key, and a send under a key used before returns what that one did (`replayed`) before any
+   * guard: a retry, under `bot_send` or `thread_send` to `bot:<name>`, sends and holds nothing more and counts against no
+   * limit. One to another bot under that key is `client_request_id_conflict`.
    */
   async sendBotMessage(botId: string, from: string, input: { to: string; message: string; requestKey?: string }): Promise<{ to: string; held?: { holdId: string }; replayed?: true }> {
     const row = this.store.activation(from)
     if (!row || row.botId !== botId || !turnRightsOf(row).botSend) throw new BotEngineError('invalid_params', "Only your chat, your work and your scheduled runs message your owner's other bots. Say in your report what you would have told it.")
     if (row.status !== 'running') throw new BotEngineError('invalid_params', 'This turn has ended; nothing was sent.')
-    const messageId = input.requestKey ? requestedMessageId(`bot:${botId}`, input.requestKey) : randomUUID()
-    const replayed = input.requestKey ? this.replayedBotMessage(botId, messageId) : undefined
+    const messageId = input.requestKey ? requestedMessageId(`bot:${botId}:thread:${row.threadId ?? from}`, input.requestKey) : randomUUID()
+    const replayed = input.requestKey ? this.replayedBotMessage(botId, messageId, input.to) : undefined
     if (replayed) return replayed
     const message = input.message.trim()
     if (!message) throw new BotEngineError('invalid_params', 'bot_send needs a message.')
@@ -10981,13 +10984,21 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * What a send under the same request key did before (`sendBotMessage`): held, and still waiting or since sent; or
-   * delivered. A held message the owner stopped, or that Continue could not send, is refused again, with why. Undefined
-   * when nothing was sent under it.
+   * delivered. A held message the owner stopped, or that Continue could not send, is refused again, with why. A send to
+   * another bot under that key is refused as `client_request_id_conflict`: the key names one message. Undefined when
+   * nothing was sent under it.
    */
-  private replayedBotMessage(botId: string, messageId: string): { to: string; held?: { holdId: string }; replayed: true } | undefined {
+  private replayedBotMessage(botId: string, messageId: string, to: string): { to: string; held?: { holdId: string }; replayed: true } | undefined {
+    const named = to.replace(/\s+/g, ' ').trim()
+    // `to` is the bot's id (an address resolved it) or its name.
+    const sameBot = (recipient: string, name: string) => {
+      if (recipient === named || name.trim().toLowerCase() === named.toLowerCase()) return
+      throw new BotEngineError('client_request_id_conflict', `This clientRequestId was first used for a message to ${name}, so it can't send one to "${plainLabel(named, 60)}". Use a new clientRequestId for a new message.`)
+    }
     const hold = this.store.chainHold(heldMessageId(messageId))
     if (hold?.botId === botId && hold.kind === 'message') {
-      const { toName } = hold.payload as HeldBotMessage
+      const { toName, to: recipient } = hold.payload as HeldBotMessage
+      sameBot(recipient, toName)
       if (hold.status === 'held') return { to: toName, held: { holdId: hold.holdId }, replayed: true }
       if (hold.status === 'continued') return { to: toName, replayed: true }
       throw new BotEngineError('bot_message_not_sent', hold.status === 'stopped'
@@ -10997,7 +11008,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const delivered = this.store.activationByKey(botMessageKey(botId, messageId))
     if (!delivered) return undefined
     const entry = this.host.definitions.get(delivered.botId)
-    return { to: (entry?.published ?? entry?.draft)?.name ?? 'the bot', replayed: true }
+    const name = (entry?.published ?? entry?.draft)?.name ?? 'the bot'
+    sameBot(delivered.botId, name)
+    return { to: name, replayed: true }
   }
 
   /**

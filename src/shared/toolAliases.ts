@@ -156,12 +156,15 @@ const MOUSSE_TOOL_ALIAS_TRANSLATIONS: Readonly<Record<string, { args(old: ToolAr
   },
   work_list: { args: (args: ToolArgs) => ({ ...args, scope: 'bot_work' }), holds: (args: ToolArgs) => args.scope === 'bot_work', runs: 'bot', says: 'scope "bot_work"' },
   // S7d4b2. `bot_send {bot, message}` is `thread_send {thread: "bot:<name>", content}`: the address names the bot, and
-  // once resolved (`addressedArgs`) the call carries the bot's id as `bot`. A bot's turn only, through the bot port.
+  // once resolved (`addressedArgs`, the only place `bot` comes from) the call carries the bot's id as `bot`. A bot's
+  // turn only, through the bot port. A call under the old name is that tool whatever it names (`byName`): without a bot
+  // and a message it is refused, as it always was, never sent as another variant (`queue_enqueue`).
   bot_send: {
     args: ({ bot, message, ...rest }: ToolArgs) => ({ ...rest, ...(bot !== undefined ? { thread: `bot:${String(bot)}` } : {}), ...(message !== undefined ? { content: message } : {}) }),
     holds: (args: ToolArgs) => args.threadId === undefined && (args.bot !== undefined || namesBot(args.thread)),
     runs: 'bot',
-    says: 'thread "bot:<name>" (another of your owner\'s bots, by the name bot_list gives)'
+    says: 'thread "bot:<name>" (another of your owner\'s bots, by the name bot_list gives)',
+    byName: true
   },
   // S7d4b. A message queued on the caller's own thread (no thread named), or on a queue whose revision the call read
   // (`expectedRevision`), as a message of work. On any turn: a thread's, a personal bot's or a definition's. A call
