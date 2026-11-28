@@ -212,6 +212,11 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     id: 39,
     date: '2026-11-28',
     text: 'Add a message to a thread\'s queue with thread_send and the expectedRevision queue_list gave (it was queue_enqueue). It works as before: it waits behind what is queued there and is refused if the queue changed since you read it. The old name still works too.'
+  },
+  {
+    id: 40,
+    date: '2026-11-28',
+    text: 'Message another of your owner\'s bots with thread_send, thread "bot:<name>" (the name bot_list gives) and the message as content (it was bot_send). It works as before: it shows in that bot\'s chat, and the same guards hold. A retry with the same clientRequestId sends it once. The old name still works too.'
   }
 ]
 

@@ -167,8 +167,12 @@ export interface BotToolHost {
   bots?: {
     /** `botId`: what an address (`bot:<name>`) records, so a retry reaches the same bot after a rename; never shown to a bot. */
     list(botId: string): Array<{ botId: string; name: string; does: string; paused?: true }>
-    /** `held`: past its chain's limit, it waits for the owner's Continue or Stop (issue #1443). */
-    send(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string; held?: { holdId: string } }>
+    /**
+     * `held`: past its chain's limit, it waits for the owner's Continue or Stop (issue #1443). `to` is the bot's name or
+     * id. `requestKey`: the call's key; a send under a key the sender used before returns what that one did
+     * (`replayed`), whether it was delivered or held, and sends nothing.
+     */
+    send(botId: string, from: string, input: { to: string; message: string; requestKey?: string }): Promise<{ to: string; held?: { holdId: string }; replayed?: true }>
   }
   /** One-off reminders: said at a time, or work started then. Wakes are listed and cancelled with them. */
   reminders: {

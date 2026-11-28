@@ -2812,8 +2812,8 @@ export class BotStore {
   }
 
   /** A message or wake the bot sent past its chain's limit, kept for the owner's answer (`bot_chain_holds`). */
-  holdChainStep(botId: string, kind: BotChainHoldKind, payload: unknown): BotChainHold {
-    const hold: BotChainHold = { holdId: `bhold_${randomUUID()}`, botId, kind, payload, status: 'held', createdAt: this.now() }
+  holdChainStep(botId: string, kind: BotChainHoldKind, payload: unknown, holdId = `bhold_${randomUUID()}`): BotChainHold {
+    const hold: BotChainHold = { holdId, botId, kind, payload, status: 'held', createdAt: this.now() }
     this.run("INSERT INTO bot_chain_holds(hold_id, bot_id, kind, payload_json, status, created_at) VALUES(?, ?, ?, ?, 'held', ?)", hold.holdId, botId, kind, JSON.stringify(payload), hold.createdAt)
     return hold
   }
