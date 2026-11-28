@@ -94,7 +94,7 @@ describe('thread_update access: a parent lifts its subagent\'s read-only access'
     const registry = d!.orch.mcpToolRegistry()
     const before = registry.capabilityRevision(childId)
     expect(d!.orch.mcpToolHost().readOnlyThread!(childId)).toBe(true)
-    expect(childTurns[0]!.tools).not.toContain('queue_enqueue')
+    expect(childTurns[0]!.tools).not.toContain('queue_update')
 
     // A stale revision changes nothing.
     const stale = await ask('Lift it, stale', { access: { readOnly: false }, expectedRevision: 'not-it' })
@@ -108,7 +108,7 @@ describe('thread_update access: a parent lifts its subagent\'s read-only access'
     expect(body.revision).toBe(registry.capabilityRevision(childId))
     expect(body.revision).not.toBe(before)
     expect(d!.orch.mcpToolHost().readOnlyThread!(childId)).toBe(false)
-    expect(registry.listForThread(childId).map((tool) => tool.name)).toContain('queue_enqueue')
+    expect(registry.listForThread(childId).map((tool) => tool.name)).toContain('queue_update')
 
     // Again: nothing to lift.
     expect(JSON.parse((await ask('Lift it again', { access: { readOnly: false } })).text!)).toMatchObject({ changed: false, applied: 'unchanged' })
@@ -118,7 +118,7 @@ describe('thread_update access: a parent lifts its subagent\'s read-only access'
     await d!.send('Go on', 'agent', childId)
     expect(childTurns).toHaveLength(2)
     expect(childTurns[1]!.mcp.token).not.toBe(childTurns[0]!.mcp.token)
-    expect(childTurns[1]!.tools).toContain('queue_enqueue')
+    expect(childTurns[1]!.tools).toContain('queue_update')
   }, 30_000)
 
   it('now: the running turn stops and the child continues on the same thread, told why', async () => {
@@ -138,7 +138,7 @@ describe('thread_update access: a parent lifts its subagent\'s read-only access'
     expect(d!.orch.listQueue(childId)).toEqual([])
     expect(d!.engine.getRun(first.runId)!.status).toBe('interrupted')
     expect(childTurns[1]!.prompt).toContain(ACCESS_LIFTED_CONTINUE)
-    expect(childTurns[1]!.tools).toContain('queue_enqueue')
+    expect(childTurns[1]!.tools).toContain('queue_update')
     expect(childTurns[1]!.mcp.token).not.toBe(childTurns[0]!.mcp.token)
   }, 30_000)
 

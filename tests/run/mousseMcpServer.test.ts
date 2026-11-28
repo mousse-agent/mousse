@@ -76,7 +76,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     const list = await rpc(server.url, attachment.token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} })
     const names = list.body.result.tools.map((tool: { name: string }) => tool.name).sort()
     // The fake host offers no browser, skills, quick actions, web or dev GUI: only the tools it can serve are listed.
-    expect(names).toEqual(['computer_list', 'model_list', 'publish_applet', 'question_ask', 'question_withdraw', 'queue_enqueue',
+    expect(names).toEqual(['computer_list', 'model_list', 'publish_applet', 'question_ask', 'question_withdraw',
       'queue_list', 'queue_update', 'read_applet', 'request_answer', 'task_create', 'task_list', 'task_update', 'thread_archive', 'thread_create', 'thread_fork',
       'thread_list', 'thread_read', 'thread_return', 'thread_search', 'thread_send', 'thread_stop', 'thread_update', 'thread_wait'])
 
@@ -341,7 +341,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     // The codes are the wire contract provider runtimes see, so they are pinned literally (-32601 is JSON-RPC's method-not-found).
     expect(unknown.body.error).toMatchObject({ code: -32601, data: { reason: 'mousse_unknown_tool' } })
     // A hidden (in-process only) tool is unknown over MCP.
-    expect((await rpc(server.url, attachment.token, call(3, 'recall_subagent', { agent: 'a', task: 'b' }))).body.error).toMatchObject({ code: -32601 })
+    expect((await rpc(server.url, attachment.token, call(3, 'create_subagents', { agents: [{ name: 'a', task: 'b' }] }))).body.error).toMatchObject({ code: -32601 })
     // A tool that fails on its own input is a tool result the model can read, not a protocol error.
     const invalid = await rpc(server.url, attachment.token, call(4, 'task_update', { id: '' }))
     expect(invalid.body.error).toBeUndefined()

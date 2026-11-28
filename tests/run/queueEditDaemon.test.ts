@@ -278,6 +278,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
         seen.revision = await call(mcp!, 'queue_list', { threadId: w.other.id })
         const to = { threadId: w.other.id, expectedRevision: stale }
         seen.enqueue = await call(mcp!, 'queue_enqueue', { ...to, content: 'x' })
+        // `queue_enqueue`'s new name: `thread_send` with the revision it read is checked against it the same way.
+        seen.send = await call(mcp!, 'thread_send', { ...to, content: 'x' })
         seen.edit = await call(mcp!, 'queue_edit', { ...to, itemId: ids.one, content: 'x' })
         seen.reorder = await call(mcp!, 'queue_reorder', { ...to, orderedIds: [ids.two, ids.one, ids.late] })
         seen.remove = await call(mcp!, 'queue_remove', { ...to, itemId: ids.one })
@@ -293,7 +295,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
 
       const current = (parse(seen.revision) as { revision: string }).revision
-      for (const name of ['enqueue', 'edit', 'reorder', 'remove', 'promote']) {
+      for (const name of ['enqueue', 'send', 'edit', 'reorder', 'remove', 'promote']) {
         expect(refusal(seen[name]), name).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'revision_mismatch', revision: current } })
         expect(refusal(seen[name])!.details.expectedRevision, name).not.toBe(current)
       }
@@ -396,6 +398,38 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       const ledger = w.d.engine.tools.listForRun(w.latestRun(w.parent.id).runId).map((entry) => entry.tool)
       expect(ledger.filter((tool) => tool === 'queue_update')).toHaveLength(4)
       expect(ledger.filter((tool) => tool === 'queue_edit' || tool === 'queue_remove')).toEqual([])
+      release.resolve()
+    })
+
+    it('a queue_enqueue retried as thread_send with the same clientRequestId queues one message, on another thread and on its own', async () => {
+      const release = deferred()
+      const seen: Record<string, Response> = {}
+      const w = world(async (input, mcp, _d, adapter) => {
+        if (input.prompt === 'hold') {
+          await adapter.hold(input, release.promise)
+          return 'held'
+        }
+        if (input.threadId !== w.parent.id) return 'ok'
+        const { revision } = await list(mcp!, w.other.id)
+        seen.first = await call(mcp!, 'queue_enqueue', { threadId: w.other.id, content: 'queued once', expectedRevision: revision, clientRequestId: 'enqueue-1' })
+        // The model never saw the answer, and retries under the new name.
+        seen.retry = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'queued once', expectedRevision: revision, clientRequestId: 'enqueue-1' })
+        // On its own thread, the new name names no thread.
+        seen.own = await call(mcp!, 'thread_send', { content: 'my own note', clientRequestId: 'enqueue-own' })
+        seen.ownRetry = await call(mcp!, 'queue_enqueue', { content: 'my own note', clientRequestId: 'enqueue-own' })
+        return 'ok'
+      })
+      await w.attach()
+      await w.d.orch.send('hold', false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack' })
+      await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the held turn')
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+
+      const first = parse(seen.first) as { item: { id: string } }
+      expect(parse(seen.retry)).toMatchObject({ item: { id: first.item.id }, replayed: true })
+      expect(w.queue(w.other.id).map((item) => item.content)).toEqual([agentMessageText(w.parent.id, 'Parent', 'queued once')])
+      const own = parse(seen.own) as { item: { id: string } }
+      expect(parse(seen.ownRetry)).toMatchObject({ item: { id: own.item.id }, replayed: true })
+      expect(w.d.engine.store.db.statement('SELECT COUNT(*) AS n FROM queue_commands').get()).toEqual({ n: 2 })
       release.resolve()
     })
 

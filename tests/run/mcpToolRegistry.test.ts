@@ -30,7 +30,6 @@ const PHASE5_TOOLS: Record<string, string> = {
   thread_create: 'actsAsCaller',
   thread_stop: 'managesOthers',
   queue_list: 'readsOthers',
-  queue_enqueue: 'managesOthers',
   queue_update: 'managesOthers',
   // Phase 6 (SPEC §16.2).
   thread_fork: 'startsThreads',
@@ -75,8 +74,8 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
       expect(Object.getOwnPropertySymbols(tool.inputSchema)).toEqual([])
     }
     expect((registry.get('delegate_task')!.inputSchema.properties as Record<string, unknown>).modeCeiling).toBeUndefined()
-    // The older delegation names stay dispatchable in process but are never listed.
-    for (const hidden of ['create_subagent', 'create_subagents', 'recall_subagent', 'integrate_delegation', 'integrate_subagent', 'list_delegations'])
+    // The older names stay callable (the delegation ones in process, or as a variant of a thread tool) but are never listed.
+    for (const hidden of ['create_subagent', 'create_subagents', 'recall_subagent', 'integrate_delegation', 'integrate_subagent', 'list_delegations', 'queue_enqueue'])
       expect(listed.some((tool) => tool.name === hidden), hidden).toBe(false)
   })
 

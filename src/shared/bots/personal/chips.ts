@@ -267,7 +267,6 @@ function classify(name: string, input: unknown, ctx: BotChipContext): Classified
     // Passing on its owner's answer to its work (`answer`) has no chip of its own.
     case 'request_answer': return typeof args.answer === 'string' || typeof args.questionId === 'string' ? null : { kind: 'approval', icon: 'think', live: 'answering an approval' }
     // A thread's queue: every change rolls up into one chip.
-    case 'queue_enqueue':
     case 'queue_update': return { kind: 'queue', icon: 'think', live: "changing a thread's queue" }
     // The owner's scheduled jobs ("schedule work in your threads"): the list is a look, every change one chip.
     case 'schedule_list': return { kind: 'schedules', icon: 'schedule', live: 'checking your scheduled jobs' }
@@ -297,7 +296,8 @@ function classify(name: string, input: unknown, ctx: BotChipContext): Classified
       const title = str(args.title)
       return { kind: 'thread_start', icon: 'think', live: 'starting a thread', ...(title ? { detail: shortChipText(title, 40) } : {}) }
     }
-    case 'thread_send': return { kind: 'thread_send', icon: 'think', live: 'messaging a thread' }
+    // A message added to a thread's queue (`queue_enqueue`, now `thread_send` with the queue's revision) is a queue change.
+    case 'thread_send': return args.expectedRevision !== undefined ? { kind: 'queue', icon: 'think', live: "changing a thread's queue" } : { kind: 'thread_send', icon: 'think', live: 'messaging a thread' }
     case 'thread_stop': return { kind: 'thread_stop', icon: 'think', live: 'stopping a thread' }
     case 'thread_archive': return { kind: 'thread_archive', icon: 'think', live: args.archived === false ? 'unarchiving a thread' : 'archiving a thread' }
     // A bot's `thread_update` hides or shows a thread it started; nothing else of it is a bot's.

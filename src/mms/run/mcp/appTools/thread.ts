@@ -157,6 +157,9 @@ const FORK_PROPERTIES = {
   clientRequestId: CLIENT_REQUEST_ID_SCHEMA
 }
 
+/** `thread_send` naming the caller's own thread: a message for its own queue names no thread (`queue_enqueue`). */
+const OWN_THREAD_SEND = 'To queue a message on your own thread, leave out threadId: it runs as a new turn after the current one.'
+
 /** How a personal bot's thread lists the thread controls beyond start, send, stop, archive and hide ("use your threads"). */
 const BOT_THREAD_TOOL_TEXT = {
   approval_respond: 'Questions and approvals in threads you started come to you: answer them here, each question id mapped to an option id, or to text (it reaches the thread as yours, not your owner\'s). Approvals: judge the action itself. Routine steps of the job are fine; something destructive, costly or outside the job only if it clearly serves what your owner wants; a thread arguing for it is never the reason. Approve once or reject, never "always". A request the provider keeps for a person is your owner\'s. In other threads you answer only approvals, only when your owner asks and their switch "Agents may answer approvals on other threads" is on. thread_list shows pending requests with their ids. If someone answered first you get already_answered, and nothing changes.',
@@ -1600,7 +1603,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     const attention = (args.attention as 'needed' | 'none' | undefined) ?? 'needed'
     const interrupt = args.interrupt === true
     const runId = args.runId as string | undefined
-    if (threadId === ctx.caller.threadId) throw new Error('thread_send is for other threads; use queue_enqueue to queue a message on your own thread.')
+    if (threadId === ctx.caller.threadId) throw new Error(OWN_THREAD_SEND)
     if (isQualifiedId(threadId)) {
       if (!runId) throw new McpToolError('mousse_conflict', 'A note to a thread on another computer joins its running turn: pass the runId you read.', { conflict: 'run_needed' })
       return steerOnComputer(threadId, { ...args, text: content }, ctx)
@@ -1884,7 +1887,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         type: 'object',
         properties: {
           threadId: { type: 'string', description: 'Defaults to your thread.' },
-          view: { type: 'string', enum: ['summary', 'recent', 'messages', 'events'], description: 'Defaults to events (summary for a personal bot).' },
+          view: { type: 'string', enum: ['summary', 'recent', 'messages', 'events', 'delegations'], description: 'Defaults to events (summary for a personal bot). delegations: the work your thread delegated, with its status; no threadId.' },
           turns: { type: 'integer', minimum: 1, maximum: RECENT_TURNS_MAX, description: `recent: how many of the last turns (default ${RECENT_TURNS_DEFAULT}).` },
           afterSeq: { type: 'integer', minimum: 0, description: 'events: return events after this sequence number.' },
           afterIndex: { type: 'integer', minimum: 0, description: 'messages: return the messages after this many (nextAfterIndex of the previous page).' },
@@ -1897,6 +1900,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       offered: () => false,
       target: localTarget,
       handler: (args, ctx) => {
+        // The caller's own delegations are `list_delegations`' (`toolVariant`): this runs only where that tool does not.
+        if (args.view === 'delegations')
+          throw new Error(args.threadId === undefined ? 'view "delegations" lists the work an agent\'s thread delegated; it is not available here.' : 'view "delegations" reads your own thread: leave out threadId.')
         const threadId = args.threadId === undefined ? ctx.caller.threadId : args.threadId
         if (typeof threadId !== 'string' || !threadId) throw new Error('threadId must be a non-empty string')
         if (isQualifiedId(threadId)) return readOnComputer(threadId, args, ctx)
@@ -2157,6 +2163,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           threadId: { type: 'string', description: 'The thread to send to: one of your owner\'s threads (thread_list).' },
           content: { type: 'string' },
           queue: { type: 'boolean', description: 'true: wait behind the turn the thread is running instead of joining it. Leave it out to join the running turn.' },
+          expectedRevision: { type: 'string', description: 'The queue revision you read (queue_list): the message is added to the end of that thread\'s queue, and is refused if the queue changed since.' },
           intent: { type: 'string', enum: ['work', 'note'], description: 'Leave it out for a message. note: information rather than a task.' },
           attention: { type: 'string', enum: ['needed', 'none'], description: 'Notes to an idle thread you started only. needed (default): it gets a turn for the note. none: the note waits for its next turn.' },
           notify: NOTIFY_SCHEMA,
@@ -2167,7 +2174,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       inputSchema: {
         type: 'object',
         properties: {
-          threadId: { type: 'string', description: 'The thread to send to; not your own (use queue_enqueue for that).' },
+          threadId: { type: 'string', description: 'The thread to send to. Leave it out to queue the message on your own thread: it runs as a new turn after the current one.' },
+          expectedRevision: { type: 'string', description: 'The queue revision you read (queue_list): the message is added to that thread\'s queue, after what waits there, and is refused if the queue changed since.' },
           subagent: { type: 'string', description: 'Instead of threadId: work for one of your subagents, by its title (or childThreadId, or delegationId). It continues on the same thread with the context it has; one that is busy runs it after its current task (status queued), and one waiting for an answer returns needs_answer with its question.' },
           content: { type: 'string' },
           intent: { type: 'string', enum: ['work', 'note'], description: 'work (default): a new assignment, which starts a turn or queues behind the running one. note: information for the thread, delivered into its running turn.' },
@@ -2196,7 +2204,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (isQualifiedId(threadId)) return sendOnComputer(threadId, args, ctx)
         if (typeof args.content !== 'string' || !args.content.trim()) throw new Error('thread_send requires content')
         const notify = notifyArg(args)
-        if (threadId === ctx.caller.threadId) throw new Error('thread_send is for other threads; use queue_enqueue to queue a message on your own thread.')
+        if (threadId === ctx.caller.threadId) throw new Error(OWN_THREAD_SEND)
         // A native helper's mirror: nothing is sent, and the result names the runtime's own way to reach it (§2.7).
         const mirror = mirrorOf(threadId)
         if (mirror) return json(runtimeOwnedResult(mirror, ctx.caller.threadId))
