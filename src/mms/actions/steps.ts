@@ -1,5 +1,5 @@
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync, type Stats } from 'node:fs'
-import { access, copyFile, lstat, mkdir, readdir, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, utimesSync, writeFileSync, type Stats } from 'node:fs'
+import { access, copyFile, lstat, mkdir, readdir, readFile, readlink, realpath, rm, utimes, writeFile } from 'node:fs/promises'
 
 /**
  * Code that reads and changes a folder through Git and the disk, written once and run two ways. Each call that can
@@ -70,5 +70,8 @@ export const files = {
   /** Removes a file, if it is there. */
   remove: (path: string): Steps<void> => step(() => rmSync(path, { force: true }), () => rm(path, { force: true })),
   copyFile: (from: string, to: string): Steps<void> => step(() => copyFileSync(from, to), () => copyFile(from, to)),
-  writeText: (path: string, text: string): Steps<void> => step(() => writeFileSync(path, text), () => writeFile(path, text))
+  writeText: (path: string, text: string): Steps<void> => step(() => writeFileSync(path, text), () => writeFile(path, text)),
+  writeBytes: (path: string, bytes: Uint8Array): Steps<void> => step(() => writeFileSync(path, bytes), () => writeFile(path, bytes)),
+  /** Sets a file's access and modification times. */
+  setTimes: (path: string, atime: Date, mtime: Date): Steps<void> => step(() => utimesSync(path, atime, mtime), () => utimes(path, atime, mtime))
 }
