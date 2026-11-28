@@ -17,6 +17,7 @@ import { needsMeLabel, threadAttention, threadStatus, worstOf, type ThreadAttent
 import { needsMeThreads, useSupervisedWaits } from '../lib/needsMe'
 import { hasMoreBelow, revealDelta } from '../lib/sidebarScroll'
 import { SIDEBAR_REVEAL_TIMEOUT_MS, useSidebarRevealStore } from '../lib/sidebarReveal'
+import { useSidebarOpenStore } from '../lib/sidebarOpen'
 import { useSidebarShowMoreStore } from '../lib/sidebarShowMore'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
@@ -56,9 +57,9 @@ import { loadEditors, useEditorsStore } from '../stores/editorsStore'
 
 import { StartFromPullRequestDialog } from './StartFromPullRequestDialog'
 import { AlsoOnBadge, ThreadComputerBadge } from './ComputerBadge'
-import { ThreadBranchLine, ThreadHoverCard, ThreadModelIcon } from './ThreadRowDetails'
+import { ThreadBranchLine, ThreadHoverCard, ThreadModelIcon, type ThreadLineShows } from './ThreadRowDetails'
 import { UNKNOWN_COMPUTER_NAME, offlineLabel, threadComputerState, useComputers } from '../lib/computers'
-import { groupComputers, groupProjects } from '../lib/projectGroups'
+import { groupComputers, groupOnSeveralComputers, groupProjects } from '../lib/projectGroups'
 import { projectHueColor, projectHues } from '../lib/projectHues'
 import { ProjectIcon } from './ProjectIcon'
 import { projectIconMenuActions } from '../lib/projectIconActions'
@@ -288,7 +289,8 @@ export function ThreadCardBody({
   pullRequests,
   statusWithAge = false,
   linkStatus,
-  terseStatus = false
+  terseStatus = false,
+  lineShows = 'branch'
 }: {
   thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt' | 'expiryStopsRun' | 'setupFailure' | 'worktreeEnabled' | 'modelOverride'>
   projectName?: string
@@ -324,6 +326,8 @@ export function ThreadCardBody({
    * card keeps the words, since the pointer passes through it and could never show the title.
    */
   terseStatus?: boolean
+  /** What its lower line names: the branch (the default), the computer, or both on two lines. */
+  lineShows?: ThreadLineShows
 }) {
   return (
     <>
@@ -356,7 +360,7 @@ export function ThreadCardBody({
           </span>
         )}
         {preview && !isRenaming && !isGeneratingTitle && <ThreadReplyPreview text={preview} className="threads-sidebar-card-preview" />}
-        <ThreadBranchLine thread={thread} threadId={threadId} pullRequests={pullRequests} model={false} hideEmpty className="threads-sidebar-card-sub" />
+        <ThreadBranchLine thread={thread} threadId={threadId} pullRequests={pullRequests} model={false} hideEmpty shows={lineShows} className="threads-sidebar-card-sub" />
       </span>
     </>
   )
@@ -409,7 +413,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   }, [pendingRows, listedInStore, storeActivity])
   const approvalThreads = useThreadsAwaitingApproval()
 
-  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
+  // Open projects and Archived, like Show more below, survive the sidebar closing and the hover peek.
+  const expandedProjects = useSidebarOpenStore((s) => s.groups)
+  const setExpandedProjects = useSidebarOpenStore((s) => s.setGroups)
   // The project the user last opened or closed. Only that group animates; one revealed for the thread
   // being opened (or a project just added) appears at once.
   const toggledProjectRef = useRef<string | null>(null)
@@ -418,7 +424,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const expandedProjectThreadLists = useSidebarShowMoreStore((s) => s.groups)
   const setExpandedProjectThreadLists = useSidebarShowMoreStore((s) => s.setGroups)
 
-  const [archivedExpanded, setArchivedExpanded] = useState(false)
+  const archivedExpanded = useSidebarOpenStore((s) => s.archived)
+  const setArchivedExpanded = useSidebarOpenStore((s) => s.setArchived)
   // The archived threads waiting on a delete confirmation, and how that delete is going.
   const [deleteRequest, setDeleteRequest] = useState<DeleteRequest | null>(null)
   const [deleteState, setDeleteState] = useState<{ busy: boolean; error?: string }>({ busy: false })
@@ -1370,6 +1377,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const hasDraft = draftedIds.has(thread.id)
     const groupId = groupIdOf(thread.projectId)
     const group = groupId ? groupById.get(groupId) : undefined
+    // A tree row names the computer in its branch's place when its project is on several computers (the branch is in
+    // its hover card); a card names both, the computer on a line of its own, once there are other computers.
+    const lineShows: ThreadLineShows = layout === 'card'
+      ? (hasOtherComputers ? 'both' : 'branch')
+      : group && groupOnSeveralComputers(group) ? 'device' : 'branch'
     // Only the Threads tab's cards carry the project's tint, unless Appearance turns it off; a thread without a
     // project has none.
     const hue = layout === 'card' && threadProjectColors !== 'off' && group ? hueByGroup.get(group.id) : undefined
@@ -1520,6 +1532,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             onCancelRename={endRename}
             onStartRename={renameFromTitle}
             pullRequests={pullRequests}
+            lineShows={lineShows}
           />
         ) : (
           <>
@@ -1555,6 +1568,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             pullRequests={pullRequests}
             end={statusNode}
             wordy={!!statusNode && wordyStatus(thread)}
+            shows={lineShows}
             className="threads-sidebar-thread-sub"
           />
         </span>

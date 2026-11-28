@@ -35,6 +35,8 @@
     "tests/harness/cursorHost.test.ts",
     "tests/cursorOneShot.test.ts",
     "tests/cursorOneShotEffects.test.ts",
+    "tests/piWorkerOneShot.test.ts",
+    "tests/piWorkerOneShotEffects.test.ts",
     "tests/harness/piAnthropicGuardProcess.test.ts",
     "tests/harness/piBedrockRetry.test.ts",
     "tests/harness/piBotEphemeral.test.ts",

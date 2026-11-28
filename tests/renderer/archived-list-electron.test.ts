@@ -1,7 +1,8 @@
 /**
  * The real sidebar in a real Chromium window, with the app's CSS and 600 archived threads: Archived opens with only
  * the cards in view drawn, scrolls to its last row with no blank band, holds the row at the top still while heights
- * are measured, keeps keyboard focus on a row scrolled far away, and the last row's menu opens.
+ * are measured, keeps keyboard focus on a row scrolled far away, the last row's menu opens, and an archived thread that opens
+ * shows its row whole.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
@@ -14,12 +15,15 @@ import { expect, it } from 'vitest'
 import { build as viteBuild } from 'vite'
 
 type View = { drawn: number; blank: number[]; first: { id: string; top: number } | null; last: string | null; scrollTop: number; room: number; headingShown: boolean }
+type Reveal = { id: string; open: boolean; row: { top: number; bottom: number } | null; view: { top: number; bottom: number } }
 type Evidence = {
   open: View & { count: string }
   end: View
   middle: { before: View; after: View }
   focusAway: View & { id: string; focused: boolean }
   lastRowMenu: { found: boolean; items: string[] }
+  revealFar: Reveal
+  revealAfterOpening: Reveal
   pageErrors: string[]
   rendererErrors: string[]
 }
@@ -87,6 +91,15 @@ it('opens 600 archived threads with only the cards in view drawn, scrolls to the
     // The last row's own menu opens and acts on it.
     expect(evidence.lastRowMenu.found, all).toBe(true)
     expect(evidence.lastRowMenu.items.some((item) => item?.includes('Unarchive')), all).toBe(true)
+
+    // Opening an archived thread opens Archived and shows its row whole, far down the long list and after a short
+    // list's opening motion.
+    for (const reveal of [evidence.revealFar, evidence.revealAfterOpening]) {
+      expect(reveal.open, all).toBe(true)
+      expect(reveal.row, all).not.toBeNull()
+      expect(reveal.row!.top, all).toBeGreaterThanOrEqual(reveal.view.top - 1)
+      expect(reveal.row!.bottom, all).toBeLessThanOrEqual(reveal.view.bottom + 1)
+    }
 
     expect(evidence.pageErrors, all).toEqual([])
   } finally {

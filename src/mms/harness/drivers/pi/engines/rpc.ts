@@ -9,7 +9,7 @@ import type { PiRuntimePaths } from '../../../pi/launch'
 import type { PiOAuthSource } from '../../../pi/oauthBroker'
 import { piShellPath } from '../../../pi/settings'
 import { instanceStateDir } from '../../../instances'
-import { piInstanceRuntime, type PiCredentials } from '../instance'
+import { piInstanceRuntime, type PiCredentials, type PiWorkerContext } from '../instance'
 
 /**
  * Pi's agent as its own process (PR 2 §4): every `pi:*` instance, except the retired providers
@@ -174,7 +174,7 @@ export function piRpcEvidenceOf(options: PiRpcDriverOptions): PiRpcEvidenceInput
   return { platform: options.platform ?? process.platform, piVersion, ...(options.evidence ? { evidence: options.evidence } : {}) }
 }
 
-export function createRpcRuntime(context: DriverContext, providerId: string, label: string, credentials: () => PiCredentials | undefined, options: PiRpcDriverOptions): DriverRuntime {
+export function createRpcRuntime(context: DriverContext, providerId: string, label: string, credentials: () => PiCredentials | undefined, options: PiRpcDriverOptions, worker?: PiWorkerContext): DriverRuntime {
   const capabilities = piRpcCaps(piRpcEvidenceOf(options))
   const notice = engineNotice(context, label)
   const engine = new PiRpcEngine({
@@ -233,7 +233,7 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
       return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value
     }
   })
-  const base = piInstanceRuntime(context.instanceId, providerId, credentials, adapter)
+  const base = piInstanceRuntime(context.instanceId, providerId, credentials, adapter, worker)
   const credential = credentialChanges(engine, () => options.identity?.(providerId), Boolean(options.identity))
   return {
     ...base,

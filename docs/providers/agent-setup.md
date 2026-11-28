@@ -330,6 +330,16 @@ with it, see [Claude's client name](claude-native-proxy.md).
   Settings, Skills & MCP, Advanced, and switch that agent off under "Share with other agents".
   Codex and Cursor relayed tools ask in the thread before they run unless the thread is in Full
   access; Claude Code and ACP agents use their own approvals.
+- **Amazon Bedrock single requests.** Titles, branch names, pull request drafts, commit messages
+  and a bot's name and digest on a Bedrock model run in a worker process of their own, started for
+  the request in an empty place and ended with it. It is offered no tool, the AWS SDK sends a failed
+  request once (`AWS_MAX_ATTEMPTS=1`), and none of your AWS files or Pi's setup loads: the worker
+  gets only the keys the entry signs in with, read at the time of each request. A bearer token and
+  static keys are passed as they are. Every other sign-in (IAM Identity Center (SSO), a credential
+  process, an assumed role, web identity, `aws login`, a container's role) is resolved by Mousse
+  first, with the AWS SDK's own credential chain in the entry's environment as Pi's turns use it
+  and one attempt per sign-in call; the worker gets only the temporary keys, never your AWS files,
+  SSO cache or credential program. They are held.
 - **Agent telemetry.** Each provider has a Telemetry setting, Off or Agent's own setting. Off starts the
   agent with its documented switch (Claude Code, Codex and the Mousse agent have one); the agent's files
   are never edited. See [Privacy and agent telemetry](../CONFIGURATION.md#privacy-and-agent-telemetry).
