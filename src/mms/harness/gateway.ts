@@ -329,11 +329,6 @@ export interface HarnessGateway {
    * Automatic naming's index). An instance never checked has no `checkedAt`.
    */
   cachedSnapshots?(scope: ProviderScope): InstanceSnapshot[]
-  /**
-   * Whether at least one of the instance's models is admitted for single requests now (`titleListing`); false for an
-   * unknown instance. Kept for computers that read only the per-instance flag.
-   */
-  canOneShot?(instanceId: string): boolean
   /** Whether `model` of the instance is admitted for an Automatic title now (`oneShot/admission.ts`). */
   admitsOneShot?(instanceId: string, model: string): boolean
   /** `admitsOneShot` for many models of one instance, reading the instance once. */
@@ -1761,21 +1756,7 @@ export class Harness implements HarnessGateway {
     return Boolean(entry && this.drivers.get(entry.driver)?.oneShotRoute)
   }
 
-  /** At least one of the instance's models is admitted for a thread title now: the flag older computers read. */
-  private oneShotAvailable(instanceId: string): boolean {
-    if (!this.hasOneShotRoute(instanceId)) return false
-    let models: InstanceModel[]
-    try {
-      models = this.catalog.models(instanceId, { kind: 'device' })
-    } catch {
-      return false
-    }
-    // An agent that lists no model runs its own default.
-    const admits = this.titleAdmitter(instanceId)
-    return models.length ? models.some((model) => admits(model.id)) : admits('default')
-  }
-
-  /** One model's title listing: held, best-effort or legacy when admitted, else unavailable with its reason. */
+  /** One model's title listing: held or best-effort when admitted, else unavailable with its reason. */
   private titleListingOf(instanceId: string, model: string, view: AdmissionView = this.admissionView): TitleModelListing {
     const admitted = admit('thread_title', { kind: 'model', instanceId, model }, view)
     if (!isPlan(admitted)) return { state: 'unavailable', reason: admitted.reason }
@@ -1834,10 +1815,7 @@ export class Harness implements HarnessGateway {
     return this.drivers.get(entry.driver)?.label ?? instanceId
   }
 
-  /**
-   * The transport a plan runs on: the runtime's own for a route with facts, else its legacy one-shot, wrapped so it
-   * reports only activity.
-   */
+  /** The transport a plan runs on: the runtime's own (`DriverRuntime.oneShotTransport`). */
   private oneShotTransportOf(record: InstanceRecord, plan: OneShotPlan, request: OneShotRequest): OneShotTransport {
     const runtime = record.runtime
     const customModel = this.catalog.customModel(record.instanceId, plan.model)
@@ -1848,15 +1826,8 @@ export class Harness implements HarnessGateway {
       ...(request.task ? { task: request.task } : {}),
       ...(request.namingOrigin ? { namingOrigin: request.namingOrigin } : {})
     }
-    if (plan.route.facts) {
-      if (!runtime.oneShotTransport) harnessFail('unsupported', `${this.displayName(record)} cannot run a single request.`, record.instanceId)
-      return runtime.oneShotTransport(spec)
-    }
-    const legacy = runtime.oneShot?.bind(runtime)
-    if (!legacy) harnessFail('unsupported', `${this.displayName(record)} cannot run a single request.`, record.instanceId)
-    return {
-      send: async (wire, events, signal) => (await legacy({ ...spec, system: wire.system, prompt: wire.prompt, onActivity: () => events.activity() }, signal)).text
-    }
+    if (!runtime.oneShotTransport) harnessFail('unsupported', `${this.displayName(record)} cannot run a single request.`, record.instanceId)
+    return runtime.oneShotTransport(spec)
   }
 
   async oneShot(request: OneShotRequest): Promise<{ text: string }> {
@@ -2627,10 +2598,6 @@ export class Harness implements HarnessGateway {
     })
   }
 
-  canOneShot(instanceId: string): boolean {
-    return this.oneShotAvailable(instanceId)
-  }
-
   isEnabledInScope(instanceId: string, scope: ProviderScope): boolean {
     const entry = this.instanceMap.list()[instanceId]
     return Boolean(entry) && entry!.enabled
@@ -2692,10 +2659,10 @@ export class Harness implements HarnessGateway {
       const option = record && this.named(record, record.runtime.llmProvider?.())
       if (!option) continue
       const visible = visibleProviderOption({ ...option, instanceId }, this.prefs.get(instanceId))
-      // Each model says whether and how it names threads; the instance flag is derived from them for older computers.
+      // Each model says whether and how it names threads.
       const view = this.entryView(instanceId)
       const models = visible.models.map((model) => ({ ...model, title: this.titleListingOf(instanceId, model.id, view) }))
-      const listed = { ...visible, models, instanceId, oneShot: models.some((model) => model.title.state !== 'unavailable') }
+      const listed = { ...visible, models, instanceId }
       // In the order the pickers have always shown: model APIs (fixed-id entries) by name, then agents.
       ;(record.driver.instanceIdFor ? apis : agents).push(listed)
     }

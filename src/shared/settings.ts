@@ -684,22 +684,17 @@ export interface LlmProviderOption {
   instanceId?: string
   label: string
   models: LlmModelOption[]
-  /**
-   * At least one of its models is admitted for a single request with no tools (chat titles, pull request drafts,
-   * commit messages): derived from the per-model `title` listing, for computers that read only this flag.
-   */
-  oneShot?: boolean
 }
 
 /**
- * One model in thread titles' listing (`HarnessGateway.titleListing`): admitted (`held`, `best_effort`, or `legacy` for
- * a provider still on its own one-shot code) or `unavailable` with its reason.
+ * One model in thread titles' listing (`HarnessGateway.titleListing`): admitted (`held` or `best_effort`) or
+ * `unavailable` with its reason.
  */
 export interface TitleModelListing {
-  state: 'held' | 'best_effort' | 'legacy' | 'unavailable'
+  state: 'held' | 'best_effort' | 'unavailable'
   /** Why it cannot name threads now (`unavailable`). */
   reason?: string
-  /** The route it runs on, when admitted (`pi:direct`, `acp:generic`, `legacy:<driver>`). */
+  /** The route it runs on, when admitted (`pi:direct`, `acp:generic`). */
   route?: string
   /** What a best-effort route does not hold, in words for its tooltip. */
   facts?: string[]

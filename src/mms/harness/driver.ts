@@ -200,7 +200,7 @@ export interface ProviderTaskEnd {
 export type NamingOrigin = 'new_thread' | 'send' | 'regenerate'
 
 /**
- * One model request with no tools and no session (a chat title), run by the gateway's `oneShot`.
+ * One model request with no tools and no session (a chat title), run by the gateway's `oneShot` on a route's transport.
  * The gateway resolved and admitted the selection and owns the timeout; the driver makes exactly one
  * request and never retries.
  */
@@ -310,12 +310,7 @@ export interface DriverRuntime {
   /** The turn runtime of this instance. */
   readonly adapter: ProviderAdapter
   /**
-   * One request with no tools on a legacy route (`legacy:<driver>`, `HarnessDriver.oneShotRoute`). Throws the
-   * provider's failure; `signal` aborts it (the caller stopped, or the runner's bounds).
-   */
-  oneShot?(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }>
-  /**
-   * The transport of a route with facts (`pi:direct`, `acp:generic`): it carries the runner's request once and reports
+   * The transport of its single-request route (`HarnessDriver.oneShotRoute`): it carries the runner's request once and reports
    * what comes back (`oneShot/runner.ts`). `spec` names the model and what the request is for; its text comes from the
    * runner.
    */

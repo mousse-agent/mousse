@@ -1,9 +1,6 @@
-import type { OneShotRouteDecision, RouteFacts } from './route'
+import type { RouteFacts } from './route'
 
-/**
- * The routes this slice runs on the runner, with their facts, and the legacy route every other provider keeps until
- * its own slice. See the providers table in docs/plans/one-shots-every-provider.md.
- */
+/** Every provider's route facts. See the providers table in docs/plans/one-shots-every-provider.md. */
 
 /** Pi: one pi-ai request in Mousse's process, with no tool offered. */
 export const PI_DIRECT_FACTS: RouteFacts = Object.freeze({ tools: 'none_offered', attempts: 'one', isolation: 'verified', launch: 'in_process', audience: 'any' })
@@ -88,8 +85,18 @@ export const OPENCODE_FREE_FACTS: RouteFacts = Object.freeze({ ...OPENCODE_SEALE
  */
 export const CURSOR_SDK_FACTS: RouteFacts = Object.freeze({ tools: 'none_offered', attempts: 'one', isolation: 'verified', launch: 'sealed_host', audience: 'any' })
 
-/** A provider still on its own one-shot code (`DriverRuntime.oneShot`), admitted with no facts claimed. */
-export function legacyOneShotRoute(driver: string): () => OneShotRouteDecision {
-  const decision: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: `legacy:${driver}` as const }) })
-  return () => decision
-}
+/**
+ * Grok with an xAI API key (`grok:direct`): one request with no tools to xAI's API, in Mousse's process, with the key
+ * Grok would use. No retry (one request on the wire on 429 and 503, counted at a stub, `tests/grokDirectOneShot.test.ts`);
+ * Mousse builds the request, so nothing of Grok's setup is in it (its config, instructions or MCP servers; shown against
+ * Grok's own run in the same home, `tests/grokDirectOneShotEffects.test.ts`). Held.
+ */
+export const GROK_DIRECT_FACTS: RouteFacts = Object.freeze({ tools: 'none_offered', attempts: 'one', isolation: 'verified', launch: 'in_process', audience: 'any' })
+
+/**
+ * Grok with its account sign-in (`acp:grok`): `acpOneShot` with the preset's inputs (`grok/oneShot.ts`): a Grok home of
+ * the request's own whose config denies every tool and sends nothing again, the entry's own `auth.json` read in place,
+ * and every source Grok reads from other agents' setups off. Grok's own tools are still offered and its retries are
+ * not counted here: best-effort, as any ACP agent.
+ */
+export const GROK_ACP_FACTS: RouteFacts = GENERIC_ACP_FACTS

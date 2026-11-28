@@ -24,9 +24,9 @@ import { resolveCommand } from '../env'
 import { ptyAvailable, runInPty, signInPrompts, type PtySpawn } from '../pty'
 import { spawnHarness } from '../spawn'
 import { fingerprintOf } from '../status'
-import { GENERIC_ACP_ARGUMENTS, sealedEnv } from '../oneShot/launch'
+import { GENERIC_ACP_ARGUMENTS, sealedEnv, type ArgumentAllowlist } from '../oneShot/launch'
 import { releasePlace, reservePlace, spawnInPlace, type Place, type PlaceProcess } from '../oneShot/places'
-import type { OneShotRouteDecision } from '../oneShot/route'
+import type { OneShotRouteDecision, OneShotRouteId } from '../oneShot/route'
 import { GENERIC_ACP_FACTS } from '../oneShot/routes'
 
 /**
@@ -46,6 +46,8 @@ const GENERIC_ACP_ROUTE: OneShotRouteDecision = Object.freeze({ route: Object.fr
 /** In a single request's place: the folder the agent works in (checked afterwards) and the one its roots point into. */
 const ONE_SHOT_WORK = 'work'
 const ONE_SHOT_ROOT = 'root'
+/** A preset's inputs written for one request (`AcpRuntimeHooks.oneShot`), beside the place's reserved roots. */
+const ONE_SHOT_INPUTS = 'inputs'
 
 /** What `<stateDir>/acp.json` keeps. */
 interface AcpState {
@@ -65,6 +67,17 @@ interface AcpState {
   filesChanged?: { hash: string; message: string }
   /** The home the saved sessions were made in (`AcpRuntimeHooks.sessionsHome`). */
   sessionsHome?: string
+  /**
+   * The single requests of a driver built on this runtime (`acpOneShot` with its preset's inputs): the route its places
+   * are named after, the narrow inputs its sealed launch adds (named variables or files, never a whole folder; written
+   * under `root`, the place's own folder for them), and the rule for the launch's arguments. Without it, only an agent
+   * known by its command runs single requests here.
+   */
+  oneShot?: {
+    route: OneShotRouteId
+    inputs(root: string): Record<string, string>
+    arguments?: ArgumentAllowlist
+  }
 }
 
 export interface AcpDriverOptions {
@@ -217,8 +230,8 @@ export interface AcpRuntime extends DriverRuntime {
 }
 
 export function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: AcpDriverOptions, ptyRuns: () => boolean, hooks: AcpRuntimeHooks = {}): AcpRuntime {
-  // Only an agent known by its command runs single requests here; a driver built on this runtime keeps its own.
-  const oneShotRoute = preset === GENERIC_ACP_PRESET && !hooks.driver
+  // An agent known by its command runs single requests here, and a driver built on this runtime that names its inputs.
+  const oneShotRoute = hooks.oneShot ?? (preset === GENERIC_ACP_PRESET && !hooks.driver ? { route: 'acp:generic' as const, inputs: () => ({}) } : undefined)
   const statePath = join(context.stateDir, 'acp.json')
   let state: AcpState = {}
   try {
@@ -339,8 +352,10 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
       throw new Error(`Mousse did not check the files of ${label} before starting it.`)
     // The program as it resolves now must be the one admitted (`OneShotEvents.launching`), or nothing starts.
     held.launching(resolved.path)
-    const env = sealedEnv({ base: context.env.env, entry: launch.env, ...(context.env.enforced ? { preset: context.env.enforced } : {}), root: join(held.place.dir, ONE_SHOT_ROOT) })
-    const proc = spawnInPlace(held.place, { command: resolved.command, args: [...resolved.args, ...GENERIC_ACP_ARGUMENTS(launch.args)], env, purpose: 'acp-one_shot', instanceId: context.instanceId, cwd: request.cwd! })
+    const inputs = oneShotRoute?.inputs(join(held.place.dir, ONE_SHOT_INPUTS)) ?? {}
+    const env = sealedEnv({ base: context.env.env, entry: launch.env, preset: { ...(context.env.enforced ?? {}), ...inputs }, root: join(held.place.dir, ONE_SHOT_ROOT) })
+    const args = (oneShotRoute?.arguments ?? GENERIC_ACP_ARGUMENTS)(launch.args)
+    const proc = spawnInPlace(held.place, { command: resolved.command, args: [...resolved.args, ...args], env, purpose: 'acp-one_shot', instanceId: context.instanceId, cwd: request.cwd! })
     held.proc = proc
     const untrack = root && agents ? agents.track(root) : track?.()
     const connection = connectAcpProcess(proc.child, request.handlers, {
@@ -713,7 +728,8 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
       save()
     },
     /**
-     * `acp:generic` (`acpOneShot`): the runner's request on a fresh agent process and session in a place of its own
+     * `acp:generic` (`acpOneShot`), or a driver's own ACP route with its preset's inputs (`AcpRuntimeHooks.oneShot`,
+     * Grok's `acp:grok`): the runner's request on a fresh agent process and session in a place of its own
      * (`oneShot/places.ts`): its record first, then its folder; the session's workspace and the process's folder are
      * its `work` folder, with no MCP server; every permission, file, terminal, question or unknown request and every
      * tool the agent reports ends the request (`AcpSessions.oneShot`). Once the tree has gone, with proof, anything
@@ -724,7 +740,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
         send: async (wire, events, signal) => {
           signal.throwIfAborted()
           if (state.signedOut) throw harnessAppError({ code: 'signed_out', message: `Sign in to ${label} in Settings → Providers.`, instanceId: context.instanceId })
-          const place = reservePlace(context.profileHome, { route: 'acp:generic', instanceId: context.instanceId })
+          const place = reservePlace(context.profileHome, { route: oneShotRoute.route, instanceId: context.instanceId })
           const work = join(place.dir, ONE_SHOT_WORK)
           const held: { place: Place; proc?: PlaceProcess; launching(executable: string): void } = { place, launching: (executable) => events.launching(executable) }
           let text = ''

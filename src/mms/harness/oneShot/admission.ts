@@ -7,19 +7,17 @@ import type { OneShotOp, OneShotRoute, OneShotRouteDecision, RouteFacts } from '
  * or why the request is not admitted. See docs/plans/one-shots-every-provider.md §2.
  */
 
-/** A route's label: computed from its facts. A legacy route claims nothing, so it has its own. */
-export type OneShotLabel = 'held' | 'best_effort' | 'legacy'
+/** A route's label: computed from its facts. */
+export type OneShotLabel = 'held' | 'best_effort'
 
 /** Held means no tool offered, one attempt, and no user config loaded; anything else is best-effort. */
 export function routeLabel(route: Pick<OneShotRoute, 'facts'>): OneShotLabel {
   const facts = route.facts
-  if (!facts) return 'legacy'
   return facts.tools === 'none_offered' && facts.attempts === 'one' && facts.isolation === 'verified' ? 'held' : 'best_effort'
 }
 
-/** The facts behind a best-effort label, in words for its tooltip. Empty for a held or legacy route. */
-export function routeFactsText(facts: RouteFacts | undefined): string[] {
-  if (!facts) return []
+/** The facts behind a best-effort label, in words for its tooltip. Empty for a held route. */
+export function routeFactsText(facts: RouteFacts): string[] {
   const lines: string[] = []
   if (facts.tools === 'detected_on_report') lines.push('The agent has tools of its own: Mousse tells it not to use them and stops the request at the first one it reports.')
   if (facts.tools === 'refused_before_run') lines.push('Tools are offered, and Mousse refuses each call before it runs.')
@@ -121,9 +119,8 @@ export interface AdmissionView {
 const no = (instanceId: string, notAdmitted: NotAdmittedCode, reason: string): NotAdmitted => Object.freeze({ notAdmitted, reason, instanceId })
 
 /**
- * Whether `op` may run on `binding`, from cached state only: an immutable plan, or why not. A legacy route keeps what
- * its driver did before (it is not held to a check here); a route that launches a program runs only once the entry's
- * check has read it, so a thread keeps its first line while its facts are unknown.
+ * Whether `op` may run on `binding`, from cached state only: an immutable plan, or why not. A route that launches a
+ * program runs only once the entry's check has read it, so a thread keeps its first line while its facts are unknown.
  */
 export function admit(op: OneShotOp, binding: OneShotBinding, view: AdmissionView): OneShotPlan | NotAdmitted {
   const { instanceId, model } = binding
@@ -140,10 +137,10 @@ export function admit(op: OneShotOp, binding: OneShotBinding, view: AdmissionVie
   if ('refused' in decision) return no(instanceId, 'refused', decision.refused)
   const route = decision.route
   // A launched route's facts are about the program the check read; an in-process route's hold by construction.
-  if (route.facts && route.facts.launch !== 'in_process' && !entry.checked) return no(instanceId, 'unchecked', `${entry.label} has not been checked yet.`)
+  if (route.facts.launch !== 'in_process' && !entry.checked) return no(instanceId, 'unchecked', `${entry.label} has not been checked yet.`)
   const known = entry.model(model)
   if (known.hidden) return no(instanceId, 'model_hidden', `${model} is hidden.`)
-  const local = route.facts?.audience === 'own_threads' || known.local
+  const local = route.facts.audience === 'own_threads' || known.local
   if (binding.kind === 'local_thread') {
     if (!local) return no(instanceId, 'not_local', "This thread's model is no longer a local one; the thread keeps its first line.")
     if (!binding.resident) return no(instanceId, 'local_unloaded', 'The local model is not loaded; the thread keeps its first line.')
@@ -156,7 +153,7 @@ export function admit(op: OneShotOp, binding: OneShotBinding, view: AdmissionVie
     instanceId,
     model,
     ...(effort ? { effort } : {}),
-    route: Object.freeze({ id: route.id, ...(route.facts ? { facts: Object.freeze({ ...route.facts }) } : {}) }),
+    route: Object.freeze({ id: route.id, facts: Object.freeze({ ...route.facts }) }),
     label: routeLabel(route),
     identity: Object.freeze({ ...entry.identity() })
   })
