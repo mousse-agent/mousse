@@ -56,24 +56,6 @@
       "expiresAt": "2026-11-27T12:11:45.533Z"
     },
     {
-      "task": "codex-update-every-install-method",
-      "session": "LAPTOP-HIEROJK7-3515af",
-      "machine": "LAPTOP-HIEROJK7",
-      "branch": "codex-update-every-install-method",
-      "paths": [
-        "src/mms/harness/driver.ts",
-        "src/mms/harness/drivers/codex.ts",
-        "src/mms/harness/ownerUpdate.ts",
-        "src/mms/harness/status.ts",
-        "src/shared/harness/status.ts",
-        "src/renderer/components/providers/CliSections.tsx",
-        "src/renderer/components/providers/providerView.ts",
-        "src/mms/harness/gateway.ts"
-      ],
-      "claimedAt": "2026-11-27T19:07:36.227Z",
-      "expiresAt": "2026-11-27T21:07:36.227Z"
-    },
-    {
       "task": "issue-2004-thread-starter-sync",
       "session": "LAPTOP-HIEROJK7-ae6a89",
       "machine": "LAPTOP-HIEROJK7",
