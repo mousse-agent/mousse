@@ -82,6 +82,22 @@ describe('Update chip in the provider heading', () => {
     }
   })
 
+  it('the card names who installed the copy, and says "can\'t tell" only when nobody is known', () => {
+    const rows: Array<[UpdateAffordance, string]> = [
+      [{ kind: 'advisory', owner: 'winget', command: 'winget upgrade --id OpenAI.Codex', latestVersion: '2.2.0' }, 'Installed with WinGet. Mousse runs this'],
+      [{ kind: 'advisory', owner: 'choco', command: 'choco upgrade codex -y', latestVersion: '2.2.0', manual: true }, 'Installed with Chocolatey. Needs administrator rights'],
+      [{ kind: 'notice', owner: 'nix', latestVersion: '2.2.0' }, 'Installed with Nix. Update it in your Nix configuration.'],
+      [{ kind: 'notice', latestVersion: '2.2.0' }, "Mousse can't tell how this copy was installed."]
+    ]
+    for (const [affordance, note] of rows) {
+      mount(affordance)
+      const wrap = chip().parentElement!
+      act(() => { wrap.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      expect(card()!.textContent).toContain(note)
+      act(() => { wrap.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    }
+  })
+
   it('shows no chip without an update', () => {
     const entry = snapshot()
     act(() => root.render(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions: {} as InstanceActions, onSaveModelPrefs: async () => {}, onRefreshModels: async () => {} })))

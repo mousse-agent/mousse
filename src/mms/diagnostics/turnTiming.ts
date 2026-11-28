@@ -1,7 +1,7 @@
 /**
  * Where a bot's chat reply spends its time, from the owner's message to the reply's first word: monotonic marks
- * (`performance.now()`) along the path, logged once per turn as milliseconds after the message, as
- * `[turn-timing] {"threadId":…,"ms":{"dispatch":…,…,"firstText":…}}`.
+ * (`performance.now()`) along the path, logged once per turn as milliseconds after the message, in the daemon log and
+ * on standard output, as `[turn-timing] {"threadId":…,"ms":{"dispatch":…,…,"firstText":…}}`.
  *
  * A turn is begun under its bot (`begin`), moved to its home thread once its dispatch knows it (`bind`), and marked by
  * the orchestrator and the runtime on that thread (`mark`); `firstText` logs it and ends it. A thread with no begun
@@ -10,6 +10,7 @@
  * Every mark is also a phase of the turn's boundary (`turnBoundary.ts`), which every thread logs.
  */
 
+import { logMeasurement } from '../log/diag'
 import { turnBoundaryMark } from './turnBoundary'
 
 interface Turn { start: number; marks: [string, number][] }
@@ -61,7 +62,7 @@ function markOn(turn: Turn | undefined, label: string): void {
 }
 
 /** The reply's first word on `threadId`: the turn is logged and ended. */
-export function turnTimingFirstText(threadId: string, log: (line: string) => void = (line) => console.info(line)): void {
+export function turnTimingFirstText(threadId: string, log: (line: string) => void = logMeasurement): void {
   const turn = turns.get(threadId)
   if (!turn) return
   turnTimingMark(threadId, 'firstText')

@@ -349,13 +349,19 @@ export interface BotsPersonalV2EventData {
  * its computer.
  */
 export const BOTS_ELSEWHERE_METHODS = ['bots.remote.list', 'bots.focus', 'bots.remote.file'] as const
+/**
+ * An applet such a bot's message shows (`bots.remote.applet`), read there for the app's main process to run in its
+ * applet frame (or the copy here, read-only, while that computer is away), and its state saved there
+ * (`bots.remote.appletState`). The main process's alone, as `applets.*` are: the window's request bridge does not offer them.
+ */
+export const BOTS_ELSEWHERE_APPLET_METHODS = ['bots.remote.applet', 'bots.remote.appletState'] as const
 /** Another computer a new bot can live on: one where this computer has Full bot access. */
 export interface BotElsewhereComputer {
   node: string
   name: string
   offline?: true
 }
-export type BotsElsewhereMethod = (typeof BOTS_ELSEWHERE_METHODS)[number]
+export type BotsElsewhereMethod = (typeof BOTS_ELSEWHERE_METHODS)[number] | (typeof BOTS_ELSEWHERE_APPLET_METHODS)[number]
 export interface BotsElsewhereApi {
   /**
    * `computers`: the other computers where this one has Full bot access, for New bot's "Lives on" (offline ones marked,
@@ -364,6 +370,11 @@ export interface BotsElsewhereApi {
   'bots.remote.list': { params: Record<string, never>; result: { bots: BotSummary[]; computers?: BotElsewhereComputer[] } }
   'bots.focus': { params: { botId: string; focused: boolean }; result: { routed: boolean; focused: boolean } }
   'bots.remote.file': { params: { botId: string; path: string }; result: { path: string; name: string; size: number } }
+  'bots.remote.applet': {
+    params: { botId: string; messageId: string; appletId: string; revisionId: string }
+    result: { bundle: import('../../applets').AppletReference & { source: import('../../applets').AppletSubmission }; state: unknown; readOnly?: true }
+  }
+  'bots.remote.appletState': { params: { botId: string; messageId: string; appletId: string; revisionId: string; state: unknown }; result: { saved: true } }
 }
 
 /**

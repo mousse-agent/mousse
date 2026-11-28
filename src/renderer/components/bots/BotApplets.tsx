@@ -15,48 +15,79 @@ import { useBotsStore } from '../../stores/botsStore'
 
 const conversations = new Map<string, AppletConversation>()
 
-/** The bot's composer as an applet's conversation: one object per bot and thread, so a card renders only when it changes. */
-export function botAppletConversation(botId: string, threadId: string): AppletConversation {
-  const key = `${botId}\0${threadId}`
+/**
+ * Where a bot's applet is read from: this computer's bot's thread, or, for a bot of another computer (`lives`), that
+ * computer through the bot by the message that shows it, with its name and whether it is offline.
+ */
+export type BotAppletSource = { threadId: string } | { messageId: string; computer: string; offline: boolean }
+
+/**
+ * The bot's composer as an applet's conversation: one object per bot and place, so a card renders only when it changes.
+ * What an applet of another computer's bot adds goes to that bot's own composer here, which sends it to that bot.
+ */
+export function botAppletConversation(botId: string, source: BotAppletSource): AppletConversation {
+  const key = 'threadId' in source ? `${botId}\0${source.threadId}` : `${botId}\0${source.messageId}\0${source.computer}\0${source.offline}`
   let conversation = conversations.get(key)
   if (!conversation) {
     conversation = {
-      threadId,
+      // A remote bot's applet has no thread here: its key stays with that bot.
+      threadId: 'threadId' in source ? source.threadId : `bot:${botId}`,
       addToDraft: (text) => {
         const store = useBotsStore.getState()
         const draft = store.drafts[botId] ?? ''
         store.setDraft(botId, draft ? `${draft}\n\n${text}` : text)
         window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')?.focus())
         return true
-      }
+      },
+      ...('threadId' in source ? {} : { bot: { botId, messageId: source.messageId, computer: source.computer, offline: source.offline } })
     }
     conversations.set(key, conversation)
   }
   return conversation
 }
 
+/** Where a message's applet is read from: its thread here, or the bot's computer (`remote`). Null when it has neither. */
+function sourceOf(applet: BotChatApplet, messageId: string | undefined, remote: BotAppletRemote | undefined): BotAppletSource | null {
+  if (remote) return messageId ? { messageId, computer: remote.computer, offline: remote.offline } : null
+  return applet.threadId ? { threadId: applet.threadId } : null
+}
+
+/** A bot of another computer: that computer's name and whether it is offline. */
+export interface BotAppletRemote { computer: string; offline: boolean }
+
 /**
  * A reply's applets, each with its name (which opens it beside the chat) above its content, and Reply beside the name.
  * The applet's content is a separate view over the page, so the pointer on it never shows the tools beside the bubble;
  * Reply here stays visible and replies to the whole message.
  */
-export function BotMessageApplets({ botId, applets, onOpen, message, onReply }: { botId: string; applets: readonly BotChatApplet[]; onOpen(applet: BotChatApplet): void; message?: BotChatMessage; onReply?(message: BotChatMessage): void }) {
+export function BotMessageApplets({ botId, applets, onOpen, message, onReply, remote }: { botId: string; applets: readonly BotChatApplet[]; onOpen(applet: BotOpenApplet): void; message?: BotChatMessage; onReply?(message: BotChatMessage): void; remote?: BotAppletRemote }) {
   return <div className="bot-message-applets">
-    {applets.map((applet) => <div key={`${applet.threadId}:${applet.reference.revisionId}`} className="bot-message-applet">
-      <AppletCard reference={applet.reference} conversation={botAppletConversation(botId, applet.threadId)} onOpen={() => onOpen(applet)} />
-      {message && onReply && <button type="button" className="bot-applet-reply" aria-label={`Reply to ${applet.reference.title}`} title="Reply"
-        onClick={() => onReply(message)}><Reply size={14} aria-hidden /></button>}
-    </div>)}
+    {applets.map((applet) => {
+      const source = sourceOf(applet, message?.id, remote)
+      if (!source) return null
+      return <div key={`${applet.threadId ?? ''}:${applet.reference.appletId}:${applet.reference.revisionId}`} className="bot-message-applet">
+        <AppletCard reference={applet.reference} conversation={botAppletConversation(botId, source)} onOpen={() => onOpen({ ...applet, ...(message ? { messageId: message.id } : {}) })} />
+        {message && onReply && <button type="button" className="bot-applet-reply" aria-label={`Reply to ${applet.reference.title}`} title="Reply"
+          onClick={() => onReply(message)}><Reply size={14} aria-hidden /></button>}
+      </div>
+    })}
   </div>
 }
 
+/** An applet opened beside the chat: the message it is on, which a bot of another computer's applet is read by. */
+export type BotOpenApplet = BotChatApplet & { messageId?: string }
+
 /** One applet beside the bot's chat, filling the pane, with the panel's Restart, Source and exports, and Close. */
-export function BotAppletPane({ botId, applet, onClose }: { botId: string; applet: BotChatApplet; onClose(): void }) {
+export function BotAppletPane({ botId, applet, onClose, remote }: { botId: string; applet: BotOpenApplet; onClose(): void; remote?: BotAppletRemote }) {
   const profileId = useAppStore((s) => s.profileId)
-  const { threadId, reference } = applet
-  const tab = useMemo(() => ({ id: `bot-applet:${threadId}:${reference.revisionId}`, title: reference.title, markdown: '', applet: { threadId, profileId, reference } }), [threadId, profileId, reference])
+  const { reference } = applet
+  const source = sourceOf(applet, applet.messageId, remote)
+  const conversation = source ? botAppletConversation(botId, source) : null
+  const threadId = conversation?.threadId ?? ''
+  const tab = useMemo(() => ({ id: `bot-applet:${threadId}:${applet.messageId ?? ''}:${reference.revisionId}`, title: reference.title, markdown: '', applet: { threadId, profileId, reference } }), [threadId, applet.messageId, profileId, reference])
+  if (!conversation) return null
   return <aside className="bot-applet-pane" aria-label={`Applet: ${reference.title}`}>
-    <AppletPanelView key={tab.id} tab={tab} conversation={botAppletConversation(botId, threadId)}
+    <AppletPanelView key={tab.id} tab={tab} conversation={conversation}
       tabs={<div className="bot-applet-pane-title">
         <span title={reference.description || undefined}>{reference.title}</span>
         <button type="button" aria-label="Close" title="Close" onClick={onClose}><X size={14} aria-hidden /></button>

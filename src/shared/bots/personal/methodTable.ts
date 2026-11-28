@@ -173,6 +173,11 @@ export const BOT_METHODS = {
   'bots.chat.file': { level: 'use', remote: reads(['botId', 'path'], ['offset']) },
   // A file for a message to the bot, sent ahead in parts: the first names it (`name`, `size`), the rest its `stage`.
   'bots.stage': { level: 'use', remote: chats(['botId', 'clientRequestId', 'offset', 'dataB64'], ['name', 'size', 'stage']) },
+  // An applet a message of the bot shows (`messageId`), named by its id and revision: its source and its saved state, in
+  // pages, and its state saved back here, which owns it. This computer's app runs its bots' applets from their threads.
+  'bots.applets.get': { level: 'use', remote: reads(['botId', 'messageId', 'appletId', 'revisionId'], ['offset']) },
+  'bots.applets.state.get': { level: 'use', remote: reads(['botId', 'messageId', 'appletId', 'revisionId'], ['offset']) },
+  'bots.applets.state.save': { level: 'use', remote: chats(['botId', 'messageId', 'appletId', 'revisionId', 'state']) },
 
   // ---------------------------------------------------------------- About → Devices (`BOT_DEVICE_METHODS`)
   // From another device the list always keeps that device: it never shuts itself out of a bot it sets up.

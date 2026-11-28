@@ -3,6 +3,7 @@ import type { AppletReference } from '../../../shared/applets'
 import { readAppletAppearance, subscribeAppletAppearance } from './appearance'
 import { appletHeightKey, rememberAppletHeight, rememberedAppletHeight } from './appletHeights'
 import type { AppletUiEvent } from '../../../shared/appletRuntime'
+import type { AppletConversation } from './appletActions'
 
 /**
  * Where a preview sits. In the transcript it scrolls with the chat and takes the height its page reports; in the side
@@ -19,6 +20,11 @@ export interface AppletRuntimeOptions {
   enabled: boolean
   /** Bumped to start the applet again. */
   restart: number
+  /**
+   * A bot of another computer's applet (`AppletConversation.bot`). It starts again when that computer goes offline or
+   * comes back, so a copy shown read only never saves over newer state there.
+   */
+  bot?: AppletConversation['bot']
 }
 
 /** Mounts begin this far before the card scrolls into view, so its page is usually ready when it arrives. */
@@ -40,12 +46,17 @@ function slotMayBeFree() {
  * main, which may then release its page for a newer applet; a released card starts again when it comes back.
  */
 export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, options: AppletRuntimeOptions) {
-  const { host, threadId, profileId, reference, enabled, restart } = options
+  const { host, threadId, profileId, reference, enabled, restart, bot } = options
+  const botId = bot?.botId
+  const messageId = bot?.messageId
+  const botOffline = Boolean(bot?.offline)
   const runtime = useRef<string | null>(null)
   const webview = useRef<HTMLWebViewElement | null>(null)
   const [src, setSrc] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
+  // Shown from the copy kept here while the bot's computer is away: what changes in it is not saved.
+  const [readOnly, setReadOnly] = useState(false)
   // In the transcript a card starts at the height this revision last measured; the side panel fills its stage.
   const heightKey = host === 'transcript' ? appletHeightKey(profileId, threadId, reference.revisionId) : null
   const [measured, setMeasured] = useState<{ key: string | null; height: number } | null>(null)
@@ -75,6 +86,7 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     let sized = false
     setReady(false)
     setSrc(null)
+    setReadOnly(false)
     const drop = () => {
       runtime.current = null
       setSrc(null)
@@ -109,7 +121,8 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
           revisionId: reference.revisionId,
           sourceHash: reference.sourceHash,
           appearance,
-          host
+          host,
+          ...(botId && messageId ? { bot: { botId, messageId } } : {})
         })
         if ('busy' in result) {
           // Every slot holds an applet on screen: wait quietly (the card stays in its loading state) for one.
@@ -123,6 +136,7 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
         }
         runtime.current = result.runtimeId
         shown = true
+        setReadOnly(Boolean(result.readOnly))
         setSrc(result.src)
         report()
       } catch (cause) {
@@ -217,8 +231,11 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     reference.revisionId,
     reference.sourceHash,
     enabled,
-    restart
+    restart,
+    botId,
+    messageId,
+    botOffline
   ])
 
-  return { runtime, webview, src, ready, error, setError, height, conversationInput, setConversationInput }
+  return { runtime, webview, src, ready, error, setError, height, conversationInput, setConversationInput, readOnly }
 }

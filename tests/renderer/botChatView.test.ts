@@ -3486,7 +3486,7 @@ it('keeps a private draft across bot switches and merges applet text and memory 
   const field=()=>host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
   await type(field(), `Please use ${key} tomorrow`)
   const {botAppletConversation}=await import('../../src/renderer/components/bots/BotApplets')
-  await act(async()=>{botAppletConversation('inbox','home').addToDraft('Add the report');useBotsStore.getState().askAboutMemory('inbox','A remembered preference')})
+  await act(async()=>{botAppletConversation('inbox',{threadId:'home'}).addToDraft('Add the report');useBotsStore.getState().askAboutMemory('inbox','A remembered preference')})
   expect(field().value).toContain('Add the report')
   fake.bots.push(summary('other'))
   await act(async()=>useBotsStore.setState({bots:[...fake.bots]}))

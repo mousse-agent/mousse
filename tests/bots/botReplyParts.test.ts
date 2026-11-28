@@ -186,12 +186,16 @@ describe('what a bot\'s thread published', () => {
 })
 
 describe('another device', () => {
-  it('reads an applet as one plain line naming it, and gets no reference to run', () => {
+  it('reads an applet by its reference, not its thread; an app that cannot run it reads one plain line naming it', () => {
+    const reference = { appletId: 'a', revisionId: 'r', sourceHash: 'h', title: 'Budget ![x](https://e.example/p.png)', description: '' }
     const remote = remoteBotMessage({
       seq: 1, id: 'm1', at: '2026-11-13T09:00:00.000Z', author: 'bot', kind: 'text', text: 'Here it is.', chips: [],
-      applets: [{ threadId: 'home', reference: { appletId: 'a', revisionId: 'r', sourceHash: 'h', title: 'Budget ![x](https://e.example/p.png)', description: '' } }]
+      applets: [{ threadId: 'home', reference }]
     }, 'bot-0123456789ab')
-    expect(remote).not.toHaveProperty('applets')
+    // The bot's thread stays on its computer: the app opens the applet by the message and its reference.
+    expect(remote.applets).toEqual([{ reference }])
     expect(remote.text).toBe('Here it is.\n\n_Applet: Budget xhttps://e.example/p.png. It opens on the computer._')
+    // An app that runs applets shows the words up to here, then the applet.
+    expect(remote.text.slice(0, remote.plainFrom)).toBe('Here it is.')
   })
 })

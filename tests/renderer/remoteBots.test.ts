@@ -204,8 +204,8 @@ describe('the chat of a bot of another computer', () => {
     expect(fake.calls).toContainEqual(['focus', 'n_laptop:b_inbox', true])
   })
 
-  it('with Use bot access there, shows only what works from here: no About, model or side panel, its setup greyed, no applets or reactions, and files can be attached', async () => {
-    await open(remote({ state: 'paused', stateText: 'Paused' }), [message(1, { text: 'Here is the chart.', applets: [{ id: 'ap1', name: 'Chart' }] as never, reaction: '👍' })])
+  it('with Use bot access there, shows only what works from here: no About, model or side panel, its setup greyed, no reactions, and files can be attached', async () => {
+    await open(remote({ state: 'paused', stateText: 'Paused' }), [message(1, { text: 'Here is the chart.', reaction: '👍' })])
     expect(button('About Inbox helper')).toBeUndefined()
     expect(button('Show side panel')).toBeUndefined()
     expect(host.querySelector('.bot-model-button, [aria-label^="Model"]')).toBeNull()
@@ -220,7 +220,6 @@ describe('the chat of a bot of another computer', () => {
     expect(useBotsStore.getState().dialog).toBeNull()
     expect(button('Attach files')).toBeDefined()
     expect(transcript().querySelector('.bot-reaction-bar, .bot-reaction')).toBeNull()
-    expect(transcript().querySelector('.bot-applets, .bot-message-applets')).toBeNull()
   })
 
   it('with Full bot access there, About, Resume and every setup item work from here, by its qualified id', async () => {
@@ -385,6 +384,64 @@ describe('a bot whose computer is offline', () => {
     expect(transcript().textContent).toContain('Came while it was away.')
     expect(fake.calls).toContainEqual(['markRead', 'n_laptop:b_inbox', 3])
     expect(box()).not.toBeNull()
+  })
+})
+
+describe('its applets', () => {
+  const reference = { appletId: 'ap1', revisionId: 'rev1', sourceHash: 'h1', title: 'Chart', description: '' }
+  /** A reply showing Chart, as another computer sends it: its words, then the plain line an app without applets reads. */
+  const withApplet = message(1, { text: 'Here is the chart.\n\n_Applet: Chart. It opens on the computer._', plainFrom: 'Here is the chart.'.length, applets: [{ reference }] })
+  /** The window's applet bridge: each mount answers `mounted`, and the page's events reach the card. */
+  const applets = (mounted: { readOnly?: true } = {}) => {
+    let listener: ((event: { runtimeId: string; type: string; text?: string }) => void) | undefined
+    const api = {
+      mount: vi.fn(async () => ({ runtimeId: 'rt1', src: 'mousse-applet://page', ...mounted })),
+      visible: vi.fn(async () => undefined),
+      unmount: vi.fn(async () => undefined),
+      appearance: vi.fn(async () => undefined),
+      onEvent: (callback: typeof listener) => { listener = callback; return () => { listener = undefined } }
+    }
+    installPreload(fake, { applets: api })
+    window.matchMedia ??= ((query: string) => ({ matches: false, media: query, addEventListener() {}, removeEventListener() {} })) as never
+    // jsdom has no IntersectionObserver: every card is on screen.
+    ;(globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = class {
+      constructor(private readonly callback: (entries: Array<{ isIntersecting: boolean }>) => void) {}
+      observe() { this.callback([{ isIntersecting: true }]) }
+      disconnect() {}
+    }
+    return { api, send: (event: { runtimeId: string; type: string; text?: string }) => listener?.(event) }
+  }
+
+  it('runs here, read through the bot by its message, and what it adds goes to that bot’s composer', async () => {
+    const { api, send } = applets()
+    await open(remote(), [withApplet])
+    await settle()
+    // Drawn under its words, which stop before the plain line.
+    expect(transcript().querySelector('.bot-message-applets .mousse-applet')?.getAttribute('aria-label')).toBe('Applet: Chart')
+    expect(transcript().textContent).not.toContain('It opens on the computer')
+    expect(api.mount).toHaveBeenCalledWith(expect.objectContaining({ appletId: 'ap1', revisionId: 'rev1', sourceHash: 'h1', bot: { botId: 'n_laptop:b_inbox', messageId: 'm1' } }))
+    expect(host.querySelector('.mousse-applet-note')).toBeNull()
+
+    await act(async () => send({ runtimeId: 'rt1', type: 'conversation-input', text: 'Make rent bigger' }))
+    await click(button('Add to conversation draft'))
+    expect(useBotsStore.getState().drafts['n_laptop:b_inbox']).toBe('From applet "Chart":\nMake rent bigger')
+  })
+
+  it('while its computer is offline, shows from the copy here, saying nothing it changes is saved', async () => {
+    const { api } = applets({ readOnly: true })
+    await open(away(), [withApplet])
+    await settle()
+    expect(api.mount).toHaveBeenCalledWith(expect.objectContaining({ bot: { botId: 'n_laptop:b_inbox', messageId: 'm1' } }))
+    expect(transcript().querySelector('.mousse-applet-note')?.textContent).toBe('Laptop is offline · changes here aren’t saved')
+  })
+
+  it('offers no repair for an applet shown from the copy here, though its computer is listed as reachable', async () => {
+    const { send } = applets({ readOnly: true })
+    await open(remote(), [withApplet])
+    await settle()
+    await act(async () => send({ runtimeId: 'rt1', type: 'error', message: 'Applet stopped.' } as never))
+    expect(transcript().querySelector('.mousse-applet-error')?.textContent).toContain('Applet stopped.')
+    expect(button('Ask the assistant to fix this', transcript())).toBeUndefined()
   })
 })
 

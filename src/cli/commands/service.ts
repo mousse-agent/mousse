@@ -1,4 +1,5 @@
 import { spawn } from 'child_process'
+import { join } from 'path'
 import { fileURLToPath } from 'url'
 import type { ParsedArgs } from '../parseArgs'
 import { exitWithError, writeOutput } from '../output'
@@ -30,7 +31,7 @@ import {
   MmsOwnerBusyError,
   resolveOwnerStatus
 } from '../../mms/ownership/MmsOwnerLease'
-import { installDaemonDiagnostics } from '../daemonDiagnostics'
+import { DAEMON_LOG_RELATIVE_PATH, installDaemonDiagnostics } from '../daemonDiagnostics'
 import { capDaemonStartupOutput } from '../startupLog'
 import { installElectronDaemonQuit } from '../electronDaemonLifetime'
 import { resolveDaemonHostInvocation } from '../daemonHost'
@@ -42,6 +43,7 @@ import { registerRemoteUpdateMethods } from '../../mms/updates/registerRemoteUpd
 import { formatStartupTiming, startupPhase, startupTimingBegin, startupTimingEnd } from '../../mms/startup/startupTiming'
 import { logInfo } from '../../mms/log/diag'
 import { startDaemonExitWatchdog } from '../daemonExitWatchdog'
+import { startDaemonStallWatch, type DaemonStallWatch } from '../daemonStallWatch'
 import { resumeGitSpawnWorkers } from '../../mms/git/gitSpawn'
 import {
   DAEMON_EXIT_DEADLINE_MS,
@@ -149,6 +151,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     : startDaemonExitWatchdog({ homeDir, ownerToken, ms: (exitDeadline?.ms ?? DAEMON_EXIT_DEADLINE_MS) + EXIT_WATCHDOG_SLACK_MS })
 
   let memoryMonitor: ReturnType<typeof prepareMemoryMonitor> = null
+  let stallWatch: DaemonStallWatch | null = null
   const shutdown = async (reason: string, exitCode = 0): Promise<void> => {
     memoryMonitor?.stop()
     memoryMonitor = null
@@ -171,6 +174,8 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
       onLog: (msg) => log(`\n${msg}`)
     })
     process.exitCode = exitCode
+    stallWatch?.stop()
+    stallWatch = null
     resolveLifetime()
   }
   let releaseElectronQuit: (() => void) | undefined
@@ -319,6 +324,9 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     if (timing) logInfo('startup', formatStartupTiming(timing, startupMs))
 
     memoryMonitor?.start()
+    // From ready on, a main thread held for seconds logs where it was held (`[warn:stall]`), also when the daemon is
+    // ended for it. Not before: startup's long synchronous steps are timed at ready already.
+    if (!opts.skipSignals && !state.shuttingDown) stallWatch = startDaemonStallWatch({ logPath: join(homeDir, DAEMON_LOG_RELATIVE_PATH) })
     // Work that must not delay readiness starts now, in the background.
     opened.mms.afterReady()
 
