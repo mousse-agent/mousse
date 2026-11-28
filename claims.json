@@ -151,6 +151,18 @@
       "expiresAt": "2026-11-28T06:59:58.693Z"
     },
     {
+      "task": "ownership-pass-yields",
+      "session": "Animatrix-303787",
+      "machine": "Animatrix",
+      "branch": "ownership-pass-yields",
+      "paths": [
+        "src/mms/lifecycle/LifecycleClaims.ts",
+        "tests/lifecycleClaimsYield.test.ts"
+      ],
+      "claimedAt": "2026-11-28T05:56:18.988Z",
+      "expiresAt": "2026-11-28T07:56:18.988Z"
+    },
+    {
       "task": "remote-bots-levels",
       "session": "Avarnics-Mac-mini.local-82964d",
       "machine": "Avarnics-Mac-mini.local",
