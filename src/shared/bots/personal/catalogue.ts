@@ -2,7 +2,7 @@ import { APPLET_GENERATION_GUIDANCE } from '../../appletGuidance'
 import { BROWSER_AUTOMATION_TOOLS } from '../../browser/automation'
 import { PROFILER_TOOL_NAMES } from '../../diagnostics/profiler'
 import { COMPUTER_TOOL_NAMES, COMPUTER_USE_REQUEST_TOOL } from '../../computerUse'
-import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
+import { BOT_LIST_TOOL } from './botMessages'
 
 /**
  * A bot's tool catalogue (docs/plans/bot-context.md §15). A bot's main turn sees a small core set of tools directly
@@ -106,7 +106,7 @@ const SHOWING_GUIDANCE = [
   APPLET_GENERATION_GUIDANCE.trim()
 ].join('\n')
 
-const BOTS_GUIDANCE = "bot_list names your owner's other bots and says what each does; bot_send tells one of them something, in its own chat, where your owner reads it too. Use it when your owner asks you to tell another bot something (\"if it's a bug, tell Alpha\"), or when what you found belongs to that bot's job. Write the message so it stands on its own: the other bot has none of your chat or memory. Then tell your owner in a few words that you told it."
+const BOTS_GUIDANCE = "bot_list names your owner's other bots and says what each does; thread_send with thread \"bot:<name>\" tells one of them something (content), in its own chat, where your owner reads it too. Use it when your owner asks you to tell another bot something (\"if it's a bug, tell Alpha\"), or when what you found belongs to that bot's job. Write the message so it stands on its own: the other bot has none of your chat or memory. Then tell your owner in a few words that you told it."
 
 const SCHEDULES_GUIDANCE = "Mousse's scheduled jobs: work done in your owner's threads or projects later or on a cadence (schedule_create, schedule_list, schedule_update, schedule_pause, schedule_run, schedule_delete). You see and change only the jobs you made. Something only you do at a time stays bot_schedule_add (reminders)."
 
@@ -171,7 +171,8 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   { id: 'you', line: 'your profile (get_profile), how much time you take, your model, your name, description and look', tools: ['get_profile', 'set_depth', 'use_model', 'set_profile'], guidance: YOU_GUIDANCE },
   { id: 'memory', line: 'list or forget memory entries', tools: ['memory_list', 'memory_forget'], guidance: MEMORY_GUIDANCE },
   { id: 'showing', line: 'applets and pictures under your message', tools: ['publish_applet', 'make_image'], guidance: SHOWING_GUIDANCE },
-  { id: 'bots', line: "your owner's other bots", tools: [BOT_LIST_TOOL, BOT_SEND_TOOL], guidance: BOTS_GUIDANCE },
+  // A message to one is thread_send to `bot:<name>` (S7d4b2), a core tool: the group holds the list.
+  { id: 'bots', line: "your owner's other bots", tools: [BOT_LIST_TOOL], guidance: BOTS_GUIDANCE },
   {
     id: 'schedules',
     line: 'scheduled jobs in your owner\'s threads',

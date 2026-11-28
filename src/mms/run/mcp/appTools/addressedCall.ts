@@ -1,4 +1,4 @@
-import { ADDRESSED_TOOLS, addressReceiptKey, type AddressResolution, type AddressTarget, type BotReach, type FamilyMember, type ResolvedAddress, type ResolveOptions } from '../../addressing'
+import { ADDRESSED_TOOLS, addressReceiptKey, botReachSends, type AddressResolution, type AddressTarget, type BotReach, type FamilyMember, type ResolvedAddress, type ResolveOptions } from '../../addressing'
 import { fitPage, makeCursor, pageEnd, readCursor } from './paging'
 import { refused } from './refusal'
 import type { JsonSchema, ToolOutcome } from './types'
@@ -133,8 +133,13 @@ export function addressedArgs(call: AddressedCall): AddressedArgs {
   }
   if (resolved.many) return { args: rest, resolved }
   const [target] = resolved.targets
-  if (target?.kind === 'bot')
+  if (target?.kind === 'bot') {
+    // A message to a bot the caller may send to (`botReachSends`) is `bot_send` (`variantOf`), with the bot's id the
+    // address recorded, so a retry reaches the same bot after a rename.
+    if (tool === 'thread_send' && botReachSends(call.bots)) return { args: { ...rest, bot: target.botId }, resolved }
+    if (botReachSends(call.bots)) return { refused: refused('unavailable', `${resolved.address} names a bot, and ${tool} does not reach bots: send it a message with thread_send.`) }
     return { refused: refused('unavailable', `${resolved.address} names a bot, and ${tool} does not reach bots yet: use bot_send to message another bot.`) }
+  }
   return { args: { ...rest, threadId: target.threadId }, resolved }
 }
 

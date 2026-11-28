@@ -60,6 +60,8 @@ export const MOUSSE_TOOL_ALIASES: Readonly<Record<string, string>> = Object.free
   subagent_stop: 'thread_stop',
   work_stop: 'thread_stop',
   work_list: 'thread_list',
+  // S7d4b2 (§2.1): a message to another of the owner's bots is `thread_send` to `bot:<name>`, through the bot port.
+  bot_send: 'thread_send',
   // S7d4b (§1.5, §2.1). `queue_enqueue` is `thread_send` to the caller's own thread, or to a queue whose revision it read;
   // `recall_subagent` is a follow-up to a named subagent (`thread_send intent: work`); `list_delegations` is
   // `thread_read view: delegations`. Each still runs its own declaration, under either name (`toolVariant`).
@@ -153,6 +155,14 @@ const MOUSSE_TOOL_ALIAS_TRANSLATIONS: Readonly<Record<string, { args(old: ToolAr
     says: 'runId alone (a piece of your work)'
   },
   work_list: { args: (args: ToolArgs) => ({ ...args, scope: 'bot_work' }), holds: (args: ToolArgs) => args.scope === 'bot_work', runs: 'bot', says: 'scope "bot_work"' },
+  // S7d4b2. `bot_send {bot, message}` is `thread_send {thread: "bot:<name>", content}`: the address names the bot, and
+  // once resolved (`addressedArgs`) the call carries the bot's id as `bot`. A bot's turn only, through the bot port.
+  bot_send: {
+    args: ({ bot, message, ...rest }: ToolArgs) => ({ ...rest, ...(bot !== undefined ? { thread: `bot:${String(bot)}` } : {}), ...(message !== undefined ? { content: message } : {}) }),
+    holds: (args: ToolArgs) => args.threadId === undefined && (args.bot !== undefined || namesBot(args.thread)),
+    runs: 'bot',
+    says: 'thread "bot:<name>" (another of your owner\'s bots, by the name bot_list gives)'
+  },
   // S7d4b. A message queued on the caller's own thread (no thread named), or on a queue whose revision the call read
   // (`expectedRevision`), as a message of work. On any turn: a thread's, a personal bot's or a definition's. A call
   // under the old name is that tool whatever it names (`byName`): it refuses what it always refused.
@@ -189,6 +199,11 @@ function queuesMessage(args: ToolArgs): boolean {
   if (args.intent !== undefined && args.intent !== 'work') return false
   if ([args.subagent, args.delegationId, args.runId, args.agent, args.bot].some((value) => value !== undefined)) return false
   return args.expectedRevision !== undefined || args.threadId === undefined
+}
+
+/** Whether a `thread` address names a bot (`bot:<name>`, `addressing.ts`). */
+export function namesBot(thread: unknown): boolean {
+  return typeof thread === 'string' && /^\s*bot\s*:/i.test(thread)
 }
 
 /** A bot's call of its subagents: it names no thread and no run of one. */
