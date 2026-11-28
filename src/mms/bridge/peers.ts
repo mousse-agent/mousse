@@ -53,6 +53,11 @@ export interface EngineDirectoryPort {
    * this device), until it connects again.
    */
   accepted?(node: NodeId): boolean
+  /**
+   * Its last connection was refused for version (pair-with-IP design §5): `there`, it runs the older Mousse;
+   * `here`, this computer does. While it is, nothing of it is used: no client, no threads. Undefined otherwise.
+   */
+  cutOff?(node: NodeId): 'there' | 'here' | undefined
   name(node: NodeId): string | undefined
   client(node: NodeId): BridgeClient
   online(node: NodeId): boolean
@@ -210,6 +215,12 @@ export class PeerDirectory {
   /** Whether `node` is an engine pairing; the Hub's engine branch and `bridge.hub.*` read it. */
   isEngine(node: NodeId): boolean {
     return !!this.options.engine()?.isEngine(node)
+  }
+
+  /** Which computer needs a Mousse update while `node` is cut off for its version; undefined while it is not. */
+  cutOff(node: NodeId): 'there' | 'here' | undefined {
+    const engine = this.options.engine()
+    return engine?.isEngine(node) ? engine.cutOff?.(node) : undefined
   }
 
   /** A client for calls to `node`; `peer_offline` when none is open. */

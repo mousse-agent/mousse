@@ -149,6 +149,13 @@ export interface EngineLimits {
   relayReadDebounceMs: number
   /** The wait before asking a helper for its relays again when the first ask failed (it may be starting). */
   relayReadRetryMs: number
+  /**
+   * How often the devices cut off for their version are read again with no event to say so (a device refused coming
+   * in again within the helper's hour between notices raises none), and how old a read may be when a window opens
+   * Devices before it is read again.
+   */
+  refusalReadMs: number
+  refusalFreshMs: number
   /** How many times the relays are asked for before the app gives up until the next relay event. */
   relayReadTries: number
   /** Plus (Phase 4): after a failed read of the Plus state or the removals at hello, the wait before the next. */
@@ -250,6 +257,8 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   relayOffersShown: 3,
   relayReadDebounceMs: 100,
   relayReadRetryMs: 1_000,
+  refusalReadMs: 300_000,
+  refusalFreshMs: 10_000,
   relayReadTries: 5,
   plusReadRetryMs: 1_000,
   plusReadTries: 5,
@@ -322,6 +331,8 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   relayOffersShown: 'MOUSSE_NET_ENGINE_RELAY_OFFERS_SHOWN',
   relayReadDebounceMs: 'MOUSSE_NET_ENGINE_RELAY_READ_DEBOUNCE_MS',
   relayReadRetryMs: 'MOUSSE_NET_ENGINE_RELAY_READ_RETRY_MS',
+  refusalReadMs: 'MOUSSE_NET_ENGINE_REFUSAL_READ_MS',
+  refusalFreshMs: 'MOUSSE_NET_ENGINE_REFUSAL_FRESH_MS',
   relayReadTries: 'MOUSSE_NET_ENGINE_RELAY_READ_TRIES',
   plusReadRetryMs: 'MOUSSE_NET_ENGINE_PLUS_READ_RETRY_MS',
   plusReadTries: 'MOUSSE_NET_ENGINE_PLUS_READ_TRIES',

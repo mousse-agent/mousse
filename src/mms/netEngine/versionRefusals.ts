@@ -51,6 +51,17 @@ export function readVersionRefusals(
   return out
 }
 
+/** Whether two reads hold the same refusals. */
+export function sameRefusals(a: ReadonlyMap<string, VersionRefusal>, b: ReadonlyMap<string, VersionRefusal>): boolean {
+  if (a.size !== b.size) return false
+  for (const [identity, refusal] of a) {
+    const other = b.get(identity)
+    if (!other || other.since !== refusal.since || other.peerMinor !== refusal.peerMinor || other.localMinor !== refusal.localMinor)
+      return false
+  }
+  return true
+}
+
 /**
  * What a device's row shows for its refusal: the lower minor names the computer that has to update (`there`, the
  * device; `here`, this computer). `told` once its one notice was shown.

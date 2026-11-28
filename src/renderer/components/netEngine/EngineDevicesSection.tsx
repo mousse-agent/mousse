@@ -54,7 +54,6 @@ import { hostLabel, removalText, removalTitle } from './plusRows'
 import {
   askedLine,
   directionOf,
-  NEEDS_UPDATE_LINE,
   needsUpdateHint,
   engineAddresses,
   engineSideRow,
@@ -378,13 +377,9 @@ export function EngineDevicesSection() {
     }
   }
 
-  /**
-   * The detail's first section: its platform and Mousse version, and its update when it is behind or cut off for its
-   * version (then "Needs update" stands in for its version tag).
-   */
-  const versionGroup = (name: string, device: Device | undefined, update: RowUpdate | undefined, cutOff = false) => {
-    const tagged = device ? versionTag({ ...device, name }, current) : undefined
-    const tag = cutOff ? { label: NEEDS_UPDATE_LINE, detail: tagged?.detail } : tagged
+  /** The detail's first section: its platform and Mousse version, and its update when it is behind or cut off. */
+  const versionGroup = (name: string, device: Device | undefined, update: RowUpdate | undefined) => {
+    const tag = device ? versionTag({ ...device, name }, current) : undefined
     const words = [device?.platform && (PLATFORM_WORDS[device.platform] ?? device.platform), device?.version].filter(Boolean)
     if (!words.length && !tag && !update) return null
     return (
@@ -397,10 +392,7 @@ export function EngineDevicesSection() {
               {tag && (
                 <>
                   {words.length > 0 && ' · '}
-                  <span
-                    className={tag.label === 'Behind' || cutOff ? 'settings-status-warn' : undefined}
-                    title={tag.detail}
-                  >
+                  <span className={tag.label === 'Behind' ? 'settings-status-warn' : undefined} title={tag.detail}>
                     {tag.label}
                   </span>
                 </>
@@ -618,14 +610,15 @@ export function EngineDevicesSection() {
     const how = connected ? engineWhere(device) : undefined
     const inView = views.find(({ side }) => side === 'in')?.view
     const showsAccess = !cutOff && !!inView?.actions.includes('access')
-    // Its update when cut off: over SSH when this computer installed it, else where to update which computer, with
-    // Check again where this computer dials it.
+    // Its update when cut off: which computer to update, with Check again where this computer dials it. No SSH
+    // update: an SSH install record names the old networking's device id, and nothing proves it is this pairing's
+    // computer.
     const cutOffUpdate = (): RowUpdate | undefined => {
       if (!cutOff) return undefined
       const update: RowUpdate | undefined =
         cutOff.who === 'here'
           ? { hint: <span className="device-update-hint">{needsUpdateHint(device.name, 'here')}</span> }
-          : updateView(device.name, node, legacy.ssh.find((record) => record.node === device.node), false, true)
+          : updateView(device.name, node, undefined, false, true)
       const checks = views.some(({ view }) => view.actions.includes('check'))
       return update?.control || !checks
         ? update
@@ -667,7 +660,7 @@ export function EngineDevicesSection() {
         <>
           {notes.length > 0 && <SettingsGroup className="prov-editor-section">{notes}</SettingsGroup>}
           {cutOff
-            ? versionGroup(device.name, node, cutOffUpdate(), true)
+            ? versionGroup(device.name, node, cutOffUpdate())
             : versionGroup(device.name, node, updateView(device.name, node, undefined, sides.includes('out')))}
           {sides.includes('out') && !removingNow && !cutOff && (
             <SettingsGroup title="Routes" description={relayNotes || undefined} className="prov-editor-section">

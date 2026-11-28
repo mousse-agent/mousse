@@ -59,8 +59,8 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.access.cancel',
   'netEngine.access.answer',
   'netEngine.access.let',
-  // A device cut off for its version: its one notice was shown (pair-with-IP design §5)
-  'netEngine.versionNotice.shown'
+  // A device cut off for its version: a window asks to be the one that shows its notice (pair-with-IP design §5)
+  'netEngine.versionNotice.claim'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
 

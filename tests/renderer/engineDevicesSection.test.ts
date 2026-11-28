@@ -502,17 +502,19 @@ describe('Settings → Devices, new networking', () => {
     expect(d.called('netEngine.retry')).toEqual([{ node: 'n1' }])
   })
 
-  it('offers the SSH update for a device cut off for its version that this computer installed, on any channel', async () => {
+  it('offers no SSH update for a device cut off for its version, as no SSH install record is proven to be it', async () => {
+    // An install record names the old networking's device id, assigned apart from the pairing's: even one that reads
+    // the same id is not proof it is the same computer.
     daemon(
       { devices: [device({ node: 'n1', state: 'offline', online: false, needsUpdate: { who: 'there', since: 1 } })] },
       {
         'net.transport.list': () => ({ manifests: [] }),
-        'net.ssh.list': () => ({ records: [{ id: 'ssh1', node: 'n1', owner: 'managed', host: 'studio', phase: 'done' }] })
+        'net.ssh.list': () => ({ records: [{ id: 'ssh1', node: 'n1', owner: 'managed', endpoint: 'studio', phase: 'done' }] })
       }
     )
     await mount()
-    expect(button(/Update…/)).toBeTruthy()
-    expect(detailText()).not.toContain('Update Mousse on Studio')
+    expect(button(/Update…/)).toBeFalsy()
+    expect(detailText()).toContain('Update Mousse on Studio to use it from here.')
   })
 
   it('says to update this computer when the device runs the newer Mousse', async () => {

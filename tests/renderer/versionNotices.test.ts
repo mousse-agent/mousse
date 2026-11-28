@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
  * The one notice when a device is first found cut off for its version (pair-with-IP design §5): it shows wherever
- * the window is, as the computers list is read, once per refusal. The daemon keeps that it showed (`told`), so no
- * window shows it again until the refusal clears; a later refusal is told again.
+ * the window is, as the computers list is read, and only in the window the daemon gives it to
+ * (`netEngine.versionNotice.claim`, one per refusal), so two windows never both show it.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -27,8 +27,10 @@ const studio = (fields: Partial<NetEngineDevice> = {}): NetEngineDevice => ({
 })
 
 let devices: NetEngineDevice[] = []
-const shown: string[] = []
-const request = vi.fn(async (method: string, params: { node?: string }) => {
+/** Each ask for a notice, and the refusals the daemon gave away (by `<node> <since>`). */
+const asks: Array<{ node: string; since: number }> = []
+const given = new Set<string>()
+const request = vi.fn(async (method: string, params: { node?: string; since?: number }) => {
   switch (method) {
     case 'net.status':
       return { enabled: false }
@@ -36,13 +38,14 @@ const request = vi.fn(async (method: string, params: { node?: string }) => {
       return { enabled: true, on: true, helper: { state: 'running' }, devices, approvals: [] }
     case 'bridge.nodes':
       return { nodes: [] }
-    case 'netEngine.versionNotice.shown':
-      shown.push(params.node!)
-      // As the daemon: it keeps that the notice showed.
-      devices = devices.map((device) =>
-        device.node === params.node && device.needsUpdate ? { ...device, needsUpdate: { ...device.needsUpdate, told: true } } : device
-      )
-      return {}
+    case 'netEngine.versionNotice.claim': {
+      asks.push({ node: params.node!, since: params.since! })
+      // As the daemon: the first ask for the refusal that holds now is given it.
+      const key = `${params.node} ${params.since}`
+      if (given.has(key)) return { show: false }
+      given.add(key)
+      return { show: true }
+    }
   }
   return {}
 })
@@ -62,42 +65,47 @@ afterEach(() => {
   act(() => root.unmount())
   host.remove()
   useComputersStore.setState(NO_COMPUTERS)
-  shown.length = 0
+  asks.length = 0
+  given.clear()
 })
 
 const read = async () => {
   await act(async () => {
     await refreshComputers()
   })
+  // The daemon's answer to the ask, then the toast.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
 }
 /** The notices on screen (the toast host draws into the page, not under its own element). */
 const notices = () => [...document.body.querySelectorAll('*')].filter((node) => node.children.length === 0 && node.textContent === NOTICE)
 
 describe('the "needs a Mousse update" notice', () => {
-  it('shows once for a device found cut off, and the daemon is told so it never repeats', async () => {
+  it('shows for a device found cut off when the daemon gives this window the notice', async () => {
     devices = [studio({ needsUpdate: { who: 'there', since: 1_000 } }), studio({ node: 'n2', name: 'Server' })]
     await read()
     expect(notices()).toHaveLength(1)
-    expect(shown).toEqual(['n1'])
-
-    // Read again (another change, the window refocused): not again, here or in any window the daemon answers. A notice
-    // shown again would be a new toast in place of this one.
-    const first = notices()[0]
-    await read()
-    expect(notices()).toEqual([first])
-    expect(shown).toEqual(['n1'])
+    expect(asks).toEqual([{ node: 'n1', since: 1_000 }])
   })
 
-  it('says nothing for a refusal already told, and tells a new refusal of the same device', async () => {
-    devices = [studio({ needsUpdate: { who: 'there', since: 2_000, told: true } })]
+  it('shows nothing when another window was given it first, though this one has not heard it was told', async () => {
+    given.add('n1 2000')
+    devices = [studio({ needsUpdate: { who: 'there', since: 2_000 } })]
     await read()
+    expect(asks).toEqual([{ node: 'n1', since: 2_000 }])
     expect(notices()).toHaveLength(0)
-    expect(shown).toEqual([])
+  })
 
-    // It cleared and the device was cut off again later: the daemon forgot the notice with the refusal.
-    devices = [studio({ needsUpdate: { who: 'there', since: 3_000 } })]
+  it('asks nothing for a refusal already told, and asks again for a new refusal of the same device', async () => {
+    devices = [studio({ needsUpdate: { who: 'there', since: 3_000, told: true } })]
     await read()
+    expect(asks).toEqual([])
+    expect(notices()).toHaveLength(0)
+
+    devices = [studio({ needsUpdate: { who: 'there', since: 4_000 } })]
+    await read()
+    expect(asks).toEqual([{ node: 'n1', since: 4_000 }])
     expect(notices()).toHaveLength(1)
-    expect(shown).toEqual(['n1'])
   })
 })

@@ -1,13 +1,19 @@
 /**
  * Devices cut off for their version (pair-with-IP design §5), through the Settings window's daemon calls over the
- * fake helper: the helper's recorded refusal shows on the device's row, Check again dials it, its one notice is
- * remembered across an app restart, and both clear once a connection agrees a version. Also how a refusal on the
+ * fake helper: the helper's recorded refusal shows on the device's row and is read again without an event, Check
+ * again dials it even while an old session is up, nothing of it is used meanwhile, one window is given its notice,
+ * which is remembered on disk, and all of it clears once a connection agrees a version. Also how a refusal on the
  * helper's list rows maps to the row (who updates, when).
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { NodeId } from '../../src/shared/net'
 import { needsUpdate, readVersionRefusals } from '../../src/mms/netEngine/versionRefusals'
 import { eventually, Fabric, REAL_HELPER, type Computer } from './checks/harness'
+
+vi.hoisted(() => {
+  // A window's read of the status reads the refusals again once the last read is this old.
+  process.env.MOUSSE_NET_ENGINE_REFUSAL_FRESH_MS = '200'
+})
 
 describe('version_refusal on the helper’s list rows', () => {
   const row = (identity: string, refusal: unknown) => ({ identity, version_refusal: refusal })
@@ -50,44 +56,81 @@ describe.skipIf(REAL_HELPER)('a device cut off for its version', () => {
   afterAll(() => fabric.close(), 120_000)
 
   const device = () => a.mms.netEngine.status().devices.find((row) => row.node === bOnA)
+  const refusalsOnA = () => {
+    const map = fabric.network.versionRefusals.get(a.endpoint) ?? new Map()
+    fabric.network.versionRefusals.set(a.endpoint, map)
+    return map
+  }
+  const dials = () => (a.fake?.requests ?? []).filter((request) => request.op === 'dial' && request.identity === b.endpoint).length
+  const claim = (since: number) => a.dispatch('netEngine.versionNotice.claim', { node: bOnA, since }, true)
   /** B stays on an older Mousse; A's connection to it drops and Check again dials it. */
   const cutOff = async () => {
     fabric.network.outdated.set(b.endpoint, 2)
     await fabric.restartHelper(a)
     await a.dispatch('netEngine.retry', { node: bOnA }, true)
   }
+  /** B is updated: Check again connects, and the refusal clears. */
+  const updated = async () => {
+    fabric.network.outdated.delete(b.endpoint)
+    await a.dispatch('netEngine.retry', { node: bOnA }, true)
+    await eventually(() => expect(device()?.needsUpdate).toBeUndefined())
+  }
 
-  it('shows Needs update after Check again is refused, keeps its notice across a restart, and clears once B updates', async () => {
+  it('shows Needs update after Check again is refused, gives its notice to one window, keeps that on disk, and clears once B updates', async () => {
     expect(device()?.needsUpdate).toBeUndefined()
     await cutOff()
     await eventually(() => expect(device()?.needsUpdate).toMatchObject({ who: 'there' }))
+    const since = device()!.needsUpdate!.since
     expect(device()?.needsUpdate?.told).toBeUndefined()
 
-    await a.dispatch('netEngine.versionNotice.shown', { node: bOnA }, true)
+    // Two windows ask: the first is given the notice, the second is not; an ask for another refusal never is.
+    await expect(claim(since + 1)).resolves.toEqual({ show: false })
+    await expect(claim(since)).resolves.toEqual({ show: true })
+    await expect(claim(since)).resolves.toEqual({ show: false })
     expect(device()?.needsUpdate?.told).toBe(true)
-    // Remembered by the app, not only this run: after a restart the refusal is still told.
+
+    // Kept on disk: with what the service held in memory dropped, the restarted engine reads it back.
+    ;(a.mms.netEngine as unknown as { versionTold?: unknown }).versionTold = undefined
     await fabric.restartEngine(a)
     await eventually(() => expect(device()?.needsUpdate).toMatchObject({ who: 'there', told: true }))
+    await expect(claim(since)).resolves.toEqual({ show: false })
 
-    // B updates: Check again connects, and the row and its notice clear.
-    fabric.network.outdated.delete(b.endpoint)
-    await a.dispatch('netEngine.retry', { node: bOnA }, true)
-    await eventually(() => expect(device()?.needsUpdate).toBeUndefined())
-
-    // Cut off again later: told again.
+    await updated()
+    // Cut off again later: a new refusal, told again.
     await cutOff()
     await eventually(() => expect(device()?.needsUpdate).toMatchObject({ who: 'there' }))
     expect(device()?.needsUpdate?.told).toBeUndefined()
+    await updated()
   }, 120_000)
 
-  it('reads the refusal again when the helper says a device was refused coming in', async () => {
-    fabric.network.versionRefusals.get(a.endpoint)?.delete(b.endpoint)
-    fabric.network.outdated.delete(b.endpoint)
-    await a.dispatch('netEngine.retry', { node: bOnA }, true)
-    await eventually(() => expect(device()?.needsUpdate).toBeUndefined())
+  it('uses nothing of a device refused coming in while its old session is up, and Check again dials it at once', async () => {
+    await eventually(() => expect(a.mms.netEngine.online(bOnA)).toBe(true))
     // As the helper: an incoming connection from B refused for version is recorded, then told.
-    fabric.network.versionRefusals.get(a.endpoint)!.set(b.endpoint, { peer_minor: 5, local_minor: 4, since: 1 })
+    refusalsOnA().set(b.endpoint, { peer_minor: 5, local_minor: 4, since: 1 })
     a.fake!.emit({ ev: 'peer.incompatible', identity: b.endpoint, peer_minor: 5 })
     await eventually(() => expect(device()?.needsUpdate).toEqual({ who: 'here', since: 1000 }))
+    // The session from before is still up, but no thread or call goes over it.
+    expect(a.mms.netEngine.online(bOnA)).toBe(false)
+    let refused: unknown
+    try {
+      a.mms.netEngine.client(bOnA)
+    } catch (error) {
+      refused = error
+    }
+    expect(refused).toMatchObject({ code: 'incompatible_peer' })
+    const before = dials()
+    await a.dispatch('netEngine.retry', { node: bOnA }, true)
+    expect(dials()).toBe(before + 1)
+    refusalsOnA().delete(b.endpoint)
+    await updated()
+    expect(a.mms.netEngine.online(bOnA)).toBe(true)
+  }, 60_000)
+
+  it('reads a refusal the helper recorded without an event when a window reads the status', async () => {
+    // As the helper within its hour between notices: B is refused coming in again, and no event says so.
+    refusalsOnA().set(b.endpoint, { peer_minor: 2, local_minor: 4, since: 50 })
+    await eventually(() => expect(device()?.needsUpdate).toEqual({ who: 'there', since: 50_000 }), 5_000)
+    refusalsOnA().delete(b.endpoint)
+    await updated()
   }, 60_000)
 })

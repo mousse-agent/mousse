@@ -48,7 +48,7 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.access.cancel': ['node'],
   'netEngine.access.answer': ['node', 'request'],
   'netEngine.access.let': ['node'],
-  'netEngine.versionNotice.shown': ['node']
+  'netEngine.versionNotice.claim': ['node']
 }
 
 const text = (value: unknown): string | undefined =>
@@ -357,9 +357,10 @@ export function registerNetEngineMethods(
             case 'netEngine.access.let':
               await engine.access().let(p.node, p.access)
               return engine.status()
-            case 'netEngine.versionNotice.shown':
-              engine.versionNoticeShown(p.node)
-              return engine.status()
+            case 'netEngine.versionNotice.claim':
+              if (typeof p.since !== 'number' || !Number.isFinite(p.since))
+                throw new NetError('bad_request', 'since must be a number.')
+              return engine.claimVersionNotice(p.node, p.since)
           }
         } catch (error) {
           if (error instanceof NetError) {
