@@ -178,8 +178,8 @@ function toml(value: unknown): string {
 
 /**
  * The `-c` overrides that define Mousse's own provider for one launch. Every field that could carry
- * a credential or change where requests go is set here, empty when unused, so a config layer that
- * names this id adds nothing that matters; a thread whose layers name it is refused anyway
+ * a credential or change where requests go is set here, empty when unused. A config file layer can
+ * still add to this table, so every thread start or resume first refuses layers that name it
  * (`routeLayerProblem`).
  */
 export function customProviderArgs(table: Pick<RunnableTable, 'name' | 'baseUrl'>, helper: Pick<CliCommand, 'command' | 'args'>): string[] {

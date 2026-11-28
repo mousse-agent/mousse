@@ -17,7 +17,7 @@ import { ChatGptTokenBroker } from '../../src/mms/harness/vendors/codex/broker'
 import { CodexInstallation } from '../../src/mms/harness/vendors/codex/installation'
 import { MANAGED_OFFLINE_OVERRIDES } from '../../src/mms/harness/vendors/codex/managedRuntime'
 import { spawnCodexAppServer, type CodexLaunch } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
-import { CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
+import { CodexProviderService, type CodexLaunchExtras } from '../../src/mms/harness/vendors/codex/CodexProviderService'
 import { CUSTOM_MODEL_PROVIDER } from '../../src/mms/harness/vendors/codex/providerRoute'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import type { CodexModelRoute } from '../../src/shared/harness/modelRoute'
@@ -135,7 +135,7 @@ describe.skipIf(skip)('Codex on its own model provider (pinned binary, fake prov
   })
 
   /** The person's own Codex home with a custom provider and its key, and a trusted project folder. */
-  function setup() {
+  function setup(options: { fetch?: typeof fetch; prepareLaunch?: () => Promise<CodexLaunchExtras> } = {}) {
     // Codex refuses its helper aliases under the system temp folder; the runs live beside the pin.
     mkdirSync(join(root, '.cache', 'wire-runs'), { recursive: true })
     const dir = mkdtempSync(join(root, '.cache', 'wire-runs', 'route-'))
@@ -145,13 +145,13 @@ describe.skipIf(skip)('Codex on its own model provider (pinned binary, fake prov
     const workspace = join(dir, 'work')
     mkdirSync(codexHome, { recursive: true })
     mkdirSync(workspace, { recursive: true })
-    const writeConfig = (baseUrl: string) => writeFileSync(join(codexHome, 'config.toml'), [
+    const writeConfig = (baseUrl: string, key = KEY) => writeFileSync(join(codexHome, 'config.toml'), [
       'model_provider = "mine"',
       '[model_providers.mine]',
       'name = "My provider"',
       `base_url = "${baseUrl}"`,
       'wire_api = "responses"',
-      `experimental_bearer_token = "${KEY}"`,
+      `experimental_bearer_token = "${key}"`,
       // The project is trusted, so its own .codex/config.toml is loaded as Codex would load it.
       `[projects.${literal(workspace)}]`,
       'trust_level = "trusted"'
@@ -167,6 +167,13 @@ describe.skipIf(skip)('Codex on its own model provider (pinned binary, fake prov
     const route: { current: CodexModelRoute | undefined } = { current: { kind: 'custom', table: 'mine', baseUrl: provider.base } }
     const launches: CodexLaunch[] = []
     const broker = new ChatGptTokenBroker()
+    // What each launch's lease serves, asked directly: the helper Codex runs asks the same.
+    const accesses: Array<() => Promise<string>> = []
+    const register = broker.register.bind(broker)
+    broker.register = (input) => {
+      accesses.push(() => input.access(new AbortController().signal))
+      return register(input)
+    }
     const questions = new UserQuestionService()
     const profileHome = join(dir, 'profile')
     const service = new CodexProviderService(profileHome, questions, {
@@ -176,6 +183,7 @@ describe.skipIf(skip)('Codex on its own model provider (pinned binary, fake prov
       },
       tokenBroker: broker,
       tokenHelper: (endpoint, leaseId) => ({ command: process.execPath, args: [helperScript, endpoint, leaseId], env: {} }),
+      ...(options.fetch ? { fetch: options.fetch } : {}),
       requestTimeoutMs: 60_000
     }, {
       launch: () => ({
@@ -183,7 +191,8 @@ describe.skipIf(skip)('Codex on its own model provider (pinned binary, fake prov
         args: [...MANAGED_OFFLINE_OVERRIDES, 'analytics.enabled=false'].flatMap((override) => ['-c', override])
       }),
       env: () => env,
-      modelRoute: () => route.current
+      modelRoute: () => route.current,
+      ...(options.prepareLaunch ? { prepareLaunch: options.prepareLaunch } : {})
     })
     stops.push(async () => {
       try {
@@ -199,7 +208,7 @@ describe.skipIf(skip)('Codex on its own model provider (pinned binary, fake prov
         .chat({ threadId, cwd: workspace, model: 'gpt-wire', prompt: 'Say hello.', mcp: null, onText: (delta) => text.push(delta) })
         .then(() => text.join(''))
     }
-    return { service, route, launches, broker, turn, workspace, codexHome, writeConfig }
+    return { service, route, launches, broker, accesses, turn, workspace, codexHome, writeConfig }
   }
 
   it('runs a turn on the provider with its key as the bearer, which never appears in argv or the environment', async () => {
@@ -245,6 +254,25 @@ describe.skipIf(skip)('Codex on its own model provider (pinned binary, fake prov
     expect(provider.requests.some(injected)).toBe(false)
   })
 
+  it("refuses a title request too when the user's config.toml adds to Mousse's provider", async () => {
+    const { service, codexHome } = setup()
+    appendFileSync(join(codexHome, 'config.toml'), `
+${INJECTED}
+`)
+    expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
+    const events = { activity: () => {}, text: () => {}, tool: () => {}, launching: () => {}, sending: () => {} }
+    await expect(service.oneShotTransport({ model: 'gpt-wire' }).send({ model: 'gpt-wire', system: '', prompt: 'Name this chat' }, events, new AbortController().signal))
+      .rejects.toThrow(`defines the provider ${CUSTOM_MODEL_PROVIDER}`)
+    expect(provider.responses()).toHaveLength(0)
+  })
+
+  it("still runs the entry's own launch check first: a private home that became a link never starts", async () => {
+    const { turn, launches, broker } = setup({ prepareLaunch: async () => { throw new Error('The private Codex home is a link.') } })
+    await expect(turn('route-linked-home')).rejects.toThrow('The private Codex home is a link.')
+    expect(launches).toHaveLength(0)
+    expect(broker.leaseCount()).toBe(0)
+  })
+
   it('stops sending the key when the base URL in config.toml changes', async () => {
     const { service, writeConfig } = setup()
     expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
@@ -254,12 +282,45 @@ describe.skipIf(skip)('Codex on its own model provider (pinned binary, fake prov
     expect(status.message).toContain('The base URL in config.toml changed')
   })
 
+  it("keeps the key in use when Mousse's own check can't reach the provider, as behind a proxy Node's fetch ignores", async () => {
+    const unreachable = (async () => { throw new TypeError('fetch failed') }) as typeof fetch
+    const { service, turn } = setup({ fetch: unreachable })
+    expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
+    expect(await turn('route-unreachable')).toContain('Hello from my provider.')
+    expect(provider.responses()[0]?.authorization).toBe(`Bearer ${KEY}`)
+    // A second turn on the same process: the cached failed check retires nothing.
+    expect(await turn('route-unreachable-2')).toContain('Hello from my provider.')
+  })
+
+  it('serves each token from config.toml as it is now, and refuses one whose key or address changed', async () => {
+    const { accesses, turn, writeConfig } = setup()
+    expect(await turn('route-lease')).toContain('Hello from my provider.')
+    const access = accesses.at(-1)!
+    expect(await access()).toBe(KEY)
+    writeConfig(provider.base, 'sk-wire-route-rotated')
+    await expect(access()).rejects.toThrow('The API key in config.toml changed')
+    writeConfig('http://127.0.0.1:9/v1')
+    await expect(access()).rejects.toThrow('The base URL in config.toml changed')
+  })
+
+  it('runs the next message on a key rotated in config.toml while Codex runs, without failing it', async () => {
+    const { turn, writeConfig } = setup()
+    expect(await turn('route-rotate')).toContain('Hello from my provider.')
+    writeConfig(provider.base, 'sk-wire-route-rotated')
+    provider.requests.length = 0
+    expect(await turn('route-rotate-2')).toContain('Hello from my provider.')
+    expect(provider.responses()[0]?.authorization).toBe('Bearer sk-wire-route-rotated')
+  })
+
   it('switches back to ChatGPT and to the provider again without restarting Mousse', async () => {
     const { service, route, broker, turn } = setup()
     expect(await turn('route-switch')).toContain('Hello from my provider.')
+    expect((await service.refreshModels()).length).toBeGreaterThan(0)
     route.current = undefined
     await service.modelRouteChanged()
     expect(broker.leaseCount()).toBe(0)
+    // The old provider's models are gone, so the next check lists the new provider's.
+    expect(service.models()).toEqual([])
     // No ChatGPT sign-in in this home: the entry needs one again, and never falls back to the key.
     expect(await service.status({ force: true })).not.toMatchObject({ state: 'connected' })
     expect(service.customRoute()).toBe(false)

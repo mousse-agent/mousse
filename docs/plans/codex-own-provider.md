@@ -20,7 +20,7 @@ A person whose Codex CLI runs on a custom model provider in `~/.codex/config.tom
 4. **Switching back.** Choosing ChatGPT sign-in clears the choice. The file isn't touched, and the ChatGPT sign-in is needed again.
 5. **Failures.**
    - A rejected key: "<host> refused the API key."
-   - An unreachable host: "Mousse can't reach <host>."
+   - An unreachable host: the key stays in use, and the turn shows Codex's own error. Mousse's check may not reach a host that Codex does (a proxy that Node's fetch ignores).
    - A file Mousse can't parse is shown read-only with its error and is never written.
    - A file that changed underneath: "File changed, reload".
    - A base URL in the file that differs from the one agreed to: the entry stops until the person agrees again.
@@ -84,7 +84,7 @@ Slice 1 parses the table with smol-toml and checks it against Codex's own readin
 
 ### Graft from B
 
-A key check before any turn: one `GET <base_url>/models` with the key, with a short timeout and no retries. It lets a bad key or an unreachable host show as an error during the probe instead of on the first chat. A 401 or 403 gives "<host> refused the API key."; a network failure gives "Mousse can't reach <host>." The check runs only on a probe, never per turn.
+A key check before any turn: one `GET <base_url>/models` with the key, with a short timeout and no retries. It lets a bad key show as an error during the probe instead of on the first chat. A 401 or 403 gives "<host> refused the API key." A network failure says nothing about the key, so the key stays in use, as with Claude's API key. A passed check is kept for 10 minutes and a failed one for 30 seconds.
 
 ### Rejected
 
@@ -112,9 +112,9 @@ These are my own marks; there was no separate judge, because the shapes agreed. 
 |---|---|
 | `-c model_providers.x={… auth={command}}` plus the provider pin works through the app-server with `wire_api="responses"` | Checked: the managed entry runs this way, and `codexManagedWire.test.ts` ("a turn carries the helper's bearer") proves it against a local fake server on the pinned binary |
 | The token helper's output is sent as the bearer to a base URL that isn't ChatGPT's | Checked by the same test: its fake server is a local address |
-| A project layer can't change a key that `-c` set on the same table | Checked on 0.162.1 (`codexRouteWire.test.ts`): Codex loads a trusted project's config.toml but drops its `model_provider` and `model_providers`, so a project adds nothing to the route. The user's own config.toml can add to the table, and a thread is refused when it does |
+| A project layer can't change a key that `-c` set on the same table | Checked on 0.162.1 (`codexRouteWire.test.ts`): Codex loads a trusted project's config.toml but drops its `model_provider` and `model_providers`, so a project adds nothing to the route. The user's own config.toml can add to the table, and every thread start or resume (chats, titles, compaction) is refused when it does |
 | `config/read` with `includeLayers` reports the project layer for a thread's working folder | Checked on 0.162.1: it lists the project, user, system and `-c` (`sessionFlags`) layers with their keys |
-| `model/list` returns the custom provider's models | Not checked. Fallback: the `model` key and a typed model id |
+| `model/list` returns the custom provider's models | Checked on 0.162.1: it asks `<base_url>/models` and falls back to Codex's bundled list when the answer isn't in Codex's own format. A route change clears the stored list, so the next check lists again |
 | `smol-toml` reads what Codex's toml crate accepts | Not checked. A mismatch leaves the file read-only, never with a bad write |
 
 ### What would make it worth revisiting
