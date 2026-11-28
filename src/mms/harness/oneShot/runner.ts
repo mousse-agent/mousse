@@ -79,8 +79,6 @@ export function classifyOneShotFailure(error: unknown): OneShotFailureKind {
   const code = codeOf(error)
   if (code === 'aborted' || code === 'cancelled' || code === 'provider_cancelled') return 'cancelled'
   if (code === 'one_shot_tool_refused') return detailOf(error, 'reason') === 'tool_detected' ? 'tool_detected' : 'tool_refused'
-  // A legacy route reports a tool it stopped after sending as a policy it could not hold.
-  if (code === 'policy_unenforceable' && oneShotWasSent(error) === true) return 'tool_detected'
   if (code === 'timeout' || code === 'provider_timeout' || name === 'TimeoutError') return 'timeout'
   if (extractLimitFromError(error)) return 'rate_limited'
   if (detailOf(error, 'retriesExhausted') === true) return 'retry_detected'

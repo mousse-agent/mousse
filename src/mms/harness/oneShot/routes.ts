@@ -87,9 +87,9 @@ export const CURSOR_SDK_FACTS: RouteFacts = Object.freeze({ tools: 'none_offered
 
 /**
  * Grok with an xAI API key (`grok:direct`): one request with no tools to xAI's API, in Mousse's process, with the key
- * Grok would use. No retry (one request on the wire on 429 and 503, counted at a stub, `tests/grokDirectOneShot.test.ts`);
+ * Grok would use. No retry (one request on the wire on 429 and 503, counted at a stub, `tests/grokOneShot.test.ts`);
  * Mousse builds the request, so nothing of Grok's setup is in it (its config, instructions or MCP servers; shown against
- * Grok's own run in the same home, `tests/grokDirectOneShotEffects.test.ts`). Held.
+ * Grok's own run in the same home, `tests/grokOneShotEffects.test.ts`). Held.
  */
 export const GROK_DIRECT_FACTS: RouteFacts = Object.freeze({ tools: 'none_offered', attempts: 'one', isolation: 'verified', launch: 'in_process', audience: 'any' })
 
