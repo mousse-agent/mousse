@@ -8,18 +8,8 @@ import { Select } from '../ui/Select'
 const PRESET_DAYS = [7, 30, 90]
 const CUSTOM = 'custom'
 
-/** The full words for a rule, where there is room for them (the recommended-rules dialog). */
-export function RuleDescription({ rule }: { rule: StorageRuleId }) {
-  const copy = STORAGE_RULE_COPY[rule]
-  return <>
-    <span className="storage-rule-line"><strong>Deletes</strong> {copy.deletes}</span>
-    {copy.never && <span className="storage-rule-line"><strong>Never deletes</strong> {copy.never}</span>}
-    {copy.note && <span className="storage-rule-line">{copy.note}</span>}
-  </>
-}
-
 /** The one short line under a rule's title; the details are its tooltip. */
-function RuleLine({ rule, text }: { rule: StorageRuleId; text?: string }) {
+export function RuleLine({ rule, text }: { rule: StorageRuleId; text?: string }) {
   return <span title={ruleTooltip(rule)}>{text ?? STORAGE_RULE_COPY[rule].line}</span>
 }
 
