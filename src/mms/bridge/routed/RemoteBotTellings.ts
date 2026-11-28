@@ -10,12 +10,10 @@ import type { BotFeedRow } from '../remote/BotStreamSources'
 const FOLD_MS = 120_000
 /** At most this many of a bot's newest messages are asked for to word its notifications (the feed lists at most 20). */
 const MESSAGES_ASKED = 20
-/**
- * How long after a feed is live again (it caught up after opening, or its computer came back) what it sends still only
- * sets what is known: the bot's computer publishes a fresh snapshot for a reader that opens its feed, which can come
- * just after the feed caught up, and holds what came while this computer was away.
- */
-export const OPEN_SETTLE_MS = 5_000
+/** What came while no window was open is told once one opens, as `BotTellings` tells its backlog: within a day only. */
+const HELD_MS = 86_400_000
+/** The backlog told once a window opens, under the words `BotTellings` uses for its own. */
+const CLOSED_LABEL = 'While Mousse was closed'
 
 export interface RemoteBotTellingsOptions {
   /** Tells this computer's windows (`bots.tell`), as this computer's own bots' notifications are told. */
@@ -29,10 +27,9 @@ export interface RemoteBotTellingsOptions {
   /** The bot's newest messages, from its computer (`bots.chat.list`). */
   messages(node: NodeId, botId: string, limit: number): Promise<RemoteBotMessage[]>
   clock?: { now(): number }
-  openSettleMs?: number
 }
 
-/** What is known of one bot of another computer: its feed's open attention and how far its chat is read. */
+/** What is known of one bot of another computer: its feed's open attention, how far its chat is read and was seen. */
 interface Bot {
   node: NodeId
   botId: string
@@ -40,8 +37,16 @@ interface Bot {
   readSeq: number
   /** The feed's open attention, by message id. */
   open: Map<string, BotAttention>
-  /** Attention ids already seen here (told, kept quiet, or there when the feed was first read): never told again. */
-  seen: Set<string>
+  /** The highest sequence of the bot's attention this computer has seen: only a message past it is news. */
+  topSeq: number
+}
+
+/** A new message seen while no window was open, told once one opens. */
+interface Held {
+  bot: Bot
+  entry: BotAttention
+  row: BotFeedRow
+  at: number
 }
 
 /**
@@ -50,25 +55,32 @@ interface Bot {
  * opens the bot's chat (each row names the bot by its ref, `<node>:<botId>`).
  *
  * It follows each computer's bots feed (`RemoteBotRegistry`), whose rows carry the bot's read mark and the messages
- * that still want the owner (`attention`). Only a live change tells. What a feed sends from the moment it (re)opens or
- * its computer goes away until a few seconds after it is live again (`OPEN_SETTLE_MS`), after a start, a reconnect, a
- * reopened feed or a copy installed, only sets what is known; so does the first row of a bot this computer had not
- * listed (a bot newly in reach). So nothing is told twice and nothing old is told late; what came meanwhile shows as
- * unread in the list. Nothing is kept on disk: after a restart every bot is new again. A bot muted or hidden here tells
- * nothing. A notification is withdrawn once none of its
- * messages wants the owner any more: read on any device (the read mark passes it), answered, or gone. A bot this
- * computer loses, or a computer it no longer reaches bots of, takes its notifications and what was known with it.
+ * that still want the owner (`attention`). A message is news once: when its sequence passes the highest this computer
+ * has seen of the bot. What a computer's feed sends until it first catches up after a start only sets what is known,
+ * and so does the first row of a bot this computer had not listed (a bot newly in reach): nothing kept on disk is
+ * needed for a restart never to repeat a notification. What came while a computer was away (a reconnect, a reopened
+ * feed) and arrives as its feed catches up is told then, folded and without a sound, as `BotTellings` tells what came
+ * while Mousse was closed; so is what came while no window was open, once one opens, if it is less than a day old. A bot muted or hidden here
+ * tells nothing. A notification is withdrawn once none of its messages wants the owner any more: read on any device
+ * (the read mark passes it), answered, or gone. A bot this computer loses, or a computer it no longer reaches bots of,
+ * takes its notifications and what was known with it.
  *
  * Nothing runs on a start or on a thread's or turn's start: it works on feed changes only, and asks the bot's computer
  * for words only for a message it is about to tell.
  */
 export class RemoteBotTellings {
   private readonly bots = new Map<string, Bot>()
-  /** Until when each computer's feed only sets what is known: unset until the feed is first live, Infinity while opening. */
-  private readonly settling = new Map<NodeId, number>()
+  /** Computers whose feed caught up since the start: before that, what they send only sets what is known. */
+  private readonly based = new Set<NodeId>()
+  /** Computers catching up after being away: what is new until their feed caught up again is told as a backlog. */
+  private readonly catching = new Set<NodeId>()
+  /** The silent fold each computer's catch-up is told in. */
+  private readonly catchFolds = new Map<NodeId, string>()
+  private readonly held = new Map<string, Held>()
   private readonly banners = new Map<string, TellingItem[]>()
   private fold: { id: string; until: number; items: TellingItem[] } | undefined
   private readonly ownSounds = new TellingSounds()
+  private windows = 0
   private closed = false
 
   constructor(private readonly options: RemoteBotTellingsOptions) {}
@@ -81,25 +93,40 @@ export class RemoteBotTellings {
     this.closed = true
   }
 
-  /** The computer's feed is (re)opening, or the computer went away: what it sends until it is live again sets what is known. */
-  unbase(node: NodeId): void {
-    this.settling.set(node, Infinity)
+  /** How many windows show notifications: until one does, new messages are held, then told as one silent fold. */
+  attach(windows: number): void {
+    const opening = windows > 0 && this.windows === 0
+    this.windows = windows
+    if (!opening || this.closed || !this.held.size) return
+    const held = [...this.held.values()]
+    this.held.clear()
+    void this.tellHeld(held)
   }
 
-  /** The computer's feed is live again (it caught up, or the computer is back): a few seconds more set what is known. */
-  opened(node: NodeId): void {
-    this.settling.set(node, this.now() + (this.options.openSettleMs ?? OPEN_SETTLE_MS))
+  /** The computer's feed is reopening, or the computer went away: what is new once it is back is told as a backlog. */
+  reconnecting(node: NodeId): void {
+    if (!this.based.has(node)) return
+    this.catching.add(node)
+    this.catchFolds.delete(node)
   }
 
   /**
-   * A snapshot of `node`'s bots feed: `live` once the feed has caught up with the computer. One sent before the feed is
-   * live, or within `OPEN_SETTLE_MS` of it, tells nothing.
+   * The computer's feed caught up (what it replays as it opens is in: the Bridge's copy, then what the computer has
+   * that the copy lacks), or the computer is back with its feed still attached: what it sends from now on is live.
    */
-  feed(node: NodeId, rows: readonly BotFeedRow[], live: boolean): void {
+  caughtUp(node: NodeId): void {
+    this.based.add(node)
+    this.catching.delete(node)
+  }
+
+  /**
+   * A snapshot of `node`'s bots feed. Until its feed first caught up since the start, a snapshot only sets what is
+   * known; while it catches up after being away, what is new in it is told as a backlog.
+   */
+  feed(node: NodeId, rows: readonly BotFeedRow[]): void {
     if (this.closed) return
-    // The first live snapshot since the feed opened or the computer came back starts the settling, if nothing did yet.
-    if (live && (this.settling.get(node) ?? Infinity) === Infinity) this.opened(node)
-    const baseline = !live || this.now() < this.settling.get(node)!
+    const start = !this.based.has(node)
+    const backlog = this.catching.has(node)
     const listed = new Set(rows.map((row) => row.id))
     const gone = [...this.bots.values()].filter((bot) => bot.node === node && !listed.has(bot.botId)).map((bot) => bot.botId)
     if (gone.length) this.lose(node, gone)
@@ -111,26 +138,38 @@ export class RemoteBotTellings {
       // A bot not listed here before (newly in reach, or first seen since a start): what it has is not news.
       const first = !bot
       if (!bot) {
-        bot = { node, botId: row.id, name: row.name, readSeq: 0, open: new Map(), seen: new Set() }
+        bot = { node, botId: row.id, name: row.name, readSeq: 0, open: new Map(), topSeq: 0 }
         this.bots.set(ref, bot)
       }
       bot.name = row.name
       bot.readSeq = typeof row.readSeq === 'number' ? row.readSeq : 0
       bot.open = new Map(attention.map((entry) => [entry.id, entry]))
-      const known = bot.seen
-      const entries = baseline || first ? [] : attention.filter((entry) => !known.has(entry.id))
-      // Only what the feed still lists is kept: a message leaves attention for good once read or answered.
-      bot.seen = new Set(attention.map((entry) => entry.id))
+      const top = bot.topSeq
+      bot.topSeq = Math.max(top, ...attention.map((entry) => entry.seq))
+      if (start || first) continue
+      // An older message coming back into the feed's list (one newer was answered) is not news: it was seen.
+      const entries = attention.filter((entry) => entry.seq > top)
       if (entries.length && !this.isQuiet(ref)) fresh.push({ bot, entries: entries.reverse(), row })
     }
     this.withdrawSettled()
-    for (const each of fresh) void this.tell(each.bot, each.entries, each.row)
+    for (const each of fresh) {
+      if (!this.windows) {
+        const at = this.now()
+        for (const entry of each.entries) this.held.set(`${qualifyId(node, each.bot.botId)}\n${entry.id}`, { bot: each.bot, entry, row: each.row, at })
+      } else void this.tell(each.bot, each.entries, each.row, backlog)
+    }
   }
 
   /** Bots this computer no longer reaches on `node` (all of them when none are named): their notifications go. */
   lose(node: NodeId, botIds?: Iterable<string>): void {
     const refs = botIds ? new Set([...botIds].map((botId) => qualifyId(node, botId))) : undefined
     for (const [ref, bot] of [...this.bots]) if (bot.node === node && (!refs || refs.has(ref))) this.bots.delete(ref)
+    for (const [key, held] of [...this.held]) if (held.bot.node === node && (!refs || refs.has(qualifyId(node, held.bot.botId)))) this.held.delete(key)
+    if (!refs) {
+      this.based.delete(node)
+      this.catching.delete(node)
+      this.catchFolds.delete(node)
+    }
     const gone = (item: TellingItem): boolean => refs ? refs.has(item.botId) : item.botId.startsWith(`${node}:`)
     for (const [id, items] of [...this.banners]) {
       if (!items.some(gone)) continue
@@ -167,6 +206,7 @@ export class RemoteBotTellings {
   private withdraw(id: string): void {
     this.banners.delete(id)
     if (this.fold?.id === id) this.fold = undefined
+    for (const [node, fold] of [...this.catchFolds]) if (fold === id) this.catchFolds.delete(node)
     this.emit({ id, rows: [], title: '', body: '', kind: 'completed', sound: false })
   }
 
@@ -178,15 +218,30 @@ export class RemoteBotTellings {
     }
   }
 
-  /** Tells the bot's new messages, worded from the messages themselves (`entries` oldest first). */
-  private async tell(bot: Bot, entries: BotAttention[], row: BotFeedRow): Promise<void> {
+  /** The items of `entries` that still want the owner, worded from the messages themselves. */
+  private async itemsOf(bot: Bot, entries: BotAttention[], row: BotFeedRow): Promise<TellingItem[]> {
     const ref = qualifyId(bot.node, bot.botId)
     const words = await this.messagesOf(bot, entries)
-    if (this.closed || this.bots.get(ref) !== bot || this.isQuiet(ref)) return
-    const items = entries
+    if (this.closed || this.bots.get(ref) !== bot || this.isQuiet(ref)) return []
+    return entries
       .map((entry) => itemOf(ref, bot.name, entry, words.get(entry.id) ?? fallback(row, entry)))
       .filter((item) => this.stillOpen(item))
+  }
+
+  /** Tells the bot's new messages (`entries` oldest first): live, or as the backlog of a computer back from away. */
+  private async tell(bot: Bot, entries: BotAttention[], row: BotFeedRow, backlog: boolean): Promise<void> {
+    const items = await this.itemsOf(bot, entries, row)
     if (!items.length) return
+    if (backlog) {
+      // What came while the computer was away: one silent fold for its catch-up, as a backlog is told.
+      const id = this.catchFolds.get(bot.node) ?? `bt_${randomUUID()}`
+      this.catchFolds.set(bot.node, id)
+      const folded = [...(this.banners.get(id) ?? []).filter((item) => this.stillOpen(item) && !this.isQuiet(item.botId)), ...items]
+      this.emit(tellingOf(id, folded, false))
+      this.banners.set(id, folded)
+      return
+    }
+    const ref = qualifyId(bot.node, bot.botId)
     const now = this.now()
     for (const item of items.filter((each) => each.tell === 'now')) {
       const id = `bt_${randomUUID()}`
@@ -201,6 +256,25 @@ export class RemoteBotTellings {
     const sound = (this.options.sounds() ?? this.ownSounds).soundFor([ref], now)
     this.emit(tellingOf(base.id, folded, sound))
     this.banners.set(base.id, folded)
+  }
+
+  /** What came while no window was open, less than a day old and still wanting the owner: one silent fold. */
+  private async tellHeld(held: Held[]): Promise<void> {
+    const now = this.now()
+    const byBot = new Map<Bot, Held[]>()
+    for (const each of held) {
+      if (now - each.at > HELD_MS) continue
+      byBot.set(each.bot, [...(byBot.get(each.bot) ?? []), each])
+    }
+    const items: TellingItem[] = []
+    for (const [bot, list] of byBot) {
+      const entries = list.map((each) => each.entry).sort((a, b) => a.seq - b.seq)
+      items.push(...(await this.itemsOf(bot, entries, list.at(-1)!.row)))
+    }
+    if (this.closed || !items.length) return
+    const id = `bt_${randomUUID()}`
+    this.emit(tellingOf(id, items, false, CLOSED_LABEL))
+    this.banners.set(id, items)
   }
 
   /** The messages named, from the copy here when it has them, else from the bot's computer; none when it can't say. */

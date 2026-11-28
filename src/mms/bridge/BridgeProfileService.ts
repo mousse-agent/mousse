@@ -704,6 +704,7 @@ export class BridgeProfileService {
       },
       clock: this.clock
     })
+    this.remoteTellings.attach(services.tellingWindows)
     this.remoteBots = new RemoteBotRegistry({
       hub: this.hub,
       client: (node) => this.peers.client(node),

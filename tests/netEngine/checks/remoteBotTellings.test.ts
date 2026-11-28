@@ -2,14 +2,14 @@
  * Notifications of another computer's bot on the viewing computer, over two real daemons paired through the engine: the
  * owner's bot posts in its chat (the real store classifies it and lists it in the bots feed), and the viewer's windows
  * are told (`bots.tell`) as they are of the viewer's own bots, or not: nothing of what a bot had when it came into
- * reach, nothing of what came while the owner was away, nothing for a bot muted here, and a notification is withdrawn
- * once the owner's computer marks the chat read. A bot of the viewer's own, muted there, tells nothing either. The same
- * rules with a scripted Bridge, a start and a restart included, are `tests/net/bridge/routed/remoteBotTellings.test.ts`.
+ * reach, what came while the owner was away once and silently, what came while no window was open once one opens,
+ * nothing for a bot muted here, and a notification is withdrawn once the owner's computer marks the chat read. A bot of
+ * the viewer's own, muted there, tells nothing either. The same rules with a scripted Bridge, a start and a restart
+ * included, are `tests/net/bridge/routed/remoteBotTellings.test.ts`.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { NodeId } from '../../../src/shared/net'
 import type { BotTelling } from '../../../src/shared/bots/personal/telling'
-import { OPEN_SETTLE_MS } from '../../../src/mms/bridge/routed/RemoteBotTellings'
 import { Fabric, type Computer } from './harness'
 
 describe('notifications of another computer’s bots', () => {
@@ -41,8 +41,8 @@ describe('notifications of another computer’s bots', () => {
   /** The viewer's copy of the owner's feed lists the bot with `messageId` as its newest message. */
   const listedUpTo = (messageId: string) =>
     vi.waitFor(() => expect(viewer.mms.bridge.remoteBots.row(ownerOnViewer, keeper)?.telling.latest?.id).toBe(messageId), { timeout: 30_000 })
-  /** A feed live again only sets what is known for a few seconds: this waits them out. */
-  const settled = () => new Promise((resolve) => setTimeout(resolve, OPEN_SETTLE_MS + 500))
+  /** A moment for a notification that should not come to have come. */
+  const quietFor = () => new Promise((resolve) => setTimeout(resolve, 1_000))
 
   beforeAll(async () => {
     owner = await fabric.computer('owner')
@@ -57,15 +57,17 @@ describe('notifications of another computer’s bots', () => {
     keeper = (await owner.mms.personalBots!.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Server keeper', description: 'keeper', clientRequestId: 'tellings-bot-1' })).bot.id
     owner.mms.botDeviceAccess.set(keeper, { mode: 'chosen', nodes: [] })
     await owner.dispatch('netEngine.workOnThreads', { enabled: false }, true)
+    // A window that shows notifications is open on the viewer.
+    viewer.mms.setTellingWindows(1)
   }, 300_000)
   afterAll(() => fabric.close(), 60_000)
 
   it('tells nothing of what a bot had when it came into reach, tells a new message once, and withdraws it once read on the owner', async () => {
-    await settled()
     const before = say('Restarted the web server.', 'now')
     owner.mms.botDeviceAccess.set(keeper, { mode: 'chosen', nodes: [viewerOnOwner] })
     await listedUpTo(before.id)
     expect(viewer.mms.bridge.remoteBots.row(ownerOnViewer, keeper)?.telling.attention.map((entry) => entry.id)).toEqual([before.id])
+    await quietFor()
     expect(told()).toEqual([])
 
     const asked = say('Restart the database too?', 'now')
@@ -78,21 +80,39 @@ describe('notifications of another computer’s bots', () => {
     expect(told().map((telling) => telling.rows.length)).toEqual([1, 0])
   }, 120_000)
 
-  it('tells nothing of what came while the owner was away, and tells again once it is back', async () => {
+  it('tells what came while the owner was away once, without a sound, and what follows as usual', async () => {
     const count = told().length
     await fabric.restartHelper(owner)
     await vi.waitFor(() => expect(viewer.mms.bridge.remoteBots.row(ownerOnViewer, keeper)?.offline).toBe(true), { timeout: 30_000 })
-    const away = say('The backup finished while you were away.', 'soon')
+    const away = say('Restore the backup now?', 'now')
     await fabric.connect(viewer, ownerOnViewer)
     await listedUpTo(away.id)
-    await settled()
-    expect(told()).toHaveLength(count)
+    await vi.waitFor(() => expect(shown()).toHaveLength(1), { timeout: 30_000 })
+    expect(shown()[0]).toMatchObject({ title: 'Server keeper', body: 'Restore the backup now?', sound: false, rows: [{ botId: ref(keeper), messageId: away.id }] })
 
-    const next = say('The disk is nearly full.', 'soon')
-    await vi.waitFor(() => expect(shown().map((telling) => telling.rows.map((each) => each.messageId))).toEqual([[next.id]]), { timeout: 30_000 })
+    // Just after it is back: told as usual, and what came while away is not told again.
+    const next = say('The disk is nearly full.', 'now')
+    await vi.waitFor(() => expect(shown()).toHaveLength(2), { timeout: 30_000 })
+    await quietFor()
+    expect(told().slice(count).map((telling) => [telling.rows.map((each) => each.messageId), telling.sound])).toEqual([[[away.id], false], [[next.id], true]])
     owner.mms.personalBots!.markRead(keeper, next.seq)
     await vi.waitFor(() => expect(shown()).toEqual([]), { timeout: 30_000 })
   }, 180_000)
+
+  it('holds what comes while no window is open on the viewer, and tells it once one opens', async () => {
+    viewer.mms.setTellingWindows(0)
+    const count = told().length
+    const asked = say('Which disk should I clear?', 'now')
+    await listedUpTo(asked.id)
+    await quietFor()
+    expect(told()).toHaveLength(count)
+
+    viewer.mms.setTellingWindows(1)
+    await vi.waitFor(() => expect(told()).toHaveLength(count + 1), { timeout: 30_000 })
+    expect(told()[count]).toMatchObject({ title: 'Server keeper', body: 'Which disk should I clear?', sound: false, rows: [{ botId: ref(keeper), messageId: asked.id }] })
+    owner.mms.personalBots!.markRead(keeper, asked.seq)
+    await vi.waitFor(() => expect(shown()).toEqual([]), { timeout: 30_000 })
+  }, 120_000)
 
   it('tells nothing for a bot muted on the viewer, its own bots included', async () => {
     await viewer.dispatch('bots.marks.set', { botId: ref(keeper), mark: 'muted', on: true })

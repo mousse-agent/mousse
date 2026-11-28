@@ -98,7 +98,7 @@ export interface RemoteBotRegistryOptions {
    * The notifications of those bots (`RemoteBotTellings`): each feed snapshot, live or replayed as the feed opens, and
    * each bot lost here.
    */
-  tellings?: Pick<RemoteBotTellings, 'feed' | 'unbase' | 'opened' | 'lose'>
+  tellings?: Pick<RemoteBotTellings, 'feed' | 'reconnecting' | 'caughtUp' | 'lose'>
   /**
    * The other computers of the user whose bots are listed (`PeerDirectory.botComputers`): those away included, a
    * pairing that no longer accepts this one left out. `undefined` when they can't be known now (the engine is still
@@ -432,12 +432,12 @@ export class RemoteBotRegistry {
       if (online !== c.online) {
         c.online = online
         moved = true
-        // Back, its feed still attached and caught up: it is live again, and settles first.
-        if (online && c.caught) this.toTellings((tellings) => tellings.opened(c.node))
+        // Back, its feed still attached and caught up: what it sends now is live again.
+        if (online && c.caught) this.toTellings((tellings) => tellings.caughtUp(c.node))
       }
       if (!online) {
         c.live = false
-        this.toTellings((tellings) => tellings.unbase(c.node))
+        this.toTellings((tellings) => tellings.reconnecting(c.node))
         continue
       }
       if (!c.attached && !c.attaching && this.now() >= c.retryAt) void this.attach(c)
@@ -474,8 +474,8 @@ export class RemoteBotRegistry {
     // What it last sent is written now, so a restart while it is away lists it.
     this.save(c, true)
     c.live = false
-    // What it sends when it is back first catches this computer up: not news.
-    this.toTellings((tellings) => tellings.unbase(c.node))
+    // What it sends when it is back first catches this computer up: told as a backlog.
+    this.toTellings((tellings) => tellings.reconnecting(c.node))
     if (!c.online) return
     c.online = false
     this.changed()
@@ -543,10 +543,13 @@ export class RemoteBotRegistry {
     held?.close()
   }
 
-  /** The feed of `c` is (re)opening, or let go: until it catches up again, a snapshot tells nothing. */
+  /**
+   * The feed of `c` is (re)opening, or let go: until it catches up again, a snapshot is not live. After a start that
+   * only sets what is known; after a reconnect what is new in it is told as a backlog.
+   */
   private unbase(c: Computer): void {
     c.caught = false
-    this.toTellings((tellings) => tellings.unbase(c.node))
+    this.toTellings((tellings) => tellings.reconnecting(c.node))
   }
 
   /** The notifications hear of a feed or a loss; their failure never stops the feed. */
@@ -597,12 +600,12 @@ export class RemoteBotRegistry {
           },
           this.feedStream(c),
           undefined,
-          // What the feed replays as it opens (the Bridge's copy, then what came while away) is not news.
+          // What the feed replays as it opens (the Bridge's copy, then what came while away) is not live.
           (caught) => {
             if (this.computersByNode.get(c.node) !== c) return
             if (!caught) return this.unbase(c)
             c.caught = true
-            this.toTellings((tellings) => tellings.opened(c.node))
+            this.toTellings((tellings) => tellings.caughtUp(c.node))
           }
         )
         if (this.closed || this.computersByNode.get(c.node) !== c || !this.options.enabled()) {
@@ -648,7 +651,7 @@ export class RemoteBotRegistry {
 
   private away(c: Computer): void {
     this.backOff(c)
-    this.toTellings((tellings) => tellings.unbase(c.node))
+    this.toTellings((tellings) => tellings.reconnecting(c.node))
     if (!c.online) return
     c.online = false
     this.changed()
@@ -712,7 +715,11 @@ export class RemoteBotRegistry {
       this.drop(c.node, { lost: gone })
     } else this.save(c, false)
     // A bot the feed no longer lists takes its notifications with it; a new message that wants the owner is told.
-    this.toTellings((tellings) => tellings.feed(c.node, feed.bots, c.caught === true))
+    this.toTellings((tellings) => {
+      // A caught-up feed of a computer reached again: what it sends is live, whichever came first.
+      if (c.caught && this.options.online(c.node)) tellings.caughtUp(c.node)
+      tellings.feed(c.node, feed.bots)
+    })
     this.changed()
   }
 }

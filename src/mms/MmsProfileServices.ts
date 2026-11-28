@@ -420,6 +420,12 @@ export class MmsProfileServices {
     if (!this.netEngine.on()) this.net.assertFeature('netBridge')
     return this.domainService()
   }
+  /** Windows that show bot notifications attached or left: what came while none was open is told once one is. */
+  setTellingWindows(count: number): void {
+    this.tellingWindows = count
+    this.personalBots?.setTellingWindows(count)
+    this.bridgeService?.remoteTellings.attach(count)
+  }
   get spaces(): SpaceProfileService {
     this.net.assertFeature('netSpaces')
     return this.domainService().spaces
@@ -448,6 +454,8 @@ export class MmsProfileServices {
   /** Personal bots (PR 6 §4). */
   /** Null when `bots.db` could not be opened: bots are unavailable, every other thread works. */
   readonly personalBots: BotEngine | null
+  /** How many windows show bot notifications (`bots.telling.v1`): this computer's own bots and other computers' bots. */
+  tellingWindows = 0
   /** The bots' hidden model choice; also lists the Settings bot model choices (`holdable`). */
   readonly botModels: BotModelChooser
   /** Usage limits met by any of the profile's requests, shared by bots' model choice and Automatic thread naming. */

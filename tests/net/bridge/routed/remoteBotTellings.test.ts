@@ -5,15 +5,16 @@
  * daemons is `tests/netEngine/checks/remoteBotTellings.test.ts`.
  *
  * Inputs: a feed snapshot replayed as the feed opens, the first one after it caught up, live ones; a start, a restart, a
- * computer away and back, a feed that ends and reopens; `now` and `soon` messages; a bot muted or hidden here; the read
- * mark passing a message, a message answered elsewhere; a bot the feed drops, a feed refused.
+ * computer away and back, a feed that ends and reopens; no window open, then one; `now` and `soon` messages; more than
+ * the feed's twenty open messages; a bot muted or hidden here; the read mark passing a message, a message answered
+ * elsewhere; a bot the feed drops, a feed refused.
  */
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RemoteBotRegistry } from '../../../../src/mms/bridge/routed/RemoteBotRegistry'
-import { OPEN_SETTLE_MS, RemoteBotTellings } from '../../../../src/mms/bridge/routed/RemoteBotTellings'
+import { RemoteBotTellings } from '../../../../src/mms/bridge/routed/RemoteBotTellings'
 import { SqliteRemoteBots } from '../../../../src/mms/bridge/routed/remoteBotStore'
 import { PRIVATE_BOTS_SUBJECT } from '../../../../src/mms/bridge/remote/privateStreams'
 import { BotMarksStore } from '../../../../src/mms/bots/marks/BotMarksStore'
@@ -31,9 +32,12 @@ const WRITER = 'bot-writer'
 type Entry = { id: string; seq: number; tell: 'now' | 'soon' }
 const now = (seq: number): Entry => ({ id: `bm_${seq}`, seq, tell: 'now' })
 const soon = (seq: number): Entry => ({ id: `bm_${seq}`, seq, tell: 'soon' })
+/** The feed lists a bot's open messages newest first, at most twenty (`BotTellings.attention`). */
 const row = (id: string, attention: Entry[] = [], readSeq = 0) => ({
-  id, name: id === KEEPER ? 'Server keeper' : 'Writer', stateText: 'Idle', readSeq, telling: { attention: [...attention].reverse() }
+  id, name: id === KEEPER ? 'Server keeper' : 'Writer', stateText: 'Idle', readSeq, telling: { attention: [...attention].reverse().slice(0, 20) }
 })
+const run = (from: number, to: number, skip: number[] = []) =>
+  Array.from({ length: to - from + 1 }, (_, n) => soon(from + n)).filter((entry) => !skip.includes(entry.seq))
 const feedOf = (...bots: ReturnType<typeof row>[]) => ({ kind: 'mousse.bots', version: 1, bots })
 
 function harness() {
@@ -66,11 +70,11 @@ function harness() {
   const chat = new Map<string, unknown>()
   const asked = vi.fn(async (_node: NodeId, _botId: string) => [...chat.values()] as never[])
   const sounds = new TellingSounds()
-  /** The notifications' clock: a feed live again only sets what is known for `OPEN_SETTLE_MS`. */
   const clock = { now: 1_800_000_000_000 }
-  const settled = () => { clock.now += OPEN_SETTLE_MS }
-  const open = () => {
-    const tellings = new RemoteBotTellings({
+  let tellings: RemoteBotTellings | undefined
+  /** A start of this computer, with `windows` showing notifications (one unless said). */
+  const open = ({ windows = 1 } = {}) => {
+    tellings = new RemoteBotTellings({
       emit: (telling) => told.push(telling),
       quiet: (ref) => {
         const m = marks.get(ref)
@@ -80,6 +84,7 @@ function harness() {
       messages: asked,
       clock: { now: () => clock.now }
     })
+    tellings.attach(windows)
     const registry = new RemoteBotRegistry({
       hub: hub as never,
       client: () => client as never,
@@ -95,17 +100,16 @@ function harness() {
     return registry
   }
   /**
-   * Opens the registry's feed and lets it catch up with `bots`, as a start does, then sends them again as the bot's
-   * computer does for a reader that opens its feed. `settle` lets the settling time pass after it.
+   * Opens the registry's feed and lets it catch up: the Bridge's copy (`replayed`), then `bots` as the bot's computer
+   * sends them to a reader that opens its feed.
    */
-  const connect = async (registry: RemoteBotRegistry, bots: ReturnType<typeof row>[], settle = true) => {
+  const connect = async (registry: RemoteBotRegistry, bots: ReturnType<typeof row>[], replayed = bots) => {
     feed = undefined
     await registry.reconcile()
     await vi.waitFor(() => expect(feed).toBeDefined())
+    feed!.update({ kind: 'snapshot', value: feedOf(...replayed) })
     feed!.update({ kind: 'snapshot', value: feedOf(...bots) })
     feed!.caught?.(true)
-    feed!.update({ kind: 'snapshot', value: feedOf(...bots) })
-    if (settle) settled()
   }
   const send = (...bots: ReturnType<typeof row>[]) => feed!.update({ kind: 'snapshot', value: feedOf(...bots) })
   /** What the windows show now: each notification's latest form, withdrawn ones left out. */
@@ -116,32 +120,37 @@ function harness() {
   }
   const settle = () => vi.waitFor(() => expect(asked.mock.results.every((result) => result.type !== 'incomplete')).toBe(true)).then(() => new Promise((resolve) => setTimeout(resolve, 0)))
   const ref = (botId: string) => `${node}:${botId}`
-  return { node, online, hub, client, refuse, marks, told, chat, asked, open, connect, send, shown, settle, settled, ref, feed: () => feed! }
+  /** What each message was told in, in order: the id of every telling that first showed it, and its sound. */
+  const firstTold = () => {
+    const seen = new Map<string, { id: string; sound: boolean }>()
+    for (const telling of told) for (const each of telling.rows) if (!seen.has(each.messageId)) seen.set(each.messageId, { id: telling.id, sound: telling.sound })
+    return seen
+  }
+  return { node, online, hub, client, refuse, marks, told, chat, asked, clock, open, connect, send, shown, settle, firstTold, ref, feed: () => feed!, tellings: () => tellings! }
 }
 
 describe('notifications of another computer’s bots', () => {
   it('tell nothing on a start, then tell a new message once, named by the bot’s ref', async () => {
     const h = harness()
     const registry = h.open()
-    // What wanted the owner before this computer looked is not news: replayed, sent as the feed opened, or a moment later.
-    await h.connect(registry, [row(KEEPER, [now(3)])], false)
+    // What wanted the owner before this computer looked is not news: replayed, or sent as the feed opened.
+    await h.connect(registry, [row(KEEPER, [now(3), now(5)])], [row(KEEPER, [now(3)])])
     h.send(row(KEEPER, [now(3), now(5)]))
     await h.settle()
     expect(h.told).toEqual([])
-    h.settled()
     // A bot newly in reach: what it has is not news either.
     h.send(row(KEEPER, [now(3), now(5)]), row(WRITER, [now(7)]))
     await h.settle()
     expect(h.told).toEqual([])
 
-    h.chat.set('bm_4', { id: 'bm_4', seq: 4, author: 'bot', kind: 'text', text: 'Which flat?', question: { status: 'open', choices: [{ label: 'Flat A' }, { label: 'Flat B' }] } })
-    h.send(row(KEEPER, [now(3), now(4), now(5)]), row(WRITER, [now(7)]))
+    h.chat.set('bm_6', { id: 'bm_6', seq: 6, author: 'bot', kind: 'text', text: 'Which flat?', question: { status: 'open', choices: [{ label: 'Flat A' }, { label: 'Flat B' }] } })
+    h.send(row(KEEPER, [now(3), now(5), now(6)]), row(WRITER, [now(7)]))
     await h.settle()
     expect(h.told).toEqual([
-      { id: expect.any(String), rows: [{ botId: h.ref(KEEPER), messageId: 'bm_4', seq: 4, tell: 'now' }], title: 'Server keeper', body: 'Which flat? — Flat A / Flat B', kind: 'question', sound: true }
+      { id: expect.any(String), rows: [{ botId: h.ref(KEEPER), messageId: 'bm_6', seq: 6, tell: 'now' }], title: 'Server keeper', body: 'Which flat? — Flat A / Flat B', kind: 'question', sound: true }
     ])
     // The same message in the next snapshot is not told again.
-    h.send(row(KEEPER, [now(3), now(4), now(5)]), row(WRITER, [now(7)]))
+    h.send(row(KEEPER, [now(3), now(5), now(6)]), row(WRITER, [now(7)]))
     await h.settle()
     expect(h.told).toHaveLength(1)
   })
@@ -165,31 +174,86 @@ describe('notifications of another computer’s bots', () => {
     expect(h.told.filter((telling) => telling.id === fold.id).map((telling) => telling.sound)).toEqual([true, false, true])
   })
 
-  it('tell nothing for what came while the computer was away, nor when the feed reopens, and tell again after', async () => {
+  it('tell what came while the computer was away or its feed reopened once, folded without a sound, and what follows as usual', async () => {
     const h = harness()
     const registry = h.open()
     await h.connect(registry, [row(KEEPER)])
-    // Away, its feed still attached: what came meanwhile arrives while it is away or just after it is back.
+    // Away, its feed still attached: what came meanwhile and arrives before it is back is one silent fold.
     h.online.delete(h.node)
     registry.nodeOffline(h.node)
     h.send(row(KEEPER, [now(1)]))
-    h.online.add(h.node)
-    await registry.reconcile()
     h.send(row(KEEPER, [now(1), now(2)]))
     await h.settle()
-    expect(h.told).toEqual([])
-    h.settled()
+    expect(h.shown()).toMatchObject([{ title: 'Server keeper · 2 messages', sound: false, rows: [{ messageId: 'bm_1' }, { messageId: 'bm_2' }] }])
+    // Just after it is back: told as usual, and the catch-up is not told again.
+    h.online.add(h.node)
+    await registry.reconcile()
+    h.send(row(KEEPER, [now(1), now(2), now(3)]))
     h.send(row(KEEPER, [now(1), now(2), now(3)]))
     await h.settle()
-    expect(h.shown().map((telling) => telling.rows[0]!.messageId)).toEqual(['bm_3'])
-    // The feed ends and is opened again at once: what it replays and sends as it opens sets what is known.
+    expect(h.shown().map((telling) => [telling.rows.map((each) => each.messageId), telling.sound])).toEqual([[['bm_1', 'bm_2'], false], [['bm_3'], true]])
+
+    // The feed ends and is opened again at once: what came meanwhile, replayed or sent as it opens, is one silent fold.
     h.feed().error('stream_unknown')
-    await h.connect(registry, [row(KEEPER, [now(1), now(2), now(3), now(4)])])
+    await h.connect(registry, [row(KEEPER, [now(1), now(2), now(3), now(4), now(5)])], [row(KEEPER, [now(1), now(2), now(3), now(4)])])
     await h.settle()
-    expect(h.shown().map((telling) => telling.rows[0]!.messageId)).toEqual(['bm_3'])
-    h.send(row(KEEPER, [now(1), now(2), now(3), now(4), now(6)]))
+    h.send(row(KEEPER, [now(1), now(2), now(3), now(4), now(5), now(6)]))
     await h.settle()
-    expect(h.shown().map((telling) => telling.rows[0]!.messageId)).toEqual(['bm_3', 'bm_6'])
+    const first = h.firstTold()
+    expect([...first.keys()]).toEqual(['bm_1', 'bm_2', 'bm_3', 'bm_4', 'bm_5', 'bm_6'])
+    expect(first.get('bm_4')).toEqual({ id: first.get('bm_5')!.id, sound: false })
+    expect(first.get('bm_6')).toMatchObject({ sound: true })
+    // Each message was told in one notification only.
+    const shownIn = new Map<string, Set<string>>()
+    for (const telling of h.told) for (const each of telling.rows) shownIn.set(each.messageId, new Set([...(shownIn.get(each.messageId) ?? []), telling.id]))
+    expect([...shownIn.values()].every((ids) => ids.size === 1)).toBe(true)
+  })
+
+  it('hold what comes while no window is open, and tell it as one silent fold once one opens', async () => {
+    const h = harness()
+    const registry = h.open({ windows: 0 })
+    await h.connect(registry, [row(KEEPER), row(WRITER)])
+    h.chat.set('bm_1', { id: 'bm_1', seq: 1, author: 'bot', kind: 'text', text: 'Which flat?', question: { status: 'open', choices: [{ label: 'Flat A' }] } })
+    h.send(row(KEEPER, [now(1)]), row(WRITER))
+    h.send(row(KEEPER, [now(1), soon(2)]), row(WRITER, [now(3)]))
+    // Read before a window opened: not told.
+    h.send(row(KEEPER, [now(1), soon(2)]), row(WRITER, [], 3))
+    await h.settle()
+    expect(h.told).toEqual([])
+    expect(h.asked).not.toHaveBeenCalled()
+
+    h.tellings().attach(1)
+    await h.settle()
+    expect(h.told).toEqual([
+      { id: expect.any(String), rows: [{ botId: h.ref(KEEPER), messageId: 'bm_1', seq: 1, tell: 'now' }, { botId: h.ref(KEEPER), messageId: 'bm_2', seq: 2, tell: 'soon' }], title: 'While Mousse was closed: Server keeper needs you', body: 'Which flat? — Flat A', kind: 'question', sound: false }
+    ])
+    // Another window, or the same messages again: nothing more.
+    h.tellings().attach(2)
+    h.send(row(KEEPER, [now(1), soon(2)]), row(WRITER, [], 3))
+    await h.settle()
+    expect(h.told).toHaveLength(1)
+
+    // Every window closed: a message older than a day by the time one opens is not told.
+    h.tellings().attach(0)
+    h.send(row(KEEPER, [now(1), soon(2), now(4)]), row(WRITER, [], 3))
+    h.clock.now += 86_400_001
+    h.tellings().attach(1)
+    await h.settle()
+    expect(h.told).toHaveLength(1)
+  })
+
+  it('tell nothing again when an older open message comes back into the feed’s twenty', async () => {
+    const h = harness()
+    const registry = h.open()
+    await h.connect(registry, [row(KEEPER, run(1, 25))])
+    // The newest is answered, then one in the middle: 5, then 4, come back into the list.
+    h.send(row(KEEPER, run(1, 24)))
+    h.send(row(KEEPER, run(1, 24, [20])))
+    await h.settle()
+    expect(h.told).toEqual([])
+    h.send(row(KEEPER, [...run(1, 24, [20]), soon(26)]))
+    await h.settle()
+    expect(h.shown().map((telling) => telling.rows.map((each) => each.messageId))).toEqual([['bm_26']])
   })
 
   it('tell nothing after a restart, for what was told before it or came since', async () => {
