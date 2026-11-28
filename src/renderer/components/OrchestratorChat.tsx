@@ -150,6 +150,10 @@ export const STEER_UNCONFIRMED = 'The steer was not confirmed. Checking whether 
 export const STEER_QUEUED = 'The reply could not take that steer, so it was queued instead.'
 /** That steer did not arrive: its text is back in the composer. */
 export const STEER_NOT_ARRIVED = 'The steer did not reach the reply, so it is back in the composer.'
+/** Send's tooltip while a first message waits for the profile's permission mode to be read (`modeUnread`). */
+export const MODE_UNREAD_SEND_TITLE = 'Waiting for your settings to load'
+/** How long after a failed read of the profile's settings it is tried again. */
+const DEFAULT_MODE_RETRY_MS = 2000
 
 /** Before the first measurement arrives: no capacity, so the composer shows no ring. */
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
@@ -293,8 +297,11 @@ export function OrchestratorChat() {
   const ownSubagentParentId = activeThread?.lineage?.parentThreadId ?? ownSubagent?.parentThreadId ?? null
   useSubagents(ownSubagentParentId && messages.length === 0 ? ownSubagentParentId : null)
   const isSubagent = Boolean((activeThread && isSubagentThread(activeThread)) || ownSubagent)
-  // The profile default.
-  const [defaultPermissionMode, setDefaultPermissionMode] = useState<PermissionMode>(DEFAULT_PERMISSION_MODE)
+  // The profile default, as this profile's settings last answered it. Until they have, the built-in default stands in
+  // only where nothing is shown or sent on it (`modeUnread` below): the service runs the profile's own.
+  const [readDefaultMode, setReadDefaultMode] = useState<{ profileId: string | null; mode: PermissionMode } | null>(null)
+  const defaultModeKnown = readDefaultMode !== null && readDefaultMode.profileId === profileId
+  const defaultPermissionMode = defaultModeKnown ? readDefaultMode.mode : DEFAULT_PERMISSION_MODE
   // Derive the ceiling inside the selector so unrelated threads' touches or updates do not re-render this chat.
   const permissionCeiling = useAppStore((s) => {
     const active = s.threads.find((thread) => thread.id === s.activeThreadId)
@@ -876,7 +883,7 @@ export function OrchestratorChat() {
       window.mousse.settings.getOptions()
     ])
     setCatalog((current) => keepCatalog(current, options.llmProviders))
-    setDefaultPermissionMode(normalizePermissionMode(settings.permissions?.defaultMode))
+    setReadDefaultMode({ profileId, mode: normalizePermissionMode(settings.permissions?.defaultMode) })
     const compaction = normalizeContextSettings(settings.context)
     setContextCompactionSetting((current) =>
       current?.compactionEnabled === compaction.compactionEnabled && current.compactionTokens === compaction.compactionTokens &&
@@ -964,10 +971,10 @@ export function OrchestratorChat() {
   }, [remoteNode, remoteDraft, remoteOptions.loaded, remoteDefaultKey, remoteThreadModel, pickedModel, providers])
 
   useEffect(() => {
-    void refreshSelection()
-    const unsubSettings = window.mousse.settings.onChanged(() => {
-      void refreshSelection()
-    })
+    // A read that fails changes nothing shown; one that leaves the profile's default unread is tried again (below).
+    const refresh = () => { refreshSelection().catch(() => undefined) }
+    refresh()
+    const unsubSettings = window.mousse.settings.onChanged(refresh)
     // A provider change can only change the model catalogue: read that alone, newest reply kept.
     let catalogRequest = 0
     const unsubProviders = onProviderListingsChanged(() => {
@@ -979,15 +986,28 @@ export function OrchestratorChat() {
         })
         .catch(() => undefined)
     })
-    const unsubSkills = window.mousse.skills.onChanged(() => {
-      void refreshSelection()
-    })
+    const unsubSkills = window.mousse.skills.onChanged(refresh)
     return () => {
       unsubSettings()
       unsubProviders()
       unsubSkills()
     }
   }, [refreshSelection])
+
+  // Settings that could not be read (the service stalled or was being replaced) are read again, each try once the last
+  // has answered, until the profile's default mode is known: until then a chat that runs in it shows none (`modeUnread`).
+  const [settingsRetry, setSettingsRetry] = useState(0)
+  useEffect(() => {
+    if (!profileReady || defaultModeKnown) return
+    let ended = false
+    const timer = setTimeout(() => {
+      void refreshSelection().catch(() => undefined).finally(() => { if (!ended) setSettingsRetry((count) => count + 1) })
+    }, DEFAULT_MODE_RETRY_MS)
+    return () => {
+      ended = true
+      clearTimeout(timer)
+    }
+  }, [profileReady, defaultModeKnown, refreshSelection, settingsRetry])
 
   const buildMessageContent = useCallback((): string => {
     const raw = buildComposerMessageContent(input, attachedFiles, voiceMessages, browserElements, references)
@@ -1308,6 +1328,8 @@ export function OrchestratorChat() {
         // Settings changed since they were shown: the composer shows what the thread really runs now, and for a thread of
         // another computer that computer's default mode and this device's limit too, which the thread may run in.
         const refusedCode = errorCodeOf(error)
+        // A thread without a mode or model of its own runs on the profile's, which may have changed unheard too.
+        if (refusedCode === 'thread_settings_changed') refreshSelection().catch(() => undefined)
         if ((refusedCode === 'thread_settings_changed' || refusedCode === 'first_send_unbound') && targetThreadId) {
           void window.mousse.threads.get(targetThreadId).then((thread) => { if (thread && stillVisible()) useAppStore.getState().upsertThread(thread) }).catch(() => undefined)
           const node = useAppStore.getState().threads.find((thread) => thread.id === targetThreadId)?.node
@@ -1367,7 +1389,7 @@ export function OrchestratorChat() {
         stopWatchingStart?.()
       }
     },
-    [activeThreadId, profileId, chatMode, loading, turnActive, compactionRunning, replyTakesSteer, setLoading, notePromptOnTheWay, queue.threadId, queue.items.length, queue.steer, queue.beginComposerSteer, queue.endComposerSteer]
+    [activeThreadId, profileId, chatMode, loading, turnActive, compactionRunning, replyTakesSteer, setLoading, notePromptOnTheWay, refreshSelection, queue.threadId, queue.items.length, queue.steer, queue.beginComposerSteer, queue.endComposerSteer]
   )
 
   // The thread's subagents, and whether any still runs: the chat then shows "Waiting for subagents…".
@@ -2139,6 +2161,11 @@ export function OrchestratorChat() {
       })
     : undefined
   const shownPermissionMode = remoteMode ? remoteMode.mode : permissionMode
+  // The mode shown would be this profile's default (the thread has no mode of its own; a new chat has none picked or
+  // remembered) and that default is not read yet: the chip shows no mode rather than one the thread may not run in, and
+  // a first message, which runs only in the mode shown, waits for it.
+  const modeUnread = !remoteMode && !defaultModeKnown && (createsThread ? !pickedMode && !remembered?.permissionMode : !activeThread?.permissionMode)
+  const firstSendWaits = modeUnread && (newChat || sendIsFirst(activeThread, turnState?.phase, activeThreadActivity))
   const shownCeiling = remoteMode
     ? remotePermissionCeiling(activeThread?.lineage ? permissionCeiling : undefined, remoteMode.limit, remoteComputer?.name ?? UNKNOWN_COMPUTER_NAME)
     : { ceiling: activeThread?.lineage ? permissionCeiling : undefined }
@@ -2327,7 +2354,7 @@ export function OrchestratorChat() {
               attachedFiles={composerHeld ? NO_ATTACHED_FILES : attachedFiles}
               onAttachedFilesChange={setAttachedFiles}
               attachmentStatus={preparation.statuses}
-              sendBlocked={composerHeld ? null : preparation.blocked}
+              sendBlocked={composerHeld ? null : preparation.blocked ?? (firstSendWaits ? MODE_UNREAD_SEND_TITLE : null)}
               attachRules={attachRules}
               messageLimit={MMS_PROTOCOL_MAX_TEXT_LENGTH}
               voiceMessages={composerHeld ? NO_VOICE_MESSAGES : voiceMessages}
@@ -2388,7 +2415,7 @@ export function OrchestratorChat() {
               </>}
               searchMentions={searchMentions}
               mentionScope={mentionScope}
-              permission={hidePermissionsWhileRunning && firstSendShown ? undefined : { mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}
+              permission={(hidePermissionsWhileRunning && firstSendShown) || modeUnread ? undefined : { mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}
               sendModeThreadId={activeThreadId ?? undefined}
 
             />

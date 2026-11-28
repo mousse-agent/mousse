@@ -383,7 +383,9 @@ it('starts A and B independently and keeps ordinary and Steer sends with A befor
   const { useAppStore } = await import('../../src/renderer/stores/appStore')
   const { createAndSelectThread, selectThread } = await import('../../src/renderer/lib/threadActions')
   const now = new Date().toISOString()
-  const draft = (id: string) => ({ id, name: 'New Chat', createdAt: now, updatedAt: now, order: 0, settingsRevision: 1, worktreeEnabled: false })
+  // Each with a mode of its own: a first message in a chat without one waits for the profile's settings, which this
+  // stub never answers.
+  const draft = (id: string) => ({ id, name: 'New Chat', createdAt: now, updatedAt: now, order: 0, settingsRevision: 1, worktreeEnabled: false, permissionMode: 'accept_edits' as const })
   useAppStore.setState({ threads: [draft('thread-a')], messages: [], loading: false, lastNewThreadProjectId: null })
   const sends: Array<{ threadId: string; request: OrchestratorSendRequest; answer: (response: OrchestratorResponse) => void }> = []
   orchestrator.isTurnActive = vi.fn(async () => false)
