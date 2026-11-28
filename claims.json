@@ -74,19 +74,6 @@
       "expiresAt": "2026-11-27T21:07:36.227Z"
     },
     {
-      "task": "daemon-stall-stacks",
-      "session": "Animatrix-81cb2e",
-      "machine": "Animatrix",
-      "branch": "daemon-stall-stacks",
-      "paths": [
-        "src/cli/daemonStallWatch.ts",
-        "src/cli/commands/service.ts",
-        "tests/daemonStallWatch.test.ts"
-      ],
-      "claimedAt": "2026-11-28T05:47:14.062Z",
-      "expiresAt": "2026-11-28T07:47:14.062Z"
-    },
-    {
       "task": "issue-2004-thread-starter-sync",
       "session": "LAPTOP-HIEROJK7-ae6a89",
       "machine": "LAPTOP-HIEROJK7",
