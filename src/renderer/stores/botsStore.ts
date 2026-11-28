@@ -6,6 +6,8 @@ import type { BotLook } from '../../shared/bots/personal/look'
 import type { BotMemoryEntry } from '../../shared/bots/personal/memory'
 import type { BotModelPick, BotModelSlots } from '../../shared/bots/personal/definition'
 import type { NewBotAccess } from '../../shared/bots/personal/deviceAccess'
+import { withMark, noMarks, type BotMark, type BotMarksByRef } from '../../shared/bots/personal/marks'
+import { DEFAULT_BOT_FILTER, type BotListFilter, type BotStateFilter } from '../lib/botList'
 import { attachmentTooLargeText } from '../../shared/bots/personal/attachments'
 import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment, type BotShownRows, type BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { BotFaceState } from '../components/bots/face/BotFace'
@@ -172,6 +174,27 @@ interface BotsState {
   findMessage(botId: string, messageId: string): Promise<boolean>
   markRead(botId: string): void
   /**
+   * What this computer marks on the bots it lists, by bot ref (`bot-marks.json` on this computer): pinned, hidden, muted,
+   * marked unread. Read once the list shows, and again when any window here changes them.
+   */
+  marks: BotMarksByRef
+  /** The Bots list's filter: kept per profile on this computer, Show hidden for the session only. */
+  filter: BotListFilter
+  /**
+   * The Bots list shows: reads this computer's marks and the saved filter, once a profile. Nothing of it is read at app
+   * open or while the sidebar shows threads.
+   */
+  showList(): void
+  loadMarks(): Promise<void>
+  /** Sets or clears one mark at once; the service's answer then stands, and a refusal puts the marks back. */
+  setMark(botId: string, mark: BotMark, on: boolean): Promise<void>
+  setFilter(change: Partial<BotListFilter>): void
+  /**
+   * "Mark as read" in a bot's menu: clears its marked unread here, and reads its chat to the newest message on the bot's
+   * computer, even when its chat was never opened here. Nothing is sent while that computer is offline.
+   */
+  readAll(botId: string): Promise<void>
+  /**
    * This window shows (or stops showing) the chat of a bot of another computer: its chat streams here while it does
    * (`bots.focus`). Said again when the window's service connection opens again, which let go of it.
    */
@@ -321,6 +344,39 @@ async function remoteList(): Promise<BotSummary[] | undefined> {
   }
 }
 
+const filterKey = (profileId: string) => `mousse-profile-${profileId}-bots-filter`
+const STATE_FILTERS: readonly BotStateFilter[] = ['all', 'needs', 'working']
+
+/** The profile's saved Bots filter on this computer; Show hidden is never saved. */
+function savedFilter(profileId: string): BotListFilter {
+  try {
+    const saved = JSON.parse(globalThis.localStorage?.getItem(filterKey(profileId)) ?? 'null') as Partial<Record<keyof BotListFilter, unknown>> | null
+    return {
+      computer: typeof saved?.computer === 'string' && saved.computer ? saved.computer : 'all',
+      state: STATE_FILTERS.includes(saved?.state as BotStateFilter) ? saved!.state as BotStateFilter : 'all',
+      hideOffline: saved?.hideOffline === true,
+      showHidden: false
+    }
+  } catch {
+    return DEFAULT_BOT_FILTER
+  }
+}
+
+function saveFilter(profileId: string | null, filter: BotListFilter): void {
+  if (!profileId) return
+  const { showHidden: _session, ...kept } = filter
+  try { globalThis.localStorage?.setItem(filterKey(profileId), JSON.stringify(kept)) } catch { /* kept for this session */ }
+}
+
+/**
+ * Marks changes sent and not answered yet, and the newest one's number: only the answer to the newest change stands,
+ * and a list read while one is on its way is not shown over it.
+ */
+let marksInFlight = 0
+/** The Bots list showed in this profile: its marks and saved filter were read then (`showList`), never at app open. */
+let listShown = false
+let marksLatest = 0
+
 const happyTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 const bySeq = (a: BotChatMessage, b: BotChatMessage) => a.seq - b.seq
@@ -411,6 +467,11 @@ export const useBotsStore = create<BotsState>((set, get) => {
       orchestrator?.onThreadMessage?.(({ threadId, message }) => noteThreadMessage(threadId, message, true)),
       orchestrator?.onThreadMessageUpdated?.(({ threadId, message }) => noteThreadMessage(threadId, message, false)),
       events.onChanged?.((event) => {
+        // Only this computer's marks changed (from this window or another here): the list itself did not.
+        if (event?.marks) {
+          if (listShown) void get().loadMarks()
+          return
+        }
         void get().refresh()
         // About, and a chat card that shows one of the bot's automations (`watchBotDetail`), read its runs again.
         if (event?.botId && (get().aboutOpen || detailWatchers.has(event.botId)) && get().details[event.botId]) void get().loadDetail(event.botId)
@@ -437,7 +498,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
   return {
     profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, references: {}, replyingTo: {},
     reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, aboutFocus: null, dialog: null,
-    memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {},
+    memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {}, marks: {}, filter: DEFAULT_BOT_FILTER,
 
     activate(profileId) {
       if (get().profileId === profileId) return
@@ -456,9 +517,74 @@ export const useBotsStore = create<BotsState>((set, get) => {
       clearBotLiveReplies()
       set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, references: {}, replyingTo: {},
         reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, aboutFocus: null, dialog: null,
-    memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {} })
+    memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {}, marks: {}, filter: DEFAULT_BOT_FILTER })
+      marksInFlight = 0
+      listShown = false
       subscribe()
       void get().refresh()
+    },
+
+    showList() {
+      const { profileId } = get()
+      if (listShown || !profileId) return
+      listShown = true
+      set({ filter: savedFilter(profileId) })
+      void get().loadMarks()
+    },
+
+    async loadMarks() {
+      const owner = epoch
+      const asked = marksLatest
+      try {
+        const marks = await bots().marks()
+        // A change made here since, or still on its way, is not undone by what was read before it.
+        if (owner !== epoch || asked !== marksLatest || marksInFlight) return
+        set({ marks })
+      } catch {
+        // An older service keeps no marks; a missed read is read again on the next change.
+      }
+    },
+
+    async setMark(botId, mark, on) {
+      const owner = epoch
+      const id = ++marksLatest
+      const before = get().marks
+      const next = withMark(before[botId], mark, on, new Date().toISOString())
+      set({ marks: noMarks(next) ? withoutKey(before, botId) : { ...before, [botId]: next } })
+      marksInFlight += 1
+      try {
+        const marks = await bots().setMark(botId, mark, on)
+        if (owner === epoch && id === marksLatest) set({ marks })
+      } catch (cause) {
+        // An older service keeps no marks: they last this session. Any other refusal puts them back as they were.
+        if (owner === epoch && id === marksLatest && !missingMethod(cause)) set({ marks: before, error: errorText(cause), errorBotId: null })
+      } finally {
+        if (owner === epoch) marksInFlight = Math.max(0, marksInFlight - 1)
+      }
+    },
+
+    setFilter(change) {
+      const filter = { ...get().filter, ...change }
+      set({ filter })
+      saveFilter(get().profileId, filter)
+    },
+
+    async readAll(botId) {
+      if (get().marks[botId]?.unread) void get().setMark(botId, 'unread', false)
+      const bot = get().bots.find((entry) => entry.id === botId)
+      // Read state lives with the bot: nothing is sent to a computer that is offline.
+      if (!bot?.unread || bot.lives?.offline) return
+      const owner = epoch
+      try {
+        const seq = cacheOf(botId).messages.at(-1)?.seq ?? (await bots().messages(botId, { limit: 1 })).messages.at(-1)?.seq
+        if (seq === undefined || owner !== epoch) return
+        readSeq.set(botId, Math.max(readSeq.get(botId) ?? 0, seq))
+        set((state) => ({ bots: state.bots.map((entry) => (entry.id === botId && entry.unread ? { ...entry, unread: 0 } : entry)) }))
+        await bots().markRead(botId, seq)
+      } catch (cause) {
+        readSeq.delete(botId)
+        if (owner === epoch) set({ error: errorText(cause), errorBotId: null })
+      }
     },
 
     async refresh() {
@@ -487,9 +613,10 @@ export const useBotsStore = create<BotsState>((set, get) => {
             set((state) => {
               // A list that brought nothing new keeps the bots held, so the open chat does not render again.
               const bots = keepEqualById(state.bots, list)
+              // Its marks go with it (the service drops its own copy of them too).
               const dropped = gone.length ? {
                 chats: withoutKeys(state.chats, gone), chatLoad: withoutKeys(state.chatLoad, gone), drafts: withoutKeys(state.drafts, gone),
-                notes: withoutKeys(state.notes, gone), replyingTo: withoutKeys(state.replyingTo, gone)
+                notes: withoutKeys(state.notes, gone), replyingTo: withoutKeys(state.replyingTo, gone), marks: withoutKeys(state.marks, gone)
               } : {}
               // A live chip lasts while its bot works.
               const working = Object.entries(state.live).filter(([id]) => list.some((bot) => bot.id === id && bot.state === 'working'))

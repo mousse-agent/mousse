@@ -9,6 +9,7 @@ import { PRIVATE_BOTS_SUBJECT } from '../remote/privateStreams'
 import type { ComputerRef } from './computerErrors'
 import { PASSING_END_CODES, RemoteBotChats, askOwner, ownerSaid } from './RemoteBotChats'
 import type { SqliteRemoteBots } from './remoteBotStore'
+import type { BotMarksStore } from '../../bots/marks/BotMarksStore'
 
 type Json = Record<string, unknown>
 const isRecord = (value: unknown): value is Json => !!value && typeof value === 'object' && !Array.isArray(value)
@@ -88,6 +89,8 @@ export interface RemoteBotRegistryOptions {
    */
   client(node: NodeId): Pick<BridgeClient, 'rpc'>
   store: SqliteRemoteBots
+  /** What this computer marks on bots (`bot-marks.json`): a bot dropped here takes its marks with it. */
+  marks?: Pick<BotMarksStore, 'dropBots' | 'dropComputer'>
   /**
    * The other computers of the user whose bots are listed (`PeerDirectory.botComputers`): those away included, a
    * pairing that no longer accepts this one left out. `undefined` when they can't be known now (the engine is still
@@ -339,6 +342,9 @@ export class RemoteBotRegistry {
       this.safely('drop the copy of a computer’s bots', () => {
         if (all) this.options.store.dropComputer(node)
         for (const bot of lost) this.options.store.dropChat(node, bot)
+        // What this computer marked on them goes too (pin, hide, mute, marked unread).
+        if (all) this.options.marks?.dropComputer(node)
+        else if (lost.length) this.options.marks?.dropBots(node, lost)
         return true
       }) === true
     // The Bridge's part of a drop still under way is not asked twice; it is tried again once it ends.

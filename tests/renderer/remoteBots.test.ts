@@ -150,12 +150,11 @@ describe('one Bots list', () => {
     expect(row('Rester').querySelector('path.bot-face-z-still')).toBeNull()
   })
 
-  it('opens no menu on a right-click of another computer\'s bot', async () => {
+  it('offers only this computer\'s marks and the checklist in the menu of another computer\'s bot, none of its setup', async () => {
     await show([local, remote()])
     await act(async () => { row('Inbox helper').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })) })
-    expect(document.querySelector('[role="menu"]')).toBeNull()
-    await act(async () => { row('Desk helper').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })) })
-    expect(document.querySelector('[role="menu"]')).not.toBeNull()
+    const items = [...document.querySelectorAll('[role="menu"][aria-label="Inbox helper menu"] [role="menuitem"]')].map((item) => item.textContent)
+    expect(items).toEqual(['Pin', 'Mark as unread', 'Mute notifications', 'Hide', 'Hide checklist'])
   })
 })
 

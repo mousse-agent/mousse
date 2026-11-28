@@ -161,6 +161,7 @@ import type { RoutedTerminalsPort } from './protocol/routedTerminalsPort'
 import type { EditorAsksPort } from './protocol/editorAsksPort'
 import type { BotReachPort } from './protocol/botReachPort'
 import { BotDeviceAccessStore } from './bots/definitions/BotDeviceAccessStore'
+import { BotMarksStore } from './bots/marks/BotMarksStore'
 import type { RemoteListsPort } from './protocol/remoteListsPort'
 import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
@@ -455,6 +456,8 @@ export class MmsProfileServices {
   readonly botBrowsers: BotBrowsers
   /** Which devices reach each bot (About → Devices), in `<profile>/bots/device-access.json`. */
   readonly botDeviceAccess: BotDeviceAccessStore
+  /** Pin, hide, mute and marked unread on every bot this computer lists, in `<profile>/bots/bot-marks.json`. */
+  readonly botMarks: BotMarksStore
   /** Bots' schedules: automations whose Who is the bot, in the shared scheduled-job store. */
   readonly botSchedules: BotScheduleBook
   private readonly botStore: BotStore | null
@@ -832,6 +835,8 @@ export class MmsProfileServices {
     })
     this.botBrowsers = botBrowsers
     this.botDeviceAccess = new BotDeviceAccessStore(join(homeDir, 'bots'))
+    // Read on first use (the Bots list asks once it shows), never here.
+    this.botMarks = new BotMarksStore(join(homeDir, 'bots'))
     this.platform.onDispose(() => botBrowsers.dispose())
     // Looked up now, so a bot's Runs on has this computer's name when it is first opened.
     computerNameIfKnown()

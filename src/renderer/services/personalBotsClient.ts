@@ -5,6 +5,7 @@ import type { BotModelPick, BotModelSlots, BotSchedule } from '../../shared/bots
 import type { BotChatAttachment, BotReplyEvent, BotsElsewhereApi, BotsElsewhereMethod, BotsPersonalV2EventData, BotsPersonalV2Method, BotsPersonalV2Params, BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { PlatformRequestApi } from '../../shared/platform'
 import type { BotDeviceAccess, BotDevicesView, NewBotAccess } from '../../shared/bots/personal/deviceAccess'
+import type { BotMark, BotMarksApi, BotMarksByRef } from '../../shared/bots/personal/marks'
 
 /**
  * The Bot UI's methods (`bots.personal.v2`, Bot Phase 1 §5.11) over the host's profile-bound
@@ -19,6 +20,10 @@ export interface PersonalBotsClient {
   remoteList(): Promise<BotSummary[]>
   /** This window shows (or no longer shows) the chat of a bot of another computer: its chat streams here while it does. */
   focus(botId: string, focused: boolean): Promise<void>
+  /** What this computer marks on the bots it lists (pin, hide, mute, marked unread), by bot ref. An older service lacks it. */
+  marks(): Promise<BotMarksByRef>
+  /** Sets or clears one mark on one bot, on this computer only; every bot's marks as they are now. */
+  setMark(botId: string, mark: BotMark, on: boolean): Promise<BotMarksByRef>
   /**
    * `slots`: the rows picked on New bot (#673), all four, sent only to a service whose choices carry `providers`;
    * `model`: one model on every row (the single picker of an older service). An older service refuses the keys.
@@ -102,6 +107,8 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     list: async () => (await call('bots.personal.list', {})).bots,
     remoteList: async () => (await elsewhere('bots.remote.list', {})).bots,
     focus: async (botId, focused) => { await elsewhere('bots.focus', { botId, focused }) },
+    marks: async () => (await transport.request<BotMarksApi['bots.marks.list']['result']>('bots.marks.list', {})).marks,
+    setMark: async (botId, mark, on) => (await transport.request<BotMarksApi['bots.marks.set']['result']>('bots.marks.set', { botId, mark, on })).marks,
     create: async ({ look, name, description, clientRequestId, model, slots, image, access }) =>
       (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}), ...(access ? { access } : {}) })).bot,
     get: (botId) => call('bots.get', { botId }),
@@ -152,7 +159,8 @@ export interface PersonalBotsEvents {
    * `reread`: the window's service connection was opened again, so chats it holds may have missed rows; with `botId`,
    * that one bot's chat stream opened again (a bot of another computer). `remote`: the other computers' bots changed.
    */
-  onChanged?(cb: (event: { botId?: string; reread?: boolean; remote?: boolean }) => void): () => void
+  /** `marks`: only what this computer marks on bots changed (`bots.marks.set`, from any of its windows). */
+  onChanged?(cb: (event: { botId?: string; reread?: boolean; remote?: boolean; marks?: boolean }) => void): () => void
   /** A bot of another computer writing its reply, while this window shows its chat. */
   onReply?(cb: (event: BotReplyEvent) => void): () => void
   onMessage?(cb: (event: BotsPersonalV2EventData['bots.message']) => void): () => void

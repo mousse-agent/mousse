@@ -175,12 +175,12 @@ describe('the Bots section', () => {
     const rightClick = async () => { await act(async () => { button('Message Inbox helper')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 60 })) }) }
     try {
       await rightClick()
-      expect(menuItems()).toEqual(['Hide checklist'])
+      expect(menuItems()).toEqual(['Pin', 'Mark as unread', 'Mute notifications', 'Hide', 'Hide checklist', 'About this bot', 'Rename', 'Change look', 'Pause', 'Delete bot'])
       await click([...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === 'Hide checklist'))
       expect(menuItems()).toEqual([])
       expect(JSON.parse(localStorage.getItem('mousse-bot-checklist-hidden')!)).toEqual(['a'])
       await rightClick()
-      expect(menuItems()).toEqual(['Show checklist'])
+      expect(menuItems()).toContain('Show checklist')
     } finally {
       setBotChecklistHidden('a', false)
     }

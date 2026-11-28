@@ -26,10 +26,10 @@ export interface ComputerOption extends FilterOption {
   local?: boolean
 }
 
-/** Three lines, shorter each: the filter button's glyph. */
-function FilterLines() {
+/** Three lines, shorter each: the filter button's glyph (the Bots list's filter uses it too). */
+export function FilterLines({ size = 16 }: { size?: number }) {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
       <path d="M4 7h16M7 12h10M10 17h4" />
     </svg>
   )

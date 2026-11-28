@@ -20,6 +20,26 @@
 /* A bot of another computer: the computer's icon beside its name; faded while that computer is offline. */
 .bot-row-computer { flex: none; align-self: center; color: var(--text-secondary); }
 .bot-row[data-away] > * { opacity: 0.55; }
+/* Marks kept on this computer: pinned, muted, and hidden (shown by Filter → Show hidden, faded). */
+.bot-row-mark { flex: none; align-self: center; display: inline-flex; color: var(--text-secondary); }
+.bot-row[data-hidden] > * { opacity: 0.55; }
+/* Marked unread with no count: a dot where the count goes. */
+.bot-row-unread.bot-row-unread-dot { min-width: 8px; width: 8px; height: 8px; padding: 0; border-radius: 50%; }
+/* A row's pin, over its time while the pointer is on the row or the keyboard is in it, as thread rows have it. */
+.bot-hover-anchor { position: relative; }
+.bot-row-actions { position: absolute; top: 4px; right: 5px; display: inline-flex; opacity: 0; pointer-events: none; transition: opacity 0.15s; }
+.bot-hover-anchor:hover .bot-row-actions,
+.bot-hover-anchor:has(:focus-visible) .bot-row-actions { opacity: 1; pointer-events: auto; }
+.bot-hover-anchor:hover .bot-row-time,
+.bot-hover-anchor:has(:focus-visible) .bot-row-time { visibility: hidden; }
+.bot-row-action { display: inline-flex; align-items: center; justify-content: center; width: 23px; height: 23px; border-radius: 4px; color: var(--text-secondary); transition: background 0.15s, color 0.15s; }
+.bot-row-action:hover, .bot-row-action:focus-visible { background: rgba(var(--accent-rgb), 0.18); color: var(--text-primary); }
+.bot-row-action.active { color: var(--text-primary); }
+@media (prefers-reduced-motion: reduce) { .bot-row-actions { transition: none; } }
+/* The Bots filter: a dot on its button while it narrows the list or shows hidden bots. */
+.chat-section-heading button.bots-filter-button { position: relative; }
+.chat-section-heading button.bots-filter-button[aria-expanded='true'] { background: rgba(var(--accent-rgb), .12); color: var(--text-primary); }
+.bots-filter-button[data-set]::after { content: ''; position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
 /* Header: the face with its activity sticker, the name with its presence under it (what it does is in About); one menu. */
 .bot-header-about { position: relative; flex: none; display: grid; place-items: center; color: inherit; border-radius: 9px; }

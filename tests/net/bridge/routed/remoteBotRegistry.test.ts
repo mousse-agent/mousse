@@ -12,6 +12,7 @@ import { RemoteBotRegistry } from '../../../../src/mms/bridge/routed/RemoteBotRe
 import { botChatSubject } from '../../../../src/mms/bridge/routed/RemoteBotChats'
 import { REMOTE_BOT_COPY_LIMITS, SqliteRemoteBots, type RemoteBotCopyLimits } from '../../../../src/mms/bridge/routed/remoteBotStore'
 import { PRIVATE_BOTS_SUBJECT } from '../../../../src/mms/bridge/remote/privateStreams'
+import { BotMarksStore } from '../../../../src/mms/bots/marks/BotMarksStore'
 import { NetError, newId, type NodeId } from '../../../../src/shared/net'
 
 const cleanups: Array<() => void> = []
@@ -66,6 +67,8 @@ function harness(options: { limits?: Partial<RemoteBotCopyLimits> } = {}) {
     dropCopy: vi.fn(async (_ref: { nodeId: NodeId; entityId: string }, _options: unknown) => true)
   }
   const stores: SqliteRemoteBots[] = []
+  /** What this computer marks on bots: a bot lost here takes its marks with it. */
+  const marks = new BotMarksStore(join(dir, 'bots'))
   const open = (): RemoteBotRegistry => {
     const store = new SqliteRemoteBots(path, Date, options.limits)
     stores.push(store)
@@ -77,7 +80,8 @@ function harness(options: { limits?: Partial<RemoteBotCopyLimits> } = {}) {
       online: (each) => online.has(each),
       enabled: () => bridge.on,
       // Long enough that a test sees what is written at once, not on the timer.
-      saveSettleMs: 60_000
+      saveSettleMs: 60_000,
+      marks
     })
     cleanups.push(() => registry.close())
     return registry
@@ -117,7 +121,7 @@ function harness(options: { limits?: Partial<RemoteBotCopyLimits> } = {}) {
   }
   /** The Bridge's copies of streams dropped so far, by subject. */
   const droppedCopies = () => h.hub.dropCopy.mock.calls.map(([ref]) => ref.entityId)
-  const h = { node, roster, online, bridge, hub, client, refuse, open, disk, feed, chat, listed, away, back, path, droppedCopies, store: () => stores.at(-1)! }
+  const h = { node, roster, online, bridge, hub, client, refuse, open, disk, feed, chat, listed, away, back, path, droppedCopies, marks, store: () => stores.at(-1)! }
   return h
 }
 
@@ -206,10 +210,15 @@ describe('losing bots of another computer', () => {
       await h.listed(registry)
       await h.back(registry)
       expect(h.disk().chats).toHaveLength(1)
+      // Marks this computer keeps: on both bots, on another computer's bot and on one of this computer's own.
+      const elsewhere = `${newId('node')}:other-bot`
+      for (const ref of [`${h.node}:${KEEPER}`, `${h.node}:${WRITER}`, elsewhere, 'own-bot']) h.marks.set(ref, 'muted', true)
 
       await loss.lose(h, registry)
       const kept = [KEEPER, WRITER].filter((id) => !loss.lost.includes(id))
       await vi.waitFor(() => expect(registry.rows().map((bot) => bot.botId)).toEqual(kept))
+      // The lost bots' marks go with them, on disk too; every other bot keeps its own.
+      expect(Object.keys(new BotMarksStore(join(h.path, '..')).list()).sort()).toEqual([...kept.map((id) => `${h.node}:${id}`), elsewhere, 'own-bot'].sort())
       expect(registry.chats.messages(h.node, KEEPER)).toEqual([])
       // On disk, at once: what a restart would read.
       const disk = h.disk()
