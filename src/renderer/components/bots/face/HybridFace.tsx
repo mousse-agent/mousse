@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { botEyeColourOf, botEyesOf, botKindOf, type BotEyes, type KnownBotLook } from '../../../../shared/bots/personal/look'
 import type { BotFaceState } from './BotFace'
+import { BotFaceSleepMark } from './BotFaceSleepMark'
 import { EYELESS, FEATURES_ONLY, FRONT_ONLY, hop } from './facePoses'
 import { sharedFaceRenderer, type FaceSpec } from './faceRenderer'
 import { EYE_BOX, eyeColour, eyeGeometry, eyeShapeOf, lidClip, mouseArcPath, mouseEyePath, pointerLook, type EyeGeometry } from './hybridEyes'
@@ -25,6 +26,8 @@ export interface HybridFaceProps {
   className?: string
   label?: string
   resting?: boolean
+  /** The bot's computer is away: its moon instead of the z (`BotFaceSleepMark`). */
+  away?: boolean
   /** The eyes glance towards the pointer, anywhere in the window, instead of wandering while idle. */
   followPointer?: boolean
 }
@@ -64,7 +67,7 @@ function layerOf(key: string, look: KnownBotLook, state: BotFaceState, size: num
   return { id: nextLayer++, key, spec: { look: body, state, size, view, still: true }, ...(front ? { front } : {}), ...(features ? { features } : {}) }
 }
 
-export function HybridFace({ look, state, size, view, className, label, resting, followPointer }: HybridFaceProps) {
+export function HybridFace({ look, state, size, view, className, label, resting, away, followPointer }: HybridFaceProps) {
   const key = `${look.colour}|${look.accessory}|${botKindOf(look)}|${state}|${view}|${size}`
   const [layers, setLayers] = useState<Layer[]>(() => [layerOf(key, look, state, size, view)])
   /** The newest layer whose picture is on its canvas. */
@@ -248,11 +251,7 @@ export function HybridFace({ look, state, size, view, className, label, resting,
           ) : null
         )}
       </span>
-      {state === 'paused' && (
-        <span className="bot-face-z" style={{ fontSize: Math.max(8, Math.round(size * 0.18)) }} aria-hidden>
-          z
-        </span>
-      )}
+      {state === 'paused' && <BotFaceSleepMark size={size} away={away} />}
     </span>
   )
 }

@@ -23,6 +23,8 @@ const fail = (botId: string, text: string) => store().addNote(botId, text, true)
  * to the bot as before.
  */
 export async function submitBotChat(botId: string): Promise<void> {
+  // The commands set a bot up, which a bot of another computer is on its own computer: there, `/` is just words.
+  if (store().bots.find((entry) => entry.id === botId)?.lives) return store().send(botId)
   const command = parseBotCommand(store().drafts[botId] ?? '')
   if (!command) return store().send(botId)
   store().setDraft(botId, '')

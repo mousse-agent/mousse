@@ -337,3 +337,30 @@ export interface BotsPersonalV2EventData {
    */
   'bots.activity': { botId: string; activationId: string; chip: BotChip | null; status?: string }
 }
+
+/**
+ * The window's view of the bots of the owner's other computers, served by the viewing computer alone and never offered
+ * to another device: `bots.remote.list`, those bots as this computer lists them (from memory and its copy on disk, never
+ * waiting on another computer), and `bots.focus`, a window keeps a bot's chat in view (its chat stream is open while one
+ * does). Calls about one of those bots are the usual bot methods with its qualified id, routed to its computer.
+ */
+export const BOTS_ELSEWHERE_METHODS = ['bots.remote.list', 'bots.focus'] as const
+export type BotsElsewhereMethod = (typeof BOTS_ELSEWHERE_METHODS)[number]
+export interface BotsElsewhereApi {
+  'bots.remote.list': { params: Record<string, never>; result: { bots: BotSummary[] } }
+  'bots.focus': { params: { botId: string; focused: boolean }; result: { routed: boolean; focused: boolean } }
+}
+
+/**
+ * A bot of another computer writing its chat turn's reply, while a window shows its chat (`bots.reply`): the reply's
+ * text so far (`text`, assistant rows only), or a new message or step in its home thread (`added`) that ends the reply
+ * shown. Display only, never stored; the posted message replaces it.
+ */
+export interface BotReplyEvent {
+  botId: string
+  messageId: string
+  role: string
+  kind?: string
+  text?: string
+  added: boolean
+}

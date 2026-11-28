@@ -62,6 +62,7 @@ import { useBotChatFind } from './useBotChatFind'
 import { useBotCutReplies, useBotLiveReply, useHasBotLiveReply } from '../../stores/botLiveReplies'
 import { useFlowingText } from '../../chat/components/agent-elements/reply-flow'
 import { FindInThreadBar } from '../../chat/components/agent-elements/find/FindInThreadBar'
+import { ComputerBadgeView } from '../ComputerBadge'
 
 const EMPTY: BotChatMessage[] = []
 const NO_FILES: AttachedFile[] = []
@@ -303,7 +304,8 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
 /** A bot message uses only the bot's id, name and look, so a change of its state does not render it again. */
 const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message === b.message && a.asked === b.asked && a.onAction === b.onAction && a.browser === b.browser &&
   a.quote === b.quote && a.starts === b.starts && a.time === b.time && a.onReply === b.onReply && a.onApplet === b.onApplet && a.settled === b.settled && a.onRetry === b.onRetry &&
-  a.bot.id === b.bot.id && a.bot.name === b.bot.name && a.live === b.live && a.follow === b.follow
+  a.bot.id === b.bot.id && a.bot.name === b.bot.name && a.live === b.live && a.follow === b.follow &&
+  Boolean(a.bot.lives) === Boolean(b.bot.lives) && Boolean(a.bot.lives?.offline) === Boolean(b.bot.lives?.offline)
 
 /**
  * `browser`: the live preview of the bot's browser, on the reply of the last run that used it. `quote`: show the
@@ -378,12 +380,19 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
   if (live) wasLive.current = true
   // A question's answers are buttons under it, so its words stop where their plain copy starts; a service whose
   // questions can't be answered here keeps that copy, and the owner answers with Reply.
-  const canSnooze = useBotsStore((s) => !s.snoozeMissing)
-  const canAnswer = useBotsStore((s) => !s.questionsMissing)
+  // A bot of another computer: its chat here answers its questions and reminders, nothing it set up there; while its
+  // computer is away its copy is read only.
+  const remote = Boolean(bot.lives)
+  const away = Boolean(bot.lives?.offline)
+  const canSnooze = useBotsStore((s) => !s.snoozeMissing) && !away
+  const canAnswer = useBotsStore((s) => !s.questionsMissing) && !away
   const question = canAnswer ? row.question : undefined
   // Its cards are drawn under its words, so those stop at their plain copy too; the pictures a gallery shows are its
   // files as well (for other devices), which the gallery shows instead of the picture strip above the words.
-  const cards = row.cards?.length ? row.cards : undefined
+  // An automation or watcher a bot of another computer set up lives there: its row's buttons would act on this
+  // computer's, so only the cards that just show something are drawn.
+  const kept = remote ? row.cards?.filter((card) => card.type !== 'automation' && card.type !== 'watcher') : row.cards
+  const cards = kept?.length ? kept : undefined
   const message = useMemo(() => {
     if ((!question && !cards) || row.plainFrom === undefined) return row
     const inGallery = galleryPaths(cards)
@@ -423,8 +432,8 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
     setReacted(true)
     bubble.current?.focus({ preventScroll: true })
   }
-  // A service without reactions (an older one) shows no bar.
-  const canReact = useBotsStore((s) => !s.reactionsMissing)
+  // A service without reactions (an older one) shows no bar; nor does a bot of another computer, which takes none from here.
+  const canReact = useBotsStore((s) => !s.reactionsMissing) && !remote
   // While a picture's menu is open, the tools beside the bubble step aside for it.
   const [menuOpen, setMenuOpen] = useState(false)
   // The tools hang off the bubble's right edge: beside a wide bubble they move left, inside the transcript.
@@ -437,18 +446,18 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
       {from && <span className="bot-from-name">{senderName(from, sender)}</span>}
       {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
       <BotReplyMedia images={shownImages} onMenuOpen={setMenuOpen} />
-      {live ? <BotTurnBody botId={bot.id} botName={bot.name} live={live} onSize={resize} follow={follow} /> : message.action ? <BotActionCard card={message.action} botId={bot.id} botName={bot.name} messageId={message.id} /> : message.actionSentAt ? <p className="bot-question-settled" role="note" data-find-text data-message-id={message.id} data-part-index="0">Sent · <time dateTime={message.actionSentAt}>{botGroupTime(message.actionSentAt)}</time></p> : words && <div className="bot-find-text" data-find-text data-message-id={message.id} data-part-index="0"><BotMarkdown text={words} className="bot-markdown" /></div>}
+      {live ? <BotTurnBody botId={bot.id} botName={bot.name} live={live} onSize={resize} follow={follow} /> : message.action ? <BotActionCard card={message.action} botId={bot.id} botName={bot.name} messageId={message.id} readOnly={away} /> : message.actionSentAt ? <p className="bot-question-settled" role="note" data-find-text data-message-id={message.id} data-part-index="0">Sent · <time dateTime={message.actionSentAt}>{botGroupTime(message.actionSentAt)}</time></p> : words && <div className="bot-find-text" data-find-text data-message-id={message.id} data-part-index="0"><BotMarkdown text={words} className="bot-markdown" /></div>}
       {cards && <BotCards cards={cards} botId={bot.id} />}
       {lostChips.length > 0 && <p className="bot-picture-chips">{lostChips.map((image) => <BotPathChip key={image.key} path={image.path!} />)}</p>}
       {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
       {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
-      {message.error && <BotErrorLine error={message.error} onAction={onAction} settled={settled} onRetry={onRetry} />}
+      {message.error && <BotErrorLine error={remote ? { ...message.error, action: undefined } : message.error} onAction={onAction} settled={settled} onRetry={away ? undefined : onRetry} />}
       {stepsOpen && <BotSteps chips={steps} />}
       {(steps.length > 0 || time && (!message.action || message.action.status === 'open')) && <div className="bot-bubble-foot">
         {steps.length > 0 && <WorkedToggle ms={ms} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
         {time && (!message.action || message.action.status === 'open') && <BubbleTime message={message} />}
       </div>}
-      {message.reaction && <BotReactionBadge emoji={message.reaction} onRemove={() => react(null)} />}
+      {message.reaction && !remote && <BotReactionBadge emoji={message.reaction} onRemove={() => react(null)} />}
     </div>
     {/* As beside a thread's reply: read it aloud, copy it as written, reply to it. Anchored to the bubble's lower
         right edge and taking no width of its own, so the bubble is as wide with them as without. */}
@@ -458,7 +467,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
         {(from ? from.message : message.text) && <ReadAloudButton speechKey={`bot:${message.id}`} markdown={from ? from.message : message.text} />}
         {/* Copy takes its cards too, as text. */}
         {(from ? from.message : cards ? row.text : message.text) && <CopyButton text={from ? from.message : cards ? row.text : message.text} />}
-        <ReplyButton onReply={() => onReply(message)} />
+        {!away && <ReplyButton onReply={() => onReply(message)} />}
       </span>
     </span>}
   </div>
@@ -467,11 +476,12 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
     onMouseEnter={clampTools} onFocus={clampTools} onMouseLeave={reacted ? () => setReacted(false) : undefined}>
     {/* As in a group chat: the sender's face at the foot of its bubble. */}
     {from ? <div className="bot-from-row"><BotFace look={sender?.look ?? DEFAULT_BOT_LOOK} state="idle" size={28} view="head" still className="bot-from-face" />{line}</div> : line}
-    {saved && <button type="button" className="bot-memory-tag" title="Open it in Memory" onClick={() => store().openMemory(bot.id, saved.title?.startsWith('Put away:\n') ? saved.highlight?.replace(/ · put away \d+$/, '') : saved.highlight)}>
+    {saved && !remote && <button type="button" className="bot-memory-tag" title="Open it in Memory" onClick={() => store().openMemory(bot.id, saved.title?.startsWith('Put away:\n') ? saved.highlight?.replace(/ · put away \d+$/, '') : saved.highlight)}>
       <Brain size={12} aria-hidden />Saved to memory
     </button>}
-    {!!message.applets?.length && <BotMessageApplets botId={bot.id} applets={message.applets} onOpen={onApplet} message={message} onReply={onReply} />}
-    {openAsk && <BotAskReplies ask={openAsk}
+    {!!message.applets?.length && !remote && <BotMessageApplets botId={bot.id} applets={message.applets} onOpen={onApplet} message={message} onReply={onReply} />}
+    {/* What a bot may do is granted on its own computer. */}
+    {openAsk && !remote && <BotAskReplies ask={openAsk}
       onAnswer={async (answer) => {
         await store().answer(bot.id, openAsk.askId, answer)
         // The service refused it ("Allow this on the computer."): Allow stays off, with why.
@@ -869,16 +879,20 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // Another bot's error stays with that bot's chat.
   const error = useBotsStore((s) => (s.errorBotId === bot.id ? s.error : null))
   const store = useBotsStore.getState
+  // A bot of another computer (`lives`): text chat, its questions, Stop and read state; what it is set up with, files,
+  // applets and its browser stay on its computer. While that computer is offline its chat is the copy kept here, read only.
+  const remote = Boolean(bot.lives)
+  const unreachable = Boolean(bot.lives?.offline)
   const transcript = useRef<HTMLDivElement>(null)
   useReclampOpenTools(transcript)
   const messages = chat?.messages ?? EMPTY
   // The chat's own turn: its typing bubble and Stop. Work beside it is in the header's list, and the chat stays free.
   // A service from before work (no `chat`, `work` or `threads` in its summary) says only that the bot works: that is
-  // the chat's. A bot that only manages threads it started is not typing.
+  // the chat's. A bot that only manages threads it started is not typing. Nothing is typing on a computer that is away.
   const legacy = bot.chat === undefined && bot.work === undefined && bot.threads === undefined
-  const working = Boolean(bot.chat) || (legacy && bot.state === 'working')
+  const working = !unreachable && (Boolean(bot.chat) || (legacy && bot.state === 'working'))
   // The chat's turn waits for the internet: no dots, and it says so.
-  const offline = bot.chat ? Boolean(bot.chat.offline) : working && bot.waiting === 'internet'
+  const offline = !unreachable && (bot.chat ? Boolean(bot.chat.offline) : working && bot.waiting === 'internet')
   const typing = working && !offline
   // The chat's turn (a service from before work: the bot's working activation), and what it said it is doing now.
   const turn = useBotsStore((s) => bot.chat?.activationId ?? (legacy ? s.live[bot.id]?.activationId : undefined))
@@ -931,7 +945,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const byId = useMemo(() => new Map(messages.map((message) => [message.id, message])), [messages])
   // The bot's own browser: the reply of the run whose tab it shows has a live preview, and Expand opens it in the side
   // panel. Each watches the browser's pictures only while it is on screen.
-  const browser = useBotBrowser(bot.id)
+  const browser = useBotBrowser(remote ? '' : bot.id)
   // The side panel docked beside the chat pane: the browser, the bot's files, Agent settings (BotSidePanel.tsx).
   const side = useBotSidePanel(bot.id)
   const filesFolder = useMemo(() => botFilesFolder(messages, bot.id), [messages, bot.id])
@@ -952,10 +966,16 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }, fileFailed), [fileFailed, showSide])
   const browserRun = browser?.activationId ?? browser?.activations.at(-1)
   const previewOn = browserRun ? messages.filter((message) => message.author === 'bot' && message.activationId === browserRun).at(-1)?.id : undefined
-  const preview = browser && browserRun ? <BotBrowserPreview bot={bot} view={browser} /> : null
+  const preview = !remote && browser && browserRun ? <BotBrowserPreview bot={bot} view={browser} /> : null
   // Work the owner's answer set going again: it starts no chat turn, so the chat says the work carries on until it posts.
   const resumed = useMemo(() => resumedWork(messages, bot.work), [messages, bot.work])
 
+  // A bot of another computer: its chat streams to this window while it shows it.
+  useEffect(() => {
+    if (!remote) return
+    store().focusRemote(bot.id, true)
+    return () => store().focusRemote(bot.id, false)
+  }, [bot.id, remote, store])
   // This window shows the bot's chat: its replies only sound while it is on screen.
   useEffect(() => {
     void window.mousse.app.setViewedBot?.(bot.id)?.catch(() => undefined)
@@ -972,7 +992,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
       window.removeEventListener('focus', readVisible)
       document.removeEventListener('visibilitychange', readVisible)
     }
-  }, [bot.id, lastSeq, store])
+    // A computer back from offline is told what was read while it was away.
+  }, [bot.id, lastSeq, store, unreachable])
 
   // New messages keep the end in view; a page loaded above keeps the reader where they were. A message the owner sends
   // from here always goes to the end, as in a messenger.
@@ -1105,7 +1126,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // `/` commands: the list follows what is typed; after `/model` it offers the bot's slots and models, read once.
   const modelInfo = useBotsStore((s) => s.modelInfo[bot.id])
   const wantsModels = /^\/model\s/i.test(draft)
-  useEffect(() => { if (wantsModels && !modelInfo) void store().loadModelInfo(bot.id) }, [wantsModels, modelInfo, bot.id, store])
+  useEffect(() => { if (wantsModels && !modelInfo && !remote) void store().loadModelInfo(bot.id) }, [wantsModels, modelInfo, bot.id, store, remote])
   const commandSuggestions = useCallback((input: string) => botCommandSuggestions(input, {
     ...(modelInfo?.custom ? { custom: modelInfo.custom } : {}),
     slotModels: slotModels(modelInfo),
@@ -1119,20 +1140,28 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     {/* The bot's colour tints the quotes of its messages. */}
     <section data-mousse="chat" className={`chat-conversation bot-conversation${typing ? ' is-typing' : ''}`} data-applet-conversation style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
       <header data-mousse="chat-header" className="chat-conversation-header">
-        <button type="button" className="bot-header-about" aria-label={`About ${bot.name}`} onClick={toggleAbout}>
-          <BotFace look={bot.look} state={botFaceState(bot, happy)} size={32} view="head" />
-          <BotActivitySticker bot={bot} typing={typing} offline={offline} />
-        </button>
+        {/* A bot of another computer has no About here: it is set up on its own computer. */}
+        {remote
+          ? <span className="bot-header-about">
+            <BotFace look={bot.look} state={botFaceState(bot, happy)} away={unreachable} size={32} view="head" />
+            {!unreachable && <BotActivitySticker bot={bot} typing={typing} offline={offline} />}
+          </span>
+          : <button type="button" className="bot-header-about" aria-label={`About ${bot.name}`} onClick={toggleAbout}>
+            <BotFace look={bot.look} state={botFaceState(bot, happy)} size={32} view="head" />
+            <BotActivitySticker bot={bot} typing={typing} offline={offline} />
+          </button>}
         <div className="bot-header-who">
-          <button type="button" className="bot-header-name" tabIndex={-1} aria-hidden onClick={toggleAbout}><h1>{bot.name}</h1></button>
-          <BotPresenceLine bot={bot} typing={typing} offline={offline} />
+          {remote
+            ? <span className="bot-header-name"><h1>{bot.name}</h1>{bot.lives && <ComputerBadgeView name={bot.lives.name} state={unreachable ? 'offline' : 'online'} of="bot" className="bot-header-computer" />}</span>
+            : <button type="button" className="bot-header-name" tabIndex={-1} aria-hidden onClick={toggleAbout}><h1>{bot.name}</h1></button>}
+          {unreachable ? <span className="bot-presence" data-kind="offline" role="status">Offline</span> : <BotPresenceLine bot={bot} typing={typing} offline={offline} />}
         </div>
         <BotTasksButton botId={bot.id} tasks={bot.tasks} />
         {/* The provider it talks on, ringed by the usage left, and its model rows. */}
-        <BotModelButton bot={bot} />
-        <button type="button" className={`bot-header-panel${side.open ? ' is-open' : ''}`} aria-label={side.open ? 'Hide side panel' : 'Show side panel'} title={side.open ? 'Hide side panel' : 'Show side panel'} aria-expanded={side.open} onClick={side.toggle}>
+        {!remote && <BotModelButton bot={bot} />}
+        {!remote && <button type="button" className={`bot-header-panel${side.open ? ' is-open' : ''}`} aria-label={side.open ? 'Hide side panel' : 'Show side panel'} title={side.open ? 'Hide side panel' : 'Show side panel'} aria-expanded={side.open} onClick={side.toggle}>
           {side.open ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
-        </button>
+        </button>}
         {/* From the menu, whose item goes as it closes: Escape then gives the focus to the composer. */}
         <BotMenu bot={bot} {...(find.openFind ? { onFind: () => { composerField()?.focus({ preventScroll: true }); find.openFind!() } } : {})} />
       </header>
@@ -1185,7 +1214,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           return <Fragment key={replyKeys.keys.get(message.id) ?? message.id}>
             {day}
             {message.author === 'owner'
-              ? <OwnerMessage botId={bot.id} message={message} pending={sending} botName={bot.name} quote={quote} starts={place.starts} time={place.time} marks={(marks ?? NO_MARKS).get(message.id)} onReply={sending ? undefined : reply} />
+              ? <OwnerMessage botId={bot.id} message={message} pending={sending} botName={bot.name} quote={quote} starts={place.starts} time={place.time} marks={(marks ?? NO_MARKS).get(message.id)} onReply={sending || unreachable ? undefined : reply} />
               : <BotMessage bot={bot} message={message} onAction={act} settled={message.error?.action?.kind === 'resume' && message.id !== resumeOn} browser={message.id === previewOn ? preview : undefined} quote={quote} starts={place.starts} time={place.time} onReply={reply} onApplet={openApplet}
                 asked={message.replyTo ? byId.get(message.replyTo.id) : undefined} onRetry={message.id === retryOn ? retry : undefined} {...(replyKeys.keys.has(message.id) ? { follow: followEnd } : {})} />}
           </Fragment>
@@ -1193,19 +1222,22 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         {resumed && <p className="bot-system-line" role="status" data-work-id={resumed.id}><span>{resumedWorkLine(bot.name, resumed)}</span></p>}
         {/* A run still working before its reply: the preview follows it here. */}
         {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}
-        {bot.state === 'paused' && <p className="bot-paused-line" role="status">{(pauseLine ?? (bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused')).replace(/\.$/, '')}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
+        {/* A bot of another computer is resumed there. */}
+        {bot.state === 'paused' && <p className="bot-paused-line" role="status">{(pauseLine ?? (bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused')).replace(/\.$/, '')}.{!remote && <> <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></>}</p>}
       </div>
       <div className="chat-input-area bot-input-area" data-applet-composer>
         {(unseen || away) && <button type="button" className="bot-jump" onClick={toEnd}><ArrowDown size={14} aria-hidden />{unseen ? 'New message' : 'Go to latest'}</button>}
-        {!!pinnedOff.length && <div className="bot-pins" role="status" aria-label="Waiting on you">{pinnedOff.map((item) => <PinnedLine key={item.kind} botId={bot.id} item={item} />)}</div>}
+        {!unreachable && !!pinnedOff.length && <div className="bot-pins" role="status" aria-label="Waiting on you">{pinnedOff.map((item) => <PinnedLine key={item.kind} botId={bot.id} item={item} />)}</div>}
+        {/* Its computer is offline: the chat is the copy kept here, and nothing can be sent until it is back. */}
+        {unreachable && bot.lives && <p className="bot-away-note" role="status">{bot.lives.name} is offline</p>}
         {/* A secret the bot asked for: typed into its private card, never into the chat. */}
-        <BotSecretRequests homeThreadId={bot.homeThreadId} botName={bot.name} />
+        {!remote && <BotSecretRequests homeThreadId={bot.homeThreadId} botName={bot.name} />}
         {/* Computer use one of the bot's turns asked to set up: whatever is chosen applies from its next turn. */}
-        <ComputerUseSetupCard threadId={bot.homeThreadId} />
-        {pasted.offer}
-        <ComposerNoticeProvider>
+        {!remote && <ComputerUseSetupCard threadId={bot.homeThreadId} />}
+        {!remote && pasted.offer}
+        {!unreachable && <ComposerNoticeProvider>
           <ComposerNoticeSource notice={error ? { tone: 'error', title: error, onDismiss: () => useBotsStore.setState({ error: null, errorBotId: null }) } : null} />
-          <BotChainHoldNotice botId={bot.id} botName={bot.name} hold={bot.chainHold} />
+          {!remote && <BotChainHoldNotice botId={bot.id} botName={bot.name} hold={bot.chainHold} />}
           <ComposerNoticeSlot />
           {replying && <div className="bot-quote bot-replying" data-author={replying.author} role="status" aria-label={`Replying to ${quoteOwner(replying, bot.name)}: ${quoteLine(replying)}`}>
             <QuoteLine quote={replying} botName={bot.name} />
@@ -1217,33 +1249,38 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             key={bot.id}
             input={draft}
             onInputChange={pasted.change}
-            attachedFiles={files}
+            attachedFiles={remote ? NO_FILES : files}
             onAttachedFilesChange={(next) => store().setAttachments(bot.id, next)}
-            references={references}
-            onAddReference={(reference) => addBotReference(bot.id, reference)}
-            onRemoveReference={(id) => store().removeReference(bot.id, id)}
-            onReferenceError={(message) => useBotsStore.setState({ error: message, errorBotId: bot.id })}
-            pastedThreadRefusal={botThreadReferenceRefusal}
+            // A bot of another computer takes words only: no files, none of this computer's threads, no `/` commands
+            // (they set it up), and a pasted secret goes as typed (keeping one is its own computer's).
+            wordsOnly={remote}
+            {...(remote ? {} : {
+              references,
+              onAddReference: (reference: ChatReference) => addBotReference(bot.id, reference),
+              onRemoveReference: (id: string) => store().removeReference(bot.id, id),
+              onReferenceError: (message: string) => useBotsStore.setState({ error: message, errorBotId: bot.id }),
+              pastedThreadRefusal: botThreadReferenceRefusal,
+              commandSuggestions
+            })}
             messageLimit={MAX_BOT_CHAT_TEXT}
             voiceMessages={NO_VOICE}
             onVoiceMessagesChange={ignore}
             enabledSkills={NO_SKILLS}
             disableSkillsPicker
             slashCommands={false}
-            commandSuggestions={commandSuggestions}
             placeholder={`Message ${bot.name}`}
             stoppable={working}
             extraActions={<BotEmojiButton field={composerField} value={draft} onChange={pasted.change} />}
-            onSend={() => { if (pasted.beforeSend()) void submitBotChat(bot.id) }}
+            onSend={() => { if (remote || pasted.beforeSend()) void submitBotChat(bot.id) }}
             onStop={() => void store().stop(bot.id)}
             lastPrompt={lastPrompt}
           />
-        </ComposerNoticeProvider>
+        </ComposerNoticeProvider>}
       </div>
     </section>
-    {appletOpen && <BotAppletPane botId={bot.id} applet={appletOpen} onClose={() => setAppletOpen(null)} />}
+    {appletOpen && !remote && <BotAppletPane botId={bot.id} applet={appletOpen} onClose={() => setAppletOpen(null)} />}
     </div>
-    <BotSidePanel bot={bot} state={side} browser={browser} folder={filesFolder} file={file} onFile={setFile} />
+    {!remote && <BotSidePanel bot={bot} state={side} browser={browser} folder={filesFolder} file={file} onFile={setFile} />}
     {memoryOpen && <BotMemoryDialog bot={bot} {...(memoryOpen.focus ? { focus: memoryOpen.focus } : {})} />}
   </ImageGalleryProvider></BotFilesProvider>
 }

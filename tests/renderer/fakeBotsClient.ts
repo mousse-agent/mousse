@@ -6,6 +6,7 @@ import { vi } from 'vitest'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../src/shared/bots/personal/chat'
 import type { BotMemoryEntry } from '../../src/shared/bots/personal/memory'
 import type { BotDevicesView } from '../../src/shared/bots/personal/deviceAccess'
+import type { BotReplyEvent } from '../../src/shared/bots/personal/methods'
 import type { PersonalBotsClient, PersonalBotsEvents } from '../../src/renderer/services/personalBotsClient'
 
 export const AT = '2026-11-07T09:00:00.000Z'
@@ -35,8 +36,12 @@ export interface FakeBots {
   calls: Array<[string, ...unknown[]]>
   emit: {
     changed(botId: string): void
-    /** The window's service connection was opened again (`bots:changed` with `reread`). */
-    reread(): void
+    /** The window's service connection was opened again (`bots:changed` with `reread`); with a bot, its chat stream did. */
+    reread(botId?: string): void
+    /** The other computers' bots changed (`bots:changed` with `remote`). */
+    remote(): void
+    /** A bot of another computer writing its reply (`bots:reply`). */
+    reply(event: BotReplyEvent): void
     message(botId: string, message: BotChatMessage): void
     /** `status`: what the activation said it is doing now; absent clears it. */
     activity(botId: string, chip: BotChip | null, activationId?: string, status?: string): void
@@ -44,7 +49,7 @@ export interface FakeBots {
 }
 
 export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, BotChatMessage[]>; details?: Record<string, BotDetail>; memory?: Record<string, BotMemoryEntry[]> } = {}): FakeBots {
-  const listeners = { changed: new Set<(e: { botId?: string; reread?: boolean }) => void>(), message: new Set<(e: { botId: string; message: BotChatMessage }) => void>(), activity: new Set<(e: { botId: string; activationId: string; chip: BotChip | null; status?: string }) => void>() }
+  const listeners = { changed: new Set<(e: { botId?: string; reread?: boolean; remote?: boolean }) => void>(), message: new Set<(e: { botId: string; message: BotChatMessage }) => void>(), activity: new Set<(e: { botId: string; activationId: string; chip: BotChip | null; status?: string }) => void>(), reply: new Set<(e: BotReplyEvent) => void>() }
   const fake: FakeBots = {
     bots: [...(initial.bots ?? [])],
     chats: { ...(initial.chats ?? {}) },
@@ -58,12 +63,15 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       onChanged: (cb) => { listeners.changed.add(cb); return () => listeners.changed.delete(cb) },
       onMessage: (cb) => { listeners.message.add(cb); return () => listeners.message.delete(cb) },
       onActivity: (cb) => { listeners.activity.add(cb); return () => listeners.activity.delete(cb) },
+      onReply: (cb) => { listeners.reply.add(cb); return () => listeners.reply.delete(cb) },
       // The preload's path for a composer file: a picked or dropped file's own, a temporary copy of a pasted one.
       attachmentPath: vi.fn(async (file: File) => (file.name.startsWith('image-') ? `/tmp/mousse-bot-attachments/1/${file.name}` : `/home/me/Desktop/${file.name}`))
     },
     emit: {
       changed: (botId) => { for (const cb of listeners.changed) cb({ botId }) },
-      reread: () => { for (const cb of listeners.changed) cb({ reread: true }) },
+      reread: (botId) => { for (const cb of listeners.changed) cb({ reread: true, ...(botId ? { botId } : {}) }) },
+      remote: () => { for (const cb of listeners.changed) cb({ remote: true }) },
+      reply: (event) => { for (const cb of listeners.reply) cb(event) },
       message: (botId, row) => { for (const cb of listeners.message) cb({ botId, message: row }) },
       activity: (botId, chip, activationId = 'act1', status) => { for (const cb of listeners.activity) cb({ botId, activationId, chip, ...(status ? { status } : {}) }) }
     }
@@ -78,7 +86,10 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
   const record = <T>(name: string, args: unknown[], result: () => T) => { fake.calls.push([name, ...args]); return Promise.resolve().then(result) }
   let seq = 1000
   fake.client = {
-    list: vi.fn(() => record('list', [], () => fake.bots.map((bot) => ({ ...bot })))),
+    // A bot with `lives` is one of another computer's: listed by `bots.remote.list`, never by this computer's own list.
+    list: vi.fn(() => record('list', [], () => fake.bots.filter((bot) => !bot.lives).map((bot) => ({ ...bot })))),
+    remoteList: vi.fn(() => record('remoteList', [], () => fake.bots.filter((bot) => bot.lives).map((bot) => ({ ...bot })))),
+    focus: vi.fn((botId, focused) => record('focus', [botId, focused], () => undefined)),
     create: vi.fn((input) => record('create', [input], () => {
       const bot = summary(`new${fake.bots.length + 1}`, { name: input.name ?? 'Inbox helper', description: input.description, look: input.look, state: 'working', stateText: 'Working…' })
       fake.bots.push(bot)

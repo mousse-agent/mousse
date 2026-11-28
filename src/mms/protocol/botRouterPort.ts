@@ -1,3 +1,4 @@
+import type { BotSummary } from '../../shared/bots/personal/chat'
 import type { HandlerContext } from './handlers'
 
 /**
@@ -16,4 +17,6 @@ export interface BotRouterPort {
    * least one window shows it; for a bot of this computer there is nothing to do.
    */
   focus(ctx: HandlerContext, botId: string, focused: boolean): Promise<{ routed: boolean; focused: boolean }>
+  /** The other computers' bots a window lists beside this computer's own (`bots.remote.list`), from what is kept here. */
+  list(ctx: HandlerContext): BotSummary[]
 }

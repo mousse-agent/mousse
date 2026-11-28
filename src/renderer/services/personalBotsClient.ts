@@ -2,7 +2,7 @@ import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../share
 import type { BotLook } from '../../shared/bots/personal/look'
 import type { BotMemoryEntry, BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { BotModelPick, BotModelSlots, BotSchedule } from '../../shared/bots/personal/definition'
-import type { BotChatAttachment, BotsPersonalV2EventData, BotsPersonalV2Method, BotsPersonalV2Params, BotsPersonalV2Result } from '../../shared/bots/personal/methods'
+import type { BotChatAttachment, BotReplyEvent, BotsElsewhereApi, BotsElsewhereMethod, BotsPersonalV2EventData, BotsPersonalV2Method, BotsPersonalV2Params, BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { PlatformRequestApi } from '../../shared/platform'
 import type { BotDeviceAccess, BotDevicesView, NewBotAccess } from '../../shared/bots/personal/deviceAccess'
 
@@ -12,6 +12,13 @@ import type { BotDeviceAccess, BotDevicesView, NewBotAccess } from '../../shared
  */
 export interface PersonalBotsClient {
   list(): Promise<BotSummary[]>
+  /**
+   * The bots of the owner's other computers, as this computer lists them (`bots.remote.list`): qualified ids, each with
+   * the computer it lives on (`lives`). Read from what this computer keeps; never waits on another one.
+   */
+  remoteList(): Promise<BotSummary[]>
+  /** This window shows (or no longer shows) the chat of a bot of another computer: its chat streams here while it does. */
+  focus(botId: string, focused: boolean): Promise<void>
   /**
    * `slots`: the rows picked on New bot (#673), all four, sent only to a service whose choices carry `providers`;
    * `model`: one model on every row (the single picker of an older service). An older service refuses the keys.
@@ -89,8 +96,12 @@ export interface PersonalBotsClient {
 export function createPersonalBotsClient(transport: PlatformRequestApi): PersonalBotsClient {
   const call = <M extends BotsPersonalV2Method>(method: M, params: BotsPersonalV2Params<M>) =>
     transport.request<BotsPersonalV2Result<M>>(method, params)
+  const elsewhere = <M extends BotsElsewhereMethod>(method: M, params: BotsElsewhereApi[M]['params']) =>
+    transport.request<BotsElsewhereApi[M]['result']>(method, params)
   return {
     list: async () => (await call('bots.personal.list', {})).bots,
+    remoteList: async () => (await elsewhere('bots.remote.list', {})).bots,
+    focus: async (botId, focused) => { await elsewhere('bots.focus', { botId, focused }) },
     create: async ({ look, name, description, clientRequestId, model, slots, image, access }) =>
       (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}), ...(access ? { access } : {}) })).bot,
     get: (botId) => call('bots.get', { botId }),
@@ -135,10 +146,15 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
   }
 }
 
-/** The preload's bot group: the events it forwards (`bots:changed`, `bots:message`, `bots:activity`) and a file's path. */
+/** The preload's bot group: the events it forwards (`bots:changed`, `bots:message`, `bots:activity`, `bots:reply`) and a file's path. */
 export interface PersonalBotsEvents {
-  /** `reread`: the window's service connection was opened again; chats it holds may have missed rows. */
-  onChanged?(cb: (event: { botId?: string; reread?: boolean }) => void): () => void
+  /**
+   * `reread`: the window's service connection was opened again, so chats it holds may have missed rows; with `botId`,
+   * that one bot's chat stream opened again (a bot of another computer). `remote`: the other computers' bots changed.
+   */
+  onChanged?(cb: (event: { botId?: string; reread?: boolean; remote?: boolean }) => void): () => void
+  /** A bot of another computer writing its reply, while this window shows its chat. */
+  onReply?(cb: (event: BotReplyEvent) => void): () => void
   onMessage?(cb: (event: BotsPersonalV2EventData['bots.message']) => void): () => void
   onActivity?(cb: (event: { botId: string; activationId: string; chip: BotChip | null; status?: string }) => void): () => void
   /** A composer file's path on this computer (see `attachmentPath`). */

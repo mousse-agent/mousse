@@ -3,13 +3,13 @@ import { Server } from '../lib/icons'
 import { UNKNOWN_COMPUTER_NAME, offlineLabel, threadComputerState, useComputer, type ComputerState } from '../lib/computers'
 import '../styles/computers.css'
 
-/** What a badge is on: a thread, or a project that is on the computer. */
-export type BadgeOf = 'thread' | 'project'
+/** What a badge is on: a thread, a project that is on the computer, or a bot that lives there. */
+export type BadgeOf = 'thread' | 'project' | 'bot'
 
 /** The words a badge gives as its tooltip and accessible name. */
 export function computerBadgeTitle(name: string, state: ComputerState, offline = 'Offline', of: BadgeOf = 'thread'): string {
-  // A thread runs on a computer; a project is on it.
-  const lead = of === 'project' ? `On ${name}` : `Runs on ${name}`
+  // A thread runs on a computer; a project is on it; a bot lives there.
+  const lead = of === 'project' ? `On ${name}` : of === 'bot' ? `Lives on ${name}` : `Runs on ${name}`
   if (state === 'online') return lead
   if (state === 'not-shared') return `${lead} · ${name} is not sharing its threads with this computer`
   return `${lead} · ${offline}`

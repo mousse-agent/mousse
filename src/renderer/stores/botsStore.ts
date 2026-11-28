@@ -15,7 +15,7 @@ import { keepEqualById } from '../lib/keepEqual'
 import { botRetryOf } from '../components/bots/botRetry'
 import { expandComposerQuotes, insertQuoteToken, registerQuote } from '../lib/composerQuotes'
 import { expandComposerThreadChips } from '../lib/composerThreadChips'
-import { clearBotLiveReplies, noteBots, noteBotStopAsked, noteThreadMessage, setBotLiveReplySources } from './botLiveReplies'
+import { clearBotLiveReplies, noteBotReply, noteBots, noteBotStopAsked, noteThreadMessage, setBotLiveReplySources } from './botLiveReplies'
 import { adoptFilePreview } from '../components/bots/fileImageCache'
 import type { ChatReference } from '../../shared/chatReferences'
 import { threadLink } from '../../shared/threadLink'
@@ -35,6 +35,11 @@ function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T
   const next = { ...record }
   delete next[key]
   return next
+}
+
+/** A record without the given keys. */
+function withoutKeys<T>(record: Record<string, T>, keys: readonly string[]): Record<string, T> {
+  return keys.reduce((kept, key) => withoutKey(kept, key), record)
 }
 
 export interface BotActionRefusal { reason: string; text: string }
@@ -166,6 +171,11 @@ interface BotsState {
   /** Loads older pages until the message is held; false when the chat has no such message. */
   findMessage(botId: string, messageId: string): Promise<boolean>
   markRead(botId: string): void
+  /**
+   * This window shows (or stops showing) the chat of a bot of another computer: its chat streams here while it does
+   * (`bots.focus`). Said again when the window's service connection opens again, which let go of it.
+   */
+  focusRemote(botId: string, focused: boolean): void
   setDraft(botId: string, text: string): void
   setAttachments(botId: string, attachments: AttachedFile[]): void
   addReference(botId: string, reference: ChatReference): void
@@ -286,6 +296,8 @@ let createOperation: Promise<BotSummary | null> | undefined
 /** Bots made here that no list has carried yet. */
 const created = new Set<string>()
 const readSeq = new Map<string, number>()
+/** The bots of other computers whose chats this window shows, by how many views show each (`focusRemote`). */
+const focusedRemote = new Map<string, number>()
 /** Bots deleted in this profile: a list that was on its way when one was deleted never brings it back. */
 const removed = new Set<string>()
 /**
@@ -297,6 +309,18 @@ let reactionPicks = 0
 /** The service does not know the method (an older one), by its code or, over IPC, its message. */
 const missingMethod = (cause: unknown) => ['method_not_available', 'method_not_found', 'unknown_method', 'platform_method_not_allowed'].includes(String((cause as { code?: unknown } | null)?.code ?? ''))
   || /method[ _]not[ _](?:allowed|found|available)|unknown[ _]method|domain method is unavailable|not allowlisted/i.test(cause instanceof Error ? cause.message : String(cause))
+/**
+ * The bots of the owner's other computers (`bots.remote.list`). None from a service without them (no Bridge, or older);
+ * undefined when they could not be read now, so the ones listed before stay.
+ */
+async function remoteList(): Promise<BotSummary[] | undefined> {
+  try {
+    return (await bots().remoteList()).filter((bot) => bot.lives)
+  } catch (cause) {
+    return missingMethod(cause) ? [] : undefined
+  }
+}
+
 const happyTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 const bySeq = (a: BotChatMessage, b: BotChatMessage) => a.seq - b.seq
@@ -391,9 +415,12 @@ export const useBotsStore = create<BotsState>((set, get) => {
         // About, and a chat card that shows one of the bot's automations (`watchBotDetail`), read its runs again.
         if (event?.botId && (get().aboutOpen || detailWatchers.has(event.botId)) && get().details[event.botId]) void get().loadDetail(event.botId)
         // The window's service connection was opened again: a chat it holds reads its newest rows, which also fills
-        // any it missed (#1042).
-        if (event?.reread) for (const botId of Object.keys(get().chats)) void get().loadChat(botId)
+        // any it missed (#1042). With a bot named, only that bot's chat stream opened again (a bot of another computer).
+        if (event?.reread) for (const botId of event.botId ? [event.botId] : Object.keys(get().chats)) if (get().chats[botId]) void get().loadChat(botId)
+        // A connection opened again let go of the other computers' chats this window showed: it holds them again.
+        if (event?.reread && !event.botId) for (const botId of focusedRemote.keys()) void bots().focus(botId, true).catch(() => undefined)
       }),
+      events.onReply?.((event) => noteBotReply(event)),
       events.onMessage?.((event) => { if (event?.botId && event.message) putMessages(event.botId, [event.message]) }),
       events.onActivity?.((event) => {
         if (!event?.botId) return
@@ -423,6 +450,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       createOperation = undefined
       created.clear()
       readSeq.clear()
+      focusedRemote.clear()
       removed.clear()
       reactions.clear()
       clearBotLiveReplies()
@@ -445,11 +473,24 @@ export const useBotsStore = create<BotsState>((set, get) => {
         do {
           refreshAgain = false
           try {
-            const list = withCreated((await bots().list()).filter((bot) => !removed.has(bot.id)))
+            const [local, remote] = await Promise.all([bots().list(), remoteList()])
             if (owner !== epoch) return
+            // The other computers' bots join the list; when they can't be read now, the ones listed before stay.
+            const elsewhere = remote ?? get().bots.filter((bot) => bot.lives)
+            const list = withCreated([...local, ...elsewhere].filter((bot) => !removed.has(bot.id)))
+            // A chat held from a computer that was offline reads its newest rows once that computer is back.
+            const back = elsewhere.filter((bot) => !bot.lives?.offline && get().bots.some((before) => before.id === bot.id && before.lives?.offline) && get().chats[bot.id])
+            // A bot of another computer that left the list read now (this device lost access to it) takes its copy here
+            // with it: messages, draft, notes and read mark.
+            const gone = remote ? get().bots.filter((bot) => bot.lives && !list.some((kept) => kept.id === bot.id)).map((bot) => bot.id) : []
+            for (const botId of gone) readSeq.delete(botId)
             set((state) => {
               // A list that brought nothing new keeps the bots held, so the open chat does not render again.
               const bots = keepEqualById(state.bots, list)
+              const dropped = gone.length ? {
+                chats: withoutKeys(state.chats, gone), chatLoad: withoutKeys(state.chatLoad, gone), drafts: withoutKeys(state.drafts, gone),
+                notes: withoutKeys(state.notes, gone), replyingTo: withoutKeys(state.replyingTo, gone)
+              } : {}
               // A live chip lasts while its bot works.
               const working = Object.entries(state.live).filter(([id]) => list.some((bot) => bot.id === id && bot.state === 'working'))
               const live = working.length === Object.keys(state.live).length ? state.live : Object.fromEntries(working)
@@ -459,8 +500,9 @@ export const useBotsStore = create<BotsState>((set, get) => {
               const activity = kept.length === Object.keys(state.activity).length ? state.activity : Object.fromEntries(kept)
               const said = Object.entries(state.statuses).filter(([id]) => running.has(id))
               const statuses = said.length === Object.keys(state.statuses).length ? state.statuses : Object.fromEntries(said)
-              return { bots, loaded: true, live, activity, statuses, ...celebrate(state.bots, bots) }
+              return { bots, loaded: true, live, activity, statuses, ...dropped, ...celebrate(state.bots, bots) }
             })
+            for (const bot of back) void get().loadChat(bot.id)
           } catch {
             // A missed list is listed again by the next event or poll; the open chat keeps what it has.
             if (owner === epoch) set({ loaded: true })
@@ -542,9 +584,19 @@ export const useBotsStore = create<BotsState>((set, get) => {
     markRead(botId) {
       const last = cacheOf(botId).messages.at(-1)
       if (!last || (readSeq.get(botId) ?? 0) >= last.seq) return
+      // Read state lives with the bot: a computer that is offline is told once it is back and its chat is read again.
+      if (get().bots.find((bot) => bot.id === botId)?.lives?.offline) return
       readSeq.set(botId, last.seq)
       set((state) => ({ bots: state.bots.map((bot) => (bot.id === botId && bot.unread ? { ...bot, unread: 0 } : bot)) }))
       void bots().markRead(botId, last.seq).catch(() => readSeq.delete(botId))
+    },
+
+    focusRemote(botId, focused) {
+      const count = (focusedRemote.get(botId) ?? 0) + (focused ? 1 : -1)
+      if (count > 0) focusedRemote.set(botId, count)
+      else focusedRemote.delete(botId)
+      // Only the first view to show it and the last to leave it tell the service.
+      if (focused ? count === 1 : count <= 0) void bots().focus(botId, focused).catch(() => undefined)
     },
 
     addNote(botId, text, error) {
@@ -586,8 +638,10 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
     async send(botId) {
       const typed = expandComposerThreadChips(expandComposerQuotes(get().drafts[botId] ?? '')).trim()
-      const attachments = get().attachments[botId] ?? []
-      const references = get().references[botId] ?? []
+      // A bot of another computer takes words only: files and this computer's threads are not sent there.
+      const remote = Boolean(get().bots.find((bot) => bot.id === botId)?.lives)
+      const attachments = remote ? [] : get().attachments[botId] ?? []
+      const references = remote ? [] : get().references[botId] ?? []
       const replyTo = get().replyingTo[botId]
       // Each thread pill goes as its link on a line of its own: the chat shows it as the thread's chip, and the bot reads
       // the thread by reference.
@@ -650,13 +704,15 @@ export const useBotsStore = create<BotsState>((set, get) => {
       const messages = cacheOf(botId).messages
       const failed = messages.find((message) => message.id === messageId)
       const again = failed ? botRetryOf(messages, failed) : null
-      if (!again) return
+      // A bot of another computer takes words only, as `send` sends them: files sent with the turn stay behind.
+      const remote = Boolean(get().bots.find((bot) => bot.id === botId)?.lives)
+      if (!again || (remote && !again.text)) return
       const owner = epoch
       const clientRequestId = retrySends.get(messageId) ?? crypto.randomUUID()
       retrySends.set(messageId, clientRequestId)
       set({ error: null })
       try {
-        const message = await bots().send(botId, again.text, clientRequestId, again.attachments, again.replyTo)
+        const message = await bots().send(botId, again.text, clientRequestId, remote ? [] : again.attachments, again.replyTo)
         if (owner !== epoch) return
         putMessages(botId, [message])
       } catch (cause) { fail(owner, cause, botId) }
