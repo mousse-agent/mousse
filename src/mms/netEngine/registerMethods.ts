@@ -346,6 +346,7 @@ export function registerNetEngineMethods(
               engine.dismissRelay(p.node, p.destination)
               return engine.status()
             case 'netEngine.access.ask':
+              engine.refuseCutOff(p.node)
               engine.access().ask(p.node)
               return engine.status()
             case 'netEngine.access.cancel':
@@ -355,6 +356,7 @@ export function registerNetEngineMethods(
               await engine.access().answer(p.node, p.request, p.yes, p.access)
               return engine.status()
             case 'netEngine.access.let':
+              engine.refuseCutOff(p.node)
               await engine.access().let(p.node, p.access)
               return engine.status()
             case 'netEngine.versionNotice.claim':

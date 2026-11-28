@@ -502,6 +502,16 @@ describe('Settings → Devices, new networking', () => {
     expect(d.called('netEngine.retry')).toEqual([{ node: 'n1' }])
   })
 
+  it('closes the Limits dialog of a device when it is found cut off for its version', async () => {
+    const d = daemon({ devices: [device({ node: 'n1' })] })
+    await mount()
+    await click(button('Limits…'))
+    const limits = () => document.body.textContent?.includes('Limits for Studio on this computer')
+    expect(limits()).toBe(true)
+    await d.change({ devices: [device({ node: 'n1', state: 'offline', online: false, needsUpdate: { who: 'there', since: 1 } })] })
+    expect(limits()).toBe(false)
+  })
+
   it('offers no SSH update for a device cut off for its version, as no SSH install record is proven to be it', async () => {
     // An install record names the old networking's device id, assigned apart from the pairing's: even one that reads
     // the same id is not proof it is the same computer.

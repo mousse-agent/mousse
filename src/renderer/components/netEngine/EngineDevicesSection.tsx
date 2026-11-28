@@ -264,6 +264,21 @@ export function EngineDevicesSection() {
     void useMousseIdStore.getState().refresh()
   })
 
+  // A device cut off for its version is disabled: what was open for it (its limits, Works on threads, letting it use
+  // this computer, an update request) closes. Remove and its update stay.
+  const cutOffKey = (status?.devices ?? [])
+    .filter((device) => device.needsUpdate)
+    .map((device) => device.node)
+    .join(' ')
+  useEffect(() => {
+    if (!cutOffKey) return
+    const cut = new Set(cutOffKey.split(' '))
+    setLimits((open) => (open && cut.has(open.node) ? undefined : open))
+    setGranting((open) => (open && cut.has(open.node) ? undefined : open))
+    setLetting((open) => (open && cut.has(open.node) ? undefined : open))
+    setUpdating((open) => (open && cut.has(open.node) ? undefined : open))
+  }, [cutOffKey])
+
   if (!status && !v1) return null
   const notInBuild = !status || status.helper.state === 'not_in_build'
   const switchOn = !!status?.enabled || v1On

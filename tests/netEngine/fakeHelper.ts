@@ -1359,7 +1359,10 @@ export class FakeHelper {
             this.network.versionRefusals.set(this.identity, refusals)
             const minorThere = this.network.outdated.get(target)
             if (minorThere !== undefined) {
-              refusals.set(target, { peer_minor: minorThere, local_minor: 4, since: Math.floor(Date.now() / 1000) })
+              // As the helper: the same refusal again keeps when it was first recorded.
+              const kept = refusals.get(target)
+              if (kept?.peer_minor !== minorThere || kept.local_minor !== 4)
+                refusals.set(target, { peer_minor: minorThere, local_minor: 4, since: Math.floor(Date.now() / 1000) })
               return reply({ error: 'unsupported_version', peer_minor: minorThere, reason: 'unsupported version' })
             }
             refusals.delete(target)

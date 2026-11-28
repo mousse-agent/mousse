@@ -495,6 +495,7 @@ export class NetEngineService implements EngineDirectoryPort {
     const started = this.require()
     const row = started.peers.serving(node)
     if (!row) throw new NetError('bad_request', 'Unknown device.')
+    this.refuseCutOff(node)
     const parsed = parseRelayDestination(destination)
     if (!parsed)
       throw new NetError('bad_request', "That isn't a relay.", { details: { reason: 'bad_destination' } })
@@ -1360,6 +1361,7 @@ export class NetEngineService implements EngineDirectoryPort {
     const started = this.require()
     const row = started.peers.serving(node)
     if (!row) throw new NetError('bad_request', 'Unknown device.')
+    this.refuseCutOff(node)
     const route = this.helper?.speaks(1) ? ownerRoute(address) : toRoute(address)
     if (!route)
       throw new NetError(
@@ -1378,6 +1380,7 @@ export class NetEngineService implements EngineDirectoryPort {
     const started = this.require()
     const row = started.peers.serving(node)
     if (!row) throw new NetError('bad_request', 'Unknown device.')
+    this.refuseCutOff(node)
     if (!(row.addresses ?? []).includes(address)) return
     await this.setAddresses(
       row,
@@ -1393,6 +1396,7 @@ export class NetEngineService implements EngineDirectoryPort {
     const started = this.require()
     const row = started.peers.serving(node)
     if (!row) throw new NetError('bad_request', 'Unknown device.')
+    this.refuseCutOff(node)
     const offered = row.offered ?? []
     if (!offered.length) return
     const addresses = [...(row.addresses ?? [])]
@@ -2219,6 +2223,7 @@ export class NetEngineService implements EngineDirectoryPort {
   async setPolicy(node: NodeId, change: NodePolicyChange): Promise<{ policy: BridgeNodePolicy }> {
     const started = this.require()
     if (!started.peers.serving(node)) throw new NetError('bad_request', 'Unknown device.')
+    this.refuseCutOff(node)
     let saved: NodePolicy | undefined
     const next = levelAfter(started.rt.policy.get(node), change)
     const applied = await started.roles.change(node, next, () => {
@@ -2527,6 +2532,21 @@ export class NetEngineService implements EngineDirectoryPort {
   cutOff(node: NodeId): 'there' | 'here' | undefined {
     const row = this.started?.peers.get(node)
     return row ? needsUpdate(this.refusals?.get(row.endpoint.toLowerCase()), false)?.who : undefined
+  }
+  /**
+   * A device cut off for its version is disabled: what it may do here, its routes and the other direction are not
+   * changed until a connection agrees a version (a dialog opened before the refusal saves nothing). Remove, its update
+   * and Check again stay.
+   */
+  refuseCutOff(node: NodeId): void {
+    const who = this.cutOff(node)
+    if (!who) return
+    const name = this.started?.peers.get(node)?.name ?? 'The other computer'
+    throw new NetError(
+      'incompatible_peer',
+      who === 'here' ? `Update Mousse here to use ${name}.` : `${name} needs a Mousse update.`,
+      { details: { reason: 'needs_update' } }
+    )
   }
   client(node: NodeId): BridgeClient {
     const started = this.started

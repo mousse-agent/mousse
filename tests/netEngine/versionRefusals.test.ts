@@ -7,6 +7,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { NodeId } from '../../src/shared/net'
+import { accessPreset } from '../../src/shared/net/accessPresets'
 import { needsUpdate, readVersionRefusals } from '../../src/mms/netEngine/versionRefusals'
 import { eventually, Fabric, REAL_HELPER, type Computer } from './checks/harness'
 
@@ -101,6 +102,15 @@ describe.skipIf(REAL_HELPER)('a device cut off for its version', () => {
     await eventually(() => expect(device()?.needsUpdate).toMatchObject({ who: 'there' }))
     expect(device()?.needsUpdate?.told).toBeUndefined()
     await updated()
+    // A window's ask that comes late, for a refusal that cleared since, takes nothing from the one recorded after it.
+    const later = since / 1000 + 100
+    refusalsOnA().set(b.endpoint, { peer_minor: 2, local_minor: 4, since: later })
+    a.fake!.emit({ ev: 'peer.incompatible', identity: b.endpoint, peer_minor: 2 })
+    await eventually(() => expect(device()?.needsUpdate?.since).toBe(later * 1000))
+    await expect(claim(since)).resolves.toEqual({ show: false })
+    expect(device()?.needsUpdate?.told).toBeUndefined()
+    await expect(claim(later * 1000)).resolves.toEqual({ show: true })
+    await updated()
   }, 120_000)
 
   it('uses nothing of a device refused coming in while its old session is up, and Check again dials it at once', async () => {
@@ -118,6 +128,26 @@ describe.skipIf(REAL_HELPER)('a device cut off for its version', () => {
       refused = error
     }
     expect(refused).toMatchObject({ code: 'incompatible_peer' })
+    // Disabled here too: a Limits dialog opened before the refusal saves nothing, and no route or other-direction
+    // change goes through.
+    const policyOf = async () =>
+      ((await a.dispatch('bridge.nodes', {}, true)) as { nodes: Array<{ node: string; policy: unknown }> }).nodes.find(
+        (row) => row.node === bOnA
+      )?.policy
+    const policyBefore = await policyOf()
+    expect(policyBefore).toBeTruthy()
+    await expect(a.dispatch('bridge.policy', { node: bOnA, terminal: true }, true)).rejects.toMatchObject({
+      code: 'incompatible_peer'
+    })
+    await expect(
+      a.dispatch('netEngine.address.add', { node: bOnA, address: '192.168.64.9:47100' }, true)
+    ).rejects.toMatchObject({ code: 'incompatible_peer' })
+    await expect(
+      a.dispatch('netEngine.access.let', { node: bOnA, access: accessPreset('work').fields }, true)
+    ).rejects.toMatchObject({
+      code: 'incompatible_peer'
+    })
+    expect(await policyOf()).toEqual(policyBefore)
     const before = dials()
     await a.dispatch('netEngine.retry', { node: bOnA }, true)
     expect(dials()).toBe(before + 1)
