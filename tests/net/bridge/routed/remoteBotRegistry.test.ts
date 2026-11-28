@@ -210,8 +210,11 @@ describe('losing bots of another computer', () => {
       await h.listed(registry)
       await h.back(registry)
       expect(h.disk().chats).toHaveLength(1)
-      // Marks this computer keeps: on both bots, on another computer's bot and on one of this computer's own.
-      const elsewhere = `${newId('node')}:other-bot`
+      // Marks this computer keeps: on both bots, on a bot of a computer that can't be told gone now (so it is kept), and
+      // on one of this computer's own.
+      const other = newId('node') as NodeId
+      h.roster.unsure = (node) => node === other
+      const elsewhere = `${other}:other-bot`
       for (const ref of [`${h.node}:${KEEPER}`, `${h.node}:${WRITER}`, elsewhere, 'own-bot']) h.marks.set(ref, 'muted', true)
 
       await loss.lose(h, registry)
@@ -485,5 +488,20 @@ describe('a computer removed while this one was not running', () => {
     expect(after.rows()).toEqual([])
     expect(h.disk()).toEqual({ feeds: [], chats: [] })
     await vi.waitFor(() => expect(h.droppedCopies().sort()).toEqual([PRIVATE_BOTS_SUBJECT, botChatSubject(KEEPER), botChatSubject(WRITER)].sort()))
+  })
+
+  it('takes its bots’ marks with it, also when no copy of any computer’s bots was ever written', async () => {
+    const h = harness()
+    const gone = `${newId('node')}:old-helper`
+    const unsure = newId('node') as NodeId
+    for (const ref of [`${h.node}:${KEEPER}`, gone, `${unsure}:art-helper`, 'own-bot']) h.marks.set(ref, 'pinned', true)
+    h.roster.unsure = (node) => node === unsure
+    h.online.clear()
+    await h.open().reconcile()
+    expect(h.disk().feeds).toEqual([])
+    // A computer still listed, or one that can't be told gone now, keeps its bots' marks; so does this computer's own.
+    const kept = [`${h.node}:${KEEPER}`, `${unsure}:art-helper`, 'own-bot'].sort()
+    expect(Object.keys(h.marks.list()).sort()).toEqual(kept)
+    expect(Object.keys(new BotMarksStore(join(h.path, '..')).list()).sort()).toEqual(kept)
   })
 })

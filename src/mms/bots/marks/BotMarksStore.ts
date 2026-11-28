@@ -38,13 +38,16 @@ function readMarks(value: unknown): BotMarks {
  *
  *     { "version": 1, "bots": { "b_…": { "pinnedAt": "…" }, "nod_…:b_…": { "hidden": true, "muted": true } } }
  *
- * Read on first use, never on a start. A file that can't be read is no marks; the first change after it puts it aside
- * (`bot-marks.json.corrupt-<time>`). A bot of another computer that this one loses (`RemoteBotRegistry`) takes its marks
- * with it (`dropBots`, `dropComputer`), and a bot of this computer that is gone for good takes its own (`dropLocal`).
+ * Read on first use, never on a start. A file that can't be read or parsed is no marks; the first change after it puts
+ * it aside (`bot-marks.json.corrupt-<time>`) and never writes over it. A change is kept only once it is written. A bot
+ * of another computer that this one loses (`RemoteBotRegistry`) takes its marks with it (`dropBots`, `dropComputer`),
+ * and so does every bot of a computer it no longer keeps (`keepComputers`), also one removed while this one was off. A
+ * bot of this computer that is gone for good takes its own (`dropLocal`).
  */
 export class BotMarksStore {
   private marks?: Map<string, BotMarks>
   private broken = false
+  private kept?: (node: string) => boolean
   readonly path: string
 
   constructor(
@@ -65,21 +68,27 @@ export class BotMarksStore {
     return { ...this.read().get(ref) }
   }
 
-  /** Sets or clears one mark; every bot's marks as they are now. */
+  /** Sets or clears one mark; every bot's marks as they are now. A change that can't be written is not kept. */
   set(ref: string, mark: BotMark, on: boolean): BotMarksByRef {
     const marks = this.read()
     const before = marks.get(ref)
-    const next = withMark(before, mark, on, new Date(this.now()).toISOString())
-    if (noMarks(next)) {
-      if (before) {
-        marks.delete(ref)
-        this.write()
-      }
-    } else if (JSON.stringify(next) !== JSON.stringify(before ?? {})) {
-      marks.set(ref, next)
-      this.write()
+    const entry = withMark(before, mark, on, new Date(this.now()).toISOString())
+    if (noMarks(entry) ? before : JSON.stringify(entry) !== JSON.stringify(before ?? {})) {
+      const next = new Map(marks)
+      if (noMarks(entry)) next.delete(ref)
+      else next.set(ref, entry)
+      this.write(next)
     }
     return this.list()
+  }
+
+  /**
+   * The other computers this one keeps (`RemoteBotRegistry`): the marks of every bot of a computer not kept go, now or,
+   * before the file is first read, when it is. A computer removed while this one was not running loses them too.
+   */
+  keepComputers(kept: (node: string) => boolean): void {
+    this.kept = kept
+    if (this.marks) this.dropUnkept()
   }
 
   /** Drops the marks of `node`'s bots named (by their ids there). True when any went. */
@@ -102,9 +111,24 @@ export class BotMarksStore {
     const marks = this.read()
     const gone = [...marks.keys()].filter(matches)
     if (!gone.length) return false
-    for (const ref of gone) marks.delete(ref)
-    this.write()
+    const next = new Map(marks)
+    for (const ref of gone) next.delete(ref)
+    this.write(next)
     return true
+  }
+
+  private dropUnkept(): void {
+    const kept = this.kept
+    if (!kept) return
+    try {
+      this.drop((ref) => {
+        const node = parseQualifiedId(ref)?.node
+        return node !== undefined && !kept(node)
+      })
+    } catch (error) {
+      // Kept in memory and on disk as they were: dropped again on the next change of the computers, or the next start.
+      console.warn('bot marks of removed computers could not be dropped', error instanceof Error ? error.message : String(error))
+    }
   }
 
   private read(): Map<string, BotMarks> {
@@ -113,8 +137,12 @@ export class BotMarksStore {
     let raw: string | undefined
     try {
       raw = readFileSync(this.path, 'utf8')
-    } catch {
-      // No file yet: no marks.
+    } catch (error) {
+      // No file yet: no marks. A file there that can't be read is set aside on the first change, never written over.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.broken = true
+        console.warn('bot marks could not be read', error instanceof Error ? error.message : String(error))
+      }
     }
     if (raw !== undefined) {
       try {
@@ -131,20 +159,24 @@ export class BotMarksStore {
       }
     }
     this.marks = marks
-    return marks
+    this.dropUnkept()
+    return this.marks
   }
 
-  private write(): void {
+  /** Writes `next` and only then keeps it: a write that fails changes nothing, so the same change is tried again whole. */
+  private write(next: Map<string, BotMarks>): void {
     mkdirSync(this.folder, { recursive: true })
     if (this.broken) {
       try {
         renameSync(this.path, `${this.path}.corrupt-${this.now()}`)
-      } catch {
-        // Gone already: nothing to keep.
+      } catch (error) {
+        // Gone already: nothing to keep. A file that can't be set aside is never written over.
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       }
       this.broken = false
     }
-    const file: StoredFile = { version: 1, bots: Object.fromEntries(this.marks ?? []) }
+    const file: StoredFile = { version: 1, bots: Object.fromEntries(next) }
     atomicWriteJsonSync(this.path, file)
+    this.marks = next
   }
 }

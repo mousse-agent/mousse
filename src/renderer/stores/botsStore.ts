@@ -576,7 +576,11 @@ export const useBotsStore = create<BotsState>((set, get) => {
       if (!bot?.unread || bot.lives?.offline) return
       const owner = epoch
       try {
-        const seq = cacheOf(botId).messages.at(-1)?.seq ?? (await bots().messages(botId, { limit: 1 })).messages.at(-1)?.seq
+        // Another computer's bot whose chat no view holds open gets no new messages here, so the copy kept of its chat
+        // can be behind: its own computer is asked for its newest message, which is what gets marked read.
+        const stale = Boolean(bot.lives) && !focusedRemote.has(botId)
+        const cached = stale ? undefined : cacheOf(botId).messages.at(-1)?.seq
+        const seq = cached ?? (await bots().messages(botId, { limit: 1 })).messages.at(-1)?.seq
         if (seq === undefined || owner !== epoch) return
         readSeq.set(botId, Math.max(readSeq.get(botId) ?? 0, seq))
         set((state) => ({ bots: state.bots.map((entry) => (entry.id === botId && entry.unread ? { ...entry, unread: 0 } : entry)) }))

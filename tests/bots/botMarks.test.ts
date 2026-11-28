@@ -4,10 +4,26 @@
  * dropped with a bot of this computer that is gone for good. A bot of another computer that is lost takes its marks
  * with it in `tests/net/bridge/routed/remoteBotRegistry.test.ts`.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+
+/** The next writes of the marks file that fail, as a full disk would. */
+const writes = vi.hoisted(() => ({ fail: 0 }))
+vi.mock('../../src/mms/data/AtomicFs', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../src/mms/data/AtomicFs')>()
+  return {
+    ...real,
+    atomicWriteJsonSync: (...args: Parameters<typeof real.atomicWriteJsonSync>) => {
+      if (writes.fail > 0) {
+        writes.fail -= 1
+        throw new Error('The disk is full.')
+      }
+      return real.atomicWriteJsonSync(...args)
+    }
+  }
+})
 import { BOT_MARKS_FILE, BotMarksStore } from '../../src/mms/bots/marks/BotMarksStore'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
 import { PROTOCOL_METHODS } from '../../src/mms/protocol/types'
@@ -72,13 +88,60 @@ describe('the marks on disk', () => {
     expect(Object.keys(store.list()).sort()).toEqual(['desk-helper', other].sort())
     expect(store.dropComputer(NODE)).toBe(false)
   })
+
+  it('drops the marks of every computer not kept, at once or when the file is first read', () => {
+    const dir = folder()
+    const other = `nod_${'b'.repeat(26)}:art-helper`
+    const store = new BotMarksStore(dir)
+    for (const ref of [REMOTE, other, 'desk-helper']) store.set(ref, 'muted', true)
+    store.keepComputers((node) => node === NODE)
+    expect(Object.keys(store.list()).sort()).toEqual([REMOTE, 'desk-helper'].sort())
+    // A start: the computers are known before the marks are first read.
+    const again = new BotMarksStore(dir)
+    again.keepComputers(() => false)
+    expect(again.list()).toEqual({ 'desk-helper': { muted: true } })
+    expect(new BotMarksStore(dir).list()).toEqual({ 'desk-helper': { muted: true } })
+  })
+
+  it('keeps no change it could not write, so the same change is written whole when tried again', () => {
+    const dir = folder()
+    const store = new BotMarksStore(dir)
+    store.set(REMOTE, 'muted', true)
+    writes.fail = 1
+    expect(() => store.set('desk-helper', 'pinned', true)).toThrow('The disk is full.')
+    expect(store.list()).toEqual({ [REMOTE]: { muted: true } })
+    store.set('desk-helper', 'pinned', true)
+    expect(Object.keys(new BotMarksStore(dir).list()).sort()).toEqual([REMOTE, 'desk-helper'].sort())
+    writes.fail = 1
+    expect(() => store.dropComputer(NODE)).toThrow('The disk is full.')
+    expect(store.dropComputer(NODE)).toBe(true)
+    expect(new BotMarksStore(dir).list()).toEqual({ 'desk-helper': { pinnedAt: expect.any(String) } })
+  })
+
+  it('never writes over a file there that it can\'t read: it is set aside on the first change', () => {
+    const dir = folder()
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, BOT_MARKS_FILE)
+    const saved = JSON.stringify({ version: 1, bots: { 'desk-helper': { muted: true } } })
+    writeFileSync(file, saved)
+    chmodSync(file, 0o000)
+    const store = new BotMarksStore(dir)
+    expect(store.list()).toEqual({})
+    store.set(REMOTE, 'pinned', true)
+    const aside = readdirSync(dir).filter((name) => name.startsWith(`${BOT_MARKS_FILE}.corrupt-`))
+    expect(aside).toHaveLength(1)
+    chmodSync(join(dir, aside[0]), 0o600)
+    expect(readFileSync(join(dir, aside[0]), 'utf8')).toBe(saved)
+    expect(Object.keys(new BotMarksStore(dir).list())).toEqual([REMOTE])
+  })
 })
 
 describe('bots.marks.list and bots.marks.set', () => {
-  const setup = (bots: string[] = ['desk-helper']) => {
+  const setup = (bots: string[] = ['desk-helper'], listed: string[] = [REMOTE]) => {
     const botMarks = new BotMarksStore(folder())
     const emit = vi.fn()
-    const mms = { botMarks, events: { emit }, personalBots: { botName: (botId: string) => (bots.includes(botId) ? 'A bot' : undefined) } }
+    const botRouter = { list: () => listed.map((id) => ({ id })) }
+    const mms = { botMarks, events: { emit }, botRouter, personalBots: { botName: (botId: string) => (bots.includes(botId) ? 'A bot' : undefined) } }
     const connection = (over: Record<string, unknown> = {}) => ({ id: 'conn-1', clientType: 'gui', binding: { profileId: 'p1', epoch: 1 }, capabilities: new Set<string>(), ...over })
     const call = (method: string, params: unknown, conn = connection()) => dispatchMethod({ mms, connection: conn } as unknown as HandlerContext, method, params)
     return { botMarks, emit, call, connection }
@@ -115,6 +178,15 @@ describe('bots.marks.list and bots.marks.set', () => {
       { botId: 'desk-helper', mark: 'pinned', on: true, extra: 1 }
     ]) await expect(call('bots.marks.set', params)).rejects.toMatchObject({ code: 'invalid_params' })
     expect(botMarks.list()).toEqual({})
+  })
+
+  it('marks another computer\'s bot only while it is listed here, and always clears a mark', async () => {
+    const { call, botMarks, emit } = setup(['desk-helper'], [])
+    botMarks.set(REMOTE, 'hidden', true)
+    await expect(call('bots.marks.set', { botId: REMOTE, mark: 'pinned', on: true })).rejects.toMatchObject({ code: 'bot_not_found' })
+    expect(botMarks.list()).toEqual({ [REMOTE]: { hidden: true } })
+    expect(emit).not.toHaveBeenCalled()
+    expect(await call('bots.marks.set', { botId: REMOTE, mark: 'hidden', on: false })).toEqual({ marks: {} })
   })
 
   it('drops the marks of this computer\'s bots that are gone for good when listed, and keeps the other computers\'', async () => {

@@ -133,9 +133,16 @@ describe('pin', () => {
     await pick('Inbox helper', 'Pin')
     expect(fake.calls).toContainEqual(['setMark', 'n_laptop:b_inbox', 'pinned', true])
     expect(names()).toEqual(['Inbox helper', 'Desk helper'])
+    // Another window of this computer unpins it and pins Desk helper: the service's marks change, and only its event
+    // reaches this window, which reads the marks again.
     fake.marks = { b_desk: { pinnedAt: '2026-11-07T11:00:00.000Z' } }
+    const reads = fake.calls.filter(([name]) => name === 'marks').length
+    const sets = fake.calls.filter(([name]) => name === 'setMark').length
     await act(async () => fake.emit.marks())
     await settle()
+    expect(fake.calls.filter(([name]) => name === 'marks')).toHaveLength(reads + 1)
+    expect(fake.calls.filter(([name]) => name === 'setMark')).toHaveLength(sets)
+    expect(names()).toEqual(['Desk helper', 'Inbox helper'])
     expect(row('Desk helper').querySelector('[aria-label="Pinned"]')).not.toBeNull()
     expect(row('Inbox helper').querySelector('[aria-label="Pinned"]')).toBeNull()
   })
@@ -204,6 +211,22 @@ describe('hide, mute and marked unread', () => {
     expect(fake.calls).toContainEqual(['markRead', 'n_laptop:b_inbox', 7])
     expect(fake.calls).toContainEqual(['setMark', 'n_laptop:b_inbox', 'unread', false])
     expect(row('Inbox helper').querySelector('.bot-row-unread')).toBeNull()
+  })
+
+  it('Mark as read asks another computer for its newest message when the copy of a chat no view holds open is behind', async () => {
+    fake.chats['n_laptop:b_inbox'] = [message(4)]
+    await show([desk, inbox()])
+    // The chat was opened once and closed: its copy stays here, and stops getting new messages.
+    await act(async () => useBotsStore.getState().focusRemote('n_laptop:b_inbox', true))
+    await act(async () => useBotsStore.getState().loadChat('n_laptop:b_inbox'))
+    await act(async () => useBotsStore.getState().focusRemote('n_laptop:b_inbox', false))
+    expect(useBotsStore.getState().chats['n_laptop:b_inbox']?.messages.at(-1)?.seq).toBe(4)
+    fake.chats['n_laptop:b_inbox'] = [message(4), message(9)]
+    fake.bots = [desk, inbox({ unread: 1 })]
+    await act(async () => useBotsStore.getState().refresh())
+    await settle()
+    await pick('Inbox helper', 'Mark as read')
+    expect(fake.calls.filter(([name]) => name === 'markRead')).toEqual([['markRead', 'n_laptop:b_inbox', 9]])
   })
 })
 

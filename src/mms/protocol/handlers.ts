@@ -2204,6 +2204,10 @@ function botMarksMethod(ctx: HandlerContext, method: 'bots.marks.list' | 'bots.m
   if (!isBotRef(botId)) throw new DomainRpcError('invalid_params', 'botId is not a bot.')
   if (!BOT_MARK_KINDS.includes(p.mark as BotMark)) throw new DomainRpcError('invalid_params', 'mark is not one of pinned, hidden, muted or unread.')
   if (typeof p.on !== 'boolean') throw new DomainRpcError('invalid_params', 'on must be true or false.')
+  // Another computer's bot is marked only while it is listed here: a mark on one already gone would never be dropped.
+  // Clearing a mark is always allowed.
+  if (p.on && parseQualifiedId(botId) && !(ctx.mms.botRouter?.list(ctx) ?? []).some((bot) => bot.id === botId))
+    throw new DomainRpcError('bot_not_found', 'That bot is not on your other computers any more.', { botId })
   const marks = ctx.mms.botMarks.set(botId, p.mark as BotMark, p.on)
   // This computer's other windows show the change too.
   ctx.mms.events.emit({ channel: 'protocol:event', data: { type: 'bots.changed', data: { marks: true } } })
