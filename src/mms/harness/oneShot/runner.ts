@@ -33,7 +33,7 @@ const sentOutcomes = new WeakMap<object, boolean>()
 
 /**
  * Whether a single request that failed with `error` was sent: true or false when the runner ran it, undefined for a
- * failure from before it (resolution, admission). A legacy route counts as sent once its transport is called.
+ * failure from before it (resolution, admission).
  */
 export function oneShotWasSent(error: unknown): boolean | undefined {
   return error && typeof error === 'object' ? sentOutcomes.get(error) : undefined
@@ -124,8 +124,8 @@ export async function runPlan(input: RunPlanInput): Promise<string> {
     if (!now || !sameIdentity(now, plan.identity)) throw stale()
   }
   checkIdentity()
-  // A route with facts says when its request leaves (`sending`); a legacy one counts as sent once called.
-  let sent = !plan.route.facts
+  // The route says when its request leaves (`sending`).
+  let sent = false
   const outcome = (error: unknown): unknown => {
     if (error && typeof error === 'object' && !sentOutcomes.has(error)) sentOutcomes.set(error, sent)
     return error
@@ -153,7 +153,7 @@ export async function runPlan(input: RunPlanInput): Promise<string> {
   const signal = input.signal ? AbortSignal.any([input.signal, ended.signal]) : ended.signal
   let streamed = 0
   const tooLong = () => harnessAppError({ code: 'protocol', reason: 'too_long', message: `${label} wrote more than ${ONE_SHOT_STREAM_CAP.toLocaleString('en-US')} characters, so Mousse stopped it.`, instanceId: plan.instanceId })
-  const offersTools = Boolean(plan.route.facts && plan.route.facts.tools !== 'none_offered')
+  const offersTools = plan.route.facts.tools !== 'none_offered'
   const wire: OneShotWireRequest = {
     model: plan.model,
     ...(offersTools ? { instruction: ONE_SHOT_INSTRUCTION } : {}),
