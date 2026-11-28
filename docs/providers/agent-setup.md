@@ -109,8 +109,15 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
   messages, a bot's name and digest) take one of two routes, by how the entry signs in:
   - **An xAI API key** (`grok:direct`, held): one request with no tools straight to xAI's API, in
     Mousse's process, with the key Grok would use. Nothing of Grok's setup is read, and a failed
-    request is not sent again. It runs on a model you choose: Grok's own default has no name the
-    API takes.
+    request is not sent again. xAI's API needs a model name, so "Agent default" runs as the default
+    in Grok's own config (`[models] default` in its home's `config.toml`) when the entry lists that
+    model or lists none yet, else as the first model the entry lists. The picker's tooltip names
+    it ("Runs as grok-4.7"). With no model listed and no default configured, it names no thread.
+  - **Leftovers of the older route.** Before this, a Grok single request ran headless in
+    `<profile>/harness/<entry>/one-shot/<request id>/`. The places sweep removes such a folder
+    once it and its contents are 30 minutes old, when it holds only that route's `home/`, `user/`,
+    `cwd/` and `prompt.txt` and its `home/config.toml` is the one that route wrote. It never
+    follows a link or junction. That route recorded no process, so age is what tells it ended.
   - **The Grok account** (`acp:grok`, best-effort): Grok over ACP on a home of the request's own,
     whose config denies every tool and sends nothing again (`models.max_retries = 0`), with Grok's
     own session title sent to port 0, memory, turn summaries and every source from Claude Code,

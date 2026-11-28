@@ -4,7 +4,7 @@
  * clearly that route's, and anything a link or junction points at are left. The old route recorded no process, so age
  * is what tells a request ended.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, lutimesSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -90,6 +90,8 @@ describe("the sweep of Grok's older single requests", () => {
     mkdirSync(root, { recursive: true })
     const link = join(root, randomUUID())
     symlinkSync(elsewhere, link, 'junction')
+    // As old as the folder it points at: only its being a link keeps it.
+    lutimesSync(link, OLD, OLD)
     sweepLegacyGrokOneShots(home, NOW)
     expect(existsSync(join(elsewhere, 'prompt.txt'))).toBe(true)
     expect(existsSync(link)).toBe(true)
