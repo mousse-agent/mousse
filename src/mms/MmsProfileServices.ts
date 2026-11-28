@@ -156,6 +156,7 @@ import { threadFolderExpired, threadFolderRoot } from './data/expiredThreads'
 import { isThreadExpired } from '../shared/threadExpiry'
 import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry'
 import type { ThreadRouterPort } from './protocol/threadRouterPort'
+import type { BotRouterPort } from './protocol/botRouterPort'
 import type { RoutedTerminalsPort } from './protocol/routedTerminalsPort'
 import type { EditorAsksPort } from './protocol/editorAsksPort'
 import type { BotReachPort } from './protocol/botReachPort'
@@ -350,6 +351,11 @@ export class MmsProfileServices {
    * the Bridge service while it is composed and cleared when it closes; the handlers consult it first.
    */
   threadRouter?: ThreadRouterPort
+  /**
+   * Sends a window's calls about a bot of another of the user's computers to that computer. Set by the Bridge service
+   * with `threadRouter`; the handlers consult it before the thread router.
+   */
+  botRouter?: BotRouterPort
   /** The terminals other computers opened here, set while Bridge is on. */
   routedTerminals?: RoutedTerminalsPort
   /** The asks other computers made for editor connections, set while Bridge is on. */

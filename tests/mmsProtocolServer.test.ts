@@ -14,6 +14,7 @@ import { MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS, MMS_PROTOCOL_MAX_COMPLETED_RESP
 import { ROUTED_METHODS } from '../src/shared/bridge/routed'
 import { parseEnvelope, asChatMode, asChatImages, asStringArray } from '../src/mms/protocol/validators'
 import { scriptTurns } from './net/bridge/hub/fixture'
+import { qualifyId } from '../src/shared/threadRef'
 
 /** Turns run on a scripted pi adapter that answers with `chatImpl` (or a short default reply). */
 function mockLlm(mms: MousseMainService, chatImpl?: () => Promise<string>): void {
@@ -1046,6 +1047,25 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
       await clients[0]!.subscribe(0)
       expect(received[0]).not.toContain('bots.tell')
     } finally { await Promise.all(clients.map(c => c.close())) }
+  })
+
+  it('replays a chat with a bot of another computer to a window only, as it is delivered live', async () => {
+    const services = await mms.getProfileServices(mms.profileId)
+    const botId = qualifyId('nod_6h8qvnjq3drmygp263madh9dv7', 'bot_remote')
+    for (const type of ['bots.message', 'bots.changed', 'bots.activity'])
+      services.events.emit({ channel: 'protocol:event', data: { type, data: { botId, message: { id: 'm', text: 'away' } } } })
+    const cli = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'cli' })
+    const gui = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'gui' })
+    try {
+      await cli.connect()
+      await gui.connect()
+      const ofBot = (replay: Array<{ type: string; data?: unknown }>) =>
+        replay.filter((event) => (event.data as { botId?: unknown } | undefined)?.botId === botId).map((event) => event.type)
+      expect(ofBot((await cli.subscribe(0)).replay)).toEqual([])
+      expect(ofBot((await gui.subscribe(0)).replay)).toEqual(['bots.message', 'bots.changed', 'bots.activity'])
+    } finally {
+      await Promise.all([cli.close(), gui.close()])
+    }
   })
 
   it('keeps legacy-only rows pending and consumes their receipts silently when a new window joins', async () => {

@@ -41,6 +41,7 @@ import { EditorAsks } from './routed/editorAsks'
 import { ThreadRouter } from './routed/ThreadRouter'
 import { MergedLists } from './routed/mergedLists'
 import { RemoteBotRegistry } from './routed/RemoteBotRegistry'
+import { BotRouter } from './routed/BotRouter'
 import { REMOTE_BOTS_DB, SqliteRemoteBots } from './routed/remoteBotStore'
 import { RemoteAutomations } from './routed/remoteAutomations'
 import { PrivateSources, raiseStreamListenerLimits } from './routed/privateSources'
@@ -69,6 +70,7 @@ export class BridgeProfileService {
   readonly lists: MergedLists
   /** The bots of the other computers this one reaches, and the copies of their chats (not used by a window yet). */
   readonly remoteBots: RemoteBotRegistry
+  readonly botRouter: BotRouter
   private readonly routerStop = new AbortController()
   readonly dispatch: DispatchService
   private readonly remote: RemoteApi
@@ -702,10 +704,24 @@ export class BridgeProfileService {
     // An engine pairing removed or released: its bots go at once.
     const offBotPeers = this.peers.onChange(() => void this.remoteBots.reconcile())
     this.remoteBots.start()
+    // A window's calls about those bots go to the computer each lives on, and their chats stream while shown.
+    this.botRouter = new BotRouter({
+      client: this.router.client,
+      registry: this.remoteBots,
+      online: (node) => this.router.isOnline(node),
+      name: (node) => this.router.computer(node).name,
+      self: () => rt.identity.self()?.node,
+      enabled: () => this.bridgeOn(),
+      emit: (type, data) => services.events.emit({ channel: 'protocol:event', data: { type, data } }),
+      onConnectionClosed: (listener) => services.domains?.onConnectionClosed(listener) ?? (() => undefined)
+    })
+    services.botRouter = this.botRouter
     this.disposers.add(() => {
+      if (services.botRouter === this.botRouter) services.botRouter = undefined
       offBotPolicy()
       offBotConnections()
       offBotPeers()
+      this.botRouter.close()
       this.remoteBots.close()
     })
     this.disposers.add(() => {

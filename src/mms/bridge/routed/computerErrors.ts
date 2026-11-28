@@ -114,7 +114,9 @@ export function isLinkLoss(error: unknown): boolean {
 export function translateNetError(
   error: unknown,
   computer: ComputerRef,
-  method: string
+  method: string,
+  /** `reasons`: a bot call, whose refusal's `reason` is passed on. */
+  options: { reasons?: boolean } = {}
 ): DomainRpcError | undefined {
   if (error instanceof DomainRpcError) return error
   if (!(error instanceof NetError)) return undefined
@@ -147,7 +149,15 @@ export function translateNetError(
       })
     case 'cancelled':
       return new DomainRpcError('cancelled', 'The request was cancelled.')
-    default:
-      return new DomainRpcError(error.code, error.message, { node: computer.node, name: computer.name })
+    default: {
+      // A bot's computer names why it refused an action (`reason`, a plain code); that, and nothing else it said,
+      // reaches the window. Thread calls pass on no details: their ids would not be named as this computer names them.
+      const reason = options.reasons ? (error.details as { reason?: unknown } | undefined)?.reason : undefined
+      return new DomainRpcError(error.code, error.message, {
+        node: computer.node,
+        name: computer.name,
+        ...(typeof reason === 'string' && /^[a-z_]{1,64}$/.test(reason) ? { reason } : {})
+      })
+    }
   }
 }

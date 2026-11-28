@@ -53,6 +53,8 @@ export const PASSING_END_CODES: ReadonlySet<string> = new Set(['cancelled', 'pee
 export interface RemoteBotChatListener {
   /** The copy changed: the chat's snapshot came, or a message was added or changed. Read it with `messages`. */
   changed?(): void
+  /** A message was added or changed, as the stream carried it (after `changed`). */
+  message?(message: RemoteBotMessage): void
   /** The bot's row, from its chat stream. */
   row?(bot: BotFeedRow): void
   /** A display-only note (`bots.activity`, `bots.reply`): shown, never kept. */
@@ -194,6 +196,7 @@ export class RemoteBotChats {
       if (!isMessage(message)) return
       this.trimmed(this.options.safely('copy a bot chat message', () => this.options.store.putMessage(chat.node, chat.botId, message, this.kept())))
       this.each(chat, (listener) => listener.changed?.())
+      this.each(chat, (listener) => listener.message?.(message))
     } else if (type === 'bots.changed' && isRecord(data.bot)) {
       this.each(chat, (listener) => listener.row?.(data.bot as unknown as BotFeedRow))
     }
