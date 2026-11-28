@@ -10,7 +10,7 @@
  * - Rows kept to the bot's own computer are refused at once, and nothing is sent.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import type { NodeId } from '../../../src/shared/net'
+import { newId, type NodeId } from '../../../src/shared/net'
 import { qualifyId } from '../../../src/shared/threadRef'
 import { accessPreset } from '../../../src/shared/net/accessPresets'
 import { BOT_FULL_TRUST_PERMISSION } from '../../../src/shared/bots/personal/manifest'
@@ -53,7 +53,17 @@ describe('setting up a bot of another computer from a window', () => {
     ['bots.devices.get', { botId }],
     ['bots.devices.set', { botId, access: { mode: 'this_computer' } }],
     ['bots.create', { node: ownerOnViewer, look: LOOK, description: 'Made from the viewer', clientRequestId: 'setup-use-create' }],
-    ['bots.delete', { botId }]
+    ['bots.delete', { botId }],
+    ...fullRows(botId)
+  ]
+  /** Full rows that change what the bot keeps or may do, for ids the bot does not have: at Full, its computer answers each. */
+  const fullRows = (botId: string): Array<[string, Record<string, unknown>]> => [
+    ['bots.memory.edit', { botId, id: 'm999999', text: 'Changed' }],
+    ['bots.memory.forget', { botId, id: 'm999999' }],
+    ['bots.schedules.remove', { botId, scheduleId: 'no-such-schedule' }],
+    ['bots.reminders.cancel', { botId, reminderId: 'rem_00000000-0000-4000-8000-000000000000' }],
+    ['bots.permissions.revoke', { botId, permissionId: 'no-such-permission' }],
+    ['bots.asks.answer', { botId, askId: 'esc_00000000-0000-4000-8000-000000000000', answer: 'not_now' }]
   ]
   /** The viewer's bot level here (its device row's bot switch): the grant stays as it is. */
   const level = async (fields: Record<string, unknown>) => {
@@ -64,6 +74,12 @@ describe('setting up a bot of another computer from a window', () => {
     await fabric.connect(viewer, ownerOnViewer)
     await viewer.dispatch('bots.get', { botId: q })
   }, { timeout: 60_000 })
+  /** Full access and Full bot access there, once the viewer has learned it (Lives on offers the owner). */
+  const atFull = async () => {
+    await level({ ...accessPreset('full').fields, bots: 'full' })
+    await reconnect()
+    await vi.waitFor(async () => expect((await viewer.dispatch('bots.remote.list', {})).computers).toHaveLength(1), { timeout: 30_000 })
+  }
 
   beforeAll(async () => {
     owner = await fabric.computer('owner')
@@ -179,4 +195,58 @@ describe('setting up a bot of another computer from a window', () => {
     }
     expect(sent(from)).toEqual([])
   }, 60_000)
+
+  it('at Full, memory, schedule, reminder, permission and ask rows reach the bot’s computer, which answers them', async () => {
+    await atFull()
+    for (const [method, params] of fullRows(q)) {
+      const from = fabric.crossed.length
+      const no = await refused(viewer.dispatch(method, params))
+      // The bot there has no such entry: its own answer, never the bot level's.
+      expect(no.details?.reason ?? '', method).not.toMatch(/^bots_/)
+      expect(no.code, method).not.toBe('not_available_remotely')
+      expect(sent(from), method).toEqual([method])
+    }
+  }, 60_000)
+
+  it('a device that is not the owner’s, or one more than a bot takes, is refused before anything runs there', async () => {
+    await atFull()
+    const stranger = newId('node')
+    const many = Array.from({ length: 64 }, () => newId('node'))
+    const before = { bots: service().list().bots.length, access: owner.mms.botDeviceAccess.get(keeper).access }
+    const create = (nodes: string[], key: string) => viewer.dispatch('bots.create', { node: ownerOnViewer, look: LOOK, description: 'Reaches a stranger', clientRequestId: key, access: { mode: 'chosen', nodes } })
+    const set = (nodes: string[]) => viewer.dispatch('bots.devices.set', { botId: q, access: { mode: 'chosen', nodes } })
+    for (const [what, call, says] of [
+      ['create, not on the account', () => create([stranger], 'setup-stranger'), 'no longer on your account'],
+      ['create, 64 and the viewer', () => create(many, 'setup-many'), 'up to 64'],
+      ['devices.set, not on the account', () => set([stranger]), 'no longer on your account'],
+      ['devices.set, 64 and the viewer', () => set(many), 'up to 64']
+    ] as const) {
+      const no = await refused(call())
+      // A plain refusal of the request: never "it may have run".
+      expect(no.code, what).toBe('invalid_params')
+      expect(no.message, what).toContain(says)
+    }
+    expect(service().list().bots).toHaveLength(before.bots)
+    expect(owner.mms.botDeviceAccess.get(keeper).access).toEqual(before.access)
+  }, 60_000)
+
+  it.each([
+    ['Use', 'use'],
+    ['Off', 'off']
+  ])('lowered from Full to %s, the computer leaves Lives on and the window hears of it, with no bot of it listed', async (_name, bots) => {
+    await atFull()
+    // No bot there reaches the viewer: only Lives on changes.
+    const access = owner.mms.botDeviceAccess.get(keeper).access
+    owner.mms.botDeviceAccess.set(keeper, { mode: 'this_computer' })
+    try {
+      await vi.waitFor(async () => expect((await viewer.dispatch('bots.remote.list', {})).bots.some((bot: { id: string }) => bot.id === q)).toBe(false), { timeout: 30_000 })
+      expect((await viewer.dispatch('bots.remote.list', {})).computers).toHaveLength(1)
+      const heardFrom = viewer.events.length
+      await level({ bots })
+      await vi.waitFor(async () => expect((await viewer.dispatch('bots.remote.list', {})).computers).toEqual([]), { timeout: 30_000 })
+      await vi.waitFor(() => expect(viewer.events.slice(heardFrom).some((event) => event.type === 'bots.changed' && (event.data as { remote?: unknown }).remote === true)).toBe(true), { timeout: 10_000 })
+    } finally {
+      owner.mms.botDeviceAccess.set(keeper, access)
+    }
+  }, 120_000)
 })

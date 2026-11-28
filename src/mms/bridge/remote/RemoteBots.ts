@@ -16,10 +16,10 @@ import type { PermissionMode } from '../../../shared/permissionMode'
 import { canonicalJson } from '../../net/sync/codec'
 import { isBotId } from '../../bots/definitions/BotDefinitionStore'
 import type { BotReachPort } from '../../protocol/botReachPort'
-import { REMOTE_BOT_REACH, botDeviceAccessProblem, type BotDeviceAccess, type BotDeviceChoice, type BotDevicesView } from '../../../shared/bots/personal/deviceAccess'
+import { BOT_DEVICES_REFUSALS, MAX_BOT_DEVICES, REMOTE_BOT_REACH, botDeviceAccessProblem, type BotDeviceAccess, type BotDevicesRefusal, type BotDeviceChoice, type BotDevicesView } from '../../../shared/bots/personal/deviceAccess'
 import { modelPickProblem, modelRowsProblem } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelPick, BotModelSlots } from '../../../shared/bots/personal/definition'
-import { botDevicesView, setBotDevices, type BotDevicesSource } from '../../bots/deviceMethods'
+import { botDevicesView, type BotDevicesSource } from '../../bots/deviceMethods'
 import { BOT_STAGE_PART_BYTES, REMOTE_BOT_FILE_BYTES, isBotFileRef, isBotStageId, isSvgName } from '../../../shared/bots/personal/remoteFiles'
 import { botFileRef, looksLikeSvg, openInside, readBotFilePage, remoteFileType, sniffImage } from './botFiles'
 import type { BotStaging } from './botStaging'
@@ -477,9 +477,10 @@ export function remoteBotMethods(options: {
   staging?: Pick<BotStaging, 'checkBegin' | 'checkAppend' | 'begin' | 'append' | 'take' | 'check' | 'drop'>
   /**
    * Which devices reach each bot, as About's Devices row reads and sets it here (`bots.devices.get`, `bots.devices.set`).
-   * Absent: both refuse, as on a computer that keeps no such choice.
+   * Absent: both refuse, as on a computer that keeps no such choice. `known`: the account's devices now, connected or
+   * not, which a choice sent by another device may name (undefined while they can't be read: not checked then).
    */
-  devices?: Pick<BotDevicesSource, 'store' | 'devices' | 'changed'>
+  devices?: Pick<BotDevicesSource, 'store' | 'devices' | 'changed'> & { known?(): readonly string[] | undefined }
 }): RpcMethod[] {
   const limitOf = (context: RpcContext): PermissionMode => {
     try {
@@ -633,6 +634,21 @@ export function remoteBotMethods(options: {
     mode: 'chosen',
     nodes: access.mode === 'chosen' ? (access.nodes.includes(node) ? [...access.nodes] : [...access.nodes, node]) : [node]
   })
+  /**
+   * A Devices choice from a device, as it will be saved (`keepingCaller`): within the limit with that device counted,
+   * and naming only the account's devices (the device itself always is one, as it is calling). Checked before the call
+   * is taken, so a choice refused here is a plain bad request, never an outcome to wonder about.
+   */
+  const checkChosen = (access: BotDeviceAccess, node: string): void => {
+    const refuse = (reason: BotDevicesRefusal) => new NetError('bad_request', BOT_DEVICES_REFUSALS[reason], { details: { reason } })
+    const kept = keepingCaller(access, node)
+    const nodes = kept.mode === 'chosen' ? kept.nodes : []
+    if (nodes.length > MAX_BOT_DEVICES) throw refuse('bot_devices_too_many')
+    const known = options.devices?.known?.()
+    if (!known) return
+    const account = new Set(known)
+    if (nodes.some((id) => id !== node && !account.has(id))) throw refuse('bot_devices_unknown')
+  }
   /** Runs on's choices as another device gets them: this computer is the only one a bot here lives on. */
   const choicesFor = <T extends Pick<BotRunsOnChoices, 'computers' | 'devices'>>(choices: T, node: string): T => ({
     ...choices,
@@ -853,7 +869,7 @@ export function remoteBotMethods(options: {
           // alone) until the owner picks. The device still learns of the bot it just made, and of nothing else.
         }
       return { bot: remoteBotSummary(bot) }
-    }),
+    }, first((p, _port, context) => checkChosen((p.access as BotDeviceAccess | undefined) ?? { mode: 'this_computer' }, context.caller.node))),
     method('bots.update', async (p, port) => {
       const { bot } = port.update(botId(p), {
         ...(typeof p.name === 'string' ? { name: p.name } : {}),
@@ -878,11 +894,15 @@ export function remoteBotMethods(options: {
     method(
       'bots.devices.set',
       async (p, _port, context) => {
-        await setBotDevices(devicesWithCaller(context.caller.node), botId(p), keepingCaller(p.access as BotDeviceAccess, context.caller.node))
+        // Checked before the call was taken (`checkChosen`): saved as it is.
+        const source = devicesOf()
+        source.store.set(botId(p), keepingCaller(p.access as BotDeviceAccess, context.caller.node))
+        source.changed?.(botId(p))
         return devicesView(botId(p), context.caller.node)
       },
-      first(() => {
+      first((p, _port, context) => {
         devicesOf()
+        checkChosen(p.access as BotDeviceAccess, context.caller.node)
       })
     ),
     method(

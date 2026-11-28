@@ -531,11 +531,18 @@ export class RemoteBotRegistry {
    */
   private refuse(c: Computer): void {
     this.detach(c)
-    const had = c.bots.size > 0
     this.dropEverything(c)
     c.bots = new Map()
+    // Nothing is set up there from here any more: it leaves New bot's Lives on, even with no bot listed.
+    this.forgetLevel(c)
     this.backOff(c)
-    if (had) this.changed()
+    this.changed()
+  }
+
+  /** This computer's level there is no longer known (the computer refused it, or is not reached): asked again on its next feed. */
+  private forgetLevel(c: Computer): void {
+    c.level = undefined
+    c.levelFor = undefined
   }
 
   private dropEverything(c: Computer): void {
@@ -688,7 +695,9 @@ export class RemoteBotRegistry {
   private away(c: Computer): void {
     this.backOff(c)
     this.toTellings((tellings) => tellings.reconnecting(c.node))
-    if (!c.online) return
+    const knew = c.level !== undefined
+    this.forgetLevel(c)
+    if (!c.online && !knew) return
     c.online = false
     this.changed()
   }
@@ -739,11 +748,34 @@ export class RemoteBotRegistry {
     if (c.levelFor === key) return
     c.levelFor = key
     if (feed.level === 'use') {
+      // Lowered to Use: the window greys its setup and drops the computer from Lives on now.
+      const was = c.level
       c.level = 'use'
+      if (was !== 'use') this.changed()
       return
     }
+    this.askLevel(c, key, feed.level === 'full' ? 'use' : (c.level ?? 'use'))
+  }
+
+  /**
+   * A call this computer took for Full was refused there for its bot level (`bots_full_needed`): setup greys at once,
+   * and the level is asked again, as the grant may be what changed.
+   */
+  levelRefused(node: NodeId): void {
+    const c = this.computersByNode.get(node)
+    if (!c) return
+    const was = c.level
+    c.level = 'use'
+    if (was !== 'use') this.changed()
+    const key = `refused:${newId('rpc')}`
+    c.levelFor = key
+    this.askLevel(c, key, 'use')
+  }
+
+  /** Asks the computer the level its gate lets through, in the background; `fallback` when it does not answer. */
+  private askLevel(c: Computer, key: string, fallback: BotLevel): void {
     void (async () => {
-      let level: BotLevel = feed.level === 'full' ? 'use' : (c.level ?? 'use')
+      let level: BotLevel = fallback
       try {
         const mine = await this.options.client(c.node).rpc('bridge.access.mine', {}, { id: newId('rpc'), deadlineMs: 15_000 })
         const bots = isRecord(mine) ? mine.bots : undefined

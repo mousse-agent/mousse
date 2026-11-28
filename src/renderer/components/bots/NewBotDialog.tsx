@@ -62,8 +62,11 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
   const livesOn = useBotsStore((s) => s.remoteComputers)
   const node = draft.node && livesOn.some((computer) => computer.node === draft.node && !computer.offline) ? draft.node : null
   const home = node ? livesOn.find((computer) => computer.node === node)?.name : undefined
-  // A computer picked under Lives on that did not answer: named on Runs on, which is this computer's again.
+  // A computer picked under Lives on that did not answer, went offline or lowered this one to Use: said on Runs on,
+  // which is this computer's again.
   const [unreached, setUnreached] = useState<string | null>(null)
+  const lastHome = useRef<string | undefined>(undefined)
+  if (home) lastHome.current = home
   // undefined while asked; null from an older service, which has no `bots.model.choices`: no Runs on step, by usage as before.
   const [choices, setChoices] = useState<BotsPersonalV2Result<'bots.model.choices'> | null | undefined>(undefined)
   const loadChoices = useCallback(() => {
@@ -82,12 +85,23 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
       if (!live) return
       if (!node) { setChoices((known) => known ?? null); return }
       // The other computer did not answer: the bot is made here unless it is picked again.
-      setUnreached(home ?? 'The other computer')
+      setUnreached(`${home ?? 'The other computer'} did not answer, so the bot is made on this computer. Pick it again to retry.`)
       setNewBotDraft({ node: null, slots: null, image: null, model: null, devices: [] })
     })
     return () => { live = false }
   }, [node, home, setNewBotDraft])
   useEffect(loadChoices, [loadChoices])
+  // The picked computer left Lives on, or is offline now: said, and its models and devices are no longer the draft's.
+  useEffect(() => {
+    if (!draft.node || node) return
+    const gone = livesOn.find((computer) => computer.node === draft.node)
+    const name = gone?.name ?? lastHome.current ?? 'The other computer'
+    setUnreached(gone?.offline
+      ? `${name} is offline now, so the bot is made on this computer.`
+      : `${name} no longer gives this computer Full bot access, so the bot is made on this computer.`)
+    setChoices(undefined)
+    setNewBotDraft({ node: null, slots: null, image: null, model: null, devices: [] })
+  }, [draft.node, node, livesOn, setNewBotDraft])
   const pickHome = (next: string | null) => {
     if (next === node) return
     setUnreached(null)
@@ -165,7 +179,7 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
               title="Other computers show here where this computer has Full bot access"
               options={[{ value: '', label: 'This computer' }, ...livesOn.map((computer) => ({ value: computer.node, label: computer.offline ? `${computer.name} · offline` : computer.name, ...(computer.offline ? { disabled: true } : {}) }))]} />
           </div>}
-          {unreached && <p className="bot-about-next" role="status">{unreached} did not answer, so the bot is made on this computer. Pick it again to retry.</p>}
+          {unreached && <p className="bot-about-next" role="status">{unreached}</p>}
           {choices ? <NewBotRunsOn choices={choices} lives={livesOn.length > 0} model={draft.model} onModel={(model) => setNewBotDraft({ model })} rows={draft.slots}
             image={draft.image} onImage={(image) => setNewBotDraft({ image })}
             onPick={(keys, pick) => setNewBotDraft({ slots: { ...(draft.slots ?? EMPTY_ROWS), ...Object.fromEntries(keys.map((key) => [key, pick])) } })}

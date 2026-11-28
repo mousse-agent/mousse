@@ -982,10 +982,13 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     store().focusRemote(bot.id, true)
     return () => store().focusRemote(bot.id, false)
   }, [bot.id, remote, store])
-  // Its computer went offline, or lowered this one to Use: About closes rather than show what can't be changed.
+  // Its computer went offline, or lowered this one to Use: About and Memory close rather than show what can't be changed.
   useEffect(() => {
-    if (!canSetup && store().aboutOpen) useBotsStore.setState({ aboutOpen: false })
-  }, [canSetup, store])
+    if (canSetup) return
+    const state = store()
+    if (state.aboutOpen) useBotsStore.setState({ aboutOpen: false })
+    if (state.memoryOpen?.botId === bot.id) useBotsStore.setState({ memoryOpen: null })
+  }, [canSetup, store, bot.id])
   // This window shows the bot's chat: its replies only sound while it is on screen.
   useEffect(() => {
     void window.mousse.app.setViewedBot?.(bot.id)?.catch(() => undefined)

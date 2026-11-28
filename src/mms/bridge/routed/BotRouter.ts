@@ -3,6 +3,7 @@ import { open, stat } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import { BOT_METHODS, type BotMethod, type BotMethodRow } from '../../../shared/bots/personal/methodTable'
 import { MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment, type BotElsewhereComputer } from '../../../shared/bots/personal/methods'
+import { BOT_DEVICES_REFUSALS, type BotDevicesRefusal } from '../../../shared/bots/personal/deviceAccess'
 import type { BotLevel } from '../../../shared/net/local'
 import { attachmentTooLargeText } from '../../../shared/bots/personal/attachments'
 import { BOT_STAGE_PART_BYTES, REMOTE_BOT_FILE_BYTES, isBotStageId, isSvgName } from '../../../shared/bots/personal/remoteFiles'
@@ -73,7 +74,7 @@ export interface BotRouterOptions {
   client: Pick<RoutedClient, 'callBot'>
   /** The other computers' bots as this one lists them, with the copies of their chats. */
   registry: Pick<RemoteBotRegistry, 'row' | 'rows' | 'onChange'> &
-    Partial<Pick<RemoteBotRegistry, 'computers' | 'levelOn'>> & { chats: Pick<RemoteBotRegistry['chats'], 'open' | 'messages'> }
+    Partial<Pick<RemoteBotRegistry, 'computers' | 'levelOn' | 'levelRefused'>> & { chats: Pick<RemoteBotRegistry['chats'], 'open' | 'messages'> }
   /** The copies here of the files those bots' chats show. Absent: none show, and none are kept of what is sent. */
   files?: Pick<RemoteBotFiles, 'fetch' | 'seed'>
   /** Whether a session with `node` is open now. */
@@ -196,11 +197,22 @@ export class BotRouter implements BotRouterPort {
     const signal = ctx.connection.lifetime
     if (method === 'bots.chat.list' && ref) return { result: await this.chatList(node, ref.id, owner, signal) }
     if (files.length && ref) return { result: await this.sendWithFiles(node, ref.id, owner, files, signal) }
-    const raw = await this.options.client.callBot(node, method, owner, {
-      write,
-      ...(write && typeof params.clientRequestId === 'string' && params.clientRequestId ? { idem: params.clientRequestId } : {}),
-      ...(signal ? { signal } : {})
-    })
+    let raw: unknown
+    try {
+      raw = await this.options.client.callBot(node, method, owner, {
+        write,
+        ...(write && typeof params.clientRequestId === 'string' && params.clientRequestId ? { idem: params.clientRequestId } : {}),
+        ...(signal ? { signal } : {})
+      })
+    } catch (error) {
+      const reason = (error as { details?: { reason?: unknown } } | null)?.details?.reason
+      // Refused there for this computer's bot level: its setup greys now, and the level is asked again.
+      if (reason === 'bots_full_needed') this.options.registry.levelRefused?.(node)
+      // A device choice refused there before it ran: the window's own wrong params, said in its words.
+      if (typeof reason === 'string' && Object.hasOwn(BOT_DEVICES_REFUSALS, reason))
+        throw new DomainRpcError('invalid_params', BOT_DEVICES_REFUSALS[reason as BotDevicesRefusal], (error as { details?: unknown }).details)
+      throw error
+    }
     return { result: qualifyBotResult(node, raw) }
   }
 

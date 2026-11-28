@@ -253,6 +253,21 @@ describe('the chat of a bot of another computer', () => {
     expect(items.filter((item) => item.getAttribute('aria-disabled') === 'true').map((item) => item.title)).toEqual(Array(6).fill('Laptop is offline'))
   })
 
+  it.each([
+    ['lowers this one to Use', { ...LAPTOP, level: 'use' as const }],
+    ['goes offline', { ...LAPTOP, level: 'full' as const, offline: true }]
+  ])('when its computer %s, an open Rename and Memory close', async (_case, lives) => {
+    await open(remote({ lives: { ...LAPTOP, level: 'full' } }))
+    await act(async () => useBotsStore.setState({ dialog: { kind: 'rename', botId: 'n_laptop:b_inbox' }, memoryOpen: { botId: 'n_laptop:b_inbox' } }))
+    expect(document.querySelector('.bot-dialog')).not.toBeNull()
+    fake.bots = [local, away({ lives })]
+    await act(async () => fake.emit.remote())
+    await settle()
+    expect(useBotsStore.getState().dialog).toBeNull()
+    expect(useBotsStore.getState().memoryOpen).toBeNull()
+    expect(document.querySelector('.bot-dialog')).toBeNull()
+  })
+
   it('sends words and files to it by its qualified id, none of this computer\'s threads, and a / as words', async () => {
     await open(remote())
     // A thread of this computer held for it some other way than its composer: never sent there.
