@@ -36,16 +36,27 @@ export function AppletName({ title, description, onOpen }: { title: string; desc
   )
 }
 
-/** An applet error with a way to ask the assistant to repair it. */
-export function AppletError({ error, onRepair }: { error: string; onRepair: () => void }) {
+/** An applet error with a way to ask the assistant to repair it (none while the bot that made it is away). */
+export function AppletError({ error, onRepair }: { error: string; onRepair?: () => void }) {
   return (
     <p className="mousse-applet-error" role="alert">
       {error}
-      <Button size="sm" type="button" onClick={onRepair}>
+      {onRepair && <Button size="sm" type="button" onClick={onRepair}>
         Ask the assistant to fix this
-      </Button>
+      </Button>}
     </p>
   )
+}
+
+/**
+ * A bot of another computer's applet shown from the copy here while that computer is away: what changes in it is not
+ * saved. Null otherwise.
+ */
+export function AppletAwayNote({ conversation, readOnly, error }: { conversation?: AppletConversation; readOnly: boolean; error: string | null }) {
+  const bot = conversation?.bot
+  // Not opened here before, it has no copy: its error says the computer is offline instead.
+  if (!bot || (!readOnly && (!bot.offline || error))) return null
+  return <p className="mousse-applet-note" role="status">{bot.computer} is offline · changes here aren’t saved</p>
 }
 
 /** Text the applet asked to add to the conversation, with Add and Dismiss. */
@@ -86,15 +97,17 @@ export const AppletCard = memo(function AppletCard({ reference, conversation, on
   const [hostThreadId] = useState(activeThreadId)
   const threadId = conversation ? conversation.threadId : hostThreadId === activeThreadId ? activeThreadId : null
   const preview = useRef<HTMLDivElement>(null)
-  const applet = useAppletRuntime(preview, { host: 'transcript', threadId, profileId, reference, enabled: true, restart: 0 })
+  const applet = useAppletRuntime(preview, { host: 'transcript', threadId, profileId, reference, enabled: true, restart: 0, bot: conversation?.bot })
   const { error, conversationInput, setConversationInput } = applet
+  const away = Boolean(conversation?.bot?.offline)
 
   const openInPanel = conversation ? onOpen : threadId ? () => useAppStore.getState().openAppletDocument(threadId, reference) : undefined
   return (
     <section className="mousse-applet" aria-label={`Applet: ${reference.title}`}>
       <AppletName title={reference.title} description={reference.description} onOpen={openInPanel} />
+      <AppletAwayNote conversation={conversation} readOnly={applet.readOnly} error={error} />
       {error && threadId && (
-        <AppletError error={error} onRepair={() => requestAppletRepair(profileId, threadId, reference, error, conversation)} />
+        <AppletError error={error} onRepair={away ? undefined : () => requestAppletRepair(profileId, threadId, reference, error, conversation)} />
       )}
       <div
         ref={preview}

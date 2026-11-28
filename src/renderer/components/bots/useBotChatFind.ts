@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import type { UIMessage } from 'ai'
 import type { BotChatMessage } from '../../../shared/bots/personal/chat'
+import { shownApplets } from '../../../shared/bots/personal/remoteApplets'
 import type { FindTurn } from '../../chat/components/agent-elements/find/find-index'
 import type { RevealNavigation } from '../../chat/components/agent-elements/find/reveal'
 import { useThreadFind, type ThreadFind } from '../../chat/components/agent-elements/find/use-thread-find'
@@ -25,7 +26,7 @@ export function botFindText(message: BotChatMessage): string {
   const action = message.action
   if (action) return [actionTitle(action), actionStatus(action)].filter(Boolean).join('\n\n')
   if (message.actionSentAt) return `Sent · ${botGroupTime(message.actionSentAt)}`
-  if (message.plainFrom !== undefined && (message.question || message.cards?.length)) return message.text.slice(0, message.plainFrom).trimEnd()
+  if (message.plainFrom !== undefined && (message.question || message.cards?.length || shownApplets(message.applets))) return message.text.slice(0, message.plainFrom).trimEnd()
   return message.text
 }
 

@@ -76,6 +76,16 @@ button.mousse-applet-name:focus-visible {
 .document-panel .mousse-applet-error {
   padding: 8px 16px;
 }
+/* A bot of another computer's applet while that computer is away: shown from the copy here, nothing it changes saved. */
+.mousse-applet-note {
+  margin: 0;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.document-panel .mousse-applet-note {
+  padding: 8px 16px;
+}
 .mousse-applet-error button {
   display: block;
   margin-top: 8px;

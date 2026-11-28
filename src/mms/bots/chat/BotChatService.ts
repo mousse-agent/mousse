@@ -927,6 +927,20 @@ export class BotChatService {
   }
 
   /**
+   * The thread an applet of the bot's chat was published in, for a device that opens it (`bots.applets.*`): the applet
+   * must be one `messageId`, a message of `botId`, shows, at exactly that revision. Another bot's message, an applet the
+   * message doesn't show, or a revision it doesn't show, is refused as not there.
+   */
+  appletThread(botId: string, messageId: string, appletId: string, revisionId: string): string {
+    this.engine.definitionOf(botId)
+    const row = this.store.message(messageId)
+    if (!row || row.botId !== botId) throw new BotEngineError('message_not_found', 'No such message.')
+    const applet = (row.attachments ?? []).find((file) => file.applet?.reference.appletId === appletId && file.applet.reference.revisionId === revisionId)?.applet
+    if (!applet?.threadId) throw new BotEngineError('applet_not_found', 'This applet is no longer in the chat.')
+    return applet.threadId
+  }
+
+  /**
    * The bot's files folder, for a device that can't open this computer's files (`bots.chat.file`), which reads only
    * inside it. Refuses a bot that is not there.
    */

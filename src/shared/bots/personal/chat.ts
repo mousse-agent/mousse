@@ -158,10 +158,11 @@ export interface BotChatMessage {
 
 /**
  * An applet a bot made: the bot's thread it was published in (the app reads and runs it from there, in the same sandbox
- * as a thread's) and its reference.
+ * as a thread's) and its reference. A bot of another computer's applet has no thread here: the app opens it through
+ * that bot (`bots.remote.applet`), by the message that shows it.
  */
 export interface BotChatApplet {
-  threadId: string
+  threadId?: string
   reference: AppletReference
 }
 

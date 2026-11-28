@@ -11,6 +11,7 @@ import { PASSING_END_CODES, RemoteBotChats, askOwner, ownerSaid } from './Remote
 import type { SqliteRemoteBots } from './remoteBotStore'
 import type { BotMarksStore } from '../../bots/marks/BotMarksStore'
 import type { RemoteBotFiles } from './remoteBotFiles'
+import type { RemoteBotApplets } from './remoteBotApplets'
 import type { RemoteBotTellings } from './RemoteBotTellings'
 import type { BotLevel } from '../../../shared/net/local'
 
@@ -105,6 +106,8 @@ export interface RemoteBotRegistryOptions {
   marks?: Pick<BotMarksStore, 'dropBots' | 'dropComputer' | 'keepComputers'>
   /** The copies of those bots' files the chats here showed (`RemoteBotFiles`): a bot dropped here takes them with it. */
   files?: Pick<RemoteBotFiles, 'dropBots' | 'dropComputer' | 'keepComputers'>
+  /** The copies of those bots' applets the windows here opened (`RemoteBotApplets`): a bot dropped here takes them with it. */
+  applets?: Pick<RemoteBotApplets, 'dropBots' | 'dropComputer' | 'keepComputers'>
   /**
    * The notifications of those bots (`RemoteBotTellings`): each feed snapshot, live or replayed as the feed opens, and
    * each bot lost here.
@@ -386,6 +389,9 @@ export class RemoteBotRegistry {
         // And the copies of their files that the chats here showed.
         if (all) this.options.files?.dropComputer(node)
         else if (lost.length) this.options.files?.dropBots(node, lost)
+        // And the copies of their applets that windows here opened.
+        if (all) this.options.applets?.dropComputer(node)
+        else if (lost.length) this.options.applets?.dropBots(node, lost)
         return true
       }) === true
     // The Bridge's part of a drop still under way is not asked twice; it is tried again once it ends.
@@ -449,6 +455,7 @@ export class RemoteBotRegistry {
     // removed before that copy was first written, still takes its bots' marks with it.
     this.safely('drop the marks of other computers’ bots', () => this.options.marks?.keepComputers((node) => kept(node as NodeId)))
     this.safely('drop the files of other computers’ bots', () => this.options.files?.keepComputers((node) => kept(node as NodeId)))
+    this.safely('drop the applets of other computers’ bots', () => this.options.applets?.keepComputers((node) => kept(node as NodeId)))
     // What is kept on disk for a computer no longer listed (it left the user's computers, was blocked, or its pairing
     // no longer accepts this one) goes too, also when it left while this computer was not running.
     const key = `${[...present.keys()].sort().join(',')}${listed.unsure ? ' unsure' : ''}`

@@ -1,6 +1,7 @@
 import type { BotSummary } from '../../shared/bots/personal/chat'
 import type { BotElsewhereComputer } from '../../shared/bots/personal/methods'
 import type { HandlerContext } from './handlers'
+import type { RemoteAppletIds, RemoteAppletOpened } from '../bridge/routed/remoteBotApplets'
 
 /**
  * What the protocol handlers need from the router that sends a window's call about a bot of another of the user's
@@ -27,4 +28,11 @@ export interface BotRouterPort {
    * files folder there when there is none or it changed. `path` is its place in that folder.
    */
   file(ctx: HandlerContext, botId: string, path: string): Promise<{ path: string; name: string; size: number }>
+  /**
+   * An applet a message of a bot of another computer shows (`bots.remote.applet`): its source and saved state, read
+   * there; while that computer is away, the copy kept here, `readOnly`.
+   */
+  applet?(ctx: HandlerContext, botId: string, ids: RemoteAppletIds): Promise<RemoteAppletOpened>
+  /** Saves such an applet's state on the bot's computer (`bots.remote.appletState`); refused at once while it is away. */
+  appletSave?(ctx: HandlerContext, botId: string, ids: RemoteAppletIds, state: unknown): Promise<{ saved: true }>
 }

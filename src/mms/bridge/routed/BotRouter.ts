@@ -9,6 +9,7 @@ import { attachmentTooLargeText } from '../../../shared/bots/personal/attachment
 import { BOT_STAGE_PART_BYTES, REMOTE_BOT_FILE_BYTES, isBotStageId, isSvgName } from '../../../shared/bots/personal/remoteFiles'
 import { Lanes } from './lanes'
 import type { RemoteBotFiles } from './remoteBotFiles'
+import type { RemoteAppletIds, RemoteAppletOpened, RemoteBotApplets } from './remoteBotApplets'
 import { isId, type NodeId } from '../../../shared/net'
 import { parseQualifiedId } from '../../../shared/threadRef'
 import { DomainRpcError } from '../../protocol/domainRegistry'
@@ -77,6 +78,8 @@ export interface BotRouterOptions {
     Partial<Pick<RemoteBotRegistry, 'computers' | 'levelOn' | 'levelRefused'>> & { chats: Pick<RemoteBotRegistry['chats'], 'open' | 'messages'> }
   /** The copies here of the files those bots' chats show. Absent: none show, and none are kept of what is sent. */
   files?: Pick<RemoteBotFiles, 'fetch' | 'seed'>
+  /** Those bots' applets, read and saved there, with the copies kept here. Absent: none open. */
+  applets?: Pick<RemoteBotApplets, 'open' | 'save'>
   /** Whether a session with `node` is open now. */
   online(node: NodeId): boolean
   /** The name a person knows `node` by. */
@@ -329,6 +332,36 @@ export class BotRouter implements BotRouterPort {
       if (error instanceof DomainRpcError) throw error
       throw new DomainRpcError('file_unavailable', 'This file can’t be shown here.')
     }
+  }
+
+  /** A bot of another computer that this computer lists, named by a window: its computer and its own id there. */
+  private listedBot(ctx: HandlerContext, botId: string): { node: NodeId; id: string } {
+    if (ctx.connection?.clientType !== 'gui' || ctx.connection.bridgeCaller)
+      throw new DomainRpcError('forbidden', 'Only a Mousse window can use a bot of another computer.')
+    const ref = parseQualifiedId(botId)
+    if (!ref) throw new DomainRpcError('invalid_params', 'That bot is on this computer. Open its applet there.')
+    const node = ref.node as NodeId
+    if (!this.options.registry.row(node, ref.id)) throw new DomainRpcError('bot_not_found', 'This bot is gone.', { botId })
+    return { node, id: ref.id }
+  }
+
+  /**
+   * An applet a message of a bot of another computer shows, for a window to run: read from that computer
+   * (`RemoteBotApplets`), which checks the message is that bot's and shows that applet at that revision; while it is
+   * away, the copy kept here, read-only. Only a window asks.
+   */
+  async applet(ctx: HandlerContext, botId: string, ids: RemoteAppletIds): Promise<RemoteAppletOpened> {
+    const { node, id } = this.listedBot(ctx, botId)
+    if (!this.options.applets || !this.options.enabled()) throw computerOffline(this.computer(node))
+    return this.options.applets.open(node, id, ids, ctx.connection?.lifetime)
+  }
+
+  /** Saves an applet's state on its bot's computer, which owns it. Refused at once while that computer is away. */
+  async appletSave(ctx: HandlerContext, botId: string, ids: RemoteAppletIds, state: unknown): Promise<{ saved: true }> {
+    const { node, id } = this.listedBot(ctx, botId)
+    if (!this.options.applets || !this.options.enabled() || !this.options.online(node)) throw computerOffline(this.computer(node))
+    await this.options.applets.save(node, id, ids, state)
+    return { saved: true }
   }
 
   /** A bot's chat: from its computer, or from the copy here if that computer does not answer within a few seconds. */

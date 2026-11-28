@@ -23,6 +23,17 @@ import { botDevicesView, type BotDevicesSource } from '../../bots/deviceMethods'
 import { BOT_STAGE_PART_BYTES, REMOTE_BOT_FILE_BYTES, isBotFileRef, isBotStageId, isSvgName } from '../../../shared/bots/personal/remoteFiles'
 import { botFileRef, looksLikeSvg, openInside, readBotFilePage, remoteFileType, sniffImage } from './botFiles'
 import type { BotStaging } from './botStaging'
+import { appletJsonBytes, type AppletBundle, type AppletReference } from '../../../shared/applets'
+import {
+  REMOTE_APPLET_PAGE_BYTES,
+  REMOTE_APPLET_SAVE_BYTES,
+  REMOTE_APPLET_SOURCE_BYTES,
+  REMOTE_APPLET_STATE_BYTES,
+  isAppletId,
+  type RemoteAppletPage,
+  type RemoteAppletStatePage
+} from '../../../shared/bots/personal/remoteApplets'
+import { createHash } from 'node:crypto'
 
 /**
  * The personal-bot methods of the user's other devices (phones and other computers): a bot's chat and its files both
@@ -161,6 +172,22 @@ export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown)
     case 'bots.chat.file':
       ok(isBotFileRef(p.path))
       if (p.offset !== undefined) ok(whole(p.offset, 0, REMOTE_BOT_FILE_BYTES))
+      break
+    case 'bots.applets.get':
+    case 'bots.applets.state.get':
+    case 'bots.applets.state.save':
+      ok(text(p.messageId, 200) && isAppletId(p.appletId) && isAppletId(p.revisionId))
+      if (p.offset !== undefined) ok(whole(p.offset, 0, method === 'bots.applets.get' ? REMOTE_APPLET_SOURCE_BYTES : REMOTE_APPLET_STATE_BYTES))
+      if (method === 'bots.applets.state.save') {
+        let size: number
+        try {
+          size = appletJsonBytes(p.state)
+        } catch {
+          size = Infinity
+        }
+        if (size > REMOTE_APPLET_SAVE_BYTES)
+          throw new NetError('too_large', 'This applet’s state is too large to save from another device.', { details: { reason: 'applet_state_too_large' } })
+      }
       break
     case 'bots.stage': {
       ok(whole(p.offset, 0, REMOTE_BOT_FILE_BYTES))
@@ -305,19 +332,25 @@ export interface RemoteBotFile {
  */
 export type RemoteBotCard = Exclude<BotChatCard, { type: 'gallery' }> | { type: 'gallery'; title?: string; files: Array<{ name: string; caption?: string; path?: string; index?: number }> }
 
+/** An applet a chat row shows, as another device sees it: its reference, opened by the message (`bots.applets.*`). */
+export interface RemoteBotApplet {
+  reference: AppletReference
+}
+
 /** A chat row as another device sees it. */
-export type RemoteBotMessage = Omit<BotChatMessage, 'attachments' | 'applets' | 'cards'> & { attachments?: RemoteBotFile[]; cards?: RemoteBotCard[] }
+export type RemoteBotMessage = Omit<BotChatMessage, 'attachments' | 'applets' | 'cards'> & { attachments?: RemoteBotFile[]; applets?: RemoteBotApplet[]; cards?: RemoteBotCard[] }
 
 /**
  * A chat row as another device sees it: a file's name and type and its place in the bot's files folder, without its
- * path on this computer; an error without an instance id; an applet as one line naming it (it runs only in this
- * computer's app, from the bot's thread here); and a gallery card's pictures by their places. A place is only ever in
- * the files folder of `botId`, the bot whose chat the message is in.
+ * path on this computer; an error without an instance id; each applet by its reference alone (never the bot's thread
+ * here), which a Mousse window opens through the bot by this message (`bots.applets.*`), and as one plain line naming
+ * it after `plainFrom`, for an app that doesn't run applets; and a gallery card's pictures by their places. A place is
+ * only ever in the files folder of `botId`, the bot whose chat the message is in.
  */
 export function remoteBotMessage(message: BotChatMessage, botId: string): RemoteBotMessage {
   const { attachments, error, applets, cards, ...rest } = message
   // The title is the bot's words: plain, so it can't add a link or an image to the line.
-  const named = applets?.map((applet) => `_Applet: ${applet.reference.title.replace(/[\\`*_[\]()<>!#|~]/g, '').trim()}. It opens on the computer._`).join('\n')
+  const named = applets?.length ? applets.map((applet) => `_Applet: ${applet.reference.title.replace(/[\\`*_[\]()<>!#|~]/g, '').trim()}. It opens on the computer._`).join('\n') : undefined
   const ref = (path: string): { path?: string } => {
     const inside = botFileRef(path, botId)
     return inside ? { path: inside } : {}
@@ -332,7 +365,9 @@ export function remoteBotMessage(message: BotChatMessage, botId: string): Remote
   })
   return {
     ...rest,
-    ...(named ? { text: rest.text ? `${rest.text}\n\n${named}` : named } : {}),
+    // An app that runs applets shows the words up to `plainFrom`, then the applets themselves.
+    ...(named ? { text: rest.text ? `${rest.text}\n\n${named}` : named, plainFrom: rest.plainFrom ?? rest.text.length } : {}),
+    ...(applets?.length ? { applets: applets.map((applet) => ({ reference: applet.reference })) } : {}),
     ...(error ? { error: remoteBotError(error) } : {}),
     ...(attachments ? { attachments: attachments.map((file) => ({ name: file.name, ...remoteFileType(file.path || file.name), ...ref(file.path) })) } : {}),
     ...(remoteCards?.length ? { cards: remoteCards } : {})
@@ -415,6 +450,34 @@ async function imagePart(file: { name: string; path: string; folder: string }, o
   }
 }
 
+/** Where a bot's applets are kept on its computer: the profile's applet store (`AppletStore`). */
+export interface RemoteBotAppletStore {
+  load(threadId: string, appletId: string, revisionId: string): AppletBundle
+  loadState(threadId: string, appletId: string, revisionId: string): unknown
+  saveState(threadId: string, appletId: string, revisionId: string, state: unknown): void
+}
+
+/** What an applet that can't be read answers: never the store's own words, which may name a path on this computer. */
+const appletGone = (): NetError => new NetError('stream_unknown', 'This applet is no longer in the chat.')
+
+/** One page of an applet's source, as JSON: `REMOTE_APPLET_PAGE_BYTES` from `offset`, with its reference. */
+export function remoteAppletPage(bundle: AppletBundle, offset: number): RemoteAppletPage {
+  const json = Buffer.from(JSON.stringify(bundle.source))
+  if (json.length > REMOTE_APPLET_SOURCE_BYTES) throw new NetError('too_large', 'This applet is too large to open on another device.')
+  if (offset > json.length) throw new NetError('bad_request')
+  const { appletId, revisionId, sourceHash, title, description } = bundle
+  return { appletId, revisionId, sourceHash, title, description, size: json.length, offset, dataB64: json.subarray(offset, offset + REMOTE_APPLET_PAGE_BYTES).toString('base64') }
+}
+
+/** One page of an applet's saved state, as the JSON of `{ state }`, with that JSON's hash. */
+export function remoteAppletStatePage(state: unknown, offset: number): RemoteAppletStatePage {
+  const json = Buffer.from(JSON.stringify({ state: state ?? null }))
+  if (json.length > REMOTE_APPLET_STATE_BYTES) throw new NetError('too_large', 'This applet’s state is too large to open on another device.')
+  if (offset > json.length) throw new NetError('bad_request')
+  const hash = createHash('sha256').update(json).digest('hex').slice(0, 32)
+  return { size: json.length, offset, hash, dataB64: json.subarray(offset, offset + REMOTE_APPLET_PAGE_BYTES).toString('base64') }
+}
+
 /** An engine refusal as a plain error; it never becomes an uncertain outcome. */
 function refusal(error: unknown): never {
   if (error instanceof NetError) throw error
@@ -481,6 +544,11 @@ export function remoteBotMethods(options: {
    * not, which a choice sent by another device may name (undefined while they can't be read: not checked then).
    */
   devices?: Pick<BotDevicesSource, 'store' | 'devices' | 'changed'> & { known?(): readonly string[] | undefined }
+  /**
+   * The profile's applets, where each bot's thread publishes them (`AppletStore`): what `bots.applets.*` read and save,
+   * only for an applet a message of the named bot shows. Absent: those rows answer as for an applet that is not there.
+   */
+  applets?: RemoteBotAppletStore
 }): RpcMethod[] {
   const limitOf = (context: RpcContext): PermissionMode => {
     try {
@@ -607,6 +675,27 @@ export function remoteBotMethods(options: {
     throw new NetError('stream_unknown', `${what} is gone.`)
   }
   const botId = (p: Record<string, unknown>): string => p.botId as string
+  const offsetOf = (p: Record<string, unknown>): number => (p.offset as number | undefined) ?? 0
+  const appletsOf = (): RemoteBotAppletStore => {
+    if (!options.applets) throw appletGone()
+    return options.applets
+  }
+  /** Reads the applet store; whatever it fails with is an applet that is not there. */
+  const appletStore = <T>(read: () => T): T => {
+    try {
+      return read()
+    } catch (error) {
+      if (error instanceof NetError) throw error
+      throw appletGone()
+    }
+  }
+  /** The applet a call names, in the bot's thread: only one the named message of the named bot shows, at that revision. */
+  const appletAt = (p: Record<string, unknown>, port: RemoteBotsPort): { threadId: string; appletId: string; revisionId: string } => {
+    const appletId = p.appletId as string
+    const revisionId = p.revisionId as string
+    const threadId = refusing(() => port.appletThread(botId(p), p.messageId as string, appletId, revisionId))
+    return { threadId, appletId, revisionId }
+  }
   /** A message names staged files only where files are taken from other devices. */
   const stagingOf = (): NonNullable<typeof options.staging> => {
     if (!options.staging) throw new NetError('stream_unknown', 'That file is no longer held. Send it again.', { details: { reason: 'stage_not_found' } })
@@ -745,6 +834,32 @@ export function remoteBotMethods(options: {
     ),
     // A file of the bot's files folder, a page at a time: only inside that folder, never SVG (`readBotFilePage`).
     method('bots.chat.file', async (p, port) => readBotFilePage(port.filesFolderOf(botId(p)), p.path as string, (p.offset as number | undefined) ?? 0)),
+    // An applet a message of this bot shows, at that revision: its source and saved state a page at a time, and its state
+    // saved here. The message must be the named bot's and show exactly that applet and revision (`appletThread`); the
+    // bot's thread it came from is never named to the device.
+    method('bots.applets.get', async (p, port) => {
+      const at = appletAt(p, port)
+      return remoteAppletPage(appletStore(() => appletsOf().load(at.threadId, at.appletId, at.revisionId)), offsetOf(p))
+    }),
+    method('bots.applets.state.get', async (p, port) => {
+      const at = appletAt(p, port)
+      return remoteAppletStatePage(appletStore(() => appletsOf().loadState(at.threadId, at.appletId, at.revisionId)), offsetOf(p))
+    }),
+    method('bots.applets.state.save', async (p, port) => {
+      const at = appletAt(p, port)
+      try {
+        appletsOf().saveState(at.threadId, at.appletId, at.revisionId, p.state)
+      } catch (error) {
+        if (error instanceof NetError) throw error
+        // The store keeps state for an applet's newest revision only.
+        if (/stale applet revision/i.test(error instanceof Error ? error.message : ''))
+          throw new NetError('conflict', 'This applet has a newer version. Open it again.', { details: { reason: 'applet_stale' } })
+        throw appletGone()
+      }
+      return { saved: true }
+    }, first((p, port) => {
+      appletAt(p, port)
+    })),
     // A file for a message to this bot, in parts. Each part passes the gate again, so a device that lost the bot sends
     // no more; the file is bound to this bot and this device, and only a message of theirs takes it.
     // Every refusal is given before the call is taken (`first`), so the device reads it as certain, never as a change

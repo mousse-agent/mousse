@@ -1,7 +1,7 @@
 import { usePastedBotSecret } from './usePastedBotSecret'
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import { ArrowDown, Brain, ChevronRight, CircleAlert, Loader2, PanelRightClose, PanelRightOpen, Reply, Shield, X } from '../../lib/icons'
-import { withAppletNames, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotError, type BotSummary } from '../../../shared/bots/personal/chat'
+import { withAppletNames, type BotChatMessage, type BotChatQuote, type BotError, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_COLOUR_HEX, DEFAULT_BOT_LOOK, normalizeBotLook } from '../../../shared/bots/personal/look'
 import { botMessageFrom, type BotMessageFrom } from '../../../shared/bots/personal/botMessages'
 import { plainCards } from '../../../shared/bots/personal/cards'
@@ -17,7 +17,8 @@ import { watchOffscreen } from '../../lib/offscreenMotion'
 import { BotFace } from './face/BotFace'
 import { BotSteps } from './BotSteps'
 import { BOT_IMAGES, BotFilesProvider, BotMarkdown, BotPathChip, fileActions } from './BotFiles'
-import { BotAppletPane, BotMessageApplets } from './BotApplets'
+import { BotAppletPane, BotMessageApplets, type BotOpenApplet } from './BotApplets'
+import { shownApplets } from '../../../shared/bots/personal/remoteApplets'
 import { BotPictureActions, BotReplyMedia } from './BotReplyMedia'
 import { BotReactionBadge, BotReactionBar } from './BotReactions'
 import { replyImages } from './botReplyImages'
@@ -209,7 +210,7 @@ export function quoteOf(message: BotChatMessage): BotChatQuote {
   // Its words without the plain copy of its cards, else its cards as text, as the service quotes it.
   const own = message.plainFrom === undefined ? message.text : message.text.slice(0, message.plainFrom).trimEnd()
   const words = (own || message.error?.text || plainCards(message.cards) || message.attachments?.map((file) => file.name).join(', ') || '').trim().split('\n').find((part) => part.trim())?.trim() ?? ''
-  const line = withAppletNames(words, message.applets)
+  const line = withAppletNames(words, shownApplets(message.applets))
   return { id: message.id, author: message.author, text: line.length > 160 ? `${line.slice(0, 159)}…` : line }
 }
 
@@ -317,7 +318,7 @@ const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message ===
  * message, once posted, is drawn in this same bubble (`useReplyKeys`). `follow`: keeps the chat's end in view as the
  * bubble grows.
  */
-interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; settled?: boolean; browser?: ReactNode; quote: boolean; starts: boolean; time: boolean; onReply(message: BotChatMessage): void; asked?: BotChatMessage; onApplet(applet: BotChatApplet): void; live?: BotLive; follow?: () => void; onRetry?: () => void }
+interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; settled?: boolean; browser?: ReactNode; quote: boolean; starts: boolean; time: boolean; onReply(message: BotChatMessage): void; asked?: BotChatMessage; onApplet(applet: BotOpenApplet): void; live?: BotLive; follow?: () => void; onRetry?: () => void }
 
 /**
  * A reply's tools hang off its bubble's right edge: beside a wide bubble they move left, inside the transcript. Measured
@@ -395,12 +396,16 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
   // computer's, so only the cards that just show something are drawn.
   const kept = remote ? row.cards?.filter((card) => card.type !== 'automation' && card.type !== 'watcher') : row.cards
   const cards = kept?.length ? kept : undefined
+  // Its applets, drawn under its words; a bot of another computer's name each one in its words too, after `plainFrom`.
+  const applets = useMemo(() => shownApplets(row.applets), [row.applets])
   const message = useMemo(() => {
-    if ((!question && !cards) || row.plainFrom === undefined) return row
+    if ((!question && !cards && !applets) || row.plainFrom === undefined) return row
     const inGallery = galleryPaths(cards)
     const attachments = row.attachments?.filter((file) => !inGallery.has(file.remote ?? file.path))
     return { ...row, text: row.text.slice(0, row.plainFrom).trimEnd(), ...(row.attachments ? { attachments } : {}) }
-  }, [question, cards, row])
+  }, [question, cards, applets, row])
+  const computer = bot.lives?.name
+  const appletsRemote = useMemo(() => (computer !== undefined ? { computer, offline: away } : undefined), [computer, away])
   const quoted = quote && message.replyTo
   // Another of the owner's bots sent it: drawn as that bot's own bubble, its face beside it and its name on top.
   const from = useMemo(() => botMessageFrom(row), [row])
@@ -481,7 +486,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
     {saved && !remote && <button type="button" className="bot-memory-tag" title="Open it in Memory" onClick={() => store().openMemory(bot.id, saved.title?.startsWith('Put away:\n') ? saved.highlight?.replace(/ · put away \d+$/, '') : saved.highlight)}>
       <Brain size={12} aria-hidden />Saved to memory
     </button>}
-    {!!message.applets?.length && !remote && <BotMessageApplets botId={bot.id} applets={message.applets} onOpen={onApplet} message={message} onReply={onReply} />}
+    {applets && <BotMessageApplets botId={bot.id} applets={applets} onOpen={onApplet} message={message} onReply={onReply} {...(appletsRemote ? { remote: appletsRemote } : {})} />}
     {/* What a bot may do is granted on its own computer. */}
     {openAsk && !remote && <BotAskReplies ask={openAsk}
       onAnswer={async (answer) => {
@@ -958,9 +963,11 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // A file a chip opened, in the side panel's Files view.
   const [file, setFile] = useState<string | null>(null)
   // An applet opened beside the chat, from its name.
-  const [appletOpen, setAppletOpen] = useState<BotChatApplet | null>(null)
+  const [appletOpen, setAppletOpen] = useState<BotOpenApplet | null>(null)
   useEffect(() => { setAppletOpen(null) }, [bot.id])
-  const openApplet = useCallback((applet: BotChatApplet) => setAppletOpen(applet), [])
+  const openApplet = useCallback((applet: BotOpenApplet) => setAppletOpen(applet), [])
+  const livesOn = bot.lives?.name
+  const appletsRemote = useMemo(() => (livesOn !== undefined ? { computer: livesOn, offline: unreachable } : undefined), [livesOn, unreachable])
   // An action on a file that the computer refused ("Can't find notes.md…") is said above the composer.
   const fileFailed = useCallback((text: string) => useBotsStore.setState({ error: text, errorBotId: bot.id }), [bot.id])
   // A chip's click: a file shows in the side panel's Files view, a folder opens in the file manager, one that is gone
@@ -1290,7 +1297,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         </ComposerNoticeProvider>}
       </div>
     </section>
-    {appletOpen && !remote && <BotAppletPane botId={bot.id} applet={appletOpen} onClose={() => setAppletOpen(null)} />}
+    {appletOpen && <BotAppletPane botId={bot.id} applet={appletOpen} onClose={() => setAppletOpen(null)} {...(appletsRemote ? { remote: appletsRemote } : {})} />}
     </div>
     {/* A bot of another computer: its Agent settings alone; its browser and files folder stay on its computer. */}
     {canSetup && <BotSidePanel bot={bot} state={side} browser={browser} folder={filesFolder} file={file} onFile={setFile} {...(remote ? { views: REMOTE_SIDE_VIEWS } : {})} />}
