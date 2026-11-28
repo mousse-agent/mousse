@@ -1763,7 +1763,7 @@ export class Harness implements HarnessGateway {
     const admitted = admit('thread_title', { kind: 'model', instanceId, model }, view)
     if (!isPlan(admitted)) return { state: 'unavailable', reason: admitted.reason }
     const facts = routeFactsText(admitted.route.facts)
-    return { state: admitted.label, route: admitted.route.id, ...(facts.length ? { facts } : {}) }
+    return { state: admitted.label, route: admitted.route.id, ...(facts.length ? { facts } : {}), ...(admitted.runsAs ? { runsAs: admitted.runsAs } : {}) }
   }
 
   titleListing(saved?: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'>): TitleListing {

@@ -300,6 +300,17 @@ describe('the gateway’s one-shot gate for a driver that proves its own route',
     return { harness, oneShot, request }
   }
 
+  it("lists the model a route runs in place of the one chosen (Grok's default on a key)", () => {
+    const base = adapterDriver(agent, { runtime: { oneShotTransport: () => ({ send: vi.fn(async () => 'A title') }), models: () => [{ id: 'default', label: 'Agent default' }] } })
+    const driver = { ...base, caps: () => grokCaps(false), oneShotRoute: () => ({ route: { id: 'grok:direct' as const, facts: GROK_DIRECT_FACTS }, runsAs: 'grok-4.7' }) }
+    let stored: unknown = { grok: { driver: 'grok', enabled: true } }
+    const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
+    const harness: Harness = testHarness({ drivers: [driver], instances, profileHome: tempDir('mousse-grok-runs-as-') })
+    stops.push(() => harness.stop())
+    const entry = harness.titleListing().entries.find((each) => each.instanceId === 'grok')
+    expect(entry?.models.find((model) => model.id === 'default')).toMatchObject({ state: 'held', route: 'grok:direct', runsAs: 'grok-4.7' })
+  })
+
   it('runs a proven one-shot although turns are Full access only, and offers the entry for titles', async () => {
     const s = setup(undefined)
     expect(s.harness.admitsOneShot('grok', 'grok-4.6')).toBe(true)

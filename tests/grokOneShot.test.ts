@@ -56,12 +56,18 @@ function accountFile(path: string, user = 'u-1'): void {
 }
 
 /** A Grok entry on the person's own home (`GROK_HOME`), run as `binaryPath`, with `base` as Mousse's environment. */
-function setup(options: { base?: NodeJS.ProcessEnv; account?: boolean; driver?: GrokDriverOptions; args?: string[] } = {}) {
+function setup(options: { base?: NodeJS.ProcessEnv; account?: boolean; driver?: GrokDriverOptions; args?: string[]; listed?: string[]; grokConfig?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mousse-grok-one-shot-'))
   dirs.push(root)
   const grokHome = join(root, 'person', '.grok')
   mkdirSync(grokHome, { recursive: true })
   if (options.account) accountFile(join(grokHome, 'auth.json'))
+  if (options.grokConfig !== undefined) writeFileSync(join(grokHome, 'config.toml'), options.grokConfig)
+  // The models the entry's last check listed, as the ACP runtime keeps them.
+  if (options.listed) {
+    mkdirSync(join(root, 'state'), { recursive: true })
+    writeFileSync(join(root, 'state', 'acp.json'), JSON.stringify({ models: options.listed.map((id) => ({ id, label: id })) }))
+  }
   const context: DriverContext = {
     instanceId: 'grok',
     builtIn: true,
@@ -125,7 +131,6 @@ describe('the route follows how the entry signs in', () => {
   const rows: Array<{ name: string; setup: Parameters<typeof setup>[0]; model: string; route?: string; label?: string; refused?: RegExp }> = [
     { name: 'an xAI API key Mousse keeps', setup: { account: true }, model: 'grok-4.7', route: 'grok:direct', label: 'held' },
     { name: 'an xAI API key in the environment', setup: { base: { XAI_API_KEY: 'xai-dummy' } }, model: 'grok-4.7:high', route: 'grok:direct', label: 'held' },
-    { name: "an API key on Grok's own default", setup: { base: { XAI_API_KEY: 'xai-dummy' } }, model: 'default', refused: /model you choose/ },
     { name: 'the Grok account', setup: { account: true }, model: 'grok-4.7', route: 'acp:grok', label: 'best_effort' },
     { name: "a sign-in Mousse cannot tell (another sign-in command)", setup: { account: true, base: { GROK_AUTH_PROVIDER_COMMAND: 'corp-token' } }, model: 'grok-4.7', refused: /cannot tell which account/ }
   ]
@@ -141,6 +146,34 @@ describe('the route follows how the entry signs in', () => {
       }
     })
   }
+})
+
+describe("Grok's \"Agent default\" on an API key", () => {
+  // Rows: Grok's own config, the models the entry lists, and what the default runs as (or why it cannot run).
+  const KEY = { XAI_API_KEY: 'xai-dummy' }
+  const rows: Array<{ name: string; grokConfig?: string; listed?: string[]; runsAs?: string; refused?: RegExp }> = [
+    { name: 'the default Grok\'s config names, when the entry lists it', grokConfig: '[models]\ndefault = "grok-4.5"\n', listed: ['grok-4.7', 'grok-4.5'], runsAs: 'grok-4.5' },
+    { name: 'the default Grok\'s config names, before the entry lists any model', grokConfig: '[models]\ndefault = "grok-4.5"\n', runsAs: 'grok-4.5' },
+    { name: 'the first listed model, when the config names none', listed: ['grok-4.7', 'grok-4.5'], runsAs: 'grok-4.7' },
+    { name: 'the first listed model, when the config names one the entry does not list', grokConfig: '[models]\ndefault = "grok-old"\n', listed: ['grok-4.7'], runsAs: 'grok-4.7' },
+    { name: 'nothing, when there is no model to resolve to', refused: /lists no model yet/ }
+  ]
+  for (const row of rows) {
+    it(`runs as ${row.name}`, () => {
+      const { driver } = setup({ base: KEY, ...(row.grokConfig ? { grokConfig: row.grokConfig } : {}), ...(row.listed ? { listed: row.listed } : {}) })
+      const decision = driver.oneShotRoute!({ config: {}, installedVersion: '9.9.9', instanceId: 'grok', model: 'default' })
+      if (row.refused) expect('refused' in decision && decision.refused).toMatch(row.refused)
+      else expect(decision).toMatchObject({ route: { id: 'grok:direct' }, runsAs: row.runsAs })
+    })
+  }
+
+  it('sends the model it resolved to, with the level chosen', async () => {
+    const stub = await startStub(200)
+    const { runtime } = setup({ base: KEY, listed: ['grok-4.7'], driver: { direct: { baseUrl: stub.base } } })
+    await runtime.oneShotTransport!({ model: 'default:high' }).send({ ...WIRE, model: 'default:high' }, events(), new AbortController().signal)
+    const body = JSON.parse(stub.requests[0]!.body) as { model: string; reasoning?: { effort?: string } }
+    expect(body).toMatchObject({ model: 'grok-4.7', reasoning: { effort: 'high' } })
+  })
 })
 
 describe('grok:direct', () => {

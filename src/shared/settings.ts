@@ -698,6 +698,8 @@ export interface TitleModelListing {
   route?: string
   /** What a best-effort route does not hold, in words for its tooltip. */
   facts?: string[]
+  /** The model it sends in place of this one, when the route resolves one (Grok's "Agent default" on an API key). */
+  runsAs?: string
 }
 
 export interface TitleListingEntry {

@@ -315,6 +315,15 @@ describe('the Thread titles row reads the cached title listing', () => {
     expect(disabled).toEqual(expect.arrayContaining(['Other agent has not been checked yet.', 'Turned-off agent is turned off.']))
   })
 
+  it("a model whose request runs as another names that model in its row's tooltip", async () => {
+    const GROK = { id: 'grok', instanceId: 'grok', label: 'Grok', models: [{ id: 'default', label: 'Agent default', title: { state: 'held', route: 'grok:direct', runsAs: 'grok-4.7' } }] } as LlmProviderOption
+    // One provider: the menu shows a single list, with no rail to choose from.
+    const { row } = await show({ llmProviders: [GROK] })
+    await act(async () => row.querySelector<HTMLButtonElement>('#agents-title-model')!.click())
+    const titles = [...document.querySelectorAll<HTMLElement>('[role="option"]')].map((option) => option.title)
+    expect(titles).toEqual([expect.stringContaining('Runs as grok-4.7')])
+  })
+
   it('a saved choice that cannot name threads shows its exact reason; a reason read for an earlier choice is not shown', async () => {
     const saved = { instanceId: 'acp:other', model: 'default', label: 'Other default', state: 'unavailable' as const, reason: 'Other agent has not been checked yet.' }
     const listing = { llmProviders: [CLAUDE, UNABLE], titleListing: { entries: [], saved } }

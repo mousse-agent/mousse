@@ -65,6 +65,8 @@ export interface OneShotPlan {
   readonly effort?: string
   readonly route: Readonly<OneShotRoute>
   readonly label: OneShotLabel
+  /** The model the route sends in place of `model`, when it resolves one (`OneShotRouteDecision.runsAs`). */
+  readonly runsAs?: string
   readonly identity: Readonly<OneShotIdentity>
 }
 
@@ -155,6 +157,7 @@ export function admit(op: OneShotOp, binding: OneShotBinding, view: AdmissionVie
     ...(effort ? { effort } : {}),
     route: Object.freeze({ id: route.id, facts: Object.freeze({ ...route.facts }) }),
     label: routeLabel(route),
+    ...(decision.runsAs ? { runsAs: decision.runsAs } : {}),
     identity: Object.freeze({ ...entry.identity() })
   })
 }

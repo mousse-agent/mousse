@@ -22,7 +22,7 @@ import type { BinaryFingerprint } from '../../../shared/harness/types'
 import { runGrokHeldCheck } from '../grok/heldCheck'
 import { GROK_HELD_SHIPPED, GrokHeldStore, grokHeldRecord, type GrokHeldRecord } from '../grok/heldEvidence'
 import { grokOneShotInputs } from '../grok/oneShot'
-import { runGrokDirectOneShot, type GrokDirectStream } from '../grok/directOneShot'
+import { grokConfiguredDefault, runGrokDirectOneShot, type GrokDirectStream } from '../grok/directOneShot'
 import { ptyAvailable, runInPty, signInPrompts, type PtySpawn } from '../pty'
 import { InstanceVault } from '../vault'
 import { createAcpRuntime } from './acp'
@@ -106,6 +106,8 @@ interface HeldEntry {
   problem(): string | undefined
   /** How a Grok process of this entry would sign in now (`grokCredential`). */
   signIn(): GrokCredential['kind']
+  /** The model Grok's "Agent default" stands for on this entry (`directDefault`), from cached state only. */
+  defaultModel(): string | undefined
 }
 
 /** After a check that could not conclude, the same version is checked again no sooner than this. */
@@ -175,8 +177,14 @@ export function grokDriver(options: GrokDriverOptions = {}): HarnessDriver {
     oneShotRoute: ({ config, instanceId, model }) => {
       const label = config.displayName ?? GROK_LABEL
       const entry = entries.get(instanceId)
-      if (entry?.signIn() === 'api_key')
-        return isAgentDefault(model) ? { refused: `${label} on an xAI API key names threads on a model you choose: pick one, or Automatic.` } : GROK_DIRECT_ROUTE
+      if (entry?.signIn() === 'api_key') {
+        if (!isAgentDefault(model)) return GROK_DIRECT_ROUTE
+        // Grok's own default has no name xAI's API takes: the request runs on the model it stands for.
+        const resolved = entry.defaultModel()
+        return resolved
+          ? { ...GROK_DIRECT_ROUTE, runsAs: resolved }
+          : { refused: `${label} lists no model yet, and its config names no default, so Mousse cannot tell which model "Agent default" is on an xAI API key. Refresh its models, or choose a model.` }
+      }
       const why = entry?.problem()
       return why ? { refused: `${why} Choose another model for thread titles, or Automatic.` } : GROK_ACP_ROUTE
     },
@@ -293,7 +301,29 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions, r
     problemRead = { atMs: now, value }
     return value
   }
-  register({ store: heldStore, problem: heldProblem, signIn: () => credential().kind })
+  /**
+   * The model Grok's "Agent default" stands for, for a request to xAI's API (`grok:direct`): the default Grok's own
+   * config names (`[models] default` in the entry's Grok home, `grokConfiguredDefault`) when the entry lists it or lists
+   * nothing yet, else the first model the entry lists. From the cached listing and that one file only, read again at
+   * most every `HELD_PROBLEM_TTL_MS`: no check is started.
+   */
+  let defaultRead: { atMs: number; value: string | undefined } | undefined
+  const directDefault = (): string | undefined => {
+    const now = Date.now()
+    if (defaultRead && now - defaultRead.atMs < HELD_PROBLEM_TTL_MS) return defaultRead.value
+    const listed = base.models().map((model) => model.id).filter((id) => id !== AGENT_DEFAULT_MODEL)
+    const configured = grokConfiguredDefault(grokHome(processEnv('status', withUserEnv(context.env.env, { ...(context.config.env ?? {}) }))))
+    const value = configured && (!listed.length || listed.includes(configured)) ? configured : listed[0]
+    defaultRead = { atMs: now, value }
+    return value
+  }
+  /** `model` with "Agent default" resolved (`directDefault`), its reasoning level kept. */
+  const directModel = (model: string): string | undefined => {
+    const resolved = directDefault()
+    const { effort } = parseThinkingSuffixFromModelId(model)
+    return resolved && effort ? `${resolved}:${effort}` : resolved
+  }
+  register({ store: heldStore, problem: heldProblem, signIn: () => credential().kind, defaultModel: () => directDefault() })
 
   /**
    * The executable a held launch starts must be the one the last check read: another one (a self-update, a replaced
@@ -574,9 +604,10 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions, r
         if (found.kind === 'none' || (found.kind === 'account' && found.state === 'expired'))
           throw harnessAppError({ code: 'signed_out', message: `Sign in to ${label} in Settings → Providers.`, instanceId: context.instanceId })
         if (found.kind === 'api_key') {
-          if (isAgentDefault(spec.model)) throw harnessAppError({ code: 'unsupported', reason: 'not_admitted', message: `${label} on an xAI API key names threads on a model you choose.`, instanceId: context.instanceId })
+          const model = isAgentDefault(spec.model) ? directModel(spec.model) : spec.model
+          if (!model) throw harnessAppError({ code: 'unsupported', reason: 'not_admitted', message: `${label} lists no model yet, and its config names no default, so Mousse cannot tell which model "Agent default" is.`, instanceId: context.instanceId })
           return runGrokDirectOneShot({
-            model: spec.model,
+            model,
             key: found.key,
             system: wire.system,
             prompt: wire.prompt,

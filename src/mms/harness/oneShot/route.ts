@@ -39,8 +39,11 @@ export interface OneShotRoute {
   facts: RouteFacts
 }
 
-/** What a driver says about one model of one entry (`HarnessDriver.oneShotRoute`). */
-export type OneShotRouteDecision = { route: OneShotRoute } | { refused: string }
+/**
+ * What a driver says about one model of one entry (`HarnessDriver.oneShotRoute`). `runsAs`: the model the route sends
+ * in place of the one chosen (Grok's "Agent default" on its API key: the model it resolves to), shown in the listing.
+ */
+export type OneShotRouteDecision = { route: OneShotRoute; runsAs?: string } | { refused: string }
 
 /** The operation a single request serves. */
 export type OneShotOp = 'thread_title' | 'branch_name' | 'pr_draft' | 'commit_message' | 'bot_name' | 'bot_digest'

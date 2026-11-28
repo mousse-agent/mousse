@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { Model } from '@earendil-works/pi-ai'
 import { stream as responsesStream } from '@earendil-works/pi-ai/api/openai-responses'
 import { normalizeContext } from '@earendil-works/pi-ai/utils/transcript'
@@ -7,6 +9,33 @@ import { assertAssistantResponseSucceeded, consumeAssistantStream } from '../dri
 
 /** xAI's API, where Grok sends a request made with an xAI API key. */
 export const XAI_API_BASE_URL = 'https://api.x.ai/v1'
+
+/**
+ * The default model Grok's own config names: `default` in the `[models]` table of `<home>/config.toml`. Undefined when
+ * the file or the key is missing.
+ */
+export function grokConfiguredDefault(home: string): string | undefined {
+  let text: string
+  try {
+    text = readFileSync(join(home, 'config.toml'), 'utf8')
+  } catch {
+    return undefined
+  }
+  let table = ''
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, '').trim()
+    const header = /^\[\s*([A-Za-z0-9_.-]+)\s*\]$/.exec(line)
+    if (header) {
+      table = header[1]!
+      continue
+    }
+    const value = table === 'models' ? /^default\s*=\s*"([^"]+)"$/.exec(line) : undefined
+    if (value?.[1]?.trim()) return value[1].trim()
+    const dotted = table === '' ? /^models\.default\s*=\s*"([^"]+)"$/.exec(line) : undefined
+    if (dotted?.[1]?.trim()) return dotted[1].trim()
+  }
+  return undefined
+}
 
 /** pi-ai's Responses transport; tests substitute it. */
 export type GrokDirectStream = typeof responsesStream
