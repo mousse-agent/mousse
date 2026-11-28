@@ -55,6 +55,11 @@ export interface EngineLimits {
   /** Streams one connection may have open, both directions counted; this computer queues its own opens past it. */
   appStreamsPerConnection: number
   /**
+   * Bot streams (`mousse.botsub`, `mousse.botrpc`, `mousse.botview`) one connection may have open, counted apart from
+   * `appStreamsPerConnection`: a bot open never queues behind thread opens. At most the helper's own bot places (16).
+   */
+  botStreamsPerConnection: number
+  /**
    * Bytes one stream may have queued for the helper before its producer waits (a blob sender, a replay or a
    * snapshot waits between chunks or pages until the queue is below this).
    */
@@ -220,6 +225,7 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   appStreamCreditBytes: 256 * 1024,
   appInteractiveReserveBytes: 1024 * 1024,
   appStreamsPerConnection: 32,
+  botStreamsPerConnection: 16,
   appStreamQueueBytes: 1024 * 1024,
   appStreamQueueMaxBytes: 16 * 1024 * 1024,
   appControlQueueBytes: 4 * 1024 * 1024,
@@ -294,6 +300,7 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   appStreamCreditBytes: 'MOUSSE_NET_ENGINE_APP_STREAM_CREDIT_BYTES',
   appInteractiveReserveBytes: 'MOUSSE_NET_ENGINE_APP_INTERACTIVE_RESERVE_BYTES',
   appStreamsPerConnection: 'MOUSSE_NET_ENGINE_APP_STREAMS_PER_CONNECTION',
+  botStreamsPerConnection: 'MOUSSE_NET_ENGINE_BOT_STREAMS_PER_CONNECTION',
   appStreamQueueBytes: 'MOUSSE_NET_ENGINE_APP_STREAM_QUEUE_BYTES',
   appStreamQueueMaxBytes: 'MOUSSE_NET_ENGINE_APP_STREAM_QUEUE_MAX_BYTES',
   appControlQueueBytes: 'MOUSSE_NET_ENGINE_APP_CONTROL_QUEUE_BYTES',
@@ -347,6 +354,8 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
 
 /** Limits that guard this computer against another: a value above the default is refused, so they only tighten. */
 const TIGHTEN_ONLY: ReadonlySet<keyof EngineLimits> = new Set([
+  // The helper opens 16 bot streams per connection by default: more here would only wait there.
+  'botStreamsPerConnection',
   'sshRemoteRequestMaxBytes',
   'sshRemoteReadMs',
   'tunnelCloseLingerMs',

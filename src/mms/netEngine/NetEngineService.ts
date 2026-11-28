@@ -61,7 +61,7 @@ import {
 import { EngineSessions } from './sessions'
 import type { BridgeClient, EngineClient } from './session/client'
 import { askUpdate, type UpdateThereParams } from '../updates/askUpdate'
-import type { EngineConnection } from './session/transport'
+import type { EngineConnection, EngineStream } from './session/transport'
 import { AppChannel, helperCode, type AppPipe } from './helper/appChannel'
 import { EngineHelper } from './helper/connections'
 import {
@@ -1820,6 +1820,15 @@ export class NetEngineService implements EngineDirectoryPort {
         name: () => this.selfName(),
         pairback: (caller, request) => pairing.pairback(caller, request),
         tunnel: (connection, stream) => editor.accept(connection, stream),
+        // Bot streams and bot calls ride on the bot labels alone (`mousse.botsub`, `mousse.botrpc`), and a bot's
+        // browser view on its own (`mousse.botview`), served by the Bridge under the bot level and the bot's Devices.
+        botStream: (stream) => isBotStreamKind(bridge().threads.privateAccess(stream)?.kind),
+        callMethod: (id, caller) => rt.rpc.methodOf(id, caller),
+        botview: (connection, stream) => {
+          const views = bridge().botViews
+          if (!views) return stream.reset('not_supported')
+          views.accept(this.callerOf(connection).node, stream)
+        },
         calledBy: (caller, name, features) => {
           pairing.heard(caller.node, features)
           pairing.named(caller.node, name)
@@ -1857,6 +1866,8 @@ export class NetEngineService implements EngineDirectoryPort {
         onServingChanged: (node) => {
           // A pairing that can no longer reach this computer keeps no editor tunnel here.
           editor.reconcile()
+          // Nor a bot's browser it took over: the bot has it back at once.
+          if (!sessions.serving(node)) this.options.bridge()?.botViews.releaseNode(node)
           // B: A's first live inbound with the row's grant connects it ("Added over SSH from <A>").
           const row = liveRow(node)
           if (
@@ -2547,6 +2558,12 @@ export class NetEngineService implements EngineDirectoryPort {
       who === 'here' ? `Update Mousse here to use ${name}.` : `${name} needs a Mousse update.`,
       { details: { reason: 'needs_update' } }
     )
+  }
+  openBotView(node: NodeId): EngineStream {
+    const started = this.started
+    if (!started || !started.peers.serving(node)) throw new NetError('peer_offline')
+    if (this.cutOff(node)) throw new NetError('incompatible_peer')
+    return started.sessions.client(node).connection.open('mousse.botview')
   }
   client(node: NodeId): BridgeClient {
     const started = this.started

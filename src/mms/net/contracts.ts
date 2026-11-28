@@ -784,6 +784,11 @@ export interface SubscriptionHandlers {
   onCaughtUp(): void
   onSnapshotInstalled(cursor: Cursor): void
   onError(code: NetErrorCode): void
+  /**
+   * `bot`: a bot stream (the bots feed, a bot's chat), which an engine session carries on the bot label in places of its
+   * own. Absent: any other stream.
+   */
+  lane?: 'bot'
 }
 
 export interface QualifiedClockEstimate {
@@ -860,7 +865,8 @@ export interface SyncSession {
     }
   ): Promise<unknown>
   /** Query never executes a missing operation; unknown/running is reported explicitly. */
-  rpcResult(id: RpcId, options: { deadlineMs: number; signal?: AbortSignal }): Promise<unknown>
+  /** `method`: the call's, which an engine session uses to ask on the label the call rode on. */
+  rpcResult(id: RpcId, options: { deadlineMs: number; signal?: AbortSignal; method?: string }): Promise<unknown>
   /** Idempotent, authenticated for the original caller; cancellation is not rollback. */
   rpcCancel(id: RpcId): Promise<void>
   sendEphemeral(message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>): void

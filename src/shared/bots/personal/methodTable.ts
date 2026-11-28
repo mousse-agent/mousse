@@ -72,6 +72,8 @@ const THIS_COMPUTER: BotMethodCallers = { callers: 'this_computer', refusal: 'Ch
 const devices = (keys: readonly string[]): LocalBy<'devices'> => ({ by: 'devices', keys, capability: BOTS_PERSONAL_V2_CAPABILITY, only: THIS_COMPUTER })
 const reads = (required: readonly string[], optional?: readonly string[]): BotMethodRemote => ({ capability: 'read', mutating: false, required, ...(optional ? { optional } : {}) })
 const chats = (required: readonly string[], optional?: readonly string[]): BotMethodRemote => ({ capability: 'chat', mutating: true, required, ...(optional ? { optional } : {}) })
+/** A Full action that changes nothing kept: its result is never saved, and a retry runs it again (the bot's browser). */
+const acts = (required: readonly string[], optional?: readonly string[]): BotMethodRemote => ({ capability: 'write', mutating: false, required, ...(optional ? { optional } : {}) })
 const writes = (required: readonly string[], optional?: readonly string[], version?: number): BotMethodRemote => ({ capability: 'write', mutating: true, required, ...(optional ? { optional } : {}), ...(version ? { version } : {}) })
 
 /**
@@ -187,15 +189,17 @@ export const BOT_METHODS = {
   // ---------------------------------------------------------------- the bot's browser (`BOTS_BROWSER_METHODS`)
   // Taking over, input, a fresh picture, opening and closing are the desktop app's on this computer alone; each handler
   // checks its connection, as some depend on the params (`get` with `frame`). Watching is Use; taking over is Full.
-  'bots.browser.get': { level: 'use', local: browser(['botId', 'frame', 'viewId']) },
+  // Another device reads the state, takes over, sends input and opens the browser through these rows; its pictures
+  // come on a `mousse.botview` stream of their own (`RemoteBotBrowsers`), never in a call, so `watch` has no row.
+  'bots.browser.get': { level: 'use', local: browser(['botId', 'frame', 'viewId']), remote: reads(['botId'], ['viewId']) },
   'bots.browser.control': { level: 'full', local: browser(['botId', 'control']) },
   'bots.browser.input': { level: 'full', local: browser(['botId', 'input']) },
-  'bots.browser.open': { level: 'full', local: browser(['botId', 'url', 'viewId', 'platform']) },
+  'bots.browser.open': { level: 'full', local: browser(['botId', 'url', 'viewId', 'platform']), remote: acts(['botId'], ['url', 'viewId', 'platform']) },
   'bots.browser.close': { level: 'full', local: browser(['botId']) },
   'bots.browser.watch': { level: 'use', local: browser(['botId', 'watchId', 'width', 'fps', 'viewId', 'page'], BOTS_BROWSER_STREAM_CAPABILITY) },
   'bots.browser.unwatch': { level: 'use', local: browser(['botId', 'watchId'], BOTS_BROWSER_STREAM_CAPABILITY) },
-  'bots.browser.hold': { level: 'full', local: browser(['botId', 'viewId', 'request'], BOTS_BROWSER_HOLD_CAPABILITY) },
-  'bots.browser.send': { level: 'full', local: browser(['botId', 'viewId', 'holdId', 'inputs'], BOTS_BROWSER_HOLD_CAPABILITY) },
+  'bots.browser.hold': { level: 'full', local: browser(['botId', 'viewId', 'request'], BOTS_BROWSER_HOLD_CAPABILITY), remote: acts(['botId', 'viewId', 'request']) },
+  'bots.browser.send': { level: 'full', local: browser(['botId', 'viewId', 'holdId', 'inputs'], BOTS_BROWSER_HOLD_CAPABILITY), remote: acts(['botId', 'viewId', 'holdId', 'inputs']) },
   // The app's main process's alone: the renderer's request bridge does not offer them.
   'bots.browser.window': { level: 'local', local: browser(['botId', 'viewId', 'holdId', 'op', 'display'], BOTS_BROWSER_WINDOW_CAPABILITY) },
   'bots.browser.files': { level: 'local', local: browser(['botId', 'viewId', 'holdId', 'paths'], BOTS_BROWSER_HOLD_CAPABILITY) }
@@ -257,4 +261,16 @@ export function botMethodAccess(): Record<RemoteBotMethod, AccessClass> {
   return Object.fromEntries(
     REMOTE_BOT_METHOD_NAMES.map((name) => [name, remoteBotLevel(name) === 'full' ? 'bots_full' : 'bots_use'])
   ) as Record<RemoteBotMethod, AccessClass>
+}
+
+/** The calls that open a bot stream on the bot's computer: the bots feed and one bot's chat. */
+export const BOT_STREAM_OPEN_METHODS = ['bridge.bots.open', 'bridge.bot.open'] as const
+const BOT_NET_METHODS: ReadonlySet<string> = new Set<string>([...REMOTE_BOT_METHOD_NAMES, ...BOT_STREAM_OPEN_METHODS])
+
+/**
+ * Whether a Net call is a bot's: one of the remote rows, or a bot stream's open. Bot calls ride on the engine's bot label
+ * (`mousse.botrpc`) and no other call does, so a bot call never waits for a thread's place and threads can't take bot places.
+ */
+export function isBotNetMethod(method: string): boolean {
+  return BOT_NET_METHODS.has(method)
 }

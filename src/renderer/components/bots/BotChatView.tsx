@@ -68,7 +68,9 @@ import { ComputerBadgeView } from '../ComputerBadge'
 
 const EMPTY: BotChatMessage[] = []
 const NO_FILES: AttachedFile[] = []
-const REMOTE_SIDE_VIEWS: readonly BotSideView[] = ['settings']
+/** A bot of another computer: its browser, watched from here, and Agent settings with Full bot access there. */
+const REMOTE_SIDE_VIEWS: readonly BotSideView[] = ['browser', 'settings']
+const REMOTE_WATCH_VIEWS: readonly BotSideView[] = ['browser']
 const NO_VOICE: VoiceMessage[] = []
 const NO_REFERENCES: ChatReference[] = []
 
@@ -955,7 +957,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const byId = useMemo(() => new Map(messages.map((message) => [message.id, message])), [messages])
   // The bot's own browser: the reply of the run whose tab it shows has a live preview, and Expand opens it in the side
   // panel. Each watches the browser's pictures only while it is on screen.
-  const browser = useBotBrowser(remote ? '' : bot.id)
+  // A bot of another computer's too: watched from here at Use, taken over at Full (`botSetupBlock`).
+  const browser = useBotBrowser(bot.id)
   // The side panel docked beside the chat pane: the browser, the bot's files, Agent settings (BotSidePanel.tsx).
   const side = useBotSidePanel(bot.id)
   // A bot of another computer has no files folder here.
@@ -979,7 +982,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }, fileFailed), [fileFailed, showSide])
   const browserRun = browser?.activationId ?? browser?.activations.at(-1)
   const previewOn = browserRun ? messages.filter((message) => message.author === 'bot' && message.activationId === browserRun).at(-1)?.id : undefined
-  const preview = !remote && browser && browserRun ? <BotBrowserPreview bot={bot} view={browser} /> : null
+  const preview = browser && browserRun ? <BotBrowserPreview bot={bot} view={browser} /> : null
   // Work the owner's answer set going again: it starts no chat turn, so the chat says the work carries on until it posts.
   const resumed = useMemo(() => resumedWork(messages, bot.work), [messages, bot.work])
 
@@ -1179,9 +1182,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         <BotTasksButton botId={bot.id} tasks={bot.tasks} />
         {/* The provider it talks on, ringed by the usage left, and its model rows. */}
         {!remote && <BotModelButton bot={bot} />}
-        {!remote && <button type="button" className={`bot-header-panel${side.open ? ' is-open' : ''}`} aria-label={side.open ? 'Hide side panel' : 'Show side panel'} title={side.open ? 'Hide side panel' : 'Show side panel'} aria-expanded={side.open} onClick={side.toggle}>
+        <button type="button" className={`bot-header-panel${side.open ? ' is-open' : ''}`} aria-label={side.open ? 'Hide side panel' : 'Show side panel'} title={side.open ? 'Hide side panel' : 'Show side panel'} aria-expanded={side.open} onClick={side.toggle}>
           {side.open ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
-        </button>}
+        </button>
         {/* From the menu, whose item goes as it closes: Escape then gives the focus to the composer. */}
         <BotMenu bot={bot} {...(find.openFind ? { onFind: () => { composerField()?.focus({ preventScroll: true }); find.openFind!() } } : {})} />
       </header>
@@ -1300,7 +1303,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     {appletOpen && <BotAppletPane botId={bot.id} applet={appletOpen} onClose={() => setAppletOpen(null)} {...(appletsRemote ? { remote: appletsRemote } : {})} />}
     </div>
     {/* A bot of another computer: its Agent settings alone; its browser and files folder stay on its computer. */}
-    {canSetup && <BotSidePanel bot={bot} state={side} browser={browser} folder={filesFolder} file={file} onFile={setFile} {...(remote ? { views: REMOTE_SIDE_VIEWS } : {})} />}
+    <BotSidePanel bot={bot} state={side} browser={browser} folder={filesFolder} file={file} onFile={setFile} {...(remote ? { views: canSetup ? REMOTE_SIDE_VIEWS : REMOTE_WATCH_VIEWS } : {})} />
     {memoryOpen && <BotMemoryDialog bot={bot} {...(memoryOpen.focus ? { focus: memoryOpen.focus } : {})} />}
   </ImageGalleryProvider></BotFilesProvider>
 }

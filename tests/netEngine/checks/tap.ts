@@ -51,7 +51,7 @@ export function tapPipe(pipe: AppPipe, from: () => string, tap: Tap): AppPipe {
     return found
   }
   const learn = (s: Stream, message: EngineMessage) => {
-    if (s.label === 'mousse.rpc' && s.method === undefined && typeof message.header.method === 'string')
+    if ((s.label === 'mousse.rpc' || s.label === 'mousse.botrpc') && s.method === undefined && typeof message.header.method === 'string')
       s.method = message.header.method
   }
   const outFrames = new FrameReader()

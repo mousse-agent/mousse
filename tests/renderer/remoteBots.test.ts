@@ -204,10 +204,13 @@ describe('the chat of a bot of another computer', () => {
     expect(fake.calls).toContainEqual(['focus', 'n_laptop:b_inbox', true])
   })
 
-  it('with Use bot access there, shows only what works from here: no About, model or side panel, its setup greyed, no reactions, and files can be attached', async () => {
+  it('with Use bot access there, shows only what works from here: no About or model, a side panel with its browser alone, its setup greyed, no reactions, and files can be attached', async () => {
     await open(remote({ state: 'paused', stateText: 'Paused' }), [message(1, { text: 'Here is the chart.', reaction: '👍' })])
     expect(button('About Inbox helper')).toBeUndefined()
-    expect(button('Show side panel')).toBeUndefined()
+    // Its browser is watched from here at Use; Agent settings need Full there.
+    await click(button('Show side panel'))
+    expect([...host.querySelectorAll('aside.bot-side .surface-menu-row')].map((row) => row.textContent?.trim())).toEqual(['Browser'])
+    await click(button('Hide side panel'))
     expect(host.querySelector('.bot-model-button, [aria-label^="Model"]')).toBeNull()
     expect(host.querySelector('.bot-header-name .computer-badge')?.getAttribute('title')).toBe('Lives on Laptop')
     expect(button('Resume', host.querySelector('.bot-paused-line')!)).toBeUndefined()

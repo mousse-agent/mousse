@@ -385,6 +385,14 @@ export class BotBrowsers implements BotBrowserHost {
     return { browser: this.botView(state, browser), ...(hold ? { hold } : {}) }
   }
 
+  /**
+   * Ends the hold a connection has of the bot's browser, as if its lease ran out (`WatchedBrowser.endHoldOf`): another
+   * device that lost its Full access or its reach to the bot gives the browser back at once. A bot never opened is left.
+   */
+  async endHoldsOf(botId: string, connectionId: string): Promise<void> {
+    await this.bots.get(botId)?.viewer.endHoldOf(connectionId)
+  }
+
   /** Numbered inputs of a view's hold (`bots.browser.send`; `WatchedBrowser.send`). */
   async send(botId: string, viewId: string, holdId: string, inputs: BotBrowserSent[], connectionId = 'local'): Promise<{ acks: BotBrowserAck[]; lastSeq: number }> {
     return this.stateFor(botId).viewer.send(viewId, holdId, inputs, connectionId)

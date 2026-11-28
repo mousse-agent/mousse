@@ -581,7 +581,7 @@ export class FakeNetwork {
     }
     for (const message of messages) {
       if (
-        end.label === 'mousse.rpc' &&
+        (end.label === 'mousse.rpc' || end.label === 'mousse.botrpc') &&
         end.method === undefined &&
         typeof message.header.method === 'string'
       )

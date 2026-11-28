@@ -454,7 +454,7 @@ export class RoutedClient {
         if (afterLoss && wire.durable) {
           // The owner may have run it already: its result is asked for before the request is repeated.
           try {
-            reply = await session.rpcResult(id, { deadlineMs: remaining(), signal })
+            reply = await session.rpcResult(id, { deadlineMs: remaining(), signal, method: wire.net })
           } catch (error) {
             if (!(error instanceof NetError && error.code === 'outcome_uncertain')) throw error
             reply = await this.send(session, wire.net, params, id, idem, deadlineMs, signal, options)
@@ -475,7 +475,7 @@ export class RoutedClient {
         if (error instanceof NetError && error.code === 'deadline_exceeded' && session.state() === 'open') {
           if (!wire.durable) throw timedOut(computer)
           try {
-            const late = await session.rpcResult(id, { deadlineMs: remaining(), signal })
+            const late = await session.rpcResult(id, { deadlineMs: remaining(), signal, method: wire.net })
             return await this.settle(node, session, computer, method, wire, id, late, signal)
           } catch {
             throw mayHaveHappened(computer, method)

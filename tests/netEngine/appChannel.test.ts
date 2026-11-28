@@ -570,6 +570,41 @@ describe('the helper, as the app sees it', () => {
     channel.close()
   })
 
+  it('opens a bot stream at once with every thread place taken, and a thread open never takes a bot place', () => {
+    const { appStreamsPerConnection: cap, botStreamsPerConnection: botCap } = engineLimits()
+    const p = pipe()
+    const channel = new AppChannel(p.app)
+    let outbound!: EngineConnection
+    new EngineHelper(channel, {
+      peers: { byIdentity: () => ({ node: 'node' as NodeId, grant: '1', endpoint: 'ab' }) },
+      attach: async (connection) => void (outbound = connection),
+      name: () => 'Desk'
+    })
+    const opens = () =>
+      p.written
+        .filter((frame) => frame.type === FRAME_JSON)
+        .map((frame) => JSON.parse(frame.body.toString('utf8')) as { op: string; label?: string; class?: string })
+        .filter((message) => message.op === 'stream.open')
+    p.push(jsonFrame({ ev: 'conn.up', conn: 1, identity: 'ab', dir: 'out' }))
+    // Every thread place taken, and one more thread open waiting.
+    for (let i = 0; i <= cap; i += 1) outbound.open('mousse.rpc')
+    expect(opens()).toHaveLength(cap)
+    // Bot chat, a bot call and a bot's browser view still go out at once; the view as bulk.
+    outbound.open('mousse.botsub')
+    outbound.open('mousse.botrpc', 'bots.chat.send')
+    outbound.open('mousse.botview')
+    expect(opens().slice(cap).map((open) => `${open.label} ${open.class}`)).toEqual([
+      'mousse.botsub interactive',
+      'mousse.botrpc interactive',
+      'mousse.botview bulk'
+    ])
+    // The bot places fill on their own; a thread open still waits for a thread place.
+    for (let i = 3; i <= botCap; i += 1) outbound.open('mousse.botsub')
+    expect(opens().filter((open) => open.label === 'mousse.rpc')).toHaveLength(cap)
+    expect(opens().filter((open) => open.label?.startsWith('mousse.bot'))).toHaveLength(botCap)
+    channel.close()
+  })
+
   it('resets a closed subscription stream after linger if an older peer never sends FIN on unsubscribe', async () => {
     vi.useFakeTimers()
     try {

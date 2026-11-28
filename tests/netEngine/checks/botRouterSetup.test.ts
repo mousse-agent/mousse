@@ -36,7 +36,7 @@ describe('setting up a bot of another computer from a window', () => {
   const sent = (from: number): string[] =>
     fabric.crossed
       .slice(from)
-      .filter((row) => row.from === viewer.endpoint && row.label === 'mousse.rpc' && row.header.t === 'call' && String(row.header.method).startsWith('bots.'))
+      .filter((row) => row.from === viewer.endpoint && row.label === 'mousse.botrpc' && row.header.t === 'call' && String(row.header.method).startsWith('bots.'))
       .map((row) => String(row.header.method))
   const service = () => owner.mms.personalBots!.service
   const LOOK = { colour: 'teal', accessory: 'cap' }

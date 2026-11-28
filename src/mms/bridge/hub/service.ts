@@ -1240,6 +1240,8 @@ export class BridgeHub {
         await this.rebuildCopy(attachment)
         if (attachment.stopped) return fail('cancelled')
         attachment.subscription = session.subscribe(descriptor.id, {
+          // A bot stream rides on the bot label, in places of its own: it never waits behind thread streams.
+          ...(options?.room === 'bots' ? { lane: 'bot' as const } : {}),
           onRecord: (record) => this.enqueue(attachment, record),
           // After the records queued before it have been displayed.
           onCaughtUp: () => {

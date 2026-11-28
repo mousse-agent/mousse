@@ -60,7 +60,9 @@ describe('bot streams over an engine pairing', () => {
       const body = message.data as { threadId: string; type: string; data: unknown }
       if (body.threadId === opened.subject) deltas.push({ type: body.type, data: body.data })
     })
+    // A bot stream rides on the bot label alone, as the Bridge attaches it (`room: 'bots'`).
     const subscription = client.subscribe(stream, {
+      lane: 'bot',
       onRecord: () => undefined,
       onCaughtUp: () => { seen.ready = true },
       onSnapshotInstalled: () => { seen.ready = true },
