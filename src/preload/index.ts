@@ -1220,6 +1220,12 @@ const api = {
       ipcRenderer.on('thread:view', handler)
       return () => ipcRenderer.removeListener('thread:view', handler)
     },
+    /** The thread a window opened on at load could not be read (its computer cannot be reached); no view follows. */
+    onViewFailed: (cb: (payload: { threadId: string; reason?: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, payload: { threadId: string; reason?: string }) => cb(payload)
+      ipcRenderer.on('thread:view-failed', handler)
+      return () => ipcRenderer.removeListener('thread:view-failed', handler)
+    },
     onActivity: (cb: (activity: ThreadActivitySnapshot) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, activity: ThreadActivitySnapshot) =>
         cb(activity)
