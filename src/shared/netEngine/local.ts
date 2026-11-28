@@ -58,7 +58,9 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.access.ask',
   'netEngine.access.cancel',
   'netEngine.access.answer',
-  'netEngine.access.let'
+  'netEngine.access.let',
+  // A device cut off for its version: its one notice was shown (pair-with-IP design §5)
+  'netEngine.versionNotice.shown'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
 
@@ -184,6 +186,19 @@ export interface NetEngineDevice {
   relay?: NetEngineDeviceRelay
   /** The missing direction of a pairing made one way, when its row may offer it. */
   other?: NetEngineOtherWay
+  /** Its last connection was refused for version: one of the two computers needs a Mousse update. */
+  needsUpdate?: NetEngineNeedsUpdate
+}
+
+/**
+ * A device cut off for its version (pair-with-IP design §5): `there`, it runs the older Mousse; `here`, this computer
+ * does. It clears once a connection with it agrees a version. `told` once its one notice was shown.
+ */
+export interface NetEngineNeedsUpdate {
+  who: 'there' | 'here'
+  /** When the refusal was recorded, ms since 1970. */
+  since: number
+  told?: true
 }
 
 /**
@@ -301,7 +316,8 @@ export const ENGINE_FEATURES = [
   'grant-revoke-local',
   'grant-roles',
   'grant-add-connected',
-  'managed-tunnel'
+  'managed-tunnel',
+  'version-refusals'
 ] as const
 export type EngineFeature = (typeof ENGINE_FEATURES)[number]
 

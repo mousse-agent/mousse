@@ -1,7 +1,8 @@
 /**
  * How Settings → Devices offers to update a computer that is behind (`computerUpdateWay`), for every input that
  * decides it: whether it is behind, an SSH install from here, whether it can be asked (a computer this one uses),
- * online or not, what it said about updating itself, and whether this computer has a release to send.
+ * online or not, what it said about updating itself, whether this computer has a release to send, and whether its
+ * connection was refused for its version.
  */
 import { describe, expect, it } from 'vitest'
 import { computerUpdateWay } from '../../src/renderer/components/netEngine/computerUpdate'
@@ -13,7 +14,8 @@ const cannot = { channel: 'stable' as const, self: false, reason: 'Updates on ma
 const managed = { id: 'ssh1', owner: 'managed' } as SshRecordView
 const base = { name: 'Laptop', state: 'open' as const, version: '0.9.0', olderThanThis: true }
 
-type Row = [string, Partial<typeof base> & { update?: unknown } | undefined, { record?: SshRecordView; canAsk?: boolean; current?: string }, string]
+type Row = [string, Partial<typeof base> & { update?: unknown; otherChannel?: boolean } | undefined, { record?: SshRecordView; canAsk?: boolean; current?: string; refused?: boolean }, string]
+const cutOff = "there:Update Mousse on Laptop to use it from here."
 const rows: Row[] = [
   ['not behind', { ...base, olderThanThis: false, update: takes }, { canAsk: true }, 'none'],
   ['no device', undefined, { canAsk: true }, 'none'],
@@ -26,7 +28,14 @@ const rows: Row[] = [
   ['offline, too old to report', { ...base, state: 'closed' as never }, { canAsk: true }, 'there:Its Mousse is too old to update from here. Update it on Laptop once.'],
   ['too old to report', { ...base }, { canAsk: true }, 'there+check:Its Mousse is too old to update from here. Update it on Laptop once.'],
   ["can't update itself", { ...base, update: cannot }, { canAsk: true }, "there:It can't update itself: Updates on macOS need a signed build. Update it on Laptop."],
-  ['app not open', { ...base, update: selfOnly }, { canAsk: true }, 'there+check:Open Mousse on Laptop to update it from here.']
+  ['app not open', { ...base, update: selfOnly }, { canAsk: true }, 'there+check:Open Mousse on Laptop to update it from here.'],
+  // Refused for its version (pair-with-IP design §5): the refusal selects the way, whatever the version says. Nothing
+  // reaches its app from here, so it is never asked.
+  ['refused, a nightly on another channel', { ...base, olderThanThis: false, otherChannel: true, state: 'closed' as never }, { refused: true, canAsk: true }, cutOff],
+  ['refused, on another channel, installed over SSH from here', { ...base, olderThanThis: false, otherChannel: true }, { refused: true, record: managed }, 'ssh'],
+  ['refused, no version known', undefined, { refused: true, canAsk: true }, cutOff],
+  ['refused, takes requests', { ...base, update: takes }, { refused: true, canAsk: true }, cutOff],
+  ['refused, installed over SSH by someone else', { ...base }, { refused: true, record: { id: 'ssh2', owner: 'external' } as SshRecordView }, cutOff]
 ]
 
 describe('computerUpdateWay', () => {
@@ -47,7 +56,8 @@ describe('computerUpdateWay', () => {
     ['offline', 'Offline'],
     ["offline, said it can't update itself", 'Updates on macOS need a signed build'],
     ['too old to report', 'Too old to update from here'],
-    ['app not open', "Mousse isn't open there"]
+    ['app not open', "Mousse isn't open there"],
+    ['refused, a nightly on another channel', 'Needs update']
   ]
   it.each(reasons)('%s: %s', (label, reason) => {
     const [, device, options] = rows.find(([name]) => name === label)!

@@ -1,5 +1,6 @@
 import type { SshRecordView } from '../../../shared/net/local'
 import { versionTag, type Device } from '../../lib/netDevices'
+import { NEEDS_UPDATE_LINE, needsUpdateHint } from './engineRows'
 
 /**
  * How a computer that is behind gets this computer's version, as its row in Settings → Devices offers it:
@@ -15,14 +16,21 @@ export type ComputerUpdateWay =
 
 /**
  * The way to update `device`, or undefined when it is not behind. `canAsk` is false for a computer that only uses
- * this one: only a computer this one uses can be asked to update.
+ * this one: only a computer this one uses can be asked to update. `refused`: its connection was refused for its
+ * version (pair-with-IP design §5), which selects a way by itself, whatever its version or channel says: over SSH when
+ * this computer installed it, otherwise on itself (nothing reaches its app from here).
  */
 export function computerUpdateWay(
   device: Pick<Device, 'name' | 'state' | 'version' | 'olderThanThis' | 'newerThanThis' | 'otherChannel' | 'update'> | undefined,
-  options: { name: string; current?: string; record?: SshRecordView; canAsk?: boolean }
+  options: { name: string; current?: string; record?: SshRecordView; canAsk?: boolean; refused?: boolean }
 ): ComputerUpdateWay | undefined {
-  const { name, current, record, canAsk = false } = options
+  const { name, current, record, canAsk = false, refused = false } = options
   const tag = device ? versionTag({ ...device, name }, current) : undefined
+  if (refused) {
+    const detail = tag?.detail ?? `${name} runs a Mousse too old to connect to this one.`
+    if (record?.owner === 'managed') return { kind: 'ssh', record, detail }
+    return { kind: 'there', hint: needsUpdateHint(name, 'there'), reason: NEEDS_UPDATE_LINE, detail, check: false }
+  }
   if (!device || tag?.label !== 'Behind') return undefined
   const detail = tag.detail
   if (record?.owner === 'managed') return { kind: 'ssh', record, detail }

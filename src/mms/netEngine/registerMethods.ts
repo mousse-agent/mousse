@@ -47,7 +47,8 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.access.ask': ['node'],
   'netEngine.access.cancel': ['node'],
   'netEngine.access.answer': ['node', 'request'],
-  'netEngine.access.let': ['node']
+  'netEngine.access.let': ['node'],
+  'netEngine.versionNotice.shown': ['node']
 }
 
 const text = (value: unknown): string | undefined =>
@@ -355,6 +356,9 @@ export function registerNetEngineMethods(
               return engine.status()
             case 'netEngine.access.let':
               await engine.access().let(p.node, p.access)
+              return engine.status()
+            case 'netEngine.versionNotice.shown':
+              engine.versionNoticeShown(p.node)
               return engine.status()
           }
         } catch (error) {

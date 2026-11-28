@@ -179,6 +179,16 @@ export class FakeNetwork {
    * answered at any minor, as the helper this app ships with takes roles; a test of a helper without roles drops it.
    */
   features: string[] = ['grant-roles']
+  /**
+   * With `version-refusals`: each helper's last refusal for version per device (`version_refusal` on its
+   * `peers.list` and `grants.list` rows), by the helper's identity, then the device's.
+   */
+  readonly versionRefusals = new Map<string, Map<string, { peer_minor: number; local_minor: number; since: number }>>()
+  /**
+   * Identities still on an older protocol minor (the value): with `version-refusals`, a dial to one fails with
+   * `unsupported_version {peer_minor}` and is recorded; a dial that connects clears the dialler's refusal.
+   */
+  readonly outdated = new Map<string, number>()
   /** Each identity's `routes.available` answer; unset: LAN ready with its routes, the other ways off. */
   readonly ways = new Map<string, Array<Record<string, unknown>>>()
   /** How long a `join.probe` takes before it answers (a cancel answers it at once). */
@@ -711,6 +721,11 @@ export class FakeHelper {
   /** It speaks 1.2 and lists `feature` in its hello. */
   private lists(feature: string): boolean {
     return (this.network.minor >= 2 || feature === 'grant-roles') && this.network.features.includes(feature)
+  }
+  /** A list row's `version_refusal` for `identity`, with `version-refusals`. */
+  private versionRefusal(identity: string): Record<string, unknown> {
+    if (!this.lists('version-refusals')) return {}
+    return { version_refusal: this.network.versionRefusals.get(this.identity)?.get(identity) ?? null }
   }
   /** What the app said in `hello`. */
   hello?: { name?: string; profile?: string }
@@ -1336,9 +1351,21 @@ export class FakeHelper {
           if (this.ignoreShutdown) return
           reply()
           return void setImmediate(() => this.kill())
-        case 'dial':
+        case 'dial': {
           if (this.paused) return reply({ error: 'paused', reason: this.paused })
-          return reply({ conn: this.network.dial(this, String(message.identity)), already: false })
+          const target = String(message.identity)
+          if (this.lists('version-refusals')) {
+            const refusals = this.network.versionRefusals.get(this.identity) ?? new Map()
+            this.network.versionRefusals.set(this.identity, refusals)
+            const minorThere = this.network.outdated.get(target)
+            if (minorThere !== undefined) {
+              refusals.set(target, { peer_minor: minorThere, local_minor: 4, since: Math.floor(Date.now() / 1000) })
+              return reply({ error: 'unsupported_version', peer_minor: minorThere, reason: 'unsupported version' })
+            }
+            refusals.delete(target)
+          }
+          return reply({ conn: this.network.dial(this, target), already: false })
+        }
         case 'routes.config': {
           if (this.network.minor < 1) return reply({ error: 'unknown_op', reason: 'routes.config' })
           const before = this.reachNow()
@@ -1488,7 +1515,8 @@ export class FakeHelper {
                 name: '',
                 role: this.network.peerRole(this.identity, identity),
                 // With relays (Phase 3): what this helper keeps about the peer's relays.
-                ...(this.relays ? { relay: this.relays.peers.get(identity) ?? null } : {})
+                ...(this.relays ? { relay: this.relays.peers.get(identity) ?? null } : {}),
+                ...this.versionRefusal(identity)
               }))
           })
         case 'join': {
@@ -1640,7 +1668,8 @@ export class FakeHelper {
               ...(this.lists('grant-roles') ? { revision } : {}),
               expires_at: null,
               receipt: this.network.receipts.get(String(grant)) ?? null,
-              ...(this.relays ? { relay: this.relays.grants.get(caller) ?? 'no_key' } : {})
+              ...(this.relays ? { relay: this.relays.grants.get(caller) ?? 'no_key' } : {}),
+              ...this.versionRefusal(caller)
             }))
           })
         case 'grant.remove': {
