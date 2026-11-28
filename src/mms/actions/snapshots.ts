@@ -540,7 +540,7 @@ function* indexTree(top: string, index: string, head: string | undefined): Steps
  * A restore writes those paths in Git's form from the snapshot's tree, as it did before exact trees. No filter driver
  * runs while the exact bytes are hashed: every one is emptied.
  *
- * Where Git converts none of the snapshot's paths (no `core.autocrlf` or `core.eol`, and `check-attr` finds no converting
+ * Where Git converts none of the snapshot's paths (`core.autocrlf` off as Git reads it in the end, and `check-attr` finds no converting
  * attribute on any of them, from any `.gitattributes`, tracked or not, or any other attributes file) the two trees are
  * the same, so the snapshot's tree is recorded as the exact tree and the second index is not run.
  */
@@ -626,7 +626,7 @@ interface Conversion {
 }
 
 /**
- * Whether Git converts any of `paths` (see the exact-bytes note): `core.autocrlf` or `core.eol` set, or an attribute
+ * Whether Git converts any of `paths` (see the exact-bytes note): `core.autocrlf` on as Git reads it in the end, or an attribute
  * that converts (`text`, `crlf`, `eol`, `filter`, `ident`, `working-tree-encoding`) on one of them, as `check-attr`
  * finds it: from every `.gitattributes` in the folder, tracked, untracked or ignored, `info/attributes`, and the global
  * and system files. With `source`, the attributes of that tree instead of the folder's (a worktree about to be written
@@ -636,14 +636,17 @@ function* conversionSteps(top: string, files: PrivateFiles, paths: readonly stri
   // Every setting, once: the exact tree reads its filter drivers from the same listing (`configListing`). Each entry is
   // `key\nvalue`, or `key` alone for a bare key, ended by NUL.
   const config = yield* tryGitStep(top, ['config', '--null', '--list'], undefined, LISTING)
-  let converts = false
+  // `core.autocrlf` as Git reads it in the end, as `convertedPaths` asks it: the listing gives every scope in Git's order
+  // (system, global, repository, worktree, command line) and the last value wins, so a person's `false` turns off the
+  // `true` Git for Windows sets system-wide. `core.eol` alone converts nothing: it applies only to files with a `text` or
+  // `eol` attribute, which `check-attr` below finds.
+  let autocrlf: string | undefined
   for (const item of config.ok ? config.stdout.split('\0').filter(Boolean) : []) {
     const newline = item.indexOf('\n')
-    const key = (newline < 0 ? item : item.slice(0, newline)).toLowerCase()
-    if (key !== 'core.autocrlf' && key !== 'core.eol') continue
-    // A bare `autocrlf` key reads as true; `core.eol` counts whatever it says.
-    if (key !== 'core.autocrlf' || !/^(false|no|off|0)$/i.test(newline < 0 ? '' : item.slice(newline + 1).trim())) converts = true
+    // A bare key reads as true.
+    if ((newline < 0 ? item : item.slice(0, newline)).toLowerCase() === 'core.autocrlf') autocrlf = newline < 0 ? 'true' : item.slice(newline + 1).trim()
   }
+  let converts = autocrlf !== undefined && !/^(false|no|off|0)$/i.test(autocrlf)
   const infoAttributes = files.infoAttributes ? yield* nonEmpty(files.infoAttributes) : false
   const modern = yield* readsAttrSource(top)
   const filtered = new Set<string>()
