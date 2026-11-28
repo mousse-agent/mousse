@@ -78,7 +78,7 @@ describe('the update on offer', () => {
     updateAffordance(base, binary, compatibilityOf(base, binary?.version), latest)
 
   it('a newer published version is an advisory with the owner\'s command and the version', () => {
-    expect(offer(at('/x/node_modules/.bin/fakecli', '2.1.0', 'npm'), '2.2.0')).toEqual({ kind: 'advisory', command: 'npm install -g fakecli@latest', latestVersion: '2.2.0', untested: true })
+    expect(offer(at('/x/node_modules/.bin/fakecli', '2.1.0', 'npm'), '2.2.0')).toEqual({ kind: 'advisory', command: 'npm install -g fakecli@latest', owner: 'npm', latestVersion: '2.2.0', untested: true })
   })
 
   it('offers nothing for a tested version when no newer one is known, or the installed one is current', () => {
@@ -103,7 +103,7 @@ describe('the update on offer', () => {
   })
 
   it('a standalone install never gets an npm command', () => {
-    expect(offer(at('/home/me/.local/bin/fakecli', '2.1.0', 'standalone'), '2.2.0')).toEqual({ kind: 'notice', latestVersion: '2.2.0', untested: true })
+    expect(offer(at('/home/me/.local/bin/fakecli', '2.1.0', 'standalone'), '2.2.0')).toEqual({ kind: 'notice', owner: 'standalone', latestVersion: '2.2.0', untested: true })
     // The real drivers: Claude and Codex update themselves, `/usr/local/bin` is not brew.
     expect(claudeCodeDriver().updateCommand?.('standalone')).toBe('claude update')
     expect(codexDriver({ builtIn: () => ({}) as never }).updateCommand?.('standalone')).toBe('codex update')
@@ -114,7 +114,7 @@ describe('the update on offer', () => {
 
   it('a too-old version keeps its update, and carries the latest version when one is known', () => {
     const binary = at('/x/node_modules/.bin/fakecli', '1.0.0', 'npm')
-    expect(offer(binary)).toEqual({ kind: 'advisory', command: 'npm install -g fakecli@latest' })
+    expect(offer(binary)).toEqual({ kind: 'advisory', command: 'npm install -g fakecli@latest', owner: 'npm' })
     expect(offer(binary, '2.2.0')).toMatchObject({ kind: 'advisory', latestVersion: '2.2.0', untested: true })
   })
 
@@ -180,7 +180,7 @@ describe('fake-CLI probes', () => {
       compatibility: { state: 'known_broken', testedRange: '2.0.0 – 2.1.999', knownProblem: { reason: 'Turns stop early', fixedIn: '2.1.8' } }
     })
     const npm: InstanceBinary = { path: '/x/node_modules/.bin/fakecli', version: '2.1.6', source: 'path', owner: 'npm' }
-    expect(updateAffordance(broken, npm, result.compatibility)).toEqual({ kind: 'advisory', command: 'npm install -g fakecli@latest' })
+    expect(updateAffordance(broken, npm, result.compatibility)).toEqual({ kind: 'advisory', command: 'npm install -g fakecli@latest', owner: 'npm' })
     // No fixed version yet: nothing to update to.
     expect(updateAffordance(broken, npm, compatibilityOf({ knownBroken: [{ range: '2.1.6', reason: 'Turns stop early' }] }, '2.1.6'))).toBeUndefined()
     // Outside the range, the tested range decides as before.
