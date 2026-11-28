@@ -302,6 +302,19 @@
       "expiresAt": "2026-11-27T20:20:10.874Z"
     },
     {
+      "task": "snapshot-seeded-index",
+      "session": "Animatrix-9618d4",
+      "machine": "Animatrix",
+      "branch": "snapshot-seeded-index",
+      "paths": [
+        "src/mms/actions/snapshots.ts",
+        "src/mms/actions/steps.ts",
+        "tests/snapshotSeededIndex.test.ts"
+      ],
+      "claimedAt": "2026-11-28T09:29:46.493Z",
+      "expiresAt": "2026-11-28T11:29:46.493Z"
+    },
+    {
       "task": "t3/queue-tool-api-unification",
       "session": "LAPTOP-HIEROJK7-3ef729",
       "machine": "LAPTOP-HIEROJK7",
