@@ -49,6 +49,7 @@ export const GIT_ACCESS = {
   'threads.settle': 'owned',
   'threads.focus': 'owned',
   'bots.focus': 'none',
+  'bots.remote.list': 'none',
   'threads.markSeen': 'none',
   'threads.reorder': 'none',
   'threads.search': 'none',

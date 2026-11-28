@@ -138,6 +138,32 @@ describe('a window’s calls about a bot of another computer', () => {
     expect(viewer.events.slice(after).filter((event) => event.type === 'bots.message')).toEqual([])
   }, 60_000)
 
+  it('lists the other computers’ bots to a window under their qualified ids, with the computer each lives on; the command line is refused', async () => {
+    const home = owner.mms.personalBots!.service.get(keeper).summary.homeThreadId
+    expect(home).toEqual(expect.any(String))
+    const { bots } = await viewer.dispatch('bots.remote.list', {})
+    expect(bots).toEqual([expect.objectContaining({ id: q, name: 'Server keeper', homeThreadId: qualifyId(ownerOnViewer, home!), lives: { node: ownerOnViewer, name: expect.any(String) } })])
+    // What the feed adds for this computer's own reading stays here.
+    for (const key of ['botId', 'readSeq', 'telling', 'activity']) expect(bots[0]).not.toHaveProperty(key)
+    expect(await refused(fromCli('bots.remote.list', {}))).toMatchObject({ code: 'forbidden' })
+  }, 60_000)
+
+  it('has a window read a shown chat again when its stream opens, and passes on the reply as the bot writes it', async () => {
+    const home = owner.mms.personalBots!.service.get(keeper).summary.homeThreadId!
+    const before = viewer.events.length
+    const heard = (match: (event: (typeof viewer.events)[number]) => boolean) => viewer.events.slice(before).some(match)
+    await viewer.dispatch('bots.focus', { botId: q, focused: true })
+    try {
+      await vi.waitFor(() => expect(heard((event) => event.type === 'bots.changed' && event.data.botId === q && event.data.reread === true)).toBe(true), { timeout: 20_000 })
+      owner.mms.orchestrator.emit('thread-message-updated', { threadId: home, message: { id: 'm_reply_1', role: 'assistant', content: 'Checking the disks', hidden: false } })
+      await vi.waitFor(() => expect(viewer.events.slice(before).filter((event) => event.type === 'bots.reply').map((event) => event.data)).toEqual([
+        { botId: q, messageId: 'm_reply_1', role: 'assistant', text: 'Checking the disks', added: false }
+      ]), { timeout: 20_000 })
+    } finally {
+      await viewer.dispatch('bots.focus', { botId: q, focused: false })
+    }
+  }, 60_000)
+
   it('sends a write once when its reply is lost: asked for again by the same request id', async () => {
     const send = vi.spyOn(owner.mms.personalBots!.service, 'chatSend')
     try {
@@ -177,8 +203,12 @@ describe('a window’s calls about a bot of another computer', () => {
     await vi.waitFor(() => expect(registry().chats.messages(ownerOnViewer, keeper).length).toBeGreaterThan(0), { timeout: 20_000 })
     await viewer.dispatch('bots.focus', { botId: q, focused: false })
 
+    const heardFrom = viewer.events.length
     await fabric.restartHelper(owner)
     await vi.waitFor(() => expect(registry().row(ownerOnViewer, keeper)?.offline).toBe(true), { timeout: 30_000 })
+    // The windows are told to list again, and list the bot as offline.
+    expect(viewer.events.slice(heardFrom).some((event) => event.type === 'bots.changed' && event.data.remote === true)).toBe(true)
+    expect((await viewer.dispatch('bots.remote.list', {})).bots).toEqual([expect.objectContaining({ id: q, lives: { node: ownerOnViewer, name: expect.any(String), offline: true } })])
     const from = fabric.crossed.length
     const started = Date.now()
     expect(await refused(viewer.dispatch('bots.chat.send', { botId: q, text: 'while away', clientRequestId: 'router-away-1' }))).toMatchObject({ code: 'computer_offline' })
@@ -195,6 +225,7 @@ describe('a window’s calls about a bot of another computer', () => {
     expect(ownerChat()).not.toContain('while away')
     const live = await viewer.dispatch('bots.chat.list', { botId: q })
     expect(live.stale).toBeUndefined()
+    expect((await viewer.dispatch('bots.remote.list', {})).bots[0].lives).toEqual({ node: ownerOnViewer, name: expect.any(String) })
   }, 120_000)
 
   it('answers a chat read from the copy when the owner is connected but does not answer in time', async () => {

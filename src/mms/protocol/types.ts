@@ -311,6 +311,7 @@ export const PROTOCOL_METHODS = [
   'threads.settle',
   'threads.focus',
   'bots.focus',
+  'bots.remote.list',
   'threads.markSeen',
   'threads.reorder',
   'threads.search',
@@ -618,6 +619,7 @@ export type ProtocolEventType =
   | 'chats.changed'
   | 'bots.message'
   | 'bots.activity'
+  | 'bots.reply'
   | 'run.event'
   | 'run.stop-requested'
   | 'run.steer-accepted'

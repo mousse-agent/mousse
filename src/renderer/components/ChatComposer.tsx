@@ -227,6 +227,8 @@ export interface ChatComposerProps {
    * `onRefused` gets a line naming it. `remote`: the thread runs on another computer, which takes images only.
    */
   attachRules?: { remote: boolean; onRefused: (line: string) => void }
+  /** The chat takes words only (a bot of another computer): no Attach, and a picked, dropped or pasted file is not attached. */
+  wordsOnly?: boolean
   /**
    * Whether the composer says Connecting…; by default, while the app is not connected to its service
    * (`useServiceConnecting`). Its placeholder says so, dots move behind its text and its toolbar's controls fade out;
@@ -317,6 +319,7 @@ export function ChatComposer({
   attachmentStatus,
   sendBlocked = null,
   attachRules,
+  wordsOnly = false,
   connecting: connectingProp,
   sendsWhenConnected = false
 }: ChatComposerProps) {
@@ -626,7 +629,7 @@ export function ChatComposer({
 
   const addFiles = useCallback(
     (files: Array<File | Omit<AttachedFile, 'id'>>) => {
-      if (!files.length) return
+      if (!files.length || wordsOnly) return
       const entries = files.map((entry) => (entry instanceof File ? { file: entry } : entry))
       const admitted = attachRules ? admitAttachments(attachedFiles, entries, { remote: attachRules.remote }) : { accepted: entries }
       if (admitted.refusal) attachRules?.onRefused(admitted.refusal)
@@ -641,7 +644,7 @@ export function ChatComposer({
       onAttachedFilesChange([...attachedFiles, ...next])
       return next
     },
-    [attachedFiles, onAttachedFilesChange, attachRules]
+    [attachedFiles, onAttachedFilesChange, attachRules, wordsOnly]
   )
 
   // An attachment removed while it had chips, kept so an undo that brings a chip back brings the attachment back too.
@@ -886,7 +889,8 @@ export function ChatComposer({
         return
       }
       const selected = event.currentTarget.selectionEnd - event.currentTarget.selectionStart
-      if (!isLongPaste(text, messageLimit - ATTACHMENT_LINES_ROOM - (input.length - selected))) {
+      // A chat that takes words only keeps a long paste as text.
+      if (wordsOnly || !isLongPaste(text, messageLimit - ATTACHMENT_LINES_ROOM - (input.length - selected))) {
         // A paste replaces whole chips, never half of one; thread links in it go in as chips, in one undo step.
         const range = rangeOverChips(atomicChips, node.selectionStart, node.selectionEnd)
         const chipped = chipLinks(text)
@@ -1762,7 +1766,7 @@ export function ChatComposer({
 
       <ComposerFooter
         run={run}
-        onAttachClick={() => fileInputRef.current?.click()}
+        onAttachClick={wordsOnly ? undefined : () => fileInputRef.current?.click()}
         loading={loading}
         stoppable={stoppable}
         disabled={disabled}

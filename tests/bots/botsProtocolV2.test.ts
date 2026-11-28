@@ -12,7 +12,7 @@ import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../src/mms/protocol/handlers'
 import type { BotChatMessage, BotDetail, BotSummary } from '../../src/shared/bots/personal/chat'
-import { BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENT_BYTES, type BotModelOption } from '../../src/shared/bots/personal/methods'
+import { BOTS_ELSEWHERE_METHODS, BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENT_BYTES, type BotModelOption } from '../../src/shared/bots/personal/methods'
 import { slotsAllOn } from '../../src/shared/bots/personal/modelSlots'
 import { botFixture, flush, runDispatch, start, finish, type BotFixture } from './botFixture'
 
@@ -352,6 +352,19 @@ describe('Bot UI wiring', () => {
       expect(PLATFORM_REQUEST_METHODS.has(method)).toBe(true)
       expect(GUI_REQUIRED_METHODS).toContain(method)
     }
+    // Other computers' bots: allowed, and not required, as a window lists none from a service without them.
+    for (const method of BOTS_ELSEWHERE_METHODS) {
+      expect(PLATFORM_REQUEST_METHODS.has(method)).toBe(true)
+      expect(GUI_REQUIRED_METHODS).not.toContain(method)
+    }
+  })
+
+  it('bridges a bot of another computer writing its reply to the renderer', async () => {
+    const { bridgeProtocolEvent } = await import('../../src/main/mms/protocolEventBridge')
+    const calls: unknown[][] = []
+    const reply = { botId: 'n_laptop:b_inbox', messageId: 'm_1', role: 'assistant', text: 'Checking', added: false }
+    expect(bridgeProtocolEvent({ type: 'bots.reply', data: reply } as never, ((...args: unknown[]) => { calls.push(args) }) as never, { getActiveThreadId: () => null } as never)).toBe(true)
+    expect(calls).toEqual([['bots:reply', reply]])
   })
 
   it('bridges bots.changed, bots.message and bots.activity to the renderer; bots.escalation is retired', async () => {

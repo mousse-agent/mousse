@@ -33,6 +33,28 @@
   from { opacity: 0; }
 }
 
+/* The bot's computer is away: a small moon over the dozing face instead of the z. It rocks slowly a few times, then
+   rests, as reduced motion (`data-still`) shows it. */
+.bot-face-moon {
+  position: absolute;
+  top: 0;
+  right: 2%;
+  color: var(--bot-face-moon, #e3cf86);
+  opacity: 0.9;
+  pointer-events: none;
+  transform-origin: 60% 60%;
+}
+.bot-face-live:not([data-still]) .bot-face-moon {
+  animation: bot-face-moon 5.2s ease-in-out 3;
+}
+@keyframes bot-face-moon {
+  0%, 100% { transform: translateY(0) rotate(0deg); opacity: 0.9; }
+  50% { transform: translateY(-1.5px) rotate(-10deg); opacity: 0.6; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bot-face-moon { animation: none !important; }
+}
+
 /* The look picker: a large preview with Shuffle and the character on the left; colours, eyes and
    accessories on the right, as compact face-only tiles (eight to a row), so the dialog fits without
    scrolling. The picked tile shows by its background alone: no border, outline or edge bar. */

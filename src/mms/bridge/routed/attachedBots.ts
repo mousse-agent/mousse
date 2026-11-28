@@ -4,7 +4,9 @@ import type { RemoteBotChatListener, RemoteBotChats } from './RemoteBotChats'
 import { qualifyBotResult } from './botIds'
 
 /** The events a window hears of a bot of another computer while it shows its chat, named as this computer names it. */
-export type AttachedBotEvent = 'bots.message' | 'bots.changed' | 'bots.activity'
+export type AttachedBotEvent = 'bots.message' | 'bots.changed' | 'bots.activity' | 'bots.reply'
+
+const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 
 export interface AttachedBotsOptions {
   chats: Pick<RemoteBotChats, 'open'>
@@ -139,9 +141,21 @@ export class AttachedBots {
     return {
       message: (message) => this.options.emit('bots.message', { botId: qualified, message: qualifyBotResult(node, message) as Record<string, unknown> }),
       row: (bot) => this.options.emit('bots.changed', { botId: qualified, bot: qualifyBotResult(node, { ...bot, id: qualified }) as Record<string, unknown> }),
+      // The stream opened, or opened again: a window that shows the chat reads it again, for what came while it was shut.
+      snapshot: () => this.options.emit('bots.changed', { botId: qualified, reread: true }),
       delta: (type, data) => {
-        if (type === 'bots.activity' && data && typeof data === 'object' && !Array.isArray(data))
-          this.options.emit('bots.activity', { ...(data as Record<string, unknown>), botId: qualified })
+        if (!isRecord(data)) return
+        if (type === 'bots.activity') this.options.emit('bots.activity', { ...data, botId: qualified })
+        // Its reply as it is written: only what the window shows of it, the bot named as this computer names it.
+        else if (type === 'bots.reply' && data.botId === held.botId && typeof data.messageId === 'string' && typeof data.role === 'string' && typeof data.added === 'boolean')
+          this.options.emit('bots.reply', {
+            botId: qualified,
+            messageId: data.messageId,
+            role: data.role,
+            ...(typeof data.kind === 'string' ? { kind: data.kind } : {}),
+            ...(typeof data.text === 'string' ? { text: data.text } : {}),
+            added: data.added
+          })
       },
       // The stream ended; the windows' leases stay, and it opens again when the bot is listed and reached.
       ended: () => {

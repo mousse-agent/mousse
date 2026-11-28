@@ -48,7 +48,7 @@ export function startFacePictureSync(deps: FacePictureSyncDeps): () => void {
   const due = (): { bot: BotSummary; look: KnownBotLook; key: string } | undefined => {
     for (const bot of deps.bots()) {
       // An older service saves no pictures, and another computer's bot is drawn by its own computer's app.
-      if (!bot.facePicture) continue
+      if (!bot.facePicture || bot.lives) continue
       const look = normalizeBotLook(bot.look)
       const key = facePictureKey(look)
       if (bot.facePicture.key === key || tried.has(`${bot.id}|${key}`)) continue

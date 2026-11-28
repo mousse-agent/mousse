@@ -333,6 +333,11 @@ export function bridgeProtocolEvent(
       broadcast('bots:activity', event.data)
       return true
     }
+    // A bot of another computer writing its reply, while a window shows its chat.
+    case 'bots.reply': {
+      broadcast('bots:reply', event.data)
+      return true
+    }
     case 'activity':
     case 'activity.snapshot': {
       // Prefer daemon-authoritative full map. Never broadcast a one-thread replacement

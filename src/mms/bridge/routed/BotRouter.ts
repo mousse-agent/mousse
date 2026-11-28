@@ -8,7 +8,8 @@ import type { RemoteBotMessage } from '../remote/RemoteBots'
 import { AttachedBots, type AttachedBotEvent } from './attachedBots'
 import { qualifyBotResult } from './botIds'
 import { computerOffline, notAvailableRemotely, type ComputerRef } from './computerErrors'
-import type { RemoteBotRegistry } from './RemoteBotRegistry'
+import type { RemoteBotRegistry, RemoteBotRow } from './RemoteBotRegistry'
+import type { BotSummary } from '../../../shared/bots/personal/chat'
 import type { RoutedClient } from './RoutedClient'
 
 /** How long a read that has a copy here waits for the bot's computer before it answers from the copy, marked stale. */
@@ -20,11 +21,18 @@ const isRecord = (value: unknown): value is Record<string, unknown> => !!value &
 const rowOf = (method: string): BotMethodRow | undefined =>
   Object.hasOwn(BOT_METHODS, method) ? (BOT_METHODS[method as BotMethod] as BotMethodRow) : undefined
 
+/** A listed bot of another computer as a window's Bots list has it: its summary, and where it lives. */
+function windowRow(row: RemoteBotRow): BotSummary {
+  // What the feed adds for telling and reading is the viewing computer's own business, not the window's.
+  const { botId: _botId, node, computerName, offline, readSeq: _readSeq, telling: _telling, activity: _activity, id, ...summary } = row
+  return { ...(qualifyBotResult(node, summary) as Omit<BotSummary, 'id'>), id, lives: { node, name: computerName, ...(offline ? { offline } : {}) } }
+}
+
 export interface BotRouterOptions {
   /** Calls to other computers, on the transport their threads use (`ThreadRouter.client`). */
   client: Pick<RoutedClient, 'callBot'>
   /** The other computers' bots as this one lists them, with the copies of their chats. */
-  registry: Pick<RemoteBotRegistry, 'row' | 'onChange'> & { chats: Pick<RemoteBotRegistry['chats'], 'open' | 'messages'> }
+  registry: Pick<RemoteBotRegistry, 'row' | 'rows' | 'onChange'> & { chats: Pick<RemoteBotRegistry['chats'], 'open' | 'messages'> }
   /** Whether a session with `node` is open now. */
   online(node: NodeId): boolean
   /** The name a person knows `node` by. */
@@ -82,6 +90,17 @@ export class BotRouter implements BotRouterPort {
 
   computer(node: NodeId): ComputerRef {
     return { node, name: this.options.name(node) }
+  }
+
+  /**
+   * The other computers' bots as a window lists them beside this computer's own: each summary under its qualified id,
+   * its threads named as this computer names them, and the computer it lives on (`lives`), offline while that computer
+   * can't be reached. Read from memory and the copy on disk; it never waits on another computer.
+   */
+  list(ctx: HandlerContext): BotSummary[] {
+    if (ctx.connection?.clientType !== 'gui' || ctx.connection.bridgeCaller)
+      throw new DomainRpcError('forbidden', 'Only a Mousse window can list the bots of other computers.')
+    return this.options.registry.rows().map(windowRow)
   }
 
   async dispatch(ctx: HandlerContext, method: string, params: unknown): Promise<{ result: unknown } | undefined> {

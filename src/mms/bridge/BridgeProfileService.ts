@@ -716,7 +716,13 @@ export class BridgeProfileService {
       onConnectionClosed: (listener) => services.domains?.onConnectionClosed(listener) ?? (() => undefined)
     })
     services.botRouter = this.botRouter
+    // The windows list those bots beside this computer's own: a feed that arrived, a computer that went or came back,
+    // a bot lost, each has them read the list again (`bots.remote.list`).
+    const offBotRows = this.remoteBots.onChange(() =>
+      services.events.emit({ channel: 'protocol:event', data: { type: 'bots.changed', data: { remote: true } } })
+    )
     this.disposers.add(() => {
+      offBotRows()
       if (services.botRouter === this.botRouter) services.botRouter = undefined
       offBotPolicy()
       offBotConnections()

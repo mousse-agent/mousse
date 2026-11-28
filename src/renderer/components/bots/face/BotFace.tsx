@@ -6,6 +6,7 @@ import { hexToRgb } from './facePoses'
 import { sharedFaceRenderer, sharedFaceRendererStatus, subscribeSharedFaceRenderer, type FaceHandle, type FaceSpec } from './faceRenderer'
 import { useFaceMode } from './faceMode'
 import { HybridFace } from './HybridFace'
+import { BOT_FACE_MOON_PATH, BotFaceSleepMark } from './BotFaceSleepMark'
 import './face.css'
 
 /**
@@ -29,12 +30,18 @@ export interface BotFaceProps {
   className?: string
   /** An idle face sleeps: eyes shut, head tipped, and its z, without the fade a paused face has. Other states ignore it. */
   sleep?: boolean
+  /**
+   * The bot's computer can't be reached: whatever its state, the face dozes at full colour with a small moon instead of
+   * the z, which drifts slowly a few times and then rests (still with reduced motion).
+   */
+  away?: boolean
 }
 
-/** What the live face and the flat drawing get: a sleeping idle face reads as paused, marked `resting`. */
+/** What the live face and the flat drawing get: a sleeping idle face, or one whose computer is away, reads as paused, marked `resting`. */
 type DrawnFaceProps = BotFaceProps & { resting?: boolean }
 
 function drawnProps(props: BotFaceProps): DrawnFaceProps {
+  if (props.away === true) return { ...props, state: 'paused', resting: true }
   return props.sleep === true && props.state === 'idle' ? { ...props, state: 'paused', resting: true } : props
 }
 
@@ -97,7 +104,7 @@ export function BotFace(input: BotFaceProps) {
   })
   // Settings → Labs → Performance (faceMode.ts): a moving face as a kept body picture with flat eyes over it.
   if (mode === 'hybrid' && status === 'ready' && !broken && !props.still && !motionOff) {
-    return <HybridFace look={normalized.look} state={normalized.state} size={normalized.size} view={normalized.view} className={props.className} label={props.label} resting={props.resting} />
+    return <HybridFace look={normalized.look} state={normalized.state} size={normalized.size} view={normalized.view} className={props.className} label={props.label} resting={props.resting} away={props.away} />
   }
   if (flat) return <BotFaceStill {...props} />
   return (
@@ -179,11 +186,7 @@ function BotFaceLive({ coverUntilDrawn, onBroken, onNoPicture, onDrawn: drawn, .
     >
       <canvas ref={canvasRef} className="bot-face-canvas" aria-hidden />
       {covered && <BotFaceStill {...props} label={undefined} className="bot-face-cover" />}
-      {state === 'paused' && (
-        <span className="bot-face-z" style={{ fontSize: Math.max(8, Math.round(size * 0.18)) }} aria-hidden>
-          z
-        </span>
-      )}
+      {state === 'paused' && <BotFaceSleepMark size={size} away={props.away} />}
     </span>
   )
 }
@@ -242,8 +245,11 @@ export function BotFaceStill(input: DrawnFaceProps) {
           <title>{BOT_ACCESSORY_LABELS[known.accessory]}</title>
         </circle>
       )}
-      {/* Asleep: the live face's z, at rest (a flat face has no motion). */}
-      {asleep && (
+      {/* Asleep: the live face's z, or its moon, at rest (a flat face has no motion). */}
+      {asleep && props.away && (
+        <path className="bot-face-z-still" transform="translate(31 -3) scale(0.42)" d={BOT_FACE_MOON_PATH} style={{ fill: 'var(--bot-face-moon, #e3cf86)' }} aria-hidden />
+      )}
+      {asleep && !props.away && (
         <text className="bot-face-z-still" x="35" y="5" fontSize="10" fontWeight="700" style={{ fill: 'var(--bot-face-z, #b8a9f6)' }} aria-hidden>
           z
         </text>

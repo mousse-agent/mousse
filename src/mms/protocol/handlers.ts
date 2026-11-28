@@ -2250,6 +2250,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!parseQualifiedId(botId)) return { routed: false, focused: false }
       return ctx.mms.botRouter?.focus(ctx, botId, focused) ?? { routed: false, focused: false }
     }
+    case 'bots.remote.list': {
+      // The other computers' bots a window lists beside this computer's own; none without Bridge.
+      rejectUnknownKeys(isObject(params) ? params : {}, ['profileId'])
+      return { bots: ctx.mms.botRouter?.list(ctx) ?? [] }
+    }
     case 'threads.markSeen': {
       // A window opened the thread or showed it in focus: it is no longer Done (finished and unseen).
       const p = isObject(params) ? params : {}

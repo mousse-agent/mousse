@@ -139,7 +139,8 @@ export function actionStatus(card: BotActionCardData): string {
   return status && card.at ? `${status} · ${botGroupTime(card.at)}` : status
 }
 
-export function BotActionCard({ card, botId, botName, messageId }: { card: BotActionCardData; botId: string; botName: string; messageId: string }) {
+/** `readOnly`: the copy of a bot whose computer is away; the action shows, and is answered once that computer is back. */
+export function BotActionCard({ card, botId, botName, messageId, readOnly = false }: { card: BotActionCardData; botId: string; botName: string; messageId: string; readOnly?: boolean }) {
   const [sending, setSending] = useState(false)
   const [refusal, setRefusal] = useState<BotActionRefusal | null>(null)
   const [error, setError] = useState('')
@@ -175,10 +176,10 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
       {previous && <p role="note" className="bot-action-notice"><CircleAlert size={14} aria-hidden />{actionText(botName)} {previous.status === 'done' ? 'already sent exactly this' : previous.status === 'failed' ? 'already tried exactly this; the tool reported an error' : "already tried exactly this and couldn't tell if it went through"} at {repeatedAt}</p>}
       {card.hasHiddenValues && <div role="note" className="bot-action-notice"><CircleAlert size={14} aria-hidden />Hidden values will be sent{card.hiddenPaths.length ? ': ' : ''}<HiddenPaths paths={card.hiddenPaths} /></div>}
       {error && <p role="alert" className="bot-action-notice"><CircleAlert size={14} aria-hidden />{error}</p>}
-      <div className="bot-ask-buttons" role="group" aria-label="Answer this action">
+      {!readOnly && <div className="bot-ask-buttons" role="group" aria-label="Answer this action">
         <button type="button" disabled={sending || card.tooLarge} onClick={() => void answer('send')}>Send</button>
         <button type="button" disabled={sending} onClick={() => void answer('not_now')}>Not now</button>
-      </div>
+      </div>}
     </>}
   </section>
 }

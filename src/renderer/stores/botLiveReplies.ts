@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from 'react'
 import type { BotChatMessage, BotSummary } from '../../shared/bots/personal/chat'
+import type { BotReplyEvent } from '../../shared/bots/personal/methods'
 import { SILENT_REPLY } from '../../shared/bots/personal/wakes'
 import type { ChatMessage } from '../../shared/types'
 import { assistantDisplayText } from '../chat/adapters/mousseToUI'
@@ -9,7 +10,9 @@ import { assistantDisplayText } from '../chat/adapters/mousseToUI'
  * chat keeps is the one the service posts when the turn settles, which replaces this.
  *
  * Its source is the bot's home thread, where its chat turns run: the service already sends every window that thread's
- * reply as it streams (at most one update every 50 ms, `TEXT_EMIT_MS`), so nothing new is asked of it. Updates reach
+ * reply as it streams (at most one update every 50 ms, `TEXT_EMIT_MS`), so nothing new is asked of it. A bot of another
+ * computer has its home thread there: while a window shows its chat, its stream carries the same messages
+ * (`bots.reply`, `noteBotReply`). Updates reach
  * the readers at most once per animation frame, and only the live bubble reads the text, so the chat around it never
  * renders for a token.
  *
@@ -112,7 +115,16 @@ function chatTurnShown(bot: BotSummary): boolean {
   return Boolean(bot.chat) || (bot.chat === undefined && bot.work === undefined && bot.threads === undefined && bot.state === 'working')
 }
 
-function isReplyText(message: ChatMessage): boolean {
+/** What of a home-thread message the live reply reads: a thread's own message, or a bot of another computer's (`bots.reply`). */
+interface ReplyNote {
+  id: string
+  role: string
+  kind?: string
+  content: string
+  hidden?: boolean
+}
+
+function isReplyText(message: ReplyNote): boolean {
   return message.role === 'assistant' && !message.hidden && (message.kind === undefined || message.kind === 'message')
 }
 
@@ -174,7 +186,21 @@ function schedule(): void {
 export function noteThreadMessage(threadId: string, message: ChatMessage | undefined, added: boolean): void {
   if (!message) return
   const bot = botOfThread(threadId)
+  if (bot) noteReply(bot, message, added)
+}
+
+/**
+ * A bot of another computer wrote its reply, while this window shows its chat (`bots.reply`): its home thread lives on
+ * that computer, which sends what of its messages the reply needs. Read as a home-thread message here is.
+ */
+export function noteBotReply(event: BotReplyEvent | undefined): void {
+  if (!event?.botId || typeof event.messageId !== 'string') return
+  const bot = sources.bots().find((entry) => entry.id === event.botId)
   if (!bot) return
+  noteReply(bot, { id: event.messageId, role: event.role, ...(event.kind ? { kind: event.kind } : {}), content: event.text ?? '' }, event.added)
+}
+
+function noteReply(bot: BotSummary, message: ReplyNote, added: boolean): void {
   if (added && (message.role === 'user' || (message.kind !== undefined && STEP_KINDS.has(message.kind)))) {
     drop(bot.id)
     return

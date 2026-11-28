@@ -14,6 +14,8 @@ import { useReplyPreviews } from '../../lib/replyPreviewSetting'
 import { OpenNetworkChatDialog } from './OpenNetworkChatDialog'
 import { BotRowMenu } from '../ThreadsContextMenu'
 import { setBotChecklistHidden, useBotChecklistHidden } from '../bots/botChecklistSetting'
+import { ComputerBadgeView } from '../ComputerBadge'
+import { offlineLabel, useComputer } from '../../lib/computers'
 import '../../styles/chats.css'
 import '../../styles/bots.css'
 
@@ -46,16 +48,21 @@ const botActivityAt = (bot: BotSummary) => bot.last?.at ?? bot.createdAt
  * face sleeps. Unread messages show as a count until its chat opens. A right-click opens its menu.
  */
 function BotRow({ bot, active, happyUntil, onOpen, onMenu }: { bot: BotSummary; active: boolean; happyUntil: number | undefined; onOpen(): void; onMenu(event: ReactMouseEvent<HTMLButtonElement>): void }) {
-  const line = botRowLine(bot)
+  // A bot of another computer that can't be reached now: its row fades and says so, and its face dozes under a moon.
+  const away = Boolean(bot.lives?.offline)
+  const line = away ? { tone: 'idle' as const, text: 'Offline', resting: true } : botRowLine(bot)
   const replyPreviews = useReplyPreviews()
-  const preview = line.resting && replyPreviews ? bot.lastReply : undefined
+  const preview = line.resting && replyPreviews && !away ? bot.lastReply : undefined
   const time = bot.last ? formatMessageTime(bot.last.at) : undefined
   const unread = active ? 0 : bot.unread
-  return <button type="button" className="bot-row" aria-current={active || undefined} title={bot.stateText && bot.state !== 'idle' ? `${bot.name}: ${bot.stateText}` : bot.name} aria-label={`Message ${bot.name}`} onClick={onOpen} onContextMenu={onMenu}>
-    <BotFace look={bot.look} state={botFaceState(bot, happyUntil)} sleep={line.resting} size={36} view="head" />
+  // A bot of another computer has no menu yet: what it offers is set up on its own computer.
+  const menu = bot.lives ? (event: ReactMouseEvent<HTMLButtonElement>) => event.preventDefault() : onMenu
+  return <button type="button" className="bot-row" data-away={away || undefined} aria-current={active || undefined} title={bot.stateText && bot.state !== 'idle' && !away ? `${bot.name}: ${bot.stateText}` : bot.name} aria-label={`Message ${bot.name}`} onClick={onOpen} onContextMenu={menu}>
+    <BotFace look={bot.look} state={botFaceState(bot, happyUntil)} sleep={line.resting} away={away} size={36} view="head" />
     <span className="bot-row-text">
       <span className="bot-row-head">
         <span className="bot-row-name">{bot.name}</span>
+        {bot.lives && <BotComputerBadge lives={bot.lives} />}
         {unread > 0 && <span className="bot-row-unread" aria-label={`${unread} unread`}>{unread}</span>}
         {time && <span className="bot-row-time">{time}</span>}
       </span>
@@ -64,6 +71,12 @@ function BotRow({ bot, active, happyUntil, onOpen, onMenu }: { bot: BotSummary; 
         : <span className="bot-row-state" data-tone={line.tone}>{line.text}</span>}
     </span>
   </button>
+}
+
+/** The computer a bot of another computer lives on, as thread rows show theirs: struck through while it is offline. */
+function BotComputerBadge({ lives }: { lives: NonNullable<BotSummary['lives']> }) {
+  const computer = useComputer(lives.node)
+  return <ComputerBadgeView name={lives.name} state={lives.offline ? 'offline' : 'online'} offline={offlineLabel(computer, Date.now())} of="bot" className="bot-row-computer" />
 }
 
 /** Where a bot's menu opens, and the row it returns the focus to. */
@@ -107,8 +120,9 @@ export function ChatsSidebar() {
     {chat.run?.state === 'running' && <span className="chat-working-dot" aria-label="Working" />}
   </button>
   const groups = snapshot.chats.filter((chat) => chat.kind === 'group')
-  // The bot that spoke last comes first.
-  const shownBots = [...bots].sort((a, b) => botActivityAt(b).localeCompare(botActivityAt(a)))
+  // The bot that spoke last comes first, this computer's and the others' together. Only a message moves a row: a reply
+  // being written never does, and rows with the same time keep their places.
+  const shownBots = [...bots].sort((a, b) => botActivityAt(b).localeCompare(botActivityAt(a)) || a.id.localeCompare(b.id))
   const [botsOpen, toggleBots] = useSectionOpen('bots')
   const [groupsOpen, toggleGroups] = useSectionOpen('groups')
   const [recentOpen, toggleRecent] = useSectionOpen('recent')
