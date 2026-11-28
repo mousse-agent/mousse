@@ -67,7 +67,7 @@ describe('Settings > Agents > Access', () => {
 
   it('an older profile that stored a level and projects reads as the switches alone', () => {
     show({ level: 'read', projectIds: ['p2'], answerApprovals: true } as Partial<AccessSetting>)
-    expect(savedByDaemon()).toEqual({ answerApprovals: true, remoteSubagents: false, computerUse: true, computers: [] })
+    expect(savedByDaemon()).toEqual({ answerApprovals: true, remoteSubagents: false, computerUse: true, computers: [], fromOtherDevices: false })
   })
 
   describe('answering approvals on other threads', () => {
@@ -90,9 +90,9 @@ describe('Settings > Agents > Access', () => {
       const { updates } = show({ computers: ['node-a'] })
       click(answerSwitch()!)
       expect(updates).toHaveBeenCalledTimes(1)
-      expect(updates).toHaveBeenCalledWith({ agentAccess: { answerApprovals: true, remoteSubagents: false, computerUse: true, computers: ['node-a'] } })
+      expect(updates).toHaveBeenCalledWith({ agentAccess: { answerApprovals: true, remoteSubagents: false, computerUse: true, computers: ['node-a'], fromOtherDevices: false } })
       expect(on()).toBe(true)
-      expect(savedByDaemon()).toEqual({ answerApprovals: true, remoteSubagents: false, computerUse: true, computers: ['node-a'] })
+      expect(savedByDaemon()).toEqual({ answerApprovals: true, remoteSubagents: false, computerUse: true, computers: ['node-a'], fromOtherDevices: false })
       click(answerSwitch()!)
       expect(savedByDaemon().answerApprovals).toBe(false)
     })
@@ -116,7 +116,7 @@ describe('Settings > Agents > Access', () => {
     it('saves the whole setting when switched, under the key it always had, and says to pair computers when none are connected', () => {
       const { updates } = show({ answerApprovals: true })
       click(remoteSwitch()!)
-      expect(updates).toHaveBeenCalledWith({ agentAccess: { answerApprovals: true, remoteSubagents: true, computerUse: true, computers: [] } })
+      expect(updates).toHaveBeenCalledWith({ agentAccess: { answerApprovals: true, remoteSubagents: true, computerUse: true, computers: [], fromOtherDevices: false } })
       expect(savedByDaemon().remoteSubagents).toBe(true)
       expect(text()).toContain('Pair them in Settings → Devices')
     })
@@ -144,6 +144,20 @@ describe('Settings > Agents > Access', () => {
       show({ remoteSubagents: true, computers: ['node-a', 'node-gone'] })
       expect(rows().map((entry) => entry.getAttribute('aria-label'))).toEqual(['node-a'])
       expect(savedByDaemon().computers).toEqual(['node-a'])
+    })
+
+    it('lets threads started from other devices use these computers, off until switched and saved with the rest', () => {
+      devices('node-a')
+      show({ remoteSubagents: false, computers: ['node-a'] })
+      const fromOthers = () => host.querySelector<HTMLButtonElement>('#agent-access-from-other-devices')
+      // It refines the computer list: hidden with it while agents may not work on other devices.
+      expect(fromOthers()).toBeNull()
+      click(remoteSwitch()!)
+      expect(fromOthers()!.getAttribute('aria-checked')).toBe('false')
+      expect(savedByDaemon().fromOtherDevices).toBe(false)
+      click(fromOthers()!)
+      expect(fromOthers()!.getAttribute('aria-checked')).toBe('true')
+      expect(savedByDaemon()).toMatchObject({ remoteSubagents: true, computers: ['node-a'], fromOtherDevices: true })
     })
 
     it('keeps allowed computers while the device list is not known yet, and shows none as removed', () => {

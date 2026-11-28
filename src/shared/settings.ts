@@ -338,6 +338,12 @@ export interface AgentAccessSettings {
    */
   computers: string[]
   /**
+   * "Threads started from other devices": a thread another of the user's devices started here (or a subagent
+   * under one) may reach the computers above beyond the device that started it. Off, the default: such a thread reaches
+   * only the device that started it, so work never chains on to a third computer unless the person here allows it.
+   */
+  fromOtherDevices: boolean
+  /**
    * Computer use (Settings → Computer use): threads' agents may see and operate apps on this computer through Cua
    * Driver. On unless turned off; a bot still needs "use the computer" (`src/shared/computerUse.ts`).
    */
@@ -374,6 +380,7 @@ export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> 
     answerApprovals: raw?.answerApprovals === true,
     remoteSubagents: raw?.remoteSubagents === true,
     computers,
+    fromOtherDevices: raw?.fromOtherDevices === true,
     computerUse: raw?.computerUse !== false,
     ...((driver) => (driver ? { computerDriver: driver } : {}))(normalizeDriverPath(raw?.computerDriver))
   }

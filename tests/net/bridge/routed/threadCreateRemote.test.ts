@@ -495,6 +495,36 @@ describe('thread_create on another computer (issue #1160)', () => {
       expect(await refusal({}, {}, () => allow(true, []))).toMatchObject({ code: 'computer_not_allowed' })
     }, 120_000)
 
+    it('a thread another device started: never refused going back to that device; a third computer until the person here allows it', async () => {
+      standInForTurns()
+      const { thread, create } = await caller()
+      const startedFrom = (node: string) => t.caller.threads.updateThreadMeta(thread.id, { startedFrom: { node } }, { touch: false })
+      const count = before()
+      startedFrom('nod_third')
+      const chained = await create({ computer: t.node, title: 'Chained', clientRequestId: 'chain-1' })
+      expect(chained.isError, JSON.stringify(chained.body)).toBe(true)
+      expect(chained.body.data).toMatchObject({ code: 'remote_from_remote', computer: expect.any(String) })
+      expect(before()).toBe(count)
+      // Started from that computer: the thread goes back there, with nothing more turned on.
+      startedFrom(t.node)
+      const back = await create({ computer: t.node, title: 'Back', clientRequestId: 'chain-2' })
+      expect(back.isError, JSON.stringify(back.body)).toBeUndefined()
+      // From a third device again, once the person here allows it: as from a thread started here.
+      startedFrom('nod_third')
+      t.caller.settings.set({ agentAccess: { ...t.caller.settings.get().agentAccess, fromOtherDevices: true } } as never)
+      try {
+        const allowed = await create({ computer: t.node, title: 'Allowed', clientRequestId: 'chain-3' })
+        expect(allowed.isError, JSON.stringify(allowed.body)).toBeUndefined()
+      } finally {
+        t.caller.settings.set({ agentAccess: { ...t.caller.settings.get().agentAccess, fromOtherDevices: false } } as never)
+      }
+      // Turned back off, that launch goes no further: its retry is refused as a new one would be.
+      const retried = await create({ computer: t.node, title: 'Allowed', clientRequestId: 'chain-3' })
+      expect(retried.isError, JSON.stringify(retried.body)).toBe(true)
+      expect(retried.body.data).toMatchObject({ code: 'remote_from_remote' })
+      expect(launchedBy(thread.id)).toHaveLength(2)
+    }, 120_000)
+
     it('not allowed there: that computer lets no agent of this one work on it', async () => {
       const body = await refusal({}, {}, () => policy.set(t.callerNode, { agentReach: 'none' }))
       expect(body).toMatchObject({ code: 'computer_not_allowed', refused: { code: 'scope_denied', retry: 'never' } })

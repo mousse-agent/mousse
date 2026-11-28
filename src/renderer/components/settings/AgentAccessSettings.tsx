@@ -6,7 +6,9 @@ import { useComputers } from '../../lib/computers'
 
 /**
  * Settings > Agents > Access and Subagents: whether agents may answer approvals on other threads, then whether they
- * may work on the user's other devices ("Let agents work on your other devices", stored as `remoteSubagents`). Both read and write the one stored `agentAccess` setting. Agents read and
+ * may work on the user's other devices ("Let agents work on your other devices", stored as `remoteSubagents`), on which of
+ * them, and whether threads another device started here may too ("Threads started from other devices",
+ * `fromOtherDevices`). All read and write the one stored `agentAccess` setting. Agents read and
  * manage every thread; there is no level to choose (SPEC §15.1).
  */
 export function AgentAccessSettings({
@@ -113,6 +115,26 @@ export function AgentAccessSettings({
             {computers.map((computer) =>
               choiceRow('computer', computer.node, computer.online ? computer.name : `${computer.name} (offline)`, access.computers.includes(computer.node), () => toggleComputer(computer.node))
             )}
+            <SettingsRow
+              title="Threads started from other devices"
+              anchor="agents-from-other-devices"
+              htmlFor="agent-access-from-other-devices"
+              description={<>
+                Can use these computers too. Without it, they reach only the device that started them.
+                <MoreDetails>
+                  A thread you start on this computer from another device can work on that device when it is turned on above.
+                  With this on, it can use the other computers turned on above too, like a thread started here. Off by default.
+                </MoreDetails>
+              </>}
+              control={
+                <Switch
+                  id="agent-access-from-other-devices"
+                  label="Threads started from other devices"
+                  checked={access.fromOtherDevices}
+                  onChange={(fromOtherDevices) => save({ fromOtherDevices })}
+                />
+              }
+            />
           </>
         ) : null}
         {subagentRows}

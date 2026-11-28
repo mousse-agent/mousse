@@ -24,10 +24,11 @@ export interface RemoteThreadLaunchesDeps {
   /** The Bridge side; undefined while Bridge is off. */
   port: () => RemoteComputersPort | undefined
   /**
-   * Whether agents here may still work on that computer (the switch in Agent access, and that computer ticked), read
-   * before every attempt: a launch the user turned off since is not finished.
+   * Whether agents here may still work on that computer from the launcher's thread (the switch in Agent access, that
+   * computer ticked, and for a thread another device started, the chain rule), read before every attempt: a launch the
+   * user turned off since is not finished.
    */
-  allowed: (node: string) => boolean
+  allowed: (node: string, launcherThreadId: string) => boolean
   /** The launch reached the other computer for the first time: the launcher's thread notes it. */
   launched: (record: RemoteLaunchRecord) => void
   /** How often open launches are tried again (default 5 s). */
@@ -156,7 +157,7 @@ export class RemoteThreadLaunches {
     // Too old to finish: whatever was made there is archived, and nothing more is sent.
     if (this.now() - Date.parse(record.createdAt) >= (this.deps.giveUpMs ?? 24 * 60 * 60_000))
       return this.abandon(record, remoteThreadId, `${name} did not confirm the launch within a day, so it was given up.`, 'launch_expired')
-    if (!this.deps.allowed(record.node)) {
+    if (!this.deps.allowed(record.node, record.launcherThreadId)) {
       const message = `The user no longer allows agents to work on ${name}.`
       if (!setUp) return this.abandon(record, remoteThreadId, message, 'computer_not_allowed')
       return { ok: true, record: this.deps.records.update(key, { firstMessageState: 'failed', lastError: message })! }

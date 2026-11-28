@@ -436,8 +436,8 @@ describe('the thread tools on a thread launched on another computer (issue #1160
  * thread of that computer this computer's agents did not launch.
  *
  * Inputs listed before the cases:
- * - who asks: an ordinary thread; a private thread; a thread another device started (one computer deep); the user's
- *   switch off, or the computer not ticked;
+ * - who asks: an ordinary thread; a private thread; a thread another device started (reaching that device, a third one,
+ *   a third one allowed here); the user's switch off, or the computer not ticked;
  * - which computer: a name from computer_list; a name that is none; offline; not sharing its threads;
  * - what is there: a thread a person started; a private thread; a thread this thread launched; many long-named threads;
  * - what that computer lets this one's agents change: threads they started (the default), all threads, nothing;
@@ -654,17 +654,34 @@ describe('thread_list, thread_search and any thread of an allowed computer (issu
     expect(versions).not.toHaveBeenCalled()
   }, 120_000)
 
-  it('a private thread, or one another device started, does not reach that computer', async () => {
+  it('a private thread does not reach that computer; one another device started reaches it when that device started it, or once allowed here', async () => {
     const secret = await launcher({ localOnly: true })
     expect((await secret.tool('thread_list', { computer: nameOf() })).body).toMatchObject({ code: 'private_thread' })
     expect((await secret.tool('thread_search', { computer: nameOf(), query: 'x' })).body).toMatchObject({ code: 'private_thread' })
 
     const relayed = await launcher()
-    const real = (t.caller.orchestrator as unknown as Loose).startedFromAnotherDevice.bind(t.caller.orchestrator)
-    vi.spyOn(t.caller.orchestrator as unknown as Loose, 'startedFromAnotherDevice').mockImplementation(((id: string) => id === relayed.thread.id || real(id)) as never)
     const theirs = personThread(`Person ${++seq}`)
-    expect((await relayed.tool('thread_list', { computer: nameOf() })).body).toMatchObject({ code: 'remote_from_remote', computer: nameOf() })
-    expect((await relayed.tool('thread_read', { threadId: t.qualified(theirs.id) })).body).toMatchObject({ code: 'remote_from_remote' })
+    const list = () => relayed.tool('thread_list', { computer: nameOf() })
+    const read = () => relayed.tool('thread_read', { threadId: t.qualified(theirs.id) })
+    const startedFrom = (node: string) => t.caller.threads.updateThreadMeta(relayed.thread.id, { startedFrom: { node } }, { touch: false })
+    const fromOthers = (on: boolean) => t.caller.settings.set({ agentAccess: { ...t.caller.settings.get().agentAccess, fromOtherDevices: on } } as never)
+    // A third device started it: that computer would chain the work on, refused until the person here allows it.
+    startedFrom('nod_third')
+    expect((await list()).body).toMatchObject({ code: 'remote_from_remote', computer: nameOf() })
+    expect((await read()).body).toMatchObject({ code: 'remote_from_remote' })
+    fromOthers(true)
+    try {
+      const allowed = await read()
+      expect(allowed.isError, allowed.text).toBeUndefined()
+    } finally {
+      fromOthers(false)
+    }
+    // That computer started it: two computers working on each other is no chain.
+    startedFrom(t.node)
+    const listed = await list()
+    expect(listed.isError, listed.text).toBeUndefined()
+    const back = await read()
+    expect(back.isError, back.text).toBeUndefined()
   }, 120_000)
 
   it('a computer that is none of the user\'s is refused; one offline, slow or not sharing is refused for a list and named as not searched', async () => {

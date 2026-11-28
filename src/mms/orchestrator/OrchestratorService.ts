@@ -166,7 +166,7 @@ import { taskCheckpoint } from '../run/delegation/checkpoint'
 import { remoteSubagentPreamble, subagentPreamble, withoutSubagentPreamble } from '../run/delegation/guidance'
 import { parseQualifiedId, qualifyId } from '../../shared/threadRef'
 import { RemoteThreadLaunches, type RemoteLaunchOutcome } from './RemoteThreadLaunches'
-import { RemoteLaunchedThreads, RemoteThreadRefusal } from './RemoteLaunchedThreads'
+import { RemoteLaunchedThreads, RemoteThreadRefusal, chainRefusal } from './RemoteLaunchedThreads'
 import { ROUTED_AGENT_BOT_SINCE, type RoutedAgentBot, type RoutedAgentMark } from '../../shared/bridge/routed'
 import { lookFields, type BotLook } from '../../shared/bots/personal/look'
 import { REMOTE_THREAD_COMMAND, remoteThreadFingerprint, remoteThreadRefusal } from './remoteThreadRequest'
@@ -3235,7 +3235,7 @@ export class OrchestratorService extends EventEmitter {
     this.remoteLaunches = new RemoteThreadLaunches({
       records: engine.remoteLaunches,
       port: () => this.remoteComputers,
-      allowed: (node) => !this.remoteThreadDenial(node, node),
+      allowed: (node, launcherThreadId) => !this.remoteThreadDenial(node, node) && !this.chainRefused(launcherThreadId, node),
       launched: (record) => this.noteRemoteLaunch(record)
     })
     // Launches a restart cut off are finished (or archived there) once that computer can be reached.
@@ -3246,7 +3246,7 @@ export class OrchestratorService extends EventEmitter {
       denial: (node, name) => this.remoteThreadDenial(node, name),
       related: (callerThreadId, launcherThreadId) => callerThreadId === launcherThreadId || lineageRelation(engine, callerThreadId, launcherThreadId) !== null,
       localOnly: (threadId) => this.isLocalOnly(threadId),
-      startedElsewhere: (threadId) => this.startedFromAnotherDevice(threadId),
+      chainRefused: (threadId, node) => this.chainRefused(threadId, node),
       remoteSubagentThread: (node, threadId) => {
         const runsOn = this.threadStore?.getThread(threadId)?.runsOn
         const there = runsOn?.node === node && runsOn.ref ? parseQualifiedId(runsOn.ref) : undefined
@@ -6121,16 +6121,17 @@ export class OrchestratorService extends EventEmitter {
       if (receipt?.threadId !== callerThreadId || earlier !== fingerprint) throw this.creationKeyConflict(key)
       const denied = this.remoteThreadDenial(stored.node, stored.computerName)
       if (denied) return refuse(denied.code, denied.message, { computer: stored.computerName })
+      if (this.chainRefused(callerThreadId, stored.node)) return refuse('remote_from_remote', chainRefusal('threads', stored.computerName), { computer: stored.computerName })
       const before = stored.state
       return this.remoteThreadResult(await launches.launch(key), before === 'launched' || before === 'abandoned')
     }
     if (engine.store.getReceipt(key)) throw this.creationKeyConflict(key)
-    // A chain stays one computer deep: work another device started here never reaches a third computer.
-    if (this.startedFromAnotherDevice(callerThreadId)) return refuse('remote_from_remote', 'A thread another device started cannot start threads on other computers.')
     const found = this.findComputer(input.computer)
     if (!found.ok) return refuse(found.code, found.message, found.extra as { computers?: Array<{ id: string; name: string }> })
     const computer = found.computer
     const at = { computer: computer.name }
+    // Work another device started here reaches that device back, and a third computer only when the person here allows it.
+    if (this.chainRefused(callerThreadId, computer.node)) return refuse('remote_from_remote', chainRefusal('threads', computer.name), at)
     const denied = this.remoteThreadDenial(computer.node, computer.name)
     if (denied) return refuse(denied.code, denied.message, at)
     if (!computer.online) return refuse('computer_offline', `${computer.name} is offline.`, at)
@@ -6213,11 +6214,18 @@ export class OrchestratorService extends EventEmitter {
     return this.remoteThreadResult(await launches.launch(key), false)
   }
 
-  /** Whether the thread, or the thread at the top of its lineage, was started from another device (`startedFrom`). */
-  private startedFromAnotherDevice(threadId: string): boolean {
+  /**
+   * Whether reaching `node` from `threadId` would chain work on to a computer the person here has not allowed. A thread
+   * another device started (or under a lineage whose top thread was, `startedFrom`) always reaches that device back:
+   * two computers working on each other is no chain, and that device's own limits for this one decide what happens
+   * there. Any other computer is a third one, reached only with "Threads started from other devices" on
+   * (`agentAccess.fromOtherDevices`). A thread started here is never chained.
+   */
+  private chainRefused(threadId: string, node: string): boolean {
     const thread = this.threadStore?.getThread(threadId)
     const root = thread?.lineage ? this.threadStore?.getThread(thread.lineage.rootThreadId) : thread
-    return Boolean(root?.startedFrom)
+    const from = root?.startedFrom?.node
+    return from !== undefined && from !== node && !this.agentAccessSettings().fromOtherDevices
   }
 
   /** Why an agent may not start a thread on `node` now: the switch in Agent access is off, or that computer is not ticked. */
@@ -9357,11 +9365,6 @@ export class OrchestratorService extends EventEmitter {
         return refuse('read_only_not_remote', 'A read-only subagent runs on this computer only. Leave out computer to start it here, or leave out readOnly to run it there as an ordinary subagent.')
       if (this.isReadOnlyChild(parentThreadId))
         return refuse('read_only_caller_requires_shared', `${READ_ONLY_CALLER_MESSAGE} A read-only subagent runs on this computer only, so leave out computer.`)
-      // A chain stays one computer deep: work another device started here never reaches a third computer.
-      const parent = this.threadStore?.getThread(parentThreadId)
-      const root = parent?.lineage ? this.threadStore?.getThread(parent.lineage.rootThreadId) : parent
-      if (root?.startedFrom)
-        return refuse('remote_from_remote', 'A thread another device started cannot start subagents on other computers.')
     }
     if (!remote || !this.remoteComputers)
       return refuse('remote_unavailable', 'Subagents on other computers need Mousse to be connected to your other computers (Settings → Devices).')
@@ -9369,6 +9372,8 @@ export class OrchestratorService extends EventEmitter {
     if (!found.ok) return refuse(found.code, found.message, found.extra)
     const computer = found.computer
     if (!prior) {
+      // Work another device started here reaches that device back, and a third computer only when the person here allows it.
+      if (this.chainRefused(parentThreadId, computer.node)) return refuse('remote_from_remote', chainRefusal('subagents', computer.name))
       const denied = this.remoteSubagentDenial(computer.node, computer.name)
       if (denied) return refuse(denied.code, denied.message)
       if (!computer.online) return refuse('computer_offline', `${computer.name} is offline.`)
@@ -9502,13 +9507,11 @@ export class OrchestratorService extends EventEmitter {
       return { computer: 'this computer', ...(current ? { current } : {}), entries }
     }
     if (this.isLocalOnly(parentThreadId)) return { listed: false, code: 'private_thread', message: PRIVATE_THREAD_REMOTE_REFUSAL }
-    const parent = this.threadStore?.getThread(parentThreadId)
-    const root = parent?.lineage ? this.threadStore?.getThread(parent.lineage.rootThreadId) : parent
-    if (root?.startedFrom) return { listed: false, code: 'remote_from_remote', message: 'A thread another device started cannot start subagents on other computers.' }
     if (!this.remoteSubagents || !this.remoteComputers)
       return { listed: false, code: 'remote_unavailable', message: 'Subagents on other computers need Mousse to be connected to your other computers (Settings → Devices).' }
     const found = this.findComputer(input.computer)
     if (!found.ok) return { listed: false, code: found.code, message: found.message, ...found.extra }
+    if (this.chainRefused(parentThreadId, found.computer.node)) return { listed: false, code: 'remote_from_remote', message: chainRefusal('subagents', found.computer.name) }
     const denied = this.remoteSubagentDenial(found.computer.node, found.computer.name)
     if (denied) return { listed: false, ...denied }
     if (!found.computer.online) return { listed: false, code: 'computer_offline', message: `${found.computer.name} is offline.` }
@@ -9767,6 +9770,7 @@ export class OrchestratorService extends EventEmitter {
       if (open) return refuse('subagent_busy', `"${target.title}" is still working on ${name}. Wait for its result, then continue it.`)
       const denied = this.remoteSubagentDenial(first.node, name)
       if (denied) return refuse(denied.code, denied.message)
+      if (this.chainRefused(parentThreadId, first.node)) return refuse('remote_from_remote', chainRefusal('continue', name))
       if (!remote.computers().find((computer) => computer.node === first.node)?.online) return refuse('computer_offline', `${name} is offline.`)
     }
     const tasks = engine.delegations.listForChildThread(target.childThreadId)
