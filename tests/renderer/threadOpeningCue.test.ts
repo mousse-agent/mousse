@@ -6,7 +6,9 @@
  * - a thread still opening after it shows the cue on its row and in the title, without renaming the thread still shown;
  * - a thread of another computer with nothing here is shown then, with "Loading from <computer>…", not held a second;
  * - the thread before's Stop and approval never show under the new thread;
- * - a transcript that cannot be read says "Couldn't reach <computer>" with Retry, never the new-thread page.
+ * - a transcript that cannot be read says "Couldn't reach <computer>" with Retry, never the new-thread page, also for a
+ *   thread that showed no messages before;
+ * - a thread of another computer whose view has no messages is still that thread, never the new-thread page.
  */
 import { act, createElement, Fragment } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -51,6 +53,8 @@ const OPENED_AFTER = `${NODE}:thr_opened_after`
 const WITH_MEDIA = `${NODE}:thr_media`
 const FROM_REFERENCE = `${NODE}:thr_reference`
 const AS_CARD = `${NODE}:thr_card`
+const EMPTY_BEFORE = `${NODE}:thr_empty_before`
+const EMPTY_VIEW = `${NODE}:thr_empty_view`
 const now = new Date().toISOString()
 const started = (id: string, extra: Record<string, unknown> = {}) => ({ id, name: `Thread ${id}`, createdAt: now, updatedAt: now, startedAt: now, order: 0, ...extra })
 const message = (id: string, content: string) => ({ id, role: 'user', content, timestamp: now })
@@ -170,7 +174,7 @@ beforeEach(async () => {
     transcriptFailed: null, openingCueThreadId: null, projects: [],
     threads: [started('thread-a'), started('thread-local'), started('thread-quick'), started(REMOTE, { node: NODE, name: 'Remote work' }), started(UNREACHABLE, { node: NODE, name: 'Far work' }),
       started('thread-between'),
-      ...[REOPENED, FAILED_FIRST, OPENED_AFTER, WITH_MEDIA, FROM_REFERENCE, AS_CARD].map((id) => started(id, { node: NODE }))] as never,
+      ...[REOPENED, FAILED_FIRST, OPENED_AFTER, WITH_MEDIA, FROM_REFERENCE, AS_CARD, EMPTY_BEFORE, EMPTY_VIEW].map((id) => started(id, { node: NODE }))] as never,
     turnStates: {},
     messages: [message('a-1', 'First thread')] as never
   })
@@ -294,6 +298,44 @@ describe('opening a thread that is slow to show', () => {
     await deliverView(UNREACHABLE, [message('far-1', 'Far')])
     expect(host.querySelector<HTMLElement>('[data-shown-thread]')?.dataset.shownMessages).toBe('far-1')
     expect(chatText()).not.toMatch(/Loading from|Couldn't reach/)
+  })
+
+  it('never shows the new-thread page for a thread of an offline computer that showed no messages before', async () => {
+    let offline = false
+    // The first time, the thread opens with no messages yet; the next time, its computer is offline.
+    threads.select = vi.fn((id: string) => (offline && id === EMPTY_BEFORE ? Promise.reject(new Error('computer_offline')) : new Promise(() => undefined)))
+    await mount()
+    const { OPENING_CUE_MS } = await import('../../src/renderer/lib/threadActions')
+    await click(EMPTY_BEFORE)
+    await deliverView(EMPTY_BEFORE, [])
+    expect(shownThread()).toBe(EMPTY_BEFORE)
+    await click('thread-local')
+    await deliverView('thread-local', [message('local-2', 'Local')])
+    expect(shownThread()).toBe('thread-local')
+    frames = []
+
+    offline = true
+    const { selectThread } = await import('../../src/renderer/lib/threadActions')
+    await act(async () => { void selectThread(EMPTY_BEFORE).catch(() => undefined) })
+    await settle()
+    await wait(OPENING_CUE_MS + 30)
+    expect(shownThread()).toBe(EMPTY_BEFORE)
+    expect(host.querySelector('.chat [role="alert"]')?.textContent).toContain("Couldn't reach Mac mini")
+    expect(host.querySelector('.chat--empty')).toBeNull()
+    expect(frames.some((frame) => frame.thread === EMPTY_BEFORE && frame.empty)).toBe(false)
+  })
+
+  it('shows a thread of an offline computer whose view has no messages as that thread, not the new-thread page', async () => {
+    const { useComputersStore } = await import('../../src/renderer/lib/computers')
+    useComputersStore.setState({ byNode: { [NODE]: { node: NODE, name: 'Mac mini', online: false } as never } })
+    await mount()
+    await click(EMPTY_VIEW)
+    // The copy of the thread kept here, read while its computer is offline, can hold no messages.
+    await deliverView(EMPTY_VIEW, [])
+    expect(shownThread()).toBe(EMPTY_VIEW)
+    expect(host.querySelector('.chat--empty')).toBeNull()
+    expect(frames.some((frame) => frame.thread === EMPTY_VIEW && frame.empty)).toBe(false)
+    expect(chatText()).toContain('Mac mini')
   })
 
   it('shows a thread asked for again only on its own timers, not those of the earlier time it was asked for', async () => {
