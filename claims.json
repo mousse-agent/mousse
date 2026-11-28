@@ -210,6 +210,22 @@
       "expiresAt": "2026-11-27T20:14:24.172Z"
     },
     {
+      "task": "remote-bots-setup",
+      "session": "Avarnics-Mac-mini.local-4e8c12",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "remote-bots-setup",
+      "paths": [
+        "src/shared/bots/personal",
+        "src/mms/bridge",
+        "src/renderer/components/bots",
+        "src/renderer/stores/botsStore.ts",
+        "src/renderer/components/chats/ChatsSidebar.tsx",
+        "src/renderer/components/ThreadsContextMenu.tsx"
+      ],
+      "claimedAt": "2026-11-28T07:27:54.697Z",
+      "expiresAt": "2026-11-28T09:27:54.697Z"
+    },
+    {
       "task": "remote-bots-share-switch-out",
       "session": "Avarnics-Mac-mini.local-7f5739",
       "machine": "Avarnics-Mac-mini.local",
@@ -307,19 +323,6 @@
       ],
       "claimedAt": "2026-11-28T06:03:45.087Z",
       "expiresAt": "2026-11-28T08:03:45.087Z"
-    },
-    {
-      "task": "t3/fence-approvals-s2",
-      "session": "LAPTOP-HIEROJK7-a26b71",
-      "machine": "LAPTOP-HIEROJK7",
-      "branch": "t3/fence-approvals-s2",
-      "paths": [
-        "src/mms/run/ThreadApprovals.ts",
-        "src/mms/orchestrator/UserQuestionService.ts",
-        "src/mms/run/delegation/approvalFence.ts"
-      ],
-      "claimedAt": "2026-11-27T05:04:49.257Z",
-      "expiresAt": "2026-11-27T07:04:49.257Z"
     },
     {
       "task": "t3/queue-tool-api-unification",
