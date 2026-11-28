@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, rmSync, type Stats } from 'node:fs'
 import { lstat, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, parse, resolve, sep } from 'node:path'
+import { dirname, join, parse, resolve, sep } from 'node:path'
 import type { GitRecord, ThreadAction } from '../../shared/threadActions'
 import { onlyExcludedIgnored } from '../git/excludedIgnored'
 import { englishMessagesEnv } from '../git/gitProcess'
@@ -359,6 +359,11 @@ interface PrivateFiles {
    * converted blob after the setting is turned off. Absent for a hidden store, whose index never converts.
    */
   plain?: string
+  /**
+   * The folder's own index, which Git keeps for its worktree (absent for a hidden store, which has none). A private index
+   * made from nothing starts from its stat data where it can (`seededIndex`).
+   */
+  worktreeIndex?: string
   /** The persistent private index of its exact tree, updated with conversions off (`exactTreeSteps`). */
   exactIndex: string
   /** The persistent private index of the files under a filter, holding their raw blob ids only (`filterVerdicts`). */
@@ -389,7 +394,7 @@ function* privateFiles(top: string, facts?: RepositoryFacts): Steps<PrivateFiles
   const [mousse, info] = facts ? [facts.mousseDir, facts.infoAttributes] : (yield* gitStep(top, ['rev-parse', '--git-path', 'mousse', '--git-path', 'info/attributes'])).split(/\r?\n/)
   const directory = resolve(top, mousse!)
   yield* disk.mkdir(directory)
-  return { directory, index: join(directory, 'snapshot-index'), plain: join(directory, 'snapshot-index-plain'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), stalled: join(directory, FILTER_STALLED), last: join(directory, 'snapshot-last.json'), infoAttributes: resolve(top, info!) }
+  return { directory, index: join(directory, 'snapshot-index'), plain: join(directory, 'snapshot-index-plain'), worktreeIndex: join(dirname(directory), 'index'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), stalled: join(directory, FILTER_STALLED), last: join(directory, 'snapshot-last.json'), infoAttributes: resolve(top, info!) }
 }
 
 /** The file name of the exact tree's persistent private index, next to the snapshot's own (`gitPolicy.ts` knows it). */
@@ -459,8 +464,12 @@ function* followTrackedFiles(top: string, env: NodeJS.ProcessEnv, head: string |
  * was force-added and committed later is in it. `plain` says whether every entry was read while Git converted nothing
  * before this update, or the index was built from nothing now (see `PrivateFiles.plain`). Only a caller that knows
  * whether Git converts now changes the mark (`exactTreeSteps`, `worktreeTreesSteps`).
+ *
+ * One made from nothing starts from HEAD with the stat data of the folder's own index (`seededIndex`), unless `seed` is
+ * false: `add -A` then reads only files that changed since Git last looked at them, not every file of a worktree just
+ * checked out. `seeded` holds that index's entries (`exactTreeSteps` reads their sizes).
  */
-function* indexTree(top: string, files: PrivateFiles, head: string | undefined): Steps<{ tree: string; gaps: CoverageGap[]; plain: boolean }> {
+function* indexTree(top: string, files: PrivateFiles, head: string | undefined, seed = true): Steps<IndexedTree> {
   const index = files.index
   const plainBefore = files.plain ? yield* disk.exists(files.plain) : false
   // A hidden store first leaves out what it does not keep (files over the size limit) and refuses a folder it cannot
@@ -478,10 +487,11 @@ function* indexTree(top: string, files: PrivateFiles, head: string | undefined):
     if (result.ok || !onlyExcludedIgnored(result.stderr, [...(hidden ? [] : [MOUSSE_DIRECTORY]), ...left.map((gap) => gap.path)])) return result
     return { ...result, ok: true }
   }
-  const indexOnce = function* (): Steps<{ tree: string; gaps: CoverageGap[]; plain: boolean }> {
-    // Built from nothing, every file is read now: none of its entries is from before.
+  const indexOnce = function* (seedNow: boolean): Steps<IndexedTree> {
     const fresh = !(yield* disk.exists(index))
-    if (fresh) yield* gitStep(top, head ? ['read-tree', head] : ['read-tree', '--empty'], env)
+    const seeded = fresh && seedNow && head && files.worktreeIndex && snapshotIndexesSeeded ? yield* seededIndex(top, files.worktreeIndex, index, head) : undefined
+    // Built from nothing, every file is read now: none of its entries is from before.
+    if (fresh && !seeded) yield* gitStep(top, head ? ['read-tree', head] : ['read-tree', '--empty'], env)
     // What can be read is recorded; what cannot (an unreadable file or folder, a nested repository with no commit) is
     // left out and named. Git stops at the first file it cannot read, so each one found is left out and it runs again.
     const gaps: CoverageGap[] = [...(hidden?.leftOut ?? [])]
@@ -518,15 +528,117 @@ function* indexTree(top: string, files: PrivateFiles, head: string | undefined):
     }
     yield* followTrackedFiles(top, env, head, gaps.map((gap) => gap.path))
     gaps.push(...yield* nestedWithChanges(top, env, gaps))
-    return { tree: yield* gitStep(top, ['write-tree'], env), gaps, plain: plainBefore || fresh }
+    return { tree: yield* gitStep(top, ['write-tree'], env), gaps, plain: plainBefore || (fresh && !seeded), ...(seeded ? { seeded } : {}) }
   }
   try {
-    return yield* indexOnce()
+    return yield* indexOnce(seed)
   } catch {
     // The caller holds the mutation locks, so a lock file left by a crash is nobody's.
     yield* disk.remove(index)
     yield* disk.remove(`${index}.lock`)
-    return yield* indexOnce()
+    return yield* indexOnce(false)
+  }
+}
+
+interface IndexedTree {
+  tree: string
+  gaps: CoverageGap[]
+  plain: boolean
+  /** The folder's own index entries the private index started from, by path (`seededIndex`). */
+  seeded?: Map<string, IndexEntry>
+}
+
+let snapshotIndexesSeeded = true
+/** For tests: while this is off, a private index made from nothing starts from HEAD alone, every file read. */
+export function seedSnapshotIndexes(on: boolean): void {
+  snapshotIndexesSeeded = on
+}
+
+/** One entry of a Git index file: its path, blob, size on disk when Git last looked, and flags. */
+interface IndexEntry { path: string; oid: string; size: number; flags: number }
+
+/** The index flag a seed must not carry: assume-unchanged, whose files Git's `add -A` does not read. */
+const ASSUME_VALID = 0x8000
+/**
+ * The extensions a seed may hold: the cached tree, the resolve-undo record, and the two offset tables Git writes for
+ * reading with threads. Any other one leaves the private index to be made from HEAD: a split index's link (Git would
+ * write a new shared index into the folder's Git directory), the untracked cache, fsmonitor's state, a sparse index's
+ * directories, or one Git adds later.
+ */
+const SEED_EXTENSIONS = new Set(['TREE', 'REUC', 'EOIE', 'IEOT'])
+
+/**
+ * A Git index file's version, entries and extension names, for versions 2 and 3 with SHA-1 or SHA-256 object ids.
+ * Undefined for any other file, one this cannot read, or one whose layout does not add up.
+ */
+function readIndexFile(bytes: Buffer): { version: number; entries: IndexEntry[]; extensions: string[] } | undefined {
+  if (bytes.length < 12 || bytes.toString('latin1', 0, 4) !== 'DIRC') return undefined
+  const version = bytes.readUInt32BE(4)
+  if (version !== 2 && version !== 3) return undefined
+  const count = bytes.readUInt32BE(8)
+  for (const hashBytes of [20, 32]) {
+    const entries: IndexEntry[] = []
+    let at = 12
+    let fits = true
+    for (let index = 0; index < count && fits; index++) {
+      const flagsAt = at + 40 + hashBytes
+      if (flagsAt + 2 > bytes.length) { fits = false; break }
+      const flags = bytes.readUInt16BE(flagsAt)
+      const extended = (flags & 0x4000) !== 0
+      if (extended && version < 3) { fits = false; break }
+      const nameAt = flagsAt + 2 + (extended ? 2 : 0)
+      let nameLength = flags & 0xfff
+      if (nameLength === 0xfff) {
+        const end = bytes.indexOf(0, nameAt)
+        if (end < 0) { fits = false; break }
+        nameLength = end - nameAt
+      }
+      const next = at + ((nameAt - at + nameLength + 8) & ~7)
+      if (next > bytes.length || bytes[nameAt + nameLength] !== 0) { fits = false; break }
+      entries.push({ path: bytes.toString('utf8', nameAt, nameAt + nameLength), oid: bytes.toString('hex', at + 40, flagsAt), size: bytes.readUInt32BE(at + 36), flags })
+      at = next
+    }
+    if (!fits) continue
+    const extensions: string[] = []
+    while (at + 8 <= bytes.length - hashBytes) {
+      extensions.push(bytes.toString('latin1', at, at + 4))
+      at += 8 + bytes.readUInt32BE(at + 4)
+    }
+    if (at === bytes.length - hashBytes) return { version, entries, extensions }
+  }
+  return undefined
+}
+
+/**
+ * Makes the private index `index`, which is not there yet, from HEAD's tree with the stat data of the folder's own
+ * index wherever that has HEAD's blob (`read-tree -m` of one tree), and returns that index's entries by path. Git then
+ * reads a file again only when its stat data changed, as it does for its own index. Only an index Git writes by default
+ * is used: version 2 (skip-worktree and intent-to-add need 3), no entry marked assume-unchanged, and no extension but
+ * `SEED_EXTENSIONS`; Git itself refuses an unmerged one. The copy keeps its time, so Git still reads again a file
+ * changed in the same moment as the index (racily clean). It is written beside the private index and renamed into
+ * place, so a snapshot of the same folder at the same moment never reads half of it.
+ * Undefined, with no private index left, for any other index or anything that fails: the caller starts from HEAD.
+ */
+function* seededIndex(top: string, worktreeIndex: string, index: string, head: string): Steps<Map<string, IndexEntry> | undefined> {
+  const written = join(dirname(index), `seed-${randomUUID()}.index`)
+  try {
+    const before = yield* disk.lstat(worktreeIndex)
+    const bytes = yield* disk.readBytes(worktreeIndex)
+    const after = yield* disk.lstat(worktreeIndex)
+    // Git replaces its index by renaming a new one over it: a read that met two files is not used.
+    if (before.mtimeMs !== after.mtimeMs || before.size !== after.size || bytes.length !== after.size) return undefined
+    const read = readIndexFile(bytes)
+    if (!read || read.version !== 2 || read.extensions.some((name) => !SEED_EXTENSIONS.has(name)) || read.entries.some((entry) => entry.flags & ASSUME_VALID)) return undefined
+    yield* disk.writeBytes(written, bytes)
+    yield* disk.setTimes(written, after.atime, after.mtime)
+    yield* disk.rename(written, index)
+    yield* gitStep(top, ['read-tree', '-m', head], { GIT_INDEX_FILE: index })
+    return new Map(read.entries.map((entry) => [entry.path, entry]))
+  } catch {
+    yield* disk.remove(written)
+    yield* disk.remove(index)
+    yield* disk.remove(`${index}.lock`)
+    return undefined
   }
 }
 
@@ -557,7 +669,11 @@ function* indexTree(top: string, files: PrivateFiles, head: string | undefined):
  * the same, so the snapshot's tree is recorded as the exact tree and the second index is not run. That holds only for a
  * private index whose every entry was read while Git converted nothing (`PrivateFiles.plain`): an entry read under
  * `core.autocrlf=true` keeps its LF blob after the setting is turned off, as long as the file's stat data does not
- * change. Any other index is rebuilt once from nothing (`rebuiltTrees`), which reads every file as Git takes it now.
+ * change. A private index seeded from the folder's own (`seededIndex`) holds entries Git wrote, under whatever settings
+ * it had then: each one whose blob is unchanged counts as read with nothing converted only when its size on disk is its
+ * blob's size. Line endings, `ident` and an encoding change the size of every file they change, so a file Git converted
+ * then shows up here. What this cannot see is a filter that kept a file's size and is no longer set. Any other index is
+ * rebuilt once from nothing (`rebuiltTrees`), which reads every file as Git takes it now.
  */
 const EXACT_LINE = 'Mousse-Bytes: exact'
 const EXACT_SUBJECT = `${SUBJECT}exact bytes`
@@ -722,15 +838,16 @@ function* sizedTreeEntries(top: string, tree: string): Steps<SizedEntry[]> {
  * run once for both. When it cannot be made, even after a retry, it says why (`failed`, Git's first line): the snapshot
  * is then recorded without one, as snapshots from before exact trees, and the gap is named; the next snapshot tries
  * again. Undefined only while exact trees are off (tests). `STALE_INDEX` when Git converts nothing but the private index
- * is not `plain` (see the note above): the caller rebuilds it (`rebuiltTrees`).
+ * is not `plain`, and not a seeded one whose sizes show nothing converted (see the note above): the caller rebuilds it
+ * (`rebuiltTrees`).
  */
-function* exactTreeSteps(top: string, files: PrivateFiles, normal: string, head: string | undefined, plain: boolean): Steps<ExactResult | typeof STALE_INDEX | undefined> {
+function* exactTreeSteps(top: string, files: PrivateFiles, normal: string, head: string | undefined, plain: boolean, seeded?: Map<string, IndexEntry>): Steps<ExactResult | typeof STALE_INDEX | undefined> {
   // Not asked whether Git converts: the index may hold converted blobs from now on.
   if (!exactTreesRecorded) return yield* unmarked(files)
   const entries = yield* sizedTreeEntries(top, normal)
   const conversion = yield* conversionSteps(top, files, entries.filter((entry) => isFile(entry.mode)).map((entry) => entry.path))
   if (!conversion.converts) {
-    if (!plain) return STALE_INDEX
+    if (!plain && !(seeded && seededSizesMatch(entries, seeded))) return STALE_INDEX
     if (files.plain && !(yield* disk.exists(files.plain))) yield* disk.writeText(files.plain, '')
     return { tree: normal, gaps: [] }
   }
@@ -763,6 +880,18 @@ type ExactResult = { tree: string; gaps: CoverageGap[] } | { failed: string }
 /** `exactTreeSteps`: Git converts nothing, but the private index may hold blobs it converted before. */
 const STALE_INDEX = 'stale index'
 
+/**
+ * Whether every file of the snapshot's tree that kept the blob the folder's own index had for it has the size that index
+ * recorded on disk (see the exact-bytes note). A size of 0 is Git's mark for an entry to read again (racily clean): Git
+ * did, so it is not compared.
+ */
+function seededSizesMatch(entries: readonly SizedEntry[], seeded: ReadonlyMap<string, IndexEntry>): boolean {
+  return entries.every((entry) => {
+    const own = isFile(entry.mode) ? seeded.get(entry.path) : undefined
+    return !own || own.oid !== entry.sha || own.size === 0 || own.size === entry.size
+  })
+}
+
 /** Takes off the private index's mark (`PrivateFiles.plain`): an update may have read files while Git converted. */
 function* unmarked(files: PrivateFiles): Steps<undefined> {
   if (files.plain) yield* disk.remove(files.plain)
@@ -775,7 +904,7 @@ function* unmarked(files: PrivateFiles): Steps<undefined> {
  */
 function* rebuiltTrees(top: string, files: PrivateFiles, head: string | undefined): Steps<{ tree: string; gaps: CoverageGap[]; exact: ExactResult | undefined }> {
   yield* disk.remove(files.index)
-  const { tree, gaps, plain } = yield* indexTree(top, files, head)
+  const { tree, gaps, plain } = yield* indexTree(top, files, head, false)
   const exact = yield* exactTreeSteps(top, files, tree, head, plain)
   if (exact === STALE_INDEX) throw new Error('A private index rebuilt from nothing was not read afresh.')
   return { tree, gaps, exact }
@@ -1138,7 +1267,7 @@ export function* worktreeTreesSteps(cwd: string, options: { exact?: boolean } = 
     yield* unmarked(files)
     return { tree: indexed.tree }
   }
-  const found = yield* exactTreeSteps(top, files, indexed.tree, head, indexed.plain)
+  const found = yield* exactTreeSteps(top, files, indexed.tree, head, indexed.plain, indexed.seeded)
   const { tree, exact } = found === STALE_INDEX ? yield* rebuiltTrees(top, files, head) : { tree: indexed.tree, exact: found }
   return { tree, ...(exact && 'tree' in exact ? { exactTree: exact.tree } : {}) }
 }
@@ -1176,7 +1305,7 @@ export function* takeSnapshotSteps(cwd: string, input: SnapshotInput, checkpoint
   const operation = yield* operationInProgressSteps(top, facts?.markers)
   turnBoundaryStep('snapshotState')
   // The exact tree comes from the same paths (see the exact-bytes note); a hidden store's tree already holds exact bytes.
-  const found = hidden ? undefined : yield* exactTreeSteps(top, files, indexed.tree, head, indexed.plain)
+  const found = hidden ? undefined : yield* exactTreeSteps(top, files, indexed.tree, head, indexed.plain, indexed.seeded)
   // Git converts nothing, but the index may hold blobs it converted before: rebuilt once (see the exact-bytes note).
   const { tree, gaps: coverageGaps, exact: exactResult } = found === STALE_INDEX ? yield* rebuiltTrees(top, files, head) : { ...indexed, exact: found }
   turnBoundaryStep('snapshotExact')
