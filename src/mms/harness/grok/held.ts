@@ -100,11 +100,19 @@ export function grokHeldPolicyProblem(heldHome: string, options: { systemDir?: s
  * the environment the entry's native launch would have: its `GROK_HOME`, when set, names the home the sign-in is in.
  */
 export function grokHeldEnv(env: NodeJS.ProcessEnv, heldHome: string, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
-  const home = variable(env, 'GROK_HOME')
-  const authPath = variable(env, 'GROK_AUTH_PATH') ?? join(grokHome(home ? { GROK_HOME: home } : {}), 'auth.json')
+  const authPath = grokAuthPath(env)
   const held: NodeJS.ProcessEnv = { ...env }
   for (const name of Object.keys(held)) if (HELD_REPLACED.includes(platform === 'win32' ? name.toUpperCase() : name)) delete held[name]
   return withUserEnv(held, { ...GROK_HELD_SWITCHES, GROK_HOME: heldHome, GROK_AUTH_PATH: authPath, GROK_WORKTREE_INHERITS_MAIN_APPROVALS: 'false' }, platform)
+}
+
+/**
+ * The entry's own `auth.json`, as its native launch would read it (`env`: that launch's environment): `GROK_AUTH_PATH`,
+ * else the one in its `GROK_HOME`, else in `~/.grok`. Read in place by every launch on a home of Mousse's: never copied.
+ */
+export function grokAuthPath(env: NodeJS.ProcessEnv): string {
+  const home = variable(env, 'GROK_HOME')
+  return variable(env, 'GROK_AUTH_PATH') ?? join(grokHome(home ? { GROK_HOME: home } : {}), 'auth.json')
 }
 
 function variable(env: NodeJS.ProcessEnv, name: string): string | undefined {

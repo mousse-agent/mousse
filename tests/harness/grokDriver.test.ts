@@ -328,7 +328,7 @@ describe('a managed Grok copy', () => {
 
 describe('the held launch', () => {
   const record = (patch: Partial<GrokHeldRecord> = {}): GrokHeldRecord => ({
-    cliVersion: '9.9.9', platform: 'linux', turns: true, titles: true, tools: ['read_file'], checkVersion: GROK_HELD_CHECK_VERSION, recordedAt: '2026-11-27T00:00:00Z', ...patch
+    cliVersion: '9.9.9', platform: 'linux', turns: true, tools: ['read_file'], checkVersion: GROK_HELD_CHECK_VERSION, recordedAt: '2026-11-27T00:00:00Z', ...patch
   })
   const held = (patch: Partial<GrokDriverOptions> = {}) => ({ driver: { platform: 'linux' as const, shipped: [], ...patch } })
 
@@ -354,17 +354,17 @@ describe('the held launch', () => {
     expect(driver.toolControlReason!({}, '9.9.9', 'grok:work')).toMatch(/cannot tell which account/)
   })
 
-  // Rows: what is known about the running version, and what the entry claims.
-  const rows: Array<{ name: string; version: string | undefined; shipped: GrokHeldRecord[]; local?: GrokHeldRecord[]; turns: boolean; titles: boolean; reason?: RegExp }> = [
-    { name: 'a shipped record for this version', version: '9.9.9', shipped: [record()], turns: true, titles: true },
-    { name: 'a local record for this version', version: '9.9.9', shipped: [], local: [record()], turns: true, titles: true },
-    { name: 'no record yet', version: '9.9.9', shipped: [], turns: false, titles: false, reason: /not yet checked that Grok 9\.9\.9/ },
-    { name: 'no version read', version: undefined, shipped: [record()], turns: false, titles: false, reason: /not read which Grok version/ },
-    { name: 'a record for another platform', version: '9.9.9', shipped: [record({ platform: 'darwin' })], turns: false, titles: false, reason: /not yet checked/ },
-    { name: 'a record of an older check', version: '9.9.9', shipped: [], local: [record({ checkVersion: GROK_HELD_CHECK_VERSION - 1 })], turns: false, titles: false, reason: /not yet checked/ },
-    { name: 'a shipped record of an older check', version: '9.9.9', shipped: [record({ checkVersion: GROK_HELD_CHECK_VERSION - 1 })], turns: false, titles: false, reason: /not yet checked/ },
-    { name: 'a version whose turns did not hold', version: '9.9.9', shipped: [record({ turns: false, reason: 'Grok ran read without asking Mousse first.' })], turns: false, titles: true, reason: /Grok ran read without asking/ },
-    { name: 'a version whose one-shots did not hold', version: '9.9.9', shipped: [record({ titles: false, reason: 'Grok offered tools in a request that runs none.' })], turns: true, titles: false, reason: /offered tools/ }
+  // Rows: what is known about the running version, and what the entry claims for turns. A thread title's route
+  // (`acp:grok`, best-effort) does not wait on the turn record: it claims nothing the record proves.
+  const rows: Array<{ name: string; version: string | undefined; shipped: GrokHeldRecord[]; local?: GrokHeldRecord[]; turns: boolean; reason?: RegExp }> = [
+    { name: 'a shipped record for this version', version: '9.9.9', shipped: [record()], turns: true },
+    { name: 'a local record for this version', version: '9.9.9', shipped: [], local: [record()], turns: true },
+    { name: 'no record yet', version: '9.9.9', shipped: [], turns: false, reason: /not yet checked that Grok 9\.9\.9/ },
+    { name: 'no version read', version: undefined, shipped: [record()], turns: false, reason: /not read which Grok version/ },
+    { name: 'a record for another platform', version: '9.9.9', shipped: [record({ platform: 'darwin' })], turns: false, reason: /not yet checked/ },
+    { name: 'a record of an older check', version: '9.9.9', shipped: [], local: [record({ checkVersion: GROK_HELD_CHECK_VERSION - 1 })], turns: false, reason: /not yet checked/ },
+    { name: 'a shipped record of an older check', version: '9.9.9', shipped: [record({ checkVersion: GROK_HELD_CHECK_VERSION - 1 })], turns: false, reason: /not yet checked/ },
+    { name: 'a version whose turns did not hold', version: '9.9.9', shipped: [record({ turns: false, reason: 'Grok ran read without asking Mousse first.' })], turns: false, reason: /Grok ran read without asking/ }
   ]
   for (const row of rows) {
     it(`claims what is proven: ${row.name}`, () => {
@@ -372,11 +372,9 @@ describe('the held launch', () => {
       if (row.local) writeFileSync(join(stateDir, 'grok-held.json'), JSON.stringify({ version: 1, records: row.local }))
       expect(driver.caps({}, row.version, undefined, 'grok:work').toolControl).toBe(row.turns ? 'approval_only' : 'uncontrolled')
       const turnsWhy = driver.toolControlReason!({}, row.version, 'grok:work')
-      const titles = driver.oneShotRoute!({ config: {}, installedVersion: row.version, instanceId: 'grok:work', model: 'grok-4.6' })
-      const titlesWhy = 'refused' in titles ? titles.refused : undefined
       expect(turnsWhy === undefined).toBe(row.turns)
-      expect(titlesWhy === undefined).toBe(row.titles)
-      if (row.reason) expect([turnsWhy, titlesWhy].filter(Boolean).join(' ')).toMatch(row.reason)
+      if (row.reason) expect(turnsWhy).toMatch(row.reason)
+      expect(driver.oneShotRoute!({ config: {}, installedVersion: row.version, instanceId: 'grok:work', model: 'grok-4.6' })).toMatchObject({ route: { id: 'acp:grok' } })
     })
   }
 
@@ -464,12 +462,12 @@ describe('the held launch', () => {
     expect(heldCheck).not.toHaveBeenCalled()
   })
 
-  it('starts a turn or a title only on the executable its check read', async () => {
+  it('starts a turn only on the executable its check read', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mousse-grok-binary-'))
     dirs.push(root)
     const binary = join(root, process.platform === 'win32' ? 'grok.exe' : 'grok')
     writeFileSync(binary, 'grok 9.9.9', { mode: 0o755 })
-    const { runtime, stateDir } = setup({ home: 'default', binaryPath: binary, base: { XAI_API_KEY: 'xai-test' }, ...held({ shipped: [record()] }) })
+    const { runtime } = setup({ home: 'default', binaryPath: binary, base: { XAI_API_KEY: 'xai-test' }, ...held({ shipped: [record()] }) })
     runtime.probed!('9.9.9', { fingerprint: fingerprintOf(binary)!, soon: true })
     await turn(runtime, root)
     expect(spawned).toHaveLength(1)
@@ -483,10 +481,7 @@ describe('the held launch', () => {
       { mcp: null, context: { nativeHistoryAfterTurn: (text: string) => text } } as never
     ).then(() => undefined, (error: unknown) => error)
     expect(refused).toMatchObject({ code: 'binding_stale' })
-    await expect(runtime.oneShot!({ model: 'default', system: 's', prompt: 'p', onActivity: () => {} } as never, new AbortController().signal)).rejects.toMatchObject({ code: 'binding_stale' })
     expect(spawned).toEqual([])
-    // Nothing was written for the refused title either.
-    expect(existsSync(join(stateDir, 'one-shot'))).toBe(false)
   })
 
   it('forgets sessions saved on another home, so the next turn hands its history to a new session', () => {

@@ -8,11 +8,10 @@ import { withUserEnv } from '../cliConfig'
 import { killTree } from '../spawn'
 import { ensureGrokHeldHome, grokHeldEnv } from './held'
 import { GROK_HELD_CHECK_VERSION, type GrokHeldRecord } from './heldEvidence'
-import { collectRun, grokOneShotArgs, grokOneShotEnv, writeGrokOneShotFiles } from './oneShot'
 import { GROK_CREDENTIAL_VARIABLES } from './variables'
 
 /**
- * The held check: Grok's held launch and its one-shot route, run against the real Grok on this computer with a stub
+ * The held check: Grok's held launch, run against the real Grok on this computer with a stub
  * model on the loopback and a dummy key, so no account is used and nothing the agent does leaves a fixture folder.
  * It runs in the background after a check of the entry finds a version it has no record for (`grokHeldRecord`), never
  * on app start or a turn. Each phase is its own Grok process; a Stop ends the check before its next process or phase.
@@ -31,12 +30,6 @@ import { GROK_CREDENTIAL_VARIABLES } from './variables'
  *   Skipped where git does not run (no worktree can exist there).
  * Hosted tools (`web_search`, `x_search`) run on xAI's side and touch nothing on this computer; they are recorded, not
  * held. A client-side web tool would need an item: an offered tool the check does not know fails it.
- *
- * One-shots, in a headless run on the one-shot launch, with every proxy variable pointing at an observer that refuses
- * all it sees: the stub answers with a tool call that would write a file. One model request reaches it, with no tools,
- * Mousse's system text alone, the person's message as written, and no rule or skill from the fixture's home; no file
- * appears, and nothing is sent anywhere else (Grok's own title request goes to port 0, where nothing can receive it:
- * its delivery fails, the attempt is not prevented). A 429 is not sent again.
  *
  * The result is `undefined` when the check could not conclude (Grok did not start, the stub saw nothing, a timeout, a
  * Stop): the last record stays.
@@ -120,7 +113,6 @@ const HOSTED_TOOLS = new Set(['web_search', 'x_search'])
 /** Grok's own title request (it names its session), told apart from the turn's requests. */
 const SIDE_REQUEST = 'generating the session title'
 const TURN_DEADLINE_MS = 120_000
-const ONE_SHOT_DEADLINE_MS = 60_000
 
 export interface GrokHeldCheckResult extends GrokHeldRecord {}
 
@@ -134,17 +126,12 @@ export async function runGrokHeldCheck(launch: GrokCheckLaunch, signal: AbortSig
   try {
     const turns = await checkTurns(launch, join(root, 'turns'), signal)
     if (!turns) return undefined
-    if (signal.aborted) return inconclusive(launch, 'stopped')
-    const titles = await checkOneShot(launch, join(root, 'one-shot'), turns.tools, signal)
-    if (!titles) return undefined
-    const reasons = [turns.reason, titles.reason].filter(Boolean)
     return {
       cliVersion: launch.cliVersion,
       platform,
       turns: turns.held,
-      titles: titles.held,
       tools: turns.tools,
-      ...(reasons.length ? { reason: reasons.join(' ') } : {}),
+      ...(turns.reason ? { reason: turns.reason } : {}),
       checkVersion: GROK_HELD_CHECK_VERSION,
       recordedAt: new Date().toISOString()
     }
@@ -202,24 +189,6 @@ async function startStub(next: () => Record<string, unknown> | undefined, onMcpC
   const address = server.address()
   const port = typeof address === 'object' && address ? address.port : 0
   return { server, base: `http://127.0.0.1:${port}/v1`, requests }
-}
-
-/** A proxy that records every request and tunnel it is asked for, and refuses each one. */
-async function startObserver(): Promise<{ url: string; seen: string[]; close: () => void }> {
-  const seen: string[] = []
-  const server = createServer((req, res) => {
-    seen.push(`${req.method} ${req.url}`)
-    res.writeHead(403)
-    res.end()
-  })
-  server.on('connect', (req: IncomingMessage, socket: NodeJS.WritableStream & { end: (data: string) => void }) => {
-    seen.push(`CONNECT ${req.url}`)
-    socket.end('HTTP/1.1 403 Forbidden\r\n\r\n')
-  })
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-  const address = server.address()
-  const port = typeof address === 'object' && address ? address.port : 0
-  return { url: `http://127.0.0.1:${port}`, seen, close: () => server.close() }
 }
 
 function answerMcp(body: string, res: ServerResponse, onCall: () => void): void {
@@ -593,111 +562,4 @@ function toolNames(body: string): string[] {
   } catch {
     return []
   }
-}
-
-/**
- * Rules and skills in the person's home, as the entry's environment names it (`HOME`, `USERPROFILE` and the config
- * folders), that must never reach a one-shot request: the one-shot runs with a new empty folder as its home instead.
- * Grok's own home is left out: Grok reads the rules and skills there, and a one-shot's holds only Mousse's config.
- */
-const RULE_MARKER = 'MOUSSE-RULE-MARKER'
-
-function writeRuleMarkers(user: string): void {
-  const put = (path: string, text: string) => {
-    mkdirSync(join(path, '..'), { recursive: true })
-    writeFileSync(path, text)
-  }
-  // Each file its own marker, so a failure can name the source.
-  const rule = (source: string) => `Always say ${RULE_MARKER}-${source}.\n`
-  const skill = (source: string) => `---\nname: mousse-marker\ndescription: ${RULE_MARKER}-${source}\n---\n${rule(source)}`
-  put(join(user, '.claude', 'CLAUDE.md'), rule('claude-md'))
-  put(join(user, '.claude', 'rules', 'mousse.md'), rule('claude-rules'))
-  put(join(user, '.claude', 'skills', 'mousse-marker', 'SKILL.md'), skill('claude-skill'))
-  put(join(user, '.agents', 'skills', 'mousse-marker', 'SKILL.md'), skill('agents-skill'))
-  put(join(user, '.cursor', 'rules', 'mousse.mdc'), `---\nalwaysApply: true\n---\n${rule('cursor-rules')}`)
-  put(join(user, '.codex', 'AGENTS.md'), rule('codex-agents'))
-  put(join(user, '.grok', 'AGENTS.md'), rule('user-grok-agents'))
-  put(join(user, 'AGENTS.md'), rule('user-agents'))
-}
-
-async function checkOneShot(launch: GrokCheckLaunch, root: string, tools: readonly string[], signal: AbortSignal): Promise<{ held: boolean; reason?: string } | undefined> {
-  const platform = launch.platform ?? process.platform
-  const system = `MOUSSE-CHECK-SYSTEM ${Date.now()}`
-  const prompt = `Name this chat: fix the login bug ${Date.now()}`
-  const problems: string[] = []
-  for (const answer of ['tool', 429] as const) {
-    if (signal.aborted) return inconclusive(launch, 'stopped')
-    const stub = await startStub(() => ({ name: 'run_terminal_command', arguments: { command: WRITE_MARKER, description: 'mark' } }), () => {}, answer === 429 ? 429 : 200)
-    const observer = await startObserver()
-    const folder = join(root, String(answer))
-    try {
-      const files = writeGrokOneShotFiles({ root: folder, system, prompt })
-      const person = join(folder, 'person')
-      writeRuleMarkers(person)
-      const personal = withUserEnv(checkEnv(launch.env, stub.base, platform), {
-        HOME: person,
-        USERPROFILE: person,
-        XDG_CONFIG_HOME: join(person, '.config'),
-        APPDATA: join(person, 'AppData', 'Roaming'),
-        LOCALAPPDATA: join(person, 'AppData', 'Local')
-      }, platform)
-      const env = withUserEnv(grokOneShotEnv(personal, files, platform), {
-        GROK_AUTH_PATH: join(folder, 'no-auth.json'),
-        HTTP_PROXY: observer.url,
-        HTTPS_PROXY: observer.url,
-        ALL_PROXY: observer.url,
-        NO_PROXY: `127.0.0.1,localhost,${new URL(stub.base).host}`
-      }, platform)
-      const child = spawn(launch.command, [...launch.args, ...grokOneShotArgs({ ...files, tools })], { cwd: files.cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-      try {
-        await deadline(collectRun(child, signal, () => killTree(child)), ONE_SHOT_DEADLINE_MS, signal)
-      } catch (error) {
-        killTree(child)
-        return inconclusive(launch, `one-shot: ${error instanceof Error ? error.message : String(error)}`)
-      }
-      const model = stub.requests.filter((request) => /\/responses$/.test(request.url))
-      if (!model.length) return inconclusive(launch, `one-shot ${answer}: the stub got no model request`)
-      if (model.length !== 1) problems.push(answer === 429 ? 'Grok sent a rate-limited request again.' : `Grok sent ${model.length} model requests for one.`)
-      const body = model[0]!.body
-      if (toolNames(body).length) problems.push('Grok offered tools in a request that runs none.')
-      if (!systemIs(body, system)) problems.push('Grok sent a system prompt other than Mousse’s.')
-      if (!userMessageIs(body, prompt)) problems.push('Grok changed the message Mousse sent.')
-      const rules = [...new Set(body.match(new RegExp(`${RULE_MARKER}-[a-z-]+`, 'g')) ?? [])]
-      if (rules.length) launch.log?.(`Grok held check, one-shot: the request carried ${rules.join(', ')}`)
-      if (rules.length) problems.push('Grok added rules or skills from the person’s setup to a request that should carry Mousse’s text alone.')
-      if (existsSync(join(files.cwd, 'marker.txt'))) problems.push('Grok ran a tool in a request that runs none.')
-      // Everything off the loopback goes through the observer, which refuses it.
-      if (observer.seen.length) problems.push(`Grok sent requests elsewhere in a request that sends one (${[...new Set(observer.seen)].join(', ')}).`)
-    } finally {
-      observer.close()
-      stub.server.close()
-    }
-  }
-  return problems.length ? { held: false, reason: [...new Set(problems)].join(' ') } : { held: true }
-}
-
-/** The text of a message's content: a string, or its text parts. */
-function textOf(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) return content.map((part) => (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' ? (part as { text: string }).text : '')).join('')
-  return JSON.stringify(content)
-}
-
-function messagesOf(body: string): Array<{ role?: string; content?: unknown }> {
-  try {
-    return (JSON.parse(body) as { input?: Array<{ role?: string; content?: unknown }> }).input ?? []
-  } catch {
-    return []
-  }
-}
-
-function systemIs(body: string, system: string): boolean {
-  const systems = messagesOf(body).filter((message) => message.role === 'system' || message.role === 'developer')
-  return systems.length === 1 && textOf(systems[0]!.content).trim() === system
-}
-
-/** The person's message reaches the model as written: one user message carries it, unchanged, and no other carries it. */
-function userMessageIs(body: string, prompt: string): boolean {
-  const users = messagesOf(body).filter((message) => message.role === 'user').map((message) => textOf(message.content))
-  return users.filter((text) => text.includes(prompt)).length === 1 && users.some((text) => text.trim() === prompt.trim())
 }

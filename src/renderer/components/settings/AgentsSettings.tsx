@@ -13,7 +13,6 @@ import { SecretsSettings } from './SecretsSettings'
 import { compactionModelOf, ContextCompactionControl } from './ContextCompactionControl'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { SettingsModelPicker } from './SettingsModelPicker'
-import { DRIVER_INFO, type DriverInfo } from '../providers/providerView'
 import { Brain, Layers, RotateCcw } from '../../lib/icons'
 import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
 import { DEVICE_SCOPE, useProviderSnapshots } from '../../lib/providerSnapshots'
@@ -369,28 +368,23 @@ export function AgentsSettings({
 
 /**
  * The title picker's models: those admitted for a single request (`LlmModelOption.title`). A computer that sends no
- * per-model listing is read from its per-instance flag and the models it marks as unable.
+ * per-model listing offers none here; its saved choice still shows, and Automatic stays.
  */
 function titlePickerProviders(providers: readonly LlmProviderOption[]): LlmProviderOption[] {
   return providers
     .map((provider) => ({
       ...provider,
-      models: provider.models.filter((model) => model.title ? model.title.state !== 'unavailable' : provider.oneShot === true && model.oneShot !== false)
+      models: provider.models.filter((model) => model.title !== undefined && model.title.state !== 'unavailable')
     }))
     .filter((provider) => provider.models.length > 0)
 }
 
-/**
- * Whether naming on `provider` (or on its `model`) is best-effort, with why for its tooltip: from the listing's label
- * and facts, else (a provider still on its own one-shot code) from what its card says.
- */
+/** Whether naming on `provider` (or on its `model`) is best-effort, with why for its tooltip: from the listing's label and facts. */
 function bestEffortNamer(provider: LlmProviderOption | undefined, model?: string): { label: string; why: string } | undefined {
   if (!provider) return undefined
   const models = model ? provider.models.filter((each) => each.id === model) : provider.models
   const listed = models.find((each) => each.title?.state === 'best_effort')
-  if (listed) return { label: provider.label, why: listed.title?.facts?.join(' ') ?? '' }
-  const info = (DRIVER_INFO as Partial<Record<string, DriverInfo>>)[provider.id]
-  return info?.bestEffortNaming && models.some((each) => !each.title || each.title.state === 'legacy') ? { label: info.label, why: info.bestEffortNaming } : undefined
+  return listed ? { label: provider.label, why: listed.title?.facts?.join(' ') ?? '' } : undefined
 }
 
 /**

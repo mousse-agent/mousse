@@ -122,6 +122,8 @@ interface FlatModelEntry {
   key: ModelFavoriteKey
   /** Every model of the family is an older one (`LlmModelOption.older`), folded behind "Show more". */
   older: boolean
+  /** The model a single request sends in its place (`TitleModelListing.runsAs`), for the row's tooltip. */
+  runsAs?: string
 }
 
 function getInitialVariantOptions(
@@ -286,6 +288,7 @@ function ProfileModelFamilyMenu({
           listing: listingKey(provider),
           badge: badges.get(listingKey(provider)),
           olderIds: new Set(provider.models.filter((model) => model.older).map((model) => model.id)),
+          runsAs: new Map(provider.models.flatMap((model) => (model.title?.runsAs ? [[model.id, model.title.runsAs] as const] : []))),
           status: provider.status && provider.status.tone !== 'ready' ? provider.status.headline : undefined
         }
       })
@@ -314,7 +317,11 @@ function ProfileModelFamilyMenu({
           brandLabel: family.brandLabel,
           multiBrand: Boolean(provider.multiBrand),
           key: favoriteKey(provider.instanceId ?? provider.providerId, family.familyId),
-          older: family.variants.every((variant) => provider.olderIds.has(variant.id) || provider.olderIds.has(parseThinkingSuffixFromModelId(variant.id).baseId))
+          older: family.variants.every((variant) => provider.olderIds.has(variant.id) || provider.olderIds.has(parseThinkingSuffixFromModelId(variant.id).baseId)),
+          ...(() => {
+            const runsAs = family.variants.map((variant) => provider.runsAs.get(variant.id)).find(Boolean)
+            return runsAs ? { runsAs } : {}
+          })()
         })
       }
     })
@@ -728,7 +735,7 @@ function ProfileModelFamilyMenu({
           id={`${idPrefix}-model-${index}`}
           aria-selected={selected}
           className="model-picker-row-main"
-          title={[entry.family.familyLabel, entry.providerLabel, entry.providerStatus].filter(Boolean).join(' · ')}
+          title={[entry.family.familyLabel, entry.providerLabel, entry.providerStatus, entry.runsAs ? `Runs as ${entry.runsAs}` : undefined].filter(Boolean).join(' · ')}
           onFocus={(event) => {
             setHighlightIndex(index)
             openVariantPanel(event.currentTarget.parentElement!)

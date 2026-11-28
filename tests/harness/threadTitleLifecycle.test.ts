@@ -438,8 +438,8 @@ describe('Automatic naming', () => {
     expect(h.thread()).toMatchObject({ name: 'OAuth callback loop', titleSource: 'auto' })
   })
 
-  it('a failure after the request was sent counts toward the three, a tool a legacy route stopped included', async () => {
-    const stopped = await ranFailure('policy_unenforceable', { sent: true })
+  it('a failure after the request was sent counts toward the three, a tool the agent reported included', async () => {
+    const stopped = await ranFailure('one_shot_tool_refused', { sent: true })
     const h = setup({ providers: connected(), answer: () => stopped })
     h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
     await h.settle()

@@ -14,8 +14,9 @@ export { titleEffortFor }
  * can run a single request, best first, from what the provider snapshots already say. Nothing here asks a provider:
  * the index is rebuilt when the snapshots change, and read synchronously at each naming.
  *
- * Best first means: the provider by the catalog's `namingProviders` (Claude, then Codex, then Antigravity, then Pi's
- * providers, then OpenCode, then the other agents), then the model's tier (`small` first: Haiku, gpt-6-luna, gemini-3.8-flash), then a subscription before an
+ * Best first means: the provider by the catalog's `namingProviders` (routes that hold first: Claude, Codex, Pi's
+ * providers, Bedrock, Cursor, OpenCode; then Grok, whose account route is best-effort; then Antigravity and any ACP
+ * agent), then the model's tier (`small` first: Haiku, gpt-6-luna, gemini-3.8-flash), then a subscription before an
  * API key, a current model before an older one, the newest release, and the order the agent lists them.
  */
 
@@ -45,12 +46,18 @@ function namingProviders(catalog: ModelCatalog | undefined): readonly string[] {
   return catalog?.namingProviders?.length ? catalog.namingProviders : (bundledModelCatalog().namingProviders ?? ['*'])
 }
 
-/** Where an instance stands in the provider list: the first entry naming its Pi provider, its driver, or `*`. */
+/**
+ * Where an instance stands in the provider list: at the entry naming its Pi provider, else its driver, else `*`. The most
+ * specific entry wins wherever it is, so `pi:amazon-bedrock` after `pi` ranks Bedrock after the other Pi providers.
+ */
 function providerRank(snapshot: InstanceSnapshot, list: readonly string[]): number {
   const piProvider = piProviderIdOf(snapshot.instanceId)
   const keys = [...(piProvider ? [`pi:${piProvider}`] : []), snapshot.driver, '*']
-  const rank = list.findIndex((entry) => keys.includes(entry))
-  return rank === -1 ? list.length : rank
+  for (const key of keys) {
+    const rank = list.indexOf(key)
+    if (rank !== -1) return rank
+  }
+  return list.length
 }
 
 interface Ranked {

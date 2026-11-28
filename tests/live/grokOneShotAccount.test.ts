@@ -1,7 +1,7 @@
 /**
- * Grok's one-shot route with the account already signed in on this computer: the driver's own `oneShot`, on the
- * user's own home, reads that sign-in in place (`GROK_AUTH_PATH`) from a home of the request's own and returns the
- * model's text. One model request with no tools; it never signs in or out. Only with MOUSSE_LIVE_GROK_ACCOUNT=1 and a
+ * Grok's account route (`acp:grok`) with the account already signed in on this computer: the runtime's transport, on
+ * the user's own home, reads that sign-in in place (`GROK_AUTH_PATH`) from a home of the request's own and returns the
+ * model's text. It never signs in or out. Only with MOUSSE_LIVE_GROK_ACCOUNT=1 and a
  * Grok sign-in already present; MOUSSE_GROK_BINARY may name the executable (else the `grok` on PATH), MOUSSE_GROK_HOME the home.
  */
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
@@ -34,17 +34,17 @@ describe.runIf(live && binary && existsSync(auth))('a Grok one-shot on the signe
     const runtime = grokDriver().create(context)
     try {
       const started = Date.now()
-      const { text } = await runtime.oneShot!({
+      const events = { activity: () => {}, text: () => {}, tool: () => {}, launching: () => {}, sending: () => {} }
+      const text = await runtime.oneShotTransport!({ model: 'default' }).send({
         model: 'default',
         system: 'You name chats. Reply with a title of at most six words, and nothing else.',
-        prompt: 'User request: the login page shows a blank screen after the password is entered',
-        onActivity: () => {}
-      }, AbortSignal.timeout(90_000))
+        prompt: 'User request: the login page shows a blank screen after the password is entered'
+      }, events, AbortSignal.timeout(90_000))
       console.log(JSON.stringify({ text, ms: Date.now() - started }))
       expect(text.trim().length).toBeGreaterThan(0)
       expect(text.length).toBeLessThan(120)
-      // The account is the same one, in the same file; the request's own folder is gone.
-      expect(readdirSync(join(root, 'state', 'one-shot'))).toEqual([])
+      // The account is the same one, in the same file; the request's own place is gone.
+      expect(readdirSync(join(root, 'one-shot'))).toEqual([])
       expect(Object.keys(JSON.parse(readFileSync(auth, 'utf8')) as Record<string, unknown>)).toEqual(signedIn)
       expect(statSync(auth).isFile()).toBe(true)
     } finally {

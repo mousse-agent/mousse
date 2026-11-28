@@ -1,20 +1,21 @@
 /**
- * Two held Grok processes refreshing one sign-in at once (`grok/held.ts`: `GROK_AUTH_PATH` points every held process at
- * the entry's own `auth.json`, which Grok refreshes in place under its own locks). A stub issuer rotates the refresh
+ * Two Grok processes on homes of Mousse's refreshing one sign-in at once (`grok/held.ts`, and a single request's inputs,
+ * `grok/oneShot.ts`: `GROK_AUTH_PATH` points each at the entry's own `auth.json`, which Grok refreshes in place under its
+ * own locks). Each runs on its own single-request home, headless, as the vehicle for a request. A stub issuer rotates the refresh
  * token on every refresh and refuses one used twice, as xAI's does; the sign-in in the fixture's `auth.json` has
  * expired, so both processes must refresh before their request. Held: one refresh per round, no refused token, both
  * requests sent with the new access token, the rotated token saved in the one `auth.json`, and no second credential
  * file anywhere. A dummy issuer and model on the loopback: no account is used. Only with MOUSSE_LIVE_GROK=1;
  * MOUSSE_GROK_BINARIES as in `grokHeldCheck.test.ts`.
  */
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { createServer, type Server } from 'node:http'
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join, relative } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { cliNames, findOnPath } from '../../src/mms/harness/env'
-import { collectRun, grokOneShotArgs, grokOneShotEnv, writeGrokOneShotFiles } from '../../src/mms/harness/grok/oneShot'
+import { grokOneShotInputs } from '../../src/mms/harness/grok/oneShot'
 
 const live = process.env.MOUSSE_LIVE_GROK === '1'
 const binaries = (process.env.MOUSSE_GROK_BINARIES?.split(delimiter).filter(Boolean)) ??
@@ -28,6 +29,19 @@ afterAll(() => { for (const root of roots) rmSync(root, { recursive: true, force
 const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url')
 const jwt = (subject: string, expires: Date, issuer: string) =>
   [b64({ alg: 'RS256', typ: 'JWT' }), b64({ sub: subject, email: 'fixture@example.invalid', exp: Math.floor(expires.getTime() / 1000), iat: Math.floor(Date.now() / 1000), iss: issuer }), 'c2ln'].join('.')
+
+/** A child's output to its end; `signal` kills it. */
+function finished(child: ChildProcess, signal: AbortSignal): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    let stdout = ''
+    let stderr = ''
+    child.stdout?.on('data', (chunk) => { stdout += chunk })
+    child.stderr?.on('data', (chunk) => { stderr += chunk })
+    signal.addEventListener('abort', () => child.kill(), { once: true })
+    child.on('error', reject)
+    child.on('close', (code) => resolve({ code, stdout, stderr }))
+  })
+}
 
 /** The stub issuer and model: each refresh token works once; a model request must carry the newest access token. */
 async function startIssuer() {
@@ -129,18 +143,24 @@ describe.runIf(live && binaries.length)('two held Grok processes refreshing one 
           const base: NodeJS.ProcessEnv = {}
           for (const [name, value] of Object.entries(process.env)) if (!/^(XAI_|GROK_)/i.test(name)) base[name] = value
           const runs = [0, 1].map((index) => {
-            const files = writeGrokOneShotFiles({ root: join(root, `round-${round}`, `process-${index}`), system: 'You name chats.', prompt: `Name this chat ${round}-${index}` })
-            const env = grokOneShotEnv({
+            const folder = join(root, `round-${round}`, `process-${index}`)
+            const cwd = join(folder, 'work')
+            mkdirSync(cwd, { recursive: true })
+            const promptFile = join(folder, 'prompt.txt')
+            writeFileSync(promptFile, `Name this chat ${round}-${index}`)
+            const env = {
               ...base,
-              GROK_AUTH_PATH: auth,
+              ...grokOneShotInputs(join(folder, 'inputs'), auth),
+              HOME: folder,
+              USERPROFILE: folder,
               GROK_OIDC_ISSUER: issuer.origin,
               GROK_OIDC_CLIENT_ID: CLIENT_ID,
               GROK_XAI_API_BASE_URL: `${issuer.origin}/v1`,
               GROK_CLI_CHAT_PROXY_BASE_URL: `${issuer.origin}/v1`,
               GROK_TELEMETRY_ENABLED: '0'
-            }, files)
-            const child = spawn(binary, grokOneShotArgs(files), { cwd: files.cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-            return collectRun(child, AbortSignal.timeout(90_000), () => child.kill())
+            }
+            const child = spawn(binary, ['--prompt-file', promptFile, '--output-format', 'json', '--max-turns', '1'], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+            return finished(child, AbortSignal.timeout(90_000))
           })
           const results = await Promise.all(runs)
           const saved = (JSON.parse(readFileSync(auth, 'utf8')) as Record<string, { refresh_token?: string; expires_at?: string }>)[scope]

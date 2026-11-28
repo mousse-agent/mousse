@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { harnessAppError } from '../../../shared/harness/types'
@@ -17,19 +16,21 @@ import { compareVersions, decodeInstanceConfig, type AuthReading, type DriverCon
 import { cliNames, resolveCommand } from '../env'
 import { grokCredential, grokHome, type GrokCredential } from '../grok/credential'
 import { GROK_API_KEY_VARIABLE } from '../grok/variables'
-import { ensureGrokHeldHome, grokHeldEnv, grokHeldHome, grokHeldPolicyProblem } from '../grok/held'
+import { ensureGrokHeldHome, grokAuthPath, grokHeldEnv, grokHeldHome, grokHeldPolicyProblem } from '../grok/held'
 import { fingerprintOf, sameBinary } from '../status'
 import type { BinaryFingerprint } from '../../../shared/harness/types'
 import { runGrokHeldCheck } from '../grok/heldCheck'
 import { GROK_HELD_SHIPPED, GrokHeldStore, grokHeldRecord, type GrokHeldRecord } from '../grok/heldEvidence'
-import { collectRun, grokOneShotArgs, grokOneShotEnv, grokOneShotResult, writeGrokOneShotFiles } from '../grok/oneShot'
-import { killTree, spawnHarness } from '../spawn'
+import { grokOneShotInputs } from '../grok/oneShot'
+import { grokConfiguredDefault, runGrokDirectOneShot, type GrokDirectStream } from '../grok/directOneShot'
 import { ptyAvailable, runInPty, signInPrompts, type PtySpawn } from '../pty'
 import { InstanceVault } from '../vault'
 import { createAcpRuntime } from './acp'
-import { legacyOneShotRoute } from '../oneShot/routes'
+import type { OneShotRouteDecision } from '../oneShot/route'
+import { GROK_ACP_FACTS, GROK_DIRECT_FACTS } from '../oneShot/routes'
 
-const grokLegacyRoute = legacyOneShotRoute('grok')
+const GROK_DIRECT_ROUTE: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: 'grok:direct' as const, facts: GROK_DIRECT_FACTS }) })
+const GROK_ACP_ROUTE: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: 'acp:grok' as const, facts: GROK_ACP_FACTS }) })
 
 /**
  * xAI's Grok CLI over ACP (the Grok preset of the ACP core). It runs the `grok` on PATH (the
@@ -94,6 +95,8 @@ export interface GrokDriverOptions {
   shipped?: readonly GrokHeldRecord[]
   /** Test seam: the held check (`runGrokHeldCheck`). */
   heldCheck?: typeof runGrokHeldCheck
+  /** Test seam: where `grok:direct` sends its request (default xAI's API), and its transport. */
+  direct?: { baseUrl?: string; stream?: GrokDirectStream }
 }
 
 /** What the driver knows of one entry's held launch: its local records, and what keeps it from one. */
@@ -101,6 +104,10 @@ interface HeldEntry {
   store: GrokHeldStore
   /** Why this entry cannot run on a held home at all (a sign-in Mousse cannot carry there); undefined when it can. */
   problem(): string | undefined
+  /** How a Grok process of this entry would sign in now (`grokCredential`). */
+  signIn(): GrokCredential['kind']
+  /** The model Grok's "Agent default" stands for on this entry (`directDefault`), from cached state only. */
+  defaultModel(): string | undefined
 }
 
 /** After a check that could not conclude, the same version is checked again no sooner than this. */
@@ -118,19 +125,24 @@ export const GROK_SIGN_IN_METHODS = [
   { id: 'api_key', label: 'API key', description: 'An xAI API key from console.x.ai.' }
 ] as const
 
+/** Grok's "Agent default": whichever model Grok picks, which a direct request to xAI's API cannot name. */
+function isAgentDefault(model: string): boolean {
+  return parseThinkingSuffixFromModelId(model).baseId === AGENT_DEFAULT_MODEL
+}
+
 export function grokDriver(options: GrokDriverOptions = {}): HarnessDriver {
   const platform = options.platform ?? process.platform
   const entries = new Map<string, HeldEntry>()
   const recordOf = (version: string | undefined, instanceId: string | undefined) =>
     grokHeldRecord(version, platform, (instanceId ? entries.get(instanceId)?.store.list() : undefined) ?? [], options.shipped ?? GROK_HELD_SHIPPED)
-  /** Why turns (`turns`) or one-shots (`titles`) are not held for this entry's version; undefined when they are. */
-  const gap = (what: 'turns' | 'titles', label: string, version: string | undefined, instanceId: string | undefined): string | undefined => {
+  /** Why turns are not held for this entry's version; undefined when they are. */
+  const gap = (label: string, version: string | undefined, instanceId: string | undefined): string | undefined => {
     const problem = instanceId ? entries.get(instanceId)?.problem() : undefined
     if (problem) return problem
     if (!version) return `Mousse has not read which ${label} version runs here yet, so it has not checked that it asks before every tool.`
     const record = recordOf(version, instanceId)
     if (!record) return `Mousse has not yet checked that ${label} ${version} asks before every tool on this computer. The check runs in the background after the next check of this entry.`
-    if (!record[what]) return `${record.reason ?? `${label} ${version} did not hold Mousse's check.`}`
+    if (!record.turns) return `${record.reason ?? `${label} ${version} did not hold Mousse's check.`}`
     return undefined
   }
   return {
@@ -154,17 +166,27 @@ export function grokDriver(options: GrokDriverOptions = {}): HarnessDriver {
     // Proven per executable: every admission stats it again (`HarnessDriver.binaryBoundCaps`).
     binaryBoundCaps: true,
     // Asks before every tool only where its held launch is proven for this version and platform.
-    caps: (config, version, _facts, instanceId) => grokCaps(!gap('turns', config.displayName ?? GROK_LABEL, version, instanceId)),
+    caps: (config, version, _facts, instanceId) => grokCaps(!gap(config.displayName ?? GROK_LABEL, version, instanceId)),
     toolControlReason: (config, version, instanceId) => {
-      const why = gap('turns', config.displayName ?? GROK_LABEL, version, instanceId)
+      const why = gap(config.displayName ?? GROK_LABEL, version, instanceId)
       return why ? `${why} Until then, ${config.displayName ?? GROK_LABEL} runs only chats you drive, in Full access.` : undefined
     },
-    // Chat titles, branch names, pull request drafts, commit messages, a bot's name and digest: one headless request
-    // with no tools (`grok/oneShot.ts`), where the check proved it for this version.
-    // Until its own slice, on that code (`DriverRuntime.oneShot`), admitted with no facts claimed.
-    oneShotRoute: ({ config, installedVersion, instanceId }) => {
-      const why = gap('titles', config.displayName ?? GROK_LABEL, installedVersion, instanceId)
-      return why ? { refused: `${why} Choose another model for chat titles, or Automatic.` } : grokLegacyRoute()
+    // Thread titles, branch names, pull request drafts, commit messages, a bot's name and digest. With an xAI API key:
+    // one direct request to xAI's API (`grok:direct`, held). With the account: `acpOneShot` on a Grok home of the
+    // request's own that denies every tool (`acp:grok`, best-effort), never where the sign-in cannot be carried there.
+    oneShotRoute: ({ config, instanceId, model }) => {
+      const label = config.displayName ?? GROK_LABEL
+      const entry = entries.get(instanceId)
+      if (entry?.signIn() === 'api_key') {
+        if (!isAgentDefault(model)) return GROK_DIRECT_ROUTE
+        // Grok's own default has no name xAI's API takes: the request runs on the model it stands for.
+        const resolved = entry.defaultModel()
+        return resolved
+          ? { ...GROK_DIRECT_ROUTE, runsAs: resolved }
+          : { refused: `${label} lists no model yet, and its config names no default, so Mousse cannot tell which model "Agent default" is on an xAI API key. Refresh its models, or choose a model.` }
+      }
+      const why = entry?.problem()
+      return why ? { refused: `${why} Choose another model for thread titles, or Automatic.` } : GROK_ACP_ROUTE
     },
     updateCommand: (owner: InstallOwner) => (owner === 'standalone' ? 'grok update' : owner === 'npm' ? 'npm install -g @xai-official/grok@latest' : undefined),
     create: (context) => createGrokRuntime(context, options, (entry) => entries.set(context.instanceId, entry), (version) => recordOf(version, context.instanceId))
@@ -279,7 +301,29 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions, r
     problemRead = { atMs: now, value }
     return value
   }
-  register({ store: heldStore, problem: heldProblem })
+  /**
+   * The model Grok's "Agent default" stands for, for a request to xAI's API (`grok:direct`): the default Grok's own
+   * config names (`[models] default` in the entry's Grok home, `grokConfiguredDefault`) when the entry lists it or lists
+   * nothing yet, else the first model the entry lists. From the cached listing and that one file only, read again at
+   * most every `HELD_PROBLEM_TTL_MS`: no check is started.
+   */
+  let defaultRead: { atMs: number; value: string | undefined } | undefined
+  const directDefault = (): string | undefined => {
+    const now = Date.now()
+    if (defaultRead && now - defaultRead.atMs < HELD_PROBLEM_TTL_MS) return defaultRead.value
+    const listed = base.models().map((model) => model.id).filter((id) => id !== AGENT_DEFAULT_MODEL)
+    const configured = grokConfiguredDefault(grokHome(processEnv('status', withUserEnv(context.env.env, { ...(context.config.env ?? {}) }))))
+    const value = configured && (!listed.length || listed.includes(configured)) ? configured : listed[0]
+    defaultRead = { atMs: now, value }
+    return value
+  }
+  /** `model` with "Agent default" resolved (`directDefault`), its reasoning level kept. */
+  const directModel = (model: string): string | undefined => {
+    const resolved = directDefault()
+    const { effort } = parseThinkingSuffixFromModelId(model)
+    return resolved && effort ? `${resolved}:${effort}` : resolved
+  }
+  register({ store: heldStore, problem: heldProblem, signIn: () => credential().kind, defaultModel: () => directDefault() })
 
   /**
    * The executable a held launch starts must be the one the last check read: another one (a self-update, a replaced
@@ -382,7 +426,12 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions, r
     // A sign-out never signs the user's own home out of Grok; a private home is Mousse's own.
     agentLogout: () => Boolean(context.env.home),
     // Turns run on the held home: sessions saved on the entry's own home before cannot be reopened there.
-    sessionsHome: heldHome
+    sessionsHome: heldHome,
+    // `acp:grok`: a home of the request's own that denies every tool, with the entry's own sign-in read in place.
+    oneShot: {
+      route: 'acp:grok',
+      inputs: (root) => grokOneShotInputs(root, grokAuthPath(withUserEnv(context.env.env, { ...(context.config.env ?? {}) })))
+    }
   })
 
   const reading = (): AuthReading => {
@@ -543,33 +592,34 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions, r
       return found.kind === 'api_key' || found.kind === 'account' ? found.subject : undefined
     },
     probed,
-    oneShot: async (spec, signal) => {
-      signal.throwIfAborted()
-      const found = credential()
-      if (found.kind === 'none' || (found.kind === 'account' && found.state === 'expired'))
-        throw harnessAppError({ code: 'signed_out', message: `Sign in to ${label} in Settings → Providers.` })
-      // The gateway admits a one-shot only on a version the check proved, and only on the executable it read.
-      const record = recordOf(probedBinary?.version)
-      if (!record?.titles) throw harnessAppError({ code: 'unsupported', message: `Mousse has not proven that this ${label} runs a request with no tools.` })
-      const running = program()
-      if (!running) throw harnessAppError({ code: 'not_installed', message: `${label} is not installed.` })
-      refuseChangedBinary(running.resolved.path)
-      if (running.managed) await checkManaged(signal, true)
-      const { baseId, effort } = parseThinkingSuffixFromModelId(spec.model)
-      const root = join(context.stateDir, 'one-shot', randomUUID())
-      try {
-        const files = writeGrokOneShotFiles({ root, system: spec.system, prompt: spec.prompt })
-        const env = grokOneShotEnv(keyed(withUserEnv(context.env.env, { ...(context.config.env ?? {}) })), files)
-        const args = grokOneShotArgs({ ...files, ...(baseId && baseId !== AGENT_DEFAULT_MODEL ? { model: baseId } : {}), ...(effort ? { effort } : {}), tools: record.tools })
-        const child = spawnHarness({ ...context.env, env }, 'grok-one-shot', running.resolved.command, [...running.resolved.args, ...args], { cwd: files.cwd, stdio: ['ignore', 'pipe', 'pipe'] })
-        spec.onActivity()
-        const run = await collectRun(child, signal, () => killTree(child))
+    /**
+     * The transport of the route admission chose by the sign-in (`oneShotRoute`): `grok:direct` with an xAI API key, else
+     * `acp:grok` on the ACP runtime's `acpOneShot`. A sign-in that changed since admission is refused by the runner
+     * (the identity's account), before anything is sent.
+     */
+    oneShotTransport: (spec) => ({
+      send: async (wire, events, signal) => {
         signal.throwIfAborted()
-        return { text: grokOneShotResult(label, run) }
-      } finally {
-        try { rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }) } catch { /* a leftover folder is harmless */ }
+        const found = credential()
+        if (found.kind === 'none' || (found.kind === 'account' && found.state === 'expired'))
+          throw harnessAppError({ code: 'signed_out', message: `Sign in to ${label} in Settings → Providers.`, instanceId: context.instanceId })
+        if (found.kind === 'api_key') {
+          const model = isAgentDefault(spec.model) ? directModel(spec.model) : spec.model
+          if (!model) throw harnessAppError({ code: 'unsupported', reason: 'not_admitted', message: `${label} lists no model yet, and its config names no default, so Mousse cannot tell which model "Agent default" is.`, instanceId: context.instanceId })
+          return runGrokDirectOneShot({
+            model,
+            key: found.key,
+            system: wire.system,
+            prompt: wire.prompt,
+            events,
+            ...(options.direct?.baseUrl ? { baseUrl: options.direct.baseUrl } : {})
+          }, signal, options.direct?.stream)
+        }
+        const why = heldProblem()
+        if (why) throw harnessAppError({ code: 'unsupported', reason: 'not_admitted', message: why, instanceId: context.instanceId })
+        return base.oneShotTransport!(spec).send(wire, events, signal)
       }
-    },
+    }),
     signIn,
     stop: () => {
       stopped = true

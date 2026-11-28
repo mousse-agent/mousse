@@ -16,7 +16,7 @@ import type { ChatMessage } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const CLAUDE = { id: 'claude-subscription', instanceId: 'claude', label: 'Claude Code', oneShot: true, models: [{ id: 'haiku', label: 'Haiku 5.5' }] } as LlmProviderOption
+const CLAUDE = { id: 'claude-subscription', instanceId: 'claude', label: 'Claude Code', models: [{ id: 'haiku', label: 'Haiku 5.5', title: { state: 'held', route: 'claude:cli' } }] } as LlmProviderOption
 const OPTIONS: SettingsOptions = { themes: [], accentColors: [], llmProviders: [CLAUDE], agentTypes: [], botProviders: [CLAUDE] }
 
 describe('the title prompt row', () => {
@@ -232,7 +232,7 @@ describe('a title request with a title prompt', () => {
 })
 
 describe('the Thread titles row with Antigravity connected', () => {
-  const ANTIGRAVITY = { id: 'antigravity', instanceId: 'antigravity', label: 'Antigravity', oneShot: true, models: [{ id: 'gemini-flash', label: 'Gemini Flash' }] } as LlmProviderOption
+  const ANTIGRAVITY = { id: 'antigravity', instanceId: 'antigravity', label: 'Antigravity', models: [{ id: 'gemini-flash', label: 'Gemini Flash', title: { state: 'best_effort', route: 'acp:antigravity', facts: ['Its own tools could still run before Mousse stops them.'] } }] } as LlmProviderOption
   let root: Root
   let host: HTMLElement
   beforeEach(() => {
@@ -268,10 +268,10 @@ describe('the Thread titles row with Antigravity connected', () => {
 
 describe('the Thread titles row reads the cached title listing', () => {
   const AGENT = {
-    id: 'acp:scripted', instanceId: 'acp:scripted', label: 'Scripted agent', oneShot: true,
+    id: 'acp:scripted', instanceId: 'acp:scripted', label: 'Scripted agent',
     models: [{ id: 'default', label: 'Agent default', title: { state: 'best_effort', route: 'acp:generic', facts: ['The agent has tools of its own.'] } }]
   } as LlmProviderOption
-  const UNABLE = { ...AGENT, id: 'acp:other', instanceId: 'acp:other', label: 'Other agent', oneShot: false, models: [{ id: 'default', label: 'Agent default', title: { state: 'unavailable', reason: 'Other agent has not been checked yet.' } }] } as LlmProviderOption
+  const UNABLE = { ...AGENT, id: 'acp:other', instanceId: 'acp:other', label: 'Other agent', models: [{ id: 'default', label: 'Agent default', title: { state: 'unavailable', reason: 'Other agent has not been checked yet.' } }] } as LlmProviderOption
   const OFF = { instanceId: 'acp:off', driver: 'acp', label: 'Turned-off agent', models: [], reason: 'Turned-off agent is turned off.' }
   let root: Root
   let host: HTMLElement
@@ -313,6 +313,15 @@ describe('the Thread titles row reads the cached title listing', () => {
     await act(async () => row.querySelector<HTMLButtonElement>('#agents-title-model')!.click())
     const disabled = [...document.querySelectorAll<HTMLElement>('[role="option"][aria-disabled="true"]')].map((option) => option.title)
     expect(disabled).toEqual(expect.arrayContaining(['Other agent has not been checked yet.', 'Turned-off agent is turned off.']))
+  })
+
+  it("a model whose request runs as another names that model in its row's tooltip", async () => {
+    const GROK = { id: 'grok', instanceId: 'grok', label: 'Grok', models: [{ id: 'default', label: 'Agent default', title: { state: 'held', route: 'grok:direct', runsAs: 'grok-4.7' } }] } as LlmProviderOption
+    // One provider: the menu shows a single list, with no rail to choose from.
+    const { row } = await show({ llmProviders: [GROK] })
+    await act(async () => row.querySelector<HTMLButtonElement>('#agents-title-model')!.click())
+    const titles = [...document.querySelectorAll<HTMLElement>('[role="option"]')].map((option) => option.title)
+    expect(titles).toEqual([expect.stringContaining('Runs as grok-4.7')])
   })
 
   it('a saved choice that cannot name threads shows its exact reason; a reason read for an earlier choice is not shown', async () => {

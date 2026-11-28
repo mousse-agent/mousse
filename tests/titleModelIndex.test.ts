@@ -36,7 +36,10 @@ const MODELS: Record<string, InstanceModel[]> = {
   'pi:anthropic': [model('claude-haiku-5-5', { capabilities: { efforts: ['low', 'high'], images: false, thinkingOff: true } })],
   'pi:openai': [model('gpt-6-luna')],
   'pi:groq': [model('llama-fast')],
+  'pi:amazon-bedrock': [model('bedrock-model')],
+  cursor: [model('cursor-model')],
   'opencode:opencode': [model('opencode/big-pickle')],
+  grok: [model('grok-model')],
   'acp:other': [model('other-model')]
 }
 
@@ -60,10 +63,13 @@ function rank(snapshots: InstanceSnapshot[], options: { models?: Record<string, 
 const ids = (candidates: Array<{ instanceId: string; model: string }>) => candidates.map((candidate) => `${candidate.instanceId}/${candidate.model}`)
 
 describe('ranking', () => {
-  it('Claude, then Codex, then Antigravity, then Pi by provider, then OpenCode, then any other agent; small models first within each', () => {
+  it('held routes first (Claude, Codex, Pi by provider, Bedrock, Cursor, OpenCode), then Grok, Antigravity and any ACP agent; small models first within each', () => {
     const ranked = rank([
       snapshot({ instanceId: 'acp:other', driver: 'acp' as InstanceSnapshot['driver'] }),
+      snapshot({ instanceId: 'grok', driver: 'grok' as InstanceSnapshot['driver'] }),
       snapshot({ instanceId: 'opencode:opencode', driver: 'opencode' as InstanceSnapshot['driver'] }),
+      snapshot({ instanceId: 'cursor', driver: 'cursor' as InstanceSnapshot['driver'] }),
+      piSnapshot('pi:amazon-bedrock'),
       piSnapshot('pi:groq'),
       piSnapshot('pi:openai'),
       piSnapshot('pi:anthropic'),
@@ -74,11 +80,15 @@ describe('ranking', () => {
     expect(ids(ranked)).toEqual([
       'claude/haiku', 'claude/sonnet', 'claude/opus',
       'codex/gpt-6-luna', 'codex/gpt-6.1-terra', 'codex/gpt-6.2-sol',
-      'antigravity/gemini-3.8-flash', 'antigravity/gemini-4-hydrogen', 'antigravity/gemini-4-neon',
       'pi:anthropic/claude-haiku-5-5',
       'pi:openai/gpt-6-luna',
       'pi:groq/llama-fast',
+      // After the `pi` entry: its own entry wins over the broader one.
+      'pi:amazon-bedrock/bedrock-model',
+      'cursor/cursor-model',
       'opencode:opencode/opencode/big-pickle',
+      'grok/grok-model',
+      'antigravity/gemini-3.8-flash', 'antigravity/gemini-4-hydrogen', 'antigravity/gemini-4-neon',
       'acp:other/other-model'
     ])
   })

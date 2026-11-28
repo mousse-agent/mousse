@@ -1309,6 +1309,13 @@ export class AcpSessions {
           active?.refuseTools?.(typeof update.title === 'string' ? update.title : 'a tool')
       }
       handlers.refuseRequest = (method) => refuseFile(active?.refuseTools ?? (() => undefined), ACP_TERMINAL_METHODS.includes(method) ? `a terminal (${method})` : `an unknown request (${method})`)
+      // xAI's own requests (a question for the person, leaving plan mode) are tools a one-shot runs none of.
+      if (handlers.extRequests) {
+        handlers.extRequests = Object.fromEntries(Object.keys(handlers.extRequests).map((method) => [method, async () => {
+          active?.refuseTools?.(`an xAI request (${method})`)
+          return { outcome: 'cancelled' }
+        }]))
+      }
     }
     const connection = this.options.connect({
       purpose,
@@ -2548,7 +2555,7 @@ export class AcpSessions {
   }
 
   /**
-   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a commit message. A
+   * One request with no tools (`acpOneShot`): a chat title, a pull request draft or a commit message. A
    * fresh agent process and session of its own in `cwd` (an empty folder the caller made for it), where the process
    * also starts, with no MCP server and no client file system, in the agent's `default` mode when it has one. The
    * prompt is {@link ONE_SHOT_INSTRUCTION}, the system text and the prompt. Every permission, file, terminal or
@@ -2562,8 +2569,6 @@ export class AcpSessions {
   async oneShot(input: OneShotInput): Promise<string> {
     const { label, quirks } = this.options
     input.signal.throwIfAborted()
-    // xAI's tagged prompts end on a notice this request does not wait for.
-    if (quirks.xaiExtensions) throw harnessAppError({ code: 'unsupported', message: `${label} cannot run a single request.` })
     await this.options.beforeLaunch?.('one_shot')
     input.signal.throwIfAborted()
     const active = this.launch('one_shot', undefined, undefined, input.cwd)
@@ -2624,11 +2629,24 @@ export class AcpSessions {
       const prompt = [ONE_SHOT_INSTRUCTION, input.system, input.prompt].filter((part) => part.trim()).join('\n\n')
       input.beforePrompt?.()
       prompting = true
-      const outcome = await active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId, prompt: [{ type: 'text', text: prompt }] })
+      // xAI: the prompt is tagged, and ends at its reply or its `prompt_complete`, whichever is first (as in `chat`).
+      const promptId = quirks.xaiExtensions ? randomUUID() : undefined
+      const reply = active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId, prompt: [{ type: 'text', text: prompt }], ...(promptId ? { _meta: { promptId } } : {}) })
+      const completion = promptId ? this.completionOf(active, promptId) : undefined
+      if (completion) reply.catch(() => undefined)
+      let outcome: unknown
+      try {
+        outcome = await (completion ? Promise.race([reply, completion.done]) : reply)
+      } finally {
+        completion?.dispose()
+      }
       // What the agent wrote just before it answered is still on its way (see `chat`).
       await new Promise<void>((resolve) => setImmediate(resolve))
       if (failed) throw failed
       input.signal.throwIfAborted()
+      // However an xAI prompt ended, a refusal or an error it reports is never an answer.
+      const reported = completion ? xaiStopFailure(label, outcome) : undefined
+      if (reported) throw reported
       const ended = promptStopOutcome(label, outcome)
       if (ended === 'cancelled') throw agentCancelledError(label)
       if (ended) throw ended

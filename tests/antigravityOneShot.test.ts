@@ -433,7 +433,6 @@ describe('gateway one-shot on Antigravity', () => {
     const harness = testHarness({ drivers: [antigravityDriver({ builtIn: () => s.service })], instances, profileHome: homes[0] })
     harnesses.push(harness)
     const listed = (await harness.llmProviders({ kind: 'device' })).find((provider) => provider.instanceId === 'antigravity')
-    expect(listed?.oneShot).toBe(true)
     // On `acpOneShot` with its own launch, labelled best-effort as any ACP agent.
     expect(listed?.models.find((model) => model.id === 'account-model')?.title).toMatchObject({ state: 'best_effort', route: 'acp:antigravity' })
     const answer = await harness.oneShot({

@@ -31,20 +31,19 @@ export interface RouteFacts {
   audience: OneShotAudience
 }
 
-/**
- * A route's name. `legacy:<driver>` is a provider still on its own one-shot code until its slice: admitted through the
- * same step, with no facts claimed.
- */
-export type OneShotRouteId = 'pi:direct' | 'pi:worker' | 'acp:generic' | 'acp:antigravity' | 'claude:cli' | 'codex:direct' | 'codex:app_server' | 'opencode:sealed' | 'cursor:sdk' | `legacy:${string}`
+/** A route's name. */
+export type OneShotRouteId = 'pi:direct' | 'pi:worker' | 'acp:generic' | 'acp:antigravity' | 'acp:grok' | 'claude:cli' | 'codex:direct' | 'codex:app_server' | 'opencode:sealed' | 'cursor:sdk' | 'grok:direct'
 
 export interface OneShotRoute {
   id: OneShotRouteId
-  /** Absent on a legacy route: it claims nothing. */
-  facts?: RouteFacts
+  facts: RouteFacts
 }
 
-/** What a driver says about one model of one entry (`HarnessDriver.oneShotRoute`). */
-export type OneShotRouteDecision = { route: OneShotRoute } | { refused: string }
+/**
+ * What a driver says about one model of one entry (`HarnessDriver.oneShotRoute`). `runsAs`: the model the route sends
+ * in place of the one chosen (Grok's "Agent default" on its API key: the model it resolves to), shown in the listing.
+ */
+export type OneShotRouteDecision = { route: OneShotRoute; runsAs?: string } | { refused: string }
 
 /** The operation a single request serves. */
 export type OneShotOp = 'thread_title' | 'branch_name' | 'pr_draft' | 'commit_message' | 'bot_name' | 'bot_digest'

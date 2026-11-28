@@ -394,7 +394,7 @@ export function leftInPlace(dir: string): string | undefined {
 }
 
 /** A folder or file as first seen: removal acts on a path only while it still names this object. */
-type Seen = Pick<BigIntStats, 'dev' | 'ino'>
+export type Seen = Pick<BigIntStats, 'dev' | 'ino'>
 
 const sameObject = (a: Seen, b: Seen) => a.dev === b.dev && a.ino === b.ino
 
@@ -420,7 +420,7 @@ function removeEntry(path: string, link: boolean): void {
  * `start`'s real path. `expected` pins `start` itself to an object seen earlier (an ownership check, a record). Throws
  * when anything changed or stayed.
  */
-function removeTree(start: string, expected?: Seen): void {
+export function removeTree(start: string, expected?: Seen): void {
   const top = lstatSync(start, { bigint: true })
   if (expected && !sameObject(top, expected)) throw new Error('The object changed since it was checked.')
   if (top.isSymbolicLink() || !top.isDirectory()) return removeEntry(start, top.isSymbolicLink())

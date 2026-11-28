@@ -2,7 +2,7 @@
  * PR 4 §4 `HarnessGateway.oneShot`: one model request with no tools (chat titles), resolved like a
  * turn for its purpose. The pi driver makes one pi-ai request in Mousse's process; the gateway owns
  * a 60 s inactivity timeout and never retries; hidden models, turned-off instances and drivers without
- * one-shots (`oneShot` absent) are refused with their typed errors. Claude Code and Codex run one-shots
+ * a route (`oneShotRoute` absent) are refused with their typed errors. Claude Code and Codex run one-shots
  * through their own runtimes (covered in their provider tests).
  */
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -22,7 +22,7 @@ import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { CODEX_CAPABILITIES } from '../../src/mms/harness/drivers/codex/adapter'
 import type { ProviderAdapter } from '../../src/mms/harness/adapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
-import { legacyOneShotRoute } from '../../src/mms/harness/oneShot/routes'
+import { CODEX_DIRECT_FACTS } from '../../src/mms/harness/oneShot/routes'
 import { botDigestOneShot, botNameOneShot } from '../../src/mms/bots/botOneShots'
 
 const homes: string[] = []
@@ -374,16 +374,16 @@ describe('the gateway admits from cached state', () => {
   function entrySetup(options: { config?: Record<string, unknown>; auth?: 'signed_out'; enabled?: false } = {}) {
     const home = mkdtempSync(join(tmpdir(), 'mousse-one-shot-entry-'))
     homes.push(home)
-    const oneShot = vi.fn(async () => ({ text: 'An answer' }))
+    const oneShot = vi.fn(async () => 'An answer')
     const base = adapterDriver(agent, {
       runtime: {
-        oneShot,
+        oneShotTransport: () => ({ send: oneShot }),
         llmProvider: () => ({ id: 'codex', label: 'Codex', models: [{ id: 'gpt-5', label: 'GPT-5' }] }),
         models: () => [{ id: 'gpt-5', label: 'GPT-5' }],
         ...(options.auth ? { auth: async () => ({ state: options.auth! }) } : {})
       }
     })
-    const driver = { ...base, oneShotRoute: legacyOneShotRoute('codex'), ...(options.config ? { decodeConfig: () => ({ ...options.config }) } : {}) }
+    const driver = { ...base, oneShotRoute: () => ({ route: { id: 'codex:direct' as const, facts: CODEX_DIRECT_FACTS } }), ...(options.config ? { decodeConfig: () => ({ ...options.config }) } : {}) }
     let stored: unknown = { codex: { driver: 'codex', enabled: options.enabled ?? true } }
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
     const harness = testHarness({ drivers: [driver], instances, profileHome: home })

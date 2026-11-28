@@ -4,7 +4,7 @@ import { atomicWriteJsonSync } from '../../data/AtomicFs'
 
 /**
  * What Grok's held launch was proven to hold, per Grok version and platform (`heldCheck.ts`). Without a record for the
- * version that runs, Mousse claims nothing: Grok runs only chats a person drives, in Full access, and names no thread.
+ * version that runs, Mousse claims nothing: Grok runs only chats a person drives, in Full access.
  */
 
 /** Bumped whenever the check proves more or differently: an older local record is checked again. */
@@ -19,11 +19,9 @@ export interface GrokHeldRecord {
    * and a saved "always allow" answer for the MCP tool both present.
    */
   turns: boolean
-  /** One-shots: one model request, no tools, only Mousse's system text, and a forced tool call ran nothing. */
-  titles: boolean
-  /** The built-in tools this version offers (from the stub's first request): every one-shot disallows them. */
+  /** The built-in tools this version offers (from the stub's first request). */
   tools: readonly string[]
-  /** Why not, in words for the user, when either is false. */
+  /** Why not, in words for the user, when `turns` is false. */
   reason?: string
   checkVersion: number
   recordedAt: string
@@ -41,13 +39,13 @@ const GROK_1_0_9X_TOOLS: readonly string[] = Object.freeze([
  * Records shipped with Mousse: `heldCheck.ts` run against the real Grok on that platform (`tests/live/grokHeldCheck.test.ts`,
  * whose controls show the same check failing without the held config, with the ask rule alone, when a worktree may take
  * its main checkout's answers, and without the startup switches).
- * - 1.0.92 and 1.0.89, Windows 11 x64: every turn item in all three phases, no startup marker, and every one-shot item.
+ * - 1.0.92 and 1.0.89, Windows 11 x64: every turn item in all three phases, and no startup marker.
  * Any other version or platform, or a record of an older check, is checked on the computer that runs it, after a check
  * of the entry finds it.
  */
 export const GROK_HELD_SHIPPED: readonly GrokHeldRecord[] = Object.freeze([
-  Object.freeze({ cliVersion: '1.0.92', platform: 'win32', turns: true, titles: true, tools: GROK_1_0_9X_TOOLS, checkVersion: 2, recordedAt: '2026-11-27T07:17:08Z' }),
-  Object.freeze({ cliVersion: '1.0.89', platform: 'win32', turns: true, titles: true, tools: GROK_1_0_9X_TOOLS, checkVersion: 2, recordedAt: '2026-11-27T07:17:20Z' })
+  Object.freeze({ cliVersion: '1.0.92', platform: 'win32', turns: true, tools: GROK_1_0_9X_TOOLS, checkVersion: 2, recordedAt: '2026-11-27T07:17:08Z' }),
+  Object.freeze({ cliVersion: '1.0.89', platform: 'win32', turns: true, tools: GROK_1_0_9X_TOOLS, checkVersion: 2, recordedAt: '2026-11-27T07:17:20Z' })
 ] satisfies GrokHeldRecord[])
 
 /** The record for `cliVersion` on `platform`: a local one of this check version, else a shipped one. */
@@ -96,6 +94,6 @@ export class GrokHeldStore {
 function isRecord(value: unknown): value is GrokHeldRecord {
   const record = value as Partial<GrokHeldRecord> | null
   return Boolean(record) && typeof record!.cliVersion === 'string' && typeof record!.platform === 'string' &&
-    typeof record!.turns === 'boolean' && typeof record!.titles === 'boolean' && Array.isArray(record!.tools) &&
+    typeof record!.turns === 'boolean' && Array.isArray(record!.tools) &&
     typeof record!.checkVersion === 'number' && typeof record!.recordedAt === 'string'
 }
