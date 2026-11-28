@@ -4,6 +4,8 @@ import { useAppStore } from '../stores/appStore'
 import { openViewedPullRequest } from '../stores/pullRequestStore'
 import { visibleThreads } from '../../shared/threadLineage'
 import { parseThreadLink } from '../../shared/threadLink'
+import { parseBotLink } from '../../shared/botLink'
+import { useChatsStore } from '../stores/chatsStore'
 import { isQualifiedId } from '../../shared/threadRef'
 import { selectOrSettle, selectThread } from '../lib/threadActions'
 import { showToast } from '../components/ui/Toast'
@@ -14,6 +16,8 @@ export type RoutedLink =
   | { kind: 'file'; path: string; line?: number; column?: number }
   | { kind: 'web'; url: string }
   | { kind: 'thread'; threadId: string }
+  /** One of the owner's bots, tagged in a message (`shared/botLink.ts`): it opens that bot's chat. */
+  | { kind: 'bot'; botId: string }
   | { kind: 'relative-file'; path: string; line?: number; column?: number }
   | { kind: 'reject' }
 
@@ -25,6 +29,8 @@ export function classifyLink(href: string): RoutedLink {
   if (mousseFile) return { kind: 'file', ...mousseFile }
   const threadId = parseThreadLink(value)
   if (threadId) return { kind: 'thread', threadId }
+  const botId = parseBotLink(value)
+  if (botId) return { kind: 'bot', botId }
   if (/^https?:\/\//i.test(value)) {
     try {
       const url = new URL(value)
@@ -107,6 +113,10 @@ export function routeLink(href: string, context?: { threadId?: string; projectId
   if (route.kind === 'reject') return false
   if (route.kind === 'thread') {
     openLinkedThread(route.threadId)
+    return true
+  }
+  if (route.kind === 'bot') {
+    void useChatsStore.getState().openBot(route.botId)
     return true
   }
   if (route.kind === 'web') {

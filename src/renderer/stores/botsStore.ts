@@ -17,6 +17,7 @@ import { keepEqualById } from '../lib/keepEqual'
 import { botRetryOf } from '../components/bots/botRetry'
 import { expandComposerQuotes, insertQuoteToken, registerQuote } from '../lib/composerQuotes'
 import { expandComposerThreadChips } from '../lib/composerThreadChips'
+import { expandComposerBotChips } from '../lib/composerBotChips'
 import { clearBotLiveReplies, noteBotReply, noteBots, noteBotStopAsked, noteThreadMessage, setBotLiveReplySources } from './botLiveReplies'
 import { adoptFilePreview } from '../components/bots/fileImageCache'
 import { REMOTE_BOT_FILE_BYTES } from '../../shared/bots/personal/remoteFiles'
@@ -817,7 +818,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
     },
 
     async send(botId) {
-      const typed = expandComposerThreadChips(expandComposerQuotes(get().drafts[botId] ?? '')).trim()
+      const typed = expandComposerBotChips(expandComposerThreadChips(expandComposerQuotes(get().drafts[botId] ?? ''))).trim()
       // A bot of another computer takes words and files; this computer's threads are not sent there.
       const remote = isRemoteBot(botId)
       const attachments = get().attachments[botId] ?? []

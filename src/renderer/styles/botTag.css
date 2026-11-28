@@ -1,0 +1,51 @@
+/*
+ * One of the owner's bots tagged in a message (`BotTag`): its face, then its name, on a faint tint of its own colour,
+ * in the sentence at the surrounding size. A press opens its chat. A bot that is gone reads as quiet text.
+ */
+
+.bot-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  margin: 0 1px;
+  padding: 0 6px 0 2px;
+  border: 0;
+  border-radius: 999px;
+  font: inherit;
+  font-weight: 500;
+  line-height: inherit;
+  vertical-align: bottom;
+  color: color-mix(in srgb, var(--tag-colour) 62%, var(--text-primary));
+  background: color-mix(in srgb, var(--tag-colour) 15%, transparent);
+  cursor: pointer;
+}
+
+.bot-tag:hover {
+  background: color-mix(in srgb, var(--tag-colour) 24%, transparent);
+}
+
+.bot-tag:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
+.bot-tag-face {
+  display: inline-flex;
+  flex: none;
+}
+
+.bot-tag-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bot-tag.is-gone {
+  padding: 0;
+  font-weight: inherit;
+  color: var(--text-secondary);
+  background: none;
+  cursor: default;
+}

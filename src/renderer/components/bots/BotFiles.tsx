@@ -5,6 +5,7 @@ import { FileText, FolderOpen, Image as ImageIcon, X } from '../../lib/icons'
 import { Markdown, restoreMousseHref, type MarkdownImages } from '../../chat/components/agent-elements/markdown'
 import { LinkLabel, threadLinkLabel } from '../../chat/components/agent-elements/link-label-view'
 import { ThreadChip } from '../ThreadChip'
+import { BotTag } from './BotTag'
 import { classifyLink, routeLink } from '../../utils/chatLinks'
 import { fileLocation, isAbsolutePath } from '../../utils/filesBrowse'
 import { parseMousseFileLink } from '../../../shared/chatReferences'
@@ -114,6 +115,8 @@ export function BotLink({ href: written, children, ...props }: { href?: string; 
   if (host?.remote && (route.kind === 'file' || route.kind === 'relative-file')) return <span>{children}</span>
   // A thread link is the same chip a thread's reply shows: the thread's title and live status.
   if (route.kind === 'thread') return <ThreadChip threadId={route.threadId} label={threadLinkLabel(href, children)} />
+  // One of the owner's bots tagged in it: that bot's face and name, which open its chat.
+  if (route.kind === 'bot') return <BotTag botId={route.botId}>{children}</BotTag>
   return <a {...props} href={href} className="an-md-link" onClick={(event) => { event.preventDefault(); routeLink(href) }}>
     <LinkLabel href={href}>{children}</LinkLabel>
   </a>

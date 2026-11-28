@@ -43,6 +43,7 @@ import { BotMemoryDialog } from './BotMemoryDialog'
 import { BotBrowserPreview } from './BotBrowser'
 import { useBotBrowser } from '../../stores/botBrowserStore'
 import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatComposer'
+import type { TaggableBot } from '../../lib/composerBotChips'
 import type { ChatReference } from '../../../shared/chatReferences'
 import { botThreadReferenceRefusal } from '../../lib/threadReference'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
@@ -1153,6 +1154,11 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     ...(modelInfo?.providers ? { providers: modelInfo.providers } : {}),
     ...(modelInfo?.imageProviders ? { imageProviders: modelInfo.imageProviders } : {})
   }), [modelInfo])
+  // `@` tags the owner's other bots on this computer, the ones this bot can message (`bot_list`): the message carries
+  // each tag, so the bot reads exactly which one the owner means.
+  const ownBots = useBotsStore((s) => s.bots)
+  const mentionBots = useMemo<TaggableBot[]>(() => ownBots.filter((other) => other.id !== bot.id && !other.lives)
+    .map((other) => ({ id: other.id, name: other.name, description: other.description, look: other.look })), [ownBots, bot.id])
 
   return <BotFilesProvider botId={bot.id} open={openFile} failed={fileFailed} remote={remote}><ImageGalleryProvider images={chatImages} actions={pictureActions}>
     {/* The chat pane: the conversation, and an applet beside it. The side panel docks outside it. */}
@@ -1279,7 +1285,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
               onRemoveReference: (id: string) => store().removeReference(bot.id, id),
               onReferenceError: (message: string) => useBotsStore.setState({ error: message, errorBotId: bot.id }),
               pastedThreadRefusal: botThreadReferenceRefusal,
-              commandSuggestions
+              commandSuggestions,
+              mentionBots
             })}
             messageLimit={MAX_BOT_CHAT_TEXT}
             voiceMessages={NO_VOICE}

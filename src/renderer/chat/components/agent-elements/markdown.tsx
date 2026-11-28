@@ -11,7 +11,9 @@ import { codeBlockPre } from "./code-block";
 import { classifyLink, inlineCodeFileHref, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
 import { LinkLabel, threadLinkLabel } from "./link-label-view";
 import { ThreadChip } from "../../../components/ThreadChip";
+import { BotTag } from "../../../components/bots/BotTag";
 import { THREAD_LINK_PREFIX } from "../../../../shared/threadLink";
+import { BOT_LINK_PREFIX } from "../../../../shared/botLink";
 import { copyMathAsTex } from "../../../markdown/math/copyMathAsTex";
 import {
   hideUnclosedMathFence,
@@ -41,15 +43,17 @@ function collapseLooseListGaps(text: string): string {
 /** Preserve fenced code exactly while normalizing prose and list whitespace. */
 const MOUSSE_FILE_MARKER = "/__mousse_file_open__?";
 const MOUSSE_THREAD_MARKER = "/__mousse_thread__/";
+const MOUSSE_BOT_MARKER = "/__mousse_bot__/";
 const LOCAL_FILE_MARKER = "/__mousse_local_file__?";
 
 /**
- * The address a link's marker stands for: `mousse-file:` or `mousse://thread/` (see `normalizeMarkdown`), or a local
- * file link as written (see `markFileLinks`).
+ * The address a link's marker stands for: `mousse-file:`, `mousse://thread/` or `mousse://bot/` (see
+ * `normalizeMarkdown`), or a local file link as written (see `markFileLinks`).
  */
 export function restoreMousseHref(href: string): string {
   if (href.startsWith(MOUSSE_FILE_MARKER)) return `mousse-file://open?${href.slice(MOUSSE_FILE_MARKER.length)}`;
   if (href.startsWith(MOUSSE_THREAD_MARKER)) return `${THREAD_LINK_PREFIX}${href.slice(MOUSSE_THREAD_MARKER.length)}`;
+  if (href.startsWith(MOUSSE_BOT_MARKER)) return `${BOT_LINK_PREFIX}${href.slice(MOUSSE_BOT_MARKER.length)}`;
   if (href.startsWith(LOCAL_FILE_MARKER)) {
     try {
       return decodeURIComponent(href.slice(LOCAL_FILE_MARKER.length));
@@ -81,6 +85,18 @@ function linkThreadAddresses(text: string): string {
       const link = `[${THREAD_LINK_PREFIX}${id}](${MOUSSE_THREAD_MARKER}${id})`;
       return before === "<" && after === ">" ? link : `${before ?? ""}${link}${after ?? ""}`;
     }))
+    .join("");
+}
+
+/**
+ * A bot tag's target (`[@Coxy](mousse://bot/<id>)`, shared/botLink.ts) becomes the bot's marker, which the anchor
+ * restores, as a thread's does. Inline code is left as written.
+ */
+function linkBotTags(text: string): string {
+  if (!/mousse:\/\/bot\//i.test(text)) return text;
+  return text
+    .split(/(`[^`\n]*`)/g)
+    .map((piece, index) => index % 2 === 1 ? piece : piece.replace(/\]\(\s*mousse:\/\/bot\//gi, `](${MOUSSE_BOT_MARKER}`))
     .join("");
 }
 
@@ -166,7 +182,7 @@ export function normalizeMarkdown(text: string): string {
       // Streamdown rejects custom schemes before its component/urlTransform
       // hooks run. A same-origin marker survives sanitation and is restored by
       // the anchor renderer; fenced examples remain byte-identical.
-      const protectedLinks = linkThreadAddresses(part.replace(/mousse-file:\/\/open\?/gi, MOUSSE_FILE_MARKER));
+      const protectedLinks = linkBotTags(linkThreadAddresses(part.replace(/mousse-file:\/\/open\?/gi, MOUSSE_FILE_MARKER)));
       return collapseLooseListGaps(fixNumberedListBreaks(keepLiteralBackslashes(protectedLinks))).replace(
         /\n{3,}/g,
         "\n\n",
@@ -454,6 +470,8 @@ const markdownComponents: Components = {
     if (route.kind === "reject") return <span>{children}</span>;
     // A thread link is a chip with the thread's title (or the link's own text) and its live status.
     if (route.kind === "thread") return <ThreadChip threadId={route.threadId} label={threadLinkLabel(routedHref, children)} />;
+    // A tagged bot is its face and name, which open its chat.
+    if (route.kind === "bot") return <BotTag botId={route.botId}>{children}</BotTag>;
     return (
       <a
         {...props}

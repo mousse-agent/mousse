@@ -3242,6 +3242,98 @@ it.each(['local', 'device'])('keeps the changed-schedule sentence and closes but
   expect(button('Send', transcript())).toBeUndefined()
 })
 
+describe('tagging another of the owner\'s bots with @', () => {
+  const coxy = summary('coxy', { name: 'Coxy', description: 'Reviews pull requests.', look: { colour: 'teal', accessory: 'cap' } })
+  const cobalt = summary('cobalt', { name: 'Cobalt', look: { colour: 'blue', accessory: 'beret' } })
+  // A bot of another computer: this bot can't message it, so it is not offered.
+  const far = summary('far', { name: 'Comet', lives: { node: 'node-b', name: 'Laptop' } })
+  const list = () => host.querySelector('#composer-command-suggestions')
+  /** The words a person reads: the faces' drawings (and their titles) left out. */
+  const words = (element: Element | null | undefined) => {
+    const copy = element?.cloneNode(true) as Element | undefined
+    copy?.querySelectorAll('svg, canvas').forEach((drawing) => drawing.remove())
+    return copy?.textContent
+  }
+  const rows = () => [...(list()?.querySelectorAll('[role="option"]') ?? [])].map(words)
+  // A chip's words without the invisible marks and slots its token is made of.
+  const chips = () => [...composer().querySelectorAll('.composer-bot-chip')].map((chip) => words(chip)?.replace(/[^\w]/g, ''))
+
+  async function openWithBots() {
+    fake.bots = [inbox, coxy, cobalt, far]
+    await act(async () => useChatsStore.getState().activate('p1'))
+    await act(async () => root.render(createElement(ChatWorkspace)))
+    await act(async () => useChatsStore.getState().openBot(inbox.id))
+  }
+
+  it('@ lists the owner\'s other bots here, typing narrows them, and a pick leaves the bot\'s chip among the words', async () => {
+    await openWithBots()
+    await type(box(), 'ask @')
+    expect(list()?.getAttribute('aria-label')).toBe('Bots to tag')
+    // Not the bot this chat is with, nor one on another computer.
+    expect(rows()).toEqual(['CoxyReviews pull requests.', 'CobaltWhat cobalt does.'])
+    await type(box(), 'ask @cox')
+    expect(rows()).toEqual(['CoxyReviews pull requests.'])
+    await press('Enter')
+    expect(list()).toBeNull()
+    expect(chips()).toEqual(['Coxy'])
+    expect(box().value.startsWith('ask ')).toBe(true)
+    expect(box().value.endsWith(' ')).toBe(true)
+  })
+
+  it('sends the tag, which names the bot exactly; the sent message shows its face and name, which open its chat', async () => {
+    await openWithBots()
+    await type(box(), 'ask @Co')
+    await press('Enter')
+    await type(box(), `${box().value}for a second opinion`)
+    await press('Enter')
+    await settle()
+    expect(fake.client.send).toHaveBeenCalledWith('inbox', 'ask [@Coxy](mousse://bot/coxy) for a second opinion', expect.any(String), [], undefined)
+    const tag = transcript().querySelector<HTMLButtonElement>('.bot-you .bot-tag')
+    expect(words(tag)).toBe('Coxy')
+    expect(tag?.title).toBe("Open Coxy's chat")
+    await click(tag)
+    await settle()
+    expect(useChatsStore.getState().activeBotId).toBe('coxy')
+  })
+
+  it('brings a sent tag back as its chip with Up; a tag of a bot that is gone reads as its name', async () => {
+    fake.chats.inbox = [
+      message(1, { author: 'owner', text: 'and [@Old](mousse://bot/gone) too' }),
+      message(2, { author: 'owner', text: 'ask [@Coxy](mousse://bot/coxy) about it' })
+    ]
+    await openWithBots()
+    await settle()
+    expect(transcript().querySelector('.bot-you .bot-tag.is-gone')?.textContent).toBe('@Old')
+    await press('ArrowUp')
+    await settle()
+    expect(chips()).toEqual(['Coxy'])
+    expect(box().value).not.toContain('mousse://bot/')
+  })
+
+  it('edits as one character: Copy takes the tag, and Backspace right after the chip takes it out whole', async () => {
+    await openWithBots()
+    await type(box(), 'ask @cox')
+    await press('Enter')
+    const value = box().value
+    box().setSelectionRange(0, value.length)
+    const setData = vi.fn()
+    await fire(box(), 'copy', 'clipboardData', { setData, getData: () => '' })
+    expect(setData).toHaveBeenCalledWith('text/plain', 'ask [@Coxy](mousse://bot/coxy) ')
+    // The caret right after the chip, before the space the pick left.
+    box().setSelectionRange(value.length - 1, value.length - 1)
+    await press('Backspace')
+    expect(chips()).toEqual([])
+    expect(box().value.trim()).toBe('ask')
+  })
+
+  it('a tag in the bot\'s own reply is the same face and name', async () => {
+    fake.chats.inbox = [message(1, { text: 'Sent it to [@Coxy](mousse://bot/coxy).' })]
+    await openWithBots()
+    await settle()
+    expect(words(transcript().querySelector('.bot-message .bot-tag'))).toBe('Coxy')
+  })
+})
+
 describe('a message from another of the owner\'s bots', () => {
   const alpha = summary('bot-alpha', { name: 'Alpha', look: { colour: 'green', accessory: 'beret' } })
   const text = '**Message from your bot Alpha**\n\n> The Mac nightly passed.\n>\n> The DMG is in `nightly/`.'
