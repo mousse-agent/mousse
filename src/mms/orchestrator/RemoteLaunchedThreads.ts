@@ -64,6 +64,15 @@ export type RemoteComputerReach =
   | { ok: false; code: string; message: string; computer?: string; computers?: Array<{ id: string; name: string }> }
 
 /** One thread of `threads.list` there, its ids named the way this computer names things. */
+/**
+ * Why a thread another device started may not reach `computer`, a third computer (`chainRefused`): what it can still
+ * reach, and where the person allows more.
+ */
+export function chainRefusal(what: 'threads' | 'subagents' | 'reach', computer: string): string {
+  const act = what === 'reach' ? `reach threads on ${computer}` : `start ${what} on ${computer}`
+  return `This thread was started from another device, so it cannot ${act}. It can still work on the device that started it. The user can allow other computers with "Threads started from other devices" in Settings → Agents → Agent access.`
+}
+
 export interface RemoteListedThread {
   id: string
   name: string
@@ -118,10 +127,10 @@ export interface RemoteLaunchedThreadsDeps {
   /** Whether the thread is private (it stays on this computer). */
   localOnly: (threadId: string) => boolean
   /**
-   * Whether the thread (or the thread at the top of its lineage) was started from another device: work another device
-   * started here never reaches a further computer (one computer deep).
+   * Whether reaching `node` from the thread would chain work another device started here on to a third computer the
+   * person here has not allowed (`OrchestratorService.chainRefused`). The device that started it is always reached.
    */
-  startedElsewhere?: (threadId: string) => boolean
+  chainRefused?: (threadId: string, node: string) => boolean
   /**
    * The thread on `node` that a subagent of this computer runs in, when `threadId` is that subagent's id here (the
    * childThreadId its parent knows it by). Undefined for any other id.
@@ -255,13 +264,13 @@ export class RemoteLaunchedThreads {
 
   /**
    * Why the caller may not work on `node` beyond the threads it launched there, read at every call: a private caller,
-   * a caller another device started (one computer deep), or the user's switch and list in Agent access.
+   * a caller another device started reaching a third computer the person here has not allowed, or the user's switch
+   * and list in Agent access.
    */
   private computerRefusal(callerThreadId: string, node: string, computer: string): { code: string; message: string } | undefined {
     if (this.deps.localOnly(callerThreadId))
       return { code: 'private_thread', message: 'This is a private thread: it stays on this computer, so it cannot reach threads on other computers.' }
-    if (this.deps.startedElsewhere?.(callerThreadId))
-      return { code: 'remote_from_remote', message: `This thread was started from another device, so it cannot reach threads on ${computer}: work another device started stays one computer deep.` }
+    if (this.deps.chainRefused?.(callerThreadId, node)) return { code: 'remote_from_remote', message: chainRefusal('reach', computer) }
     return this.deps.denial(node, computer)
   }
 

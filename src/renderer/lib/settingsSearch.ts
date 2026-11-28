@@ -96,6 +96,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Answer approvals on other threads', section: 'agents', anchor: 'agents-access-approvals', keywords: ['permissions', 'agents may answer approvals'] },
   { title: 'Subagents', section: 'agents', anchor: 'agents-subagents', keywords: ['subagent'] },
   { title: 'Let agents work on your other devices', section: 'agents', anchor: 'agents-remote-subagents', keywords: ['computers', 'remote', 'subagents on other devices', 'let agents start subagents on your other devices'] },
+  { title: 'Threads started from other devices', section: 'agents', anchor: 'agents-from-other-devices', keywords: ['third computer', 'chain', 'remote', 'other devices', 'started from another device'], needs: { anchor: 'agents-remote-subagents', reason: 'Threads started from other devices appears once Let agents work on your other devices is on and another computer is paired.' } },
   { title: 'Worktree per subagent', section: 'agents', anchor: 'agents-subagent-worktrees', keywords: ['experimental', 'branch', 'give each subagent its own worktree'] },
   { title: 'GitHub', section: 'source-control', anchor: 'source-control-github', keywords: ['gh', 'github cli', 'sign in', 'sign out', 'login', 'account', 'connect', 'clone'] },
   { title: 'Cua Driver', section: 'computer', anchor: 'computer-driver', keywords: ['computer use', 'cua', 'install', 'version', 'desktop', 'screen'] },

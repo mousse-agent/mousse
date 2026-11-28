@@ -91,9 +91,24 @@ describe('a routed call marked as an agent\'s (issue #1160)', () => {
     const title = thread.startedFrom!.agent!.title
     expect(title).not.toMatch(/[‮​]/)
     expect(title).not.toContain(AGENT_MESSAGE_PREFIX)
-    // A thread started this way cannot start subagents on a third computer.
-    const refused = await (t.owner.orchestrator as unknown as Loose).delegateRemoteTask(id, 'run-x', { computer: 'any', prompt: 'p', workspace: 'isolated', role: 'implement', title: 'T' }, { toolCallId: 'c' }, { accessLevel: 'manage' })
-    expect(refused).toMatchObject({ started: false, code: 'remote_from_remote' })
+    // A thread started this way starts subagents back on the computer whose agent started it: the chain rule lets that
+    // through to this computer's own switch (off here). A third computer is refused until the person here allows it.
+    const orchestrator = t.owner.orchestrator as unknown as Loose
+    const delegate = (computer: string, call: string) =>
+      orchestrator.delegateRemoteTask(id, 'run-x', { computer, prompt: 'p', workspace: 'isolated', role: 'implement', title: 'T' }, { toolCallId: call }, { accessLevel: 'manage' })
+    expect(await delegate(t.callerNode, 'c-back')).toMatchObject({ started: false, code: 'remote_subagents_off' })
+    const findComputer = orchestrator.findComputer.bind(orchestrator)
+    vi.spyOn(orchestrator, 'findComputer').mockImplementation(((ref: string) =>
+      ref === 'Third' ? { ok: true, computer: { node: 'nod_third', name: 'Third', online: true } } : findComputer(ref)) as never)
+    expect(await delegate('Third', 'c-third')).toMatchObject({ started: false, code: 'remote_from_remote' })
+    expect(await orchestrator.listModels(id, { computer: 'Third' })).toMatchObject({ listed: false, code: 'remote_from_remote' })
+    const access = t.owner.settings.get().agentAccess
+    t.owner.settings.set({ agentAccess: { ...access, fromOtherDevices: true } } as never)
+    try {
+      expect(await delegate('Third', 'c-third-allowed')).toMatchObject({ started: false, code: 'remote_subagents_off' })
+    } finally {
+      t.owner.settings.set({ agentAccess: access } as never)
+    }
     // A person's create, unmarked, records no agent.
     const person = await call('threads.create', { name: 'By a person' })
     expect(t.owner.threads.getThread(person.thread.id)!.startedFrom).toEqual({ node: t.callerNode })
