@@ -67,17 +67,6 @@ interface AcpState {
   filesChanged?: { hash: string; message: string }
   /** The home the saved sessions were made in (`AcpRuntimeHooks.sessionsHome`). */
   sessionsHome?: string
-  /**
-   * The single requests of a driver built on this runtime (`acpOneShot` with its preset's inputs): the route its places
-   * are named after, the narrow inputs its sealed launch adds (named variables or files, never a whole folder; written
-   * under `root`, the place's own folder for them), and the rule for the launch's arguments. Without it, only an agent
-   * known by its command runs single requests here.
-   */
-  oneShot?: {
-    route: OneShotRouteId
-    inputs(root: string): Record<string, string>
-    arguments?: ArgumentAllowlist
-  }
 }
 
 export interface AcpDriverOptions {
@@ -123,6 +112,17 @@ export interface AcpRuntimeHooks {
    * its history to a new session.
    */
   sessionsHome?: string
+  /**
+   * The single requests of a driver built on this runtime (`acpOneShot` with its preset's inputs): the route its places
+   * are named after, the narrow inputs its sealed launch adds (named variables or files, never a whole folder; written
+   * under `root`, the place's own folder for them), and the rule for the launch's arguments. Without it, only an agent
+   * known by its command runs single requests here.
+   */
+  oneShot?: {
+    route: OneShotRouteId
+    inputs(root: string): Record<string, string>
+    arguments?: ArgumentAllowlist
+  }
 }
 
 /**
@@ -231,7 +231,7 @@ export interface AcpRuntime extends DriverRuntime {
 
 export function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: AcpDriverOptions, ptyRuns: () => boolean, hooks: AcpRuntimeHooks = {}): AcpRuntime {
   // An agent known by its command runs single requests here, and a driver built on this runtime that names its inputs.
-  const oneShotRoute = hooks.oneShot ?? (preset === GENERIC_ACP_PRESET && !hooks.driver ? { route: 'acp:generic' as const, inputs: () => ({}) } : undefined)
+  const oneShotRoute: AcpRuntimeHooks['oneShot'] = hooks.oneShot ?? (preset === GENERIC_ACP_PRESET && !hooks.driver ? { route: 'acp:generic', inputs: () => ({}) } : undefined)
   const statePath = join(context.stateDir, 'acp.json')
   let state: AcpState = {}
   try {
