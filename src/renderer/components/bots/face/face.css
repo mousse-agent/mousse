@@ -45,7 +45,8 @@
   transform-origin: 60% 60%;
 }
 .bot-face-live:not([data-still]) .bot-face-moon {
-  animation: bot-face-moon 5.2s ease-in-out 3;
+  /* In steps, as the z beside it: a few frames a second, never every frame. */
+  animation: bot-face-moon 5.2s steps(20, jump-none) 3;
 }
 @keyframes bot-face-moon {
   0%, 100% { transform: translateY(0) rotate(0deg); opacity: 0.9; }

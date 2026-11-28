@@ -37,6 +37,11 @@ function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T
   return next
 }
 
+/** A record without the given keys. */
+function withoutKeys<T>(record: Record<string, T>, keys: readonly string[]): Record<string, T> {
+  return keys.reduce((kept, key) => withoutKey(kept, key), record)
+}
+
 export interface BotActionRefusal { reason: string; text: string }
 
 export const BOT_CHAT_PAGE = 50
@@ -414,7 +419,6 @@ export const useBotsStore = create<BotsState>((set, get) => {
         if (event?.reread) for (const botId of event.botId ? [event.botId] : Object.keys(get().chats)) if (get().chats[botId]) void get().loadChat(botId)
         // A connection opened again let go of the other computers' chats this window showed: it holds them again.
         if (event?.reread && !event.botId) for (const botId of focusedRemote.keys()) void bots().focus(botId, true).catch(() => undefined)
-        // A connection opened again let go of the other computers' chats this window showed: it holds them again.
       }),
       events.onReply?.((event) => noteBotReply(event)),
       events.onMessage?.((event) => { if (event?.botId && event.message) putMessages(event.botId, [event.message]) }),
@@ -476,9 +480,17 @@ export const useBotsStore = create<BotsState>((set, get) => {
             const list = withCreated([...local, ...elsewhere].filter((bot) => !removed.has(bot.id)))
             // A chat held from a computer that was offline reads its newest rows once that computer is back.
             const back = elsewhere.filter((bot) => !bot.lives?.offline && get().bots.some((before) => before.id === bot.id && before.lives?.offline) && get().chats[bot.id])
+            // A bot of another computer that left the list read now (this device lost access to it) takes its copy here
+            // with it: messages, draft, notes and read mark.
+            const gone = remote ? get().bots.filter((bot) => bot.lives && !list.some((kept) => kept.id === bot.id)).map((bot) => bot.id) : []
+            for (const botId of gone) readSeq.delete(botId)
             set((state) => {
               // A list that brought nothing new keeps the bots held, so the open chat does not render again.
               const bots = keepEqualById(state.bots, list)
+              const dropped = gone.length ? {
+                chats: withoutKeys(state.chats, gone), chatLoad: withoutKeys(state.chatLoad, gone), drafts: withoutKeys(state.drafts, gone),
+                notes: withoutKeys(state.notes, gone), replyingTo: withoutKeys(state.replyingTo, gone)
+              } : {}
               // A live chip lasts while its bot works.
               const working = Object.entries(state.live).filter(([id]) => list.some((bot) => bot.id === id && bot.state === 'working'))
               const live = working.length === Object.keys(state.live).length ? state.live : Object.fromEntries(working)
@@ -488,7 +500,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
               const activity = kept.length === Object.keys(state.activity).length ? state.activity : Object.fromEntries(kept)
               const said = Object.entries(state.statuses).filter(([id]) => running.has(id))
               const statuses = said.length === Object.keys(state.statuses).length ? state.statuses : Object.fromEntries(said)
-              return { bots, loaded: true, live, activity, statuses, ...celebrate(state.bots, bots) }
+              return { bots, loaded: true, live, activity, statuses, ...dropped, ...celebrate(state.bots, bots) }
             })
             for (const bot of back) void get().loadChat(bot.id)
           } catch {
@@ -692,13 +704,15 @@ export const useBotsStore = create<BotsState>((set, get) => {
       const messages = cacheOf(botId).messages
       const failed = messages.find((message) => message.id === messageId)
       const again = failed ? botRetryOf(messages, failed) : null
-      if (!again) return
+      // A bot of another computer takes words only, as `send` sends them: files sent with the turn stay behind.
+      const remote = Boolean(get().bots.find((bot) => bot.id === botId)?.lives)
+      if (!again || (remote && !again.text)) return
       const owner = epoch
       const clientRequestId = retrySends.get(messageId) ?? crypto.randomUUID()
       retrySends.set(messageId, clientRequestId)
       set({ error: null })
       try {
-        const message = await bots().send(botId, again.text, clientRequestId, again.attachments, again.replyTo)
+        const message = await bots().send(botId, again.text, clientRequestId, remote ? [] : again.attachments, again.replyTo)
         if (owner !== epoch) return
         putMessages(botId, [message])
       } catch (cause) { fail(owner, cause, botId) }

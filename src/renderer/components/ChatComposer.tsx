@@ -1503,12 +1503,14 @@ export function ChatComposer({
     const files = Array.from(event.dataTransfer.files)
     if (!files.length) return
     event.preventDefault()
+    // A composer for words only takes no files, nor the threads and files this window drags out.
+    if (wordsOnly) return
     // A file this window drags out (a file tree row, a chip) means here what the window's own drag meant.
     const own = ownFileDrop(files)
     if (own?.kind === 'ignore') return
     if (own?.kind === 'reference') {
       const parsed = parseChatReference({ ...own.reference, id: own.reference.id ?? `${own.reference.kind}:${crypto.randomUUID()}` })
-      if (parsed) dropReference(parsed, at)
+      if (parsed && onAddReference) dropReference(parsed, at)
       return
     }
     // Dropped on the text among words, each file also gets its chip at the drop point.

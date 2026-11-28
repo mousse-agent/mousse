@@ -8,7 +8,9 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BotChatMessage, BotSummary } from '../../src/shared/bots/personal/chat'
+import { plainCards, type BotChatCard } from '../../src/shared/bots/personal/cards'
 import { setAnimationSpeed } from '../../src/renderer/lib/motion'
+import { startDragOut } from '../../src/renderer/lib/fileDragOut'
 import { fakeBots, installPreload, message, summary, type FakeBots } from './fakeBotsClient'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -286,5 +288,71 @@ describe('a bot whose computer is offline', () => {
     expect(transcript().textContent).toContain('Came while it was away.')
     expect(fake.calls).toContainEqual(['markRead', 'n_laptop:b_inbox', 3])
     expect(box()).not.toBeNull()
+  })
+})
+
+describe('what stays on its own computer', () => {
+  it('draws no automation or watcher it set up there, so nothing here pauses, opens or reads one', async () => {
+    const cards: BotChatCard[] = [
+      { type: 'automation', jobId: 'job-1', name: 'Inbox digest', label: 'every hour' },
+      { type: 'facts', title: 'Inbox', rows: [{ label: 'Unread', value: '3' }] } as BotChatCard
+    ]
+    const pause = vi.fn(async () => undefined)
+    const resume = vi.fn(async () => undefined)
+    installPreload(fake, { scheduled: { pause, resume } })
+    await open(remote(), [message(1, { id: 'c1', text: `Set up.\n\n${plainCards(cards)}`, plainFrom: 'Set up.'.length, cards })])
+    expect(transcript().querySelector('[data-testid="bot-automation-card"]')).toBeNull()
+    expect(button('Pause', transcript())).toBeUndefined()
+    expect([...transcript().querySelectorAll('button')].some((element) => element.getAttribute('aria-label')?.startsWith('Open automation'))).toBe(false)
+    expect(transcript().querySelector('dl')?.textContent).toContain('Unread')
+    expect(fake.calls.some(([name]) => name === 'get')).toBe(false)
+    expect(pause).not.toHaveBeenCalled()
+  })
+
+  it('retries a failed turn with its words only, and not at all when it had only files', async () => {
+    const turn = (text: string) => [
+      message(1, { id: 'o1', author: 'owner', text, activationId: 'a1', attachments: [{ name: 'log.txt', path: '/home/me/log.txt' }] }),
+      message(2, { id: 'e1', kind: 'error', text: 'I hit an error, so I stopped.', error: { text: 'I hit an error, so I stopped.' }, activationId: 'a1' })
+    ]
+    await open(remote(), turn('Read the log.'))
+    await act(async () => useBotsStore.getState().retry('n_laptop:b_inbox', 'e1'))
+    const sent = fake.calls.find(([name]) => name === 'send')!
+    expect(sent[2]).toBe('Read the log.')
+    expect(sent[4]).toEqual([])
+    fake.calls.length = 0
+    fake.chats['n_laptop:b_inbox'] = turn('')
+    await act(async () => useBotsStore.getState().loadChat('n_laptop:b_inbox'))
+    await act(async () => useBotsStore.getState().retry('n_laptop:b_inbox', 'e1'))
+    expect(fake.calls.some(([name]) => name === 'send')).toBe(false)
+  })
+
+  it('takes no file or chip from this window dropped on its composer', async () => {
+    await open(remote())
+    await type(box()!, 'See the notes')
+    const bridge ={ start: vi.fn(() => new Promise(() => {})), startComposerFile: vi.fn(() => new Promise(() => {})) }
+    startDragOut({ preventDefault: () => {} }, { name: 'notes.md', item: { kind: 'path', path: '/home/me/notes.md' } as never, inApp: { kind: 'reference', reference: { kind: 'file', title: 'notes.md', path: '/home/me/notes.md' } } }, bridge as never)
+    const drop = new Event('drop', { bubbles: true, cancelable: true })
+    Object.defineProperty(drop, 'dataTransfer', { value: { files: [new File(['x'], 'notes.md')], types: ['Files'], getData: () => '' } })
+    await act(async () => { box()!.dispatchEvent(drop) })
+    await settle()
+    expect(box()!.value).toBe('See the notes')
+    expect(useBotsStore.getState().drafts['n_laptop:b_inbox']).toBe('See the notes')
+    expect(host.querySelector('.bot-input-area .composer-chip, .bot-input-area [data-chip]')).toBeNull()
+  })
+})
+
+describe('a bot this computer can no longer reach', () => {
+  it('leaves with its copy here, and its open chat closes', async () => {
+    await open(remote(), [message(1, { text: 'Three new invoices.' })])
+    await act(async () => useBotsStore.getState().setDraft('n_laptop:b_inbox', 'half written'))
+    fake.bots = [local]
+    await act(async () => useBotsStore.getState().refresh())
+    await settle()
+    const state = useBotsStore.getState()
+    expect(state.bots.map((bot) => bot.id)).toEqual(['b_desk'])
+    expect(state.chats['n_laptop:b_inbox']).toBeUndefined()
+    expect(state.drafts['n_laptop:b_inbox']).toBeUndefined()
+    expect(useChatsStore.getState().activeBotId).toBeNull()
+    expect(host.textContent).not.toContain('Three new invoices.')
   })
 })

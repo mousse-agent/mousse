@@ -389,7 +389,10 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
   const question = canAnswer ? row.question : undefined
   // Its cards are drawn under its words, so those stop at their plain copy too; the pictures a gallery shows are its
   // files as well (for other devices), which the gallery shows instead of the picture strip above the words.
-  const cards = row.cards?.length ? row.cards : undefined
+  // An automation or watcher a bot of another computer set up lives there: its row's buttons would act on this
+  // computer's, so only the cards that just show something are drawn.
+  const kept = remote ? row.cards?.filter((card) => card.type !== 'automation' && card.type !== 'watcher') : row.cards
+  const cards = kept?.length ? kept : undefined
   const message = useMemo(() => {
     if ((!question && !cards) || row.plainFrom === undefined) return row
     const inGallery = galleryPaths(cards)

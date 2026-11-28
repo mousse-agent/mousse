@@ -223,3 +223,12 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
   },
   setDraft(chatId, draft) { set((state) => ({ drafts: { ...state.drafts, [chatId]: draft } })) }
 }))
+
+// A bot of another computer that leaves the list (this device lost access to it) closes its chat here, with the thread
+// of it shown in the pane.
+useBotsStore.subscribe((next, previous) => {
+  if (next.bots === previous.bots) return
+  const { activeBotId } = useChatsStore.getState()
+  if (!activeBotId || next.bots.some((bot) => bot.id === activeBotId)) return
+  if (previous.bots.some((bot) => bot.id === activeBotId && bot.lives)) useChatsStore.setState({ activeBotId: null, botThread: null })
+})
