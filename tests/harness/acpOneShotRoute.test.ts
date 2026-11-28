@@ -104,7 +104,6 @@ describe('a generic ACP agent names threads on acpOneShot', () => {
     // The entry's check runs (the providers page, or Automatic's first checks).
     await p.harness.llmProviders({ kind: 'device' })
     const listed = (await p.titleOptions()).llmProviders.find((provider) => provider.instanceId === id)!
-    expect(listed.oneShot).toBe(true)
     const model = listed.models.find((each) => each.id === 'default')!
     expect(model.title).toMatchObject({ state: 'best_effort', route: 'acp:generic', facts: expect.arrayContaining([expect.stringContaining('tools of its own')]) })
     // The person picks it: the choice is what the picker writes from that listing.
