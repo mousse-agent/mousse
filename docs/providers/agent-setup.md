@@ -44,6 +44,10 @@ Cursor entry. There is nothing to install or find on PATH.
 - Each Cursor entry keeps its own key in Mousse's vault and its agents in its own store. Mousse
   never reads `~/.cursor/sdk/auth.json` or an ambient `CURSOR_API_KEY`.
 - Cursor approves its tools itself (Auto-review on), so it runs only chats a person drives.
+- **Single requests** (titles, branch names, pull request drafts, commit messages, a bot's name and
+  digest) run on a Cursor host of their own, started for the request in an empty place and ended
+  with it, never the host that runs chats. Its agent is offered no tool, loads no rule, skill, hook
+  or MCP server, and has the SDK's retries off: one model request each. They are held.
 - Signing out forgets the key in Mousse. A key minted by an account sign-in stays valid on Cursor's
   side until it expires (90 days) unless revoked at cursor.com/dashboard.
 - A model API entry `pi:cursor` keeps working on the Mousse agent until the user moves it to a

@@ -71,6 +71,15 @@ export const OPENCODE_CONSOLE_FACTS: RouteFacts = Object.freeze({ ...OPENCODE_SE
  */
 export const OPENCODE_FREE_FACTS: RouteFacts = Object.freeze({ ...OPENCODE_SEALED_FACTS, tools: 'refused_before_run' })
 
+/**
+ * Cursor (`cursor:sdk`): a host process of its own for the request, in its place, separate from the host that runs
+ * turns. One agent with no built-in tool (`tools: []`, sent as an empty `x-cursor-agent-allowed-tools`), no settings
+ * layer (`settingSources: []`: no rules, skills, hooks or MCP servers of the user's or a project's) and the SDK's
+ * retries off (`enableAgentRetries: false`): one request on the wire on 429 and 503, counted at a stub, and no user
+ * config loaded, shown in `tests/cursorOneShotEffects.test.ts`. Held.
+ */
+export const CURSOR_SDK_FACTS: RouteFacts = Object.freeze({ tools: 'none_offered', attempts: 'one', isolation: 'verified', launch: 'sealed_host', audience: 'any' })
+
 /** A provider still on its own one-shot code (`DriverRuntime.oneShot`), admitted with no facts claimed. */
 export function legacyOneShotRoute(driver: string): () => OneShotRouteDecision {
   const decision: OneShotRouteDecision = Object.freeze({ route: Object.freeze({ id: `legacy:${driver}` as const }) })

@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import type * as CursorSdk from '@cursor/sdk'
 import {
+  CURSOR_ONE_SHOT_HOST,
   isCursorAuthFailure,
   redactCursorText,
   type CursorAgentSetup,
@@ -14,6 +15,7 @@ import {
   type CursorHostMethods,
   type CursorHostRequest,
   type CursorLocal,
+  type CursorOneShotRequest,
   type CursorUsage
 } from './cursorProtocol'
 
@@ -432,4 +434,92 @@ function main(): void {
   send({ event: 'ready' })
 }
 
+// -- Single request -----------------------------------------------------------------------------
+
+/**
+ * The agent of a single request (`CURSOR_ONE_SHOT_HOST`): no built-in tool (sent as an empty allowed-tools list), no
+ * settings layer (no rules, skills, hooks or MCP servers of the user's or a project's), no MCP server, custom tool or
+ * subagent of Mousse's, Auto-review off, and the SDK's own retries off, so a failed request is never sent again.
+ */
+export function cursorOneShotOptions(request: CursorOneShotRequest, store: CursorSdk.LocalAgentStore): CursorSdk.AgentOptions {
+  return {
+    apiKey: request.apiKey,
+    ...(request.model ? { model: request.model } : {}),
+    tools: [],
+    local: {
+      cwd: request.cwd,
+      store,
+      settingSources: [],
+      autoReview: false,
+      enableAgentRetries: false
+    }
+  }
+}
+
+/** The first line on stdin, or undefined when stdin closes first. */
+function firstLine(): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
+    let done = false
+    input.on('line', (line) => {
+      if (done || !line.trim()) return
+      done = true
+      resolve(line)
+    })
+    input.on('close', () => {
+      if (!done) resolve(undefined)
+      // The caller closing stdin ends the request.
+      process.exit(0)
+    })
+  })
+}
+
+async function oneShotMain(): Promise<void> {
+  for (const method of ['log', 'info', 'debug'] as const) console[method] = (...args: unknown[]) => console.error(...args)
+  delete process.env.CURSOR_API_KEY
+  let sdk: Sdk
+  try {
+    sdk = loadSdk()
+  } catch (error) {
+    console.error('[cursor-host] could not load @cursor/sdk', error instanceof Error ? error.message : String(error))
+    process.exit(3)
+  }
+  process.on('unhandledRejection', (reason) => {
+    if (isShellSpawnRejection(reason) || isClosedExecStreamWrite(reason)) return
+    console.error('[cursor-host] unhandled rejection', describeFailure(reason))
+    process.exit(1)
+  })
+  send({ event: 'ready' })
+  const line = await firstLine()
+  if (!line) return
+  const runId = 'one-shot'
+  let agent: CursorSdk.SDKAgent | undefined
+  try {
+    const request = JSON.parse(line) as CursorOneShotRequest
+    agent = await sdk.Agent.create(cursorOneShotOptions(request, new sdk.JsonlLocalAgentStore(request.storeDir)))
+    const transport = new TransportErrorReply()
+    const run = await agent.send({ text: request.text }, {
+      onDelta: ({ update }) => {
+        const value = update as unknown as Record<string, unknown>
+        if (value.type === 'text-delta' && typeof value.text === 'string') transport.push(value.text)
+        send({ event: 'delta', runId, update: value })
+      }
+    })
+    const result = await run.wait()
+    const failure = result.status === 'finished' ? transport.failure : undefined
+    send({ event: 'run_end', runId, status: result.status, ...(result.error ? { error: runError(result.error) } : {}), ...(failure ? { transportFailure: failure } : {}) })
+  } catch (error) {
+    send({ event: 'run_end', runId, status: isCancellation(error) ? 'cancelled' : 'error', ...(isCancellation(error) ? {} : { error: hostError(error) }) })
+  } finally {
+    try {
+      agent?.close()
+    } catch {
+      // The process ends next.
+    }
+  }
+  // stdout drains before the process ends.
+  out.write('', () => process.exit(0))
+}
+
 if (process.env.MOUSSE_CURSOR_HOST === '1') main()
+else if (process.env.MOUSSE_CURSOR_HOST === CURSOR_ONE_SHOT_HOST) void oneShotMain()
