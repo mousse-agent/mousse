@@ -61,6 +61,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'sidebar' }: ProfileSwit
 
   const reload = async () => {
     const epoch = ++reloadEpoch.current
+    const shown = useAppStore.getState().profileId
     let result: Awaited<ReturnType<typeof window.mousse.profiles.list>>
     let status: Awaited<ReturnType<typeof window.mousse.profiles.status>>
     try {
@@ -72,14 +73,19 @@ export function ProfileSwitcher({ onSwitched, variant = 'sidebar' }: ProfileSwit
       if (epoch !== reloadEpoch.current) return
       throw cause
     }
-    if (epoch !== reloadEpoch.current) return
-    const bound = status.binding?.profileId ?? result.defaultProfileId
-    // A footer always belongs to the active window profile, including while
-    // replies for a previous profile or an unmounted sidebar are still pending.
-    if (bound !== useAppStore.getState().profileId) return
+    // A reply read while the window changed profile, or for an unmounted sidebar, belongs to neither profile.
+    if (epoch !== reloadEpoch.current || useAppStore.getState().profileId !== shown) return
+    const binding = status.binding?.profileId
+    if ((binding ?? result.defaultProfileId) !== shown) {
+      // The service has the window on another profile, as after a switch that reported a failure but went
+      // through: the window follows it, and this footer reads again for that profile.
+      const moved = binding ? result.profiles.find((profile) => profile.id === binding && profile.status === 'active') : undefined
+      if (moved) onSwitched?.(moved)
+      return
+    }
     setProfiles(result.profiles)
     setError(null)
-    const selected = result.profiles.find((profile) => profile.id === bound)
+    const selected = result.profiles.find((profile) => profile.id === shown)
     if (selected) {
       migrateLegacyProfilePreferences(selected)
       onSwitched?.(selected)
@@ -173,6 +179,13 @@ export function ProfileSwitcher({ onSwitched, variant = 'sidebar' }: ProfileSwit
     }
   }, [open])
 
+  /** The active profile the service has this window on, if it says. */
+  const boundProfile = async (): Promise<ProfilePublicDto | undefined> => {
+    const [result, status] = await Promise.all([window.mousse.profiles.list(), window.mousse.profiles.status()])
+    const binding = status.binding?.profileId
+    return binding ? result.profiles.find((profile) => profile.id === binding && profile.status === 'active') : undefined
+  }
+
   /**
    * Binds the window to a profile; true once it is bound. `holdBusy` leaves the busy state on for a
    * caller that has more to do after the switch (archiving the profile left behind).
@@ -194,7 +207,19 @@ export function ProfileSwitcher({ onSwitched, variant = 'sidebar' }: ProfileSwit
       onSwitched?.(result.profile)
       return true
     } catch (cause) {
-      if (epoch === requestEpoch.current) setError(messageOf(cause))
+      if (epoch !== requestEpoch.current) return false
+      // A switch can fail here after the service already moved the window (its answer timed out, or a step
+      // after the bind failed). The window then follows where it really is.
+      const moved = await boundProfile().catch(() => undefined)
+      if (epoch !== requestEpoch.current) return false
+      if (moved?.id === ref) {
+        switched = true
+        setOpen(false)
+        migrateLegacyProfilePreferences(moved)
+        onSwitched?.(moved)
+        return true
+      }
+      setError(messageOf(cause))
       return false
     } finally {
       endSwitch(switched)
