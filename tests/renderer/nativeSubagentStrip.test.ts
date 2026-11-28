@@ -128,8 +128,10 @@ describe('the native subagent page', () => {
       createElement(NativeSubagentPage, { threadId: 't1' }))))
     expect(host.textContent).toContain('Waiting on 1 subagent')
     expect(pathNames()).toEqual(['acme-web', 'Fix the picker'])
+    // The closed row names the subagent too; its line is in the list Details opens.
+    expect(host.querySelector('.background-work-summary')!.textContent).toContain('Waiting on 1 subagent · picker code')
     click(host.querySelector('.background-work-summary[aria-expanded="false"]'))
-    click([...host.querySelectorAll('button')].find((button) => button.textContent?.includes('picker code')))
+    click([...host.querySelectorAll('ul[aria-label="What runs in the background"] button')].find((button) => button.textContent?.includes('picker code')))
 
     const page = () => host.querySelector('section[aria-label="picker code, native subagent"]')
     expect(page()).not.toBeNull()

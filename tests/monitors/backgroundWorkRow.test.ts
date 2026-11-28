@@ -1,13 +1,20 @@
+// @vitest-environment jsdom
 /**
  * The composer's status row of a thread's background work (issue #1605): what its line says, what Details lists and
  * what each Stop stops. The data is what the daemon pushes (`thread.backgroundWork`) plus the thread's running subagents.
  */
-import { createElement } from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it, vi } from 'vitest'
-import { BackgroundWorkRowView, backgroundLines } from '../../src/renderer/components/BackgroundWorkRow'
+import { act, createElement } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { BackgroundWorkRow, backgroundLines, rowNames } from '../../src/renderer/components/BackgroundWorkRow'
 import { PROVIDER_BACKGROUND_ID, backgroundCounts, backgroundHeadline, type BackgroundWorkItem, type ThreadBackgroundWork } from '../../src/shared/backgroundWork'
 import type { SubagentSummary } from '../../src/shared/subagents'
+
+// The command's colours are a matter of looks (checked in the app); here it shows as plain text.
+vi.mock('../../src/renderer/chat/components/agent-elements/code-highlighter', () => ({
+  codeHighlighter: { highlight: () => null, getThemes: () => ['github-light', 'github-dark'] }
+}))
+;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const item = (id: string, kind: BackgroundWorkItem['kind'], description = id): BackgroundWorkItem => ({
   id, kind, description, startedAt: '2026-11-20T10:00:00.000Z', until: '2026-11-20T10:30:00.000Z'
@@ -69,23 +76,64 @@ describe('Details', () => {
   })
 })
 
-describe('the row', () => {
-  const render = (props: Partial<Parameters<typeof BackgroundWorkRowView>[0]> = {}) => renderToStaticMarkup(createElement(BackgroundWorkRowView, {
-    headline: 'Waiting on 1 monitor', lines: [{ key: 'mon-1', title: 'CI for PR 12', kind: 'Monitor', mark: { kind: 'monitor' }, tooltip: 'gh pr checks 12 --watch', stop: () => undefined }],
-    open: false, onToggle: () => undefined, onStopAll: () => undefined, ...props
-  }))
+describe('what the closed row names', () => {
+  const line = (title: string) => ({ key: title, title, kind: 'Command', tooltip: '', mark: { kind: 'command' as const } })
+  const reported = (items: BackgroundWorkItem[], id: string): ThreadBackgroundWork => ({ ...work(items), latest: { id, line: 'Permission denied', at: '2026-11-20T10:05:00.000Z' } })
+  it.each([
+    // [what runs, the lines, what the row names]
+    ['the work that reported last, by its description, never the line it printed',
+      reported([item('bg-1', 'background', 'Measure folder sizes'), item('bg-2', 'background', 'Run the tests')], 'bg-1'), ['Measure folder sizes', 'Run the tests'], 'Measure folder sizes'],
+    ['the one thing that runs when nothing reported', work([]), ['API reviewer'], 'API reviewer'],
+    ['the one thing that runs when what reported has ended', reported([], 'bg-gone'), ['API reviewer'], 'API reviewer'],
+    ['nothing when several run and none reported', work([item('bg-1', 'background'), item('bg-2', 'background')]), ['bg-1', 'bg-2'], undefined]
+  ])('%s', (_case, threadWork, titles, names) => {
+    expect(rowNames(titles.map(line), threadWork)).toBe(names)
+  })
+})
 
-  it('shows the line, the latest activity, Details and Stop; the list only once Details is open', () => {
-    const closed = render({ latest: 'build: pass' })
-    expect(closed).toContain('Waiting on 1 monitor')
-    expect(closed).toContain(' · build: pass')
-    expect(closed).toContain('>Details<')
-    expect(closed).toContain('aria-label="Stop"')
-    expect(closed).toContain('aria-expanded="false"')
-    expect(closed).not.toContain('CI for PR 12')
-    const open = render({ open: true })
-    expect(open).toContain('CI for PR 12')
-    expect(open).toContain('aria-label="Stop CI for PR 12"')
-    expect(open).toContain('title="gh pr checks 12 --watch"')
+describe('the row', () => {
+  let host: HTMLDivElement
+  let root: Root
+  const writeText = vi.fn(async () => undefined)
+  const threadWork: ThreadBackgroundWork = {
+    ...work([
+      { ...item('bg-1', 'background', 'Measure folder sizes'), command: 'du -sh * | sort -h' },
+      { ...item('mon-1', 'command', 'CI for PR 12'), command: 'gh pr checks 12 --watch' },
+      item('kw-1', 'keep_working', 'review')
+    ]),
+    latest: { id: 'bg-1', line: 'du: cannot read directory: Permission denied', at: '2026-11-20T10:05:00.000Z' }
+  }
+
+  beforeEach(() => {
+    ;(window as unknown as { mousse: unknown }).mousse = { orchestrator: { abort: vi.fn() }, threads: { stopBackground: vi.fn() } }
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    host = document.createElement('div')
+    document.body.appendChild(host)
+    root = createRoot(host)
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+  })
+
+  const lineOf = (title: string) => [...host.querySelectorAll('li')].find((li) => li.querySelector('.background-work-title')?.textContent === title)!
+
+  it('names the work, not what it printed; Details shows each command in full with Copy', async () => {
+    await act(async () => root.render(createElement(BackgroundWorkRow, { threadId: 't1', subagents: [], work: threadWork, onStopAll: () => undefined })))
+    const summary = host.querySelector('button[aria-expanded]')!
+    expect(summary.textContent).toContain('Waiting on 1 command and 2 monitors · Measure folder sizes')
+    expect(host.textContent).not.toContain('Permission denied')
+    expect(host.textContent).not.toContain('du -sh')
+
+    act(() => { (summary as HTMLElement).click() })
+    expect(lineOf('Measure folder sizes').textContent).toContain('du -sh * | sort -h')
+    expect(lineOf('CI for PR 12').textContent).toContain('gh pr checks 12 --watch')
+    // A hold runs no command: nothing to show or copy.
+    expect(lineOf('review').querySelector('button[aria-label="Copy command"]')).toBeNull()
+    expect(host.textContent).not.toContain('Permission denied')
+
+    await act(async () => { lineOf('Measure folder sizes').querySelector<HTMLElement>('button[aria-label="Copy command"]')!.click() })
+    expect(writeText).toHaveBeenCalledWith('du -sh * | sort -h')
   })
 })

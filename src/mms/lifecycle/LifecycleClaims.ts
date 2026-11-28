@@ -166,7 +166,7 @@ export async function getExternalResourceClaims(current: ResourceLifecycleStore,
   for (let round = 0; round < 8; round++) {
     const needs: OwnershipNeed[] = []
     try {
-      ownerStores(current, collectingReads(facts, needs))
+      await runYielding(ownerStoresSteps(current, collectingReads(facts, needs)))
     } catch (error) {
       // As below: a refusal made on a stand-in for something not yet read is checked again once it is read.
       if (!needs.length) throw error
@@ -181,7 +181,7 @@ export async function getExternalResourceClaims(current: ResourceLifecycleStore,
   for (let round = 0; ; round++) {
     const needs: OwnershipNeed[] = []
     try {
-      const claims = claimsFrom(current, ownedIds, collectingReads(facts, needs))
+      const claims = await runYielding(claimsSteps(current, ownedIds, collectingReads(facts, needs)))
       if (!needs.length) {
         if (early.length && facts.worktrees.size) {
           const refresh = early
@@ -192,7 +192,7 @@ export async function getExternalResourceClaims(current: ResourceLifecycleStore,
           // checks refuses here, and any newly registered project's legacy folder is collected and scanned.
           const lateNeeds: OwnershipNeed[] = []
           try {
-            ownerStores(current, collectingReads(facts, lateNeeds))
+            await runYielding(ownerStoresSteps(current, collectingReads(facts, lateNeeds)))
           } catch (error) {
             if (!lateNeeds.length) throw error
           }
@@ -207,8 +207,38 @@ export async function getExternalResourceClaims(current: ResourceLifecycleStore,
       // A first pass may stop on a real refusal before naming every checkout; that refusal stands once nothing is missing.
       if (!needs.length) throw error
     }
-    if (round >= 8) return claimsFrom(current, ownedIds, finalReads(facts))
+    if (round >= 8) return await runYielding(claimsSteps(current, ownedIds, finalReads(facts)))
     await readOwnershipFacts(needs, facts)
+  }
+}
+
+/**
+ * The ownership passes below are written once, as steps, and run two ways. {@link getExternalResourceClaims} lets the
+ * event loop run between steps (`runYielding`): with a thousand threads a pass reads for many seconds, and under load
+ * long enough that the app takes the service for stuck and replaces it, ending every running turn. A caller that must
+ * act on the answer before anything else runs (`getExternalResourceClaimsFromFacts`) still runs them in one go
+ * (`runSteps`). Each step is one thread's inventory or one folder of the ownership scan.
+ */
+type Steps<T> = Generator<void, T, void>
+
+/** How long a yielding pass works before it lets the event loop run. */
+export const OWNERSHIP_PASS_SLICE_MS = 20
+
+function runSteps<T>(steps: Steps<T>): T {
+  for (;;) {
+    const step = steps.next()
+    if (step.done) return step.value
+  }
+}
+
+async function runYielding<T>(steps: Steps<T>): Promise<T> {
+  let since = performance.now()
+  for (;;) {
+    const step = steps.next()
+    if (step.done) return step.value
+    if (performance.now() - since < OWNERSHIP_PASS_SLICE_MS) continue
+    await new Promise<void>((resume) => setImmediate(resume))
+    since = performance.now()
   }
 }
 
@@ -221,7 +251,12 @@ export function getExternalResourceClaimsFromFacts(current: ResourceLifecycleSto
 }
 
 function claimsFrom(current: ResourceLifecycleStore, ownedIds: Set<string>, reads: OwnershipReads): ExternalClaims {
-  return ownerStores(current, reads).flatMap(({ store, records }) => {
+  return runSteps(claimsSteps(current, ownedIds, reads))
+}
+
+function* claimsSteps(current: ResourceLifecycleStore, ownedIds: Set<string>, reads: OwnershipReads): Steps<ExternalClaims> {
+  const all: ExternalClaims = []
+  for (const { store, records } of yield* ownerStoresSteps(current, reads)) {
     const pass = createInventoryStorePass(records)
     const sameProfile = resolve(store.profileHome) === resolve(current.profileHome)
     const included = records.filter((record) => record.state !== 'purged' && !(sameProfile && ownedIds.has(record.taskId)))
@@ -247,16 +282,18 @@ function claimsFrom(current: ResourceLifecycleStore, ownedIds: Set<string>, read
     for (const root of roots) markCovered(root.taskId)
     // Guard against corrupt parent cycles: any included record not covered by a root is still inventoried.
     for (const record of included) if (!covered.has(record.taskId)) { roots.push(record); markCovered(record.taskId) }
-    return roots.flatMap((record) => {
+    for (const record of roots) {
+      yield
       const inventory = inventoryFrom(store, record, {}, reads, pass)
       // Paths are compared by their real paths, so an alias (a link, `/tmp` for `/private/tmp`) names the same folder.
-      const claims: ExternalClaims = inventory.resources.map((resource) => ({ ...resource, peerProfileId: store.profileId, ...(isAbsolute(resource.identity) ? { canonicalIdentity: reads.canonical(resource.identity) } : {}) }))
-      if (!inventory.blockers.length) return claims
+      for (const resource of inventory.resources) all.push({ ...resource, peerProfileId: store.profileId, ...(isAbsolute(resource.identity) ? { canonicalIdentity: reads.canonical(resource.identity) } : {}) })
+      if (!inventory.blockers.length) continue
       // Records read in full, with only a checkout that can't be verified: what the thread may own is known, so only that is held.
-      if (inventory.blockers.every((blocker) => blocker.startsWith(UNVERIFIED_WORKTREE))) return [...claims, unverifiedClaim(store, current, record, inventory, reads, pass)]
+      if (inventory.blockers.every((blocker) => blocker.startsWith(UNVERIFIED_WORKTREE))) { all.push(unverifiedClaim(store, current, record, inventory, reads, pass)); continue }
       throw new Error(`Shared ownership cannot be proven for profile ${store.profileId}, task ${record.taskId}: ${inventory.blockers.join('; ')}`)
-    })
-  })
+    }
+  }
+  return all
 }
 
 /** Why a thread folder no record owns refuses a delete, in words a person can act on. */
@@ -288,7 +325,7 @@ function leftByMove(listed: ReadonlyArray<{ store: ResourceLifecycleStore; recor
  * profiles, their thread folders, the old data folders inside project folders and the thread indexes. None of this reads
  * Git, so a refusal here comes before any checkout is read.
  */
-function ownerStores(current: ResourceLifecycleStore, reads: OwnershipReads): Array<{ store: ResourceLifecycleStore; records: TaskLifecycleRecord[] }> {
+function* ownerStoresSteps(current: ResourceLifecycleStore, reads: OwnershipReads): Steps<Array<{ store: ResourceLifecycleStore; records: TaskLifecycleRecord[] }>> {
   const nested = basename(dirname(current.profileHome)) === 'profiles'
   const installation = nested ? dirname(dirname(current.profileHome)) : current.profileHome
   const profilesRoot = join(installation, 'profiles')
@@ -316,11 +353,15 @@ function ownerStores(current: ResourceLifecycleStore, reads: OwnershipReads): Ar
     } else if (nested && existsSync(join(installation, 'threads-index.json')) && JSON.parse(readFileSync(join(installation, 'threads-index.json'), 'utf8')).length) throw new Error('Unmigrated legacy thread ownership prevents cleanup.')
   } else if (nested || existsSync(profilesRoot) && readdirSync(profilesRoot).length) throw new Error('Profile storage has no validated installation registry; cleanup is blocked.')
 
-  const listed = stores.map((store) => ({ store, records: store.list() }))
+  const listed: Array<{ store: ResourceLifecycleStore; records: TaskLifecycleRecord[] }> = []
+  for (const store of stores) {
+    yield
+    listed.push({ store, records: store.list() })
+  }
   // The layouts threads were moved out of: the installation's own folders from before profiles, and the old data folders
   // inside project folders. A thread's copy left there by that move is no other owner (`leftByMove`).
   const movedFrom = (store: ResourceLifecycleStore): boolean => nested && resolve(store.profileHome) === resolve(installation)
-  return listed.map(({ store, records }) => {
+  for (const { store, records } of listed) {
     let visited = 0
     // Which folders each record names, by task id: one lookup per thread folder instead of a search of every record.
     const locationsById = new Map<string, Set<string>>()
@@ -330,7 +371,8 @@ function ownerStores(current: ResourceLifecycleStore, reads: OwnershipReads): Ar
       for (const location of record.locations) set.add(resolve(location))
     }
     const recordNames = (id: string, path: string): boolean => locationsById.get(id)?.has(resolve(path)) ?? false
-    const scanOwners = (root: string, path: string, depth = 0): void => {
+    const scanOwners = function* (root: string, path: string, depth = 0): Steps<void> {
+      yield
       if (!existsSync(path)) return
       assertLifecyclePath(root, path)
       if (++visited > OWNER_SCAN_LIMIT || depth > 4) throw new Error('Unregistered storage layout exceeds bounded ownership discovery.')
@@ -346,10 +388,10 @@ function ownerStores(current: ResourceLifecycleStore, reads: OwnershipReads): Ar
         // Completed migration backups are deliberately historical, never new live owners.
         if (name === '.migration-trash') continue
         const child = join(path, name)
-        if (lstatSync(child).isDirectory() || lstatSync(child).isSymbolicLink()) scanOwners(root, child, depth + 1)
+        if (lstatSync(child).isDirectory() || lstatSync(child).isSymbolicLink()) yield* scanOwners(root, child, depth + 1)
       }
     }
-    for (const root of [join(store.profileHome, 'thread-data'), join(store.profileHome, 'trash', 'threads'), join(store.profileHome, '.data')]) scanOwners(root, root)
+    for (const root of [join(store.profileHome, 'thread-data'), join(store.profileHome, 'trash', 'threads'), join(store.profileHome, '.data')]) yield* scanOwners(root, root)
     const projectsPath = join(store.profileHome, 'projects.json')
     if (existsSync(projectsPath)) {
       assertLifecyclePath(store.profileHome, projectsPath)
@@ -372,6 +414,6 @@ function ownerStores(current: ResourceLifecycleStore, reads: OwnershipReads): Ar
       const entries = JSON.parse(readFileSync(index, 'utf8')) as Array<{ id?: string }>
       if (!Array.isArray(entries) || entries.some((entry) => !entry.id || !locationsById.has(entry.id) && !(movedFrom(store) && leftByMove(listed, entry.id, undefined, store)))) throw new Error(`Unregistered thread ownership in profile ${store.profileId} prevents cleanup.`)
     }
-    return { store, records }
-  })
+  }
+  return listed
 }

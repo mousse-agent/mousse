@@ -47,10 +47,10 @@ function renderSettings(workspace: ComposerWorkspace, device?: ComposerDevicePro
   return { onChange }
 }
 
-function renderPicker(workspace: ComposerWorkspace) {
+function renderPicker(workspace: ComposerWorkspace, projects: Project[] = [project]) {
   const onChange = vi.fn()
   act(() => root.render(createElement(ComposerProjectPicker, {
-    projects: [project],
+    projects,
     workspace,
     disabled: false,
     onChange,
@@ -80,6 +80,24 @@ describe('new thread project picker', () => {
     act(() => host.querySelector<HTMLButtonElement>('[aria-label="Project"]')!.click())
     const add = document.querySelector('[role="menu"][aria-label="Select project"] [data-project-id="__open_project__"]')
     expect(add!.textContent).toBe('Add project')
+  })
+
+  it('names the folder beside each project whose name another one has, and only those', () => {
+    const at = (id: string, name: string, path: string): Project => ({ ...project, id, name, path })
+    renderPicker({ projectId: 'home', worktreeEnabled: false }, [
+      project,
+      at('home', 'mousse', '/Users/ana/code/mousse'),
+      at('drive', 'Mousse', '/Volumes/work/mousse'),
+      at('deep', 'mousse', '/Volumes/work/clients/2026/archive/nested/projects/mousse')
+    ])
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="Project"]')!.click())
+    const row = (id: string) => document.querySelector<HTMLButtonElement>(`[role="menu"][aria-label="Select project"] [data-project-id="${id}"]`)!
+    expect(row('p1').textContent).toBe('acme-web')
+    expect(row('home').textContent).toBe('mousse~/code/mousse')
+    expect(row('drive').textContent).toBe('Mousse/Volumes/work/mousse')
+    // A long folder keeps its start and its last folders; the tooltip keeps all of it.
+    expect(row('deep').textContent).toBe('mousse/Volumes/…/nested/projects/mousse')
+    expect(row('deep').title).toBe('/Volumes/work/clients/2026/archive/nested/projects/mousse')
   })
 })
 
