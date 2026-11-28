@@ -82,6 +82,19 @@
       "expiresAt": "2026-11-28T07:07:14.564Z"
     },
     {
+      "task": "mousse/collapse-long-bot-messages-and-tagging",
+      "session": "Animatrix-b71b0d",
+      "machine": "Animatrix",
+      "branch": "mousse/collapse-long-bot-messages-and-tagging",
+      "paths": [
+        "src/renderer/components/bots",
+        "src/renderer/components/ChatComposer.tsx",
+        "src/renderer/styles/bots.css"
+      ],
+      "claimedAt": "2026-11-28T10:09:27.757Z",
+      "expiresAt": "2026-11-28T12:09:27.757Z"
+    },
+    {
       "task": "one-shots-slice-2",
       "session": "Animatrix-10734d",
       "machine": "Animatrix",
