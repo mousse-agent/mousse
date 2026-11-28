@@ -202,9 +202,10 @@ async function dialog(d: ReturnType<typeof daemon>, side: 'in' | 'out') {
   }
 }
 
+/** The "Also let <name> use this computer" switch. */
 const ALSO_LET = () =>
-  [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((box) =>
-    box.closest('label')?.textContent?.startsWith('Also let ')
+  [...document.querySelectorAll<HTMLElement>('[role="switch"]')].find((item) =>
+    document.getElementById(item.getAttribute('aria-labelledby') ?? '')?.textContent?.startsWith('Also let ')
   )
 
 describe('Let a device in while networking starts', () => {
@@ -228,7 +229,7 @@ describe('Send link (§5.1)', () => {
   it('asks what the device may do first, then shows the link with Copy, the code apart from it, the tries left, and the end after three wrong codes', async () => {
     const d = daemon()
     const update = await dialog(d, 'in')
-    await click(button('Send a link with a code instead'))
+    await click(button('Link'))
     // No Allow follows a link: the level is picked before the link exists, Work on threads first.
     expect(text()).toContain('What can it do here?')
     const radio = (label: string) =>
@@ -266,7 +267,7 @@ describe('Send link (§5.1)', () => {
   it('is offered only when the helper speaks Send link', async () => {
     await dialog(daemon({ sendLink: undefined }), 'in')
     expect(document.querySelector('[aria-label="Pairing QR code"]')).toBeTruthy()
-    expect(button('Send a link with a code instead')).toBeUndefined()
+    expect(button('Link')).toBeUndefined()
   })
 })
 
@@ -281,7 +282,7 @@ describe('Scan or paste a sent link (§5.3)', () => {
     await submit(field('Pairing link'))
     expect(text()).toContain('Use the computer in this link from here?')
     expect(text()).toContain('192.168.1.20:7443 (Same network), 100.101.7.2:7443 (Tailscale)')
-    expect(ALSO_LET()!.checked).toBe(false)
+    expect(ALSO_LET()!.getAttribute('aria-checked')).toBe('false')
     // One way: nothing of this computer's is offered to share.
     expect(text()).not.toContain('Internet 203.0.113.7:7443')
     await click(ALSO_LET())

@@ -1,17 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import type { AccessPresetFields } from '../../../shared/net/accessPresets'
 import type {
   NetEngineStatus,
   NetEngineWay,
   NetEngineWayReadiness
 } from '../../../shared/netEngine/local'
-import { CopyButton } from '../settings/IconButtons'
 import { Modal } from '../ui/Modal'
+import { Select, type SelectOption } from '../ui/Select'
 import { DelayedLoader } from '../ui/DelayedLoader'
+import { Segmented } from '../settings/SettingsRow'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { AllowPrompt } from './AllowPrompt'
 import { CloudflareSetup } from './CloudflareSetup'
-import { ChoiceRow, clock, Preparing, QrCode, toMs, useNow } from './pairingParts'
+import { BackButton, ChoiceRow, clock, endInvitation, Preparing, QrCode, toMs, useNow } from './pairingParts'
 import { JoinedLine, SendLinkPanel } from './SendLinkParts'
 import { hasFeatures, WAY_LABEL, WAY_ORDER, wayFix, wayReason } from './ways'
 
@@ -22,21 +23,22 @@ interface Invite {
   ways?: NetEngineWay[]
 }
 
-type Step =
-  | { kind: 'pick' }
-  | { kind: 'code'; way?: NetEngineWay }
-  | { kind: 'link'; way?: NetEngineWay }
-  | { kind: 'tunnel' }
+/** What the dialog shows: a code to share, the list of ways (to set one up or turn it on), or the tunnel's setup. */
+type View = 'code' | 'ways' | 'tunnel'
+
+/** How the code is shared: shown as a QR code, or sent as a link with a code read out another way. */
+type Share = 'qr' | 'link'
 
 /** Where the dialog opens when Reach this computer opens it: the tunnel's setup, or a link over one way. */
 export type LetDeviceInStart = { kind: 'tunnel' } | { kind: 'link'; way?: NetEngineWay }
 
-const SSH_HINT = 'Can you SSH into this computer? Add it from the other computer instead. No code needed.'
+/** The way menu's last entry, which opens the list of ways. */
+const OTHER_WAYS = 'other'
 
 /**
- * Let a device in: how it will connect (the ways this computer has, ready or why not, with the setting that fixes
- * one), then a code for that way with its link and time left. The device's request is answered here with the
- * access it gets. A helper without the way picker makes a code as before. Closing ends the code it made.
+ * Let a device in: QR code or Link along the top, the code under it, and the way it connects over as a menu of the
+ * ready ways. It opens on a code for the nearest ready way; with none ready, on the list of ways with what fixes
+ * each. The device's request is answered here with the access it gets. Closing ends the code it made.
  */
 export function LetDeviceInDialog({
   status,
@@ -46,7 +48,7 @@ export function LetDeviceInDialog({
   onAddPhone
 }: {
   status: NetEngineStatus | undefined
-  /** Opens at this step instead of the way picker. */
+  /** Opens at this step instead of a code for the nearest ready way. */
   initial?: LetDeviceInStart
   onClose: () => void
   /** Opens Reach this computer for a way that needs setting up there (the dialog closes). */
@@ -59,113 +61,150 @@ export function LetDeviceInDialog({
   const picker = hasFeatures(status, 'route-readiness', 'invite-way')
   // A code or link names its way only to a helper that takes one.
   const pickWay = hasFeatures(status, 'invite-way')
-  // Until networking has started, what the helper offers is unknown: the picker waits for its ways, and only a
-  // running helper without the picker goes straight to a code. Once running, the step holds through a restart.
-  const [chosen, setStep] = useState<Step | undefined>(initial)
-  const step: Step = chosen ?? (ready && !picker ? { kind: 'code' } : { kind: 'pick' })
-  useEffect(() => {
-    if (!chosen && ready) setStep(step)
-  }, [chosen, ready, step])
+  const [view, setView] = useState<View | undefined>(
+    initial?.kind === 'tunnel' ? 'tunnel' : initial?.kind === 'link' ? 'code' : undefined
+  )
+  const [share, setShare] = useState<Share>(initial?.kind === 'link' ? 'link' : 'qr')
+  const [way, setWay] = useState<NetEngineWay | undefined>(initial?.kind === 'link' ? initial.way : undefined)
+  const ways = useWays(picker && ready, status)
   // The tunnel's setup is a step here when this computer can run Cloudflare Tunnel itself.
   const managedTunnel = hasFeatures(status, 'managed-tunnel') && !!engine?.cloudflare
-  const setUp = (way: NetEngineWay) => (way === 'tunnel' && managedTunnel ? setStep({ kind: 'tunnel' }) : onSetUp(way))
+  const setUp = (next: NetEngineWay) => (next === 'tunnel' && managedTunnel ? setView('tunnel') : onSetUp(next))
   // A device asked to come in (or was let in): the dialog shows only that.
   const [answering, setAnswering] = useState(false)
   const { busy, error, setError, call } = useDaemonCall()
+
+  // Once networking runs, open on a code for the nearest ready way, or on the list when none is ready. A helper
+  // without the picker makes a code as before.
+  const readyWays = (ways.list ?? []).filter((item) => item.state === 'ready').map((item) => item.way)
+  const nearest = readyWays[0]
+  useEffect(() => {
+    if (view || !ready) return
+    if (!picker) setView('code')
+    else if (ways.list) {
+      if (nearest) setWay(nearest)
+      setView(nearest ? 'code' : 'ways')
+    }
+  }, [view, ready, picker, ways.list, nearest])
 
   // The code this dialog shows, and a Send link it made: closing ends whichever is still open.
   const inviteRef = useRef<string | undefined>(undefined)
   const linkRef = useRef<string | undefined>(undefined)
   useEffect(
     () => () => {
-      for (const invitation of [inviteRef.current, linkRef.current])
-        if (invitation)
-          void window.mousse.platformRequest
-            .request('netEngine.invite.cancel', { invitation })
-            .catch(() => undefined)
+      endInvitation(inviteRef)
+      endInvitation(linkRef)
     },
     []
   )
 
+  const pickShare = (next: Share) => {
+    // Only the shown one stays open: a QR code nobody sees, or a link nobody sent, is ended.
+    endInvitation(next === 'link' ? inviteRef : linkRef)
+    setShare(next)
+  }
+  const endShown = () => {
+    endInvitation(inviteRef)
+    endInvitation(linkRef)
+  }
+  const pickWayFromMenu = (next: string) => {
+    if (next === way) return
+    // A code is valid only while it shows: the list of ways ends it, and coming back makes a new one.
+    endShown()
+    if (next === OTHER_WAYS) setView('ways')
+    else setWay(next as NetEngineWay)
+  }
+  const makeFor = (next: NetEngineWay) => {
+    setWay(next)
+    setView('code')
+  }
+
+  const back =
+    view === 'tunnel' && picker
+      ? () => setView('ways')
+      : view === 'ways' && nearest
+        ? () => setView('code')
+        : undefined
+  // The way of the code shown stays listed while the helper's next answer says it is ready.
+  const listed = way && !readyWays.includes(way) ? [way, ...readyWays] : readyWays
+  const wayOptions: SelectOption[] = [
+    ...listed.map((item) => ({ value: item, label: WAY_LABEL[item] })),
+    { value: OTHER_WAYS, label: 'Set up another way…' }
+  ]
+
   return (
     <Modal
       open
-      title={step.kind === 'tunnel' ? 'Cloudflare Tunnel' : 'Use this computer from your phone or another computer'}
+      className="engine-pair-modal"
+      title={view === 'tunnel' ? 'Cloudflare Tunnel' : 'Let a device in'}
+      headerStart={back ? <BackButton onBack={back} /> : undefined}
       onClose={onClose}
     >
-      <div className="engine-dialog" data-step={step.kind}>
-        {step.kind === 'pick' && (
-          <WayPicker
-            status={status}
-            ready={ready}
-            onMake={(way) => setStep({ kind: 'code', way })}
-            onSetUp={setUp}
+      <div className="engine-dialog" data-step={view ?? 'starting'}>
+        {!view &&
+          (status ? <Preparing helper={status.helper} ready={ready && !ways.error && !error} /> : null)}
+        {view === 'ways' && ways.list && (
+          <WayPicker ways={ways} reach={status?.reach} onMake={makeFor} onSetUp={setUp} />
+        )}
+        {view === 'tunnel' && (
+          <CloudflareSetup
+            connection={engine?.cloudflare}
+            readiness={hasFeatures(status, 'route-readiness')}
+            onMake={() => makeFor('tunnel')}
+            onOwnTunnel={() => onSetUp('tunnel')}
           />
         )}
-        {step.kind === 'tunnel' && (
+        {view === 'code' && engine && (
           <>
-            <CloudflareSetup
-              connection={engine?.cloudflare}
-              readiness={hasFeatures(status, 'route-readiness')}
-              onMake={() => setStep({ kind: 'code', ...(pickWay ? { way: 'tunnel' as const } : {}) })}
-              onOwnTunnel={() => onSetUp('tunnel')}
-            />
-            {picker && (
-              <button type="button" className="engine-text-btn" onClick={() => setStep({ kind: 'pick' })}>
-                Pick another way
-              </button>
+            {engine.sendLink && !answering && (
+              <Segmented
+                ariaLabel="How to share it"
+                value={share}
+                options={[
+                  { value: 'qr', label: 'QR code' },
+                  { value: 'link', label: 'Link' }
+                ]}
+                onChange={pickShare}
+              />
+            )}
+            {share === 'qr' || !engine.sendLink ? (
+              <CodeStep
+                key={way ?? 'any'}
+                status={engine}
+                ready={ready}
+                way={pickWay ? way : undefined}
+                picker={picker}
+                inviteRef={inviteRef}
+                busy={busy}
+                call={call}
+                error={error}
+                setError={setError}
+                onAnswering={setAnswering}
+              />
+            ) : (
+              <SendLinkPanel
+                status={status}
+                way={pickWay ? way : undefined}
+                onInvitation={(invitation) => {
+                  linkRef.current = invitation
+                }}
+              />
+            )}
+            {picker && !answering && (
+              <WayRow way={way} options={wayOptions} onPick={pickWayFromMenu} />
             )}
           </>
         )}
-        {step.kind === 'code' && engine && (
-          <CodeStep
-            status={engine}
-            ready={ready}
-            way={step.way}
-            picker={picker}
-            inviteRef={inviteRef}
-            onBack={picker ? () => setStep({ kind: 'pick' }) : undefined}
-            busy={busy}
-            call={call}
-            error={error}
-            setError={setError}
-            onAnswering={setAnswering}
-          />
+        {onAddPhone && !answering && view !== 'tunnel' && (
+          <div className="engine-pair-foot">
+            <button type="button" className="engine-quiet-btn" onClick={onAddPhone}>
+              Add a phone
+            </button>
+          </div>
         )}
-        {step.kind === 'link' && (
-          <SendLinkPanel
-            status={status}
-            way={pickWay ? step.way : undefined}
-            onInvitation={(invitation) => {
-              linkRef.current = invitation
-            }}
-          />
-        )}
-        {step.kind !== 'link' && step.kind !== 'tunnel' && !(step.kind === 'code' && answering) && (
-          <>
-            <p className="engine-hint">{SSH_HINT}</p>
-            <div className="engine-dialog-more">
-              {engine?.sendLink && (
-                <button
-                  type="button"
-                  className="engine-text-btn"
-                  title="A link to send in a chat, with a code to read out another way."
-                  onClick={() => setStep({ kind: 'link', ...(step.kind === 'code' && step.way ? { way: step.way } : {}) })}
-                >
-                  Send a link with a code instead
-                </button>
-              )}
-              {onAddPhone && (
-                <button type="button" className="engine-text-btn" onClick={onAddPhone}>
-                  Add a phone
-                </button>
-              )}
-            </div>
-          </>
-        )}
-        {error && step.kind !== 'code' && (
+        {(ways.error || (error && view !== 'code')) && (
           <p role="alert" className="chat-error">
-            {error}
+            {ways.error || error}
           </p>
         )}
       </div>
@@ -173,60 +212,101 @@ export function LetDeviceInDialog({
   )
 }
 
-/** "How will it connect?": each way and whether it is ready; ready ones are picked, the others say why. */
-function WayPicker({
-  status,
-  ready,
-  onMake,
-  onSetUp
+/** "Connects over" and the way, as a menu of the ready ways; its last entry opens the list of every way. */
+function WayRow({
+  way,
+  options,
+  onPick
 }: {
-  status: NetEngineStatus | undefined
-  ready: boolean
-  onMake: (way: NetEngineWay) => void
-  onSetUp: (way: NetEngineWay) => void
+  way: NetEngineWay | undefined
+  options: SelectOption[]
+  onPick: (value: string) => void
 }) {
+  const labelId = useId()
+  return (
+    <div className="engine-pair-row">
+      <span id={labelId}>Connects over</span>
+      <Select
+        size="small"
+        value={way}
+        options={options}
+        placeholder="Any ready way"
+        align="end"
+        ariaLabelledBy={labelId}
+        onChange={onPick}
+      />
+    </div>
+  )
+}
+
+interface Ways {
+  /** Every way, nearest first, once the helper said; undefined before. */
+  list: NetEngineWayReadiness[] | undefined
+  busy: boolean
+  error: string
+  /** Turns a way's switch on in Reach and reads the ways again. */
+  turnOn: (way: NetEngineWay) => Promise<void>
+}
+
+/**
+ * The ways this computer has and whether each is ready, read again when Reach or the Cloudflare connection changes,
+ * here or elsewhere.
+ */
+function useWays(enabled: boolean, status: NetEngineStatus | undefined): Ways {
   const { busy, error, call } = useDaemonCall()
-  const [ways, setWays] = useState<NetEngineWayReadiness[]>()
-  const [picked, setPicked] = useState<NetEngineWay>()
+  const [list, setList] = useState<NetEngineWayReadiness[]>()
   const [round, setRound] = useState(0)
-  // Read again when Reach changes (a switch turned on here or elsewhere).
-  const reachKey = JSON.stringify(status?.reach ?? null)
+  const reachKey = JSON.stringify([status?.reach ?? null, status?.cloudflare?.state ?? null])
 
   const load = useCallback(async () => {
     const answer = await call<{ ways: NetEngineWayReadiness[] }>('netEngine.routes.available', {})
     if (!answer) return
-    const sorted = [...answer.value.ways].sort((a, b) => WAY_ORDER.indexOf(a.way) - WAY_ORDER.indexOf(b.way))
-    setWays(sorted)
-    setPicked((now) =>
-      now && sorted.some((item) => item.way === now && item.state === 'ready')
-        ? now
-        : sorted.find((item) => item.state === 'ready')?.way
-    )
+    setList([...answer.value.ways].sort((a, b) => WAY_ORDER.indexOf(a.way) - WAY_ORDER.indexOf(b.way)))
   }, [call])
   useEffect(() => {
-    if (ready) void load()
-  }, [ready, load, round, reachKey])
+    if (enabled) void load()
+  }, [enabled, load, round, reachKey])
 
   const turnOn = async (way: NetEngineWay) => {
     if (await call('netEngine.routes.config', way === 'lan' ? { lan: true } : { tailnet: true }))
       setRound((value) => value + 1)
   }
+  return { list, busy, error, turnOn }
+}
 
-  if (!ways)
-    return status ? <Preparing helper={status.helper} ready={ready && !error} /> : null
+/** "How will it connect?": each way and whether it is ready; ready ones are picked, the others say why. */
+function WayPicker({
+  ways,
+  reach,
+  onMake,
+  onSetUp
+}: {
+  ways: Ways
+  reach: NetEngineStatus['reach'] | undefined
+  onMake: (way: NetEngineWay) => void
+  onSetUp: (way: NetEngineWay) => void
+}) {
+  const list = ways.list ?? []
+  const [picked, setPicked] = useState<NetEngineWay>()
+  // The picked way stays while it is ready; otherwise the nearest ready one is picked.
+  const chosen =
+    picked && list.some((item) => item.way === picked && item.state === 'ready')
+      ? picked
+      : list.find((item) => item.state === 'ready')?.way
+
   return (
     <div className="engine-choices">
       <p id="engine-ways-title" className="engine-choices-title">
         How will it connect?
       </p>
       <div className="engine-choice-list" role="radiogroup" aria-labelledby="engine-ways-title">
-        {ways.map((item) => {
+        {list.map((item) => {
           const on = item.state === 'ready'
-          const fix = wayFix(item, status?.reach)
+          const fix = wayFix(item, reach)
           return (
             <ChoiceRow
               key={item.way}
-              selected={picked === item.way}
+              selected={chosen === item.way}
               disabled={!on}
               dim={!on}
               title={on ? item.routes.join(', ') : undefined}
@@ -247,10 +327,10 @@ function WayPicker({
                 <button
                   type="button"
                   className="settings-btn engine-way-fix"
-                  disabled={busy}
+                  disabled={ways.busy}
                   onClick={(event) => {
                     event.stopPropagation()
-                    void turnOn(item.way)
+                    void ways.turnOn(item.way)
                   }}
                 >
                   Turn on
@@ -273,17 +353,12 @@ function WayPicker({
           )
         })}
       </div>
-      {error && (
-        <p role="alert" className="chat-error">
-          {error}
-        </p>
-      )}
       <div className="devices-dialog-actions">
         <button
           type="button"
           className="settings-btn ui-btn-primary"
-          disabled={!picked || busy}
-          onClick={() => picked && onMake(picked)}
+          disabled={!chosen || ways.busy}
+          onClick={() => chosen && onMake(chosen)}
         >
           Make code
         </button>
@@ -293,8 +368,8 @@ function WayPicker({
 }
 
 /**
- * The code for one way: QR, link with Copy, and "Works over <way> · used once · expires in m:ss"; a new one when it
- * runs out. The device's request shows here as Allow; once allowed, its row's state.
+ * The QR code for one way and "Used once · expires in m:ss" under it; a new one when it runs out. The device's
+ * request shows here as Allow; once allowed, its row's state.
  */
 function CodeStep({
   status,
@@ -302,7 +377,6 @@ function CodeStep({
   way,
   picker,
   inviteRef,
-  onBack,
   busy,
   call,
   error,
@@ -314,7 +388,6 @@ function CodeStep({
   way?: NetEngineWay
   picker: boolean
   inviteRef: { current: string | undefined }
-  onBack?: () => void
   busy: boolean
   call: ReturnType<typeof useDaemonCall>['call']
   error: string
@@ -339,6 +412,7 @@ function CodeStep({
   const approval = invite && status.approvals.find((item) => item.invitation === invite.invitation)
   const answering = !!approval || !!allowed
   useEffect(() => onAnswering(answering), [answering, onAnswering])
+  useEffect(() => () => onAnswering(false), [onAnswering])
   useEffect(() => {
     if (expiresAt === undefined || now < expiresAt || approval || allowed) return
     inviteRef.current = undefined
@@ -368,31 +442,13 @@ function CodeStep({
       </p>
     )
   if (approval) return <AllowPrompt approval={approval} busy={busy} onAnswer={(yes, access) => void answer(yes, access)} />
-  const shownWay = invite?.ways?.[0] ?? way
   return (
     <div className="engine-code">
       {invite ? (
         <div className="engine-qr">
           <QrCode text={invite.uri} />
-          <div className="engine-paste">
-            <input
-              className="settings-input"
-              readOnly
-              value={invite.uri}
-              aria-label="Link to share"
-              title="Scan the code on the other device, or send it this link."
-              onFocus={(event) => event.currentTarget.select()}
-            />
-            <CopyButton text={invite.uri} label="Copy link" />
-          </div>
           <p className="settings-muted engine-code-line" role="timer" title="A new code shows when it runs out.">
-            {[
-              shownWay ? `Works over ${WAY_LABEL[shownWay]}` : undefined,
-              'used once',
-              expiresAt !== undefined ? `expires in ${clock(expiresAt - now)}` : undefined
-            ]
-              .filter(Boolean)
-              .join(' · ')}
+            {expiresAt !== undefined ? `Used once · expires in ${clock(expiresAt - now)}` : 'Used once'}
           </p>
           {!picker && (
             <p className="engine-hint" title="This networking version picks the way itself.">
@@ -411,23 +467,6 @@ function CodeStep({
         <p role="alert" className="chat-error">
           {error}
         </p>
-      )}
-      {onBack && (
-        <button
-          type="button"
-          className="engine-text-btn"
-          onClick={() => {
-            const open = inviteRef.current
-            inviteRef.current = undefined
-            if (open)
-              void window.mousse.platformRequest
-                .request('netEngine.invite.cancel', { invitation: open })
-                .catch(() => undefined)
-            onBack()
-          }}
-        >
-          Pick another way
-        </button>
       )}
     </div>
   )

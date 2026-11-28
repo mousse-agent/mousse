@@ -10,24 +10,29 @@ import { Modal } from '../ui/Modal'
 import { DelayedLoader } from '../ui/DelayedLoader'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { readPairingLink } from './engineRows'
-import { CheckIcon, defaultCamera, PasteField, Scanner } from './pairingParts'
+import { Segmented } from '../settings/SettingsRow'
+import { AlsoLet, BackButton, CheckIcon, defaultCamera, LinkForm, Scanner } from './pairingParts'
 import { EnterLinkPanel, JoinRoutes } from './SendLinkParts'
 import { SshAddSteps } from './SshAddSteps'
 import { cannotUse, hasFeatures, linkWays, waysText } from './ways'
 
+/** How the other computer is reached: its link pasted, its QR code scanned, or SSH. */
+type Tab = 'link' | 'scan' | 'ssh'
+
 type Step =
   | { kind: 'choose' }
-  | { kind: 'scan' }
-  | { kind: 'ssh' }
   | { kind: 'check'; ticket: string; host?: string }
   | { kind: 'enter'; link?: string }
 
 /** The other computer, before it says its own name. */
 const UNNAMED_HOST = 'the other computer'
 
+/** Where the link or code comes from. */
+const OTHER_SIDE = 'On the other computer, choose Let a device in.'
+
 /**
- * Use another computer from here: its link (pasted or scanned) or SSH. A link is read and, where networking can,
- * checked from here before anything is sent; this computer only uses it unless "Also let" is ticked.
+ * Use another computer from here: Link, Scan or SSH along the top. A link is read and, where networking can,
+ * checked from here before anything is sent; this computer only uses it unless "Also let" is on.
  */
 export function UseComputerDialog({
   status,
@@ -43,6 +48,7 @@ export function UseComputerDialog({
   camera?: () => Promise<MediaStream | undefined>
 }) {
   const [step, setStep] = useState<Step>({ kind: 'choose' })
+  const [tab, setTab] = useState<Tab>('link')
   const [notRead, setNotRead] = useState('')
 
   // One reader for pasted and scanned links: a sent link (kind 2) goes on to its code, a shown one to the check.
@@ -70,41 +76,44 @@ export function UseComputerDialog({
     if (link && !read(link)) setNotRead('This isn’t a link from Mousse.')
   }, [read])
 
-  const title =
-    step.kind === 'ssh' ? 'Connect over SSH' : step.kind === 'scan' ? 'Scan its code' : 'Use another computer'
+  // SSH needs a helper that speaks protocol 1.1, which reports Reach.
+  const ssh = !!(status?.on && status.reach)
+  const tabs: Array<{ value: Tab; label: string; title: string }> = [
+    { value: 'link', label: 'Link', title: 'Paste the link the other computer shows or sent' },
+    { value: 'scan', label: 'Scan', title: 'Scan its QR code with this computer’s camera' },
+    ...(ssh ? [{ value: 'ssh' as const, label: 'SSH', title: 'No code needed. Uses your SSH keys or agent.' }] : [])
+  ]
+  const choosing = step.kind === 'choose'
   return (
-    <Modal open title={title} onClose={onClose}>
-      <div className="engine-dialog" data-step={step.kind}>
-        {step.kind === 'choose' && (
-          <div className="engine-dialog-home">
-            <p className="settings-muted">On the other computer, choose Let a device in.</p>
-            <PasteField onText={read} />
-            <div className="engine-dialog-alt">
-              <button
-                type="button"
-                className="settings-btn"
-                title="With this computer’s camera"
-                onClick={() => setStep({ kind: 'scan' })}
-              >
-                Scan its code
-              </button>
-              {status?.on && status.reach && (
-                <button
-                  type="button"
-                  className="settings-btn"
-                  title="No code needed. Uses your SSH keys or agent."
-                  onClick={() => setStep({ kind: 'ssh' })}
-                >
-                  Connect over SSH
-                </button>
-              )}
-            </div>
-          </div>
+    <Modal
+      open
+      className="engine-pair-modal"
+      title="Use another computer"
+      headerStart={choosing ? undefined : <BackButton onBack={() => setStep({ kind: 'choose' })} />}
+      onClose={onClose}
+    >
+      <div className="engine-dialog" data-step={choosing ? tab : step.kind}>
+        {choosing && (
+          <>
+            <Segmented
+              ariaLabel="How to connect"
+              value={tab}
+              options={tabs}
+              onChange={(next) => {
+                setNotRead('')
+                setTab(next)
+              }}
+            />
+            {tab === 'link' && <LinkForm onText={read} hint={OTHER_SIDE} />}
+            {tab === 'scan' && (
+              <>
+                <Scanner camera={camera} everyMs={status?.scanIntervalMs ?? DEFAULT_SCAN_INTERVAL_MS} onText={read} />
+                <p className="engine-hint">{OTHER_SIDE}</p>
+              </>
+            )}
+            {tab === 'ssh' && <SshAddSteps onDone={onClose} />}
+          </>
         )}
-        {step.kind === 'scan' && (
-          <Scanner camera={camera} everyMs={status?.scanIntervalMs ?? DEFAULT_SCAN_INTERVAL_MS} onText={read} />
-        )}
-        {step.kind === 'ssh' && <SshAddSteps onDone={onClose} />}
         {step.kind === 'enter' && (
           <EnterLinkPanel status={status} initialLink={step.link} onJoined={onClose} />
         )}
@@ -270,18 +279,15 @@ export function CheckStep({
                 : 'Reading the code…'}
         </p>
       )}
-      <label className="engine-check-box" title="Without it, this computer only uses it.">
-        <input
-          type="checkbox"
-          checked={back}
-          disabled={busy}
-          onChange={(event) => {
-            setBack(event.target.checked)
-            if (!event.target.checked) setShare([])
-          }}
-        />
-        Also let {name} use this computer
-      </label>
+      <AlsoLet
+        name={name}
+        checked={back}
+        disabled={busy}
+        onChange={(next) => {
+          setBack(next)
+          if (!next) setShare([])
+        }}
+      />
       {preview && (
         <JoinRoutes
           preview={preview}

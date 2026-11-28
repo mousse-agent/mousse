@@ -51,6 +51,8 @@ export interface SelectProps<T extends string = string> {
   title?: string
   /** With more options than this, typing in the open list filters it instead of jumping. */
   filterAfter?: number
+  /** Which edge of the trigger the open list lines up with; `end` for a menu at the right of its row. */
+  align?: 'start' | 'end'
 }
 
 const TYPEAHEAD_RESET_MS = 600
@@ -82,6 +84,7 @@ export function Select<T extends string = string>({
   renderValue,
   title,
   filterAfter,
+  align = 'start',
   'data-testid': testId
 }: SelectProps<T>) {
   const [open, setOpen] = useState(false)
@@ -182,7 +185,7 @@ export function Select<T extends string = string>({
     open,
     anchorRef: triggerRef,
     contentRef: listRef,
-    placement: 'below-start',
+    placement: align === 'end' ? 'below-end' : 'below-start',
     gap: 4,
     deps: [options.length, minWidth]
   })
