@@ -408,7 +408,7 @@ export function remoteBotMethods(options: {
    * Files another device sends ahead of a message (`bots.stage`), each bound to the bot and the device that sent it.
    * Absent: `bots.stage` refuses, and a message names no staged file.
    */
-  staging?: Pick<BotStaging, 'begin' | 'append' | 'take' | 'check' | 'release' | 'drop'>
+  staging?: Pick<BotStaging, 'checkBegin' | 'checkAppend' | 'begin' | 'append' | 'take' | 'check' | 'release' | 'drop'>
 }): RpcMethod[] {
   const limitOf = (context: RpcContext): PermissionMode => {
     try {
@@ -540,6 +540,11 @@ export function remoteBotMethods(options: {
     if (!options.staging) throw new NetError('stream_unknown', 'That file is no longer held. Send it again.', { details: { reason: 'stage_not_found' } })
     return options.staging
   }
+  /** Where files from other devices are held, on a computer that takes them. */
+  const stagerOf = (): NonNullable<typeof options.staging> => {
+    if (!options.staging) throw new NetError('conflict', 'This computer takes no files from other devices.')
+    return options.staging
+  }
   const takeStaged = (node: string, bot: string, ids: readonly string[]): Array<{ name: string; path: string }> => stagingOf().take(node, bot, ids)
   const actionSize = (p: Record<string, unknown>, port: RemoteBotsPort): void => {
       if (p.answer === 'send') {
@@ -607,16 +612,22 @@ export function remoteBotMethods(options: {
     method('bots.chat.file', async (p, port) => readBotFilePage(port.filesFolderOf(botId(p)), p.path as string, (p.offset as number | undefined) ?? 0)),
     // A file for a message to this bot, in parts. Each part passes the gate again, so a device that lost the bot sends
     // no more; the file is bound to this bot and this device, and only a message of theirs takes it.
+    // Every refusal is given before the call is taken (`first`), so the device reads it as certain, never as a change
+    // that may have happened; the part is checked again as it is written.
     method('bots.stage', async (p, _port, context) => {
-      const staging = options.staging
-      if (!staging) throw new NetError('conflict', 'This computer takes no files from other devices.')
+      const staging = stagerOf()
       const part = Buffer.from(p.dataB64 as string, 'base64')
-      // An SVG is never taken from another device, by its name or its first bytes.
-      if (p.stage === undefined && (isSvgName(p.name as string) || looksLikeSvg(part.subarray(0, 1024))))
-        throw new NetError('conflict', 'SVG files can’t be sent to another computer.', { details: { reason: 'svg' } })
       if (p.stage === undefined) return staging.begin(context.caller.node, botId(p), p.name as string, p.size as number, part)
       return staging.append(context.caller.node, botId(p), p.stage as string, p.offset as number, part)
-    }),
+    }, first((p, _port, context) => {
+      const staging = stagerOf()
+      const part = Buffer.from(p.dataB64 as string, 'base64')
+      if (p.stage !== undefined) return staging.checkAppend(context.caller.node, botId(p), p.stage as string, p.offset as number, part.length)
+      // An SVG is never taken from another device, by its name or its first bytes.
+      if (isSvgName(p.name as string) || looksLikeSvg(part.subarray(0, 1024)))
+        throw new NetError('conflict', 'SVG files can’t be sent to another computer.', { details: { reason: 'svg' } })
+      staging.checkBegin(context.caller.node, p.name as string, p.size as number)
+    })),
     method('bots.memory.list', async (p, port) => port.memoryList(botId(p))),
     method('bots.chat.send', async (p, port, context) => {
       const staged = (p.staged as string[] | undefined) ?? []

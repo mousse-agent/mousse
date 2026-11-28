@@ -92,8 +92,11 @@ export class BotStaging {
     }
   }
 
-  /** The first part of a file: checked against the limits, kept for `caller` and `botId` alone. Answers its id. */
-  async begin(caller: string, botId: string, name: string, size: number, first: Buffer): Promise<{ stage: string; received: number; size: number }> {
+  /**
+   * Refuses a first part `begin` would refuse (its size, the device's and the area's limits) without keeping anything,
+   * so a refusal can be given before the call is taken (`bots.stage`'s check for a new call): a refusal then is certain.
+   */
+  checkBegin(caller: string, name: string, size: number): void {
     this.sweep()
     const limits = this.limits
     if (size > limits.file)
@@ -103,6 +106,25 @@ export class BotStaging {
       throw new NetError('conflict', 'Too many files are on their way. Send again when these are sent.', { details: { reason: 'stage_full' } })
     if (this.used() + size > limits.totalBytes)
       throw new NetError('conflict', 'The computer is holding as many files as it may. Try again shortly.', { details: { reason: 'stage_full' } })
+  }
+
+  /** Refuses a next part `append` would refuse, without writing it (see `checkBegin`). */
+  checkAppend(caller: string, botId: string, id: string, offset: number, length: number): void {
+    this.sweep()
+    this.nextPart(this.own(caller, botId, id), offset, length)
+  }
+
+  private nextPart(file: Staged, offset: number, length: number): void {
+    if (file.busy) throw new NetError('conflict', 'That file is busy.', { details: { reason: 'stage_busy' } })
+    if (offset !== file.received)
+      throw new NetError('conflict', 'That part is not the next one.', { details: { reason: 'stage_offset', received: file.received } })
+    if (length > BOT_STAGE_PART_BYTES || file.received + length > file.size || (!length && file.received < file.size))
+      throw new NetError('bad_request')
+  }
+
+  /** The first part of a file: checked against the limits, kept for `caller` and `botId` alone. Answers its id. */
+  async begin(caller: string, botId: string, name: string, size: number, first: Buffer): Promise<{ stage: string; received: number; size: number }> {
+    this.checkBegin(caller, name, size)
     const id = `bst_${randomUUID().replaceAll('-', '')}`
     const path = join(this.options.folder, id)
     const file: Staged = { id, botId, caller, name, size, received: 0, path, createdAt: this.now(), busy: true }
@@ -121,11 +143,7 @@ export class BotStaging {
   /** The next part of a file `caller` began for `botId`, at exactly the bytes received so far. */
   async append(caller: string, botId: string, id: string, offset: number, part: Buffer): Promise<{ stage: string; received: number; size: number }> {
     const file = this.own(caller, botId, id)
-    if (file.busy) throw new NetError('conflict', 'That file is busy.', { details: { reason: 'stage_busy' } })
-    if (offset !== file.received)
-      throw new NetError('conflict', 'That part is not the next one.', { details: { reason: 'stage_offset', received: file.received } })
-    if (part.length > BOT_STAGE_PART_BYTES || file.received + part.length > file.size || (!part.length && file.received < file.size))
-      throw new NetError('bad_request')
+    this.nextPart(file, offset, part.length)
     file.busy = true
     try {
       if (part.length) await appendFile(file.path, part)

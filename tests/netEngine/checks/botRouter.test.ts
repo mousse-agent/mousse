@@ -327,6 +327,13 @@ describe('a window’s calls about a bot of another computer', () => {
     expect(await refused(viewer.dispatch('bots.chat.send', { botId: q, text: 'Logo', clientRequestId: 'router-svg-1', attachments: [{ name: 'logo.svg', path: join(mine, 'logo.svg') }] })))
       .toMatchObject({ code: 'bot_attachment_refused' })
     expect(sent(from)).toEqual([])
+    // One that names itself a picture goes up, and the bot's computer refuses it at its first part: certainly, not as a
+    // change that may have happened, and nothing reaches the bot.
+    writeFileSync(join(mine, 'sneaky.png'), '<svg xmlns="http://www.w3.org/2000/svg" onload="x()"/>')
+    const sneaky = await refused(viewer.dispatch('bots.chat.send', { botId: q, text: 'Sneaky', clientRequestId: 'router-svg-2', attachments: [{ name: 'sneaky.png', path: join(mine, 'sneaky.png') }] }))
+    expect(sneaky).toMatchObject({ code: 'conflict', details: { reason: 'svg' } })
+    expect(sent(from)).toEqual(['bots.stage'])
+    expect(ownerChat()).not.toContain('Sneaky')
     expect(await refused(viewer.dispatch('bots.remote.file', { botId: q, path: '../../secret.png' }))).toMatchObject({ code: 'invalid_params' })
     expect(await refused(viewer.dispatch('bots.remote.file', { botId: q, path: '/etc/hosts' }))).toMatchObject({ code: 'invalid_params' })
     const folder = owner.mms.personalBots!.service.filesFolderOf(keeper)
