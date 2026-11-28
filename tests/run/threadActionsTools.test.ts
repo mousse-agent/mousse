@@ -145,10 +145,10 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
   })
 
   describe('thread_send', () => {
-    it('refuses the caller\'s own thread and points to queue_enqueue, without a host call', async () => {
+    it('refuses the caller\'s own thread by id and says to leave threadId out to queue there, without a host call', async () => {
       const { call, host } = await world()
       const result = await call('thread_send', { threadId: 'caller', content: 'x' })
-      expect(result).toMatchObject({ isError: true, text: expect.stringContaining('queue_enqueue') })
+      expect(result).toMatchObject({ isError: true, text: expect.stringContaining('leave out threadId') })
       expect(host.sendToThread).not.toHaveBeenCalled()
     })
 
@@ -246,7 +246,8 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
 
     it('validates its input before it reaches the host', async () => {
       const { call, host } = await world()
-      for (const args of [{ threadId: 'target' }, { threadId: 'target', content: '   ' }, { content: 'x' }] as Array<Record<string, unknown>>)
+      // With no thread at all it queues on the caller's own thread (`queue_enqueue`, queueEditDaemon.test.ts).
+      for (const args of [{ threadId: 'target' }, { threadId: 'target', content: '   ' }, { content: '  ' }] as Array<Record<string, unknown>>)
         expect((await call('thread_send', args).catch((error) => ({ isError: true, error }))).isError, JSON.stringify(args)).toBe(true)
       expect(host.sendToThread).not.toHaveBeenCalled()
     })
