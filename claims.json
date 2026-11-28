@@ -101,6 +101,21 @@
       "expiresAt": "2026-11-27T12:40:03.362Z"
     },
     {
+      "task": "issue-2030-remote-bot-browser",
+      "session": "Avarnics-Mac-mini.local-7ee761",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "issue-2030-remote-bot-browser",
+      "paths": [
+        "src/mms/netEngine/session",
+        "src/mms/netEngine/helper/connections.ts",
+        "src/mms/bots/browser",
+        "src/mms/bridge/routed/BotRouter.ts",
+        "src/renderer/components/bots/BotBrowser.tsx"
+      ],
+      "claimedAt": "2026-11-28T11:00:19.649Z",
+      "expiresAt": "2026-11-28T13:00:19.649Z"
+    },
+    {
       "task": "issue-2104-offline-project-dedup",
       "session": "Animatrix-5d1857",
       "machine": "Animatrix",
