@@ -10,6 +10,7 @@ import type { ComputerRef } from './computerErrors'
 import { PASSING_END_CODES, RemoteBotChats, askOwner, ownerSaid } from './RemoteBotChats'
 import type { SqliteRemoteBots } from './remoteBotStore'
 import type { BotMarksStore } from '../../bots/marks/BotMarksStore'
+import type { RemoteBotTellings } from './RemoteBotTellings'
 
 type Json = Record<string, unknown>
 const isRecord = (value: unknown): value is Json => !!value && typeof value === 'object' && !Array.isArray(value)
@@ -66,6 +67,8 @@ interface Computer {
   saveTimer?: ReturnType<typeof setTimeout>
   /** The Bridge's copy of its feed stream was reset in this run of failures; a feed snapshot ends the run. */
   copyDropped?: boolean
+  /** Its feed has caught up with the computer since it was last (re)opened: a snapshot now is a live change. */
+  caught?: boolean
 }
 
 /** What is still to be dropped of a computer's bots, after a drop that did not go through. */
@@ -91,6 +94,11 @@ export interface RemoteBotRegistryOptions {
   store: SqliteRemoteBots
   /** What this computer marks on bots (`bot-marks.json`): a bot dropped here takes its marks with it. */
   marks?: Pick<BotMarksStore, 'dropBots' | 'dropComputer' | 'keepComputers'>
+  /**
+   * The notifications of those bots (`RemoteBotTellings`): each feed snapshot, live or replayed as the feed opens, and
+   * each bot lost here.
+   */
+  tellings?: Pick<RemoteBotTellings, 'feed' | 'unbase' | 'opened' | 'lose'>
   /**
    * The other computers of the user whose bots are listed (`PeerDirectory.botComputers`): those away included, a
    * pairing that no longer accepts this one left out. `undefined` when they can't be known now (the engine is still
@@ -424,9 +432,12 @@ export class RemoteBotRegistry {
       if (online !== c.online) {
         c.online = online
         moved = true
+        // Back, its feed still attached and caught up: it is live again, and settles first.
+        if (online && c.caught) this.toTellings((tellings) => tellings.opened(c.node))
       }
       if (!online) {
         c.live = false
+        this.toTellings((tellings) => tellings.unbase(c.node))
         continue
       }
       if (!c.attached && !c.attaching && this.now() >= c.retryAt) void this.attach(c)
@@ -463,6 +474,8 @@ export class RemoteBotRegistry {
     // What it last sent is written now, so a restart while it is away lists it.
     this.save(c, true)
     c.live = false
+    // What it sends when it is back first catches this computer up: not news.
+    this.toTellings((tellings) => tellings.unbase(c.node))
     if (!c.online) return
     c.online = false
     this.changed()
@@ -497,6 +510,7 @@ export class RemoteBotRegistry {
     c.unsaved = undefined
     this.chats.lose(c.node, c.bots.keys())
     this.drop(c.node, { all: true, lost: c.bots.keys() })
+    this.toTellings((tellings) => tellings.lose(c.node))
   }
 
   /** Bots this computer no longer reaches on `node`: their rows and chat copies go at once, on disk too. */
@@ -504,6 +518,7 @@ export class RemoteBotRegistry {
     const c = this.computersByNode.get(node)
     this.chats.lose(node, botIds)
     this.drop(node, { lost: botIds })
+    this.toTellings((tellings) => tellings.lose(node, botIds))
     if (!c) return
     const gone = botIds.filter((id) => c.bots.has(id))
     for (const id of gone) c.bots.delete(id)
@@ -524,7 +539,25 @@ export class RemoteBotRegistry {
     const held = c.attached
     c.attached = undefined
     c.live = false
+    this.unbase(c)
     held?.close()
+  }
+
+  /** The feed of `c` is (re)opening, or let go: until it catches up again, a snapshot tells nothing. */
+  private unbase(c: Computer): void {
+    c.caught = false
+    this.toTellings((tellings) => tellings.unbase(c.node))
+  }
+
+  /** The notifications hear of a feed or a loss; their failure never stops the feed. */
+  private toTellings(work: (tellings: NonNullable<RemoteBotRegistryOptions['tellings']>) => void): void {
+    const tellings = this.options.tellings
+    if (!tellings) return
+    try {
+      work(tellings)
+    } catch (error) {
+      this.failedOnce('follow the notifications of other computers’ bots', error)
+    }
   }
 
   private backOff(c: Computer): void {
@@ -550,6 +583,7 @@ export class RemoteBotRegistry {
     if (c.attached || c.attaching) return c.attaching
     c.attaching = (async () => {
       try {
+        this.unbase(c)
         const handle = await this.options.hub.attach(
           { nodeId: c.node, entityId: PRIVATE_BOTS_SUBJECT },
           (update) => {
@@ -558,9 +592,18 @@ export class RemoteBotRegistry {
           (code) => {
             c.attached = undefined
             c.live = false
+            this.unbase(c)
             this.ended(c, code)
           },
-          this.feedStream(c)
+          this.feedStream(c),
+          undefined,
+          // What the feed replays as it opens (the Bridge's copy, then what came while away) is not news.
+          (caught) => {
+            if (this.computersByNode.get(c.node) !== c) return
+            if (!caught) return this.unbase(c)
+            c.caught = true
+            this.toTellings((tellings) => tellings.opened(c.node))
+          }
         )
         if (this.closed || this.computersByNode.get(c.node) !== c || !this.options.enabled()) {
           handle.close()
@@ -605,6 +648,7 @@ export class RemoteBotRegistry {
 
   private away(c: Computer): void {
     this.backOff(c)
+    this.toTellings((tellings) => tellings.unbase(c.node))
     if (!c.online) return
     c.online = false
     this.changed()
@@ -667,6 +711,8 @@ export class RemoteBotRegistry {
       this.chats.lose(c.node, gone)
       this.drop(c.node, { lost: gone })
     } else this.save(c, false)
+    // A bot the feed no longer lists takes its notifications with it; a new message that wants the owner is told.
+    this.toTellings((tellings) => tellings.feed(c.node, feed.bots, c.caught === true))
     this.changed()
   }
 }

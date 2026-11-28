@@ -28,10 +28,11 @@ it('lists the unread now and soon messages, newest first, and none that is read,
   expect([owner, early, soon, later, now].map((m) => f.store.message(m.id)?.tell)).toEqual([null, 'soon', 'soon', 'later', 'now'])
 
   const telling = f.bots.feedTelling(botId)
+  const attention = [{ id: now.id, seq: now.seq, tell: 'now' }, { id: soon.id, seq: soon.seq, tell: 'soon' }]
   expect(telling).toEqual({
     readSeq: early.seq,
     latest: { id: now.id, seq: now.seq, author: 'bot', tell: 'now' },
-    attention: [now.id, soon.id]
+    attention
   })
 
   // The feed row another device reads carries the same.
@@ -40,7 +41,7 @@ it('lists the unread now and soon messages, newest first, and none that is read,
   }
   expect(feed.bots.find((bot) => bot.id === botId)).toMatchObject({
     readSeq: early.seq,
-    telling: { latest: { id: now.id, tell: 'now' }, attention: [now.id, soon.id] }
+    telling: { latest: { id: now.id, tell: 'now' }, attention }
   })
 
   // Read on any device: nothing wants the owner any more.

@@ -1063,6 +1063,11 @@ export class MmsProfileServices {
       }
     }
     this.personalBots = opened?.engine ?? null
+    // A bot muted or hidden on this computer tells nothing here (`bot-marks.json`); the marks are read once a row is due.
+    this.personalBots?.tellings.setQuiet((botId) => {
+      const marks = this.botMarks.get(botId)
+      return marks.muted === true || marks.hidden === true
+    })
     this.platform.onDispose(onSettingsSaved(() => this.personalBots?.settingsChanged()))
     // A bot's browser that comes back to it on its own (the window that held it went away) says so in its chat.
     const chat = opened?.engine.chat
