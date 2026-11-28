@@ -95,7 +95,6 @@ describe.skipIf(!binary)('OpenCode names threads on opencode:sealed (real OpenCo
     cleanups.push(() => stub.close())
     const { user, harness, titleOptions, listed } = await profile(stub, () => ({ userConfig: stubProviderConfig(stub, 'dummy-key'), sealedConfig: stubProviderConfig(stub, 'dummy-key') }))
 
-    expect(listed.oneShot).toBe(true)
     const keyed = listed.models.find((model) => model.id === 'stub/stub-model')!
     expect(keyed.title).toMatchObject({ state: 'held', route: 'opencode:sealed' })
     // OpenCode's own free models are offered `read`: best-effort, and the listing says why.

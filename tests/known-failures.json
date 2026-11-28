@@ -1,4 +1,5 @@
 [
+  { "file": "tests/harness/telemetryEnv.test.ts", "test": "Off wins over the connection's own variables; the user's own Claude Code is unchanged until flipped; flipping back leaves them as written", "issue": 2139, "how": "EPERM removing its mousse-tel-claude temp folder in afterEach, on master too", "platform": "win32" },
   { "file": "tests/netEngine/askOtherDirection.test.ts", "test": "takes nothing from a message alone: extra fields, repeated ids and unasked answers", "issue": 2121, "how": "NetError: The peer is offline. at the second send on the access exchange, on master too", "platform": "win32" },
   { "file": "tests/netEngine/askOtherDirection.test.ts", "test": "never prompts twice for one request id, however many others come after it", "issue": 2121, "how": "NetError: The peer is offline. at a later send on the access exchange, on master too", "platform": "win32" },
   { "file": "tests/storageCleanupRestore.test.ts", "issue": 2128, "how": "the file does not run: EPERM removing its mousse-foundation-test temp folder", "platform": "win32" },
@@ -17,7 +18,6 @@
   { "file": "tests/run/profileDatabase.test.ts", "test": "with owner-only permissions and migrates idempotently", "issue": 1964, "how": "Windows keeps no POSIX file modes: expected 438 to be 448", "platform": "win32" },
   { "file": "tests/run/profileDatabase.test.ts", "test": "refuses a symlinked run directory", "issue": 1964, "how": "creating the symlink fails with EPERM without Developer Mode", "platform": "win32" },
   { "file": "tests/net/bridge/routed/threadToolsRemote.test.ts", "test": "kept while that computer is offline, it is sent by the restarted daemon once that computer answers", "issue": 1965, "how": "intermittent: the archive is still pending, not sent" },
-  { "file": "tests/docs/setupMatrix.test.ts", "issue": 1966, "how": "the file does not load: SyntaxError: Invalid or unexpected token" },
   { "file": "tests/threadSearchIndex.test.ts", "test": "thread search index", "issue": 1971, "how": "EPERM removing the index folder while the index database is open", "platform": "win32" },
   { "file": "tests/gitFoundationProtocol.test.ts", "test": "a public main-agent send writes into the task", "issue": 1973, "how": "EPERM removing its temp folder: a file in it is still held open", "platform": "win32" },
   { "file": "tests/gitFoundationProtocol.test.ts", "test": "public undo/redo selects a parent turn", "issue": 1973, "how": "EPERM removing its temp folder: a file in it is still held open", "platform": "win32" },
