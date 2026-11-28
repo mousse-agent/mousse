@@ -215,7 +215,7 @@ export const DIAGNOSTICS_HELP = `The service samples memory only while the profi
 
 Usage:
   mousse-cli diagnostics memory       The latest memory numbers per process, the hourly
-                                      trend and any limit out of bounds, read from
+                                      trend and any target exceeded, read from
                                       <home>/diagnostics/memory.jsonl
   mousse-cli diagnostics memory report
                                       Print the issue text and a link that opens it

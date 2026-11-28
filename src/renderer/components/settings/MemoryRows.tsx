@@ -16,14 +16,14 @@ function cell(n: number | undefined): string {
   return n === undefined ? '-' : String(Math.round(n))
 }
 
-/** The tooltip on the summary: the service's counts, growth and anything out of bounds. */
+/** The tooltip on the summary: the service's counts, growth and anything above target. */
 export function memoryBreakdown(status: MemoryStatus): string {
   const sample = status.sample
   if (!sample) return 'No sample yet'
   const c = sample.counts
   const lines = [`Loaded threads ${c.loadedThreads}, runtimes ${c.threadRuntimes}, SQLite ${c.sqliteConnections ?? '-'}, workers ${c.workerThreads}, terminals ${c.ptys}, providers ${c.providerProcesses}`]
   if (status.growthMbPerHour !== null) lines.push(`Growth ${status.growthMbPerHour} MB/h`)
-  for (const breach of status.breaches) lines.push(`Out of bounds: ${breach.summary}`)
+  for (const breach of status.breaches) lines.push(`Above target: ${breach.summary}`)
   lines.push(`Log: <Mousse home>/${status.logFile}`)
   return lines.join('\n')
 }
