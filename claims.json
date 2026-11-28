@@ -178,6 +178,20 @@
       "expiresAt": "2026-11-28T07:56:18.988Z"
     },
     {
+      "task": "reach-back-to-starting-device",
+      "session": "Animatrix-f0c53d",
+      "machine": "Animatrix",
+      "branch": "reach-back-to-starting-device",
+      "paths": [
+        "src/mms/orchestrator/OrchestratorService.ts",
+        "src/mms/orchestrator/RemoteLaunchedThreads.ts",
+        "src/shared/settings.ts",
+        "src/renderer/components/settings/AgentAccessSettings.tsx"
+      ],
+      "claimedAt": "2026-11-28T10:59:16.587Z",
+      "expiresAt": "2026-11-28T12:59:16.587Z"
+    },
+    {
       "task": "remote-bots-levels",
       "session": "Avarnics-Mac-mini.local-82964d",
       "machine": "Avarnics-Mac-mini.local",
