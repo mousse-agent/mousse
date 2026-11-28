@@ -312,6 +312,18 @@
       "expiresAt": "2026-11-27T20:20:10.874Z"
     },
     {
+      "task": "snapshot-line-ending-check",
+      "session": "Animatrix-d44a12",
+      "machine": "Animatrix",
+      "branch": "mousse/fix-snapshot-autocrlf-config-check",
+      "paths": [
+        "src/mms/actions/snapshots.ts",
+        "tests/snapshotExactBytes.test.ts"
+      ],
+      "claimedAt": "2026-11-28T06:03:45.087Z",
+      "expiresAt": "2026-11-28T08:03:45.087Z"
+    },
+    {
       "task": "t3/fence-approvals-s2",
       "session": "LAPTOP-HIEROJK7-a26b71",
       "machine": "LAPTOP-HIEROJK7",
