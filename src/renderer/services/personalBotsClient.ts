@@ -189,8 +189,13 @@ export function attachmentPath(file: File): Promise<string> {
   return bridge.attachmentPath ? bridge.attachmentPath(file) : Promise.reject(new Error('Restart Mousse to attach files to a bot message.'))
 }
 
-/** The plain message of a failed request (RPC errors carry a code and a message). */
+/**
+ * The plain message of a failed request (RPC errors carry a code and a message). A refusal that crossed from another
+ * computer can arrive with only its code's general wording; its `details.reason` says what it was, so that is shown.
+ */
 export function errorText(cause: unknown): string {
+  const reason = (cause as { details?: { reason?: unknown } } | null)?.details?.reason
+  if (reason === 'svg') return 'SVG files can’t be sent to another computer.'
   if (cause && typeof cause === 'object' && 'message' in cause) return String((cause as { message: unknown }).message)
   return String(cause)
 }

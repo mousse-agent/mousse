@@ -211,6 +211,22 @@ describe('the chat of a bot of another computer', () => {
     expect(fake.calls.some(([name]) => name === 'remoteFile')).toBe(false)
   })
 
+  it('says an SVG can’t be sent when the bot’s computer refuses one, and keeps the words and the file', async () => {
+    await open(remote())
+    // Refused on the bot's computer: the code arrives with its general wording; the reason says what it was.
+    vi.mocked(fake.client.send).mockRejectedValueOnce({ code: 'conflict', message: 'The same identifier was used with different content.', details: { reason: 'svg' } })
+    await act(async () => {
+      useBotsStore.getState().setAttachments('n_laptop:b_inbox', [{ id: 'f1', file: new File(['<svg/>'], 'drawing.svg', { type: 'image/svg+xml' }) }])
+    })
+    await type(box()!, 'Here is the drawing')
+    await click(button('Send message'))
+    await settle()
+    expect(host.textContent).toContain('SVG files can’t be sent to another computer.')
+    expect(host.textContent).not.toContain('The same identifier was used')
+    expect(box()!.value).toBe('Here is the drawing')
+    expect(useBotsStore.getState().attachments['n_laptop:b_inbox']?.map((file) => file.file.name)).toEqual(['drawing.svg'])
+  })
+
   it('reads its chat again, alone, when its chat stream opens again', async () => {
     fake.chats.b_desk = [message(1)]
     await open(remote())
