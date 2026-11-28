@@ -88,6 +88,18 @@
       "expiresAt": "2026-11-27T12:40:03.362Z"
     },
     {
+      "task": "issue-2104-offline-project-dedup",
+      "session": "Animatrix-5d1857",
+      "machine": "Animatrix",
+      "branch": "issue-2104-offline-project-dedup",
+      "paths": [
+        "src/mms/bridge/routed/mergedLists.ts",
+        "tests/net/bridge/routed/mergedLists.test.ts"
+      ],
+      "claimedAt": "2026-11-28T05:07:14.564Z",
+      "expiresAt": "2026-11-28T07:07:14.564Z"
+    },
+    {
       "task": "one-shots-slice-2",
       "session": "Animatrix-10734d",
       "machine": "Animatrix",
