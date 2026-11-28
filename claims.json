@@ -101,6 +101,19 @@
       "expiresAt": "2026-11-27T18:58:27.324Z"
     },
     {
+      "task": "one-shots-slice-5",
+      "session": "Animatrix-37e5c4",
+      "machine": "Animatrix",
+      "branch": "one-shots-slice-5",
+      "paths": [
+        "src/mms/harness/drivers/pi",
+        "src/mms/harness/oneShot",
+        "src/mms/harness/pi/bedrockWorker.ts"
+      ],
+      "claimedAt": "2026-11-28T04:59:58.693Z",
+      "expiresAt": "2026-11-28T06:59:58.693Z"
+    },
+    {
       "task": "remote-bots-levels",
       "session": "Avarnics-Mac-mini.local-82964d",
       "machine": "Avarnics-Mac-mini.local",
