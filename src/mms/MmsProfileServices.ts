@@ -426,6 +426,10 @@ export class MmsProfileServices {
     this.personalBots?.setTellingWindows(count)
     this.bridgeService?.remoteTellings.attach(count)
   }
+  /** A bot was marked here (`bots.marks.set`): what is held of another computer's bot now muted or hidden goes. */
+  botMarksChanged(): void {
+    this.bridgeService?.remoteTellings.marksChanged()
+  }
   get spaces(): SpaceProfileService {
     this.net.assertFeature('netSpaces')
     return this.domainService().spaces

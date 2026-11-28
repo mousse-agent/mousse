@@ -242,6 +242,82 @@ describe('notifications of another computer’s bots', () => {
     expect(h.told).toHaveLength(1)
   })
 
+  it('hold no more than each bot’s feed still lists, and drop what is read, too old or quieted while no window is open', async () => {
+    const h = harness()
+    const registry = h.open({ windows: 0 })
+    /** What is held for a window: internal, as the claim is what is kept in memory. */
+    const held = () => (h.tellings() as unknown as { held: Map<string, unknown> }).held.size
+    await h.connect(registry, [row(KEEPER), row(WRITER)])
+    // Thirty new messages, one at a time: the feed lists only the newest twenty, and only those are held.
+    for (let seq = 1; seq <= 30; seq += 1) h.send(row(KEEPER, run(1, seq)), row(WRITER))
+    expect(held()).toBe(20)
+    // Read up to 25 on any device: only 26 to 30 stay.
+    h.send(row(KEEPER, run(1, 30), 25), row(WRITER, [now(40)]))
+    expect(held()).toBe(6)
+    // Muted here, with no feed change: its message goes at once.
+    h.marks.set(h.ref(WRITER), 'muted', true)
+    h.tellings().marksChanged()
+    expect(held()).toBe(5)
+    // A day later, the next snapshot drops what is too old.
+    h.clock.now += 86_400_001
+    h.send(row(KEEPER, run(1, 30), 25), row(WRITER, [now(40)]))
+    expect(held()).toBe(0)
+    h.tellings().attach(1)
+    await h.settle()
+    expect(h.told).toEqual([])
+    expect(h.asked).not.toHaveBeenCalled()
+  })
+
+  it('ask no words of a bot read or muted before a window opens, and tell only what still wants the owner once worded', async () => {
+    const h = harness()
+    const registry = h.open({ windows: 0 })
+    const third = 'bot-third'
+    const fourth = 'bot-fourth'
+    await h.connect(registry, [row(KEEPER), row(WRITER), row(third), row(fourth)])
+    h.send(row(KEEPER, [now(1)]), row(WRITER, [now(2)]), row(third, [now(3)]), row(fourth, [now(4)]))
+    // Read on its computer, and muted here without a word to the notifications: neither is asked for words.
+    h.send(row(KEEPER, [now(1)], 1), row(WRITER, [now(2)]), row(third, [now(3)]), row(fourth, [now(4)]))
+    h.marks.set(h.ref(WRITER), 'muted', true)
+    // The third bot is worded at once; while the fourth's words are asked for, the third's message is read.
+    let answer!: (messages: never[]) => void
+    h.asked.mockImplementation(async (_node, botId) => botId === fourth ? new Promise<never[]>((resolve) => { answer = resolve }) : [])
+    h.tellings().attach(1)
+    await vi.waitFor(() => expect(answer).toBeDefined())
+    expect(h.asked.mock.calls.map((call) => call[1])).toEqual([third, fourth])
+    h.send(row(KEEPER, [now(1)], 1), row(WRITER, [now(2)]), row(third, [], 3), row(fourth, [now(4)]))
+    answer([])
+    await h.settle()
+    expect(h.told.map((telling) => telling.rows.map((each) => each.messageId))).toEqual([['bm_4']])
+  })
+
+  it('hold again what was being worded when the last window closed, and tell it once one opens', async () => {
+    const h = harness()
+    const registry = h.open()
+    await h.connect(registry, [row(KEEPER)])
+    let answer!: (messages: never[]) => void
+    h.asked.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve }))
+    h.send(row(KEEPER, [now(1)]))
+    await vi.waitFor(() => expect(answer).toBeDefined())
+    h.tellings().attach(0)
+    answer([])
+    await h.settle()
+    expect(h.told).toEqual([])
+
+    // A window opens and closes again while the held message is worded: held still.
+    let again!: (messages: never[]) => void
+    h.asked.mockImplementationOnce(() => new Promise((resolve) => { again = resolve }))
+    h.tellings().attach(1)
+    await vi.waitFor(() => expect(again).toBeDefined())
+    h.tellings().attach(0)
+    again([])
+    await h.settle()
+    expect(h.told).toEqual([])
+
+    h.tellings().attach(1)
+    await h.settle()
+    expect(h.told).toMatchObject([{ rows: [{ botId: h.ref(KEEPER), messageId: 'bm_1' }], sound: false }])
+  })
+
   it('tell nothing again when an older open message comes back into the feed’s twenty', async () => {
     const h = harness()
     const registry = h.open()

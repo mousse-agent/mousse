@@ -2209,6 +2209,7 @@ function botMarksMethod(ctx: HandlerContext, method: 'bots.marks.list' | 'bots.m
   if (p.on && parseQualifiedId(botId) && !(ctx.mms.botRouter?.list(ctx) ?? []).some((bot) => bot.id === botId))
     throw new DomainRpcError('bot_not_found', 'That bot is not on your other computers any more.', { botId })
   const marks = ctx.mms.botMarks.set(botId, p.mark as BotMark, p.on)
+  ctx.mms.botMarksChanged?.()
   // This computer's other windows show the change too.
   ctx.mms.events.emit({ channel: 'protocol:event', data: { type: 'bots.changed', data: { marks: true } } })
   return { marks }

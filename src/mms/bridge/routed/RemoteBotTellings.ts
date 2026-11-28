@@ -41,11 +41,15 @@ interface Bot {
   topSeq: number
 }
 
-/** A new message seen while no window was open, told once one opens. */
+/**
+ * A new message seen while no window was open, told once one opens: only what telling it needs. One stays held only
+ * while its bot's feed still lists it (at most twenty a bot), it is less than a day old and the bot is not quiet here.
+ */
 interface Held {
-  bot: Bot
+  ref: string
   entry: BotAttention
-  row: BotFeedRow
+  /** Its words should its bot's computer not give them: the feed's latest reply line, or none. */
+  fallback: string
   at: number
 }
 
@@ -97,10 +101,17 @@ export class RemoteBotTellings {
   attach(windows: number): void {
     const opening = windows > 0 && this.windows === 0
     this.windows = windows
-    if (!opening || this.closed || !this.held.size) return
+    if (!opening || this.closed) return
+    this.pruneHeld()
+    if (!this.held.size) return
     const held = [...this.held.values()]
     this.held.clear()
     void this.tellHeld(held)
+  }
+
+  /** A bot was muted, hidden or marked otherwise here: what is held of a bot now quiet goes. */
+  marksChanged(): void {
+    this.pruneHeld()
   }
 
   /** The computer's feed is reopening, or the computer went away: what is new once it is back is told as a backlog. */
@@ -152,19 +163,36 @@ export class RemoteBotTellings {
       if (entries.length && !this.isQuiet(ref)) fresh.push({ bot, entries: entries.reverse(), row })
     }
     this.withdrawSettled()
+    this.pruneHeld()
     for (const each of fresh) {
       if (!this.windows) {
+        const ref = qualifyId(node, each.bot.botId)
         const at = this.now()
-        for (const entry of each.entries) this.held.set(`${qualifyId(node, each.bot.botId)}\n${entry.id}`, { bot: each.bot, entry, row: each.row, at })
+        for (const entry of each.entries) this.hold({ ref, entry, fallback: fallback(each.row, entry), at })
       } else void this.tell(each.bot, each.entries, each.row, backlog)
     }
+  }
+
+  private hold(held: Held): void {
+    this.held.set(`${held.ref}\n${held.entry.id}`, held)
+  }
+
+  /** Whether a held message is still to be told: its bot's feed lists it unread, it is recent and the bot not quiet. */
+  private stillHeld(held: Held, now = this.now()): boolean {
+    const bot = this.bots.get(held.ref)
+    return !!bot && now - held.at <= HELD_MS && held.entry.seq > bot.readSeq && bot.open.has(held.entry.id) && !this.isQuiet(held.ref)
+  }
+
+  private pruneHeld(): void {
+    const now = this.now()
+    for (const [key, held] of [...this.held]) if (!this.stillHeld(held, now)) this.held.delete(key)
   }
 
   /** Bots this computer no longer reaches on `node` (all of them when none are named): their notifications go. */
   lose(node: NodeId, botIds?: Iterable<string>): void {
     const refs = botIds ? new Set([...botIds].map((botId) => qualifyId(node, botId))) : undefined
     for (const [ref, bot] of [...this.bots]) if (bot.node === node && (!refs || refs.has(ref))) this.bots.delete(ref)
-    for (const [key, held] of [...this.held]) if (held.bot.node === node && (!refs || refs.has(qualifyId(node, held.bot.botId)))) this.held.delete(key)
+    for (const [key, held] of [...this.held]) if (refs ? refs.has(held.ref) : held.ref.startsWith(`${node}:`)) this.held.delete(key)
     if (!refs) {
       this.based.delete(node)
       this.catching.delete(node)
@@ -219,19 +247,33 @@ export class RemoteBotTellings {
   }
 
   /** The items of `entries` that still want the owner, worded from the messages themselves. */
-  private async itemsOf(bot: Bot, entries: BotAttention[], row: BotFeedRow): Promise<TellingItem[]> {
+  private async itemsOf(bot: Bot, entries: BotAttention[], fallbackOf: (entry: BotAttention) => string): Promise<TellingItem[]> {
     const ref = qualifyId(bot.node, bot.botId)
     const words = await this.messagesOf(bot, entries)
     if (this.closed || this.bots.get(ref) !== bot || this.isQuiet(ref)) return []
     return entries
-      .map((entry) => itemOf(ref, bot.name, entry, words.get(entry.id) ?? fallback(row, entry)))
+      .map((entry) => itemOf(ref, bot.name, entry, words.get(entry.id) ?? { id: entry.id, text: fallbackOf(entry) }))
       .filter((item) => this.stillOpen(item))
+  }
+
+  /** An item still to be told now: its bot is the one it was worded for, its message unread, and the bot not quiet. */
+  private stillToTell(item: TellingItem, bot: Bot): boolean {
+    return this.bots.get(item.botId) === bot && this.stillOpen(item) && !this.isQuiet(item.botId)
   }
 
   /** Tells the bot's new messages (`entries` oldest first): live, or as the backlog of a computer back from away. */
   private async tell(bot: Bot, entries: BotAttention[], row: BotFeedRow, backlog: boolean): Promise<void> {
-    const items = await this.itemsOf(bot, entries, row)
+    const items = await this.itemsOf(bot, entries, (entry) => fallback(row, entry))
     if (!items.length) return
+    if (!this.windows) {
+      // The last window closed while the words were asked for: held until one opens.
+      const at = this.now()
+      for (const item of items) {
+        const entry = entries.find((each) => each.id === item.messageId)!
+        this.hold({ ref: item.botId, entry, fallback: fallback(row, entry), at })
+      }
+      return
+    }
     if (backlog) {
       // What came while the computer was away: one silent fold for its catch-up, as a backlog is told.
       const id = this.catchFolds.get(bot.node) ?? `bt_${randomUUID()}`
@@ -260,18 +302,30 @@ export class RemoteBotTellings {
 
   /** What came while no window was open, less than a day old and still wanting the owner: one silent fold. */
   private async tellHeld(held: Held[]): Promise<void> {
+    // What was read, answered or quieted meanwhile is dropped before its bot's computer is asked for any words.
     const now = this.now()
     const byBot = new Map<Bot, Held[]>()
     for (const each of held) {
-      if (now - each.at > HELD_MS) continue
-      byBot.set(each.bot, [...(byBot.get(each.bot) ?? []), each])
+      if (!this.stillHeld(each, now)) continue
+      const bot = this.bots.get(each.ref)!
+      byBot.set(bot, [...(byBot.get(bot) ?? []), each])
     }
-    const items: TellingItem[] = []
+    const worded: Array<{ item: TellingItem; bot: Bot; held: Held }> = []
     for (const [bot, list] of byBot) {
+      const byId = new Map(list.map((each) => [each.entry.id, each]))
       const entries = list.map((each) => each.entry).sort((a, b) => a.seq - b.seq)
-      items.push(...(await this.itemsOf(bot, entries, list.at(-1)!.row)))
+      for (const item of await this.itemsOf(bot, entries, (entry) => byId.get(entry.id)!.fallback)) worded.push({ item, bot, held: byId.get(item.messageId)! })
     }
-    if (this.closed || !items.length) return
+    if (this.closed) return
+    // Each one again, as the words of another bot were asked for meanwhile.
+    const left = worded.filter((each) => this.stillToTell(each.item, each.bot))
+    if (!left.length) return
+    if (!this.windows) {
+      // Every window closed while the words were asked for: held until one opens.
+      for (const each of left) this.hold(each.held)
+      return
+    }
+    const items = left.map((each) => each.item)
     const id = `bt_${randomUUID()}`
     this.emit(tellingOf(id, items, false, CLOSED_LABEL))
     this.banners.set(id, items)
@@ -323,6 +377,6 @@ function itemOf(ref: string, name: string, entry: BotAttention, message: Pick<Re
 }
 
 /** A message whose words could not be read: the bot's latest reply line when it is that message, else "New message". */
-function fallback(row: BotFeedRow, entry: BotAttention): Pick<RemoteBotMessage, 'id' | 'text'> {
-  return { id: entry.id, text: row.telling?.latest?.id === entry.id ? (row.lastReply ?? '') : '' }
+function fallback(row: BotFeedRow, entry: BotAttention): string {
+  return row.telling?.latest?.id === entry.id ? (row.lastReply ?? '') : ''
 }
