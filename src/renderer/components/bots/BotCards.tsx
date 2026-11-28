@@ -68,7 +68,8 @@ function ProgressCard({ card }: { card: BotProgressCard }) {
 }
 
 function GalleryCard({ card }: { card: BotChatGalleryCard }) {
-  const images: ReplyImage[] = card.files.map((file) => ({ key: file.path, path: file.path, name: file.caption ?? file.name }))
+  // A picture of a bot of another computer is known by its place there (`remote`) until its copy here is read.
+  const images: ReplyImage[] = card.files.map((file) => ({ key: file.remote ?? file.path, path: file.path, name: file.caption ?? file.name }))
   return <section className="bot-card bot-gallery" aria-label={card.title ?? 'Pictures'}>
     {card.title && <p className="bot-card-title">{card.title}</p>}
     <BotReplyMedia images={images} />
@@ -91,7 +92,10 @@ export function BotCards({ cards, botId }: { cards: readonly BotChatCard[]; botI
   </div>
 }
 
-/** The paths a message's galleries show, which its own picture strip leaves to them. */
+/**
+ * The files a message's galleries show, which its own picture strip leaves to them: each by its path, or a bot of
+ * another computer's by its place there (`remote`).
+ */
 export function galleryPaths(cards: readonly BotChatCard[] | undefined): ReadonlySet<string> {
-  return new Set((cards ?? []).flatMap((card) => (card.type === 'gallery' ? card.files.map((file) => file.path) : [])))
+  return new Set((cards ?? []).flatMap((card) => (card.type === 'gallery' ? card.files.map((file) => file.remote ?? file.path) : [])))
 }

@@ -142,6 +142,8 @@ describe('a picture an MCP tool hands a bot', () => {
     const reply = chatOf(f, botId).filter((message) => message.author === 'bot').at(-1)!
     expect(reply.attachments).toEqual([{ name: saved[0], path: join(files, 'images', days[0]!, saved[0]!) }])
     expect(f.bots.service.attachmentFile(botId, reply.id, 0).name).toBe(saved[0])
+    // Another device reads it by its place in the files folder.
+    expect(remoteBotMessage(reply, botId).attachments?.[0]?.path).toBe(`images/${days[0]}/${saved[0]}`)
 
     // Taken by that message: the activation's next one carries none.
     const next = f.bots.chat.post({ botId, author: 'bot', kind: 'notice', text: 'One more thing.', activationId: firstActivation, threadId: payload.threadId })
@@ -188,7 +190,7 @@ describe('another device', () => {
     const remote = remoteBotMessage({
       seq: 1, id: 'm1', at: '2026-11-13T09:00:00.000Z', author: 'bot', kind: 'text', text: 'Here it is.', chips: [],
       applets: [{ threadId: 'home', reference: { appletId: 'a', revisionId: 'r', sourceHash: 'h', title: 'Budget ![x](https://e.example/p.png)', description: '' } }]
-    })
+    }, 'bot-0123456789ab')
     expect(remote).not.toHaveProperty('applets')
     expect(remote.text).toBe('Here it is.\n\n_Applet: Budget xhttps://e.example/p.png. It opens on the computer._')
   })

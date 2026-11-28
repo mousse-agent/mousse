@@ -205,8 +205,8 @@ export class ThreadRouter implements ThreadRouterPort {
   ): Promise<{ result: unknown } | undefined> {
     // `threads.focus` is the router's own method: the handler calls `focus` below. Reordering is an overlay
     // this computer keeps for itself: the handler places the rows of other computers among its own.
-    // `bots.focus` is the bot router's (`BotRouter.focus`).
-    if (method === 'threads.focus' || method === 'bots.focus' || !isRecord(params)) return undefined
+    // `bots.focus` and `bots.remote.file` are the bot router's (`BotRouter.focus`, `BotRouter.file`).
+    if (method === 'threads.focus' || method === 'bots.focus' || method === 'bots.remote.file' || !isRecord(params)) return undefined
     // A CLI that names a qualified id is still refused below; a window's drag is the handler's to place.
     if ((method === 'threads.reorder' || method === 'projects.reorder') && ctx.connection?.clientType === 'gui')
       return undefined

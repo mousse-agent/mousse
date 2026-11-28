@@ -6,6 +6,7 @@ import { ImageLightbox, type LightboxImage } from '../../chat/components/agent-e
 import { routeLink } from '../../utils/chatLinks'
 import { botImageSource, fileNameOf, isImageAttachment } from './imageSources'
 import { fileImages, listeners, loadFileImage, type FileImage } from './fileImageCache'
+import { useBotFiles } from './botFilesHost'
 
 export { adoptFilePreview, botFileImageUrl, resetBotFileImages } from './fileImageCache'
 
@@ -109,12 +110,14 @@ export function BotOtherFiles({ files }: { files: BotFiles }) {
 
 /**
  * An image in a message's text. A `data:` image (PNG, JPEG, GIF, WebP) or an image file of this computer shows as a
- * thumbnail; a web image is never loaded and shows as a link that opens in the browser; anything else is left out.
+ * thumbnail; a web image is never loaded and shows as a link that opens in the browser; anything else is left out. A
+ * bot of another computer names files there, never here: such an image shows as its name only.
  */
 export function BotMarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+  const remote = useBotFiles()?.remote
   const source = botImageSource(src)
   if (source.kind === 'data') return <Thumb id={source.url} url={source.url} name={alt} className="is-inline" />
-  if (source.kind === 'file') return <FileThumb path={source.path} name={alt?.trim() || fileNameOf(source.path)} className="is-inline" />
+  if (source.kind === 'file' && !remote) return <FileThumb path={source.path} name={alt?.trim() || fileNameOf(source.path)} className="is-inline" />
   if (source.kind === 'link') {
     const label = alt?.trim() || new URL(source.url).hostname
     return <a className="bot-image-link" href={source.url} title={source.url} onClick={(event) => { event.preventDefault(); routeLink(source.url) }}>

@@ -342,13 +342,16 @@ export interface BotsPersonalV2EventData {
  * The window's view of the bots of the owner's other computers, served by the viewing computer alone and never offered
  * to another device: `bots.remote.list`, those bots as this computer lists them (from memory and its copy on disk, never
  * waiting on another computer), and `bots.focus`, a window keeps a bot's chat in view (its chat stream is open while one
- * does). Calls about one of those bots are the usual bot methods with its qualified id, routed to its computer.
+ * does), and `bots.remote.file`, the copy on this computer of a file such a bot's chat shows (`path`, its place in the
+ * bot's files folder there). Calls about one of those bots are the usual bot methods with its qualified id, routed to
+ * its computer.
  */
-export const BOTS_ELSEWHERE_METHODS = ['bots.remote.list', 'bots.focus'] as const
+export const BOTS_ELSEWHERE_METHODS = ['bots.remote.list', 'bots.focus', 'bots.remote.file'] as const
 export type BotsElsewhereMethod = (typeof BOTS_ELSEWHERE_METHODS)[number]
 export interface BotsElsewhereApi {
   'bots.remote.list': { params: Record<string, never>; result: { bots: BotSummary[] } }
   'bots.focus': { params: { botId: string; focused: boolean }; result: { routed: boolean; focused: boolean } }
+  'bots.remote.file': { params: { botId: string; path: string }; result: { path: string; name: string; size: number } }
 }
 
 /**

@@ -85,8 +85,9 @@ const writes = (required: readonly string[], optional?: readonly string[], versi
  * permissions (answering an ask is a grant), memory edits, delete, taking over its browser, its Devices, new bots.
  * A row with a level but no `remote` is not offered to another device yet; its level is the one it gets when it is.
  *
- * The remote keys differ from the local ones where a device has no use for them: no `attachments` on a message (they
- * name files on this computer), a new bot's `reach` instead of `access`, and no prompt edit in `bots.update`.
+ * The remote keys differ from the local ones where a device has no use for them: `staged` files instead of a message's
+ * `attachments` (which name files on this computer), a new bot's `reach` instead of `access`, and no prompt edit in
+ * `bots.update`.
  */
 export const BOT_METHODS = {
   // ---------------------------------------------------------------- the Bot UI (`bots.personal.v2`)
@@ -106,7 +107,8 @@ export const BOT_METHODS = {
   'bots.chat.send': {
     level: 'use',
     local: chat(['botId', 'text', 'attachments', 'clientRequestId', 'replyTo']),
-    remote: chats(['botId', 'text', 'clientRequestId'], ['replyTo'])
+    // `staged`: files another device sent ahead with `bots.stage`, for this bot and from that device alone.
+    remote: chats(['botId', 'text', 'clientRequestId'], ['replyTo', 'staged'])
   },
   'bots.chat.stop': { level: 'use', local: chat(['botId']), remote: chats(['botId']) },
   'bots.chat.markRead': { level: 'use', local: chat(['botId', 'seq']), remote: chats(['botId', 'seq']) },
@@ -162,7 +164,12 @@ export const BOT_METHODS = {
 
   // ---------------------------------------------------------------- another device only
   // A picture from a bot's chat, in parts; this computer's app reads the file itself.
+  // It stays until the phone app moves to `bots.chat.file` (#2023).
   'bots.chat.attachment': { level: 'use', remote: reads(['botId', 'messageId', 'index'], ['offset']) },
+  // A file of the bot's files folder, in pages (never SVG); this computer's app reads the file itself.
+  'bots.chat.file': { level: 'use', remote: reads(['botId', 'path'], ['offset']) },
+  // A file for a message to the bot, sent ahead in parts: the first names it (`name`, `size`), the rest its `stage`.
+  'bots.stage': { level: 'use', remote: chats(['botId', 'clientRequestId', 'offset', 'dataB64'], ['name', 'size', 'stage']) },
 
   // ---------------------------------------------------------------- About → Devices (`BOT_DEVICE_METHODS`)
   'bots.devices.get': { level: 'full', local: devices(['botId']) },

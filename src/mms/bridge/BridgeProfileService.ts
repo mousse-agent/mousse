@@ -30,6 +30,7 @@ import type { BotReachPort } from '../protocol/botReachPort'
 import type { BotDeviceChoice } from '../../shared/bots/personal/deviceAccess'
 import { remoteListMethods } from './remote/RemoteLists'
 import { botDeviceLimitFrom, remoteBotMethods } from './remote/RemoteBots'
+import { BotStaging, stagedFileLost } from './remote/botStaging'
 import { cleanDeviceName } from '../../shared/bridge/editorAsk'
 import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
@@ -41,6 +42,7 @@ import { EditorAsks } from './routed/editorAsks'
 import { ThreadRouter } from './routed/ThreadRouter'
 import { MergedLists } from './routed/mergedLists'
 import { RemoteBotRegistry } from './routed/RemoteBotRegistry'
+import { RemoteBotFiles, type RemoteFilePage } from './routed/remoteBotFiles'
 import { RemoteBotTellings } from './routed/RemoteBotTellings'
 import type { RemoteBotMessage } from './remote/RemoteBots'
 import { BotRouter } from './routed/BotRouter'
@@ -531,8 +533,31 @@ export class BridgeProfileService {
         ...method,
         handle: (params, context) => this.track(method.handle(params, context))
       })
+    // Files another device sends a bot ahead of its message: kept apart from the bot's files folder until one takes them,
+    // and dropped once the device no longer reaches that bot (its level Off, left out of the bot's Devices, the bot gone,
+    // the device blocked here or gone from the account), as a queued message of that device is (`offWithdraw`).
+    const botStaging = new BotStaging({ folder: join(services.getProfileHomeDir(), 'bots', 'staging'), clock: this.clock })
+    const stopStagingSweep = botStaging.start()
+    const dropLostStaging = (): void => {
+      const present = this.peers.accountDevices()
+      botStaging.dropWhere(stagedFileLost({
+        bots: services.personalBots?.botIds(),
+        canReach: (botId, node) => reach.canReach(botId, node),
+        blocked: (node) => rt.policy.isBlocked(node as NodeId),
+        ...(present ? { present } : {})
+      }))
+    }
+    const offStagingReach = reach.onChange(dropLostStaging)
+    services.personalBots?.events.on('changed', dropLostStaging)
+    this.disposers.add(() => {
+      offStagingReach()
+      services.personalBots?.events.off('changed', dropLostStaging)
+      stopStagingSweep()
+      botStaging.close()
+    })
     // The owner's personal bots, from a phone or another computer: their chats, asks and pause, and a new bot.
     for (const method of remoteBotMethods({
+      staging: botStaging,
       bots: () => services.personalBots?.service ?? undefined,
       // The device's own limit here: what a bot does with threads in a turn its message started is held to it.
       deviceLimit: botDeviceLimitFrom(rt.policy),
@@ -706,11 +731,19 @@ export class BridgeProfileService {
       clock: this.clock
     })
     this.remoteTellings.attach(services.tellingWindows)
+    // The pictures and files their chats show, copied here a page at a time when a window first shows them.
+    const remoteBotFiles = new RemoteBotFiles({
+      folder: join(services.getProfileHomeDir(), 'bots', 'remote-files'),
+      read: async (node, botId, path, offset, signal) =>
+        (await this.router.client.callBot(node, 'bots.chat.file', { botId, path, ...(offset ? { offset } : {}) }, { write: false, ...(signal ? { signal } : {}) })) as RemoteFilePage,
+      online: (node) => this.router.isOnline(node) && this.bridgeOn()
+    })
     this.remoteBots = new RemoteBotRegistry({
       hub: this.hub,
       client: (node) => this.peers.client(node),
       store: new SqliteRemoteBots(join(services.getProfileHomeDir(), 'bots', REMOTE_BOTS_DB), this.clock),
       marks: services.botMarks,
+      files: remoteBotFiles,
       tellings: this.remoteTellings,
       // While the engine is still starting (or the roster can't be read) the computers are not known: none is forgotten.
       // With the engine on and the v1 roster unreadable, the v1 devices are neither listed nor forgotten.
@@ -732,6 +765,7 @@ export class BridgeProfileService {
     this.botRouter = new BotRouter({
       client: this.router.client,
       registry: this.remoteBots,
+      files: remoteBotFiles,
       online: (node) => this.router.isOnline(node),
       name: (node) => this.router.computer(node).name,
       self: () => rt.identity.self()?.node,

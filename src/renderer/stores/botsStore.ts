@@ -19,6 +19,8 @@ import { expandComposerQuotes, insertQuoteToken, registerQuote } from '../lib/co
 import { expandComposerThreadChips } from '../lib/composerThreadChips'
 import { clearBotLiveReplies, noteBotReply, noteBots, noteBotStopAsked, noteThreadMessage, setBotLiveReplySources } from './botLiveReplies'
 import { adoptFilePreview } from '../components/bots/fileImageCache'
+import { REMOTE_BOT_FILE_BYTES } from '../../shared/bots/personal/remoteFiles'
+import { copyRemotePictures, filesToSend, forgetFailedRemoteFiles, forgetRemoteBot, holdRemotePreview, isRemoteBot, onRemoteFileCopied, placeRemoteFiles, recheckRemoteCopies, resetRemoteBotFiles, setRemoteBotLookup, type RemoteFileRead } from './remoteBotFiles'
 import type { ChatReference } from '../../shared/chatReferences'
 import { threadLink } from '../../shared/threadLink'
 
@@ -299,7 +301,7 @@ const handedOver = new Set<string>()
  * The composer's pictures of a message being sent, handed to its confirmed copy's files, so a pasted image stays in
  * place from sending to sent instead of waiting empty for the file to be read. A picture with no matching file goes.
  */
-function handOverPreviews(pending: readonly BotChatMessage[], incoming: readonly BotChatMessage[]): void {
+function handOverPreviews(botId: string, pending: readonly BotChatMessage[], incoming: readonly BotChatMessage[]): void {
   for (const message of incoming) {
     if (message.author !== 'owner' || !message.clientRequestId) continue
     const sent = pending.find((entry) => entry.id === pendingId(message.clientRequestId!))
@@ -307,7 +309,9 @@ function handOverPreviews(pending: readonly BotChatMessage[], incoming: readonly
       if (!file.previewUrl || handedOver.has(file.previewUrl)) return
       handedOver.add(file.previewUrl)
       const copy = message.attachments?.[index]
+      // A file sent to a bot of another computer shows at its place there until its copy here is read.
       if (copy?.path && copy.name === file.name) adoptFilePreview(copy.path, file.previewUrl)
+      else if (copy?.remote && copy.name === file.name) holdRemotePreview(botId, copy.remote, file.previewUrl)
       else URL.revokeObjectURL(file.previewUrl)
     })
   }
@@ -380,10 +384,17 @@ let marksLatest = 0
 const happyTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 const bySeq = (a: BotChatMessage, b: BotChatMessage) => a.seq - b.seq
-/** `messages` with `incoming` added or replaced by id, in seq order. */
-function upsert(messages: BotChatMessage[], incoming: BotChatMessage[]): BotChatMessage[] {
+/** Reads the copy here of a file of a bot of another computer. */
+const readRemoteFile: RemoteFileRead = (botId, ref) => bots().remoteFile(botId, ref)
+/**
+ * `botId`'s `messages` with `incoming` added or replaced by id, in seq order. A bot of another computer's files are
+ * placed (`remoteBotFiles.ts`), and its pictures without a copy here are read.
+ */
+function upsert(botId: string, messages: BotChatMessage[], incoming: BotChatMessage[]): BotChatMessage[] {
+  const placed = placeRemoteFiles(botId, incoming)
+  copyRemotePictures(botId, placed, readRemoteFile)
   const byId = new Map(messages.map((message) => [message.id, message]))
-  for (const message of incoming) byId.set(message.id, message)
+  for (const message of placed) byId.set(message.id, message)
   return [...byId.values()].sort(bySeq)
 }
 const replaceBot = (list: BotSummary[], bot: BotSummary) =>
@@ -394,11 +405,12 @@ async function attachmentOf(attached: AttachedFile): Promise<BotChatAttachment> 
   return { name: attached.file.name || 'file', path: await attachmentPath(attached.file) }
 }
 
-/** Why these files can't be sent, or null when they can. */
-function attachmentsRefusal(files: readonly AttachedFile[]): string | null {
+/** Why these files can't be sent, or null when they can. A bot of another computer (`remote`) takes smaller files. */
+function attachmentsRefusal(files: readonly AttachedFile[], remote: boolean): string | null {
   if (files.length > MAX_BOT_CHAT_ATTACHMENTS) return `Attach at most ${MAX_BOT_CHAT_ATTACHMENTS} files.`
-  const large = files.find((attached) => attached.file.size > MAX_BOT_CHAT_ATTACHMENT_BYTES)
-  return large ? attachmentTooLargeText(large.file.name) : null
+  const limit = remote ? REMOTE_BOT_FILE_BYTES : MAX_BOT_CHAT_ATTACHMENT_BYTES
+  const large = files.find((attached) => attached.file.size > limit)
+  return large ? attachmentTooLargeText(large.file.name, limit) : null
 }
 
 /** The face a bot shows now: its state, or "done" for a moment after it finished well. */
@@ -424,16 +436,24 @@ export const useBotsStore = create<BotsState>((set, get) => {
   const fail = (owner: number, cause: unknown, botId: string | null = null) => { if (owner === epoch) set({ error: errorText(cause), errorBotId: botId, busy: false }) }
   const cacheOf = (botId: string): BotChatCache => get().chats[botId] ?? { messages: [], hasMore: false, loadingOlder: false }
   const putMessages = (botId: string, incoming: BotChatMessage[]) => {
-    if (!removed.has(botId)) handOverPreviews(get().pending[botId] ?? [], incoming)
-    putConfirmed(botId, incoming)
+    const placed = placeRemoteFiles(botId, incoming)
+    if (!removed.has(botId)) handOverPreviews(botId, get().pending[botId] ?? [], placed)
+    putConfirmed(botId, placed)
   }
+  setRemoteBotLookup((botId) => Boolean(get().bots.find((bot) => bot.id === botId)?.lives))
+  // A file of a bot of another computer was copied here: its chat shows it.
+  onRemoteFileCopied((botId) => set((state) => {
+    const cache = state.chats[botId]
+    const messages = cache ? placeRemoteFiles(botId, cache.messages) : undefined
+    return cache && messages !== cache.messages ? { chats: { ...state.chats, [botId]: { ...cache, messages: messages! } } } : {}
+  }))
   const putConfirmed = (botId: string, incoming: BotChatMessage[]) => set((state) => {
     if (removed.has(botId)) return {}
     const cache = state.chats[botId] ?? { messages: [], hasMore: false, loadingOlder: false }
     // A confirmed message clears only the bubble sent with its request id, so two identical messages on their way stay two.
     const owned = new Set(incoming.flatMap((message) => (message.author === 'owner' && message.clientRequestId ? [pendingId(message.clientRequestId)] : [])))
     const pending = (state.pending[botId] ?? []).filter((message) => !owned.has(message.id))
-    return { chats: { ...state.chats, [botId]: { ...cache, messages: upsert(cache.messages, incoming) } }, pending: { ...state.pending, [botId]: pending } }
+    return { chats: { ...state.chats, [botId]: { ...cache, messages: upsert(botId, cache.messages, incoming) } }, pending: { ...state.pending, [botId]: pending } }
   })
   /** A list with the bots made here that no list carried yet: one asked for before a bot was made doesn't drop it. */
   const withCreated = (listed: BotSummary[]): BotSummary[] => {
@@ -514,6 +534,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       focusedRemote.clear()
       removed.clear()
       reactions.clear()
+      resetRemoteBotFiles()
       clearBotLiveReplies()
       set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, references: {}, replyingTo: {},
         reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, aboutFocus: null, dialog: null,
@@ -649,6 +670,10 @@ export const useBotsStore = create<BotsState>((set, get) => {
       // A chat with nothing held yet says it is loading, and that it failed with Retry; one already shown just updates.
       const first = !get().chats[botId]
       if (first) set((state) => ({ chatLoad: { ...state.chatLoad, [botId]: 'loading' } }))
+      // Pictures of a bot of another computer that could not be read are tried again as its chat is read again.
+      forgetFailedRemoteFiles(botId)
+      // Its copies known here are asked for again: kept on this computer as recently shown, or read again if let go.
+      recheckRemoteCopies(botId, readRemoteFile)
       try {
         const page = await bots().messages(botId, { limit: BOT_CHAT_PAGE })
         if (owner !== epoch) return
@@ -661,7 +686,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
           const held = (state.chats[botId]?.messages ?? []).filter((message) => !gap || message.seq > first)
           const { [botId]: _old, ...live } = state.live
           return {
-            chats: { ...state.chats, [botId]: { messages: upsert(held, page.messages), hasMore: page.messages.length >= BOT_CHAT_PAGE, loadingOlder: false } },
+            chats: { ...state.chats, [botId]: { messages: upsert(botId, held, page.messages), hasMore: page.messages.length >= BOT_CHAT_PAGE, loadingOlder: false } },
             live: page.live ? { ...live, [botId]: page.live } : live,
             ...(page.live?.status ? { statuses: { ...state.statuses, [page.live.activationId]: page.live.status } } : {}),
             chatLoad
@@ -688,7 +713,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
           if (owner !== epoch) return
           set((state) => {
             const current = state.chats[botId] ?? cache
-            return { chats: { ...state.chats, [botId]: { messages: upsert(current.messages, page.messages), hasMore: page.messages.length >= BOT_CHAT_PAGE, loadingOlder: false } } }
+            return { chats: { ...state.chats, [botId]: { messages: upsert(botId, current.messages, page.messages), hasMore: page.messages.length >= BOT_CHAT_PAGE, loadingOlder: false } } }
           })
         } catch (cause) {
           if (owner === epoch) set((state) => ({ error: errorText(cause), errorBotId: botId, chats: { ...state.chats, [botId]: { ...cacheOf(botId), loadingOlder: false } } }))
@@ -769,16 +794,16 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
     async send(botId) {
       const typed = expandComposerThreadChips(expandComposerQuotes(get().drafts[botId] ?? '')).trim()
-      // A bot of another computer takes words only: files and this computer's threads are not sent there.
-      const remote = Boolean(get().bots.find((bot) => bot.id === botId)?.lives)
-      const attachments = remote ? [] : get().attachments[botId] ?? []
+      // A bot of another computer takes words and files; this computer's threads are not sent there.
+      const remote = isRemoteBot(botId)
+      const attachments = get().attachments[botId] ?? []
       const references = remote ? [] : get().references[botId] ?? []
       const replyTo = get().replyingTo[botId]
       // Each thread pill goes as its link on a line of its own: the chat shows it as the thread's chip, and the bot reads
       // the thread by reference.
       const text = [typed, references.flatMap((reference) => (reference.threadId ? [threadLink(reference.threadId)] : [])).join('\n')].filter(Boolean).join('\n\n')
       if (!text && !attachments.length) return
-      const refusal = attachmentsRefusal(attachments)
+      const refusal = attachmentsRefusal(attachments, remote)
       if (refusal) {
         set({ error: refusal, errorBotId: botId })
         return
@@ -804,16 +829,16 @@ export const useBotsStore = create<BotsState>((set, get) => {
       }))
       try {
         const files = await Promise.all(attachments.map(attachmentOf))
-        const message = await bots().send(botId, text, admission.clientRequestId, files, replyTo?.id)
+        const [message] = placeRemoteFiles(botId, [await bots().send(botId, text, admission.clientRequestId, files, replyTo?.id)])
         // The pictures shown while sending go to the sent message's files (unless its copy came first and took them);
         // any left over are no longer needed.
-        if (owner === epoch) handOverPreviews([shown], [message])
+        if (owner === epoch) handOverPreviews(botId, [shown], [message!])
         for (const attached of attachments) {
           if (attached.previewUrl && !handedOver.delete(attached.previewUrl)) URL.revokeObjectURL(attached.previewUrl)
         }
         if (owner !== epoch) return
         set((state) => ({ pending: { ...state.pending, [botId]: (state.pending[botId] ?? []).filter((entry) => entry.id !== shown.id) } }))
-        putConfirmed(botId, [message])
+        putConfirmed(botId, [message!])
       } catch (cause) {
         if (owner !== epoch) return
         // Nothing was sent: the words and files go back into the composer.
@@ -835,15 +860,15 @@ export const useBotsStore = create<BotsState>((set, get) => {
       const messages = cacheOf(botId).messages
       const failed = messages.find((message) => message.id === messageId)
       const again = failed ? botRetryOf(messages, failed) : null
-      // A bot of another computer takes words only, as `send` sends them: files sent with the turn stay behind.
-      const remote = Boolean(get().bots.find((bot) => bot.id === botId)?.lives)
-      if (!again || (remote && !again.text)) return
+      if (!again) return
       const owner = epoch
       const clientRequestId = retrySends.get(messageId) ?? crypto.randomUUID()
       retrySends.set(messageId, clientRequestId)
       set({ error: null })
       try {
-        const message = await bots().send(botId, again.text, clientRequestId, remote ? [] : again.attachments, again.replyTo)
+        // A file of a bot of another computer is sent again from its copy here, read first when there is none.
+        const files = await filesToSend(botId, again.attachments, readRemoteFile)
+        const message = await bots().send(botId, again.text, clientRequestId, files, again.replyTo)
         if (owner !== epoch) return
         putMessages(botId, [message])
       } catch (cause) { fail(owner, cause, botId) }
@@ -1193,6 +1218,12 @@ export const useBotsStore = create<BotsState>((set, get) => {
 // A live reply follows its bot's chat turn and its chat's messages: it goes once its message is posted.
 setBotLiveReplySources({ bots: () => useBotsStore.getState().bots, messages: (botId) => useBotsStore.getState().chats[botId]?.messages ?? [] })
 useBotsStore.subscribe((state, previous) => { if (state.bots !== previous.bots || state.chats !== previous.chats) noteBots() })
+// A bot of another computer that leaves the list takes what this window kept of its files with it.
+useBotsStore.subscribe((state, previous) => {
+  if (state.bots === previous.bots) return
+  const present = new Set(state.bots.map((bot) => bot.id))
+  for (const bot of previous.bots) if (bot.lives && !present.has(bot.id)) forgetRemoteBot(bot.id)
+})
 
 /** Failures whose words come from the service and are meant for the owner as they are. */
 const PLAIN_CREATE_FAILURES = new Set(['invalid_params', 'bot_invalid', 'bots_unavailable', 'model_unavailable'])

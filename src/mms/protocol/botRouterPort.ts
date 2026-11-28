@@ -19,4 +19,9 @@ export interface BotRouterPort {
   focus(ctx: HandlerContext, botId: string, focused: boolean): Promise<{ routed: boolean; focused: boolean }>
   /** The other computers' bots a window lists beside this computer's own (`bots.remote.list`), from what is kept here. */
   list(ctx: HandlerContext): BotSummary[]
+  /**
+   * A file a bot of another computer's chat shows (`bots.remote.file`): its copy on this computer, read from the bot's
+   * files folder there when there is none or it changed. `path` is its place in that folder.
+   */
+  file(ctx: HandlerContext, botId: string, path: string): Promise<{ path: string; name: string; size: number }>
 }

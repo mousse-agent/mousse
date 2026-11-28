@@ -70,7 +70,7 @@ const inside = (root: string, path: string): boolean => {
  * A picture a gallery shows, as its full path inside the bot's files folder (`filesFolder`), or why not. A path may be
  * full, a `file://` address, or relative to the folder; links are followed, and the file they reach must be inside the
  * folder, a PNG, JPEG, GIF or WebP by its first bytes (never SVG) and at most `MAX_BOT_IMAGE_BYTES`. Checked when the
- * card is made and again whenever the picture is read (`bots.chat.attachment`).
+ * card is made, and the folder again whenever another device reads the picture (`bots.chat.file`).
  */
 export function galleryPicture(filesFolder: string, given: string): { path: string } | { problem: string } {
   let path = given.trim()

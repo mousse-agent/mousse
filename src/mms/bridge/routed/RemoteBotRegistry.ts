@@ -10,6 +10,7 @@ import type { ComputerRef } from './computerErrors'
 import { PASSING_END_CODES, RemoteBotChats, askOwner, ownerSaid } from './RemoteBotChats'
 import type { SqliteRemoteBots } from './remoteBotStore'
 import type { BotMarksStore } from '../../bots/marks/BotMarksStore'
+import type { RemoteBotFiles } from './remoteBotFiles'
 import type { RemoteBotTellings } from './RemoteBotTellings'
 
 type Json = Record<string, unknown>
@@ -94,6 +95,8 @@ export interface RemoteBotRegistryOptions {
   store: SqliteRemoteBots
   /** What this computer marks on bots (`bot-marks.json`): a bot dropped here takes its marks with it. */
   marks?: Pick<BotMarksStore, 'dropBots' | 'dropComputer' | 'keepComputers'>
+  /** The copies of those bots' files the chats here showed (`RemoteBotFiles`): a bot dropped here takes them with it. */
+  files?: Pick<RemoteBotFiles, 'dropBots' | 'dropComputer' | 'keepComputers'>
   /**
    * The notifications of those bots (`RemoteBotTellings`): each feed snapshot, live or replayed as the feed opens, and
    * each bot lost here.
@@ -353,6 +356,9 @@ export class RemoteBotRegistry {
         // What this computer marked on them goes too (pin, hide, mute, marked unread).
         if (all) this.options.marks?.dropComputer(node)
         else if (lost.length) this.options.marks?.dropBots(node, lost)
+        // And the copies of their files that the chats here showed.
+        if (all) this.options.files?.dropComputer(node)
+        else if (lost.length) this.options.files?.dropBots(node, lost)
         return true
       }) === true
     // The Bridge's part of a drop still under way is not asked twice; it is tried again once it ends.
@@ -415,6 +421,7 @@ export class RemoteBotRegistry {
     // Marks follow the computers themselves, not the copy on disk: a computer this one never kept bots of, or one
     // removed before that copy was first written, still takes its bots' marks with it.
     this.safely('drop the marks of other computers’ bots', () => this.options.marks?.keepComputers((node) => kept(node as NodeId)))
+    this.safely('drop the files of other computers’ bots', () => this.options.files?.keepComputers((node) => kept(node as NodeId)))
     // What is kept on disk for a computer no longer listed (it left the user's computers, was blocked, or its pairing
     // no longer accepts this one) goes too, also when it left while this computer was not running.
     const key = `${[...present.keys()].sort().join(',')}${listed.unsure ? ' unsure' : ''}`

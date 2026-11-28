@@ -23,9 +23,10 @@ const FILE_LINK = /\]\(mousse-file:\/\/open\?path=([^)\s]+)\)/g
 /**
  * The reply's pictures, in the order they come (its words first, then its files; each once), and its words without
  * the Markdown images that now show above them. A path to a picture stays in the words as its chip; a web image
- * stays as its link (it never loads); fenced code is left as written.
+ * stays as its link (it never loads); fenced code is left as written. `remote`: the bot lives on another computer, so a
+ * path in its words is a file there, never read here: only its files (their copies here) and `data:` images show.
  */
-export function replyImages(message: Pick<BotChatMessage, 'text' | 'attachments'>): { images: ReplyImage[]; text: string } {
+export function replyImages(message: Pick<BotChatMessage, 'text' | 'attachments'>, remote = false): { images: ReplyImage[]; text: string } {
   const images: ReplyImage[] = []
   const add = (image: ReplyImage) => {
     const known = images.find((entry) => entry.key === image.key)
@@ -45,12 +46,13 @@ export function replyImages(message: Pick<BotChatMessage, 'text' | 'attachments'
     }
     const kept = line.replace(MARKDOWN_IMAGE, (whole, alt: string, bracketed?: string, bare?: string) => {
       const source = botImageSource(bracketed ?? bare)
+      if (source.kind === 'file' && remote) return whole
       if (source.kind === 'file') add({ key: source.path, path: source.path, name: alt.trim() || fileNameOf(source.path) })
       else if (source.kind === 'data') add({ key: source.url, url: source.url, name: alt.trim() || 'Picture' })
       else return whole
       return ''
     })
-    for (const [, encoded] of linkBotPaths(kept).matchAll(FILE_LINK)) {
+    if (!remote) for (const [, encoded] of linkBotPaths(kept).matchAll(FILE_LINK)) {
       let path: string
       try { path = decodeURIComponent(encoded!) } catch { continue }
       if (isImageFile(path)) add({ key: path, path, name: fileNameOf(path), chip: true })

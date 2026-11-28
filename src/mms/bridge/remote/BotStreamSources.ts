@@ -203,7 +203,7 @@ export function botStreamSource(services: BotStreamsServices, reader: string, bo
     snapshot: () => {
       reached()
       const bot = row()
-      const snapshot: BotStreamSnapshot = { kind: 'mousse.bot', version: 1, bot, page: fittedBotPage(port().service.chatList(botId)) }
+      const snapshot: BotStreamSnapshot = { kind: 'mousse.bot', version: 1, bot, page: fittedBotPage(port().service.chatList(botId), botId) }
       return mmsJson(snapshot)
     },
     watch: (listener, onError) => {
@@ -252,7 +252,7 @@ export function botStreamSource(services: BotStreamsServices, reader: string, bo
       }
       const message = (event: { botId?: unknown; message?: BotChatMessage }): void => {
         if (event?.botId !== botId || !event.message) return
-        send({ type: 'bots.message', data: { botId, message: fittedBotMessage(event.message) } satisfies BotStreamEvents['bots.message'] })
+        send({ type: 'bots.message', data: { botId, message: fittedBotMessage(event.message, botId) } satisfies BotStreamEvents['bots.message'] })
         // Its unread count, last line and telling metadata move with it.
         refreshRow()
       }

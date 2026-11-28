@@ -54,6 +54,8 @@ describe('the bot method table', () => {
       'bots.get': 'use',
       'bots.chat.list': 'use',
       'bots.chat.attachment': 'use',
+      'bots.chat.file': 'use',
+      'bots.stage': 'use',
       'bots.memory.list': 'use',
       'bots.chat.send': 'use',
       'bots.chat.stop': 'use',

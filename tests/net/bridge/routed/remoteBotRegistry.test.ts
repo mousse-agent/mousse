@@ -4,7 +4,7 @@
  * is under the test's control. What the disk holds is read through a second store on the same file, as a restart
  * would read it. The same flows over two real daemons are `tests/netEngine/checks/remoteBotCopies.test.ts`.
  */
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -13,6 +13,7 @@ import { botChatSubject } from '../../../../src/mms/bridge/routed/RemoteBotChats
 import { REMOTE_BOT_COPY_LIMITS, SqliteRemoteBots, type RemoteBotCopyLimits } from '../../../../src/mms/bridge/routed/remoteBotStore'
 import { PRIVATE_BOTS_SUBJECT } from '../../../../src/mms/bridge/remote/privateStreams'
 import { BotMarksStore } from '../../../../src/mms/bots/marks/BotMarksStore'
+import { RemoteBotFiles } from '../../../../src/mms/bridge/routed/remoteBotFiles'
 import { NetError, newId, type NodeId } from '../../../../src/shared/net'
 
 const cleanups: Array<() => void> = []
@@ -69,6 +70,8 @@ function harness(options: { limits?: Partial<RemoteBotCopyLimits> } = {}) {
   const stores: SqliteRemoteBots[] = []
   /** What this computer marks on bots: a bot lost here takes its marks with it. */
   const marks = new BotMarksStore(join(dir, 'bots'))
+  /** The copies of the files their chats show: a bot lost here takes them with it. */
+  const files = new RemoteBotFiles({ folder: join(dir, 'bots', 'remote-files'), read: async () => { throw new Error('not read here') }, online: () => false })
   const open = (): RemoteBotRegistry => {
     const store = new SqliteRemoteBots(path, Date, options.limits)
     stores.push(store)
@@ -81,7 +84,8 @@ function harness(options: { limits?: Partial<RemoteBotCopyLimits> } = {}) {
       enabled: () => bridge.on,
       // Long enough that a test sees what is written at once, not on the timer.
       saveSettleMs: 60_000,
-      marks
+      marks,
+      files
     })
     cleanups.push(() => registry.close())
     return registry
@@ -121,7 +125,7 @@ function harness(options: { limits?: Partial<RemoteBotCopyLimits> } = {}) {
   }
   /** The Bridge's copies of streams dropped so far, by subject. */
   const droppedCopies = () => h.hub.dropCopy.mock.calls.map(([ref]) => ref.entityId)
-  const h = { node, roster, online, bridge, hub, client, refuse, open, disk, feed, chat, listed, away, back, path, droppedCopies, marks, store: () => stores.at(-1)! }
+  const h = { node, roster, online, bridge, hub, client, refuse, open, disk, feed, chat, listed, away, back, path, droppedCopies, marks, files, dir, store: () => stores.at(-1)! }
   return h
 }
 
@@ -216,10 +220,18 @@ describe('losing bots of another computer', () => {
       h.roster.unsure = (node) => node === other
       const elsewhere = `${other}:other-bot`
       for (const ref of [`${h.node}:${KEEPER}`, `${h.node}:${WRITER}`, elsewhere, 'own-bot']) h.marks.set(ref, 'muted', true)
+      // A picture each bot's chat showed here, kept as a file of this computer.
+      const picture = join(h.dir, 'picture.png')
+      writeFileSync(picture, 'png')
+      for (const botId of [KEEPER, WRITER]) h.files.seed(h.node, botId, 'images/picture.png', 'picture.png', picture)
+      const copies = new Map<string, string>()
+      for (const botId of [KEEPER, WRITER]) copies.set(botId, (await h.files.fetch(h.node, botId, 'images/picture.png')).path)
 
       await loss.lose(h, registry)
       const kept = [KEEPER, WRITER].filter((id) => !loss.lost.includes(id))
       await vi.waitFor(() => expect(registry.rows().map((bot) => bot.botId)).toEqual(kept))
+      // The lost bots' pictures go with them; a bot kept keeps its own.
+      for (const [botId, copy] of copies) expect(existsSync(copy), botId).toBe(kept.includes(botId))
       // The lost bots' marks go with them, on disk too; every other bot keeps its own.
       expect(Object.keys(new BotMarksStore(join(h.path, '..')).list()).sort()).toEqual([...kept.map((id) => `${h.node}:${id}`), elsewhere, 'own-bot'].sort())
       expect(registry.chats.messages(h.node, KEEPER)).toEqual([])
