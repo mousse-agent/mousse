@@ -2764,6 +2764,27 @@ html[data-chat-width='full'] .chat {
   color: currentColor;
 }
 
+/* A bot chip: one of the owner's bots tagged with `@` (lib/composerBotChips.ts). Its face sits in the token's blank
+ * slot; the chip takes the bot's colour, as the tag in the sent message does (botTag.css). */
+.composer-bot-chip {
+  color: color-mix(in srgb, var(--tag-colour) 62%, var(--text-primary));
+  background: color-mix(in srgb, var(--tag-colour) 15%, transparent);
+}
+
+.composer-bot-chip-face {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  transform: translate(-50%, -50%);
+}
+
+/* A bot's row in the `@` list: its face where other rows have their icon. */
+.composer-suggestion-icon.composer-suggestion-bot {
+  width: 18px;
+  justify-content: center;
+}
+
 .composer-thread-chip-computer {
   color: var(--text-secondary);
 }

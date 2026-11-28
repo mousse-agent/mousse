@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ComponentProps, ReactNode } from 'react'
+import type { ComponentProps, CSSProperties, ReactNode } from 'react'
 import { File as FileIcon, GitFork, IconPhoto, MessageSquare, Mic, RefreshCw, Reply, X } from '../lib/icons'
 import type {
   BrowserElementAttachment,
@@ -26,7 +26,7 @@ import {
   type ComposerCommandDef,
   type MentionItem
 } from '../../shared/composerCommands'
-import { CommandRowContent, ComposerSuggestionList, MentionRowContent, SkillRowContent, type SuggestionRow } from './ComposerSuggestionList'
+import { CommandRowContent, ComposerSuggestionList, MarkedText, markQuery, MentionRowContent, SkillRowContent, type SuggestionRow } from './ComposerSuggestionList'
 import { ComposerFooter, STEER_BINDING, formatRecordingTime as formatDuration, isSteerKey, type ComposerRunProps } from './ComposerFooter'
 import { markSteerKey, steersOnEnter, type SendMode } from '../lib/steerKey'
 import { useThreadSendMode } from '../lib/sendMode'
@@ -99,6 +99,18 @@ import {
   type AttachmentChipSpan
 } from '../lib/composerAttachmentChips'
 import { formatSentChip } from '../../shared/inlineAttachments'
+import {
+  botChipParts,
+  botChipRegistry,
+  chipBotTags,
+  expandComposerBotChips,
+  findBotChips,
+  matchTaggableBots,
+  registerBotChip,
+  type TaggableBot
+} from '../lib/composerBotChips'
+import { DEFAULT_BOT_LOOK, BOT_COLOUR_HEX, normalizeBotLook, type BotLook } from '../../shared/bots/personal/look'
+import { BotFace } from './bots/face/BotFace'
 
 import { admitAttachments, type ChipStatus } from '../lib/attachmentPreparation'
 import { countRender } from '../chat/components/agent-elements/render-counts'
@@ -199,6 +211,12 @@ export interface ChatComposerProps {
   disableSkillsPicker?: boolean
   /** A row above the input, such as a subagent asking a question; it brings its own layout. */
   banner?: ReactNode
+  /**
+   * Bots the `@` list offers to tag (a bot's chat: the owner's other bots). A pick leaves the bot's chip, its face and
+   * name, which goes as the bot's tag (`lib/composerBotChips.ts`); a tag of one of them typed, pasted or brought back
+   * by Up becomes its chip too.
+   */
+  mentionBots?: readonly TaggableBot[]
   /** Searches the project's files and folders for an `@` mention; rejects when there is no project to search. */
   searchMentions?: (query: string) => Promise<FileSearchResponse>
   /**
@@ -238,6 +256,9 @@ export interface ChatComposerProps {
 }
 
 /** A chip under the pointer: a thread chip (and whether on its remove mark) or an attachment chip, by its place in its list. */
+/** A row of the `@` list: a skill, a file or folder, or a bot to tag. */
+type ComposerMention = MentionItem<SkillDescriptor> | { kind: 'bot'; bot: TaggableBot }
+
 interface ChipHit {
   kind: 'thread' | 'attachment'
   index: number
@@ -308,6 +329,7 @@ export function ChatComposer({
   lastPrompt,
   disableSkillsPicker = false,
   banner,
+  mentionBots,
   searchMentions,
   mentionScope,
   permission,
@@ -470,13 +492,25 @@ export function ChatComposer({
   const threadChips = useMemo(() => findThreadChips(input, threadChipRegistry()), [input])
   // Attachment chips: an attachment or reference placed among the text, at its place (`lib/composerAttachmentChips.ts`).
   const attachmentChips = useMemo(() => findAttachmentChips(input, attachmentChipRegistry()), [input])
-  // Every chip that edits as one character: thread chips and attachment chips.
+  // Bot chips: a bot tagged with `@`, its face and name at its place (`lib/composerBotChips.ts`).
+  const botChips = useMemo(() => findBotChips(input, botChipRegistry()), [input])
+  // Every chip that edits as one character: thread chips, attachment chips and bot chips.
   const atomicChips = useMemo(
-    () => (attachmentChips.length ? [...threadChips, ...attachmentChips].sort((a, b) => a.index - b.index) : threadChips),
-    [threadChips, attachmentChips]
+    () => (attachmentChips.length || botChips.length ? [...threadChips, ...attachmentChips, ...botChips].sort((a, b) => a.index - b.index) : threadChips),
+    [threadChips, attachmentChips, botChips]
   )
-  const chipLinks = (text: string, within?: { start: number; end: number }) =>
-    chipThreadLinks(text, (threadId) => (pastedThreadRefusal?.(threadId) ? null : threadChipLabel(threadId)), registerThreadChip, within)
+  // Thread links become their chips, then the tags of the bots this composer offers become theirs.
+  const chipLinks = (text: string, within?: { start: number; end: number }) => {
+    const threads = chipThreadLinks(text, (threadId) => (pastedThreadRefusal?.(threadId) ? null : threadChipLabel(threadId)), registerThreadChip, within)
+    if (!mentionBots?.length) return threads
+    const range = within && { start: threads.map(within.start), end: threads.map(within.end) }
+    const bots = chipBotTags(threads.value, (botId) => mentionBots.find((bot) => bot.id === botId)?.name ?? null, registerBotChip, range)
+    return bots.value === threads.value ? threads : { value: bots.value, map: (offset: number) => bots.map(threads.map(offset)) }
+  }
+  const hasChipLinks = (text: string) => {
+    const lower = text.toLowerCase()
+    return lower.includes('mousse://thread/') || (Boolean(mentionBots?.length) && lower.includes('mousse://bot/'))
+  }
   // The text box's value as its own typing last left it; any other `input` was set from outside (a draft, Up, a
   // queued message given back), and its links become chips.
   const nativeValueRef = useRef<string | null>(null)
@@ -506,13 +540,18 @@ export function ChatComposer({
     isMentionResultCurrent(mentionSearch, { scopeKey: mentionScopeKey, query: mentionQuery.query })
       ? mentionSearch
       : null
-  const mentionItems: MentionItem<SkillDescriptor>[] = mentionQuery
+  const fileMentions: MentionItem<SkillDescriptor>[] = mentionQuery
     ? mergeMentionSuggestions(
         skillsPickerDisabled ? [] : enabledSkills,
         mentionResult && !mentionResult.failed ? mentionResult.results : [],
         { query: mentionQuery.query, limit: MENTION_ROW_LIMIT }
       )
     : []
+  // Bots to tag come first, when this composer offers any (a bot's chat).
+  const botMentions = mentionQuery && mentionBots?.length ? matchTaggableBots(mentionBots, mentionQuery.query) : []
+  const mentionItems: ComposerMention[] = botMentions.length
+    ? [...botMentions.map((bot) => ({ kind: 'bot' as const, bot })), ...fileMentions]
+    : fileMentions
   const mentionFooter = mentionResult?.failed
     ? 'File search needs a project'
     : mentionResult?.indexing
@@ -983,7 +1022,7 @@ export function ChatComposer({
     const node = composerInputRef.current
     const pending = pendingChipRef.current
     pendingChipRef.current = null
-    if (!node || !input.toLowerCase().includes('mousse://thread/')) {
+    if (!node || !hasChipLinks(input)) {
       nativeValueRef.current = input
       return
     }
@@ -1077,7 +1116,7 @@ export function ChatComposer({
     const node = event.currentTarget
     const range = rangeOverChips(atomicChips, node.selectionStart, node.selectionEnd)
     const selected = node.value.slice(range.start, range.end)
-    const text = expandComposerAttachmentChips(expandComposerThreadChips(selected), (entry) => entry.name)
+    const text = expandComposerAttachmentChips(expandComposerBotChips(expandComposerThreadChips(selected)), (entry) => entry.name)
     if (text === selected) return
     event.preventDefault()
     event.clipboardData.setData('text/plain', text)
@@ -1121,11 +1160,19 @@ export function ChatComposer({
   }
 
   // Picks a row of the `@` list. Text from an input method that is still composing is never replaced.
-  const pickMention = (item: MentionItem<SkillDescriptor> | undefined) => {
+  const pickMention = (item: ComposerMention | undefined) => {
     if (!item || !mentionQuery || composingRef.current) return
     const range = { index: mentionQuery.index, end: Math.min(Math.max(caret, 0), input.length) }
     if (item.kind === 'skill') {
       applySkill(item.skill.id, range)
+      return
+    }
+    // A bot leaves its chip in place of the `@query`, and a space after it unless the text goes on with one.
+    if (item.kind === 'bot') {
+      const gap = /^[\s.,;:!?)\]}]/.test(input.slice(range.end)) ? '' : ' '
+      commitEdit(applyMentionPick(input, range, `${registerBotChip({ botId: item.bot.id, name: item.bot.name })}${gap}`))
+      setSuggestionsDismissed(true)
+      setSelectedSuggestion(0)
       return
     }
     if (
@@ -1223,13 +1270,19 @@ export function ChatComposer({
       kind: span.kind,
       hover: chipHover?.kind === 'attachment' && chipHover.index === index
     }))
+    // A bot chip's face is the bot's look now, when this composer offers it; any other draws the default face.
+    const bots = botChips.map((span) => ({
+      start: span.index,
+      end: span.index + span.length,
+      look: mentionBots?.find((bot) => bot.id === span.botId)?.look
+    }))
     return (
       <>
-        {renderMarkdownBackdrop(input, chip, quotes, threads, attachments)}
+        {renderMarkdownBackdrop(input, chip, quotes, threads, attachments, bots)}
         {input.endsWith('\n') ? '\u200B' : null}
       </>
     )
-  }, [input, skillIndex, skillLength, quoteSpans, threadChips, attachmentChips, chipHover])
+  }, [input, skillIndex, skillLength, quoteSpans, threadChips, attachmentChips, botChips, mentionBots, chipHover])
 
   // Shift+Enter (or a picker-free new line) on a list item starts the next item, as the textarea's own
   // typing would: through insertText, so undo and the input event stay native.
@@ -1664,12 +1717,14 @@ export function ChatComposer({
 
       {showMentionPicker && (
         <ComposerSuggestionList
-          ariaLabel="File, folder and skill suggestions"
+          ariaLabel={botMentions.length && !fileMentions.length ? 'Bots to tag' : 'File, folder and skill suggestions'}
           rows={mentionItems.map(
-            (item): SuggestionRow => ({
-              key: item.kind === 'skill' ? `skill:${item.skill.id}` : `${item.kind}:${item.path}`,
-              content: <MentionRowContent item={item} query={mentionQuery?.query} />
-            })
+            (item): SuggestionRow => item.kind === 'bot'
+              ? { key: `bot:${item.bot.id}`, content: <BotMentionRow bot={item.bot} query={mentionQuery?.query} /> }
+              : {
+                  key: item.kind === 'skill' ? `skill:${item.skill.id}` : `${item.kind}:${item.path}`,
+                  content: <MentionRowContent item={item} query={mentionQuery?.query} />
+                }
           )}
           selected={selectedSuggestion}
           onHover={setSelectedSuggestion}
@@ -1826,7 +1881,7 @@ export function buildComposerMessageContent(
 ): string {
   const parts: string[] = []
   const typed = expandComposerAttachmentChips(
-    expandComposerThreadChips(expandComposerQuotes(input)),
+    expandComposerBotChips(expandComposerThreadChips(expandComposerQuotes(input))),
     (entry) => sentChipText(entry, attachedFiles, references)
   ).trim()
   if (typed) parts.push(typed)
@@ -1893,15 +1948,22 @@ function renderMarkdownBackdrop(
   chip: { start: number; end: number } | null,
   quotes: Array<{ start: number; end: number }> = [],
   threads: Array<{ start: number; end: number; threadId: string; hover: 'chip' | 'close' | null }> = [],
-  attachments: Array<{ start: number; end: number; kind: AttachmentChipEntry['kind']; hover: boolean }> = []
+  attachments: Array<{ start: number; end: number; kind: AttachmentChipEntry['kind']; hover: boolean }> = [],
+  bots: Array<{ start: number; end: number; look?: BotLook }> = []
 ): ReactNode[] {
-  const cuts = [...(chip ? [chip.start, chip.end] : []), ...[...quotes, ...threads, ...attachments].flatMap((token) => [token.start, token.end])]
+  const cuts = [...(chip ? [chip.start, chip.end] : []), ...[...quotes, ...threads, ...attachments, ...bots].flatMap((token) => [token.start, token.end])]
   const nodes: ReactNode[] = []
   for (const span of composerMarkdownSpans(text)) {
     const bounds = [...new Set([span.start, ...cuts.filter((cut) => cut > span.start && cut < span.end), span.end])].sort((a, b) => a - b)
     for (let i = 0; i < bounds.length - 1; i += 1) {
       const start = bounds[i]
       const end = bounds[i + 1]
+      // A bot chip is drawn whole: the bot's face in the token's blank slot, then its name, in its colour.
+      const bot = bots.find((item) => start >= item.start && end <= item.end)
+      if (bot) {
+        if (start === bot.start) nodes.push(<ComposerBotChip key={start} token={text.slice(bot.start, bot.end)} look={bot.look} />)
+        continue
+      }
       // A Reply pill is drawn whole, without Markdown: its reply icon in the token's blank first slot, then the preview.
       // A thread chip is drawn whole too: its icon and status dot in the token's blank slots.
       const threadIndex = threads.findIndex((item) => start >= item.start && end <= item.end)
@@ -1941,6 +2003,33 @@ function renderMarkdownBackdrop(
     }
   }
   return nodes
+}
+
+/** A bot chip as the input backdrop draws it, over the token's own glyphs: the bot's face in its blank slot, then its name. */
+function ComposerBotChip({ token, look }: { token: string; look?: BotLook }) {
+  const parts = botChipParts(token)
+  const shown = look ?? DEFAULT_BOT_LOOK
+  return (
+    <span className="composer-thread-chip composer-bot-chip" style={{ '--tag-colour': BOT_COLOUR_HEX[normalizeBotLook(shown).colour] } as CSSProperties}>
+      <span className="composer-chip-slot">{parts.head}<span className="composer-bot-chip-face"><BotFace look={shown} state="idle" size={14} view="head" still /></span></span>
+      {parts.rest}
+    </span>
+  )
+}
+
+/** A bot in the `@` list: its face, its name with the typed part marked, and what it does. */
+function BotMentionRow({ bot, query = '' }: { bot: TaggableBot; query?: string }) {
+  return (
+    <span className="composer-suggestion-row">
+      <span className="composer-suggestion-icon composer-suggestion-bot" aria-hidden="true">
+        <BotFace look={bot.look} state="idle" size={18} view="head" still />
+      </span>
+      <span className="composer-suggestion-text">
+        <span className="composer-command-suggestion-name"><MarkedText segments={markQuery(bot.name, query)} /></span>
+        {bot.description ? <span className="composer-command-suggestion-description">{bot.description}</span> : null}
+      </span>
+    </span>
+  )
 }
 
 /** An attachment chip as the input backdrop draws it, over the token's own glyphs: the icon in its blank slot, then the name. */

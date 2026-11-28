@@ -382,7 +382,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: BOT_LIST_TOOL,
-    description: "Your owner's other bots: each one's name, what it does, and whether it is paused. Look here when your owner names another of their bots (\"tell Alpha\"), or before you send one a message.",
+    description: "Your owner's other bots: each one's name, what it does, and whether it is paused. Look here when your owner names another of their bots (\"tell Alpha\"), or tags one in their message: [@Alpha](mousse://bot/…) means exactly their bot of that name, the name bot_send takes. Also look here before you send one a message.",
     parameters: Type.Object({})
   },
   {
