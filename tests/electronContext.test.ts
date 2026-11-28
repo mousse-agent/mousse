@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { join, resolve } from 'path'
-import { resolveElectronUserData, finishElectronCli, configureWindowlessElectron } from '../src/cli/electronContext'
+import { resolveElectronUserData, finishElectronCli, configureWindowlessElectron, useOwnMacKeychainItem } from '../src/cli/electronContext'
 
 describe('Electron vault context', () => {
   const appData = resolve('fixture/app-data')
@@ -78,5 +78,48 @@ describe('a windowless Electron run (the CLI and the daemon)', () => {
     configureWindowlessElectron(app)
     configureWindowlessElectron(app)
     expect(app.switches.get('enable-features')).toBe('SomeFeature,NetworkServiceInProcess2')
+  })
+})
+
+describe('the keychain item of a signed macOS build', () => {
+  function fakeApp() {
+    const listeners = new Map<string, () => void>()
+    return {
+      name: 'mousse',
+      isPackaged: true,
+      once: (event: string, listener: () => void) => listeners.set(event, listener),
+      launch: () => listeners.get('will-finish-launching')?.()
+    }
+  }
+
+  it('starts under a name of its own, which Electron gives its keychain item, then gets its name back', () => {
+    const app = fakeApp(),
+      mark = vi.fn()
+    useOwnMacKeychainItem(app, () => true, mark)
+    expect(app.name).toBe('Mousse')
+    expect(mark).not.toHaveBeenCalled()
+    app.launch()
+    expect(app.name).toBe('mousse')
+    expect(mark).toHaveBeenCalledOnce()
+  })
+
+  it('leaves unsigned builds and other systems under their name', () => {
+    const app = fakeApp(),
+      mark = vi.fn()
+    useOwnMacKeychainItem(app, () => false, mark)
+    app.launch()
+    expect(app.name).toBe('mousse')
+    expect(mark).not.toHaveBeenCalled()
+  })
+
+  it('keeps the name off macOS and in development builds', () => {
+    if (process.platform !== 'darwin') {
+      const app = fakeApp()
+      useOwnMacKeychainItem(app, undefined, vi.fn())
+      expect(app.name).toBe('mousse')
+    }
+    const dev = { ...fakeApp(), isPackaged: false }
+    useOwnMacKeychainItem(dev, undefined, vi.fn())
+    expect(dev.name).toBe('mousse')
   })
 })

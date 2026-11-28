@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { atomicWriteFileSync } from '../data/AtomicFs'
-import { createSecretCodec, type SecretCodec } from '../providers/secretCodec'
+import { createSecretCodec, savedElsewhere, type SecretCodec } from '../providers/secretCodec'
 import { setAsideSecretFile } from '../providers/secretFile'
 
 /**
@@ -47,8 +47,8 @@ export class InstanceVault {
         decrypted = null
       }
       if (decrypted === null) {
-        if (!this.codec.plainAtRest) throw this.failure('decryption is unavailable or failed')
-        // Saved through the keychain, which this build never asks: start empty.
+        if (!savedElsewhere(this.codec)) throw this.failure('decryption is unavailable or failed')
+        // Saved through a keychain item this build never asks: start empty.
         setAsideSecretFile(this.path)
         return (this.cache = {})
       }

@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync
 import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
-import { createSecretCodec, type SecretCodec } from '../../providers/secretCodec'
+import { createSecretCodec, savedElsewhere, type SecretCodec } from '../../providers/secretCodec'
 import { openSecretFile, sealSecretFile, SecretFileError } from '../../providers/secretFile'
 import { instanceStateDir } from '../instances'
 import { ChatGptAuthError, MESSAGES } from './errors'
@@ -314,8 +314,8 @@ export class ChatGptStore {
     try {
       value = openSecretFile(row.payload, this.codec).value
     } catch (error) {
-      if (error instanceof SecretFileError && error.kind === 'unavailable' && this.codec.plainAtRest) {
-        // Saved through the keychain, which this build never asks: kept aside, and the next sign-in replaces it.
+      if (error instanceof SecretFileError && error.kind === 'unavailable' && savedElsewhere(this.codec)) {
+        // Saved through a keychain item this build never asks: kept aside, and the next sign-in replaces it.
         try {
           writeFileSync(`${this.path}.keychain-${row.revision}`, row.payload, { flag: 'wx', mode: 0o600 })
         } catch (copy) {

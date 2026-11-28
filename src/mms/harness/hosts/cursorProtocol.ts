@@ -59,6 +59,22 @@ export interface CursorHostMethods {
 
 export type CursorHostMethod = keyof CursorHostMethods
 
+/**
+ * `MOUSSE_CURSOR_HOST` of a host started for one single request (`cursor/oneShot.ts`): it says `ready`, reads one
+ * {@link CursorOneShotRequest} line, runs it on one agent with no tool, no settings layer and no retry, reports its
+ * `delta` events and one `run_end`, then exits. It serves nothing else.
+ */
+export const CURSOR_ONE_SHOT_HOST = 'one_shot'
+
+/** The one request a single-request host runs. `cwd` and `storeDir` are inside its place. */
+export interface CursorOneShotRequest {
+  apiKey: string
+  model?: CursorModelSelection
+  text: string
+  cwd: string
+  storeDir: string
+}
+
 export interface CursorModel {
   id: string
   displayName?: string

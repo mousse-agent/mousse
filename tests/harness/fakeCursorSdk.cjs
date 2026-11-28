@@ -34,6 +34,8 @@ function described(options) {
     apiKey: options.apiKey ?? null,
     model: options.model,
     mode: options.mode,
+    tools: options.tools,
+    mcpServers: options.mcpServers,
     local: local && {
       store: local.store && local.store.kind,
       storeDir: local.store && local.store.dir,

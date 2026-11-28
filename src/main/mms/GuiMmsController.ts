@@ -27,6 +27,7 @@ import { resolveDaemonHostInvocation } from '../../cli/daemonHost'
 import { endDaemonProcess } from '../../cli/daemonExitWatchdog'
 import { rotateStartupLogSync, STARTUP_LOG_CAP_ENV, STARTUP_LOG_FILE, STARTUP_LOG_MAX_BYTES } from '../../cli/startupLog'
 import { daemonCommand } from './daemonCommand'
+import { prepareOwnMacKeychainItem } from '../../mms/providers/secretCodec'
 import { ensureWindowsGit, withWindowsGitPath } from './windowsGit'
 import { nativeGitEnvironment, nativeGitInstaller, installNativeGit, type NativeGitInstaller } from './nativeGit'
 import type { GitSetup } from '../../shared/gitSetup'
@@ -1521,6 +1522,8 @@ export class GuiMmsController extends EventEmitter {
 
   private async spawnDaemon(): Promise<ChildProcess> {
     this.assertMayConnect()
+    // The service must find a signed Mac build's keychain item already made, rather than race to make it.
+    prepareOwnMacKeychainItem()
     // Prefer the CLI entry packaged next to main; fall back to source-layout path in dev.
     const candidates = [
       join(__dirname, '../cli/index.js'),
