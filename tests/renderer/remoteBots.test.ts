@@ -263,9 +263,11 @@ describe('its reply as it is written', () => {
 describe('a bot whose computer is offline', () => {
   it('opens read only from the copy: one line in the composer\'s place, no typing, no answers', async () => {
     const question = message(2, { id: 'qb', text: 'Which one?\n\nA · B', plainFrom: 'Which one?'.length, question: { questionId: 'q_1', choices: [{ label: 'A' }, { label: 'B' }], other: false, status: 'open' } })
-    await open(away({ state: 'working', chat: { activationId: 'act1' }, unread: 1 }), [message(1, { text: 'Three new invoices.' }), question])
+    await open(away({ state: 'working', chat: { activationId: 'act1' }, unread: 1 }), [message(0, { id: 'o0', author: 'owner', text: 'Any invoices?' }), message(1, { text: 'Three new invoices.' }), question])
     expect(transcript().textContent).toContain('Three new invoices.')
     expect(box()).toBeNull()
+    // Nothing can be sent, so no message, the owner's included, offers a reply.
+    expect([...transcript().querySelectorAll('button')].map((button) => button.getAttribute('aria-label') ?? button.textContent)).not.toContain('Reply')
     expect(host.querySelector('.bot-away-note')?.textContent).toBe('Laptop is offline')
     expect(transcript().querySelector('.bot-typing, .bot-turn-typing')).toBeNull()
     expect(transcript().querySelector('.bot-question-replies')).toBeNull()
