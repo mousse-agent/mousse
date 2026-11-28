@@ -16,6 +16,23 @@
       "expiresAt": "2026-11-27T17:32:25.878Z"
     },
     {
+      "task": "bot-chat-tags-bots",
+      "session": "Animatrix-b71b0d",
+      "machine": "Animatrix",
+      "branch": "bot-chat-tags-bots",
+      "paths": [
+        "src/renderer/components/ChatComposer.tsx",
+        "src/renderer/lib/composerBotChips.ts",
+        "src/renderer/chat/components/agent-elements/markdown.tsx",
+        "src/renderer/utils/chatLinks.ts",
+        "src/shared/botLink.ts",
+        "src/mms/run/mcp/appTools/bots.ts",
+        "src/renderer/components/bots"
+      ],
+      "claimedAt": "2026-11-28T10:39:50.830Z",
+      "expiresAt": "2026-11-28T12:39:50.830Z"
+    },
+    {
       "task": "bot-skills-and-browser-handoff",
       "session": "Animatrix-17eea9",
       "machine": "Animatrix",
