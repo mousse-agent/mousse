@@ -709,6 +709,7 @@ export class ToolRegistry {
       return target && outcome.isError && namesThread(outcome.text, target) && !visible(target) ? OUT_OF_REACH : outcome
     }
     if (args.runId !== undefined) return refused('invalid_arguments', `runId names one run; leave it out with thread "${resolved.address}".`)
+    if (args.expectedRevision !== undefined) return refused('invalid_arguments', `expectedRevision is one thread's queue revision; leave it out with thread "${resolved.address}", or name one thread.`)
     // Each target's key comes from the call's key and the target; the one target of a set is keyed as a call that named it.
     const keyOf = (threadId: string) => (resolved.targets.length === 1 ? request.toolCallId : `${request.toolCallId}:${threadId}`)
     const one = async ({ target, args: targetArgs }: ReturnType<typeof fanOutCalls>[number]) => {
@@ -756,22 +757,29 @@ export class ToolRegistry {
    * runs only the variants every turn has (`queue_enqueue`): a definition delegates nothing. A bot's turn runs its own
    * tool through the bot port or not at all: never the thread tool in its place (the one of `subagent_start` and
    * `work_start` the turn is offered). A call that named a thread by address (`addressed`) is the thread tool: on a bot's
-   * turn, never one of its own. A call under an old name that runs by name (`runsUnderOwnName`) is that tool whatever its
-   * arguments. The registry's preflight (`resolveCall`) and its dispatch both choose here, so a gate judges the tool
-   * that runs.
+   * turn, never one of its own; it is still `queue_enqueue` when it gives that thread's queue revision, on every turn, so
+   * a retry of `queue_enqueue` under the address is the same request. A call under an old name that runs by name
+   * (`runsUnderOwnName`) is that tool whatever its arguments. A `thread_send` that gives `expectedRevision` and is not
+   * `queue_enqueue` is refused before anything is sent: nothing else reads a revision. The registry's preflight
+   * (`resolveCall`) and its dispatch both choose here, so a gate judges the tool that runs.
    */
   private variantOf(name: string, tool: MousseTool, args: Record<string, unknown>, turn: AppToolTurn, calledAs?: string, addressed = false): MousseTool | ToolOutcome {
     const kind = turn.bot ? 'bot' : turn.definition ? 'definition' : 'thread'
     const byName = calledAs && canonicalToolName(calledAs) === name && runsUnderOwnName(calledAs, kind) ? this.variants.get(calledAs) : undefined
     if (byName) return byName
-    const olds = addressed && turn.bot ? [] : toolVariants(name, args, kind)
+    // A bot's call that named a thread is never one of its own tools; under a bot tool's own name it is refused below.
+    const botAddressed = addressed && turn.bot
+    const olds = botAddressed && calledAs && isBotVariant(calledAs) ? [] : toolVariants(name, args, kind).filter((old) => !(botAddressed && isBotVariant(old)))
     // A bot's old name runs its own tools or none: a thread it can't take is refused, never sent to the thread tool.
     if (turn.bot && calledAs && isBotVariant(calledAs) && !olds.length)
       return refused('invalid_arguments', `${calledAs} is your own work's tool and takes no thread. To reach a thread, call ${name}.`)
     const declared = olds.flatMap((old) => this.variants.get(old) ?? [])
     if (turn.bot && olds.length && !declared.length) return refused('unavailable', `${olds[0]} is not available here: your bot's tools are not.`)
     // A call under an old name is that tool and no other (`work_start` never runs as `subagent_start`).
-    return declared.find((variant) => variant.name === calledAs) ?? declared.find((variant) => variant.offered?.(turn) ?? true) ?? declared[0] ?? tool
+    const running = declared.find((variant) => variant.name === calledAs) ?? declared.find((variant) => variant.offered?.(turn) ?? true) ?? declared[0] ?? tool
+    if (name === 'thread_send' && args.expectedRevision !== undefined && running.name !== 'queue_enqueue')
+      return refused('invalid_arguments', `expectedRevision applies only when you queue work: a message to your own thread, or to one thread's queue with no runId, subagent or intent "note".`)
+    return running
   }
 
   /**

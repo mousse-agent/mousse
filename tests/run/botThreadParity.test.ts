@@ -98,9 +98,9 @@ describe('a bot uses what a thread\'s agent can', () => {
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host, { bots: () => deps })
     const workRun = await fx.runningRun('work')
     turns.register(appTurn({ threadId: 'work', runId: workRun.runId, bot: authority, approvals: 'never', ...(role === 'subagent' ? { subagent: true } : {}) }))
-    const call = async (name: string, args: Record<string, unknown> = {}) => {
+    const call = async (name: string, args: Record<string, unknown> = {}, toolCallId?: string) => {
       try {
-        const outcome = await registry.call(name, args, request({ threadId: 'work', runId: workRun.runId }))
+        const outcome = await registry.call(name, args, request({ threadId: 'work', runId: workRun.runId, ...(toolCallId ? { toolCallId } : {}) }))
         // A refusal reads as its words; its shape is checked in toolRefusalShape.test.ts.
         return { error: outcome.isError === true, text: refusalOf(outcome)?.message ?? outcome.text }
       } catch (error) {
@@ -168,6 +168,30 @@ describe('a bot uses what a thread\'s agent can', () => {
       expect(await call('queue_remove', { threadId: 'mine', itemId: 'item-1', expectedRevision: 'rev-1' })).toMatchObject({ error: false })
       expect(queueCommands.map((entry) => [entry.threadId, entry.command.op, entry.options.actor.threadId])).toEqual([['mine', 'enqueue', 'work'], ['mine', 'remove', 'work']])
       expect(await call('queue_enqueue', { threadId: 'private', content: 'x', expectedRevision: 'rev-0' })).toMatchObject({ error: true, text: expect.stringMatching(/not available to you/) })
+    })
+
+    it('a queue_enqueue retried as thread_send to the same thread, by id or by address, is the same request: it queues under one key and never reaches the running turn', async () => {
+      const { call, host, queueCommands } = await world()
+      const message = { content: 'Then run the tests.', expectedRevision: 'rev-0' }
+      expect(await call('queue_enqueue', { threadId: 'mine', ...message }, 'mcp:queue-1')).toMatchObject({ error: false })
+      // The model never saw the answer and retries under the new name, naming the thread by address.
+      expect(await call('thread_send', { thread: 'mine', ...message }, 'mcp:queue-1')).toMatchObject({ error: false })
+      expect(await call('thread_send', { threadId: 'mine', ...message }, 'mcp:queue-1')).toMatchObject({ error: false })
+      // The host replays a key it has seen (queueEditDaemon.test.ts): every call reached it as the one enqueue.
+      expect(queueCommands.map((entry) => [entry.threadId, entry.command, entry.options.clientRequestId])).toEqual(
+        Array(3).fill(['mine', { op: 'enqueue', content: 'Then run the tests.', expectedRevision: 'rev-0' }, 'queue_enqueue:work:mcp:queue-1']))
+      expect(host.steerRun).not.toHaveBeenCalled()
+    })
+
+    it('refuses expectedRevision on a send that queues nothing, before anything is sent', async () => {
+      const { call, host, queueCommands } = await world()
+      for (const args of [
+        { threadId: 'mine', runId: 'run-9', intent: 'note', expectedRevision: 'stale', content: 'Use the staging database.' },
+        { thread: 'mine', runId: 'run-9', intent: 'note', expectedRevision: 'stale', content: 'Use the staging database.' }
+      ])
+        expect(await call('thread_send', args), JSON.stringify(args)).toMatchObject({ error: true, text: expect.stringMatching(/^expectedRevision applies only when you queue work/) })
+      expect(host.steerRun).not.toHaveBeenCalled()
+      expect(queueCommands).toEqual([])
     })
 
     it('answers an approval in one of its owner\'s threads through the agents\' rule', async () => {
