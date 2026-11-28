@@ -457,13 +457,12 @@ function* followTrackedFiles(top: string, env: NodeJS.ProcessEnv, head: string |
  * Git's stat cache keeps the next one fast; a missing, locked or corrupt one is rebuilt from HEAD. Every snapshot also
  * brings it in line with the files HEAD and the real index track (`followTrackedFiles`), so a file that is ignored but
  * was force-added and committed later is in it. `plain` says whether every entry was read while Git converted nothing
- * before this update, or the index was built from nothing now (see `PrivateFiles.plain`). The mark is taken off before
- * the index changes, and only `exactTreeSteps` puts it back, once it knows Git converts nothing now.
+ * before this update, or the index was built from nothing now (see `PrivateFiles.plain`). Only a caller that knows
+ * whether Git converts now changes the mark (`exactTreeSteps`, `worktreeTreesSteps`).
  */
 function* indexTree(top: string, files: PrivateFiles, head: string | undefined): Steps<{ tree: string; gaps: CoverageGap[]; plain: boolean }> {
   const index = files.index
   const plainBefore = files.plain ? yield* disk.exists(files.plain) : false
-  if (plainBefore) yield* disk.remove(files.plain!)
   // A hidden store first leaves out what it does not keep (files over the size limit) and refuses a folder it cannot
   // snapshot at all; what it leaves out is named with the rest.
   const store = activeHiddenStore(top)
@@ -726,14 +725,16 @@ function* sizedTreeEntries(top: string, tree: string): Steps<SizedEntry[]> {
  * is not `plain` (see the note above): the caller rebuilds it (`rebuiltTrees`).
  */
 function* exactTreeSteps(top: string, files: PrivateFiles, normal: string, head: string | undefined, plain: boolean): Steps<ExactResult | typeof STALE_INDEX | undefined> {
-  if (!exactTreesRecorded) return undefined
+  // Not asked whether Git converts: the index may hold converted blobs from now on.
+  if (!exactTreesRecorded) return yield* unmarked(files)
   const entries = yield* sizedTreeEntries(top, normal)
   const conversion = yield* conversionSteps(top, files, entries.filter((entry) => isFile(entry.mode)).map((entry) => entry.path))
   if (!conversion.converts) {
     if (!plain) return STALE_INDEX
-    if (files.plain) yield* disk.writeText(files.plain, '')
+    if (files.plain && !(yield* disk.exists(files.plain))) yield* disk.writeText(files.plain, '')
     return { tree: normal, gaps: [] }
   }
+  yield* unmarked(files)
   const earlier = { head, previous: yield* readLast(files.last), directory: files.directory }
   try {
     return yield* exactIndexTree(top, files, entries, conversion, earlier)
@@ -761,6 +762,12 @@ type ExactResult = { tree: string; gaps: CoverageGap[] } | { failed: string }
 
 /** `exactTreeSteps`: Git converts nothing, but the private index may hold blobs it converted before. */
 const STALE_INDEX = 'stale index'
+
+/** Takes off the private index's mark (`PrivateFiles.plain`): an update may have read files while Git converted. */
+function* unmarked(files: PrivateFiles): Steps<undefined> {
+  if (files.plain) yield* disk.remove(files.plain)
+  return undefined
+}
 
 /**
  * The private index rebuilt from nothing, every file read as Git takes it now (see the exact-bytes note), and both trees
@@ -1126,7 +1133,11 @@ export function* worktreeTreesSteps(cwd: string, options: { exact?: boolean } = 
   const files = yield* privateFiles(top)
   const head = yield* headOf(top)
   const indexed = yield* indexTree(top, files, head)
-  if (options.exact === false || activeHiddenStore(top)) return { tree: indexed.tree }
+  if (options.exact === false || activeHiddenStore(top)) {
+    // Not asked whether Git converts (see `PrivateFiles.plain`).
+    yield* unmarked(files)
+    return { tree: indexed.tree }
+  }
   const found = yield* exactTreeSteps(top, files, indexed.tree, head, indexed.plain)
   const { tree, exact } = found === STALE_INDEX ? yield* rebuiltTrees(top, files, head) : { tree: indexed.tree, exact: found }
   return { tree, ...(exact && 'tree' in exact ? { exactTree: exact.tree } : {}) }
