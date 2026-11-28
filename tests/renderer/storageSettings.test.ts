@@ -11,7 +11,7 @@ import { StorageSettings } from '../../src/renderer/components/StorageSettings'
 import { sliceArcs } from '../../src/renderer/components/storage/StorageDonut'
 import { DaysSelect, StoragePolicyRows, parseCustomDays } from '../../src/renderer/components/storage/StoragePolicyRows'
 import { StorageUsageView } from '../../src/renderer/components/storage/StorageUsageSection'
-import { STORAGE_RULE_COPY, WORKTREE_GROUP_DESCRIPTION, WORKTREE_GROUP_TOOLTIP, ruleLabel, ruleTooltip, type StorageRuleId } from '../../src/renderer/lib/storageCopy'
+import { RECOMMENDED_COPY, STORAGE_RULE_COPY, WORKTREE_GROUP_DESCRIPTION, WORKTREE_GROUP_TOOLTIP, ruleLabel, ruleTooltip, type StorageRuleId } from '../../src/renderer/lib/storageCopy'
 import { SELF_MACHINE, offlineUsage, type MachineUsage } from '../../src/renderer/lib/storageUsage'
 
 const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim()
@@ -468,23 +468,24 @@ describe('the notice about the recommended rules', () => {
 
   it('says nothing has changed and offers to review, not to switch things on', () => {
     const page = text(notice())
-    expect(page).toContain('Recommended cleanup rules are available')
-    expect(page).toContain('Nothing has changed: only the worktrees of deleted threads are removed automatically.')
-    expect(page).toContain('Review recommended cleanup rules')
-    expect(page).toContain('Dismiss')
-    expect(page).not.toContain('Turn on recommended rules')
+    expect(page).toContain('Recommended cleanup rules')
+    expect(page).toContain('Off for now; only worktrees of deleted threads are removed.')
+    expect(page).toContain('Review')
+    expect(notice()).toContain('aria-label="Dismiss"')
+    expect(page).not.toContain('Turn on')
   })
 
-  it('lists each recommended rule with what it deletes and never deletes before anything is turned on', () => {
-    const page = text(notice(true))
+  it('lists each recommended rule as a title and one short line, with what it deletes and never deletes in the tooltip', () => {
+    const html = notice(true)
+    const page = text(html)
     for (const id of ['inactive', 'merged', 'captures'] as const) {
-      expect(page).toContain(`Deletes ${STORAGE_RULE_COPY[id].deletes}`)
-      const never = STORAGE_RULE_COPY[id].never
-      if (never) expect(page).toContain(`Never deletes ${never}`)
+      expect(page, `${id} title`).toContain(RECOMMENDED_COPY.rules[id])
+      expect(page, `${id} line`).toContain(STORAGE_RULE_COPY[id].line)
+      expect(html, `${id} tooltip`).toContain(`title="Deletes ${STORAGE_RULE_COPY[id].deletes.slice(0, 30)}`)
     }
-    expect(page).toContain('A download saved by an older version with a .png name')
-    expect(page).toContain('Not now')
-    expect(page).toContain('Turn on recommended rules')
+    expect(page).not.toContain('Deletes ')
+    expect(page).not.toContain('Never deletes')
+    expect(page).toContain('Turn on')
   })
 
   it('turns on the new rules and keeps the choice about deleted threads', () => {
