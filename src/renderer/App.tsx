@@ -441,6 +441,14 @@ export default function App() {
         hydrationReceived = true
         finishHydration()
       }),
+      // The thread the window opened on is on a computer that cannot be reached: the window opens, and the thread says
+      // it could not be read, with Retry.
+      window.mousse.threads.onViewFailed(({ threadId, reason }) => {
+        if (!isCurrentProfile() || !isSelectedThread(threadId)) return
+        useAppStore.getState().failLoadedTranscript(threadId, reason)
+        hydrationReceived = true
+        finishHydration()
+      }),
       // Live agent/task registry updates for the selected thread (not the select path).
       window.mousse.agents.onUpdated(applyIfCurrent(setAgents)),
       window.mousse.tasks.onUpdated(applyIfCurrent(setTasks)),

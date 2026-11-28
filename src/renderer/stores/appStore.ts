@@ -564,6 +564,11 @@ interface AppState {
   holdOpeningMessage: (threadId: string, message: ChatMessage) => void
   /** The selected (or held) thread's transcript will not arrive (its select failed): stop waiting for it. */
   settleTranscript: (threadId: string, reason?: string) => void
+  /**
+   * The thread the window opened on at load could not be read (its computer cannot be reached). With no messages to
+   * show (a warm start may still show its last ones), it says so, with Retry; never an empty or new thread.
+   */
+  failLoadedTranscript: (threadId: string, reason?: string) => void
   setMessages: (messages: ChatMessage[]) => void
   applyThreadMessages: (snapshot: ThreadMessagesSnapshot, profileId: string | null) => void
   addMessage: (message: ChatMessage) => void
@@ -1031,6 +1036,12 @@ export const useAppStore = create<AppState>()(persist(tabAgreement(threadPanels(
     const held = openingEarly?.threadId === threadId ? openingEarly.messages : []
     openingEarly = { threadId, messages: upsertMessage(held, message) }
   },
+  failLoadedTranscript: (threadId, reason) =>
+    set((s) => {
+      if (s.activeThreadId !== threadId || s.openingThreadId !== null) return s
+      if (s.messages.length > 0) return s.transcriptPending ? { transcriptPending: false } : s
+      return { transcriptPending: false, transcriptFailed: { threadId, ...(reason ? { reason } : {}) }, openingCueThreadId: null }
+    }),
   settleTranscript: (threadId, reason) =>
     set((s) => {
       // A thread that was waiting for its transcript shows that it could not be read, never an empty thread.
