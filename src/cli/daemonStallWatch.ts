@@ -19,7 +19,7 @@ import { Worker } from 'node:worker_threads'
  * `resampleMs` is logged as such.
  *
  * Lines go straight to `daemon.log` (`[warn:stall]`), from this thread: the main thread's own writes are buffered and
- * would wait out the stall. They hold function names and script paths below the app's folder (`main/index.js:120:7`),
+ * would wait out the stall. They hold function names and script paths below the app's folder (`out/cli/index.js:120:7`),
  * never values, arguments or the home folder. At most `maxPerHour` stalls are sampled an hour; the rest are counted.
  */
 
@@ -70,12 +70,12 @@ const write = (text) => {
 }
 const seconds = (ms) => (ms / 1000).toFixed(1) + ' s'
 
-// A script's address below the app's folder, never the folder itself: it names the home folder.
+// A script's address below the app's folder, never the folder itself: it names the home folder. A package keeps its name.
 const shortUrl = (url) => {
   if (!url) return '?'
   if (url.startsWith('node:')) return url
   const path = url.replace(/\\/g, '/')
-  for (const marker of ['/out/', '/src/', '/node_modules/']) {
+  for (const marker of ['/node_modules/', '/out/', '/src/']) {
     const at = path.lastIndexOf(marker)
     if (at >= 0) return path.slice(at + 1)
   }
@@ -225,7 +225,7 @@ export function startDaemonStallWatch(opts: DaemonStallWatchOptions): DaemonStal
       maxFrames: opts.maxFrames ?? 20,
       maxPerHour: opts.maxPerHour ?? STALL_MAX_PER_HOUR
     },
-    resourceLimits: { maxOldGenerationSizeMb: 32 }
+    resourceLimits: { maxOldGenerationSizeMb: 64 }
   })
   // Never keeps the process alive by itself.
   worker.unref()

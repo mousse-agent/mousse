@@ -189,8 +189,6 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     // Electron app they launch keeps its renderer sandbox.
     delete process.env.ELECTRON_DISABLE_SANDBOX
     installDaemonDiagnostics({ homeDir, shutdown })
-    // A main thread held for seconds logs where it was held (`[warn:stall]`), also when the service is ended for it.
-    stallWatch = startDaemonStallWatch({ logPath: join(homeDir, DAEMON_LOG_RELATIVE_PATH) })
     process.on('SIGINT', () => {
       void shutdown('SIGINT')
     })
@@ -326,6 +324,9 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     if (timing) logInfo('startup', formatStartupTiming(timing, startupMs))
 
     memoryMonitor?.start()
+    // From ready on, a main thread held for seconds logs where it was held (`[warn:stall]`), also when the daemon is
+    // ended for it. Not before: startup's long synchronous steps are timed at ready already.
+    if (!opts.skipSignals && !state.shuttingDown) stallWatch = startDaemonStallWatch({ logPath: join(homeDir, DAEMON_LOG_RELATIVE_PATH) })
     // Work that must not delay readiness starts now, in the background.
     opened.mms.afterReady()
 
