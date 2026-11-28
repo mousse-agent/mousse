@@ -204,3 +204,60 @@ export async function runWorkerDirect(script: string, env: NodeJS.ProcessEnv, re
 export function workerRequest(stub: BedrockStub, env: Record<string, string>): Record<string, unknown> {
   return { model: bedrockModel(stub.url), system: 'You name chats in a few words.', prompt: `${PROMPT_LINE}: control.`, env }
 }
+
+/** What the AWS sign-in stub hands out: each sign-in's own made-up temporary keys. */
+export const SIGNED_IN = {
+  sso: { id: 'ASIASSOSIGNIN000001', token: 'SSO_SESSION_TOKEN_7d2a' },
+  role: { id: 'ASIAROLESIGNIN00001', token: 'ROLE_SESSION_TOKEN_7d2a' },
+  webIdentity: { id: 'ASIAWEBIDSIGNIN0001', token: 'WEBID_SESSION_TOKEN_7d2a' },
+  container: { id: 'ASIACONTAINER000001', token: 'CONTAINER_SESSION_TOKEN_7d2a' }
+} as const
+
+export interface AwsSignInStub {
+  url: string
+  /** `METHOD path body` of each request, and the SSO bearer token it carried. */
+  requests: Array<{ line: string; ssoToken?: string }>
+  close(): Promise<void>
+}
+
+/**
+ * The AWS services a sign-in calls, never AWS itself: STS (`AssumeRole`, `AssumeRoleWithWebIdentity`), the SSO portal's
+ * role credentials, and a container's credential endpoint (`/creds`), at a loopback HTTP/1.1 server reached through
+ * `AWS_ENDPOINT_URL_STS`/`AWS_ENDPOINT_URL_SSO` and `AWS_CONTAINER_CREDENTIALS_FULL_URI`. `status` answers every
+ * request with that error instead.
+ */
+export async function awsSignInStub(input: { status?: 503 } = {}): Promise<AwsSignInStub> {
+  const { createServer: createHttpServer } = await import('node:http')
+  const requests: AwsSignInStub['requests'] = []
+  const expiration = () => new Date(Date.now() + 3_600_000)
+  const server = createHttpServer((req, res) => {
+    let body = ''
+    req.on('data', (chunk: Buffer) => { body += chunk.toString('utf8') })
+    req.on('end', () => {
+      const token = req.headers['x-amz-sso_bearer_token']
+      requests.push({ line: `${req.method} ${req.url} ${body}`, ...(typeof token === 'string' ? { ssoToken: token } : {}) })
+      if (input.status) {
+        res.writeHead(input.status, { 'content-type': 'text/xml' })
+        return res.end('<ErrorResponse><Error><Type>Receiver</Type><Code>ServiceUnavailable</Code><Message>unavailable</Message></Error></ErrorResponse>')
+      }
+      if (req.url?.startsWith('/federation/credentials')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ roleCredentials: { accessKeyId: SIGNED_IN.sso.id, secretAccessKey: 'sso-secret', sessionToken: SIGNED_IN.sso.token, expiration: expiration().getTime() } }))
+      }
+      if (req.url?.startsWith('/creds')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ AccessKeyId: SIGNED_IN.container.id, SecretAccessKey: 'container-secret', Token: SIGNED_IN.container.token, Expiration: expiration().toISOString() }))
+      }
+      const action = /Action=(\w+)/.exec(body)?.[1] ?? 'AssumeRole'
+      const keys = action === 'AssumeRoleWithWebIdentity' ? SIGNED_IN.webIdentity : SIGNED_IN.role
+      res.writeHead(200, { 'content-type': 'text/xml' })
+      res.end(`<${action}Response xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><${action}Result><Credentials><AccessKeyId>${keys.id}</AccessKeyId><SecretAccessKey>role-secret</SecretAccessKey><SessionToken>${keys.token}</SessionToken><Expiration>${expiration().toISOString()}</Expiration></Credentials><AssumedRoleUser><Arn>arn:aws:sts::111111111111:assumed-role/r/s</Arn><AssumedRoleId>AROA0000:s</AssumedRoleId></AssumedRoleUser></${action}Result></${action}Response>`)
+    })
+  })
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    requests,
+    close: () => new Promise<void>((done) => server.close(() => done()))
+  }
+}

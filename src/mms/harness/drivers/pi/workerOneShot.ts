@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -11,7 +12,8 @@ import { releasePlace, reservePlace, spawnInPlace, type PlaceProcess } from '../
 import type { OneShotRouteDecision, OneShotTransport } from '../../oneShot/route'
 import { PI_WORKER_FACTS } from '../../oneShot/routes'
 import { PI_AMBIENT_MARKER } from '../../pi/envKeys'
-import type { PiWorkerMessage, PiWorkerRequest } from '../../pi/workerProtocol'
+import { recordHarnessSpawn } from '../../spawn'
+import { PI_AWS_CREDENTIALS_ARG, type PiAwsCredentialsRequest, type PiAwsCredentialsResult, type PiWorkerMessage, type PiWorkerRequest } from '../../pi/workerProtocol'
 import { assertAssistantResponseSucceeded } from './stream'
 
 /**
@@ -28,9 +30,11 @@ import { assertAssistantResponseSucceeded } from './stream'
  *   folder, for every client setting (attempts, retry mode, endpoints, region) and for a profile's credentials. The
  *   sealed launch keeps those variables out and puts the home in the place, so none of the person's files load.
  * - The request carries the only credentials it may use, read now (so a replaced credentials file is read the next
- *   time): a bearer token, or static keys and the region, from the entry's sign-in, the environment, or the one profile
- *   it names. A profile that signs in another way (SSO, a credential process, a role, web identity, `aws login`) would
- *   need more of the person's setup (caches, programs, other profiles): its requests are refused with the reason.
+ *   time): a bearer token, or keys and the region, from the entry's sign-in, the environment, or the one profile it
+ *   names. Static keys are read here. Every other sign-in (SSO, a credential process, an assumed role, web identity,
+ *   `aws login`, a container's role) is resolved on Mousse's side by the AWS SDK's own credential chain, in the
+ *   entry's environment as Pi's turns have it, in a short sign-in process (`resolveAwsSignIn`) with one attempt for
+ *   each STS or SSO call. The worker gets only the temporary keys: never the files, the SSO cache or the program.
  */
 
 export const PI_WORKER_ROUTE = 'pi:worker' as const
@@ -48,17 +52,8 @@ export const PI_WORKER_AWS_ENV: Readonly<Record<string, string>> = Object.freeze
 /** Where the request goes, when the entry sets it: an endpoint, and pi-ai's own Bedrock switches. Never a credential. */
 const ENDPOINT_ENV = ['AWS_ENDPOINT_URL_BEDROCK_RUNTIME', 'AWS_ENDPOINT_URL', 'AWS_USE_FIPS_ENDPOINT', 'AWS_USE_DUALSTACK_ENDPOINT', 'AWS_BEDROCK_FORCE_HTTP1', 'AWS_BEDROCK_SKIP_AUTH', 'AWS_BEDROCK_FORCE_CACHE']
 
-/** A profile key that signs in some other way than static keys, and what it is called. */
-const OTHER_SIGN_INS: ReadonlyArray<[string, string]> = [
-  ['sso_session', 'IAM Identity Center (SSO)'],
-  ['sso_start_url', 'IAM Identity Center (SSO)'],
-  ['credential_process', 'a credential process'],
-  ['role_arn', 'an assumed role'],
-  ['source_profile', 'an assumed role'],
-  ['credential_source', 'an assumed role'],
-  ['web_identity_token_file', 'web identity'],
-  ['login_session', '`aws login`']
-]
+/** Profile keys of a sign-in other than static keys (the SDK's `fromIni` cases): the AWS SDK resolves those. */
+const SDK_SIGN_INS = ['sso_session', 'sso_start_url', 'sso_account_id', 'sso_region', 'sso_role_name', 'credential_process', 'role_arn', 'source_profile', 'credential_source', 'web_identity_token_file', 'login_session']
 
 /** What the worker is given to sign the request with. */
 export interface BedrockInputs {
@@ -75,8 +70,27 @@ export interface StoredBedrockCredential {
   env?: Record<string, string>
 }
 
-/** A refusal before anything is sent: the request does not count as an attempt. */
-export class BedrockInputRefused extends Error {}
+/** Keys the AWS SDK's sign-in gave. */
+export interface AwsKeys {
+  accessKeyId: string
+  secretAccessKey: string
+  sessionToken?: string
+}
+
+/**
+ * The AWS SDK's sign-in for `profile` (else its own order: the default profile, web identity, a container's role, the
+ * instance's), with `region` for its STS or SSO call: the temporary keys it gave.
+ */
+export type AwsSignIn = (profile: string | undefined, region: string | undefined) => Promise<AwsKeys>
+
+function keysEnv(keys: AwsKeys, region: string | undefined): Record<string, string> {
+  return {
+    AWS_ACCESS_KEY_ID: keys.accessKeyId,
+    AWS_SECRET_ACCESS_KEY: keys.secretAccessKey,
+    ...(keys.sessionToken ? { AWS_SESSION_TOKEN: keys.sessionToken } : {}),
+    ...(region ? { AWS_REGION: region } : {})
+  }
+}
 
 function lookup(env: NodeJS.ProcessEnv, name: string): string | undefined {
   const upper = name.toUpperCase()
@@ -122,37 +136,40 @@ async function readIni(path: string): Promise<Map<string, Record<string, string>
 }
 
 /**
- * The static keys and region of the one profile `name`, read from the person's files now: the config file's
- * `[profile name]` (`[default]`), with the credentials file's `[name]` over it. Nothing else of the files is kept.
+ * The keys and region of the one profile `name`, read now: the config file's `[profile name]` (`[default]`), with the
+ * credentials file's `[name]` over it. Static keys are read here; any other sign-in is the AWS SDK's (`signIn`). Nothing
+ * else of the files is kept. `name` undefined is the SDK's own order: the default profile when it holds static keys,
+ * else whatever the SDK's chain finds (web identity, a container's role, the instance's).
  */
-async function profileInputs(name: string, env: NodeJS.ProcessEnv, region: string | undefined): Promise<BedrockInputs> {
+async function profileInputs(name: string | undefined, env: NodeJS.ProcessEnv, region: string | undefined, signIn: AwsSignIn): Promise<BedrockInputs> {
   const home = awsHome(env)
   const configFile = lookup(env, 'AWS_CONFIG_FILE') ?? join(home, '.aws', 'config')
   const credentialsFile = lookup(env, 'AWS_SHARED_CREDENTIALS_FILE') ?? join(home, '.aws', 'credentials')
   const [config, credentials] = await Promise.all([readIni(configFile), readIni(credentialsFile)])
-  const fromConfig = name === 'default' ? { ...config.get('default'), ...config.get('profile default') } : config.get(`profile ${name}`)
-  const fromCredentials = credentials.get(name)
-  if (!fromConfig && !fromCredentials) throw harnessAppError({ code: 'signed_out', message: `The AWS profile "${name}" is not in ${credentialsFile} or ${configFile}.` })
-  const profile = { ...fromConfig, ...fromCredentials }
-  const other = OTHER_SIGN_INS.find(([key]) => profile[key])
-  if (other)
-    throw new BedrockInputRefused(`The AWS profile "${name}" signs in with ${other[1]}, which needs more of the AWS setup than a single request is given.`)
+  const section = name ?? 'default'
+  const fromConfig = section === 'default' ? { ...config.get('default'), ...config.get('profile default') } : config.get(`profile ${section}`)
+  const fromCredentials = credentials.get(section)
+  const profile: Record<string, string> = { ...fromConfig, ...fromCredentials }
+  const where = region ?? profile.region
+  const sdk = SDK_SIGN_INS.some((key) => profile[key])
   const id = profile.aws_access_key_id
   const secret = profile.aws_secret_access_key
-  if (!id || !secret) throw harnessAppError({ code: 'signed_out', message: `The AWS profile "${name}" has no access key.` })
-  const out: Record<string, string> = { AWS_ACCESS_KEY_ID: id, AWS_SECRET_ACCESS_KEY: secret }
-  if (profile.aws_session_token) out.AWS_SESSION_TOKEN = profile.aws_session_token
-  const where = region ?? profile.region
-  if (where) out.AWS_REGION = where
-  return { env: out, source: `profile ${name}` }
+  if (!sdk && id && secret)
+    return { env: keysEnv({ accessKeyId: id, secretAccessKey: secret, ...(profile.aws_session_token ? { sessionToken: profile.aws_session_token } : {}) }, where), source: `profile ${section}` }
+  if (name !== undefined && !sdk) {
+    if (!fromConfig && !fromCredentials) throw harnessAppError({ code: 'signed_out', message: `The AWS profile "${name}" is not in ${credentialsFile} or ${configFile}.` })
+    throw harnessAppError({ code: 'signed_out', message: `The AWS profile "${name}" has no access key.` })
+  }
+  return { env: keysEnv(await signIn(name, where), where), source: name ? `profile ${name}, signed in by the AWS SDK` : 'the AWS SDK\'s sign-in' }
 }
 
 /**
  * What a request signs with, read now, in pi-ai's order: a bearer token (the entry's stored key, else
  * `AWS_BEARER_TOKEN_BEDROCK`); the profile the sign-in stored; static keys in the environment; `AWS_PROFILE`; else the
- * default profile. Web identity and container roles are refused. `env` is the entry's environment as Mousse runs it.
+ * SDK's own order (the default profile, web identity, a container's role, the instance's). `env` is the entry's
+ * environment as Mousse runs it; `signIn` resolves every sign-in but static keys.
  */
-export async function bedrockInputs(stored: StoredBedrockCredential | undefined, ambient: NodeJS.ProcessEnv): Promise<BedrockInputs> {
+export async function bedrockInputs(stored: StoredBedrockCredential | undefined, ambient: NodeJS.ProcessEnv, signIn: AwsSignIn): Promise<BedrockInputs> {
   const env: NodeJS.ProcessEnv = { ...ambient, ...(stored?.env ?? {}) }
   const region = lookup(env, 'AWS_REGION') ?? lookup(env, 'AWS_DEFAULT_REGION')
   const regionEnv: Record<string, string> = region ? { AWS_REGION: region } : {}
@@ -160,20 +177,66 @@ export async function bedrockInputs(stored: StoredBedrockCredential | undefined,
   const bearer = key ?? lookup(env, 'AWS_BEARER_TOKEN_BEDROCK')
   if (bearer) return { bearerToken: bearer, env: regionEnv, source: key ? 'the stored bearer token' : 'AWS_BEARER_TOKEN_BEDROCK' }
   const storedProfile = stored?.env?.AWS_PROFILE
-  if (storedProfile) return profileInputs(storedProfile, env, region)
+  if (storedProfile) return profileInputs(storedProfile, env, region, signIn)
   const id = lookup(env, 'AWS_ACCESS_KEY_ID')
   const secret = lookup(env, 'AWS_SECRET_ACCESS_KEY')
   if (id && secret) {
     const token = lookup(env, 'AWS_SESSION_TOKEN')
     return { env: { AWS_ACCESS_KEY_ID: id, AWS_SECRET_ACCESS_KEY: secret, ...(token ? { AWS_SESSION_TOKEN: token } : {}), ...regionEnv }, source: 'AWS access keys' }
   }
-  const profile = lookup(env, 'AWS_PROFILE')
-  if (profile) return profileInputs(profile, env, region)
-  if (lookup(env, 'AWS_WEB_IDENTITY_TOKEN_FILE') || lookup(env, 'AWS_ROLE_ARN'))
-    throw new BedrockInputRefused('AWS signs in here with web identity, which needs more of the AWS setup than a single request is given.')
-  if (lookup(env, 'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI') || lookup(env, 'AWS_CONTAINER_CREDENTIALS_FULL_URI'))
-    throw new BedrockInputRefused("AWS signs in here with a container's role, which needs more of the AWS setup than a single request is given.")
-  return profileInputs('default', env, region)
+  return profileInputs(lookup(env, 'AWS_PROFILE'), env, region, signIn)
+}
+
+/** How long the AWS sign-in may take before the request fails. */
+const SIGN_IN_TIMEOUT_MS = 60_000
+
+/**
+ * The AWS SDK's sign-in for a request, on Mousse's side: the worker entry started with `PI_AWS_CREDENTIALS_ARG` in the
+ * entry's environment (`env`), as Pi's turns have it, so the SDK finds the person's files, SSO cache and credential
+ * program where it always does, without changing Mousse's own environment. `AWS_MAX_ATTEMPTS=1` is added, so no STS or
+ * SSO call is retried. It writes back only the keys, which stay in memory for this request.
+ */
+export function resolveAwsSignIn(input: { execPath: string; script: string; env: NodeJS.ProcessEnv; label: string; instanceId: string; signal: AbortSignal }): AwsSignIn {
+  return (profile, region) => new Promise((resolve, reject) => {
+    input.signal.throwIfAborted()
+    const env: NodeJS.ProcessEnv = { ...input.env, ELECTRON_RUN_AS_NODE: '1', ...PI_WORKER_AWS_ENV }
+    recordHarnessSpawn({ instanceId: input.instanceId, purpose: 'pi-aws-sign-in', command: input.execPath, args: [input.script, PI_AWS_CREDENTIALS_ARG], env })
+    const child = spawn(input.execPath, [input.script, PI_AWS_CREDENTIALS_ARG], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    let out = ''
+    let stderrTail = ''
+    let done = false
+    const finish = (error: unknown, keys?: AwsKeys) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      input.signal.removeEventListener('abort', aborted)
+      if (child.exitCode === null) child.kill()
+      if (keys) resolve(keys)
+      else reject(error)
+    }
+    const failed = (why: string) => harnessAppError({ code: 'signed_out', message: `${input.label}: AWS did not sign in (${why}). Mousse did not send the request.`, instanceId: input.instanceId })
+    const aborted = () => finish(input.signal.reason ?? new DOMException('Aborted', 'AbortError'))
+    input.signal.addEventListener('abort', aborted, { once: true })
+    const timer = setTimeout(() => finish(failed(`no answer in ${SIGN_IN_TIMEOUT_MS / 1000} s`)), SIGN_IN_TIMEOUT_MS)
+    child.on('error', (error) => finish(failed(error.message)))
+    child.stdin.on('error', () => { /* the sign-in already ended */ })
+    child.stderr.on('data', (chunk: Buffer) => { stderrTail = (stderrTail + chunk.toString('utf8')).slice(-1_000) })
+    child.stdout.on('data', (chunk: Buffer) => { out += chunk.toString('utf8') })
+    child.on('close', (code) => {
+      let result: PiAwsCredentialsResult | undefined
+      try {
+        result = JSON.parse(out.trim().split('\n').at(-1) ?? '') as PiAwsCredentialsResult
+      } catch {
+        result = undefined
+      }
+      if (result && 'accessKeyId' in result && result.accessKeyId && result.secretAccessKey)
+        return finish(undefined, { accessKeyId: result.accessKeyId, secretAccessKey: result.secretAccessKey, ...(result.sessionToken ? { sessionToken: result.sessionToken } : {}) })
+      const tail = stderrTail.trim().split('\n').slice(-2).join(' ').slice(0, 300)
+      finish(failed(result && 'error' in result ? result.error : `exit code ${code}${tail ? `: ${tail}` : ''}`))
+    })
+    const request: PiAwsCredentialsRequest = { ...(profile ? { profile } : {}), ...(region ? { region } : {}) }
+    child.stdin.end(`${JSON.stringify(request)}\n`)
+  })
 }
 
 /** The built worker entry beside the bundle that runs this code (`out/main/piWorker.js`). */
@@ -227,14 +290,9 @@ export function piWorkerTransport(options: PiWorkerOptions, spec: () => PiWorker
       signal.throwIfAborted()
       if (!options.script) throw harnessAppError({ code: 'unsupported', reason: 'not_admitted', message: `${label} cannot run a single request: this build of Mousse has no Pi worker.`, instanceId })
       const { model, reasoning, sessionId } = spec()
-      let inputs: BedrockInputs
-      try {
-        inputs = await bedrockInputs(options.credential(), options.baseEnv)
-      } catch (error) {
-        if (error instanceof BedrockInputRefused)
-          throw harnessAppError({ code: 'unsupported', reason: 'not_admitted', message: `${label}: ${error.message} Mousse did not send the request.`, instanceId })
-        throw error
-      }
+      const stored = options.credential()
+      const signIn = resolveAwsSignIn({ execPath: options.execPath, script: options.script, env: { ...options.baseEnv, ...(stored?.env ?? {}) }, label, instanceId, signal })
+      const inputs = await bedrockInputs(stored, options.baseEnv, signIn)
       signal.throwIfAborted()
       const endpoint: Record<string, string> = {}
       for (const name of ENDPOINT_ENV) {

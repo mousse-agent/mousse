@@ -2,7 +2,25 @@
  * The NDJSON protocol between a Pi single request (`pi:worker`, `drivers/pi/workerOneShot.ts`) and its worker process
  * (`worker.ts`). The worker says `ready` once, takes one request line on stdin, streams events on stdout and ends with
  * one `end`. Neither side imports the other, and nothing here loads pi-ai or the AWS SDK.
+ *
+ * Started with `PI_AWS_CREDENTIALS_ARG`, the same entry is the daemon's AWS sign-in instead (never sealed, never in a
+ * place): it takes one `PiAwsCredentialsRequest` line, resolves it with the AWS SDK's own credential chain in the
+ * entry's environment, and writes one `PiAwsCredentialsResult` line.
  */
+
+/** The argument that starts the entry as the AWS sign-in. */
+export const PI_AWS_CREDENTIALS_ARG = '--aws-credentials'
+
+/** What to sign in as: the profile (else the SDK's own order), and the region for its STS or SSO call. */
+export interface PiAwsCredentialsRequest {
+  profile?: string
+  region?: string
+}
+
+/** The temporary keys the sign-in gave, or why it failed. */
+export type PiAwsCredentialsResult =
+  | { accessKeyId: string; secretAccessKey: string; sessionToken?: string; expiration?: string }
+  | { error: string }
 
 /** The request: the model as pi-ai defines it, the text, and the credential inputs the entry uses, never more. */
 export interface PiWorkerRequest {

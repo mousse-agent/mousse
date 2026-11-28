@@ -1,5 +1,5 @@
 import { createInterface } from 'node:readline'
-import type { PiWorkerMessage, PiWorkerRequest } from './workerProtocol'
+import { PI_AWS_CREDENTIALS_ARG, type PiAwsCredentialsRequest, type PiAwsCredentialsResult, type PiWorkerMessage, type PiWorkerRequest } from './workerProtocol'
 
 /**
  * Pi's single-request worker (`pi:worker`): one pi-ai Bedrock request with no tool, in a process of its own, started by
@@ -12,6 +12,11 @@ import type { PiWorkerMessage, PiWorkerRequest } from './workerProtocol'
  * credentials it may use.
  *
  * It speaks NDJSON on stdin/stdout (`workerProtocol.ts`): `ready`, one request line, events, one `end`, then it exits.
+ *
+ * Started with `PI_AWS_CREDENTIALS_ARG`, it is the daemon's AWS sign-in instead: unsealed, in the entry's environment
+ * (`AWS_MAX_ATTEMPTS=1` added), it resolves the entry's profile with the AWS SDK's own credential chain, as Pi's turns
+ * do (SSO, a credential process, an assumed role, web identity, `aws login`, a container's role), and writes back only
+ * the temporary keys. The request's worker gets those keys and nothing of the setup they came from.
  */
 
 function send(message: PiWorkerMessage, then?: () => void): void {
@@ -49,20 +54,59 @@ async function run(request: PiWorkerRequest): Promise<void> {
   send({ event: 'end', text, ...(failed ? { error: message.errorMessage, provider: message.provider } : {}) }, () => process.exit(0))
 }
 
+/** The AWS sign-in: one request line, the SDK's chain, one result line. Nothing retries below it. */
+async function resolveCredentials(request: PiAwsCredentialsRequest): Promise<PiAwsCredentialsResult> {
+  const { defaultProvider } = await import('@aws-sdk/credential-provider-node')
+  const provider = defaultProvider({
+    ...(request.profile ? { profile: request.profile } : {}),
+    ...(request.region ? { parentClientConfig: { region: request.region } } : {}),
+    // A container's credential endpoint: no retry. The STS and SSO clients take one attempt from AWS_MAX_ATTEMPTS in
+    // this process's environment (the launch sets it), which also reaches the web-identity client no config is given to.
+    maxRetries: 0
+  })
+  const credentials = await provider()
+  return {
+    accessKeyId: credentials.accessKeyId,
+    secretAccessKey: credentials.secretAccessKey,
+    ...(credentials.sessionToken ? { sessionToken: credentials.sessionToken } : {}),
+    ...(credentials.expiration ? { expiration: credentials.expiration.toISOString() } : {})
+  }
+}
+
+function writeResult(result: PiAwsCredentialsResult, code: number): void {
+  process.stdout.write(`${JSON.stringify(result)}
+`, () => process.exit(code))
+}
+
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity })
 let started = false
-lines.on('line', (line) => {
-  if (started) return
-  started = true
-  let request: PiWorkerRequest
-  try {
-    request = JSON.parse(line) as PiWorkerRequest
-  } catch {
-    send({ event: 'end', text: '', error: 'The worker could not read its request.' }, () => process.exit(1))
-    return
-  }
-  run(request).catch((error: unknown) => {
-    send({ event: 'end', text: '', error: error instanceof Error ? error.message : String(error) }, () => process.exit(1))
+if (process.argv.includes(PI_AWS_CREDENTIALS_ARG)) {
+  lines.once('line', (line) => {
+    let request: PiAwsCredentialsRequest
+    try {
+      request = JSON.parse(line) as PiAwsCredentialsRequest
+    } catch {
+      return writeResult({ error: 'The AWS sign-in could not read its request.' }, 1)
+    }
+    resolveCredentials(request).then(
+      (result) => writeResult(result, 0),
+      (error: unknown) => writeResult({ error: error instanceof Error ? error.message : String(error) }, 1)
+    )
   })
-})
-send({ event: 'ready' })
+} else {
+  lines.on('line', (line) => {
+    if (started) return
+    started = true
+    let request: PiWorkerRequest
+    try {
+      request = JSON.parse(line) as PiWorkerRequest
+    } catch {
+      send({ event: 'end', text: '', error: 'The worker could not read its request.' }, () => process.exit(1))
+      return
+    }
+    run(request).catch((error: unknown) => {
+      send({ event: 'end', text: '', error: error instanceof Error ? error.message : String(error) }, () => process.exit(1))
+    })
+  })
+  send({ event: 'ready' })
+}

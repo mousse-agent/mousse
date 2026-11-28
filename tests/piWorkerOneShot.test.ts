@@ -4,6 +4,7 @@
  * Bedrock stream and AWS SDK at a loopback stub (`harness/realPiWorker.ts`), with made-up keys, started through the
  * Pi runtime's single-request transport as a title request starts it.
  */
+import { createHash } from 'node:crypto'
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
@@ -12,11 +13,12 @@ import { piDriver } from '../src/mms/harness/drivers/pi'
 import { ProviderInstanceService } from '../src/mms/harness/instanceMap'
 import { testHarness } from '../src/mms/run/testkit/harness'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
-import { bedrockInputs } from '../src/mms/harness/drivers/pi/workerOneShot'
+import { bedrockInputs, type AwsSignIn } from '../src/mms/harness/drivers/pi/workerOneShot'
+import { observeHarnessSpawns, type HarnessSpawn } from '../src/mms/harness/spawn'
 import { routeLabel } from '../src/mms/harness/oneShot/admission'
 import { classifyOneShotFailure } from '../src/mms/harness/oneShot/runner'
 import { placesLeft } from './harness/realOpencode'
-import { BEDROCK_MODEL, bedrockModel, bedrockStub, ENTRY_KEY_ID, ENTRY_SECRET, piPerson, PROMPT_LINE, piWorkerRuntime, piWorkerScript, runWorkerDirect, sendWorkerOnce, workerRequest, type StubAnswer } from './harness/realPiWorker'
+import { awsSignInStub, BEDROCK_MODEL, bedrockModel, bedrockStub, ENTRY_KEY_ID, ENTRY_SECRET, piPerson, PROMPT_LINE, piWorkerRuntime, piWorkerScript, runWorkerDirect, sendWorkerOnce, SIGNED_IN, workerRequest, type StubAnswer } from './harness/realPiWorker'
 
 let script: string
 beforeAll(async () => {
@@ -173,23 +175,6 @@ describe('pi:worker credentials', () => {
     expect(stub.signers()).toEqual(['AKIAROTATEFIRST00001', 'AKIAROTATESECOND0002'])
   }, 90_000)
 
-  it('a profile that signs in with SSO is refused with its reason, before anything is sent', async () => {
-    const person = piPerson()
-    cleanups.push(person.remove)
-    mkdirSync(join(person.home, '.aws'), { recursive: true })
-    writeFileSync(join(person.home, '.aws', 'config'), '[profile corp]\nsso_session = corp\nsso_account_id = 111111111111\nregion = us-east-1\n')
-    const stub = await bedrockStub({ text: 'ok' })
-    cleanups.push(() => stub.close())
-    const runtime = piWorkerRuntime({ person, script, stub, ambient: { AWS_PROFILE: 'corp' } })
-    const { seen, sent } = sendWorkerOnce(runtime)
-    const error = await sent.then(() => undefined, (failure: unknown) => failure)
-    expect(classifyOneShotFailure(error)).toBe('not_admitted')
-    expect((error as Error).message).toMatch(/profile "corp" signs in with IAM Identity Center \(SSO\)/)
-    expect(seen.sent).toBe(0)
-    expect(stub.requests).toEqual([])
-    expect(placesLeft(person.profile)).toEqual([])
-  }, 90_000)
-
   // Every way the entry can sign in, and what the worker is given for it. `home` holds the person's AWS files.
   const files = {
     config: [
@@ -204,7 +189,8 @@ describe('pi:worker credentials', () => {
     ].join('\n'),
     credentials: ['[keys]', 'aws_access_key_id = AKIAKEYS', 'aws_secret_access_key = keys-secret', 'aws_session_token = keys-token', '[other]', 'aws_access_key_id = AKIAOTHER', 'aws_secret_access_key = other-secret'].join('\n')
   }
-  type Row = [string, { key?: string; env?: Record<string, string> } | undefined, Record<string, string>, { bearerToken?: string; env?: Record<string, string>; refused?: RegExp; signedOut?: RegExp }]
+  type Row = [string, { key?: string; env?: Record<string, string> } | undefined, Record<string, string>, { bearerToken?: string; env?: Record<string, string>; signIn?: [string | undefined, string | undefined]; signedOut?: RegExp }]
+  const SDK_KEYS = { AWS_ACCESS_KEY_ID: 'ASIAFROMSDK', AWS_SECRET_ACCESS_KEY: 'sdk-secret', AWS_SESSION_TOKEN: 'sdk-token' }
   const rows: Row[] = [
     ['a stored bearer token, over everything else', { key: 'stored-bearer' }, { AWS_ACCESS_KEY_ID: 'AKIAENV', AWS_SECRET_ACCESS_KEY: 's', AWS_REGION: 'us-east-2' }, { bearerToken: 'stored-bearer', env: { AWS_REGION: 'us-east-2' } }],
     ['the ambient marker with AWS_BEARER_TOKEN_BEDROCK', { key: '<authenticated>' }, { AWS_BEARER_TOKEN_BEDROCK: 'env-bearer' }, { bearerToken: 'env-bearer', env: {} }],
@@ -212,13 +198,13 @@ describe('pi:worker credentials', () => {
     ['keys in the environment, over AWS_PROFILE', { key: '<authenticated>' }, { AWS_ACCESS_KEY_ID: 'AKIAENV', AWS_SECRET_ACCESS_KEY: 's', AWS_SESSION_TOKEN: 't', AWS_PROFILE: 'keys' }, { env: { AWS_ACCESS_KEY_ID: 'AKIAENV', AWS_SECRET_ACCESS_KEY: 's', AWS_SESSION_TOKEN: 't' } }],
     ['AWS_PROFILE, with AWS_REGION over the profile’s region', undefined, { AWS_PROFILE: 'keys', AWS_REGION: 'ap-south-1' }, { env: { AWS_ACCESS_KEY_ID: 'AKIAKEYS', AWS_SECRET_ACCESS_KEY: 'keys-secret', AWS_SESSION_TOKEN: 'keys-token', AWS_REGION: 'ap-south-1' } }],
     ['nothing set: the default profile, and none of its other settings', { key: '<authenticated>' }, {}, { env: { AWS_ACCESS_KEY_ID: 'AKIADEFAULT', AWS_SECRET_ACCESS_KEY: 'default-secret', AWS_REGION: 'eu-west-1' } }],
-    ['an SSO profile', undefined, { AWS_PROFILE: 'sso' }, { refused: /IAM Identity Center \(SSO\)/ }],
-    ['a credential-process profile', undefined, { AWS_PROFILE: 'process' }, { refused: /a credential process/ }],
-    ['an assumed-role profile', undefined, { AWS_PROFILE: 'role' }, { refused: /an assumed role/ }],
-    ['a web-identity profile', undefined, { AWS_PROFILE: 'web' }, { refused: /web identity/ }],
-    ['an `aws login` profile', undefined, { AWS_PROFILE: 'login' }, { refused: /`aws login`/ }],
-    ['web identity in the environment', undefined, { AWS_WEB_IDENTITY_TOKEN_FILE: '/tmp/t', AWS_ROLE_ARN: 'arn' }, { refused: /web identity/ }],
-    ['a container role', undefined, { AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: '/v2/creds' }, { refused: /container/ }],
+    ['an SSO profile: the AWS SDK signs in', undefined, { AWS_PROFILE: 'sso' }, { signIn: ['sso', undefined], env: SDK_KEYS }],
+    ['a credential-process profile: the AWS SDK signs in', undefined, { AWS_PROFILE: 'process' }, { signIn: ['process', undefined], env: SDK_KEYS }],
+    ['an assumed-role profile: the AWS SDK signs in, in AWS_REGION', undefined, { AWS_PROFILE: 'role', AWS_REGION: 'us-east-2' }, { signIn: ['role', 'us-east-2'], env: { ...SDK_KEYS, AWS_REGION: 'us-east-2' } }],
+    ['a web-identity profile: the AWS SDK signs in', undefined, { AWS_PROFILE: 'web' }, { signIn: ['web', undefined], env: SDK_KEYS }],
+    ['an `aws login` profile: the AWS SDK signs in', undefined, { AWS_PROFILE: 'login' }, { signIn: ['login', undefined], env: SDK_KEYS }],
+    ['the stored profile signs in with SSO', { key: '', env: { AWS_PROFILE: 'sso' } }, {}, { signIn: ['sso', undefined], env: SDK_KEYS }],
+    ['no profile and no default keys: the AWS SDK’s own order, in the default profile’s region', undefined, {}, { signIn: [undefined, 'eu-west-1'], env: { ...SDK_KEYS, AWS_REGION: 'eu-west-1' } }],
     ['a profile with no keys', undefined, { AWS_PROFILE: 'empty' }, { signedOut: /no access key/ }],
     ['a profile in neither file', undefined, { AWS_PROFILE: 'missing' }, { signedOut: /not in/ }]
   ]
@@ -228,11 +214,179 @@ describe('pi:worker credentials', () => {
     mkdirSync(join(person.home, '.aws'), { recursive: true })
     writeFileSync(join(person.home, '.aws', 'config'), files.config)
     writeFileSync(join(person.home, '.aws', 'credentials'), files.credentials)
-    const reading = bedrockInputs(stored, { HOME: person.home, USERPROFILE: person.home, ...env })
-    if (expected.refused) return expect(reading).rejects.toThrow(expected.refused)
+    const calls: Array<[string | undefined, string | undefined]> = []
+    const signIn: AwsSignIn = async (profile, region) => {
+      calls.push([profile, region])
+      return { accessKeyId: 'ASIAFROMSDK', secretAccessKey: 'sdk-secret', sessionToken: 'sdk-token' }
+    }
+    // The last row has no default keys: only its region stays.
+    const home = _name.startsWith('no profile') ? { config: '[default]\nregion = eu-west-1\n', credentials: '' } : files
+    writeFileSync(join(person.home, '.aws', 'config'), home.config)
+    writeFileSync(join(person.home, '.aws', 'credentials'), home.credentials)
+    const reading = bedrockInputs(stored, { HOME: person.home, USERPROFILE: person.home, ...env }, signIn)
     if (expected.signedOut) return expect(reading).rejects.toMatchObject({ code: 'signed_out', message: expect.stringMatching(expected.signedOut) })
     const inputs = await reading
     expect(inputs.bearerToken).toBe(expected.bearerToken)
     expect(inputs.env).toEqual(expected.env)
+    // Static keys and bearer tokens never start the SDK's sign-in.
+    expect(calls).toEqual(expected.signIn ? [expected.signIn] : [])
   })
+})
+
+/**
+ * Every way a person signs in to AWS, resolved on Mousse's side by the AWS SDK's own chain (in the entry's
+ * environment, as Pi's turns have it), at a loopback stub of STS, the SSO portal and a container's credential endpoint,
+ * with made-up keys. The worker gets only the temporary keys: the request is signed with them, and the worker's launch
+ * holds none of the files, the SSO cache, the token file or the program they came from.
+ */
+describe('pi:worker signs in every way the person does', () => {
+  interface SignInCase {
+    name: string
+    keys: { id: string; token: string }
+    /** The person's setup: files under their home, and the entry's environment. */
+    setup(home: string, root: string, authUrl: string): Record<string, string>
+    /** The sign-in call the stub must see. */
+    call: RegExp
+  }
+  const cases: SignInCase[] = [
+    {
+      name: 'an SSO profile (a cached IAM Identity Center sign-in)',
+      keys: { id: SIGNED_IN.sso.id, token: SIGNED_IN.sso.token },
+      setup: (home) => {
+        writeFileSync(join(home, '.aws', 'config'), ['[profile corp]', 'sso_session = corp', 'sso_account_id = 111111111111', 'sso_role_name = dev', 'region = us-east-1', '[sso-session corp]', 'sso_region = us-east-1', 'sso_start_url = https://example.awsapps.com/start', ''].join('\n'))
+        const cache = join(home, '.aws', 'sso', 'cache')
+        mkdirSync(cache, { recursive: true })
+        writeFileSync(join(cache, `${createHash('sha1').update('corp').digest('hex')}.json`), JSON.stringify({ accessToken: 'SSO_ACCESS_TOKEN_7d2a', expiresAt: new Date(Date.now() + 3_600_000).toISOString(), region: 'us-east-1', startUrl: 'https://example.awsapps.com/start' }))
+        return { AWS_PROFILE: 'corp' }
+      },
+      call: /^GET \/federation\/credentials\?account_id=111111111111&role_name=dev/
+    },
+    {
+      name: 'a credential-process profile (a program prints the keys)',
+      keys: { id: 'ASIAPROCESS00000001', token: 'PROCESS_SESSION_TOKEN_7d2a' },
+      setup: (home, root) => {
+        const program = join(root, 'aws-credential-program.cjs')
+        writeFileSync(program, "console.log(JSON.stringify({ Version: 1, AccessKeyId: 'ASIAPROCESS00000001', SecretAccessKey: 'process-secret', SessionToken: 'PROCESS_SESSION_TOKEN_7d2a' }))\n")
+        writeFileSync(join(home, '.aws', 'config'), ['[profile tool]', `credential_process = "${process.execPath}" "${program}"`, 'region = us-east-1', ''].join('\n'))
+        return { AWS_PROFILE: 'tool' }
+      },
+      call: /^$/
+    },
+    {
+      name: 'an assumed-role profile (STS AssumeRole from a source profile)',
+      keys: { id: SIGNED_IN.role.id, token: SIGNED_IN.role.token },
+      setup: (home) => {
+        writeFileSync(join(home, '.aws', 'config'), ['[profile admin]', 'role_arn = arn:aws:iam::111111111111:role/admin', 'source_profile = base', 'region = us-east-1', ''].join('\n'))
+        writeFileSync(join(home, '.aws', 'credentials'), ['[base]', 'aws_access_key_id = AKIABASEPROFILE0001', 'aws_secret_access_key = base-secret', ''].join('\n'))
+        return { AWS_PROFILE: 'admin' }
+      },
+      call: /^POST \/ Action=AssumeRole&/
+    },
+    {
+      name: 'web identity in the environment (STS AssumeRoleWithWebIdentity)',
+      keys: { id: SIGNED_IN.webIdentity.id, token: SIGNED_IN.webIdentity.token },
+      setup: (_home, root) => {
+        const token = join(root, 'web-identity-token')
+        writeFileSync(token, 'web-identity-jwt')
+        return { AWS_WEB_IDENTITY_TOKEN_FILE: token, AWS_ROLE_ARN: 'arn:aws:iam::111111111111:role/ci', AWS_REGION: 'us-east-1' }
+      },
+      call: /^POST \/ Action=AssumeRoleWithWebIdentity&/
+    },
+    {
+      name: 'a container’s role (its credential endpoint)',
+      keys: { id: SIGNED_IN.container.id, token: SIGNED_IN.container.token },
+      setup: (_home, _root, authUrl) => ({ AWS_CONTAINER_CREDENTIALS_FULL_URI: `${authUrl}/creds`, AWS_REGION: 'us-east-1' }),
+      call: /^GET \/creds/
+    }
+  ]
+
+  async function signInSetup(signIn: SignInCase, auth: Awaited<ReturnType<typeof awsSignInStub>>) {
+    const person = piPerson()
+    cleanups.push(person.remove)
+    const aws = join(person.home, '.aws')
+    mkdirSync(aws, { recursive: true })
+    const stub = await bedrockStub({ text: 'ok' })
+    cleanups.push(() => stub.close())
+    const ambient = {
+      // The person's own files, named as a person may name them, and the stub for every AWS sign-in service.
+      AWS_CONFIG_FILE: join(aws, 'config'),
+      AWS_SHARED_CREDENTIALS_FILE: join(aws, 'credentials'),
+      AWS_ENDPOINT_URL_STS: auth.url,
+      AWS_ENDPOINT_URL_SSO: auth.url,
+      AWS_EC2_METADATA_DISABLED: 'true',
+      ...signIn.setup(person.home, person.root, auth.url)
+    }
+    const spawns: HarnessSpawn[] = []
+    cleanups.push(observeHarnessSpawns((spawned) => spawns.push(spawned)))
+    const runtime = piWorkerRuntime({ person, script, stub, ambient })
+    return { person, stub, runtime, ambient, spawns }
+  }
+
+  it.each(cases)('$name names a thread: the request is signed with the keys the SDK resolved, and the worker holds none of the setup', async (signIn) => {
+    const auth = await awsSignInStub()
+    cleanups.push(() => auth.close())
+    const { person, stub, runtime, ambient, spawns } = await signInSetup(signIn, auth)
+    await expect(sendWorkerOnce(runtime).sent).resolves.toBe('ok')
+    expect(stub.signers()).toEqual([signIn.keys.id])
+    expect(stub.requests[0]!.headers['x-amz-security-token']).toBe(signIn.keys.token)
+    expect(auth.requests.map((request) => request.line)).toEqual(signIn.call.source === '^$' ? [] : [expect.stringMatching(signIn.call)])
+    if (signIn.keys.id === SIGNED_IN.sso.id) expect(auth.requests[0]!.ssoToken).toBe('SSO_ACCESS_TOKEN_7d2a')
+    // One sign-in on Mousse's side, in the entry's environment with one attempt; then the sealed worker.
+    expect(spawns.map((spawned) => spawned.purpose)).toEqual(['pi-aws-sign-in', 'pi-one_shot'])
+    expect(spawns[0]!.env).toMatchObject({ ...ambient, AWS_MAX_ATTEMPTS: '1' })
+    const worker = spawns[1]!
+    const launch = JSON.stringify([worker.args, worker.env])
+    // Nothing of where the keys came from: the AWS files, the SSO cache, the token file, the program, the stub.
+    for (const mark of ['.aws', 'sso', 'aws-credential-program', 'web-identity-token', auth.url]) expect(launch).not.toContain(mark)
+    for (const name of Object.keys(ambient)) expect(Object.keys(worker.env)).not.toContain(name)
+    expect(Object.keys(worker.env).filter((name) => /^AWS_/i.test(name)).sort()).toEqual(['AWS_MAX_ATTEMPTS', 'AWS_RETRY_MODE'])
+    expect(placesLeft(person.profile)).toEqual([])
+  }, 90_000)
+
+  it('a failed STS call is made once, the request is never sent, and the sign-in failure says why', async () => {
+    const auth = await awsSignInStub({ status: 503 })
+    cleanups.push(() => auth.close())
+    const { stub, runtime } = await signInSetup(cases.find((each) => each.name.startsWith('an assumed-role'))!, auth)
+    const { seen, sent } = sendWorkerOnce(runtime)
+    const error = await sent.then(() => undefined, (failure: unknown) => failure)
+    expect(classifyOneShotFailure(error)).toBe('signed_out')
+    expect((error as Error).message).toMatch(/AWS did not sign in/)
+    expect(auth.requests).toHaveLength(1)
+    expect(seen.sent).toBe(0)
+    expect(stub.requests).toEqual([])
+  }, 90_000)
+
+  it('a failed container credential call is made once by each of the SDK’s two container providers, never retried', async () => {
+    const auth = await awsSignInStub({ status: 503 })
+    cleanups.push(() => auth.close())
+    const { stub, runtime } = await signInSetup(cases.find((each) => each.name.startsWith('a container'))!, auth)
+    const error = await sendWorkerOnce(runtime).sent.then(() => undefined, (failure: unknown) => failure)
+    expect(classifyOneShotFailure(error)).toBe('signed_out')
+    expect(auth.requests.map((request) => request.line.trim())).toEqual(['GET /creds', 'GET /creds'])
+    expect(stub.requests).toEqual([])
+  }, 90_000)
+
+  it('control: the same sign-in without AWS_MAX_ATTEMPTS calls STS three times', async () => {
+    const auth = await awsSignInStub({ status: 503 })
+    cleanups.push(() => auth.close())
+    const person = piPerson()
+    cleanups.push(person.remove)
+    mkdirSync(join(person.home, '.aws'), { recursive: true })
+    // A web-identity profile: its STS client takes no config from the sign-in, only the environment.
+    const token = join(person.root, 'web-identity-token')
+    writeFileSync(token, 'web-identity-jwt')
+    writeFileSync(join(person.home, '.aws', 'config'), ['[profile ci]', 'role_arn = arn:aws:iam::111111111111:role/ci', `web_identity_token_file = ${token}`, 'region = us-east-1', ''].join('\n'))
+    const env = { PATH: process.env.PATH ?? '', SYSTEMROOT: process.env.SYSTEMROOT ?? '', ...person.env, AWS_ENDPOINT_URL_STS: auth.url, AWS_EC2_METADATA_DISABLED: 'true' }
+    const signInOnce = async (extra: Record<string, string>) => {
+      const before = auth.requests.length
+      const { execFile } = await import('node:child_process')
+      await new Promise<void>((done) => {
+        const child = execFile(process.execPath, [script, '--aws-credentials'], { env: { ...env, ...extra } }, () => done())
+        child.stdin?.end(`${JSON.stringify({ profile: 'ci' })}\n`)
+      })
+      return auth.requests.length - before
+    }
+    expect(await signInOnce({ AWS_MAX_ATTEMPTS: '1' })).toBe(1)
+    expect(await signInOnce({})).toBe(3)
+  }, 90_000)
 })
