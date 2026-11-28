@@ -192,9 +192,10 @@ export interface BotsPersonalV2Api {
    * whose choices carry `providers`. `image`: the Images row (#1088), one of `imageProviders`' models; sent only to a
    * service whose choices carry `imageProviders`. `access`: which devices reach the new bot (New bot's Devices step),
    * saved before the bot is listed anywhere; sent only to a service whose choices carry `reachOnCreate`. Absent, or
-   * `all` from an older app, this computer alone.
+   * `all` from an older app, this computer alone. `node` (a window only): made on that other computer of the owner's,
+   * New bot's "Lives on", routed there; it always reaches this computer too.
    */
-  'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }; result: { bot: BotSummary } }
+  'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess; node?: string }; result: { bot: BotSummary } }
   'bots.get': { params: { botId: string }; result: BotDetail }
   /**
    * Renames the bot, changes its look, or (`description`) edits its prompt in About: the description it works under from
@@ -254,9 +255,10 @@ export interface BotsPersonalV2Api {
   'bots.model.get': { params: { botId: string }; result: { model: string | null; slots?: BotShownRows; named?: Partial<Record<BotModelSlotKey, string>>; image?: BotModelPick | null; images?: BotImageUsage; custom?: BotCustomSlot[] } & BotRunsOnChoices }
   /**
    * What New bot's Runs on offers before the bot exists (#673): the same choices as `bots.model.get`, and `last`, the
-   * rows of the owner's newest bot with picks, which a new bot starts from (null where it had none).
+   * rows of the owner's newest bot with picks, which a new bot starts from (null where it had none). `node` (a window
+   * only): what that other computer offers, for New bot's "Lives on" there; its devices mark this one `caller`.
    */
-  'bots.model.choices': { params: Record<string, never>; result: BotRunsOnChoices & { last?: BotShownRows } }
+  'bots.model.choices': { params: { node?: string }; result: BotRunsOnChoices & { last?: BotShownRows } }
   /**
    * The single picker before rows: one model by name on every row, on the entry that offers it now, or null, which
    * leaves a bot from before picks by usage. A picked bot is never set back to by usage.
@@ -347,9 +349,19 @@ export interface BotsPersonalV2EventData {
  * its computer.
  */
 export const BOTS_ELSEWHERE_METHODS = ['bots.remote.list', 'bots.focus', 'bots.remote.file'] as const
+/** Another computer a new bot can live on: one where this computer has Full bot access. */
+export interface BotElsewhereComputer {
+  node: string
+  name: string
+  offline?: true
+}
 export type BotsElsewhereMethod = (typeof BOTS_ELSEWHERE_METHODS)[number]
 export interface BotsElsewhereApi {
-  'bots.remote.list': { params: Record<string, never>; result: { bots: BotSummary[] } }
+  /**
+   * `computers`: the other computers where this one has Full bot access, for New bot's "Lives on" (offline ones marked,
+   * not offered). Absent from an older service.
+   */
+  'bots.remote.list': { params: Record<string, never>; result: { bots: BotSummary[]; computers?: BotElsewhereComputer[] } }
   'bots.focus': { params: { botId: string; focused: boolean }; result: { routed: boolean; focused: boolean } }
   'bots.remote.file': { params: { botId: string; path: string }; result: { path: string; name: string; size: number } }
 }

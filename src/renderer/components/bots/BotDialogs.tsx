@@ -7,6 +7,7 @@ import { runConfirmed } from './runBotCommand'
 import { useChatsStore } from '../../stores/chatsStore'
 import { BotLookPicker } from './face/BotLookPicker'
 import { BOT_FULL_TRUST_PERMISSION } from '../../../shared/bots/personal/manifest'
+import { botSetupBlock } from './botSetup'
 
 /**
  * A small dialog in the Chats style (`chat-dialog`): focus inside, Escape and the backdrop close it.
@@ -138,7 +139,12 @@ export function BotDialogs() {
   const dialog = useBotsStore((s) => s.dialog)
   const bots = useBotsStore((s) => s.bots)
   const bot = dialog && bots.find((entry) => entry.id === dialog.botId)
-  if (!dialog || !bot) return null
+  // Its computer went offline, or lowered this one to Use: the dialog closes rather than change what it no longer can.
+  const blocked = Boolean(bot && botSetupBlock(bot))
+  useEffect(() => {
+    if (blocked) close()
+  }, [blocked])
+  if (!dialog || !bot || blocked) return null
   if (dialog.kind === 'confirm') return <CommandConfirmDialog key={`${bot.id}:${dialog.command}`} bot={bot} command={dialog.command} />
   if (dialog.kind === 'rename') return <RenameDialog key={bot.id} bot={bot} />
   if (dialog.kind === 'fullTrust') return <FullTrustDialog key={bot.id} bot={bot} />

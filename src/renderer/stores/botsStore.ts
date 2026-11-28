@@ -9,7 +9,7 @@ import type { NewBotAccess } from '../../shared/bots/personal/deviceAccess'
 import { withMark, noMarks, type BotMark, type BotMarksByRef } from '../../shared/bots/personal/marks'
 import { DEFAULT_BOT_FILTER, type BotListFilter, type BotStateFilter } from '../lib/botList'
 import { attachmentTooLargeText } from '../../shared/bots/personal/attachments'
-import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment, type BotShownRows, type BotsPersonalV2Result } from '../../shared/bots/personal/methods'
+import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment, type BotElsewhereComputer, type BotShownRows, type BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { BotFaceState } from '../components/bots/face/BotFace'
 import type { AttachedFile } from '../components/ChatComposer'
 import { attachmentPath, createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
@@ -92,6 +92,12 @@ export interface NewBotDraft {
    * only to a service that takes it.
    */
   devices: string[]
+  /**
+   * Lives on: another computer the bot is made on (one where this computer has Full bot access), or null for this
+   * computer, the default. Picking another clears the model rows, the Images row and the devices, which are that
+   * computer's.
+   */
+  node: string | null
   /** The step New bot shows, so closing and reopening returns to it. */
   step: NewBotStep
   /** The owner typed or picked something: a click beside the dialog no longer closes it. */
@@ -99,7 +105,7 @@ export interface NewBotDraft {
 }
 /** New bot's steps: the look, what it does (name and sentence), where it runs, and (with other devices) which reach it. */
 export type NewBotStep = 'look' | 'about' | 'runsOn' | 'devices'
-const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, image: null, devices: [], step: 'look', touched: false }
+const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, image: null, devices: [], node: null, step: 'look', touched: false }
 
 /**
  * The step that can fix a refused create: a model no longer offered is Runs on's, a name or sentence the service
@@ -115,6 +121,8 @@ export function newBotStepForFailure(cause: unknown, current: NewBotStep): NewBo
 interface BotsState {
   profileId: string | null
   bots: BotSummary[]
+  /** The other computers where this one has Full bot access: New bot's "Lives on" offers those online. */
+  remoteComputers: BotElsewhereComputer[]
   loaded: boolean
   chats: Record<string, BotChatCache>
   /** A chat's first load while it runs, or after it failed (until Retry). Absent once the chat is held. */
@@ -243,8 +251,11 @@ interface BotsState {
   seedNewBotRows(last: BotShownRows | undefined, offered: (pick: BotModelPick) => boolean): void
   /** Moves New bot to a step; moving alone is not putting anything in. */
   setNewBotStep(step: NewBotStep): void
-  /** One create at a time: a second call while one is on its way gets the same answer. */
-  create(input: { look: BotLook; name?: string; description: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }): Promise<BotSummary | null>
+  /**
+   * One create at a time: a second call while one is on its way gets the same answer. `node`: made on that other
+   * computer (New bot's "Lives on"), where this one has Full bot access.
+   */
+  create(input: { look: BotLook; name?: string; description: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess; node?: string }): Promise<BotSummary | null>
   update(botId: string, change: { name?: string; look?: BotLook }): Promise<boolean>
   /**
    * The owner edits the bot's prompt in About (its description; null: back to the default). Its next turn works under
@@ -340,11 +351,12 @@ const missingMethod = (cause: unknown) => ['method_not_available', 'method_not_f
  * The bots of the owner's other computers (`bots.remote.list`). None from a service without them (no Bridge, or older);
  * undefined when they could not be read now, so the ones listed before stay.
  */
-async function remoteList(): Promise<BotSummary[] | undefined> {
+async function remoteList(): Promise<{ bots: BotSummary[]; computers: BotElsewhereComputer[] } | undefined> {
   try {
-    return (await bots().remoteList()).filter((bot) => bot.lives)
+    const listed = await bots().remoteList()
+    return { bots: listed.bots.filter((bot) => bot.lives), computers: listed.computers ?? [] }
   } catch (cause) {
-    return missingMethod(cause) ? [] : undefined
+    return missingMethod(cause) ? { bots: [], computers: [] } : undefined
   }
 }
 
@@ -397,8 +409,18 @@ function upsert(botId: string, messages: BotChatMessage[], incoming: BotChatMess
   for (const message of placed) byId.set(message.id, message)
   return [...byId.values()].sort(bySeq)
 }
+/**
+ * A bot's summary as a call answered it. A bot of another computer keeps where it lives: its computer's answer never
+ * says (the list adds it), so a rename or a pause from here doesn't make it look like this computer's own.
+ */
 const replaceBot = (list: BotSummary[], bot: BotSummary) =>
-  removed.has(bot.id) ? list : list.some((entry) => entry.id === bot.id) ? list.map((entry) => (entry.id === bot.id ? bot : entry)) : [...list, bot]
+  removed.has(bot.id) ? list : list.some((entry) => entry.id === bot.id)
+    ? list.map((entry) => (entry.id === bot.id ? (entry.lives && !bot.lives ? { ...bot, lives: entry.lives } : bot) : entry))
+    : [...list, bot]
+
+/** The computers as listed before when nothing about them changed, so New bot does not render again. */
+const keepEqualByNode = (before: BotElsewhereComputer[], next: BotElsewhereComputer[]): BotElsewhereComputer[] =>
+  JSON.stringify(before) === JSON.stringify(next) ? before : next
 
 /** A composer file as `bots.chat.send` names it: its name and its path on this computer. */
 async function attachmentOf(attached: AttachedFile): Promise<BotChatAttachment> {
@@ -516,7 +538,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
   }
 
   return {
-    profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, references: {}, replyingTo: {},
+    profileId: null, bots: [], remoteComputers: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, references: {}, replyingTo: {},
     reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, aboutFocus: null, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {}, marks: {}, filter: DEFAULT_BOT_FILTER,
 
@@ -536,7 +558,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       reactions.clear()
       resetRemoteBotFiles()
       clearBotLiveReplies()
-      set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, references: {}, replyingTo: {},
+      set({ profileId, bots: [], remoteComputers: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, references: {}, replyingTo: {},
         reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, aboutFocus: null, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {}, marks: {}, filter: DEFAULT_BOT_FILTER })
       marksInFlight = 0
@@ -624,10 +646,12 @@ export const useBotsStore = create<BotsState>((set, get) => {
         do {
           refreshAgain = false
           try {
-            const [local, remote] = await Promise.all([bots().list(), remoteList()])
+            const [local, listed] = await Promise.all([bots().list(), remoteList()])
             if (owner !== epoch) return
+            const remote = listed?.bots
             // The other computers' bots join the list; when they can't be read now, the ones listed before stay.
             const elsewhere = remote ?? get().bots.filter((bot) => bot.lives)
+            const remoteComputers = listed ? keepEqualByNode(get().remoteComputers, listed.computers) : get().remoteComputers
             const list = withCreated([...local, ...elsewhere].filter((bot) => !removed.has(bot.id)))
             // A chat held from a computer that was offline reads its newest rows once that computer is back.
             const back = elsewhere.filter((bot) => !bot.lives?.offline && get().bots.some((before) => before.id === bot.id && before.lives?.offline) && get().chats[bot.id])
@@ -652,7 +676,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
               const activity = kept.length === Object.keys(state.activity).length ? state.activity : Object.fromEntries(kept)
               const said = Object.entries(state.statuses).filter(([id]) => running.has(id))
               const statuses = said.length === Object.keys(state.statuses).length ? state.statuses : Object.fromEntries(said)
-              return { bots, loaded: true, live, activity, statuses, ...dropped, ...celebrate(state.bots, bots) }
+              return { bots, remoteComputers, loaded: true, live, activity, statuses, ...dropped, ...celebrate(state.bots, bots) }
             })
             for (const bot of back) void get().loadChat(bot.id)
           } catch {
@@ -1093,8 +1117,11 @@ export const useBotsStore = create<BotsState>((set, get) => {
       set({ busy: true, error: null, errorBotId: null })
       const operation = (async () => {
         try {
-          const bot = await bots().create({ ...input, clientRequestId })
+          const made = await bots().create({ ...input, clientRequestId })
           if (owner !== epoch) return null
+          // Made on another computer: it lives there, where this computer has Full bot access.
+          const there = input.node ? get().remoteComputers.find((computer) => computer.node === input.node) : undefined
+          const bot: BotSummary = input.node && !made.lives ? { ...made, lives: { node: input.node, name: there?.name ?? 'the other computer', level: 'full' } } : made
           pendingCreate = undefined
           created.add(bot.id)
           set((state) => ({ bots: replaceBot(state.bots, bot), busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT }))
@@ -1150,8 +1177,9 @@ export const useBotsStore = create<BotsState>((set, get) => {
       try {
         await bots().setDevices(botId, { mode: 'this_computer' })
         if (owner !== epoch) return
-        // The list's lock shows at once; the service's `bots.changed` reads it again too.
-        set((state) => ({ bots: state.bots.map((bot) => (bot.id === botId ? { ...bot, reach: 'this_computer' } : bot)) }))
+        // The list's lock shows at once; the service's `bots.changed` reads it again too. A bot of another computer now
+        // reaches its own computer and this one, which its list does not show.
+        set((state) => ({ bots: state.bots.map((bot) => (bot.id === botId && !bot.lives ? { ...bot, reach: 'this_computer' } : bot)) }))
       } catch (cause) { fail(owner, cause, botId) }
     },
 

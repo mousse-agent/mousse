@@ -59,6 +59,17 @@ export type RemoteBotReach = (typeof REMOTE_BOT_REACH)[number]
 /** Most devices one bot's list holds. */
 export const MAX_BOT_DEVICES = 64
 
+/**
+ * Why another device's device choice was refused by the bot's computer before anything ran there. Only the reason
+ * crosses the wire; the device that sent it says it in these words.
+ */
+export const BOT_DEVICES_REFUSALS = {
+  bot_devices_unknown: 'One of those devices is no longer on your account.',
+  bot_devices_unread: "Your devices can't be checked right now. Try again in a moment.",
+  bot_devices_too_many: `Chosen devices are up to ${MAX_BOT_DEVICES}, this device included.`
+} as const
+export type BotDevicesRefusal = keyof typeof BOT_DEVICES_REFUSALS
+
 /** Why `value` is not a device choice, or undefined when it is one. */
 export function botDeviceAccessProblem(value: unknown): string | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return 'A device choice is this_computer or chosen.'
@@ -88,6 +99,11 @@ export interface BotDeviceChoice {
   kind: 'computer' | 'phone' | 'unknown'
   /** Its bot level on this computer (Settings, Devices) is Off: it reaches no bot here, whatever is picked. */
   botsOff?: true
+  /**
+   * The device that asked, from another computer: the bot always reaches it (a choice it sends keeps it), so its window
+   * shows it as "This computer", locked on.
+   */
+  caller?: true
 }
 
 /**
@@ -101,9 +117,9 @@ export interface BotDevicesView {
 }
 
 /**
- * The methods of About's Devices row. Only this computer's own window and command line call them: they are not in the
- * table of methods another device may call (`REMOTE_BOT_METHODS`), never routed (`bots.` stays local), and refused
- * for a call that came through Bridge.
+ * The methods of About's Devices row. This computer's own window and command line call them locally, refused for a call
+ * that came through Bridge; another device calls them only as its remote rows at Full bot access (`REMOTE_BOT_METHODS`),
+ * where the calling device is always kept among the devices that reach the bot.
  */
 export const BOT_DEVICE_METHODS = ['bots.devices.get', 'bots.devices.set'] as const
 export type BotDeviceMethod = (typeof BOT_DEVICE_METHODS)[number]

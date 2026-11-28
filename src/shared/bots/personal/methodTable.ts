@@ -86,8 +86,8 @@ const writes = (required: readonly string[], optional?: readonly string[], versi
  * A row with a level but no `remote` is not offered to another device yet; its level is the one it gets when it is.
  *
  * The remote keys differ from the local ones where a device has no use for them: `staged` files instead of a message's
- * `attachments` (which name files on this computer), a new bot's `reach` instead of `access`, and no prompt edit in
- * `bots.update`.
+ * `attachments` (which name files on this computer), and no single `model` by name on a new bot (an app from before
+ * rows). A new bot's `access` from another device always keeps that device, as does `bots.devices.set`.
  */
 export const BOT_METHODS = {
   // ---------------------------------------------------------------- the Bot UI (`bots.personal.v2`)
@@ -95,14 +95,16 @@ export const BOT_METHODS = {
   'bots.create': {
     level: 'full',
     local: chat(['look', 'name', 'description', 'clientRequestId', 'model', 'slots', 'image', 'access']),
-    // 2: `reach` (`RemoteBotReach`).
-    remote: writes(['look', 'description', 'clientRequestId'], ['name', 'reach'], 2)
+    // 2: `reach` (`RemoteBotReach`). 3: the rows, the Images row and the Devices step of New bot "Lives on" (`slots`,
+    // `image`, `access`), each as the bot's computer offers them.
+    remote: writes(['look', 'description', 'clientRequestId'], ['name', 'reach', 'slots', 'image', 'access'], 3)
   },
   'bots.get': { level: 'use', local: chat(['botId']), remote: reads(['botId']) },
-  'bots.update': { level: 'full', local: chat(['botId', 'name', 'look', 'description']), remote: writes(['botId'], ['name', 'look']) },
+  // 2: `description`, the bot's instructions as About edits them.
+  'bots.update': { level: 'full', local: chat(['botId', 'name', 'look', 'description']), remote: writes(['botId'], ['name', 'look', 'description'], 2) },
   'bots.personal.pause': { level: 'full', local: chat(['botId']), remote: writes(['botId']) },
   'bots.personal.resume': { level: 'full', local: chat(['botId']), remote: writes(['botId']) },
-  'bots.delete': { level: 'full', local: chat(['botId']) },
+  'bots.delete': { level: 'full', local: chat(['botId']), remote: writes(['botId']) },
   'bots.chat.list': { level: 'use', local: chat(['botId', 'beforeSeq', 'limit']), remote: reads(['botId'], ['beforeSeq', 'limit']) },
   'bots.chat.send': {
     level: 'use',
@@ -122,8 +124,8 @@ export const BOT_METHODS = {
   'bots.permissions.revoke': { level: 'full', local: chat(['botId', 'permissionId']), remote: writes(['botId', 'permissionId']) },
   'bots.schedules.add': { level: 'full', local: chat(['botId', 'when', 'prompt', 'model']) },
   'bots.schedules.remove': { level: 'full', local: chat(['botId', 'scheduleId']), remote: writes(['botId', 'scheduleId']) },
-  // Runs on: the bot's models and the entries they are on.
-  'bots.model.get': { level: 'full', local: chat(['botId']) },
+  // Runs on: the bot's models and the entries they are on, as the bot's computer has them.
+  'bots.model.get': { level: 'full', local: chat(['botId']), remote: reads(['botId']) },
   'bots.model.set': { level: 'full', local: chat(['botId', 'model']) },
   'bots.memory.list': { level: 'use', local: chat(['botId', 'history']), remote: reads(['botId']) },
   'bots.memory.forget': { level: 'full', local: chat(['botId', 'id']), remote: writes(['botId', 'id']) },
@@ -134,9 +136,10 @@ export const BOT_METHODS = {
   'bots.reminders.snooze': { level: 'use', local: chat(['botId', 'messageId', 'choice']), remote: chats(['botId', 'messageId', 'choice']) },
   'bots.work.stop': { level: 'use', local: chat(['botId', 'workId']), remote: chats(['botId', 'workId']) },
   'bots.reminders.cancel': { level: 'full', local: chat(['botId', 'reminderId']), remote: writes(['botId', 'reminderId']) },
-  'bots.model.choices': { level: 'full', local: chat([]) },
-  'bots.model.setSlots': { level: 'full', local: chat(['botId', 'slots', 'oneWork']) },
-  'bots.model.setImage': { level: 'full', local: chat(['botId', 'pick']) },
+  // New bot's choices on the computer it will live on: its models, and its devices for the Devices step.
+  'bots.model.choices': { level: 'full', local: chat([]), remote: reads([]) },
+  'bots.model.setSlots': { level: 'full', local: chat(['botId', 'slots', 'oneWork']), remote: writes(['botId'], ['slots', 'oneWork']) },
+  'bots.model.setImage': { level: 'full', local: chat(['botId', 'pick']), remote: writes(['botId', 'pick']) },
   'bots.chat.react': { level: 'use', local: chat(['botId', 'messageId', 'emoji']) },
   'bots.questions.answer': {
     level: 'use',
@@ -172,8 +175,9 @@ export const BOT_METHODS = {
   'bots.stage': { level: 'use', remote: chats(['botId', 'clientRequestId', 'offset', 'dataB64'], ['name', 'size', 'stage']) },
 
   // ---------------------------------------------------------------- About → Devices (`BOT_DEVICE_METHODS`)
-  'bots.devices.get': { level: 'full', local: devices(['botId']) },
-  'bots.devices.set': { level: 'full', local: devices(['botId', 'access']) },
+  // From another device the list always keeps that device: it never shuts itself out of a bot it sets up.
+  'bots.devices.get': { level: 'full', local: devices(['botId']), remote: reads(['botId']) },
+  'bots.devices.set': { level: 'full', local: devices(['botId', 'access']), remote: writes(['botId', 'access']) },
 
   // ---------------------------------------------------------------- the bot's browser (`BOTS_BROWSER_METHODS`)
   // Taking over, input, a fresh picture, opening and closing are the desktop app's on this computer alone; each handler

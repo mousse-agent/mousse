@@ -1,4 +1,5 @@
 import type { BotSummary } from '../../shared/bots/personal/chat'
+import type { BotElsewhereComputer } from '../../shared/bots/personal/methods'
 import type { HandlerContext } from './handlers'
 
 /**
@@ -19,6 +20,8 @@ export interface BotRouterPort {
   focus(ctx: HandlerContext, botId: string, focused: boolean): Promise<{ routed: boolean; focused: boolean }>
   /** The other computers' bots a window lists beside this computer's own (`bots.remote.list`), from what is kept here. */
   list(ctx: HandlerContext): BotSummary[]
+  /** The other computers where this one has Full bot access (New bot's "Lives on"), from what is kept here. */
+  computers?(ctx: HandlerContext): BotElsewhereComputer[]
   /**
    * A file a bot of another computer's chat shows (`bots.remote.file`): its copy on this computer, read from the bot's
    * files folder there when there is none or it changed. `path` is its place in that folder.

@@ -23,12 +23,28 @@ export interface BotDevicesSource {
 }
 
 /** The choice as About shows it: devices no longer on the account are left out of the list. */
-async function view(source: BotDevicesSource, botId: string): Promise<BotDevicesView> {
+export async function botDevicesView(source: Pick<BotDevicesSource, 'store' | 'devices'>, botId: string): Promise<BotDevicesView> {
   const { access, unreadable } = source.store.get(botId)
   const devices = (await source.devices().catch(() => undefined)) ?? []
   const known = new Set(devices.map((device) => device.node))
   const shown: BotDeviceAccess = access.mode === 'chosen' ? { mode: 'chosen', nodes: access.nodes.filter((node) => known.has(node)) } : access
   return { access: shown, devices, ...(unreadable ? { unreadable: true } : {}) }
+}
+
+/**
+ * Saves a bot's Devices choice (the bot is known to be there): a device it names must still be on the account, when the
+ * account's devices can be read now. `invalid_params` otherwise.
+ */
+export async function setBotDevices(source: Pick<BotDevicesSource, 'store' | 'devices' | 'changed'>, botId: string, access: BotDeviceAccess): Promise<void> {
+  if (access.mode === 'chosen') {
+    const devices = await source.devices().catch(() => undefined)
+    if (devices) {
+      const known = new Set(devices.map((device) => device.node))
+      if (access.nodes.some((node) => !known.has(node))) throw new DomainRpcError('invalid_params', 'One of those devices is no longer on your account.')
+    }
+  }
+  source.store.set(botId, access)
+  source.changed?.(botId)
 }
 
 function validate(method: BotDeviceMethod, value: unknown): Record<string, unknown> {
@@ -63,19 +79,8 @@ export function registerBotDeviceMethods(
           if (!source) throw new DomainRpcError('bots_unavailable', 'Bots are unavailable in this profile: their data could not be opened.')
           const botId = params.botId as string
           source.assertBot(botId)
-          if (method === 'bots.devices.set') {
-            const access = params.access as BotDeviceAccess
-            if (access.mode === 'chosen') {
-              const devices = await source.devices().catch(() => undefined)
-              if (devices) {
-                const known = new Set(devices.map((device) => device.node))
-                if (access.nodes.some((node) => !known.has(node))) throw new DomainRpcError('invalid_params', 'One of those devices is no longer on your account.')
-              }
-            }
-            source.store.set(botId, access)
-            source.changed?.(botId)
-          }
-          return await view(source, botId)
+          if (method === 'bots.devices.set') await setBotDevices(source, botId, params.access as BotDeviceAccess)
+          return await botDevicesView(source, botId)
         } catch (error) {
           if (error instanceof BotDefinitionError) throw new DomainRpcError(error.code, error.message)
           throw error

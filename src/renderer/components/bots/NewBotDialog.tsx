@@ -11,6 +11,7 @@ import { WizardSteps } from '../ui/WizardSteps'
 import { ReportButton } from '../bugReports/ReportButton'
 import { BotDialogFrame } from './BotDialogs'
 import { BotComputerSelect, BotModelRows, BotModelSelect, offeredListing } from './BotRunsOn'
+import { Select } from '../ui/Select'
 import { BotLookPicker } from './face/BotLookPicker'
 import { BOT_DEVICES_TIP } from '../../../shared/bots/personal/deviceAccess'
 import { BotDeviceSwitches, accessOf } from './BotDevices'
@@ -29,6 +30,8 @@ const FOCUSABLE = 'input:not(:disabled), textarea:not(:disabled), button:not(:di
  * later ones start from the owner's last bot's picks that are still offered. A service without `bots.model.choices`
  * has no Runs on step, so Create bot is on What it does. When the owner has another device (phones too), a Devices step
  * follows Runs on and holds Create bot: this computer always reaches the bot, and each other device only when turned on.
+ * Where this computer has Full bot access on another computer, Runs on starts with Lives on (this computer by default):
+ * a bot made there lives there, with that computer's models and devices, and this computer always reaches it.
  * What the owner puts in, and the step, are the store's draft, so closing, a click beside the dialog or a remount never
  * loses them; once anything is put in, only Close or Escape closes the dialog. A refused create returns to the step
  * that can fix it. From Automations it opens on What it does with the automation's words and, once made, returns
@@ -54,11 +57,22 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
   useEffect(() => {
     if (!useBotsStore.getState().newBotDraft.look) useBotsStore.setState((state) => ({ newBotDraft: { ...state.newBotDraft, look: firstLook } }))
   }, [firstLook])
+  // Lives on: the other computers where this computer has Full bot access. One picked that is no longer among them, or
+  // is offline now, is this computer again.
+  const livesOn = useBotsStore((s) => s.remoteComputers)
+  const node = draft.node && livesOn.some((computer) => computer.node === draft.node && !computer.offline) ? draft.node : null
+  const home = node ? livesOn.find((computer) => computer.node === node)?.name : undefined
+  // A computer picked under Lives on that did not answer, went offline or lowered this one to Use: said on Runs on,
+  // which is this computer's again.
+  const [unreached, setUnreached] = useState<string | null>(null)
+  const lastHome = useRef<string | undefined>(undefined)
+  if (home) lastHome.current = home
   // undefined while asked; null from an older service, which has no `bots.model.choices`: no Runs on step, by usage as before.
   const [choices, setChoices] = useState<BotsPersonalV2Result<'bots.model.choices'> | null | undefined>(undefined)
   const loadChoices = useCallback(() => {
     let live = true
-    botsClient().modelChoices().then((next) => {
+    // Another computer's choices are its own: its models, and its devices.
+    botsClient().modelChoices(node ?? undefined).then((next) => {
       if (!live) return
       setChoices(next)
       // The rows start from the draft's, else the owner's last bot's picks; a pick no longer offered is empty again.
@@ -67,13 +81,37 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
       // An image model no longer offered is None again (#1088).
       const image = useBotsStore.getState().newBotDraft.image
       if (image && !offeredListing(next.imageProviders ?? [], image)) useBotsStore.setState((state) => ({ newBotDraft: { ...state.newBotDraft, image: null } }))
-    }, () => { if (live) setChoices((known) => known ?? null) })
+    }, () => {
+      if (!live) return
+      if (!node) { setChoices((known) => known ?? null); return }
+      // The other computer did not answer: the bot is made here unless it is picked again.
+      setUnreached(`${home ?? 'The other computer'} did not answer, so the bot is made on this computer. Pick it again to retry.`)
+      setNewBotDraft({ node: null, slots: null, image: null, model: null, devices: [] })
+    })
     return () => { live = false }
-  }, [])
+  }, [node, home, setNewBotDraft])
   useEffect(loadChoices, [loadChoices])
+  // The picked computer left Lives on, or is offline now: said, and its models and devices are no longer the draft's.
+  useEffect(() => {
+    if (!draft.node || node) return
+    const gone = livesOn.find((computer) => computer.node === draft.node)
+    const name = gone?.name ?? lastHome.current ?? 'The other computer'
+    setUnreached(gone?.offline
+      ? `${name} is offline now, so the bot is made on this computer.`
+      : `${name} no longer gives this computer Full bot access, so the bot is made on this computer.`)
+    setChoices(undefined)
+    setNewBotDraft({ node: null, slots: null, image: null, model: null, devices: [] })
+  }, [draft.node, node, livesOn, setNewBotDraft])
+  const pickHome = (next: string | null) => {
+    if (next === node) return
+    setUnreached(null)
+    setChoices(undefined)
+    setNewBotDraft({ node: next, slots: null, image: null, model: null, devices: [] })
+  }
 
-  // Devices only when the owner has another device (phones too) and the service can save the choice.
-  const otherDevices = choices?.reachOnCreate ? choices.devices ?? [] : []
+  // Devices only when the owner has another device (phones too) and the service can save the choice. On another
+  // computer, this one (`caller` in its list) always reaches the bot, so it has no switch.
+  const otherDevices = choices?.reachOnCreate ? (choices.devices ?? []).filter((device) => !device.caller) : []
   const steps: NewBotStep[] = choices === null ? ['look', 'about'] : ['look', 'about', 'runsOn', ...(otherDevices.length ? ['devices' as const] : [])]
   // A step this service has no room for (Runs on, left open before an older service answered) shows as the last one.
   const step = steps.includes(draft.step) ? draft.step : steps[steps.length - 1]!
@@ -113,7 +151,7 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
     // that are still offered.
     const offered = new Set(otherDevices.map((device) => device.node))
     const access = choices?.reachOnCreate ? accessOf(state.newBotDraft.devices.filter((node) => offered.has(node))) : null
-    const bot = await state.create({ look: state.newBotDraft.look ?? look, description, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}), ...(access ? { access } : {}) })
+    const bot = await state.create({ look: state.newBotDraft.look ?? look, description, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}), ...(access ? { access } : {}), ...(node ? { node } : {}) })
     if (bot && onCreated) onCreated(bot)
     else if (bot) await useChatsStore.getState().openBot(bot.id)
     // Refused because a pick is gone: Runs on (where the store returned) offers what is there now, and that row is empty.
@@ -135,7 +173,14 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
             onChange={(event) => setNewBotDraft({ description: event.target.value })} />
         </>}
         {step === 'runsOn' && <div className="bot-new-runs-on-step">
-          {choices ? <NewBotRunsOn choices={choices} model={draft.model} onModel={(model) => setNewBotDraft({ model })} rows={draft.slots}
+          {livesOn.length > 0 && <div className="bot-new-row">
+            <span title="The computer that keeps the bot and does its work">Lives on</span>
+            <Select ariaLabel="Computer the new bot lives on" size="small" value={node ?? ''} disabled={busy} onChange={(value) => pickHome(value || null)}
+              title="Other computers show here where this computer has Full bot access"
+              options={[{ value: '', label: 'This computer' }, ...livesOn.map((computer) => ({ value: computer.node, label: computer.offline ? `${computer.name} · offline` : computer.name, ...(computer.offline ? { disabled: true } : {}) }))]} />
+          </div>}
+          {unreached && <p className="bot-about-next" role="status">{unreached}</p>}
+          {choices ? <NewBotRunsOn choices={choices} lives={livesOn.length > 0} model={draft.model} onModel={(model) => setNewBotDraft({ model })} rows={draft.slots}
             image={draft.image} onImage={(image) => setNewBotDraft({ image })}
             onPick={(keys, pick) => setNewBotDraft({ slots: { ...(draft.slots ?? EMPTY_ROWS), ...Object.fromEntries(keys.map((key) => [key, pick])) } })}
             onOneWork={() => { const rows = draft.slots ?? EMPTY_ROWS; setNewBotDraft({ slots: { ...rows, light: rows.medium, hard: rows.medium } }) }} /> : null}
@@ -143,7 +188,8 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
         {step === 'devices' && <div className="bot-new-devices" data-testid="bot-new-devices">
           <p className="bot-new-label" title={`${BOT_DEVICES_TIP} Change it later in About.`}>Devices that reach it</p>
           <BotDeviceSwitches name={draft.name.trim() || 'the new bot'} devices={otherDevices} chosen={draft.devices}
-            onTick={(node, on) => setNewBotDraft({ devices: on ? [...draft.devices.filter((id) => id !== node), node] : draft.devices.filter((id) => id !== node) })} />
+            onTick={(device, on) => setNewBotDraft({ devices: on ? [...draft.devices.filter((id) => id !== device), device] : draft.devices.filter((id) => id !== device) })}
+            {...(home ? { home } : {})} />
         </div>}
         {error && <p role="alert" className="chat-error bot-new-error">{error}</p>}
         {error && <ReportButton className="bot-new-report" error={{ title: 'New bot could not be created', message: error, surface: 'New bot dialog' }} />}
@@ -165,8 +211,10 @@ const EMPTY_ROWS: BotShownRows = { talk: null, light: null, medium: null, hard: 
  * others greyed), then the model rows, Talk and Work (and each kind of work under Advanced), in the app's model picker.
  * An older service without rows has its single Model picker, by usage unless a model is picked.
  */
-function NewBotRunsOn({ choices, model, onModel, rows, image, onImage, onPick, onOneWork }: {
+function NewBotRunsOn({ choices, lives, model, onModel, rows, image, onImage, onPick, onOneWork }: {
   choices: BotRunsOnChoices
+  /** Lives on is shown above, naming the computer: no Computer row then. */
+  lives: boolean
   model: string | null
   onModel: (model: string | null) => void
   rows: BotShownRows | null
@@ -177,12 +225,12 @@ function NewBotRunsOn({ choices, model, onModel, rows, image, onImage, onPick, o
 }) {
   const here = choices.computers.find((computer) => computer.id === choices.computer)
   return <div className="bot-new-runs-on" data-testid="bot-new-runs-on">
-    <div className="bot-new-row">
+    {!lives && <div className="bot-new-row">
       <span>Computer</span>
       {choices.computers.length > 1
         ? <BotComputerSelect ariaLabel="New bot's computer" title="A bot runs on the computer it is made on" choices={choices} />
         : <span className="bot-new-runs-on-computer" title="This computer. A bot runs on the computer it is made on.">{here?.name ?? 'This computer'}</span>}
-    </div>
+    </div>}
     {choices.providers
       ? <BotModelRows name="New bot" providers={choices.providers} unavailableProviders={choices.unavailableProviders}
         slots={rows ?? EMPTY_ROWS} {...(choices.notes ? { notes: choices.notes } : {})}

@@ -152,9 +152,10 @@ export class BridgeProfileService {
             policy?: { bots?: string }
           }>
         }
-        // Only the devices connected here are offered.
+        // Every device of the account, connected now or not: a paired computer that is only offline is still offered,
+        // so saving Devices never drops it.
         return view.nodes
-          .filter((entry) => !entry.self && !entry.revoked && entry.connection === 'connected')
+          .filter((entry) => !entry.self && !entry.revoked)
           .map((entry): BotDeviceChoice => ({
             node: entry.node,
             name: cleanDeviceName(entry.name || 'Unnamed device'),
@@ -564,6 +565,14 @@ export class BridgeProfileService {
       // Which bots the calling device reaches; a bot it made stays within its reach, unless a choice was saved for it.
       reach,
       madeBy: keepMakerInReach(access, reach, (botId) => services.personalBots?.reachChanged(botId)),
+      // About's Devices row from a device at Full: the same choice this computer's own About sets.
+      devices: {
+        store: access,
+        devices: () => botReach.devices(),
+        // The account's devices whether connected now or not: a choice sent from another device may name only these.
+        known: () => this.peers.accountDevices(),
+        changed: (botId) => services.personalBots?.reachChanged(botId)
+      },
       // The bots feed and one bot's chat, read by the device that opened them alone.
       openStream: async (reader, stream) => {
         const spec: PrivateSpec = { reader, kind: stream.kind, subject: stream.kind === 'bot' ? stream.botId : '' }

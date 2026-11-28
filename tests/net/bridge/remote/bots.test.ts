@@ -188,8 +188,8 @@ describe('bot method params', () => {
     })
     const methods = remoteBotMethods({ bots: () => undefined })
     expect(methods.map((entry) => entry.method).sort()).toEqual(Object.keys(REMOTE_BOT_METHODS).sort())
-    // A read's result (the chat) is never kept in the request ledger.
-    expect(methods.filter((entry) => entry.ephemeral).map((entry) => entry.method).sort()).toEqual(['bots.chat.attachment', 'bots.chat.file', 'bots.chat.list', 'bots.get', 'bots.memory.list'])
+    // A read's result (the chat, the model rows, the devices) is never kept in the request ledger.
+    expect(methods.filter((entry) => entry.ephemeral).map((entry) => entry.method).sort()).toEqual(['bots.chat.attachment', 'bots.chat.file', 'bots.chat.list', 'bots.devices.get', 'bots.get', 'bots.memory.list', 'bots.model.choices', 'bots.model.get'])
     expect(REMOTE_BOT_METHODS).toMatchObject({
       'bots.chat.attachment': { capability: 'read', mutating: false },
       'bots.chat.file': { capability: 'read', mutating: false },
@@ -202,8 +202,18 @@ describe('bot method params', () => {
       'bots.memory.forget': { capability: 'write', mutating: true },
       'bots.memory.edit': { capability: 'write', mutating: true }
     })
-    // Nothing a remote device must not do: no delete, no model, no memory export, no new schedule.
-    for (const name of ['bots.delete', 'bots.model.get', 'bots.model.set', 'bots.memory.export', 'bots.schedules.add', 'bots.personal.list'])
+    // Setting a bot up from another computer: write rows, and the reads behind About.
+    expect(REMOTE_BOT_METHODS).toMatchObject({
+      'bots.delete': { capability: 'write', mutating: true },
+      'bots.model.get': { capability: 'read', mutating: false },
+      'bots.model.choices': { capability: 'read', mutating: false },
+      'bots.model.setSlots': { capability: 'write', mutating: true },
+      'bots.model.setImage': { capability: 'write', mutating: true },
+      'bots.devices.get': { capability: 'read', mutating: false },
+      'bots.devices.set': { capability: 'write', mutating: true }
+    })
+    // What stays on the bot's own computer: the old single model, memory export, a new schedule, and its own list.
+    for (const name of ['bots.model.set', 'bots.memory.export', 'bots.schedules.add', 'bots.personal.list'])
       expect(Object.keys(REMOTE_BOT_METHODS)).not.toContain(name)
   })
 })
@@ -547,7 +557,14 @@ describe('the bot level of the calling device', () => {
       'bots.permissions.set': { botId: BOT, permissionId: 'p1', enabled: false },
       'bots.permissions.revoke': { botId: BOT, permissionId: 'p1' },
       'bots.memory.forget': { botId: BOT, id: 'm1' },
-      'bots.memory.edit': { botId: BOT, id: 'm1', text: 'Call me Sam.' }
+      'bots.memory.edit': { botId: BOT, id: 'm1', text: 'Call me Sam.' },
+      'bots.delete': { botId: BOT },
+      'bots.model.get': { botId: BOT },
+      'bots.model.choices': {},
+      'bots.model.setSlots': { botId: BOT, oneWork: true },
+      'bots.model.setImage': { botId: BOT, pick: null },
+      'bots.devices.get': { botId: BOT },
+      'bots.devices.set': { botId: BOT, access: { mode: 'this_computer' } }
   }
   const names = Object.keys(REMOTE_BOT_METHODS) as RemoteBotMethod[]
   /** The rows another device may call at Use; every other remote row needs Full. */

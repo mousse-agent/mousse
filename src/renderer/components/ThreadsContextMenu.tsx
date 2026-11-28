@@ -420,8 +420,11 @@ export interface BotRowMenuTarget {
   checklistHidden: boolean
   /** The bot's computer, when it is another one and offline now: what needs it is greyed out and says so. */
   offlineComputer?: string
-  /** This computer's bots: what is set up on the bot itself. A bot of another computer is set up there. */
-  setup?: { paused: boolean; canWall: boolean }
+  /**
+   * What is set up on the bot itself. `off`: why it can't be from here (a bot of another computer that is offline, or
+   * where this computer has only Use bot access); the items show greyed with it as their tooltip.
+   */
+  setup?: { paused: boolean; canWall: boolean; off?: string; wallTitle?: string }
 }
 
 /**
@@ -457,13 +460,13 @@ export function BotRowMenu({ x, y, target, onClose, onAction }: { x: number; y: 
       {setup && (
         <>
           <Separator />
-          {item('about', <Info />, 'About this bot')}
-          {item('rename', <EditRegular />, 'Rename')}
-          {item('look', <Image />, 'Change look')}
-          {item('pause', setup.paused ? <Play /> : <Pause />, setup.paused ? 'Resume' : 'Pause')}
-          {setup.canWall && item('private', <Lock />, 'Make private', { title: 'Only this computer reaches it. Change it in About.' })}
+          {item('about', <Info />, 'About this bot', { off: setup.off })}
+          {item('rename', <EditRegular />, 'Rename', { off: setup.off })}
+          {item('look', <Image />, 'Change look', { off: setup.off })}
+          {item('pause', setup.paused ? <Play /> : <Pause />, setup.paused ? 'Resume' : 'Pause', { off: setup.off })}
+          {setup.canWall && item('private', <Lock />, 'Make private', { title: setup.wallTitle ?? 'Only this computer reaches it. Change it in About.', off: setup.off })}
           <Separator />
-          {item('delete', <DeleteRegular />, 'Delete bot', { danger: true })}
+          {item('delete', <DeleteRegular />, 'Delete bot', { danger: true, off: setup.off })}
         </>
       )}
     </MenuFrame>

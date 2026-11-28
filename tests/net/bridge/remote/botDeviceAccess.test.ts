@@ -1,7 +1,7 @@
 /**
  * Which of the owner's devices reach a personal bot (`docs/bots.md`, Two layers). The claim: to a device that is left
- * out, the bot does not exist; a device whose switch is off reaches no bot; only this computer's own window changes
- * either; a new bot reaches only its own computer (and its maker); a device linked later reaches no bot; and the
+ * out, the bot does not exist; a device whose switch is off reaches no bot; only this computer's own window, or a
+ * device with Full bot access through its own rows, changes either; a new bot reaches only its own computer (and its maker); a device linked later reaches no bot; and the
  * update's one-time snapshot narrows or widens nothing.
  */
 import { EventEmitter } from 'node:events'
@@ -28,6 +28,7 @@ import { classifyRoutedMethod } from '../../../../src/shared/bridge/routed'
 import { BRIDGE_REMOTE_METHODS } from '../../../../src/mms/bridge/remote/capabilities'
 import { NET_LOCAL_METHODS } from '../../../../src/shared/net/local'
 import { BOT_DEVICE_METHODS, type BotDeviceAccess } from '../../../../src/shared/bots/personal/deviceAccess'
+import { BOT_METHODS } from '../../../../src/shared/bots/personal/methodTable'
 import type { BotReachPort } from '../../../../src/mms/protocol/botReachPort'
 import { botFixture, chatOf, createBot, type BotFixture } from '../../../bots/botFixture'
 
@@ -39,7 +40,8 @@ const WORK = 'act_00000000-0000-0000-0000-000000000000'
 const as = (node: string) => ({ caller: { node, user: 'usr_x' }, signal: new AbortController().signal }) as unknown as RpcContext
 
 /** The params a device sends for each method that names a bot, for `botId`. */
-function paramsFor(botId: string): Record<Exclude<RemoteBotMethod, 'bots.create'>, Record<string, unknown>> {
+type Named = Exclude<RemoteBotMethod, 'bots.create' | 'bots.model.choices'>
+function paramsFor(botId: string): Record<Named, Record<string, unknown>> {
   return {
     'bots.get': { botId },
     'bots.chat.list': { botId },
@@ -63,10 +65,16 @@ function paramsFor(botId: string): Record<Exclude<RemoteBotMethod, 'bots.create'
     'bots.permissions.set': { botId, permissionId: 'p1', enabled: false },
     'bots.permissions.revoke': { botId, permissionId: 'p1' },
     'bots.memory.forget': { botId, id: 'm1' },
-    'bots.memory.edit': { botId, id: 'm1', text: 'Call me Sam.' }
+    'bots.memory.edit': { botId, id: 'm1', text: 'Call me Sam.' },
+    'bots.delete': { botId },
+    'bots.model.get': { botId },
+    'bots.model.setSlots': { botId, oneWork: true },
+    'bots.model.setImage': { botId, pick: null },
+    'bots.devices.get': { botId },
+    'bots.devices.set': { botId, access: { mode: 'this_computer' } }
   }
 }
-const NAMED = Object.keys(REMOTE_BOT_METHODS).filter((name) => name !== 'bots.create') as Array<Exclude<RemoteBotMethod, 'bots.create'>>
+const NAMED = Object.keys(REMOTE_BOT_METHODS).filter((name) => name !== 'bots.create' && name !== 'bots.model.choices') as Named[]
 
 /** What a call answers, as the dispatcher runs it for a new execution: validate, authorize, authorizeNew, handle. */
 async function outcome(methods: RpcMethod[], name: RemoteBotMethod, params: unknown, context: RpcContext): Promise<{ ok: true } | { code: string; message?: string; details?: unknown }> {
@@ -295,9 +303,10 @@ describe('what is already under way', () => {
 })
 
 describe('who changes it', () => {
-  it('no method a device may call changes it: not in its table, not routed, and bots.update takes a name and a look only', () => {
+  it('a device changes it only with Full bot access, through its own rows; bots.update takes a name, a look and a sentence only', () => {
     for (const method of BOT_DEVICE_METHODS) {
-      expect(Object.keys(REMOTE_BOT_METHODS)).not.toContain(method)
+      expect(BOT_METHODS[method].level, method).toBe('full')
+      expect(Object.keys(REMOTE_BOT_METHODS)).toContain(method)
       expect(Object.keys(BRIDGE_REMOTE_METHODS)).not.toContain(method)
       expect(classifyRoutedMethod(method)).toMatchObject({ kind: 'local' })
     }
@@ -353,6 +362,34 @@ describe('who changes it', () => {
     // The same request id again names that bot; the laptop, which does not reach it, gets nothing and widens nothing.
     expect(await outcome(methods, 'bots.create', params, as(LAPTOP))).toMatchObject({ code: 'stream_unknown' })
     expect(store.get(made.bot.id).access).toEqual({ mode: 'chosen', nodes: [PHONE] })
+  })
+
+  it('while the account\'s devices can\'t be read, a device names no other device: refused before it runs, and nothing is saved', async () => {
+    const botId = (await createBot(f, { name: 'Penny', reply: 'Hello.' })).botId
+    onBoth(botId)
+    const { reach } = reachOver(store)
+    let known: string[] | undefined
+    const devices = { store, devices: async () => [], known: () => known }
+    const methods = remoteBotMethods({ bots: () => f.bots.service, reach, devices, madeBy: keepMakerInReach(store, reach) })
+    const look = { colour: 'teal', accessory: 'cap' }
+    const stranger = newId('node')
+    const count = () => f.bots.service.list().bots.length
+    const before = count()
+    const unread = { code: 'bad_request', details: { reason: 'bot_devices_unread' } }
+    expect(await outcome(methods, 'bots.devices.set', { botId, access: { mode: 'chosen', nodes: [stranger] } }, as(PHONE))).toMatchObject(unread)
+    expect(await outcome(methods, 'bots.devices.set', { botId, access: { mode: 'chosen', nodes: [LAPTOP] } }, as(PHONE))).toMatchObject(unread)
+    expect(await outcome(methods, 'bots.create', { look, description: 'Tidy', clientRequestId: 'unread-1', access: { mode: 'chosen', nodes: [stranger] } }, as(PHONE))).toMatchObject(unread)
+    expect(store.get(botId).access).toEqual({ mode: 'chosen', nodes: [PHONE, LAPTOP] })
+    expect(count()).toBe(before)
+    // Naming only itself, or no device, needs no check: it is the calling device.
+    expect(await outcome(methods, 'bots.devices.set', { botId, access: { mode: 'chosen', nodes: [PHONE] } }, as(PHONE))).toEqual({ ok: true })
+    expect(store.get(botId).access).toEqual({ mode: 'chosen', nodes: [PHONE] })
+    expect(await outcome(methods, 'bots.create', { look, description: 'Tidy', clientRequestId: 'unread-2' }, as(PHONE))).toEqual({ ok: true })
+    expect(count()).toBe(before + 1)
+    // Once read, the account's devices are taken and others are not.
+    known = [PHONE, LAPTOP]
+    expect(await outcome(methods, 'bots.devices.set', { botId, access: { mode: 'chosen', nodes: [LAPTOP] } }, as(PHONE))).toEqual({ ok: true })
+    expect(await outcome(methods, 'bots.devices.set', { botId, access: { mode: 'chosen', nodes: [stranger] } }, as(PHONE))).toMatchObject({ code: 'bad_request', details: { reason: 'bot_devices_unknown' } })
   })
 })
 
