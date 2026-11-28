@@ -11,6 +11,7 @@ import { accessPreset } from '../../../src/shared/net/accessPresets'
 import type { BotBrowserFrameEvent, BotBrowserView } from '../../../src/shared/bots/personal/browser'
 import type { DomainConnectionContext } from '../../../src/mms/protocol/domainRegistry'
 import { dispatchMethod } from '../../../src/mms/protocol/handlers'
+import { BrowserAutomationError } from '../../../src/mms/browser/automation/BrowserSessionManager'
 import { Fabric, type Computer } from './harness'
 
 const VIEW = { open: true, control: 'bot', holder: 'bot', activations: [] } as unknown as BotBrowserView
@@ -75,6 +76,13 @@ describe('a bot’s browser of another computer, as that computer loses the devi
     await reconnect()
   }, 300_000)
   afterAll(() => fabric.close(), 60_000)
+
+  it('says a hold that ended there as the window’s own hold_ended, when the window renews it', async () => {
+    vi.mocked(owner.mms.botBrowsers.hold).mockRejectedValueOnce(new BrowserAutomationError({ code: 'hold_ended', message: "You don't hold this browser now." }))
+    await expect(fromWindow('bots.browser.hold', { botId: q, viewId: 'view_reach_0', request: { op: 'renew', holdId: 'hold_1' } }))
+      .rejects.toMatchObject({ code: 'hold_ended' })
+    asked.length = 0
+  }, 60_000)
 
   it('ends a device’s hold at once when its connection drops', async () => {
     await viewer.dispatch('bots.browser.hold', { botId: q, viewId: 'view_reach_1', request: { op: 'take' } })

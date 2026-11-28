@@ -71,6 +71,8 @@ interface View {
   ended: boolean
   /** The other side ended its half: nothing waits for it when this side ends. */
   peerEnded: boolean
+  /** Resets the stream if the other side never ends its half. */
+  linger?: ReturnType<typeof setTimeout>
   /** Ends the browser's watch with the stream. */
   lifetime: AbortController
   startedAt: number
@@ -172,6 +174,7 @@ export class RemoteBotBrowsers {
     this.views.add(view)
     channel.onEnd(() => {
       view.peerEnded = true
+      clearTimeout(view.linger)
       this.end(view)
     })
     let queue = Promise.resolve()
@@ -209,7 +212,7 @@ export class RemoteBotBrowsers {
         emit: (event) => this.emit(view, event)
       })
       if (view.ended) return
-      view.channel.send({ t: 'view', browser: withoutFrame(browser) } satisfies BotViewMessage)
+      view.channel.send({ t: 'view', browser: withoutFrame(await this.withHold(view.node, botId, watch.viewId, browser)) } satisfies BotViewMessage)
     } catch (error) {
       if (view.ended) return
       try {
@@ -218,6 +221,22 @@ export class RemoteBotBrowsers {
         // Gone already.
       }
       this.reset(view, error instanceof NetError ? error.code : 'refused')
+    }
+  }
+
+  /**
+   * A view's state with the hold the device has, when it has it: the view's stream watches under a connection of its
+   * own, and the device's hold is bound to the device's (`connectionOf`), so a window that opened its view again (on
+   * another path, say) gets its hold back and goes on with it.
+   */
+  private async withHold(node: string, botId: string, viewId: string | undefined, browser: BotBrowserView): Promise<BotBrowserView> {
+    if (!viewId || browser.holder !== 'this-view' || (browser as { hold?: unknown }).hold || !this.holders.get(node)?.has(botId)) return browser
+    try {
+      const held = await this.browsers().view(botId, { connectionId: RemoteBotBrowsers.connectionOf(node), viewId })
+      const hold = (held as { hold?: BotBrowserView['hold'] }).hold
+      return hold ? { ...browser, hold } : browser
+    } catch {
+      return browser
     }
   }
 
@@ -269,10 +288,10 @@ export class RemoteBotBrowsers {
     try {
       view.channel.end()
       if (!view.peerEnded) {
-        const timer = setTimeout(() => {
+        view.linger = setTimeout(() => {
           if (!view.peerEnded) view.channel.reset('cancelled')
         }, this.options.lingerMs ?? engineLimits().tunnelCloseLingerMs)
-        timer.unref?.()
+        view.linger.unref?.()
       }
     } catch {
       view.channel.reset('cancelled')
@@ -329,7 +348,7 @@ export class RemoteBotBrowsers {
     if (view.ended) return
     try {
       if (view.watchId && view.botId && this.holders.get(view.node)?.has(view.botId))
-        view.channel.send({ t: 'update', event: { watchId: view.watchId, holdEnded: 'expired' } } satisfies BotViewMessage)
+        view.channel.send({ t: 'update', event: { watchId: view.watchId, holdEnded: 'expired', control: 'bot', holder: 'bot' } } satisfies BotViewMessage)
       view.channel.send({ t: 'end', reason } satisfies BotViewMessage)
     } catch {
       this.reset(view, reason)

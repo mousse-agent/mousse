@@ -20,6 +20,10 @@ import { computerOffline, type ComputerRef } from './computerErrors'
 
 /** How long a watch waits for the bot's computer's answer. */
 const ANSWER_MS = 10_000
+/** How many times in a row a view opens again on the current path before it says it stopped. */
+const MAX_RESUMES = 2
+/** Ends that are the bot's computer's refusal: the view is not opened again. */
+const REFUSALS: ReadonlySet<string> = new Set(['forbidden', 'stream_unknown', 'not_supported', 'bad_request', 'incompatible_peer'])
 
 /** The window a view shows in: its connection to this daemon. */
 export interface BotViewWindow {
@@ -49,6 +53,10 @@ interface View {
   closing: boolean
   /** Why the bot's computer ended the view, when it said (`end`). */
   endReason?: string
+  /** The last watch sent: sent again when the view opens again on another path. */
+  lastWatch?: BotViewWatch
+  /** Times it opened again since the bot's computer last answered. */
+  resumes: number
   frames: number
   bytes: number
   startedAt: number
@@ -103,6 +111,7 @@ export class RemoteBotViews {
         reject(computerOffline(this.options.computer(node)))
       }, this.options.answerMs ?? ANSWER_MS)
       current.answers.push({ resolve, reject, timer })
+      current.lastWatch = watch
       try {
         current.channel.send({ ...watch })
       } catch {
@@ -160,7 +169,7 @@ export class RemoteBotViews {
   }
 
   private start(key: string, window: BotViewWindow, node: NodeId, botId: string, watchId: string, stream: EngineStream): View {
-    const view: View = { key, node, botId, watchId, window, channel: new Channel(stream), answers: [], ended: false, closing: false, frames: 0, bytes: 0, startedAt: Date.now() }
+    const view: View = { key, node, botId, watchId, window, channel: new Channel(stream), answers: [], ended: false, closing: false, resumes: 0, frames: 0, bytes: 0, startedAt: Date.now() }
     this.views.set(key, view)
     view.channel.onMessage((message) => this.heard(view, message))
     view.channel.onEnd((reason) => this.end(view, reason ?? view.endReason ?? 'peer_offline'))
@@ -179,6 +188,7 @@ export class RemoteBotViews {
     const header = message.header as BotViewMessage
     switch (header.t) {
       case 'view': {
+        view.resumes = 0
         const answer = view.answers.shift()
         if (answer) {
           clearTimeout(answer.timer)
@@ -187,6 +197,8 @@ export class RemoteBotViews {
         return
       }
       case 'error': {
+        // A refused watch ends its view: it is not opened again.
+        view.endReason ??= header.error?.code ?? 'refused'
         const answer = view.answers.shift()
         if (answer) {
           clearTimeout(answer.timer)
@@ -252,14 +264,50 @@ export class RemoteBotViews {
         view.channel.reset('cancelled')
       }
     }
+    this.options.counted?.({ node: view.node, frames: view.frames, bytes: view.bytes, ms: Date.now() - view.startedAt })
+    const refused = reason !== undefined && REFUSALS.has(reason)
+    const online = this.options.online(view.node)
+    // Its stream alone ended with the computer still there (its path switched, the stream was reset): the view opens
+    // again on the path in use, with nothing said to the window, and a hold the window has there goes on.
+    if (!view.closing && !refused && view.endReason === undefined && online && this.resume(view)) return
     const error = refusalOf(reason, this.options.computer(view.node))
     for (const answer of view.answers.splice(0)) {
       clearTimeout(answer.timer)
       answer.reject(error)
     }
-    // Pictures stopped without the window asking: it says it is not updating, and its next renewal opens a new stream.
-    if (!view.closing) this.deliver(view, { watchId: view.watchId, stalled: reason === 'forbidden' || reason === 'stream_unknown' ? reason : 'offline' })
-    this.options.counted?.({ node: view.node, frames: view.frames, bytes: view.bytes, ms: Date.now() - view.startedAt })
+    // Pictures stopped without the window asking: it says it is not updating (`offline` only when that computer is),
+    // and its next renewal opens a new stream.
+    if (!view.closing) this.deliver(view, { watchId: view.watchId, stalled: refused ? reason! : online ? 'interrupted' : 'offline' })
+  }
+
+  /** Opens an ended view again on the current path and sends its last watch; false when it can't. */
+  private resume(view: View): boolean {
+    if (!view.lastWatch || view.resumes >= MAX_RESUMES) return false
+    let stream: EngineStream
+    try {
+      stream = this.options.open(view.node)
+    } catch {
+      return false
+    }
+    const next = this.start(view.key, view.window, view.node, view.botId, view.watchId, stream)
+    next.resumes = view.resumes + 1
+    next.lastWatch = view.lastWatch
+    // A watch waiting for its answer gets the one to the watch sent again; with none, the answer is only read.
+    next.answers = view.answers.splice(0)
+    if (!next.answers.length) {
+      const timer = setTimeout(() => {
+        const at = next.answers.findIndex((answer) => answer.timer === timer)
+        if (at >= 0) next.answers.splice(at, 1)
+      }, this.options.answerMs ?? ANSWER_MS)
+      timer.unref?.()
+      next.answers.push({ resolve: () => undefined, reject: () => undefined, timer })
+    }
+    try {
+      next.channel.send({ ...view.lastWatch })
+    } catch {
+      this.end(next, 'peer_offline')
+    }
+    return true
   }
 }
 

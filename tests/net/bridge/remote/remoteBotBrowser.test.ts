@@ -95,7 +95,10 @@ function setup(options: { level?: BotLevel; credit?: boolean } = {}) {
     return gate
   }
   if (options.credit) credit()
+  /** Each view's stream as the bot's computer has it. */
+  const streams: EngineStream[] = []
   link.inbound.onStream((stream) => {
+    streams.push(stream)
     const paced: EngineStream = options.credit
       ? {
           label: stream.label,
@@ -117,7 +120,7 @@ function setup(options: { level?: BotLevel; credit?: boolean } = {}) {
     computer: (node) => ({ node, name: 'Owner' })
   })
   return {
-    link, host, viewer, owner, window, shown, ownerNode, viewerNode,
+    link, host, viewer, owner, window, shown, ownerNode, viewerNode, streams,
     lose: (change: Partial<typeof access>) => {
       Object.assign(access, change)
       for (const listener of listeners) listener()
@@ -229,6 +232,8 @@ describe('a device the bot’s computer lets go of', () => {
     lose({ reach: false })
     await vi.waitFor(() => expect(shown.at(-1)).toMatchObject({ stalled: 'forbidden' }))
     expect(shown.map((event) => event.holdEnded ?? event.stalled)).toEqual(['expired', 'forbidden'])
+    // The browser is the bot's again, as the window shows it.
+    expect(shown[0]).toMatchObject({ holdEnded: 'expired', control: 'bot', holder: 'bot' })
   })
 
   it('ends its views and every hold it has when it no longer reaches this computer, one opened without a view too', async () => {
@@ -247,6 +252,53 @@ describe('a device the bot’s computer lets go of', () => {
     await host.open(viewerNode, BOT, { url: 'https://example.com/' })
     lose({ level: 'use' })
     await vi.waitFor(() => expect(owner.ended).toEqual([`${BOT} remote:${viewerNode}`]))
+  })
+
+  it('keeps the hold when a view’s stream alone ends with its computer still there, and the view goes on', async () => {
+    const { link, host, viewer, owner, window, shown, ownerNode, viewerNode, streams } = setup({ level: 'full' })
+    // As `WatchedBrowser` answers: a hold is bound to the device's connection and its view; a view's watch (under its
+    // stream's own connection) sees that view hold it, and the hold itself is told only to the hold's connection.
+    const hold = { id: 'hold_1', lastSeq: 0, computer: 'Owner' }
+    let held: { viewId: string; connectionId: string } | undefined
+    const watch = owner.port.watch
+    owner.port.watch = async (botId, watchId, input) => {
+      await watch(botId, watchId, input)
+      return held && input.viewId === held.viewId ? { ...VIEW, control: 'remote', holder: 'this-view' } as BotBrowserView : VIEW
+    }
+    owner.port.view = async (_botId, input) =>
+      held && input?.viewId === held.viewId ? { ...VIEW, control: 'remote', holder: 'this-view', ...(input.connectionId === held.connectionId ? { hold } : {}) } as BotBrowserView : VIEW
+    const hold_ = owner.port.hold
+    owner.port.hold = async (botId, viewId, request, connectionId) => {
+      held = { viewId, connectionId }
+      return hold_(botId, viewId, request, connectionId)
+    }
+    await viewer.watch(window, ownerNode, BOT, { watchId: 'w1', width: 480, fps: 5, viewId: 'v1' })
+    await host.hold(viewerNode, BOT, 'v1', { op: 'take' })
+
+    // Its path switched: the old stream is reset with the computer still there. Then a reset of the stream alone.
+    for (const [round, reason] of [[1, 'path_replaced'], [2, 'too_large']] as const) {
+      streams[round - 1]!.reset(reason)
+      await vi.waitFor(() => expect(owner.watches).toHaveLength(round + 1))
+      await vi.waitFor(() => expect([viewer.viewCount, host.viewCount]).toEqual([1, 1]))
+      expect(link.outbound.isOpen()).toBe(true)
+    }
+    // The window is told nothing stopped, the hold goes on there, and pictures come on the new stream.
+    expect(shown.filter((event) => event.stalled || event.holdEnded)).toEqual([])
+    expect(owner.ended).toEqual([])
+    await owner.watches.at(-1)!.emit(picture(7))
+    await vi.waitFor(() => expect(shown.at(-1)?.frame?.at).toBe(7))
+    // The window's next renewal, on the new stream, gets its hold back.
+    const renewed = await viewer.watch(window, ownerNode, BOT, { watchId: 'w1', width: 480, fps: 5, viewId: 'v1' })
+    expect(renewed.browser).toMatchObject({ holder: 'this-view', hold: { id: 'hold_1' } })
+  })
+
+  it('says its computer is offline, so the window drops its hold, only when it is', async () => {
+    const { link, viewer, window, shown, ownerNode, viewerNode, host } = setup({ level: 'full' })
+    await viewer.watch(window, ownerNode, BOT, { watchId: 'w1', width: 480, fps: 5, viewId: 'v1' })
+    await host.hold(viewerNode, BOT, 'v1', { op: 'take' })
+    link.cut()
+    await vi.waitFor(() => expect(shown.at(-1)).toMatchObject({ watchId: 'w1', stalled: 'offline' }))
+    expect(viewer.viewCount).toBe(0)
   })
 
   it('says to update the other computer when its pairing has no view streams', async () => {
