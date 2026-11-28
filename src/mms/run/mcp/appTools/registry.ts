@@ -9,7 +9,7 @@ import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, definitionToolGranted, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
 import { botMayBeOffered } from '../../../../shared/bots/personal/manifest'
 import { BOT_USE_TOOL } from '../../../../shared/bots/personal/catalogue'
-import { botVariantSays, canonicalToolCall, canonicalToolName, isBotVariant, isRunningVariant, isToolAlias, toolVariants } from '../../../../shared/toolAliases'
+import { botVariantSays, canonicalToolCall, canonicalToolName, isBotVariant, isRunningVariant, isToolAlias, runsUnderOwnName, toolVariants } from '../../../../shared/toolAliases'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
@@ -36,6 +36,7 @@ import {
   type ToolTimeline
 } from './types'
 import { asRefusal, readRefusal, refused, refusalText } from './refusal'
+import { threadLink } from '../../../../shared/threadLink'
 import { addressedArgs, familyPage, fanOutCalls, fanOutRow, fanOutRows, notSentRow, OUT_OF_REACH, withAddress, type ThreadAddresses } from './addressedCall'
 import { ADDRESSED_TOOLS, type BotReach } from '../../addressing'
 import { BOT_SEND_TOOL } from '../../../../shared/bots/personal/botMessages'
@@ -281,6 +282,17 @@ function declaringRetryKey(tool: MousseTool): MousseTool {
 export function botReachOf(turn: AppToolTurn): BotReach {
   if (!turn.bot) return 'own'
   return turn.bot.appTools.has(BOT_SEND_TOOL) && turn.bot.role !== 'subagent' ? 'others' : 'none'
+}
+
+/** `list_delegations`' rows as `thread_read view: delegations` returns them: the thread they belong to, then the rows. */
+function delegationsView(threadId: string, outcome: ToolOutcome): ToolOutcome {
+  let rows: unknown
+  try {
+    rows = JSON.parse(outcome.text)
+  } catch {
+    return outcome
+  }
+  return Array.isArray(rows) ? { ...outcome, text: JSON.stringify({ threadId, link: threadLink(threadId), view: 'delegations', delegations: rows }) } : outcome
 }
 
 /** Where a call stands once its turn is known (`ToolRegistry.call`). */
@@ -642,7 +654,10 @@ export class ToolRegistry {
     // `thread_list scope: family` lists the family, with paging; called by its old name `list_subagents`, it returns
     // that tool's rows as it always did. A bot's own work list (`scope: bot_work`, `work_list`) is never paged here.
     const family = name === 'thread_list' && args.scope === 'family' && calledAs !== 'list_subagents' && !outcome.isError ? this.options.addresses?.family?.(caller.threadId) : undefined
-    return this.reportingLacks(name, site, family ? familyPage(family, outcome, this.readableBy(caller, turn), caller.threadId, args) : outcome)
+    // `thread_read view: delegations` reads as the thread's other views do; under its old name `list_delegations`, it
+    // returns that tool's bare list.
+    const delegations = name === 'thread_read' && args.view === 'delegations' && calledAs !== 'list_delegations' && !outcome.isError
+    return this.reportingLacks(name, site, family ? familyPage(family, outcome, this.readableBy(caller, turn), caller.threadId, args) : delegations ? delegationsView(caller.threadId, outcome) : outcome)
   }
 
   /** `call` once the call is admitted: a bot catalogue's `use_tool`, a user MCP tool, or an app tool. */
@@ -738,13 +753,18 @@ export class ToolRegistry {
   /**
    * The declaration that runs a call of `name`: the old tool's own when the call is the variant it became (`toolVariant`),
    * so it is checked and run as that tool always was, whichever name it came under; else `tool`. A definition's turn
-   * runs none: a definition delegates nothing. A bot's turn runs its own tool through the bot port or not at all: never
-   * the thread tool in its place (the one of `subagent_start` and `work_start` the turn is offered). A call that named a
-   * thread by address (`addressed`) is the thread tool: on a bot's turn, never one of its own. The registry's preflight
-   * (`resolveCall`) and its dispatch both choose here, so a gate judges the tool that runs.
+   * runs only the variants every turn has (`queue_enqueue`): a definition delegates nothing. A bot's turn runs its own
+   * tool through the bot port or not at all: never the thread tool in its place (the one of `subagent_start` and
+   * `work_start` the turn is offered). A call that named a thread by address (`addressed`) is the thread tool: on a bot's
+   * turn, never one of its own. A call under an old name that runs by name (`runsUnderOwnName`) is that tool whatever its
+   * arguments. The registry's preflight (`resolveCall`) and its dispatch both choose here, so a gate judges the tool
+   * that runs.
    */
   private variantOf(name: string, tool: MousseTool, args: Record<string, unknown>, turn: AppToolTurn, calledAs?: string, addressed = false): MousseTool | ToolOutcome {
-    const olds = addressed && turn.bot ? [] : toolVariants(name, args, turn.bot ? 'bot' : turn.definition ? undefined : 'thread')
+    const kind = turn.bot ? 'bot' : turn.definition ? 'definition' : 'thread'
+    const byName = calledAs && canonicalToolName(calledAs) === name && runsUnderOwnName(calledAs, kind) ? this.variants.get(calledAs) : undefined
+    if (byName) return byName
+    const olds = addressed && turn.bot ? [] : toolVariants(name, args, kind)
     // A bot's old name runs its own tools or none: a thread it can't take is refused, never sent to the thread tool.
     if (turn.bot && calledAs && isBotVariant(calledAs) && !olds.length)
       return refused('invalid_arguments', `${calledAs} is your own work's tool and takes no thread. To reach a thread, call ${name}.`)

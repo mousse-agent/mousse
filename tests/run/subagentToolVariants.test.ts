@@ -78,6 +78,33 @@ describe('the subagent tools as variants of the thread tools', () => {
     }
   })
 
+  it('list_delegations is thread_read view "delegations": its old name returns its bare list, the new one the thread\'s view of it', async () => {
+    const { call, fake } = await world()
+    const row = { delegationId: 'd1', childThreadId: 'child', title: 'API reviewer', status: 'completed', wake: 'always', childRunStatus: 'completed', createdAt: 'now' }
+    vi.mocked(fake.delegation.listDelegations).mockReturnValue([row] as never)
+    expect(JSON.parse((await call('list_delegations', {})).text)).toEqual([row])
+    const view = await call('thread_read', { view: 'delegations' })
+    expect(JSON.parse(view.text)).toMatchObject({ threadId: 'caller', view: 'delegations', delegations: [row] })
+    expect(fake.delegation.listDelegations).toHaveBeenCalledTimes(2)
+    // Another thread's delegations are not this view's: it reads the caller's own.
+    expect((await denied(call('thread_read', { threadId: 'target', view: 'delegations' })))?.message).toContain('leave out threadId')
+    expect(fake.delegation.listDelegations).toHaveBeenCalledTimes(2)
+  })
+
+  it('recall_subagent is a follow-up to a named subagent under either name: one request per clientRequestId', async () => {
+    const { call, fake } = await world()
+    vi.mocked(fake.delegation.named.recall).mockResolvedValue({ name: 'API reviewer', delegationId: 'd2' } as never)
+    const old = await call('recall_subagent', { agent: 'API reviewer', task: 'Round two' }, 'mcp:recall-1')
+    expect(JSON.parse(old.text)).toEqual({ name: 'API reviewer', delegationId: 'd2' })
+    await call('thread_send', { agent: 'API reviewer', content: 'Round two' }, 'mcp:recall-1')
+    expect(vi.mocked(fake.delegation.named.recall).mock.calls.map(([input, key]) => [input.agent, input.task, key])).toEqual([
+      ['API reviewer', 'Round two', { toolCallId: 'mcp:recall-1' }],
+      ['API reviewer', 'Round two', { toolCallId: 'mcp:recall-1' }]
+    ])
+    expect(grantHoldsCall('recall_subagent', 'thread_send', { threadId: 'target', content: 'x' })).toBe(false)
+    expect(grantHoldsCall('list_delegations', 'thread_read', { view: 'events' })).toBe(false)
+  })
+
   it('a call that names a thread is the new tool\'s: stopping a thread that is not yours needs its run, and stops nothing without it', async () => {
     const { call, fake, targetRun } = await world()
     // An old name cannot carry the old tool's authority to a thread it names: task_cancel with a threadId is thread_stop.

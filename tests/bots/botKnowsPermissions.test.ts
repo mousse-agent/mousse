@@ -211,7 +211,7 @@ describe('the stated permissions match the tools a run is given', () => {
 
 describe("a bot's thread lists only tools a bot can hold", () => {
   const tool = (name: string): MousseTool => ({ name, description: name, inputSchema: { type: 'object', properties: {} }, access: 'reads', class: 'read', handler: async () => ({ text: '' }) }) as unknown as MousseTool
-  const names = ['integrate_delegation', 'thread_read', 'queue_enqueue', 'browser_open', 'browser_request_human', 'web_fetch', 'remind', 'permission_ask']
+  const names = ['integrate_delegation', 'thread_read', 'queue_update', 'browser_open', 'browser_request_human', 'web_fetch', 'remind', 'permission_ask']
 
   it('lists no delegation or queue tools on a bot thread, only the thread tools "use your threads" gives, and every tool on any other', () => {
     const registry = new ToolRegistry({ activeRunId: () => null, botRole: (threadId) => (threadId === 'bot-home' ? 'activation' : undefined) })

@@ -59,7 +59,13 @@ export const MOUSSE_TOOL_ALIASES: Readonly<Record<string, string>> = Object.free
   subagent_result: 'thread_wait',
   subagent_stop: 'thread_stop',
   work_stop: 'thread_stop',
-  work_list: 'thread_list'
+  work_list: 'thread_list',
+  // S7d4b (§1.5, §2.1). `queue_enqueue` is `thread_send` to the caller's own thread, or to a queue whose revision it read;
+  // `recall_subagent` is a follow-up to a named subagent (`thread_send intent: work`); `list_delegations` is
+  // `thread_read view: delegations`. Each still runs its own declaration, under either name (`toolVariant`).
+  queue_enqueue: 'thread_send',
+  recall_subagent: 'thread_send',
+  list_delegations: 'thread_read'
 })
 
 /**
@@ -85,9 +91,10 @@ type ToolArgs = Record<string, unknown>
  * arguments into the new tool's, and the variant it fixes wins over the call; `holds` says whether a call of the new
  * tool is that variant, since a grant of the old name holds only that (`grantHoldsCall`). `runs`: the old tool's own
  * declaration still runs that variant, on a thread's turn or a personal bot's (`toolVariant`); `says` names the arguments
- * that make a call that variant, where a bot's turn lists the new tool in the bot's words (`botVariantSays`).
+ * that make a call that variant, where a bot's turn lists the new tool in the bot's words (`botVariantSays`). `byName`: a
+ * call under the old name runs the old declaration whatever its arguments (`runsUnderOwnName`), as it always did.
  */
-const MOUSSE_TOOL_ALIAS_TRANSLATIONS: Readonly<Record<string, { args(old: ToolArgs): ToolArgs; holds(args: ToolArgs): boolean; runs?: VariantTurn; says?: string }>> = Object.freeze({
+const MOUSSE_TOOL_ALIAS_TRANSLATIONS: Readonly<Record<string, { args(old: ToolArgs): ToolArgs; holds(args: ToolArgs): boolean; runs?: VariantRuns; says?: string; byName?: boolean }>> = Object.freeze({
   // `thread_hide {threadId, hidden = true}` is `thread_update {threadId, hidden}`; never `access`.
   thread_hide: {
     args: ({ hidden, ...rest }: ToolArgs) => ({ ...rest, hidden: hidden === undefined ? true : hidden }),
@@ -145,16 +152,57 @@ const MOUSSE_TOOL_ALIAS_TRANSLATIONS: Readonly<Record<string, { args(old: ToolAr
     runs: 'bot',
     says: 'runId alone (a piece of your work)'
   },
-  work_list: { args: (args: ToolArgs) => ({ ...args, scope: 'bot_work' }), holds: (args: ToolArgs) => args.scope === 'bot_work', runs: 'bot', says: 'scope "bot_work"' }
+  work_list: { args: (args: ToolArgs) => ({ ...args, scope: 'bot_work' }), holds: (args: ToolArgs) => args.scope === 'bot_work', runs: 'bot', says: 'scope "bot_work"' },
+  // S7d4b. A message queued on the caller's own thread (no thread named), or on a queue whose revision the call read
+  // (`expectedRevision`), as a message of work. On any turn: a thread's, a personal bot's or a definition's. A call
+  // under the old name is that tool whatever it names (`byName`): it refuses what it always refused.
+  queue_enqueue: {
+    args: (args: ToolArgs) => args,
+    holds: (args: ToolArgs) => queuesMessage(args),
+    runs: 'any',
+    byName: true
+  },
+  // `recall_subagent {agent, task}` is work for the subagent titled `agent`: `continue_subagent` under its older name.
+  recall_subagent: {
+    args: ({ task, ...rest }: ToolArgs) => ({ ...rest, ...(task !== undefined ? { content: task } : {}), intent: 'work' }),
+    holds: (args: ToolArgs) => args.threadId === undefined && args.agent !== undefined && (args.intent === undefined || args.intent === 'work'),
+    runs: 'thread',
+    byName: true
+  },
+  // `list_delegations` is the caller's own delegations: `thread_read view: delegations` with no thread named.
+  list_delegations: {
+    args: (args: ToolArgs) => ({ ...args, view: 'delegations' }),
+    holds: (args: ToolArgs) => args.view === 'delegations' && args.threadId === undefined,
+    runs: 'thread',
+    byName: true
+  }
 })
+
+/**
+ * A `thread_send` that is `queue_enqueue`: a message of work that names no other recipient (a subagent, a bot, a run)
+ * and either no thread (the caller's own) or the revision of the queue it read.
+ */
+function queuesMessage(args: ToolArgs): boolean {
+  if (args.intent !== undefined && args.intent !== 'work') return false
+  if ([args.subagent, args.delegationId, args.runId, args.agent, args.bot].some((value) => value !== undefined)) return false
+  return args.expectedRevision !== undefined || args.threadId === undefined
+}
 
 /** A bot's call of its subagents: it names no thread and no run of one. */
 function noThread(args: ToolArgs): boolean {
   return args.threadId === undefined && args.runId === undefined
 }
 
-/** The kind of turn an old tool's own declaration runs its variant on: a thread's (not a definition's) or a personal bot's. */
-type VariantTurn = 'thread' | 'bot'
+/** The kind of turn a call runs on: a thread's, a personal bot's or a trusted definition's. */
+type VariantTurn = 'thread' | 'bot' | 'definition'
+
+/** The kind of turn an old tool's own declaration runs its variant on: one kind, or any. */
+type VariantRuns = VariantTurn | 'any'
+
+/** Whether a variant declared to run on `runs` runs on this kind of turn. */
+function runsOn(runs: VariantRuns | undefined, turn: VariantTurn): boolean {
+  return runs === turn || runs === 'any'
+}
 
 /** A call that names one of the caller's subagents the old way (`subagent` or `delegationId`) and no thread. */
 function namesOwnSubagent(args: ToolArgs): boolean {
@@ -195,7 +243,15 @@ export function toolVariant(name: string, args: ToolArgs, turn: VariantTurn | un
 /** Every old tool `toolVariant` could name, in order: a bot's turn is offered one of `subagent_start` and `work_start`. */
 export function toolVariants(name: string, args: ToolArgs, turn: VariantTurn | undefined): string[] {
   if (!turn) return []
-  return Object.entries(MOUSSE_TOOL_ALIAS_TRANSLATIONS).flatMap(([old, variant]) => (variant.runs === turn && MOUSSE_TOOL_ALIASES[old] === name && variant.holds(args) ? [old] : []))
+  return Object.entries(MOUSSE_TOOL_ALIAS_TRANSLATIONS).flatMap(([old, variant]) => (runsOn(variant.runs, turn) && MOUSSE_TOOL_ALIASES[old] === name && variant.holds(args) ? [old] : []))
+}
+
+/**
+ * Whether a call under the old name `calledAs` runs that old tool's declaration on this kind of turn whatever its
+ * arguments: `queue_enqueue` on another thread without a revision is refused as it always was, not sent as a message.
+ */
+export function runsUnderOwnName(calledAs: string, turn: VariantTurn): boolean {
+  return own(MOUSSE_TOOL_ALIAS_TRANSLATIONS, calledAs) && MOUSSE_TOOL_ALIAS_TRANSLATIONS[calledAs].byName === true && runsOn(MOUSSE_TOOL_ALIAS_TRANSLATIONS[calledAs].runs, turn)
 }
 
 /** Whether `name` is an old tool only a personal bot's turn runs (S7d4a): no other turn has it under either name. */
