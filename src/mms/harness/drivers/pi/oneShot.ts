@@ -3,11 +3,36 @@ import { harnessAppError } from '../../../../shared/harness/types'
 import { parseListedModelId } from '../../../../shared/modelVariants'
 import { customModelDefinition } from '../../catalog'
 import { ONE_SHOT_TASK_TEXT, type OneShotSpec } from '../../driver'
-import { piOneShotRunsOn } from './oneShotApis'
 import { assertAssistantResponseSucceeded, consumeAssistantStream, getCacheSessionId, getReasoningStreamOptions } from './stream'
 
 /** What a pi one-shot reads of the profile's pi-ai models: the catalogue, credentials and transport. */
 export type PiOneShotModels = Pick<Models, 'getModel' | 'getModels' | 'getAuth' | 'stream' | 'streamSimple'>
+
+/**
+ * The model APIs whose single requests run in Pi's worker (`pi:worker`, `workerOneShot.ts`), never in Mousse's process:
+ * Bedrock's. pi-ai builds its AWS client with no `maxAttempts` and takes no per-call setting, so the AWS SDK would retry
+ * below Mousse here; the worker's launch holds it to one attempt.
+ */
+export const PI_WORKER_APIS: ReadonlySet<string> = new Set(['bedrock-converse-stream'])
+
+/**
+ * The pi-ai model a single request on `spec.model` runs: the provider's catalogue model, or the user's custom model on
+ * the transport of the provider's first listed model; and the effort the id names.
+ */
+export function piOneShotModel(models: Pick<PiOneShotModels, 'getModel' | 'getModels'>, providerId: string, spec: Pick<OneShotSpec, 'model' | 'customModel'>): { model: Model<Api>; effort: string | undefined } {
+  // An id the provider lists exactly is that model (`phi3:medium` on Ollama), never a model at an effort.
+  const { baseId, effort } = parseListedModelId(spec.model, (id) => models.getModel(providerId, id) !== undefined)
+  const model = models.getModel(providerId, baseId) ?? customModel(models, providerId, spec)
+  if (!model)
+    throw harnessAppError({ code: 'model_unavailable', message: `${baseId} is not a model of this provider. Refresh models or choose another one.` })
+  return { model, effort }
+}
+
+/** The API a model id runs on, from the cached catalogue only: a model the provider does not list runs on its first one's. */
+export function piModelApi(models: Pick<PiOneShotModels, 'getModel' | 'getModels'>, providerId: string, modelId: string): string | undefined {
+  const { baseId } = parseListedModelId(modelId, (id) => models.getModel(providerId, id) !== undefined)
+  return (models.getModel(providerId, baseId) ?? models.getModels(providerId)[0])?.api
+}
 
 /**
  * One pi-ai request with no tools, in Mousse's process (a chat title): the provider's catalogue model
@@ -15,14 +40,10 @@ export type PiOneShotModels = Pick<Models, 'getModel' | 'getModels' | 'getAuth' 
  * keeps and refreshes them, and the reply's text. Not a loop: one request, no retry.
  */
 export async function runPiOneShot(models: PiOneShotModels, providerId: string, spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
-  // An id the provider lists exactly is that model (`phi3:medium` on Ollama), never a model at an effort.
-  const { baseId, effort } = parseListedModelId(spec.model, (id) => models.getModel(providerId, id) !== undefined)
-  const model = models.getModel(providerId, baseId) ?? customModel(models, providerId, spec)
-  if (!model)
-    throw harnessAppError({ code: 'model_unavailable', message: `${baseId} is not a model of this provider. Refresh models or choose another one.` })
-  // Bedrock's AWS SDK would retry below Mousse in this process (`piOneShotRunsOn`).
-  if (!piOneShotRunsOn(model.api))
-    throw harnessAppError({ code: 'unsupported', message: `Bedrock models cannot ${ONE_SHOT_TASK_TEXT[spec.task ?? 'title']} yet. Choose another title model in Settings → Agents, or Automatic.` })
+  const { model, effort } = piOneShotModel(models, providerId, spec)
+  // Bedrock's AWS SDK would retry below Mousse in this process: its requests run in the worker.
+  if (PI_WORKER_APIS.has(model.api))
+    throw harnessAppError({ code: 'unsupported', reason: 'not_admitted', message: `Bedrock models ${ONE_SHOT_TASK_TEXT[spec.task ?? 'title']} in a worker of their own, never in Mousse's process.` })
   // Reading the credentials may refresh a sign-in over the network: the timeout and a stop bound it too.
   if (!(await untilAborted(() => models.getAuth(model), signal)))
     throw harnessAppError({ code: 'signed_out', message: 'This provider is not signed in. Sign in or choose another model.' })
@@ -74,7 +95,7 @@ function untilAborted<T>(start: () => Promise<T>, signal: AbortSignal): Promise<
 }
 
 /** A custom model added to the provider runs with the transport of the provider's first listed model. */
-function customModel(models: PiOneShotModels, providerId: string, spec: OneShotSpec): Model<Api> | undefined {
+function customModel(models: Pick<PiOneShotModels, 'getModels'>, providerId: string, spec: Pick<OneShotSpec, 'customModel'>): Model<Api> | undefined {
   const template = spec.customModel ? models.getModels(providerId)[0] : undefined
   return spec.customModel && template ? customModelDefinition(template, spec.customModel) : undefined
 }

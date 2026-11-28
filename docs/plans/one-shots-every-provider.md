@@ -106,7 +106,7 @@ Labels are as computed; a route's slice changes its facts.
 |---|---|---|---|
 | Pi | `pi:direct` | none / one / verified / in_process | held |
 | Local models | `pi:direct`, `own_threads` | none / one / verified / in_process | held |
-| Pi on Bedrock | `pi:worker` with `AWS_MAX_ATTEMPTS=1` set before client creation | none / one / verified / sealed_child | held (slice 5; best-effort `pi:direct` until then) |
+| Pi on Bedrock | `pi:worker` with `AWS_MAX_ATTEMPTS=1` set before client creation; SSO, credential-process, role, web-identity, `aws login` and container sign-ins refused | none / one / verified / sealed_child | held (slice 5) |
 | Generic ACP | `acpOneShot`, default sealed environment, no provider-specific code | detected_on_report / unenforced / env_only / sealed_child | best-effort |
 | Antigravity | `acpOneShot` plus preset inputs; keeps #1936's flags, sign-in handling, post-exit scratch check and quota mapping | detected_on_report / unenforced / env_only / sealed_child | best-effort |
 | Claude | migrated in slice 2, with a handoff fence (no resend after the spare took the prompt), `CLAUDE_CODE_MAX_RETRIES=0`, `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1`, and its place as cwd | none / one if the stub count proves it / verified unless managed / sealed_child | held, or best-effort |

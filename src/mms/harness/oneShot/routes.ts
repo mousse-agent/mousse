@@ -8,6 +8,14 @@ import type { OneShotRouteDecision, RouteFacts } from './route'
 /** Pi: one pi-ai request in Mousse's process, with no tool offered. */
 export const PI_DIRECT_FACTS: RouteFacts = Object.freeze({ tools: 'none_offered', attempts: 'one', isolation: 'verified', launch: 'in_process', audience: 'any' })
 
+/**
+ * Pi on Bedrock (`pi:worker`): the same request in a worker process of its own, in its place, with `AWS_MAX_ATTEMPTS=1`
+ * set before pi-ai makes its AWS client (one request on the wire on 429 and 503, counted at a stub) and only the
+ * credentials the entry uses; none of the person's AWS files or Pi's setup loads, shown in
+ * `tests/piWorkerOneShotEffects.test.ts`. Held.
+ */
+export const PI_WORKER_FACTS: RouteFacts = Object.freeze({ tools: 'none_offered', attempts: 'one', isolation: 'verified', launch: 'sealed_child', audience: 'any' })
+
 /** A local server's model on Pi: the same request, for the threads that run on it only. */
 export const PI_LOCAL_FACTS: RouteFacts = Object.freeze({ ...PI_DIRECT_FACTS, audience: 'own_threads' })
 

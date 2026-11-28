@@ -51,6 +51,23 @@ export function getCursorHostBuildOptions(projectRoot = root) {
 }
 
 /**
+ * Pi's single-request worker beside the CLI bundle (`out/cli/piWorker.js`): the daemon starts it as a child process
+ * for each Bedrock single request, and it loads pi-ai's Bedrock stream from node_modules.
+ */
+export function getPiWorkerBuildOptions(projectRoot = root) {
+  return {
+    entryPoints: [resolve(projectRoot, 'src/mms/harness/pi/worker.ts')],
+    outfile: resolve(projectRoot, 'out/cli/piWorker.js'),
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: 'node20',
+    sourcemap: true,
+    packages: 'external'
+  }
+}
+
+/**
  * The thread database worker (`docs/thread-storage.md`), one self-contained file beside each bundle that starts it:
  * `out/cli/threadDbWorker.js` for the daemon run from the CLI bundle, `out/main/threadDbWorker.js` for the one run from
  * the app's. It imports Node built-ins only, so it loads the same from a packaged app's unpacked files.
@@ -144,6 +161,7 @@ export async function buildCli(opts = {}) {
     const worker = await buildBrowserWorker(root, { reuse })
     const cli = await cachedBuild(options, { projectRoot: root, name: 'cli', reuse })
     await cachedBuild(getCursorHostBuildOptions(root), { projectRoot: root, name: 'cursor-host', reuse })
+    await cachedBuild(getPiWorkerBuildOptions(root), { projectRoot: root, name: 'pi-worker', reuse })
     await cachedBuild(getChatgptTokenBuildOptions(root), { projectRoot: root, name: 'chatgpt-token', reuse })
     await cachedBuild(getSshProxyBuildOptions(root), { projectRoot: root, name: 'ssh-proxy', reuse })
     await cachedBuild(getBotSupervisorBuildOptions(root), { projectRoot: root, name: 'bot-supervisor', reuse })
@@ -178,6 +196,7 @@ export async function buildCli(opts = {}) {
   await ctx.watch()
   // The host rarely changes; it is built once when watching starts.
   await cachedBuild(getCursorHostBuildOptions(root), { projectRoot: root, name: 'cursor-host' })
+  await cachedBuild(getPiWorkerBuildOptions(root), { projectRoot: root, name: 'pi-worker' })
   await cachedBuild(getChatgptTokenBuildOptions(root), { projectRoot: root, name: 'chatgpt-token' })
   await cachedBuild(getSshProxyBuildOptions(root), { projectRoot: root, name: 'ssh-proxy' })
   await cachedBuild(getBotSupervisorBuildOptions(root), { projectRoot: root, name: 'bot-supervisor' })
