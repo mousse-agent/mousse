@@ -2,21 +2,6 @@
   "version": 1,
   "claims": [
     {
-      "task": "add-machine-location",
-      "session": "Animatrix-1e9b85",
-      "machine": "Animatrix",
-      "branch": "add-machine-location",
-      "paths": [
-        "src/mms/sourceControl/cloneHere.ts",
-        "src/renderer/components/AddToMachineDialog.tsx",
-        "src/renderer/components/CloneFolderField.tsx",
-        "src/renderer/components/addToMachine.css",
-        "src/renderer/lib/addToMachine.ts"
-      ],
-      "claimedAt": "2026-11-28T06:02:17.157Z",
-      "expiresAt": "2026-11-28T08:02:17.157Z"
-    },
-    {
       "task": "applets-in-page-webview",
       "session": "Avarnics-Mac-mini.local-3ff47c",
       "machine": "Avarnics-Mac-mini.local",
@@ -389,17 +374,6 @@
       ],
       "claimedAt": "2026-11-27T15:53:06.509Z",
       "expiresAt": "2026-11-27T17:53:06.509Z"
-    },
-    {
-      "task": "tree-corrections",
-      "session": "LAPTOP-HIEROJK7-dfae29",
-      "machine": "LAPTOP-HIEROJK7",
-      "branch": "tree-corrections",
-      "paths": [
-        "src/mms/run/delegation/treeCorrection.ts"
-      ],
-      "claimedAt": "2026-11-27T04:23:54.256Z",
-      "expiresAt": "2026-11-27T06:23:54.256Z"
     },
     {
       "task": "turn-timings-daemon-log",
