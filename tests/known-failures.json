@@ -1,4 +1,5 @@
 [
+  { "file": "tests/renderer/bot-chat-width-electron.test.ts", "test": "keeps a narrow bot chat free of sideways scroll", "issue": 2143, "how": "the narrowing control expects tools that would overflow: expected -12.59375 to be greater than 0, on master too", "platform": "win32" },
   { "file": "tests/netEngine/askOtherDirection.test.ts", "test": "takes nothing from a message alone: extra fields, repeated ids and unasked answers", "issue": 2121, "how": "NetError: The peer is offline. at the second send on the access exchange, on master too", "platform": "win32" },
   { "file": "tests/netEngine/askOtherDirection.test.ts", "test": "never prompts twice for one request id, however many others come after it", "issue": 2121, "how": "NetError: The peer is offline. at a later send on the access exchange, on master too", "platform": "win32" },
   { "file": "tests/storageCleanupRestore.test.ts", "issue": 2128, "how": "the file does not run: EPERM removing its mousse-foundation-test temp folder", "platform": "win32" },

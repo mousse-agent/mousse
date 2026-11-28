@@ -2,6 +2,7 @@ import { compareLaunched, launchedActive, launchedRecent, launchedGoing, type Bo
 import { guardTextCharacters } from '../../../shared/bots/personal/modelSlots'
 import { botGroupTime } from './messageGroups'
 import { askNoticeText } from '../../../shared/bots/personal/askText'
+import { botMessageFrom, type BotMessageFrom } from '../../../shared/bots/personal/botMessages'
 
 /**
  * How a bot's chat reads as a messenger: what the renderer infers from the chat's rows alone (`bot_messages`), with
@@ -74,6 +75,39 @@ export function withNotes(rows: readonly BotChatRow[], notes: readonly BotWindow
 const noteRow = (note: BotWindowLine): BotChatRow => (note.cut
   ? { kind: 'system', id: note.id, at: note.at, text: note.text, cut: true }
   : { kind: 'system', id: note.id, at: note.at, text: note.text, note: note.error ? 'error' : 'info' })
+
+/**
+ * A run of messages the owner's other bots sent this bot, one after another (`botMessageFrom`), which the chat folds
+ * behind one quiet line ("Coxy sent 2 messages") so they don't crowd out the owner's own conversation. `id`: its first
+ * message's id, which stays as the run grows; `start` and `end`: its rows (`end` exclusive); `senders`: each bot once,
+ * in the order they first wrote.
+ */
+export interface BotExchange { id: string; start: number; end: number; senders: BotMessageFrom[] }
+
+/**
+ * The runs of other bots' messages among `rows`. Any other row ends a run (the bot's reply, the owner's message, a
+ * quiet line), and so does a new day (`days[i]`: the day line above row i, when it has one), so a day line never hides
+ * inside a fold.
+ */
+export function botExchanges(rows: readonly BotChatRow[], days: ReadonlyArray<{ day?: string } | undefined>): BotExchange[] {
+  const runs: BotExchange[] = []
+  let run: BotExchange | undefined
+  rows.forEach((row, index) => {
+    const from = row.kind === 'message' && row.message.author === 'bot' ? botMessageFrom(row.message) : undefined
+    if (!from) { run = undefined; return }
+    if (run && !days[index]?.day) {
+      run.end = index + 1
+      if (!run.senders.some((sender) => sameSender(sender, from))) run.senders.push(from)
+      return
+    }
+    run = { id: (row as Extract<BotChatRow, { kind: 'message' }>).message.id, start: index, end: index + 1, senders: [from] }
+    runs.push(run)
+  })
+  return runs
+}
+
+/** One bot, by its id when both rows keep it, else by the name each holds. */
+const sameSender = (a: BotMessageFrom, b: BotMessageFrom) => (a.botId && b.botId ? a.botId === b.botId : a.name === b.name)
 
 /** The quiet line an answer the owner tapped leaves in place of their bubble: "You answered “Flat B”". */
 export function tappedAnswerLine(label: string): string {
