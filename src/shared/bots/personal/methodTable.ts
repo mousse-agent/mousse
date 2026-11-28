@@ -163,6 +163,9 @@ export const BOT_METHODS = {
   'bots.facePicture.save': { level: 'local', local: chat(['botId', 'key', 'png'], { callers: 'window', refusal: "Only the Mousse window saves a bot's face picture." }) },
 
   // ---------------------------------------------------------------- another device only
+  // A picture from a bot's chat, in parts; this computer's app reads the file itself.
+  // It stays until the phone app moves to `bots.chat.file` (#2023).
+  'bots.chat.attachment': { level: 'use', remote: reads(['botId', 'messageId', 'index'], ['offset']) },
   // A file of the bot's files folder, in pages (never SVG); this computer's app reads the file itself.
   'bots.chat.file': { level: 'use', remote: reads(['botId', 'path'], ['offset']) },
   // A file for a message to the bot, sent ahead in parts: the first names it (`name`, `size`), the rest its `stage`.

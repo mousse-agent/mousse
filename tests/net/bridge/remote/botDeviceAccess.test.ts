@@ -43,6 +43,7 @@ function paramsFor(botId: string): Record<Exclude<RemoteBotMethod, 'bots.create'
   return {
     'bots.get': { botId },
     'bots.chat.list': { botId },
+    'bots.chat.attachment': { botId, messageId: 'm1', index: 0 },
     'bots.chat.file': { botId, path: 'a.png' },
     'bots.stage': { botId, clientRequestId: `stage-${botId}`, offset: 0, dataB64: 'aGk=', name: 'a.png', size: 2 },
     'bots.memory.list': { botId },
@@ -185,6 +186,10 @@ describe('a bot the device may not reach answers as a bot that is not there', ()
     const { reach } = reachOver(store)
     const staging = new BotStaging({ folder: join(dir, 'staging') })
     const methods = remoteBotMethods({ bots: () => f.bots.service, reach, deviceLimit: () => 'full', staging })
+    // An ask, reminder or message of one bot is looked for in the bot the call names, which the device must reach.
+    const message = chatOf(f, theirs)[0]!
+    expect(await outcome(methods, 'bots.chat.attachment', { botId: theirs, messageId: message.id, index: 0 }, as(PHONE))).toMatchObject({ code: 'stream_unknown' })
+    expect(await outcome(methods, 'bots.chat.attachment', { botId: mine, messageId: message.id, index: 0 }, as(PHONE))).toMatchObject({ code: 'stream_unknown' })
     // A file is looked for in the folder of the bot the call names, which the device must reach.
     const folder = f.bots.service.filesFolderOf(theirs)
     mkdirSync(folder, { recursive: true })

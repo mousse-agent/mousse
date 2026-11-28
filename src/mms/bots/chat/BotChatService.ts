@@ -1,5 +1,7 @@
 import { PageChecks } from '../pageChecks'
 import { BotActionChanged } from '../actions/BotActions'
+import { realpathSync } from 'node:fs'
+import { sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { withAppletNames, type BotChatApplet, type BotChatMessage, type BotChip, type BotDetail, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_BASE_SLOT_NAMES, BOT_MODEL_SLOT_KEYS, DEFAULT_BOT_MODEL, ENDED_ACTIVATION_STATUSES, MAX_BOT_CUSTOM_SLOT_DESCRIPTION, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotCustomSlot, type BotDefinition, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../shared/bots/personal/definition'
@@ -897,6 +899,29 @@ export class BotChatService {
     if (isSpecialAsk(escalation.permission)) return 'export_memory'
     // "Use your threads" starts threads that run with full access: another device allows it only if it may run them so.
     return 'tool' in escalation.permission && botGrantTool(escalation.permission.tool) === BOT_THREADS_PERMISSION ? 'threads' : 'permission'
+  }
+
+  /**
+   * One file a chat message carries, for a device that can't open this computer's files (a phone): only the copy in
+   * the bot's own files folder, where every attachment is kept, never a path anywhere else.
+   */
+  attachmentFile(botId: string, messageId: string, index: number): { name: string; path: string } {
+    this.engine.definitionOf(botId)
+    const folder = this.engine.filesFolder(botId)
+    const row = this.store.message(messageId)
+    if (!row || row.botId !== botId) throw new BotEngineError('message_not_found', 'No such message.')
+    const file = row.attachments?.[index]
+    if (!file) throw new BotEngineError('attachment_not_found', 'No such file.')
+    let real: string
+    let root: string
+    try {
+      real = realpathSync(file.path)
+      root = realpathSync(folder)
+    } catch {
+      throw new BotEngineError('attachment_not_found', `${file.name} is no longer on the computer.`)
+    }
+    if (!real.startsWith(root + sep)) throw new BotEngineError('attachment_not_found', `${file.name} is not in the bot's files.`)
+    return { name: file.name, path: real }
   }
 
   /**

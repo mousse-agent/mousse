@@ -235,16 +235,18 @@ describe('a gallery', () => {
     return path
   }
 
-  it('shows pictures from the files folder; each is also one of the message\'s files, which another device reads by its place there', async () => {
+  it('shows pictures from the files folder; each is also one of the message\'s files, which another device reads by its place there or by index', async () => {
     const made = picture('flat-a.png')
     picture('flat-b.png')
     const reply = await shown([{ type: 'gallery', title: 'Flats', files: [{ path: made, caption: 'Flat A' }, { path: 'images/flat-b.png' }] }])
     expect(reply.cards).toEqual([{ type: 'gallery', title: 'Flats', files: [{ path: made, name: 'flat-a.png', caption: 'Flat A' }, { path: join(folder, 'images', 'flat-b.png'), name: 'flat-b.png' }] }])
     expect(reply.attachments).toEqual([{ name: 'flat-a.png', path: made }, { name: 'flat-b.png', path: join(folder, 'images', 'flat-b.png') }])
     expect(reply.text.slice(reply.plainFrom).trim()).toBe('Flats\nflat-a.png (Flat A)\nflat-b.png')
-    // Another device gets no path of this computer: the picture's name, caption and its place in the files folder.
+    expect(f.bots.service.attachmentFile(botId, reply.id, 1).path).toBe(join(folder, 'images', 'flat-b.png'))
+    // Another device gets no path of this computer: the picture's name, caption, its place in the files folder and its
+    // place among the message's files (the phone's `bots.chat.attachment`, until it moves to `bots.chat.file`).
     const remote = remoteBotMessage(reply)
-    expect(remote.cards).toEqual([{ type: 'gallery', title: 'Flats', files: [{ name: 'flat-a.png', caption: 'Flat A', path: 'images/flat-a.png' }, { name: 'flat-b.png', path: 'images/flat-b.png' }] }])
+    expect(remote.cards).toEqual([{ type: 'gallery', title: 'Flats', files: [{ name: 'flat-a.png', caption: 'Flat A', path: 'images/flat-a.png', index: 0 }, { name: 'flat-b.png', path: 'images/flat-b.png', index: 1 }] }])
     expect(remote.attachments?.map((file) => file.path)).toEqual(['images/flat-a.png', 'images/flat-b.png'])
     expect(JSON.stringify(remote)).not.toContain(folder)
   })

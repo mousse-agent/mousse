@@ -86,6 +86,10 @@ describe('bot method params', () => {
 
   it('checks the About and image methods', () => {
     const REM = 'rem_00000000-0000-0000-0000-000000000000'
+    expect(validateRemoteBotParams('bots.chat.attachment', { botId: BOT, messageId: 'm1', index: 0, offset: 40_960 })).toBeTruthy()
+    bad('bots.chat.attachment', { botId: BOT, messageId: 'm1', index: 10 })
+    bad('bots.chat.attachment', { botId: BOT, messageId: 'm1', index: 0, offset: -1 })
+    bad('bots.chat.attachment', { botId: BOT, messageId: 'm1', index: 0, path: '/etc/passwd' })
     expect(validateRemoteBotParams('bots.chat.file', { botId: BOT, path: 'images/a b.png', offset: 40_960 })).toBeTruthy()
     expect(validateRemoteBotParams('bots.update', { botId: BOT, name: 'Pip' })).toBeTruthy()
     expect(validateRemoteBotParams('bots.reminders.cancel', { botId: BOT, reminderId: REM })).toBeTruthy()
@@ -148,8 +152,9 @@ describe('bot method params', () => {
     const methods = remoteBotMethods({ bots: () => undefined })
     expect(methods.map((entry) => entry.method).sort()).toEqual(Object.keys(REMOTE_BOT_METHODS).sort())
     // A read's result (the chat) is never kept in the request ledger.
-    expect(methods.filter((entry) => entry.ephemeral).map((entry) => entry.method).sort()).toEqual(['bots.chat.file', 'bots.chat.list', 'bots.get', 'bots.memory.list'])
+    expect(methods.filter((entry) => entry.ephemeral).map((entry) => entry.method).sort()).toEqual(['bots.chat.attachment', 'bots.chat.file', 'bots.chat.list', 'bots.get', 'bots.memory.list'])
     expect(REMOTE_BOT_METHODS).toMatchObject({
+      'bots.chat.attachment': { capability: 'read', mutating: false },
       'bots.chat.file': { capability: 'read', mutating: false },
       'bots.stage': { capability: 'chat', mutating: true },
       'bots.memory.list': { capability: 'read', mutating: false },
@@ -480,6 +485,7 @@ describe('the bot level of the calling device', () => {
   const params: Record<RemoteBotMethod, unknown> = {
       'bots.get': { botId: BOT },
       'bots.chat.list': { botId: BOT },
+      'bots.chat.attachment': { botId: BOT, messageId: 'm1', index: 0 },
       'bots.chat.file': { botId: BOT, path: 'a.png' },
       'bots.stage': { botId: BOT, clientRequestId: 's1', offset: 0, dataB64: 'aGk=', name: 'a.png', size: 2 },
       'bots.memory.list': { botId: BOT },
@@ -504,7 +510,7 @@ describe('the bot level of the calling device', () => {
   }
   const names = Object.keys(REMOTE_BOT_METHODS) as RemoteBotMethod[]
   /** The rows another device may call at Use; every other remote row needs Full. */
-  const USE_ROWS = ['bots.get', 'bots.chat.list', 'bots.chat.file', 'bots.stage', 'bots.memory.list', 'bots.chat.send', 'bots.chat.stop', 'bots.work.stop', 'bots.chat.markRead', 'bots.questions.answer', 'bots.reminders.snooze', 'bots.actions.answer']
+  const USE_ROWS = ['bots.get', 'bots.chat.list', 'bots.chat.attachment', 'bots.chat.file', 'bots.stage', 'bots.memory.list', 'bots.chat.send', 'bots.chat.stop', 'bots.work.stop', 'bots.chat.markRead', 'bots.questions.answer', 'bots.reminders.snooze', 'bots.actions.answer']
   /** Methods over a port that counts every read, for a device at `level`. */
   const counted = (level: BotLevel) => {
     const seen = { reads: 0 }
@@ -682,6 +688,42 @@ describe('files and About from another device', () => {
     expect(notes.first).toMatchObject({ name: 'notes.txt', mime: 'text/plain', size: 2 })
     expect(notes.first.image).toBeUndefined()
     expect(notes.data.toString()).toBe('hi')
+  })
+
+  // `bots.chat.attachment` stays for the phone app until it moves to `bots.chat.file` (#2023).
+  it('reads an image of the chat in parts by its message and place among its files, never its path', async () => {
+    const data = png(100 * 1024)
+    const message = await sendWith([{ name: 'shot.png', data }, { name: 'notes.txt', data: Buffer.from('hi') }])
+    const page = (await call(methods, 'bots.chat.list', { botId })) as { messages: Array<{ id: string; attachments?: unknown }> }
+    expect(JSON.stringify(page)).not.toContain(dir)
+    const parts: Buffer[] = []
+    for (let offset = 0; ;) {
+      const part = (await call(methods, 'bots.chat.attachment', { botId, messageId: message.id, index: 0, offset })) as { name: string; mime: string; size: number; offset: number; dataB64: string }
+      expect(part).toMatchObject({ name: 'shot.png', mime: 'image/png', size: data.length, offset })
+      expect(Buffer.byteLength(JSON.stringify(part))).toBeLessThan(63 * 1024)
+      const bytes = Buffer.from(part.dataB64, 'base64')
+      parts.push(bytes)
+      offset += bytes.length
+      if (offset >= part.size) break
+    }
+    expect(parts.length).toBe(3)
+    expect(Buffer.concat(parts).equals(data)).toBe(true)
+    // A file that is not an image, and a file past the list, are refused.
+    expect((await refused(() => call(methods, 'bots.chat.attachment', { botId, messageId: message.id, index: 1 }))).code).toBe('conflict')
+    expect((await refused(() => call(methods, 'bots.chat.attachment', { botId, messageId: message.id, index: 2 }))).code).toBe('stream_unknown')
+    expect((await refused(() => call(methods, 'bots.chat.attachment', { botId, messageId: 'nope', index: 0 }))).code).toBe('stream_unknown')
+  })
+
+  it('refuses an image by message that is too large, not what its name says, or outside the bot\'s files', async () => {
+    const big = await sendWith([{ name: 'big.png', data: png(1536 * 1024 + 1) }])
+    expect((await refused(() => call(methods, 'bots.chat.attachment', { botId, messageId: big.id, index: 0 }))).code).toBe('too_large')
+    const fake = await sendWith([{ name: 'fake.png', data: Buffer.from('<svg onload="x()"/>') }])
+    expect((await refused(() => call(methods, 'bots.chat.attachment', { botId, messageId: fake.id, index: 0 }))).code).toBe('conflict')
+    // A row that names a file anywhere else (it never does) is not read.
+    const outside = join(dir, 'outside.png')
+    writeFileSync(outside, png(100))
+    f.store.run('UPDATE bot_messages SET attachments_json = ? WHERE id = ?', JSON.stringify([{ name: 'outside.png', path: outside }]), fake.id)
+    expect((await refused(() => call(methods, 'bots.chat.attachment', { botId, messageId: fake.id, index: 0 }))).code).toBe('stream_unknown')
   })
 
   it('refuses a way out of the folder, a link out of it, another bot\'s file, an SVG and a file over the limit', async () => {

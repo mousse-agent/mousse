@@ -131,7 +131,7 @@ Opening the app or the Chats tab reads only memory and the copy on disk; it neve
 - The `bots_chat` and `bots_manage` access classes (replaced by the levels; `speech.*` gets a class of its own).
 - The refusal of every remote caller in `bots.devices.*` and `bots.permissions.set` (replaced by the Full level; local callers other than the window are still refused).
 - `bots` in the threads lists stream (replaced by the bots feed).
-- `bots.chat.attachment` (replaced by `bots.chat.file`).
+- `bots.chat.attachment` (replaced by `bots.chat.file`; it stays until the phone app moves to `bots.chat.file`, #2023).
 - Polling for remote rows; local bots keep `useBotsPolling` until it is replaced separately.
 
 `withHiddenBots` stays as it is: a computer serving a thread can't know whether the reader reaches a bot that lives on a third computer, so it keeps naming such a bot "a bot".

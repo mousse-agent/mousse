@@ -1,3 +1,4 @@
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
 import { botActionRefusalText, isBotActionRefusalCode } from '../../../shared/bots/personal/actionRefusal'
 import { NetError, type NodeCapability, type NodeId } from '../../../shared/net'
 import { launchedActive, type BotChatCard, type BotChatMessage, type BotDetail, type BotError, type BotSummary } from '../../../shared/bots/personal/chat'
@@ -18,7 +19,7 @@ import { isBotId } from '../../bots/definitions/BotDefinitionStore'
 import type { BotReachPort } from '../../protocol/botReachPort'
 import { REMOTE_BOT_REACH, type BotDeviceAccess } from '../../../shared/bots/personal/deviceAccess'
 import { BOT_STAGE_PART_BYTES, REMOTE_BOT_FILE_BYTES, isBotFileRef, isBotStageId, isSvgName } from '../../../shared/bots/personal/remoteFiles'
-import { botFileRef, looksLikeSvg, readBotFilePage, remoteFileType } from './botFiles'
+import { botFileRef, looksLikeSvg, readBotFilePage, remoteFileType, sniffImage } from './botFiles'
 import type { BotStaging } from './botStaging'
 
 /**
@@ -92,6 +93,10 @@ const LOOK_KEYS = new Set(['colour', 'accessory', 'kind', 'eyes', 'eyeColour'])
 export const REMOTE_BOT_MESSAGE_BYTES = 32 * 1024
 /** A read's result stays below one RPC reply (63 KiB); older messages are left for the next page. */
 const RESULT_BYTES = 56 * 1024
+/** The largest image another device may read from a bot's chat with `bots.chat.attachment`. */
+export const REMOTE_BOT_IMAGE_BYTES = 1536 * 1024
+/** One part of an image: 40 KiB, under 55 KiB as base64, so a part fits one reply. */
+export const REMOTE_BOT_IMAGE_PART_BYTES = 40 * 1024
 /** A staged part as base64: `BOT_STAGE_PART_BYTES` of bytes, rounded up to whole groups of four. */
 const STAGE_PART_B64 = Math.ceil(BOT_STAGE_PART_BYTES / 3) * 4
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
@@ -140,6 +145,11 @@ export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown)
     case 'bots.chat.list':
       if (p.beforeSeq !== undefined) ok(whole(p.beforeSeq, 1))
       if (p.limit !== undefined) ok(whole(p.limit, 1, MAX_BOT_CHAT_PAGE))
+      break
+    case 'bots.chat.attachment':
+      ok(text(p.messageId, 200))
+      ok(whole(p.index, 0, MAX_BOT_CHAT_ATTACHMENTS - 1))
+      if (p.offset !== undefined) ok(whole(p.offset, 0, REMOTE_BOT_IMAGE_BYTES))
       break
     case 'bots.chat.file':
       ok(isBotFileRef(p.path))
@@ -264,9 +274,10 @@ export interface RemoteBotFile {
 
 /**
  * A card as another device sees it: a gallery's pictures by name, each with its place inside the bot's files folder
- * (`path`, read with `bots.chat.file`), never its path on this computer.
+ * (`path`, read with `bots.chat.file`) and its place among the message's files (`index`, read with
+ * `bots.chat.attachment`) when it is one of them, never its path on this computer.
  */
-export type RemoteBotCard = Exclude<BotChatCard, { type: 'gallery' }> | { type: 'gallery'; title?: string; files: Array<{ name: string; caption?: string; path?: string }> }
+export type RemoteBotCard = Exclude<BotChatCard, { type: 'gallery' }> | { type: 'gallery'; title?: string; files: Array<{ name: string; caption?: string; path?: string; index?: number }> }
 
 /** A chat row as another device sees it. */
 export type RemoteBotMessage = Omit<BotChatMessage, 'attachments' | 'applets' | 'cards'> & { attachments?: RemoteBotFile[]; cards?: RemoteBotCard[] }
@@ -287,7 +298,10 @@ export function remoteBotMessage(message: BotChatMessage): RemoteBotMessage {
   const remoteCards = cards?.map((card): RemoteBotCard => card.type !== 'gallery' ? card : {
     type: 'gallery',
     ...(card.title ? { title: card.title } : {}),
-    files: card.files.map((file) => ({ name: file.name, ...(file.caption ? { caption: file.caption } : {}), ...ref(file.path) }))
+    files: card.files.map((file) => {
+      const index = attachments?.findIndex((attached) => attached.path === file.path) ?? -1
+      return { name: file.name, ...(file.caption ? { caption: file.caption } : {}), ...ref(file.path), ...(index >= 0 ? { index } : {}) }
+    })
   })
   return {
     ...rest,
@@ -347,6 +361,32 @@ function fittedPage(page: BotsPersonalV2Api['bots.chat.list']['result']): Remote
     total += size
   }
   return { ...page, messages: kept }
+}
+
+/** One part of an image file of a bot's chat, checked to be a raster image within the size limit. */
+function imagePart(file: { name: string; path: string }, offset: number): { name: string; mime: string; size: number; offset: number; dataB64: string } {
+  if (!remoteFileType(file.name).image && !remoteFileType(file.path).image)
+    throw new NetError('conflict', 'Only images open on another device.')
+  let fd: number
+  try {
+    fd = openSync(file.path, 'r')
+  } catch {
+    throw new NetError('stream_unknown', `${file.name} is no longer on the computer.`)
+  }
+  try {
+    const size = fstatSync(fd).size
+    if (size > REMOTE_BOT_IMAGE_BYTES) throw new NetError('too_large', `${file.name} is too large to show here. Open it on the computer.`)
+    const head = Buffer.alloc(Math.min(16, size))
+    readSync(fd, head, 0, head.length, 0)
+    const mime = sniffImage(head)
+    if (!mime) throw new NetError('conflict', 'Only images open on another device.')
+    if (offset > size) throw new NetError('bad_request')
+    const part = Buffer.alloc(Math.min(REMOTE_BOT_IMAGE_PART_BYTES, size - offset))
+    const read = part.length ? readSync(fd, part, 0, part.length, offset) : 0
+    return { name: file.name, mime, size, offset, dataB64: part.subarray(0, read).toString('base64') }
+  } finally {
+    closeSync(fd)
+  }
 }
 
 /** An engine refusal as a plain error; it never becomes an uncertain outcome. */
@@ -607,6 +647,9 @@ export function remoteBotMethods(options: {
           ...(p.limit !== undefined ? { limit: p.limit as number } : {})
         })
       )
+    ),
+    method('bots.chat.attachment', async (p, port) =>
+      imagePart(port.attachmentFile(botId(p), p.messageId as string, p.index as number), (p.offset as number | undefined) ?? 0)
     ),
     // A file of the bot's files folder, a page at a time: only inside that folder, never SVG (`readBotFilePage`).
     method('bots.chat.file', async (p, port) => readBotFilePage(port.filesFolderOf(botId(p)), p.path as string, (p.offset as number | undefined) ?? 0)),

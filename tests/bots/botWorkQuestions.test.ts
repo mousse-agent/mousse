@@ -646,6 +646,7 @@ describe("the bot's browser", () => {
     await tool('question_ask', work.prepared, work.payload.threadId, FLATS)
     const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === workId)!
     expect(bubble.attachments).toEqual([expect.objectContaining({ name: expect.stringMatching(/^browser-screenshot-.+\.png$/) })])
+    expect(f.bots.service.attachmentFile(botId, bubble.id, 0).name).toBe(bubble.attachments![0]!.name)
     // In the bot's files folder, so another device reads it there.
     expect(remoteBotMessage(bubble).attachments?.[0]?.path).toMatch(/\/browser-screenshot-.+\.png$/)
     await endTurn(work)
