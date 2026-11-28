@@ -28,8 +28,8 @@ export function setDiagSink(sink: DiagSink | null): void {
   diagSink = sink
 }
 
-function emit(level: DiagLevel, line: string): void {
-  console.error(line)
+function emit(level: DiagLevel, line: string, print: (line: string) => void = (text) => console.error(text)): void {
+  print(line)
   if (!diagSink) return
   try {
     diagSink(level, line)
@@ -84,6 +84,14 @@ export function logDebug(module: string, message: string, error?: unknown, field
 /** A measurement worth keeping in the daemon log in every build, such as where the start spent its time. */
 export function logInfo(module: string, message: string): void {
   emit('info', `[info:${module}] ${message}`)
+}
+
+/**
+ * A measurement its module writes as a whole line (`[turn-boundary] {…}`): printed on standard output, and kept in the
+ * daemon log in every build, as `logInfo`'s lines are.
+ */
+export function logMeasurement(line: string): void {
+  emit('info', line, (text) => console.info(text))
 }
 
 export function logWarn(module: string, message: string, error?: unknown, fields?: Record<string, unknown>): void {

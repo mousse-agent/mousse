@@ -20,6 +20,8 @@ const catalog = (): LlmProviderOption[] => [
 ]
 /** The profile's default permission mode; a test may set another. */
 let defaultMode = 'accept_edits'
+/** How many reads of settings fail before they answer, as while the service stalls or is replaced. */
+let settingsFailures = 0
 const settings = (): MousseSettings => ({
   provider: { llmProvider: 'claude-subscription', model: 'opus' },
   permissions: { defaultMode },
@@ -51,7 +53,14 @@ function stubBridge(): void {
     })
   const sections: Record<string, unknown> = {
     settings: section({
-      get: () => { reads.get++; return answer(settings()) },
+      get: () => {
+        reads.get++
+        if (settingsFailures > 0) {
+          settingsFailures -= 1
+          return Promise.reject(new Error('Request timeout: settings.get'))
+        }
+        return answer(settings())
+      },
       getOptions: () => { reads.getOptions++; return answer({ themes: [], accentColors: [], llmProviders: catalog(), agentTypes: [] }) },
       onChanged: (listener: (value: MousseSettings) => void) => {
         settingsListeners.push(listener)
@@ -81,6 +90,7 @@ beforeEach(async () => {
   settingsListeners = []
   bridge = {}
   defaultMode = 'accept_edits'
+  settingsFailures = 0
   stubBridge()
   const { useAppStore } = await import('../../src/renderer/stores/appStore')
   useAppStore.setState({ profileId: 'prf_test', profileReady: true, workspaceReady: true, hidePermissionsWhileRunning: true })
@@ -428,6 +438,69 @@ describe('the first send of a new chat runs with what the composer shows', () =>
     await send('Fix the parser')
     expect(daemon.calls.some((call) => call[0] === 'setModel')).toBe(false)
     expect(daemon.sentWith()?.[1]).toBe('opus')
+  })
+})
+
+describe("a chat that runs in the profile's permission mode", () => {
+  /**
+   * An empty chat in a project where nothing was picked yet (a project just added): no mode of its own, so it runs in the
+   * profile's default, Full access. `failedReads` reads of settings fail first, as while the service stalls.
+   */
+  async function emptyChat(options: { failedReads?: number; ownMode?: Thread['permissionMode'] } = {}) {
+    defaultMode = 'full'
+    settingsFailures = options.failedReads ?? 0
+    await listModels(['fresh'])
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const draft = threadRow('draft', { projectId: 'fresh', worktreeEnabled: true, modelOverride: OPUS, settingsRevision: 1, ...(options.ownMode ? { permissionMode: options.ownMode } : {}) })
+    useAppStore.setState({
+      projects: [project('fresh')],
+      threads: [draft], activeThreadId: 'draft', messages: [],
+      composerWorkspaceDrafts: { draft: { projectId: 'fresh', worktreeEnabled: true } }
+    })
+    const daemon = daemonForSend(draft, { defaultMode: 'full' })
+    await mountComposer()
+    return daemon
+  }
+  const sendButton = () => host.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')
+
+  afterEach(() => { vi.useRealTimers() })
+
+  // Reproduction: the read failed, the chip showed the built-in Auto-accept edits, and the first send was refused.
+  it('shows no mode and holds the first message until the profile mode is read, then runs in it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout'] })
+    const daemon = await emptyChat({ failedReads: 1 })
+    expect(permissionChip()).toBeUndefined()
+    expect(sendButton()?.disabled).toBe(true)
+    await send('Fix the parser')
+    expect(daemon.calls.filter((call) => call[0] === 'send' || call[0] === 'refused')).toEqual([])
+
+    // The next read answers.
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+    await settle()
+    expect(permissionChip()).toBe('Permissions: Full access')
+    await send('Fix the parser')
+    expect(daemon.sentWith()).toEqual(['full', 'opus'])
+    expect(daemon.calls.some((call) => call[0] === 'refused')).toBe(false)
+  })
+
+  it('a chat with a mode of its own shows it and sends while the profile mode cannot be read', async () => {
+    const daemon = await emptyChat({ failedReads: 1000, ownMode: 'ask' })
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+    await send('Fix the parser')
+    expect(daemon.sentWith()).toEqual(['ask', 'opus'])
+  })
+
+  it('after a refusal because the profile mode changed unheard, the chip shows the new mode and sending again runs', async () => {
+    const daemon = await emptyChat()
+    expect(permissionChip()).toBe('Permissions: Full access')
+    // Another window sets the profile to Ask; this window did not hear it.
+    defaultMode = 'ask'
+    daemon.setDefaultMode('ask')
+    await send('Fix the parser')
+    expect(daemon.calls.some((call) => call[0] === 'refused' && call[1] === 'thread_settings_changed')).toBe(true)
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+    await send('Fix the parser')
+    expect(daemon.sentWith()).toEqual(['ask', 'opus'])
   })
 })
 

@@ -6,6 +6,8 @@ import { createProcessFailureHandlers, DAEMON_LOG_RELATIVE_PATH, installDaemonDi
 import { normalizeAppError } from '../src/shared/errors'
 import { logError, logWarn, setDiagSink } from '../src/mms/log/diag'
 import { RotatingFileLog } from '../src/mms/log/rotatingFileLog'
+import { inTurnBoundary, turnBoundaryMark } from '../src/mms/diagnostics/turnBoundary'
+import { turnTimingBegin, turnTimingBind, turnTimingFirstText } from '../src/mms/diagnostics/turnTiming'
 
 const dirs: string[] = []
 function tmp(): string {
@@ -149,5 +151,31 @@ describe('error references in daemon.log', () => {
     // Once the service's diagnostics are disposed, nothing more is written for it.
     normalizeAppError(new Error('after dispose'))
     expect(readFileSync(join(homeDir, DAEMON_LOG_RELATIVE_PATH), 'utf8')).not.toContain('after dispose')
+  })
+})
+
+describe('turn timings in daemon.log', () => {
+  // The service's standard output goes to mms-startup.log, which stops growing at its size cap; daemon.log keeps these.
+  it('a turn boundary\'s line and a bot reply\'s timing line are written there, not only printed', async () => {
+    const printed: string[] = []
+    vi.spyOn(console, 'info').mockImplementation((line: unknown) => { printed.push(String(line)) })
+    const homeDir = tmp()
+    const diagnostics = installDaemonDiagnostics({ homeDir, shutdown: async () => undefined })
+    try {
+      await inTurnBoundary({ threadId: 'thread-1', runId: 'run-1' }, async () => {
+        turnBoundaryMark('thread-1', 'workspace')
+      })
+      turnTimingBegin('bot-1')
+      turnTimingBind('bot-1', 'thread-1')
+      turnTimingFirstText('thread-1')
+    } finally {
+      diagnostics.dispose()
+    }
+    const lines = readFileSync(join(homeDir, DAEMON_LOG_RELATIVE_PATH), 'utf8').split('\n')
+    const boundary = lines.find((line) => line.includes(' [turn-boundary] '))
+    expect(JSON.parse(boundary!.slice(boundary!.indexOf('{')))).toMatchObject({ threadId: 'thread-1', runId: 'run-1', edge: 'start', phases: { workspace: {} } })
+    expect(lines.find((line) => line.includes(' [turn-timing] '))).toContain('"threadId":"thread-1"')
+    // Still printed, for a service started by hand.
+    expect(printed.filter((line) => line.startsWith('[turn-boundary] ') || line.startsWith('[turn-timing] '))).toHaveLength(2)
   })
 })
