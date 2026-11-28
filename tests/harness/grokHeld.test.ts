@@ -1,6 +1,5 @@
 /**
- * Grok's held launch, on Mousse's side (`grok/held.ts`, `grok/oneShot.ts`, the preset's `allowsUnasked`, the gateway's
- * one-shot gate). What the real Grok does with the held home is proven by `tests/live/grokHeldCheck.test.ts`; the ACP
+ * Grok's held launch, on Mousse's side (`grok/held.ts`, the preset's `allowsUnasked`, the gateway's one-shot gate). What the real Grok does with the held home is proven by `tests/live/grokHeldCheck.test.ts`; the ACP
  * agent here is hand-authored and proves only Mousse's answers.
  */
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
@@ -12,12 +11,12 @@ import { GROK_CAPS, GROK_PRESET, grokAllowsUnasked, grokCaps } from '../../src/m
 import { AcpSessions } from '../../src/mms/harness/acp/session'
 import { confinedRead, confinedSearch, linkFreeTree } from '../../src/mms/harness/acp/confinedRead'
 import { GROK_HELD_CONFIG, GROK_HELD_SWITCHES, ensureGrokHeldHome, grokHeldEnv, grokHeldPolicyProblem } from '../../src/mms/harness/grok/held'
-import { grokOneShotResult } from '../../src/mms/harness/grok/oneShot'
 import { runGrokHeldCheck } from '../../src/mms/harness/grok/heldCheck'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { MODEL_REFRESH_STARTUP_DELAY_MS, type Harness, type TurnSpec } from '../../src/mms/harness/gateway'
 import type { ProviderAdapter, TurnInput } from '../../src/mms/harness/adapter'
 import { CODEX_CAPABILITIES } from '../../src/mms/harness/drivers/codex/adapter'
+import { GROK_DIRECT_FACTS } from '../../src/mms/harness/oneShot/routes'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
@@ -286,34 +285,13 @@ describe('the held check after a Stop', () => {
   })
 })
 
-describe('reading a headless one-shot', () => {
-  const run = (stdout: unknown, code = 0, stderr = '') => ({ code, stdout: typeof stdout === 'string' ? stdout : JSON.stringify(stdout), stderr })
-  it('takes the text of a finished answer', () => {
-    expect(grokOneShotResult('Grok', run({ text: 'Login bug fix', stopReason: 'end_turn', sessionId: 's' }))).toBe('Login bug fix')
-  })
-  // Rows: what Grok printed, and the error Mousse reports.
-  const failures: Array<[string, ReturnType<typeof run>, string]> = [
-    ['a tool call the turn limit stopped', run({ text: '', stopReason: 'max_turn_requests' }, 1, 'Error: max turns reached'), 'one_shot_tool_refused'],
-    ['a rate limit', run({ type: 'error', message: 'stub 429' }, 1), 'rate_limited'],
-    ['a refused sign-in', run({ type: 'error', message: 'Unauthorized (401) from https://api.x.ai' }, 1), 'signed_out'],
-    ['an unavailable service', run({ type: 'error', message: 'API error (status 503 Service Unavailable)' }, 1), 'service_unavailable'],
-    ['output that is not JSON', run('panic: something', 101, 'thread main panicked'), 'protocol'],
-    ['an answer with a failing exit', run({ text: 'half', stopReason: 'end_turn' }, 1), 'protocol']
-  ]
-  for (const [name, output, code] of failures) {
-    it(`reports ${name} as ${code}`, () => {
-      expect(() => grokOneShotResult('Grok', output)).toThrow(expect.objectContaining({ code }) as never)
-    })
-  }
-})
-
 describe('the gateway’s one-shot gate for a driver that proves its own route', () => {
   const agent: ProviderAdapter = { driver: 'grok', capabilities: { ...CODEX_CAPABILITIES }, configured: () => true, startTurn: async () => { throw new Error('unused') }, interrupt: async () => 'not_active' }
   function setup(refusal: string | undefined) {
-    const oneShot = vi.fn(async () => ({ text: 'A title' }))
-    const base = adapterDriver(agent, { runtime: { oneShot } })
+    const oneShot = vi.fn(async () => 'A title')
+    const base = adapterDriver(agent, { runtime: { oneShotTransport: () => ({ send: oneShot }) } })
     // Turns are not held (uncontrolled); one-shots are, or not, by its route (`oneShotRoute`).
-    const driver = { ...base, caps: () => grokCaps(false), oneShotRoute: () => (refusal ? { refused: refusal } : { route: { id: 'legacy:grok' as const } }), toolControlReason: () => 'Grok 9.9.9 is not checked yet.' }
+    const driver = { ...base, caps: () => grokCaps(false), oneShotRoute: () => (refusal ? { refused: refusal } : { route: { id: 'grok:direct' as const, facts: GROK_DIRECT_FACTS } }), toolControlReason: () => 'Grok 9.9.9 is not checked yet.' }
     let stored: unknown = { grok: { driver: 'grok', enabled: true } }
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
     const harness: Harness = testHarness({ drivers: [driver], instances, profileHome: tempDir('mousse-grok-gate-') })
@@ -324,14 +302,14 @@ describe('the gateway’s one-shot gate for a driver that proves its own route',
 
   it('runs a proven one-shot although turns are Full access only, and offers the entry for titles', async () => {
     const s = setup(undefined)
-    expect(s.harness.canOneShot('grok')).toBe(true)
+    expect(s.harness.admitsOneShot('grok', 'grok-4.6')).toBe(true)
     await expect(s.harness.oneShot(s.request)).resolves.toEqual({ text: 'A title' })
     expect(s.oneShot).toHaveBeenCalledTimes(1)
   })
 
   it('refuses an unproven one-shot with its reason, sends nothing, and leaves the entry out of the title pickers', async () => {
     const s = setup('Mousse has not yet checked Grok 9.9.9.')
-    expect(s.harness.canOneShot('grok')).toBe(false)
+    expect(s.harness.admitsOneShot('grok', 'grok-4.6')).toBe(false)
     await expect(s.harness.oneShot(s.request)).rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('Mousse has not yet checked Grok 9.9.9.') })
     expect(s.oneShot).not.toHaveBeenCalled()
   })

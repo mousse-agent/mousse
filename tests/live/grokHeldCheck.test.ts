@@ -2,8 +2,7 @@
  * The held check (`grok/heldCheck.ts`) on the real Grok: every tool of a held turn asks Mousse before any effect, in a
  * plain project with the person's allow rules and a saved answer present, in a trusted project whose own config allows
  * everything, and in a worktree whose main checkout has a saved answer; no hook or MCP server from another agent's
- * setup or the project starts; the one-shot route sends one request with no tools, Mousse's text alone and the
- * message as written, and nothing anywhere else. It runs against a stub model with a dummy key: no account, no
+ * setup or the project starts. It runs against a stub model with a dummy key: no account, no
  * sign-in, nothing leaves the loopback. Only with MOUSSE_LIVE_GROK=1; MOUSSE_GROK_BINARIES lists the executables to
  * check, separated by the path delimiter (else the `grok` on PATH). Its passing records are what `GROK_HELD_SHIPPED`
  * holds (MOUSSE_GROK_RECORDS names a file to write them to).
@@ -27,11 +26,11 @@ const check = (binary: string, seams: Pick<GrokCheckLaunch, 'heldConfig' | 'drop
 
 describe.runIf(live && binaries.length)('the held check on the real Grok', () => {
   for (const binary of binaries) {
-    it(`holds every turn item, every startup source and the one-shot route: ${binary}`, async () => {
+    it(`holds every turn item and every startup source: ${binary}`, async () => {
       const record = await check(binary)
       // MOUSSE_GROK_RECORDS names a file the passing records are added to, for `GROK_HELD_SHIPPED`.
       if (process.env.MOUSSE_GROK_RECORDS) appendFileSync(process.env.MOUSSE_GROK_RECORDS, `${JSON.stringify(record)}\n`)
-      expect(record).toMatchObject({ cliVersion: versionOf(binary), platform: process.platform, turns: true, titles: true })
+      expect(record).toMatchObject({ cliVersion: versionOf(binary), platform: process.platform, turns: true })
       expect(record!.reason).toBeUndefined()
     }, 300_000)
   }
