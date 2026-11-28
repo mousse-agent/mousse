@@ -48,7 +48,7 @@ import { botThreadReferenceRefusal } from '../../lib/threadReference'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
 import { BotChainHoldNotice } from './BotChainHoldNotice'
 import { botGroupTime, placeMessages } from './messageGroups'
-import { botDoingLine, chatRows, resumedWork, resumedWorkLine, withNotes, type BotChatRow, type OwnerMarks } from './botChatShape'
+import { botDoingLine, botExchanges, chatRows, resumedWork, resumedWorkLine, withNotes, type BotChatRow, type BotExchange, type OwnerMarks } from './botChatShape'
 import { BOT_CHAT_WINDOW_STEP, rowIndex, rowKey, windowStart } from './botChatWindow'
 import { botCommandSuggestions } from './botCommands'
 import { slotModels, submitBotChat } from './runBotCommand'
@@ -512,6 +512,42 @@ function SystemLine({ row }: { row: Extract<BotChatRow, { kind: 'system' }> }) {
   return <p className={className} role={row.note === 'error' ? 'alert' : 'note'} {...(row.title ? { title: row.title } : {})} {...(row.of ? { 'data-message-id': row.of } : {})}><span>{row.text}</span></p>
 }
 
+/** "Coxy", "Coxy and Dotty", "Coxy, Dotty and Max". */
+const namesLine = (names: readonly string[]) => (names.length > 2 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names.join(' and '))
+
+/**
+ * The quiet line a run of messages from the owner's other bots folds behind (`botExchanges`): their faces and "Coxy
+ * sent 2 messages". It opens the run under it and folds it again; folding a run read past brings the line back into
+ * view.
+ */
+function BotExchangeLine({ exchange, open, onToggle }: { exchange: BotExchange; open: boolean; onToggle(id: string): void }) {
+  const bots = useBotsStore((s) => s.bots)
+  const line = useRef<HTMLParagraphElement>(null)
+  const senders = exchange.senders.map((from) => {
+    const sender = bots.find((other) => (from.botId ? other.id === from.botId : other.name === from.name))
+    return { key: from.botId ?? from.name, name: senderName(from, sender), look: sender?.look ?? DEFAULT_BOT_LOOK }
+  })
+  const count = exchange.end - exchange.start
+  const toggle = () => {
+    onToggle(exchange.id)
+    if (!open) return
+    requestAnimationFrame(() => {
+      const element = line.current
+      const lane = element?.closest<HTMLElement>('.chat-transcript')
+      if (!element || !lane) return
+      const above = lane.getBoundingClientRect().top - element.getBoundingClientRect().top
+      if (above > 0) lane.scrollTop -= above + LANDING_MARGIN
+    })
+  }
+  return <p ref={line} className="bot-system-line bot-exchange-line">
+    <button type="button" aria-expanded={open} onClick={toggle}>
+      <span className="bot-exchange-faces" aria-hidden>{senders.slice(0, 3).map((sender) => <BotFace key={sender.key} look={sender.look} state="idle" size={18} view="head" still />)}</span>
+      <span>{namesLine(senders.map((sender) => sender.name))} sent {count === 1 ? 'a message' : `${count} messages`}</span>
+      <ChevronRight size={12} className="bot-exchange-chevron" aria-hidden />
+    </button>
+  </p>
+}
+
 /** What a bubble shows while it is the chat's live turn: whether it waits for the internet, and what it is doing now. */
 interface BotLive { offline: boolean; doing: string }
 
@@ -937,17 +973,31 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   shownRef.current = shown
   const fromRef = useRef(from)
   fromRef.current = from
+  // Runs of messages from the owner's other bots, each folded behind one quiet line until the owner opens it
+  // (`botExchanges`); the open ones by their first message's id.
+  const exchanges = useMemo(() => botExchanges(shown, places), [shown, places])
+  const exchangeAt = useMemo(() => new Map(exchanges.flatMap((exchange) => Array.from({ length: exchange.end - exchange.start }, (_, offset) => [exchange.start + offset, exchange] as const))), [exchanges])
+  const exchangeAtRef = useRef(exchangeAt)
+  exchangeAtRef.current = exchangeAt
+  const [openExchanges, setOpenExchanges] = useState<ReadonlySet<string>>(() => new Set())
+  const toggleExchange = useCallback((id: string) => setOpenExchanges((open) => {
+    const next = new Set(open)
+    if (!next.delete(id)) next.add(id)
+    return next
+  }), [])
   useLayoutEffect(() => {
     if (!revealOlder.current || !firstId) return
     revealOlder.current = false
     if (shown[0]) setFrom(rowKey(shown[0]))
   }, [firstId, shown])
-  // A quote's message above the window is drawn, with every row after it.
+  // A quote's message above the window is drawn, with every row after it; one in a folded run opens its run.
   useEffect(() => {
     revealers.set(bot.id, (id) => {
       const rows = shownRef.current
       const index = rowIndex(rows, id)
       if (index >= 0 && index < windowStart(rows, fromRef.current)) setFrom(rowKey(rows[index]!))
+      const folded = exchangeAtRef.current.get(index)
+      if (folded) setOpenExchanges((open) => (open.has(folded.id) ? open : new Set(open).add(folded.id)))
     })
     return () => { revealers.delete(bot.id) }
   }, [bot.id])
@@ -1045,6 +1095,18 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     setUnseen(false)
     setAway(false)
   }, [bot.id])
+  // A run of other bots' messages opened or folded moves the end without a scroll: whether the reader is still at it
+  // is read again, so the chat does not pull them to the end while they read a run they opened there.
+  const exchangesSeen = useRef(openExchanges)
+  useLayoutEffect(() => {
+    const element = transcript.current
+    if (!element || exchangesSeen.current === openExchanges) return
+    exchangesSeen.current = openExchanges
+    const held = anchor.current
+    held.atEnd = !held.landing && element.scrollHeight - element.scrollTop - element.clientHeight < 40
+    held.height = element.scrollHeight
+    if (!held.heading) setAway(!held.atEnd)
+  }, [openExchanges])
   const toEnd = () => {
     const element = transcript.current
     if (element?.scrollTo) element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
@@ -1227,12 +1289,23 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             </details>
             : row.cut ? <BotCutReply text={row.text} starts={place.starts} /> : <SystemLine row={row} />}</Fragment>
           const message = row.message
+          const key = replyKeys.keys.get(message.id) ?? message.id
+          // Another bot's message, in its run's fold: the line sits on the first row of the run that is drawn, the
+          // messages under it only while it is open.
+          const exchange = exchangeAt.get(index)
+          const exchangeOpen = Boolean(exchange && openExchanges.has(exchange.id))
+          // Each row is two children, what goes above its message and the message, as the live turn's row is: the
+          // message keeps its place (and the live bubble that becomes it), and the line stays mounted as it opens.
+          const lead = exchange && (index === exchange.start || index === start)
+            ? <Fragment>{day}<BotExchangeLine exchange={exchange} open={exchangeOpen} onToggle={toggleExchange} /></Fragment>
+            : day
+          if (exchange && !exchangeOpen) return lead && <Fragment key={key}>{lead}{null}</Fragment>
           const sending = index >= rows.length
           // A reply shows what it answers unless that is the message right above it.
           const above = shown[index - 1]
           const quote = Boolean(message.replyTo) && (sending || !((above?.kind === 'message' && above.message.id === message.replyTo!.id) || (above?.kind === 'system' && above.of === message.replyTo!.id)))
-          return <Fragment key={replyKeys.keys.get(message.id) ?? message.id}>
-            {day}
+          return <Fragment key={key}>
+            {lead}
             {message.author === 'owner'
               ? <OwnerMessage botId={bot.id} message={message} pending={sending} botName={bot.name} quote={quote} starts={place.starts} time={place.time} marks={(marks ?? NO_MARKS).get(message.id)} onReply={sending || unreachable ? undefined : reply} />
               : <BotMessage bot={bot} message={message} onAction={act} settled={message.error?.action?.kind === 'resume' && message.id !== resumeOn} browser={message.id === previewOn ? preview : undefined} quote={quote} starts={place.starts} time={place.time} onReply={reply} onApplet={openApplet}

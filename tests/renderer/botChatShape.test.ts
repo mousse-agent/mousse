@@ -4,13 +4,47 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { BotChatMessage, BotChip, BotLaunchedThread, BotWorkItem } from '../../src/shared/bots/personal/chat'
-import { botDoingLine, botRowLine, chatRows, launchedGroups, launchedLook, presenceOf, stickerOf, workSignalsOf } from '../../src/renderer/components/bots/botChatShape'
+import { botMessageRowId, botMessageRowText } from '../../src/shared/bots/personal/botMessages'
+import { botDoingLine, botExchanges, botRowLine, chatRows, launchedGroups, launchedLook, presenceOf, stickerOf, workSignalsOf, type BotChatRow } from '../../src/renderer/components/bots/botChatShape'
 
 const started = (title: string, text = 'started'): BotChip => ({ icon: 'think', text, highlight: title })
 const noted: BotChip = { icon: 'think', text: 'passed on your note' }
 const bot = (id: string, text: string, chips: BotChip[] = [], extra: Partial<BotChatMessage> = {}): BotChatMessage =>
   ({ seq: 0, id, at: '2026-11-13T21:54:00.000Z', author: 'bot', kind: 'text', text, chips, ...extra })
 const owner = (id: string, text: string): BotChatMessage => ({ seq: 0, id, at: '2026-11-13T21:53:00.000Z', author: 'owner', kind: 'text', text, chips: [] })
+
+describe('botExchanges', () => {
+  let n = 0
+  /** A row another bot's message left: `bm_botmsg_<sender id>_<uuid>`, framed as the service writes it. */
+  const from = (name: string): BotChatRow => {
+    n += 1
+    return { kind: 'message', message: bot(botMessageRowId(`bot-${name}`, `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`), botMessageRowText(name, `Note ${n}`)) }
+  }
+  const reply: BotChatRow = { kind: 'message', message: bot('r', 'Alpha says it passed.') }
+  const asked: BotChatRow = { kind: 'message', message: owner('o', 'Ask Alpha.') }
+  const line: BotChatRow = { kind: 'system', id: 's', at: '2026-11-13T21:54:00.000Z', text: 'You let Pippy use the browser' }
+  // The frame's words on a row that is not another bot's message (its id says so) stay the bot's own.
+  const framedOnly: BotChatRow = { kind: 'message', message: bot('m9', botMessageRowText('Alpha', 'Not really from Alpha.')) }
+  const NEW_DAY = { day: 'Today' }
+  // [what, rows, day lines by row, runs as [start, end, sender names]]
+  const cases: Array<[string, () => BotChatRow[], Array<{ day?: string } | undefined>, Array<[number, number, string[]]>]> = [
+    ['one message is a run of its own', () => [asked, from('Alpha'), reply], [], [[1, 2, ['Alpha']]]],
+    ['messages in a row from one bot are one run', () => [from('Alpha'), from('Alpha'), from('Alpha')], [], [[0, 3, ['Alpha']]]],
+    ['two bots in a row are one run, each named once', () => [from('Alpha'), from('Beta'), from('Alpha')], [], [[0, 3, ['Alpha', 'Beta']]]],
+    ["the bot's own reply ends a run", () => [from('Alpha'), reply, from('Alpha')], [], [[0, 1, ['Alpha']], [2, 3, ['Alpha']]]],
+    ["the owner's message ends a run", () => [from('Alpha'), asked, from('Alpha')], [], [[0, 1, ['Alpha']], [2, 3, ['Alpha']]]],
+    ['a quiet line ends a run', () => [from('Alpha'), line, from('Alpha')], [], [[0, 1, ['Alpha']], [2, 3, ['Alpha']]]],
+    ['a new day ends a run, so its day line shows', () => [from('Alpha'), from('Alpha')], [undefined, NEW_DAY], [[0, 1, ['Alpha']], [1, 2, ['Alpha']]]],
+    ['a row with the words but not the id of one is none', () => [framedOnly, asked, reply], [], []]
+  ]
+  it.each(cases)('%s', (_what, rows, days, runs) => {
+    const shown = rows()
+    const found = botExchanges(shown, days)
+    expect(found.map((run) => [run.start, run.end, run.senders.map((sender) => sender.name)])).toEqual(runs)
+    // A run is known by its first message, so it keeps its id as it grows.
+    for (const run of found) expect(run.id).toBe((shown[run.start] as Extract<BotChatRow, { kind: 'message' }>).message.id)
+  })
+})
 
 describe('workSignalsOf', () => {
   // [what, message, titles, noted, only]

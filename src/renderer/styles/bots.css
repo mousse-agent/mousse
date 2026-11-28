@@ -144,6 +144,17 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 /* A `/` command's result: several lines (`/status`, `/model`) read left to right in a rounded box. */
 .bot-system-line.is-note > span { white-space: pre-line; overflow-wrap: anywhere; text-align: left; border-radius: 10px; }
 .bot-system-line.is-error > span { color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, transparent); }
+/* Messages from the owner's other bots, folded behind one such line: the senders' faces, who sent how many, and a
+   chevron that turns down while the run is open. */
+.bot-exchange-line > button { display: inline-flex; align-items: center; gap: 6px; max-width: 80%; min-width: 0; padding: 2px 8px 2px 4px; border: 0; border-radius: 999px; font: inherit; font-size: 12px; line-height: 18px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 7%, transparent); cursor: pointer; transition: color 150ms ease-out; }
+.bot-exchange-line > button:hover { color: var(--text-primary); }
+.bot-exchange-line > button:focus-visible { outline: none; color: var(--text-primary); background-image: var(--ui-focus-layer); }
+.bot-exchange-line > button > span:not(.bot-exchange-faces) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-exchange-faces { display: inline-flex; flex: none; }
+.bot-exchange-faces > * + * { margin-left: -6px; }
+.bot-exchange-chevron { flex: none; transition: transform 150ms ease-out; }
+.bot-exchange-line > button[aria-expanded="true"] > .bot-exchange-chevron { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .bot-exchange-line > button, .bot-exchange-chevron { transition: none; } }
 
 /* The bot's messages: bubbles on the left, the time in each one's corner. */
 /* A reply keeps a gutter on its right, so it reads as the bot's side; its applets take the whole reply width instead. */

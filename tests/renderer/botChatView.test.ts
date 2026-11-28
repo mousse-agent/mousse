@@ -3245,18 +3245,54 @@ it.each(['local', 'device'])('keeps the changed-schedule sentence and closes but
 describe('a message from another of the owner\'s bots', () => {
   const alpha = summary('bot-alpha', { name: 'Alpha', look: { colour: 'green', accessory: 'beret' } })
   const text = '**Message from your bot Alpha**\n\n> The Mac nightly passed.\n>\n> The DMG is in `nightly/`.'
-  async function openWith(row: { id: string; text: string }, sender = alpha) {
-    fake.bots = [inbox, sender]
+  /** Opens the inbox's chat with these rows between the owner's ask and the bot's answer, the fold opened unless `folded`. */
+  async function openWith(row: { id: string; text: string } | Array<{ id: string; text: string }>, sender = alpha, folded = false) {
+    fake.bots = [inbox, sender, beta]
+    const between = Array.isArray(row) ? row : [row]
     fake.chats[inbox.id] = [
       message(1, { author: 'owner', text: 'Ask Alpha about the nightly.' }),
-      message(2, { id: row.id, kind: 'notice', text: row.text }),
-      message(3, { text: 'Alpha says the nightly passed.' })
+      ...between.map((entry, index) => message(2 + index, { id: entry.id, kind: 'notice', text: entry.text })),
+      message(2 + between.length, { id: 'answer', text: 'Alpha says the nightly passed.' })
     ]
     await act(async () => useChatsStore.getState().activate('p1'))
     await act(async () => root.render(createElement(ChatWorkspace)))
     await act(async () => useChatsStore.getState().openBot(inbox.id))
+    if (!folded) await click(fold())
   }
+  const beta = summary('bot-beta', { name: 'Beta', look: { colour: 'blue', accessory: 'cap' } })
   const sent = (id: string) => host.querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
+  const fold = () => host.querySelector<HTMLButtonElement>('.bot-exchange-line button')
+  const ID = 'bm_botmsg_bot-alpha_6f1c2a3b-0d4e-4f5a-9b6c-7d8e9f0a1b2c'
+  const SECOND = 'bm_botmsg_bot-beta_7a2d3b4c-1e5f-4a6b-8c7d-9e0f1a2b3c4d'
+  const fromBeta = '**Message from your bot Beta**\n\n> Verdict: tighten, don\'t revert.'
+
+  it('folds behind one line that says who sent how many, which opens the run and folds it again; the chat around it stays', async () => {
+    await openWith([{ id: ID, text }, { id: SECOND, text: fromBeta }], alpha, true)
+    expect(fold()!.textContent).toContain('Alpha and Beta sent 2 messages')
+    expect(fold()!.getAttribute('aria-expanded')).toBe('false')
+    expect(host.querySelector(`[data-message-id="${ID}"]`)).toBeNull()
+    expect(host.querySelector(`[data-message-id="${SECOND}"]`)).toBeNull()
+    expect(transcript().textContent).toContain('Ask Alpha about the nightly.')
+    expect(transcript().textContent).toContain('Alpha says the nightly passed.')
+    const line = fold()
+    await click(line)
+    // The same button, so the focus a keyboard opened it with stays on it.
+    expect(fold()).toBe(line)
+    expect(fold()!.getAttribute('aria-expanded')).toBe('true')
+    expect(sent(ID).textContent).toContain('The Mac nightly passed.')
+    expect(sent(SECOND).textContent).toContain('Verdict: tighten')
+    await click(fold())
+    expect(host.querySelector(`[data-message-id="${ID}"]`)).toBeNull()
+    expect(fold()!.textContent).toContain('Alpha and Beta sent 2 messages')
+  })
+
+  it('opens its run when find or a quote lands on a folded message', async () => {
+    await openWith({ id: ID, text }, alpha, true)
+    expect(host.querySelector(`[data-message-id="${ID}"]`)).toBeNull()
+    expect(await botMessageScroller(inbox.id)(ID, { isCurrent: () => true })).toBe(true)
+    expect(sent(ID).textContent).toContain('The Mac nightly passed.')
+    expect(fold()!.getAttribute('aria-expanded')).toBe('true')
+  })
 
   it('reads as that bot\'s own message: its name on top and its words, with no header or quote, and Copy takes the words alone', async () => {
     const id = 'bm_botmsg_bot-alpha_6f1c2a3b-0d4e-4f5a-9b6c-7d8e9f0a1b2c'
