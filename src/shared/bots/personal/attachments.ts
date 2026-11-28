@@ -12,7 +12,10 @@ export function attachmentFileName(name: string): string {
   return WINDOWS_RESERVED.test(stem) ? `_${clean}` : clean
 }
 
-/** What the owner reads when a file is over `MAX_BOT_CHAT_ATTACHMENT_BYTES`. */
-export function attachmentTooLargeText(name: string): string {
-  return `${name} is larger than ${MAX_BOT_CHAT_ATTACHMENT_BYTES / 1024 / 1024} MB.`
+/**
+ * What the owner reads when a file is over `limit`: `MAX_BOT_CHAT_ATTACHMENT_BYTES`, or `REMOTE_BOT_FILE_BYTES` for a
+ * bot of another computer.
+ */
+export function attachmentTooLargeText(name: string, limit = MAX_BOT_CHAT_ATTACHMENT_BYTES): string {
+  return `${name} is larger than ${limit / 1024 / 1024} MB.`
 }

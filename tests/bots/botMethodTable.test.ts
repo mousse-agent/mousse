@@ -53,7 +53,8 @@ describe('the bot method table', () => {
     expect(Object.fromEntries(REMOTE_BOT_METHOD_NAMES.map((name) => [name, rows[name].level]))).toEqual({
       'bots.get': 'use',
       'bots.chat.list': 'use',
-      'bots.chat.attachment': 'use',
+      'bots.chat.file': 'use',
+      'bots.stage': 'use',
       'bots.memory.list': 'use',
       'bots.chat.send': 'use',
       'bots.chat.stop': 'use',

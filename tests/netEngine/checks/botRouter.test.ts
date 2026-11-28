@@ -11,6 +11,8 @@
  * - a write while the owner is away: refused at once, nothing kept to send later; a read of the chat answers the copy;
  * - a write whose reply is lost: asked for again by its request id, and run once.
  */
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { NodeId } from '../../../src/shared/net'
 import { qualifyId } from '../../../src/shared/threadRef'
@@ -275,6 +277,65 @@ describe('a window’s calls about a bot of another computer', () => {
     const no = await refused(viewer.dispatch('bots.chat.send', { botId: q, text: 'x'.repeat(50 * 1024), clientRequestId: 'router-large-1' }))
     expect(no.code).toBe('too_large')
     expect(sent(from)).toEqual([])
+  }, 60_000)
+
+  it('sends a picture to the bot, a part at a time, and shows the bot’s pictures here from a copy read from its files', async () => {
+    const png = (size: number, fill: number): Buffer => {
+      const data = Buffer.alloc(size, fill)
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(data)
+      return data
+    }
+    const mine = join(viewer.home, 'outbox')
+    mkdirSync(mine, { recursive: true })
+    const picture = png(70 * 1024, 1)
+    writeFileSync(join(mine, 'pic.png'), picture)
+    const from = fabric.crossed.length
+    const { message } = await viewer.dispatch('bots.chat.send', { botId: q, text: 'Look', clientRequestId: 'router-pic-1', attachments: [{ name: 'pic.png', path: join(mine, 'pic.png') }] })
+    // The file went first, in 32 KiB parts, then the message naming it; the bot's computer has it in the bot's files.
+    expect(sent(from)).toEqual(['bots.stage', 'bots.stage', 'bots.stage', 'bots.chat.send'])
+    expect(message.attachments).toEqual([{ name: 'pic.png', mime: 'image/png', image: true, path: expect.stringMatching(/^attachments\/.+\/pic\.png$/) }])
+    const folder = owner.mms.personalBots!.service.filesFolderOf(keeper)
+    const there = owner.mms.personalBots!.service.chatList(keeper, {}).messages.find((row) => row.text === 'Look')!
+    expect(there.attachments).toEqual([{ name: 'pic.png', path: join(folder, message.attachments[0].path) }])
+    expect(readFileSync(there.attachments![0]!.path).equals(picture)).toBe(true)
+    // The window shows it from a file of this computer, the same bytes.
+    const shown = await viewer.dispatch('bots.remote.file', { botId: q, path: message.attachments[0].path })
+    expect(shown).toMatchObject({ name: 'pic.png', size: picture.length })
+    expect(shown.path.startsWith(viewer.home)).toBe(true)
+    expect(readFileSync(shown.path).equals(picture)).toBe(true)
+
+    // The bot's picture: read from its files folder there, a page at a time, into a copy here.
+    const made = png(90 * 1024, 2)
+    mkdirSync(join(folder, 'images'), { recursive: true })
+    writeFileSync(join(folder, 'images', 'chart.png'), made)
+    owner.mms.personalBots!.chat.post({ botId: keeper, author: 'bot', kind: 'text', text: 'Here is the chart.', attachments: [{ name: 'chart.png', path: join(folder, 'images', 'chart.png') }] })
+    const page = await viewer.dispatch('bots.chat.list', { botId: q })
+    const reply = page.messages.find((row: { text: string }) => row.text === 'Here is the chart.')
+    expect(reply.attachments).toEqual([{ name: 'chart.png', mime: 'image/png', image: true, path: 'images/chart.png' }])
+    expect(JSON.stringify(page)).not.toContain(folder)
+    const before = fabric.crossed.length
+    const copy = await viewer.dispatch('bots.remote.file', { botId: q, path: 'images/chart.png' })
+    expect(readFileSync(copy.path).equals(made)).toBe(true)
+    expect(sent(before)).toEqual(['bots.chat.file', 'bots.chat.file', 'bots.chat.file'])
+  }, 60_000)
+
+  it('refuses an SVG, a way out of the bot’s files and a link out of them, from either side', async () => {
+    const mine = join(viewer.home, 'outbox')
+    mkdirSync(mine, { recursive: true })
+    writeFileSync(join(mine, 'logo.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>')
+    const from = fabric.crossed.length
+    expect(await refused(viewer.dispatch('bots.chat.send', { botId: q, text: 'Logo', clientRequestId: 'router-svg-1', attachments: [{ name: 'logo.svg', path: join(mine, 'logo.svg') }] })))
+      .toMatchObject({ code: 'bot_attachment_refused' })
+    expect(sent(from)).toEqual([])
+    expect(await refused(viewer.dispatch('bots.remote.file', { botId: q, path: '../../secret.png' }))).toMatchObject({ code: 'invalid_params' })
+    expect(await refused(viewer.dispatch('bots.remote.file', { botId: q, path: '/etc/hosts' }))).toMatchObject({ code: 'invalid_params' })
+    const folder = owner.mms.personalBots!.service.filesFolderOf(keeper)
+    mkdirSync(folder, { recursive: true })
+    writeFileSync(join(folder, 'drawing.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>')
+    writeFileSync(join(owner.home, 'outside.png'), 'not the bot’s')
+    symlinkSync(join(owner.home, 'outside.png'), join(folder, 'link.png'))
+    expect(await refused(viewer.dispatch('bots.remote.file', { botId: q, path: 'drawing.svg' }))).toMatchObject({ code: 'conflict', details: { reason: 'svg' } })
+    expect(await refused(viewer.dispatch('bots.remote.file', { botId: q, path: 'link.png' }))).toMatchObject({ code: 'stream_unknown' })
   }, 60_000)
 
   it('refuses a key the bot’s computer does not take from another device, and sends nothing', async () => {

@@ -63,9 +63,12 @@ export interface BotWatcherCard {
 /** A card as the bot made it, or Mousse for it, and `bots.db` keeps it (`bot_messages.cards_json`). */
 export type BotCard = BotFactsCard | BotChecklistCard | BotProgressCard | BotGalleryCard | BotAutomationCard | BotWatcherCard
 
-/** A gallery as the app gets it: each picture with its file's name too. */
+/**
+ * A gallery as the app gets it: each picture with its file's name too. `remote`: a picture of a bot of another
+ * computer, by its place in that bot's files folder; `path` is then its copy on this computer, empty until read.
+ */
 export interface BotChatGalleryCard extends Omit<BotGalleryCard, 'files'> {
-  files: Array<{ path: string; name: string; caption?: string }>
+  files: Array<{ path: string; name: string; caption?: string; remote?: string }>
 }
 
 /** A card on a chat message, as the app draws it. */

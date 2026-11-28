@@ -235,17 +235,17 @@ describe('a gallery', () => {
     return path
   }
 
-  it('shows pictures from the files folder; each is also one of the message\'s files, which another device reads by index', async () => {
+  it('shows pictures from the files folder; each is also one of the message\'s files, which another device reads by its place there', async () => {
     const made = picture('flat-a.png')
     picture('flat-b.png')
     const reply = await shown([{ type: 'gallery', title: 'Flats', files: [{ path: made, caption: 'Flat A' }, { path: 'images/flat-b.png' }] }])
     expect(reply.cards).toEqual([{ type: 'gallery', title: 'Flats', files: [{ path: made, name: 'flat-a.png', caption: 'Flat A' }, { path: join(folder, 'images', 'flat-b.png'), name: 'flat-b.png' }] }])
     expect(reply.attachments).toEqual([{ name: 'flat-a.png', path: made }, { name: 'flat-b.png', path: join(folder, 'images', 'flat-b.png') }])
     expect(reply.text.slice(reply.plainFrom).trim()).toBe('Flats\nflat-a.png (Flat A)\nflat-b.png')
-    expect(f.bots.service.attachmentFile(botId, reply.id, 1).path).toBe(join(folder, 'images', 'flat-b.png'))
-    // Another device gets no path: the picture's name, caption and its place among the files.
+    // Another device gets no path of this computer: the picture's name, caption and its place in the files folder.
     const remote = remoteBotMessage(reply)
-    expect(remote.cards).toEqual([{ type: 'gallery', title: 'Flats', files: [{ name: 'flat-a.png', caption: 'Flat A', index: 0 }, { name: 'flat-b.png', index: 1 }] }])
+    expect(remote.cards).toEqual([{ type: 'gallery', title: 'Flats', files: [{ name: 'flat-a.png', caption: 'Flat A', path: 'images/flat-a.png' }, { name: 'flat-b.png', path: 'images/flat-b.png' }] }])
+    expect(remote.attachments?.map((file) => file.path)).toEqual(['images/flat-a.png', 'images/flat-b.png'])
     expect(JSON.stringify(remote)).not.toContain(folder)
   })
 

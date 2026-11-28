@@ -141,7 +141,8 @@ describe('a picture an MCP tool hands a bot', () => {
     await finish(f, payload, 'completed', { text: 'Here is the chart.' })
     const reply = chatOf(f, botId).filter((message) => message.author === 'bot').at(-1)!
     expect(reply.attachments).toEqual([{ name: saved[0], path: join(files, 'images', days[0]!, saved[0]!) }])
-    expect(f.bots.service.attachmentFile(botId, reply.id, 0).name).toBe(saved[0])
+    // Another device reads it by its place in the files folder.
+    expect(remoteBotMessage(reply).attachments?.[0]?.path).toBe(`images/${days[0]}/${saved[0]}`)
 
     // Taken by that message: the activation's next one carries none.
     const next = f.bots.chat.post({ botId, author: 'bot', kind: 'notice', text: 'One more thing.', activationId: firstActivation, threadId: payload.threadId })

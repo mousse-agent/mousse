@@ -5,7 +5,7 @@
  * update's one-time snapshot narrows or widens nothing.
  */
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -18,6 +18,7 @@ import {
   type RemoteBotMethod
 } from '../../../../src/mms/bridge/remote/RemoteBots'
 import { createBotReach, keepMakerInReach, withHiddenBots } from '../../../../src/mms/bridge/remote/botReach'
+import { BotStaging } from '../../../../src/mms/bridge/remote/botStaging'
 import { MmsListsSource, type ListsServices } from '../../../../src/mms/bridge/remote/MmsListsSource'
 import { BotDeviceAccessStore, BOT_DEVICE_ACCESS_FILE } from '../../../../src/mms/bots/definitions/BotDeviceAccessStore'
 import { registerBotDeviceMethods, type BotDevicesSource } from '../../../../src/mms/bots/deviceMethods'
@@ -42,7 +43,8 @@ function paramsFor(botId: string): Record<Exclude<RemoteBotMethod, 'bots.create'
   return {
     'bots.get': { botId },
     'bots.chat.list': { botId },
-    'bots.chat.attachment': { botId, messageId: 'm1', index: 0 },
+    'bots.chat.file': { botId, path: 'a.png' },
+    'bots.stage': { botId, clientRequestId: `stage-${botId}`, offset: 0, dataB64: 'aGk=', name: 'a.png', size: 2 },
     'bots.memory.list': { botId },
     'bots.chat.send': { botId, text: 'Hi', clientRequestId: `send-${botId}` },
     'bots.chat.stop': { botId },
@@ -181,11 +183,21 @@ describe('a bot the device may not reach answers as a bot that is not there', ()
     store.set(mine, { mode: 'chosen', nodes: [PHONE] })
     store.set(theirs, { mode: 'this_computer' })
     const { reach } = reachOver(store)
-    const methods = remoteBotMethods({ bots: () => f.bots.service, reach, deviceLimit: () => 'full' })
-    // An ask, reminder or message of one bot is looked for in the bot the call names, which the device must reach.
-    const message = chatOf(f, theirs)[0]!
-    expect(await outcome(methods, 'bots.chat.attachment', { botId: theirs, messageId: message.id, index: 0 }, as(PHONE))).toMatchObject({ code: 'stream_unknown' })
-    expect(await outcome(methods, 'bots.chat.attachment', { botId: mine, messageId: message.id, index: 0 }, as(PHONE))).toMatchObject({ code: 'stream_unknown' })
+    const staging = new BotStaging({ folder: join(dir, 'staging') })
+    const methods = remoteBotMethods({ bots: () => f.bots.service, reach, deviceLimit: () => 'full', staging })
+    // A file is looked for in the folder of the bot the call names, which the device must reach.
+    const folder = f.bots.service.filesFolderOf(theirs)
+    mkdirSync(folder, { recursive: true })
+    writeFileSync(join(folder, 'secret.txt'), 'kept')
+    expect(await outcome(methods, 'bots.chat.file', { botId: theirs, path: 'secret.txt' }, as(PHONE))).toMatchObject({ code: 'stream_unknown' })
+    expect(await outcome(methods, 'bots.chat.file', { botId: mine, path: 'secret.txt' }, as(PHONE))).toMatchObject({ code: 'stream_unknown' })
+    // A file staged for the bot it reaches goes to that bot only.
+    const { stage } = (await methods.find((entry) => entry.method === 'bots.stage')!.handle(
+      { botId: mine, clientRequestId: 'st-1', offset: 0, dataB64: Buffer.from('hi').toString('base64'), name: 'a.txt', size: 2 }, as(PHONE)
+    )) as { stage: string }
+    expect(await outcome(methods, 'bots.chat.send', { botId: theirs, text: 'Hi', clientRequestId: 'c-1', staged: [stage] }, as(PHONE))).toMatchObject({ code: 'stream_unknown' })
+    expect(await outcome(methods, 'bots.stage', { botId: theirs, clientRequestId: 'st-2', offset: 2, dataB64: 'aGk=', stage }, as(PHONE))).toMatchObject({ code: 'stream_unknown' })
+    expect(chatOf(f, theirs).some((message) => message.author === 'owner')).toBe(false)
   })
 })
 

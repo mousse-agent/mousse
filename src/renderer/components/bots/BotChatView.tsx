@@ -396,7 +396,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
   const message = useMemo(() => {
     if ((!question && !cards) || row.plainFrom === undefined) return row
     const inGallery = galleryPaths(cards)
-    const attachments = row.attachments?.filter((file) => !inGallery.has(file.path))
+    const attachments = row.attachments?.filter((file) => !inGallery.has(file.remote ?? file.path))
     return { ...row, text: row.text.slice(0, row.plainFrom).trimEnd(), ...(row.attachments ? { attachments } : {}) }
   }, [question, cards, row])
   const quoted = quote && message.replyTo
@@ -879,8 +879,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // Another bot's error stays with that bot's chat.
   const error = useBotsStore((s) => (s.errorBotId === bot.id ? s.error : null))
   const store = useBotsStore.getState
-  // A bot of another computer (`lives`): text chat, its questions, Stop and read state; what it is set up with, files,
-  // applets and its browser stay on its computer. While that computer is offline its chat is the copy kept here, read only.
+  // A bot of another computer (`lives`): chat with files, its questions, Stop and read state; what it is set up with,
+  // its files pane, applets and its browser stay on its computer. While that computer is offline its chat is the copy kept here, read only.
   const remote = Boolean(bot.lives)
   const unreachable = Boolean(bot.lives?.offline)
   const transcript = useRef<HTMLDivElement>(null)
@@ -1249,11 +1249,10 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             key={bot.id}
             input={draft}
             onInputChange={pasted.change}
-            attachedFiles={remote ? NO_FILES : files}
+            attachedFiles={files}
             onAttachedFilesChange={(next) => store().setAttachments(bot.id, next)}
-            // A bot of another computer takes words only: no files, none of this computer's threads, no `/` commands
-            // (they set it up), and a pasted secret goes as typed (keeping one is its own computer's).
-            wordsOnly={remote}
+            // A bot of another computer takes words and files: none of this computer's threads, no `/` commands (they
+            // set it up), and a pasted secret goes as typed (keeping one is its own computer's).
             {...(remote ? {} : {
               references,
               onAddReference: (reference: ChatReference) => addBotReference(bot.id, reference),

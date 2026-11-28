@@ -50,6 +50,7 @@ export const GIT_ACCESS = {
   'threads.focus': 'owned',
   'bots.focus': 'none',
   'bots.remote.list': 'none',
+  'bots.remote.file': 'none',
   'bots.marks.list': 'none',
   'bots.marks.set': 'none',
   'threads.markSeen': 'none',

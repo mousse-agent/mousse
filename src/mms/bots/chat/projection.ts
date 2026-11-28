@@ -180,8 +180,8 @@ function chatCards(cards: readonly BotCard[] | undefined): BotChatCard[] {
 }
 
 /**
- * The pictures a message's galleries show, as its files too (`card`), so a phone reads them through
- * `bots.chat.attachment` and an older app shows them: each once, after the files it has, while there is room.
+ * The pictures a message's galleries show, as its files too (`card`), so another device reads them through
+ * `bots.chat.file` and an older app shows them: each once, after the files it has, while there is room.
  */
 function galleryFiles(cards: readonly BotCard[], files: ReadonlyArray<{ path: string }>): Array<{ name: string; path: string; card: true }> {
   const added: Array<{ name: string; path: string; card: true }> = []

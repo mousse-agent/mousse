@@ -177,7 +177,7 @@ describe('the chat of a bot of another computer', () => {
     expect(fake.calls).toContainEqual(['focus', 'n_laptop:b_inbox', true])
   })
 
-  it('shows only what works from here: no About, model, side panel or setup in its menu, no files, applets or reactions', async () => {
+  it('shows only what works from here: no About, model, side panel or setup in its menu, no applets or reactions, and files can be attached', async () => {
     await open(remote(), [message(1, { text: 'Here is the chart.', applets: [{ id: 'ap1', name: 'Chart' }] as never, reaction: '👍' })])
     expect(button('About Inbox helper')).toBeUndefined()
     expect(button('Show side panel')).toBeUndefined()
@@ -185,14 +185,14 @@ describe('the chat of a bot of another computer', () => {
     expect(host.querySelector('.bot-header-name .computer-badge')?.getAttribute('title')).toBe('Lives on Laptop')
     await click(button('Bot menu'))
     expect([...host.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual(['Find in chat', 'Hide checklist'])
-    expect(button('Attach files')).toBeUndefined()
+    expect(button('Attach files')).toBeDefined()
     expect(transcript().querySelector('.bot-reaction-bar, .bot-reaction')).toBeNull()
     expect(transcript().querySelector('.bot-applets, .bot-message-applets')).toBeNull()
   })
 
-  it('sends words to it by its qualified id, with no files and none of this computer\'s threads, and a / as words', async () => {
+  it('sends words and files to it by its qualified id, none of this computer\'s threads, and a / as words', async () => {
     await open(remote())
-    // Held for it some other way than its composer (which offers neither): never sent there.
+    // A thread of this computer held for it some other way than its composer: never sent there.
     await act(async () => {
       useBotsStore.getState().setAttachments('n_laptop:b_inbox', [{ id: 'f1', file: new File(['x'], 'notes.txt', { type: 'text/plain' }) }])
       useBotsStore.getState().addReference('n_laptop:b_inbox', { id: 'r1', kind: 'thread', threadId: 't_local', title: 'Local thread' } as never)
@@ -203,8 +203,12 @@ describe('the chat of a bot of another computer', () => {
     const sent = fake.calls.find(([name]) => name === 'send')!
     expect(sent.slice(0, 2)).toEqual(['send', 'n_laptop:b_inbox'])
     expect(sent[2]).toBe('/clear the old drafts')
-    expect(sent[4] ?? []).toEqual([])
+    expect(sent[4]).toEqual([{ name: 'notes.txt', path: '/home/me/Desktop/notes.txt' }])
     expect(fake.calls.some(([name]) => name === 'clearChat')).toBe(false)
+    // The sent message names the file by its place there; it is no path to read here, and not a picture to fetch.
+    const shown = useBotsStore.getState().chats['n_laptop:b_inbox']!.messages.at(-1)!
+    expect(shown.attachments).toEqual([{ name: 'notes.txt', path: '', remote: 'attachments/2026-11-08/notes.txt' }])
+    expect(fake.calls.some(([name]) => name === 'remoteFile')).toBe(false)
   })
 
   it('reads its chat again, alone, when its chat stream opens again', async () => {
@@ -308,21 +312,42 @@ describe('what stays on its own computer', () => {
     expect(pause).not.toHaveBeenCalled()
   })
 
-  it('retries a failed turn with its words only, and not at all when it had only files', async () => {
-    const turn = (text: string) => [
-      message(1, { id: 'o1', author: 'owner', text, activationId: 'a1', attachments: [{ name: 'log.txt', path: '/home/me/log.txt' }] }),
-      message(2, { id: 'e1', kind: 'error', text: 'I hit an error, so I stopped.', error: { text: 'I hit an error, so I stopped.' }, activationId: 'a1' })
-    ]
-    await open(remote(), turn('Read the log.'))
+  const failedTurn = (text: string) => [
+    message(1, { id: 'o1', author: 'owner', text, activationId: 'a1', attachments: [{ name: 'log.txt', path: 'attachments/2026-11-08/log.txt' }, { name: 'passwd', path: '/etc/passwd' }] }),
+    message(2, { id: 'e1', kind: 'error', text: 'I hit an error, so I stopped.', error: { text: 'I hit an error, so I stopped.' }, activationId: 'a1' })
+  ]
+
+  it('retries a failed turn with its files, each read here from its place there, and never a full path it names', async () => {
+    await open(remote(), failedTurn('Read the log.'))
     await act(async () => useBotsStore.getState().retry('n_laptop:b_inbox', 'e1'))
+    expect(fake.calls).toContainEqual(['remoteFile', 'n_laptop:b_inbox', 'attachments/2026-11-08/log.txt'])
     const sent = fake.calls.find(([name]) => name === 'send')!
     expect(sent[2]).toBe('Read the log.')
-    expect(sent[4]).toEqual([])
-    fake.calls.length = 0
-    fake.chats['n_laptop:b_inbox'] = turn('')
-    await act(async () => useBotsStore.getState().loadChat('n_laptop:b_inbox'))
+    expect(sent[4]).toEqual([{ name: 'log.txt', path: '/home/me/.mousse/bots/remote-files/log.txt' }])
+  })
+
+  it('retries a failed turn of files alone', async () => {
+    await open(remote(), failedTurn(''))
     await act(async () => useBotsStore.getState().retry('n_laptop:b_inbox', 'e1'))
-    expect(fake.calls.some(([name]) => name === 'send')).toBe(false)
+    const sent = fake.calls.find(([name]) => name === 'send')!
+    expect(sent[2]).toBe('')
+    expect(sent[4]).toEqual([{ name: 'log.txt', path: '/home/me/.mousse/bots/remote-files/log.txt' }])
+  })
+
+  it('shows its pictures from their copies here, read as they come, and nothing from a full path of that computer', async () => {
+    await open(remote(), [message(1, { text: 'The chart.', attachments: [{ name: 'chart.png', path: 'images/chart.png' }, { name: 'shot.png', path: '/home/them/shot.png' }] })])
+    await settle()
+    expect(fake.calls.filter(([name]) => name === 'remoteFile')).toEqual([['remoteFile', 'n_laptop:b_inbox', 'images/chart.png']])
+    const files = useBotsStore.getState().chats['n_laptop:b_inbox']!.messages[0]!.attachments
+    expect(files).toEqual([
+      { name: 'chart.png', path: '/home/me/.mousse/bots/remote-files/chart.png', remote: 'images/chart.png' },
+      { name: 'shot.png', path: '' }
+    ])
+    // A picture the bot posts later is read as it comes.
+    await act(async () => fake.emit.message('n_laptop:b_inbox', message(2, { text: 'And the map.', attachments: [{ name: 'map.png', path: 'images/map.png' }] })))
+    await settle()
+    expect(fake.calls).toContainEqual(['remoteFile', 'n_laptop:b_inbox', 'images/map.png'])
+    expect(useBotsStore.getState().chats['n_laptop:b_inbox']!.messages.at(-1)!.attachments![0]!.path).toBe('/home/me/.mousse/bots/remote-files/map.png')
   })
 
   it('takes no file or chip from this window dropped on its composer', async () => {

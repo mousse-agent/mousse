@@ -113,12 +113,19 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       return { messages: before.slice(-(page.limit ?? 100)), ...(fake.live[botId] ? { live: fake.live[botId] } : {}) }
     })),
     send: vi.fn((botId, text, clientRequestId, attachments, replyTo) => record('send', [botId, text, clientRequestId, attachments, ...(replyTo ? [replyTo] : [])], () => {
-      // The service saves the files in the bot's files folder; the row names the copies.
-      const saved = attachments?.map((file) => ({ name: file.name, path: `/home/me/.mousse/bots/files/${botId}/attachments/2026-11-08/${file.name}` }))
+      // The service saves the files in the bot's files folder; the row names the copies: by full path on this
+      // computer, by their place in the bot's files folder (`bots.chat.file`) for another computer's bot.
+      const remote = fake.bots.some((bot) => bot.id === botId && bot.lives)
+      const saved = attachments?.map((file) => ({ name: file.name, path: `${remote ? '' : `/home/me/.mousse/bots/files/${botId}/`}attachments/2026-11-08/${file.name}` }))
       const quoted = replyTo ? (fake.chats[botId] ?? []).find((entry) => entry.id === replyTo) : undefined
       const row = message(++seq, { id: `sent:${clientRequestId}`, author: 'owner', text, clientRequestId, ...(saved?.length ? { attachments: saved } : {}), ...(quoted ? { replyTo: { id: quoted.id, author: quoted.author, text: quoted.text } } : {}) })
       fake.chats[botId] = [...(fake.chats[botId] ?? []), row]
       return row
+    })),
+    // A file of another computer's bot, copied to this computer (`bots.remote.file`).
+    remoteFile: vi.fn((botId, path) => record('remoteFile', [botId, path], () => {
+      const name = path.split('/').pop() ?? path
+      return { path: `/home/me/.mousse/bots/remote-files/${name}`, name, size: 1 }
     })),
     stop: vi.fn((botId) => record('stop', [botId], () => undefined)),
     stopWork: vi.fn((botId, workId) => record('stopWork', [botId, workId], () => undefined)),

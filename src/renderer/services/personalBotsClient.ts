@@ -20,6 +20,11 @@ export interface PersonalBotsClient {
   remoteList(): Promise<BotSummary[]>
   /** This window shows (or no longer shows) the chat of a bot of another computer: its chat streams here while it does. */
   focus(botId: string, focused: boolean): Promise<void>
+  /**
+   * A file a bot of another computer's chat shows, by its place in that bot's files folder: its copy on this computer
+   * (`bots.remote.file`), read from there when there is none or it changed.
+   */
+  remoteFile(botId: string, path: string): Promise<{ path: string; name: string; size: number }>
   /** What this computer marks on the bots it lists (pin, hide, mute, marked unread), by bot ref. An older service lacks it. */
   marks(): Promise<BotMarksByRef>
   /** Sets or clears one mark on one bot, on this computer only; every bot's marks as they are now. */
@@ -107,6 +112,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     list: async () => (await call('bots.personal.list', {})).bots,
     remoteList: async () => (await elsewhere('bots.remote.list', {})).bots,
     focus: async (botId, focused) => { await elsewhere('bots.focus', { botId, focused }) },
+    remoteFile: (botId, path) => elsewhere('bots.remote.file', { botId, path }),
     marks: async () => (await transport.request<BotMarksApi['bots.marks.list']['result']>('bots.marks.list', {})).marks,
     setMark: async (botId, mark, on) => (await transport.request<BotMarksApi['bots.marks.set']['result']>('bots.marks.set', { botId, mark, on })).marks,
     create: async ({ look, name, description, clientRequestId, model, slots, image, access }) =>

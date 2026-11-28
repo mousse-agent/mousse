@@ -2290,6 +2290,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       rejectUnknownKeys(isObject(params) ? params : {}, ['profileId'])
       return { bots: ctx.mms.botRouter?.list(ctx) ?? [] }
     }
+    case 'bots.remote.file': {
+      // A picture or file another computer's bot has in its chat, copied here for the window to show.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['profileId', 'botId', 'path'])
+      const botId = asString(p.botId, 'botId', 256)
+      const path = asString(p.path, 'path', 1024)
+      if (!ctx.mms.botRouter) throw new DomainRpcError('computer_offline', 'Your other computers are not connected. Turn on networking in Settings, Devices.')
+      return ctx.mms.botRouter.file(ctx, botId, path)
+    }
     case 'threads.markSeen': {
       // A window opened the thread or showed it in focus: it is no longer Done (finished and unseen).
       const p = isObject(params) ? params : {}
