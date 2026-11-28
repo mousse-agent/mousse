@@ -5,7 +5,7 @@ import { listingServes } from '../../shared/providerInstances'
 import type { ModelPickTarget } from './ModelFamilyMenu'
 import { applyEffortToModelId, findModelFamily, getModelSpeedOptions, parseModelVariant, parseThinkingSuffixFromModelId, reasoningLevelLabel, resolveModelVariant, resolveReasoning, speedLabel } from '../../shared/modelVariants'
 import { Check, Zap } from '../lib/icons'
-import { FloatingPortal, useClosestAnchor, useFloatingPosition } from '../lib/floatingLayer'
+import { FloatingPortal, usePinnedPopover } from '../lib/floatingLayer'
 import { describePermissionMode } from '../../shared/permissionMode'
 import { permissionModeIcon } from '../lib/permissionModeIcon'
 import { PermissionModeSection, permissionChoice, type PermissionControl } from './ComposerPermissionPicker'
@@ -217,9 +217,12 @@ export function SpeedToggle({ target, onSelect, onClose }: {
   </div>
 }
 
+/** Room for every mode; less only where the window has less above the chip. */
+const PERMISSION_MENU_MAX_HEIGHT = 480
+
 /**
  * The composer's permission chip: the thread's mode as an icon, left of the model button. One click
- * opens the modes above the composer, one row each with its name and what it does. Only Full access
+ * opens the modes just above the chip, one row each with its name and what it does. Only Full access
  * is tinted (amber). The menu keeps focus inside; Escape closes it back to the chip.
  */
 export function PermissionChip({ control }: { control: PermissionControl }) {
@@ -232,12 +235,11 @@ export function PermissionChip({ control }: { control: PermissionControl }) {
   const name = describePermissionMode(choice.shown)
   // Why the mode runs or is capped differently: the agent cannot enforce it, or a limit sits below.
   const limit = choice.reason ?? Object.values(choice.blocked)[0]
-  // Above the whole composer (left edges lined up), so it never covers the draft.
-  const anchorRef = useClosestAnchor(buttonRef, '.composer')
-  const style = useFloatingPosition({ open, anchorRef, contentRef: menuRef, placement: 'above-start', deps: [control.mode] })
+  // Pinned just above the chip, left edges lined up, as the model picker sits above its button.
+  const style = usePinnedPopover({ open, anchorRef: buttonRef, contentRef: menuRef, maxHeight: PERMISSION_MENU_MAX_HEIGHT })
   const close = () => { setOpen(false); buttonRef.current?.focus() }
-  // The layer stays hidden until it is measured, and a hidden row cannot take focus.
-  const shown = open && style.visibility === 'visible'
+  // The layer stays hidden until it is placed, and a hidden row cannot take focus.
+  const shown = open && style.visibility !== 'hidden'
   useEffect(() => {
     if (shown) focusRunSettings(menuRef.current, openedByKeyboard.current)
   }, [shown])
