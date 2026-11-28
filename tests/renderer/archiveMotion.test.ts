@@ -10,6 +10,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ThreadsSidebar } from '../../src/renderer/components/ThreadsSidebar'
 import { useAppStore } from '../../src/renderer/stores/appStore'
+import { useSidebarOpenStore } from '../../src/renderer/lib/sidebarOpen'
 import type { Project, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -50,6 +51,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  useSidebarOpenStore.setState({ groups: new Set(), archived: false })
   act(() => root.unmount())
   host.remove()
   useAppStore.setState(original)

@@ -193,21 +193,48 @@ export function ArchivedList({ threads, renderRow, scrollRef, keepIds, revealId 
   }, [scrollRef, sync])
   useLayoutEffect(sync, [sync, tops])
 
-  // The open thread's row: on screen when the list opens, and when another archived thread opens.
+  // The open thread's row: on screen when the list opens, and when another archived thread opens. It waits while
+  // Archived opens (its rows are capped and cannot scroll then), scrolls to the row's estimated place so it is drawn,
+  // then puts the drawn row's own box in the middle of the view if any of it is cut off.
   const revealIndex = revealId ? threads.findIndex((thread) => thread.id === revealId) : -1
   const revealed = useRef<string | null>(null)
-  useLayoutEffect(() => {
-    if (!revealId || revealIndex < 0 || revealed.current === revealId) return
-    revealed.current = revealId
+  const pending = useRef<{ id: string; index: number } | null>(null)
+  pending.current = revealId && revealIndex >= 0 && revealed.current !== revealId ? { id: revealId, index: revealIndex } : null
+  const reveal = useCallback(() => {
+    const target = pending.current
     const scroller = scrollRef.current
     const list = listRef.current
-    if (!scroller || !list || scroller.clientHeight <= 0) return
-    const top = listOffset(scroller, list) + tops[revealIndex]
-    const bottom = top + tops[revealIndex + 1] - tops[revealIndex] - gap
-    if (top < scroller.scrollTop) scroller.scrollTop = top
-    else if (bottom > scroller.scrollTop + scroller.clientHeight) scroller.scrollTop = bottom - scroller.clientHeight
+    if (!target || !scroller || !list || scroller.clientHeight <= 0 || list.closest('.ui-collapse[data-motion]')) return
+    const view = scroller.getBoundingClientRect()
+    const row = heights.current.has(target.id)
+      ? [...list.querySelectorAll<HTMLElement>('[data-thread-id]')].find((item) => item.dataset.threadId === target.id)
+      : undefined
+    if (row) {
+      const box = (row.closest('.threads-sidebar-thread-container') ?? row).getBoundingClientRect()
+      if (box.top < view.top || box.bottom > view.bottom) scroller.scrollTop += box.top + box.height / 2 - (view.top + view.height / 2)
+      revealed.current = target.id
+      pending.current = null
+    } else {
+      const tops = topsRef.current
+      const middle = listOffset(scroller, list) + (tops[target.index] + tops[target.index + 1] - gap) / 2
+      scroller.scrollTop = middle - scroller.clientHeight / 2
+    }
     sync()
-  }, [gap, listOffset, revealId, revealIndex, scrollRef, sync, tops])
+  }, [gap, listOffset, scrollRef, sync])
+  // Again once a drawn row is measured (tops), when the footer changes size, and when Archived finishes opening.
+  useLayoutEffect(reveal, [reveal, revealId, revealIndex, tops])
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current
+    const collapse = listRef.current?.closest('.ui-collapse')
+    const resize = scroller && typeof ResizeObserver === 'function' ? new ResizeObserver(reveal) : null
+    if (scroller) resize?.observe(scroller)
+    const motion = collapse && typeof MutationObserver === 'function' ? new MutationObserver(reveal) : null
+    if (collapse) motion?.observe(collapse, { attributes: true, attributeFilter: ['data-motion'] })
+    return () => {
+      resize?.disconnect()
+      motion?.disconnect()
+    }
+  }, [reveal, scrollRef])
 
   const indexOf = useMemo(() => new Map(threads.map((thread, index) => [thread.id, index])), [threads])
   const kept = [...(keepIds ?? []), ...(focusedId ? [focusedId] : [])].map((id) => indexOf.get(id) ?? -1)

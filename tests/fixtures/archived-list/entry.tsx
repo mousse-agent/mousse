@@ -117,5 +117,34 @@ Object.assign(window, { qa: {
     await frames(4)
     return { found: true, items: [...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent) }
   },
+  // The open thread's archived row is shown whole, with Archived closed when the thread opens: far down the long
+  // list (placed by estimated heights first), and in a short list whose opening is animated.
+  async revealFar() {
+    return revealAfterClosing('old-450')
+  },
+  async revealAfterOpening() {
+    useAppStore.setState({ threads: [thread('live', 'Live thread'), ...archived.slice(0, 12)], activeThreadId: null })
+    await frames(4)
+    return revealAfterClosing('old-10')
+  },
   errors: () => errors,
 } })
+
+async function revealAfterClosing(id: string) {
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  const toggle = document.querySelector<HTMLElement>('.threads-sidebar-section-archived .threads-sidebar-heading-toggle')!
+  if (toggle.getAttribute('aria-expanded') === 'true') toggle.click()
+  await new Promise((done) => setTimeout(done, 600))
+  useAppStore.setState({ activeThreadId: id })
+  await new Promise((done) => setTimeout(done, 1000))
+  await frames(4)
+  const box = footer().getBoundingClientRect()
+  const heading = document.querySelector('.threads-sidebar-section-archived .threads-sidebar-heading')!.getBoundingClientRect()
+  const row = drawn().find((item) => idOf(item) === id)?.closest('.threads-sidebar-thread-container')?.getBoundingClientRect()
+  return {
+    id,
+    open: toggle.getAttribute('aria-expanded') === 'true',
+    row: row ? { top: Math.round(row.top), bottom: Math.round(row.bottom) } : null,
+    view: { top: Math.round(Math.max(box.top, heading.bottom)), bottom: Math.round(box.bottom) },
+  }
+}
