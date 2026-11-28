@@ -221,6 +221,14 @@ describe('acp:grok', () => {
     expect(started.args).toEqual(grokArgs())
   })
 
+  it('starts nothing for a sign-in Mousse cannot tell, even once admitted', async () => {
+    const { runtime } = setup({ account: true, base: { GROK_AUTH_PROVIDER_COMMAND: 'corp-token' } })
+    const seen = events()
+    await expect(runtime.oneShotTransport!({ model: 'grok-4.7' }).send(WIRE, seen, new AbortController().signal)).rejects.toMatchObject({ code: 'unsupported', details: { reason: 'not_admitted' } })
+    expect(launched).toEqual([])
+    expect(seen.sent).toBe(0)
+  })
+
   it('names the sign-in file as it is now: a replaced file is the next request’s, and no copy is kept anywhere', async () => {
     const { runtime, grokHome, root } = setup({ account: true })
     const first = await launch(runtime)
