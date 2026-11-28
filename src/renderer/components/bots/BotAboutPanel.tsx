@@ -527,7 +527,8 @@ export function BotAboutPanel({ bot, inPanel = false }: { bot: BotSummary; inPan
                 {run.does ? <span className="bot-about-does">{run.does}</span> : null}
                 {run.lastAt ? <span className="bot-about-when">Last ran {agoText(run.lastAt, now)}{run.lastOutcome === 'failed' ? ', failed' : run.lastOutcome === 'stopped' ? ', stopped' : ''}</span> : null}
               </>}>
-              <button type="button" className="settings-icon-btn" aria-label={`Open ${run.name ?? run.label} in Automations`} title="Open in Automations" onClick={() => useAppStore.getState().setScheduledOpen(true)}><ExternalLink size={14} /></button>
+              {/* A bot of another computer runs its automations there: this computer's Automations doesn't list them. */}
+              {!bot.lives && <button type="button" className="settings-icon-btn" aria-label={`Open ${run.name ?? run.label} in Automations`} title="Open in Automations" onClick={() => useAppStore.getState().setScheduledOpen(true)}><ExternalLink size={14} /></button>}
               <ConfirmRemoveButton label={`Remove ${run.name ?? run.label}`} onRemove={() => void store().removeSchedule(bot.id, run.id)} />
             </Row>)}
           </div>
@@ -551,7 +552,7 @@ export function BotAboutPanel({ bot, inPanel = false }: { bot: BotSummary; inPan
         <div className="settings-group-rows bot-about-surface bot-about-setup">
           <div className="settings-item bot-about-setup-body">
             <RunsOn name={bot.name} state={runsOn} />
-            <BotDevicesRow botId={bot.id} name={bot.name} reach={bot.reach} />
+            <BotDevicesRow botId={bot.id} name={bot.name} reach={bot.reach} {...(bot.lives ? { home: bot.lives.name } : {})} />
           </div>
         </div>
       </Fold>

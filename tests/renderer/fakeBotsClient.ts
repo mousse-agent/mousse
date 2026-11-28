@@ -6,7 +6,7 @@ import { vi } from 'vitest'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../src/shared/bots/personal/chat'
 import type { BotMemoryEntry } from '../../src/shared/bots/personal/memory'
 import type { BotDevicesView } from '../../src/shared/bots/personal/deviceAccess'
-import type { BotReplyEvent } from '../../src/shared/bots/personal/methods'
+import type { BotElsewhereComputer, BotReplyEvent } from '../../src/shared/bots/personal/methods'
 import { noMarks, withMark, type BotMarksByRef } from '../../src/shared/bots/personal/marks'
 import type { PersonalBotsClient, PersonalBotsEvents } from '../../src/renderer/services/personalBotsClient'
 
@@ -36,6 +36,8 @@ export interface FakeBots {
   devices: Record<string, BotDevicesView>
   /** The marks this computer keeps on bots (`bots.marks.list`), by bot ref. */
   marks: BotMarksByRef
+  /** The other computers where this one has Full bot access (`bots.remote.list`'s `computers`): New bot's Lives on. */
+  remoteComputers: BotElsewhereComputer[]
   calls: Array<[string, ...unknown[]]>
   emit: {
     changed(botId: string): void
@@ -63,6 +65,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     memory: { ...(initial.memory ?? {}) },
     devices: {},
     marks: { ...(initial.marks ?? {}) },
+    remoteComputers: [],
     calls: [],
     client: undefined as unknown as PersonalBotsClient,
     events: {
@@ -95,7 +98,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
   fake.client = {
     // A bot with `lives` is one of another computer's: listed by `bots.remote.list`, never by this computer's own list.
     list: vi.fn(() => record('list', [], () => fake.bots.filter((bot) => !bot.lives).map((bot) => ({ ...bot })))),
-    remoteList: vi.fn(() => record('remoteList', [], () => fake.bots.filter((bot) => bot.lives).map((bot) => ({ ...bot })))),
+    remoteList: vi.fn(() => record('remoteList', [], () => ({ bots: fake.bots.filter((bot) => bot.lives).map((bot) => ({ ...bot })), computers: fake.remoteComputers.map((computer) => ({ ...computer })) }))),
     focus: vi.fn((botId, focused) => record('focus', [botId, focused], () => undefined)),
     create: vi.fn((input) => record('create', [input], () => {
       const bot = summary(`new${fake.bots.length + 1}`, { name: input.name ?? 'Inbox helper', description: input.description, look: input.look, state: 'working', stateText: 'Working…' })
@@ -187,7 +190,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       fake.memory[botId] = []
       return detail(botId).summary
     })),
-    modelChoices: vi.fn(() => record('modelChoices', [], () => ({ models: [{ model: 'sonnet', label: 'Claude · sonnet' }], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }] }))),
+    modelChoices: vi.fn((node?: string) => record('modelChoices', node ? [node] : [], () => ({ models: [{ model: 'sonnet', label: 'Claude · sonnet' }], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }] }))),
     removeSchedule: vi.fn((botId, scheduleId) => record('removeSchedule', [botId, scheduleId], () => {
       const next = { ...detail(botId), runs: detail(botId).runs.filter((item) => item.id !== scheduleId) }
       fake.details[botId] = next

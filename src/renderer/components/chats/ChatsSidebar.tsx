@@ -18,6 +18,7 @@ import { useReplyPreviews } from '../../lib/replyPreviewSetting'
 import { OpenNetworkChatDialog } from './OpenNetworkChatDialog'
 import { BotRowMenu, type BotRowAction, type BotRowMenuTarget } from '../ThreadsContextMenu'
 import { setBotChecklistHidden, useBotChecklistHidden } from '../bots/botChecklistSetting'
+import { botSetupBlock, botWallTitle } from '../bots/botSetup'
 import { ComputerBadgeView } from '../ComputerBadge'
 import { offlineLabel, useComputer } from '../../lib/computers'
 import '../../styles/chats.css'
@@ -107,6 +108,18 @@ function botRowAction(bot: BotSummary, action: BotRowAction, checklistHidden: bo
   else if (action === 'private') void store.makePrivate(bot.id)
 }
 
+/**
+ * The setup items of a bot's menu. A bot of another computer has them where this computer has Full bot access there,
+ * greyed with why where it has not or that computer is offline. Make private there keeps the bot to its own computer
+ * and this one (its list of devices is not shown here, so it is always offered).
+ */
+function botSetupTarget(bot: BotSummary): NonNullable<BotRowMenuTarget['setup']> {
+  const paused = bot.state === 'paused'
+  if (!bot.lives) return { paused, canWall: bot.reach !== undefined && bot.reach !== 'this_computer' }
+  const off = botSetupBlock(bot)
+  return { paused, canWall: true, wallTitle: botWallTitle(bot.lives.name), ...(off ? { off } : {}) }
+}
+
 /** A bot row's menu, kept outside the row's hover card. Closing it returns the focus to the row unless it moved on. */
 function BotRowMenuAt({ at, onClose }: { at: BotMenuAt; onClose(): void }) {
   const checklistHidden = useBotChecklistHidden(at.botId)
@@ -128,8 +141,7 @@ function BotRowMenuAt({ at, onClose }: { at: BotMenuAt; onClose(): void }) {
     hidden: Boolean(marks?.hidden),
     checklistHidden,
     ...(bot.lives?.offline ? { offlineComputer: bot.lives.name } : {}),
-    // A bot of another computer is set up there (slice 10 brings that here): nothing of it is offered yet.
-    ...(bot.lives ? {} : { setup: { paused: bot.state === 'paused', canWall: bot.reach !== undefined && bot.reach !== 'this_computer' } })
+    setup: botSetupTarget(bot)
   }
   return <BotRowMenu x={at.x} y={at.y} target={target} onClose={close} onAction={(action) => { botRowAction(bot, action, checklistHidden); close() }} />
 }

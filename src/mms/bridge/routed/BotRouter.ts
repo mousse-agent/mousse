@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto'
 import { open, stat } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import { BOT_METHODS, type BotMethod, type BotMethodRow } from '../../../shared/bots/personal/methodTable'
-import { MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment } from '../../../shared/bots/personal/methods'
+import { MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment, type BotElsewhereComputer } from '../../../shared/bots/personal/methods'
+import type { BotLevel } from '../../../shared/net/local'
 import { attachmentTooLargeText } from '../../../shared/bots/personal/attachments'
 import { BOT_STAGE_PART_BYTES, REMOTE_BOT_FILE_BYTES, isBotStageId, isSvgName } from '../../../shared/bots/personal/remoteFiles'
 import { Lanes } from './lanes'
@@ -56,18 +57,23 @@ async function sizeOf(file: BotChatAttachment): Promise<number> {
   return found.size
 }
 
-/** A listed bot of another computer as a window's Bots list has it: its summary, and where it lives. */
-function windowRow(row: RemoteBotRow): BotSummary {
+/**
+ * A listed bot of another computer as a window's Bots list has it: its summary, and where it lives, with this computer's
+ * bot level there (`full` sets it up from here).
+ */
+function windowRow(row: RemoteBotRow, level: BotLevel | undefined): BotSummary {
   // What the feed adds for telling and reading is the viewing computer's own business, not the window's.
   const { botId: _botId, node, computerName, offline, readSeq: _readSeq, telling: _telling, activity: _activity, id, ...summary } = row
-  return { ...(qualifyBotResult(node, summary) as Omit<BotSummary, 'id'>), id, lives: { node, name: computerName, ...(offline ? { offline } : {}) } }
+  const lives = { node, name: computerName, ...(level === 'full' ? { level: 'full' as const } : {}), ...(offline ? { offline } : {}) }
+  return { ...(qualifyBotResult(node, summary) as Omit<BotSummary, 'id'>), id, lives }
 }
 
 export interface BotRouterOptions {
   /** Calls to other computers, on the transport their threads use (`ThreadRouter.client`). */
   client: Pick<RoutedClient, 'callBot'>
   /** The other computers' bots as this one lists them, with the copies of their chats. */
-  registry: Pick<RemoteBotRegistry, 'row' | 'rows' | 'onChange'> & { chats: Pick<RemoteBotRegistry['chats'], 'open' | 'messages'> }
+  registry: Pick<RemoteBotRegistry, 'row' | 'rows' | 'onChange'> &
+    Partial<Pick<RemoteBotRegistry, 'computers' | 'levelOn'>> & { chats: Pick<RemoteBotRegistry['chats'], 'open' | 'messages'> }
   /** The copies here of the files those bots' chats show. Absent: none show, and none are kept of what is sent. */
   files?: Pick<RemoteBotFiles, 'fetch' | 'seed'>
   /** Whether a session with `node` is open now. */
@@ -139,7 +145,22 @@ export class BotRouter implements BotRouterPort {
   list(ctx: HandlerContext): BotSummary[] {
     if (ctx.connection?.clientType !== 'gui' || ctx.connection.bridgeCaller)
       throw new DomainRpcError('forbidden', 'Only a Mousse window can list the bots of other computers.')
-    return this.options.registry.rows().map(windowRow)
+    const registry = this.options.registry
+    return registry.rows().map((row) => windowRow(row, registry.levelOn?.(row.node)))
+  }
+
+  /**
+   * The other computers a window may make a bot on or set bots up on (`bots.remote.list`'s `computers`): those where
+   * this computer's bot level is Full, offline ones marked. Read from memory; it never waits on another computer.
+   */
+  computers(ctx: HandlerContext): BotElsewhereComputer[] {
+    if (ctx.connection?.clientType !== 'gui' || ctx.connection.bridgeCaller)
+      throw new DomainRpcError('forbidden', 'Only a Mousse window can list the bots of other computers.')
+    if (!this.options.enabled()) return []
+    const self = this.selfNode()
+    return (this.options.registry.computers?.() ?? []).flatMap((c) =>
+      c.level === 'full' && c.node !== self ? [{ node: c.node, name: c.name, ...(c.offline || !this.options.online(c.node) ? { offline: true as const } : {}) }] : []
+    )
   }
 
   async dispatch(ctx: HandlerContext, method: string, params: unknown): Promise<{ result: unknown } | undefined> {

@@ -36,7 +36,8 @@ import { BotTasksButton } from './BotTasksButton'
 import { BotModelButton } from './BotModelButton'
 import { botRetryOf } from './botRetry'
 import { ReportButton } from '../bugReports/ReportButton'
-import { BotSidePanel, botFilesFolder, useBotSidePanel } from './BotSidePanel'
+import { BotSidePanel, botFilesFolder, useBotSidePanel, type BotSideView } from './BotSidePanel'
+import { botSetupBlock } from './botSetup'
 import { BotMemoryDialog } from './BotMemoryDialog'
 import { BotBrowserPreview } from './BotBrowser'
 import { useBotBrowser } from '../../stores/botBrowserStore'
@@ -66,6 +67,7 @@ import { ComputerBadgeView } from '../ComputerBadge'
 
 const EMPTY: BotChatMessage[] = []
 const NO_FILES: AttachedFile[] = []
+const REMOTE_SIDE_VIEWS: readonly BotSideView[] = ['settings']
 const NO_VOICE: VoiceMessage[] = []
 const NO_REFERENCES: ChatReference[] = []
 
@@ -883,6 +885,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // its files pane, applets and its browser stay on its computer. While that computer is offline its chat is the copy kept here, read only.
   const remote = Boolean(bot.lives)
   const unreachable = Boolean(bot.lives?.offline)
+  // About, Resume and the rest of its setup: always for this computer's bots; for a bot of another computer only with
+  // Full bot access there while that computer is reached (`botSetupBlock`).
+  const canSetup = !botSetupBlock(bot)
   const transcript = useRef<HTMLDivElement>(null)
   useReclampOpenTools(transcript)
   const messages = chat?.messages ?? EMPTY
@@ -977,6 +982,10 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     store().focusRemote(bot.id, true)
     return () => store().focusRemote(bot.id, false)
   }, [bot.id, remote, store])
+  // Its computer went offline, or lowered this one to Use: About closes rather than show what can't be changed.
+  useEffect(() => {
+    if (!canSetup && store().aboutOpen) useBotsStore.setState({ aboutOpen: false })
+  }, [canSetup, store])
   // This window shows the bot's chat: its replies only sound while it is on screen.
   useEffect(() => {
     void window.mousse.app.setViewedBot?.(bot.id)?.catch(() => undefined)
@@ -1141,8 +1150,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     {/* The bot's colour tints the quotes of its messages. */}
     <section data-mousse="chat" className={`chat-conversation bot-conversation${typing ? ' is-typing' : ''}`} data-applet-conversation style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
       <header data-mousse="chat-header" className="chat-conversation-header">
-        {/* A bot of another computer has no About here: it is set up on its own computer. */}
-        {remote
+        {/* A bot of another computer has About here only with Full bot access there, while that computer is reached. */}
+        {!canSetup
           ? <span className="bot-header-about">
             <BotFace look={bot.look} state={botFaceState(bot, happy)} away={unreachable} size={32} view="head" />
             {!unreachable && <BotActivitySticker bot={bot} typing={typing} offline={offline} />}
@@ -1223,8 +1232,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         {resumed && <p className="bot-system-line" role="status" data-work-id={resumed.id}><span>{resumedWorkLine(bot.name, resumed)}</span></p>}
         {/* A run still working before its reply: the preview follows it here. */}
         {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}
-        {/* A bot of another computer is resumed there. */}
-        {bot.state === 'paused' && <p className="bot-paused-line" role="status">{(pauseLine ?? (bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused')).replace(/\.$/, '')}.{!remote && <> <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></>}</p>}
+        {/* A bot of another computer is resumed from here only with Full bot access there. */}
+        {bot.state === 'paused' && <p className="bot-paused-line" role="status">{(pauseLine ?? (bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused')).replace(/\.$/, '')}.{canSetup && <> <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></>}</p>}
       </div>
       <div className="chat-input-area bot-input-area" data-applet-composer>
         {(unseen || away) && <button type="button" className="bot-jump" onClick={toEnd}><ArrowDown size={14} aria-hidden />{unseen ? 'New message' : 'Go to latest'}</button>}
@@ -1280,7 +1289,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     </section>
     {appletOpen && !remote && <BotAppletPane botId={bot.id} applet={appletOpen} onClose={() => setAppletOpen(null)} />}
     </div>
-    {!remote && <BotSidePanel bot={bot} state={side} browser={browser} folder={filesFolder} file={file} onFile={setFile} />}
+    {/* A bot of another computer: its Agent settings alone; its browser and files folder stay on its computer. */}
+    {canSetup && <BotSidePanel bot={bot} state={side} browser={browser} folder={filesFolder} file={file} onFile={setFile} {...(remote ? { views: REMOTE_SIDE_VIEWS } : {})} />}
     {memoryOpen && <BotMemoryDialog bot={bot} {...(memoryOpen.focus ? { focus: memoryOpen.focus } : {})} />}
   </ImageGalleryProvider></BotFilesProvider>
 }

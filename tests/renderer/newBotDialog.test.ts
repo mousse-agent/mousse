@@ -624,3 +624,107 @@ describe('Runs on with rows (#673)', () => {
     expect(createButton()?.disabled).toBe(true)
   })
 })
+
+describe('Lives on: a new bot made on another computer', () => {
+  const livesOn = () => dialog()!.querySelector<HTMLElement>('[aria-label="Computer the new bot lives on"]')
+  const optionsShown = () => [...document.querySelectorAll<HTMLElement>('[role="option"]')].map((option) => [option.textContent, option.getAttribute('aria-disabled')])
+  const deviceSwitch = (label: string) => dialog()!.querySelector<HTMLButtonElement>(`[role="switch"][aria-label^="${label} reaches"]`)
+  const settle = async () => { for (let turn = 0; turn < 4; turn += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) }) }
+  /** Each computer answers Runs on with its own model and devices; the laptop lists this computer (`caller`) among them. */
+  const choicesByComputer = () => vi.mocked(fake.client.modelChoices).mockImplementation(async (node?: string) => node === 'nod_laptop'
+    ? { models: [{ model: 'opus', label: 'Laptop · opus' }], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Laptop' }], reachOnCreate: true,
+      devices: [{ node: 'nod_desk', name: 'Desk', kind: 'computer', caller: true }, { node: 'nod_pocket', name: 'Pocket', kind: 'phone' }] }
+    : { models: [{ model: 'sonnet', label: 'Desk · sonnet' }], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }], reachOnCreate: true })
+
+  it('offers the computers where this one has Full bot access, after this computer, which is picked; one offline is greyed', async () => {
+    fake.remoteComputers = [{ node: 'nod_laptop', name: 'Laptop' }, { node: 'nod_server', name: 'Server', offline: true }]
+    choicesByComputer()
+    await open([])
+    await toRunsOn('Sort my inbox.')
+    expect(livesOn()?.textContent).toContain('This computer')
+    // Lives on names the computer: no Computer row beside it.
+    expect(dialog()!.querySelector('.bot-new-runs-on-computer')).toBeNull()
+    await click(livesOn()!)
+    expect(optionsShown()).toEqual([['This computer', null], ['Laptop', null], ['Server · offline', 'true']])
+  })
+
+  it('is not there without such a computer: the bot is made here, as before', async () => {
+    choicesByComputer()
+    await open([])
+    await toRunsOn('Sort my inbox.')
+    expect(livesOn()).toBeNull()
+    expect(dialog()!.querySelector('.bot-new-runs-on-computer')?.textContent).toBe('Desk')
+    await click(createButton())
+    await act(async () => {})
+    expect(creates()[0]![1]).not.toHaveProperty('node')
+  })
+
+  it('makes it on the computer picked: that computer\'s models and devices, and this computer always reaches it', async () => {
+    fake.remoteComputers = [{ node: 'nod_laptop', name: 'Laptop' }]
+    choicesByComputer()
+    await open([])
+    await toRunsOn('Sort my inbox.')
+    expect(stepLabels()).toEqual(['Look', 'What it does', 'Runs on'])
+    await click(livesOn()!)
+    await pickOption('Laptop')
+    await settle()
+    expect(vi.mocked(fake.client.modelChoices).mock.calls).toEqual([[undefined], ['nod_laptop']])
+    await click(modelPicker())
+    expect(optionsShown().map(([label]) => label)).toEqual(['By usage', 'Laptop · opus'])
+    await pickOption('Laptop · opus')
+    // The laptop's other devices: a Devices step, with the laptop and this computer always on.
+    expect(stepLabels()).toEqual(['Look', 'What it does', 'Runs on', 'Devices'])
+    await click(nextButton())
+    expect(deviceSwitch('Laptop')?.getAttribute('aria-checked')).toBe('true')
+    expect(deviceSwitch('Laptop')?.disabled).toBe(true)
+    expect(deviceSwitch('This computer')?.disabled).toBe(true)
+    expect(deviceSwitch('Desk')).toBeNull()
+    expect(deviceSwitch('Pocket')?.getAttribute('aria-checked')).toBe('false')
+    await click(deviceSwitch('Pocket')!)
+    await click(createButton())
+    await settle()
+    expect(creates()[0]![1]).toMatchObject({ node: 'nod_laptop', model: 'opus', access: { mode: 'chosen', nodes: ['nod_pocket'] } })
+    expect(useBotsStore.getState().bots.find((bot) => bot.id === 'new1')?.lives).toEqual({ node: 'nod_laptop', name: 'Laptop', level: 'full' })
+  })
+
+  it('picking this computer again clears the other computer\'s model and devices, and asks this computer', async () => {
+    fake.remoteComputers = [{ node: 'nod_laptop', name: 'Laptop' }]
+    choicesByComputer()
+    await open([])
+    await toRunsOn('Sort my inbox.')
+    await click(livesOn()!)
+    await pickOption('Laptop')
+    await settle()
+    await click(modelPicker())
+    await pickOption('Laptop · opus')
+    await click(nextButton())
+    await click(deviceSwitch('Pocket')!)
+    await click(stepTab('Runs on'))
+    await click(livesOn()!)
+    await pickOption('This computer')
+    await settle()
+    expect(vi.mocked(fake.client.modelChoices).mock.calls.at(-1)).toEqual([undefined])
+    expect(stepLabels()).toEqual(['Look', 'What it does', 'Runs on'])
+    await click(createButton())
+    await settle()
+    expect(creates()[0]![1]).not.toHaveProperty('node')
+    expect(creates()[0]![1]).not.toHaveProperty('model')
+    expect(creates()[0]![1]).toMatchObject({ access: { mode: 'this_computer' } })
+  })
+
+  it('a computer that does not answer: says so, and the bot is made here', async () => {
+    fake.remoteComputers = [{ node: 'nod_laptop', name: 'Laptop' }]
+    choicesByComputer()
+    await open([])
+    await toRunsOn('Sort my inbox.')
+    vi.mocked(fake.client.modelChoices).mockRejectedValueOnce(Object.assign(new Error('No answer'), { code: 'timeout' }))
+    await click(livesOn()!)
+    await pickOption('Laptop')
+    await settle()
+    expect(dialog()!.textContent).toContain('Laptop did not answer, so the bot is made on this computer.')
+    expect(livesOn()?.textContent).toContain('This computer')
+    await click(createButton())
+    await settle()
+    expect(creates()[0]![1]).not.toHaveProperty('node')
+  })
+})

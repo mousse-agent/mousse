@@ -96,6 +96,9 @@ span.bot-header-name { display: flex; align-items: center; gap: 6px; }
 .bot-menu button { display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 9px; border-radius: 7px; font-size: 12px; color: var(--text-primary); text-align: left; }
 .bot-menu button:hover, .bot-menu button:focus-visible { background: color-mix(in srgb, var(--text-secondary) 11%, transparent); outline: none; }
 .bot-menu button.is-danger { color: var(--error, #e79090); }
+/* Greyed out, yet still reached by the arrow keys so its tooltip can say why. */
+.bot-menu button[aria-disabled='true'] { opacity: .5; cursor: default; }
+.bot-menu button[aria-disabled='true']:hover:not(:focus-visible) { background: transparent; }
 .bot-menu hr { border: 0; border-top: 1px solid rgba(var(--accent-pale-rgb), .1); margin: 4px 2px; }
 
 /* The transcript and the composer share one centred column: nearly the full pane on a narrow one (95% at 1000px),

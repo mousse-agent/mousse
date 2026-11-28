@@ -12,6 +12,7 @@ import type { SqliteRemoteBots } from './remoteBotStore'
 import type { BotMarksStore } from '../../bots/marks/BotMarksStore'
 import type { RemoteBotFiles } from './remoteBotFiles'
 import type { RemoteBotTellings } from './RemoteBotTellings'
+import type { BotLevel } from '../../../shared/net/local'
 
 type Json = Record<string, unknown>
 const isRecord = (value: unknown): value is Json => !!value && typeof value === 'object' && !Array.isArray(value)
@@ -70,6 +71,13 @@ interface Computer {
   copyDropped?: boolean
   /** Its feed has caught up with the computer since it was last (re)opened: a snapshot now is a live change. */
   caught?: boolean
+  /**
+   * This computer's bot level there, as the gate there lets it through (`bridge.access.mine`); undefined until known.
+   * Asked again when the level its feed carries changes, and each time the feed is (re)opened.
+   */
+  level?: BotLevel
+  /** The feed's level the level above was asked for; undefined after the feed (re)opens. */
+  levelFor?: string
 }
 
 /** What is still to be dropped of a computer's bots, after a drop that did not go through. */
@@ -237,6 +245,25 @@ export class RemoteBotRegistry {
       bots: c.bots.size,
       ...(c.error ? { error: c.error } : {})
     }))
+  }
+
+  /**
+   * The other computers this one reaches bots on, with this computer's bot level there when known (`full` lets it set
+   * bots up there and make new ones, New bot's "Lives on"). One whose feed has not opened in this run is offline.
+   */
+  computers(): Array<{ node: NodeId; name: string; level?: BotLevel; offline?: true }> {
+    this.load()
+    return [...this.computersByNode.values()].map((c) => ({
+      node: c.node,
+      name: c.name,
+      ...(c.level ? { level: c.level } : {}),
+      ...(c.online && c.live ? {} : { offline: true as const })
+    }))
+  }
+
+  /** This computer's bot level on `node`, when known. */
+  levelOn(node: NodeId): BotLevel | undefined {
+    return this.computersByNode.get(node)?.level
   }
 
   /** The computers with a drop still to go through, for the tests. */
@@ -556,6 +583,8 @@ export class RemoteBotRegistry {
    */
   private unbase(c: Computer): void {
     c.caught = false
+    // The level is asked again with the feed's next snapshot: grants may have changed meanwhile.
+    c.levelFor = undefined
     this.toTellings((tellings) => tellings.reconnecting(c.node))
   }
 
@@ -696,7 +725,36 @@ export class RemoteBotRegistry {
         return true
       })
       .slice(0, this.options.store.limits.feedRows)
-    return { kind: 'mousse.bots', version: 1, bots }
+    const level = value.level === 'use' || value.level === 'full' ? value.level : undefined
+    return { kind: 'mousse.bots', version: 1, bots, ...(level ? { level } : {}) }
+  }
+
+  /**
+   * The level the feed carries is the device setting there; what the gate lets through can be lower (a grant without
+   * write is Use). So at Full the computer is asked (`bridge.access.mine`), in the background; at Use, or from an older
+   * computer whose feed says nothing and can't be asked, setup stays greyed. Never asked on a thread's or turn's start.
+   */
+  private learnLevel(c: Computer, feed: BotsFeedSnapshot): void {
+    const key = feed.level ?? 'unknown'
+    if (c.levelFor === key) return
+    c.levelFor = key
+    if (feed.level === 'use') {
+      c.level = 'use'
+      return
+    }
+    void (async () => {
+      let level: BotLevel = feed.level === 'full' ? 'use' : (c.level ?? 'use')
+      try {
+        const mine = await this.options.client(c.node).rpc('bridge.access.mine', {}, { id: newId('rpc'), deadlineMs: 15_000 })
+        const bots = isRecord(mine) ? mine.bots : undefined
+        if (bots === 'off' || bots === 'use' || bots === 'full') level = bots
+      } catch {
+        // Not answered now: setup stays greyed until the feed is opened again.
+      }
+      if (this.closed || this.computersByNode.get(c.node) !== c || c.levelFor !== key || c.level === level) return
+      c.level = level
+      this.changed()
+    })()
   }
 
   /** A feed snapshot from the computer: its bots now. A bot it no longer lists is lost here, row and copy. */
@@ -709,6 +767,7 @@ export class RemoteBotRegistry {
     c.live = true
     c.online = true
     c.copyDropped = false
+    this.learnLevel(c, feed)
     this.relisted(c)
     if (c.error) {
       console.info('[bots] reading the bots of a computer again', { node: c.node, after: c.error })

@@ -19,18 +19,26 @@ export function accessOf(nodes: readonly string[]): BotDeviceAccess {
 /** Why a device reaches no bot here whatever is ticked: its own switch for bots is off (Settings, Devices). */
 const botsOffTip = (device: BotDeviceChoice) => `Bots are Off for ${device.name} in Settings, Devices, so it reaches none of them.`
 
+/** A device that always reaches the bot: its switch is on and can't be turned off. */
+function LockedDevice({ label, name, testId }: { label: string; name: string; testId: string }) {
+  return <div className="bot-about-row bot-device-pick" data-testid={testId}>
+    <span>{label}</span>
+    <Switch label={`${label} reaches ${name}`} checked disabled onChange={() => undefined} />
+  </div>
+}
+
 /**
  * One switch per other device of the owner's, after this computer, which is always on: New bot's Devices step and
  * About → Devices. A device whose own switch for bots is off (Settings, Devices) reaches no bot here whatever is picked,
- * and says so.
+ * and says so. `home`: the bot lives on that other computer, listed first; this computer, which set it up from here
+ * (`caller` in that computer's list), always reaches it too.
  */
-export function BotDeviceSwitches({ name, devices, chosen, onTick }: { name: string; devices: BotDeviceChoice[]; chosen: readonly string[]; onTick(node: string, on: boolean): void }) {
+export function BotDeviceSwitches({ name, devices, chosen, onTick, home }: { name: string; devices: BotDeviceChoice[]; chosen: readonly string[]; onTick(node: string, on: boolean): void; home?: string }) {
+  const others = home ? devices.filter((device) => !device.caller) : devices
   return <>
-    <div className="bot-about-row bot-device-pick" data-testid="bot-device-here">
-      <span>This computer</span>
-      <Switch label={`This computer reaches ${name}`} checked disabled onChange={() => undefined} />
-    </div>
-    {devices.map((device) => (
+    {home && <LockedDevice label={home} name={name} testId="bot-device-home" />}
+    <LockedDevice label="This computer" name={name} testId="bot-device-here" />
+    {others.map((device) => (
       <div className="bot-about-row bot-device-pick" key={device.node} data-testid="bot-about-device">
         <span title={device.botsOff ? botsOffTip(device) : undefined}>
           {device.name}
@@ -45,9 +53,10 @@ export function BotDeviceSwitches({ name, devices, chosen, onTick }: { name: str
 /**
  * About → Devices: which of the owner's devices reach this bot. This computer always does; each other device (phones
  * too) has its own switch, off until the owner turns it on, so a device linked later reaches no bot. A device left out
- * sees nothing of the bot (the tooltip). An older service has no such choice, and the row is not shown.
+ * sees nothing of the bot (the tooltip). An older service has no such choice, and the row is not shown. `home`: the bot
+ * lives on that other computer, which keeps the choice; it and this computer always reach it.
  */
-export function BotDevicesRow({ botId, name, reach }: { botId: string; name: string; reach?: BotDeviceAccessMode | undefined }) {
+export function BotDevicesRow({ botId, name, reach, home }: { botId: string; name: string; reach?: BotDeviceAccessMode | undefined; home?: string }) {
   const [view, setView] = useState<BotDevicesView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [missing, setMissing] = useState(false)
@@ -84,12 +93,14 @@ export function BotDevicesRow({ botId, name, reach }: { botId: string; name: str
   const chosen = view.access.mode === 'chosen' ? view.access.nodes : []
   const tick = (node: string, on: boolean) => void save(accessOf(on ? [...chosen, node] : chosen.filter((id) => id !== node)))
   const tip = view.unreadable ? 'What was saved could not be read, so only this computer reaches this bot until you pick again.' : BOT_DEVICES_TIP
+  const others = home ? view.devices.filter((device) => !device.caller) : view.devices
+  const showSwitches = home ? true : view.devices.length > 0
   return <>
     <div className="bot-about-row" data-testid="bot-about-devices">
       <span title={tip}>Devices</span>
-      {!view.devices.length && <small className="bot-about-next" title={tip}>Only this computer</small>}
+      {!others.length && !home && <small className="bot-about-next" title={tip}>Only this computer</small>}
     </div>
-    {view.devices.length > 0 && <BotDeviceSwitches name={name} devices={view.devices} chosen={chosen} onTick={tick} />}
+    {showSwitches && <BotDeviceSwitches name={name} devices={view.devices} chosen={chosen} onTick={tick} {...(home ? { home } : {})} />}
     {error ? <p className="bot-about-empty" role="alert">{error}</p> : null}
   </>
 }

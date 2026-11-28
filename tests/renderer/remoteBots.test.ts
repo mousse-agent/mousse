@@ -150,11 +150,38 @@ describe('one Bots list', () => {
     expect(row('Rester').querySelector('path.bot-face-z-still')).toBeNull()
   })
 
-  it('offers only this computer\'s marks and the checklist in the menu of another computer\'s bot, none of its setup', async () => {
-    await show([local, remote()])
+  /** The row menu's items of another computer's bot: label, and the tooltip of a greyed one. */
+  const rowMenu = async () => {
     await act(async () => { row('Inbox helper').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })) })
-    const items = [...document.querySelectorAll('[role="menu"][aria-label="Inbox helper menu"] [role="menuitem"]')].map((item) => item.textContent)
-    expect(items).toEqual(['Pin', 'Mark as unread', 'Mute notifications', 'Hide', 'Hide checklist'])
+    return [...document.querySelectorAll<HTMLElement>('[role="menu"][aria-label="Inbox helper menu"] [role="menuitem"]')]
+  }
+  const SETUP = ['About this bot', 'Rename', 'Change look', 'Pause', 'Make private', 'Delete bot']
+  const greyed = (items: HTMLElement[]) => items.filter((item) => item.getAttribute('aria-disabled') === 'true').map((item) => [item.textContent, item.title])
+
+  it('with Full bot access there, its row menu sets it up from here', async () => {
+    await show([local, remote({ lives: { ...LAPTOP, level: 'full' } })])
+    const items = await rowMenu()
+    expect(items.map((item) => item.textContent)).toEqual(['Pin', 'Mark as unread', 'Mute notifications', 'Hide', 'Hide checklist', ...SETUP])
+    expect(greyed(items)).toEqual([])
+    expect(items.find((item) => item.textContent === 'Make private')!.title).toBe('Only Laptop and this computer reach it. Change it in About.')
+    await click(items.find((item) => item.textContent === 'Pause'))
+    await settle()
+    expect(fake.calls).toContainEqual(['pause', 'n_laptop:b_inbox'])
+  })
+
+  it('with Use bot access there, its setup shows greyed, saying why, and does nothing', async () => {
+    await show([local, remote()])
+    const items = await rowMenu()
+    expect(greyed(items)).toEqual(SETUP.map((label) => [label, 'Needs Full bot access on Laptop']))
+    await click(items.find((item) => item.textContent === 'Pause'))
+    await settle()
+    expect(fake.calls.some(([name]) => name === 'pause')).toBe(false)
+  })
+
+  it('while its computer is offline, its setup shows greyed, saying so, even with Full bot access there', async () => {
+    await show([local, away({ lives: { ...LAPTOP, level: 'full', offline: true } })])
+    const items = await rowMenu()
+    expect(greyed(items).filter(([label]) => SETUP.includes(label!))).toEqual(SETUP.map((label) => [label, 'Laptop is offline']))
   })
 })
 
@@ -177,17 +204,53 @@ describe('the chat of a bot of another computer', () => {
     expect(fake.calls).toContainEqual(['focus', 'n_laptop:b_inbox', true])
   })
 
-  it('shows only what works from here: no About, model, side panel or setup in its menu, no applets or reactions, and files can be attached', async () => {
-    await open(remote(), [message(1, { text: 'Here is the chart.', applets: [{ id: 'ap1', name: 'Chart' }] as never, reaction: '👍' })])
+  it('with Use bot access there, shows only what works from here: no About, model or side panel, its setup greyed, no applets or reactions, and files can be attached', async () => {
+    await open(remote({ state: 'paused', stateText: 'Paused' }), [message(1, { text: 'Here is the chart.', applets: [{ id: 'ap1', name: 'Chart' }] as never, reaction: '👍' })])
     expect(button('About Inbox helper')).toBeUndefined()
     expect(button('Show side panel')).toBeUndefined()
     expect(host.querySelector('.bot-model-button, [aria-label^="Model"]')).toBeNull()
     expect(host.querySelector('.bot-header-name .computer-badge')?.getAttribute('title')).toBe('Lives on Laptop')
+    expect(button('Resume', host.querySelector('.bot-paused-line')!)).toBeUndefined()
     await click(button('Bot menu'))
-    expect([...host.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual(['Find in chat', 'Hide checklist'])
+    const items = [...host.querySelectorAll<HTMLElement>('.bot-menu [role="menuitem"]')]
+    expect(items.map((item) => item.textContent)).toEqual(['About this bot', 'Find in chat', 'Hide checklist', 'Rename', 'Change look', 'Resume', 'Make private', 'Delete bot'])
+    expect(items.filter((item) => item.getAttribute('aria-disabled') === 'true').map((item) => [item.textContent, item.title])).toEqual(
+      ['About this bot', 'Rename', 'Change look', 'Resume', 'Make private', 'Delete bot'].map((label) => [label, 'Needs Full bot access on Laptop']))
+    await click(items.find((item) => item.textContent === 'Rename'))
+    expect(useBotsStore.getState().dialog).toBeNull()
     expect(button('Attach files')).toBeDefined()
     expect(transcript().querySelector('.bot-reaction-bar, .bot-reaction')).toBeNull()
     expect(transcript().querySelector('.bot-applets, .bot-message-applets')).toBeNull()
+  })
+
+  it('with Full bot access there, About, Resume and every setup item work from here, by its qualified id', async () => {
+    await open(remote({ lives: { ...LAPTOP, level: 'full' }, state: 'paused', stateText: 'Paused' }))
+    await click(button('Resume', host.querySelector('.bot-paused-line')!))
+    await settle()
+    expect(fake.calls).toContainEqual(['resume', 'n_laptop:b_inbox'])
+    await click(button('Bot menu'))
+    const items = [...host.querySelectorAll<HTMLElement>('.bot-menu [role="menuitem"]')]
+    expect(items.filter((item) => item.getAttribute('aria-disabled') === 'true')).toEqual([])
+    await click(items.find((item) => item.textContent === 'Rename'))
+    expect(useBotsStore.getState().dialog).toEqual({ kind: 'rename', botId: 'n_laptop:b_inbox' })
+    await act(async () => useBotsStore.setState({ dialog: null }))
+    await click(button('Bot menu'))
+    await click([...host.querySelectorAll<HTMLElement>('.bot-menu [role="menuitem"]')].find((item) => item.textContent === 'About this bot'))
+    await settle()
+    expect(useBotsStore.getState().aboutOpen).toBe(true)
+  })
+
+  it('while its computer is offline, its setup is greyed saying so, and an open About closes', async () => {
+    await open(remote({ lives: { ...LAPTOP, level: 'full' } }))
+    await act(async () => useBotsStore.setState({ aboutOpen: true }))
+    expect(useBotsStore.getState().aboutOpen).toBe(true)
+    fake.bots = [local, away({ lives: { ...LAPTOP, level: 'full', offline: true } })]
+    await act(async () => fake.emit.remote())
+    await settle()
+    expect(useBotsStore.getState().aboutOpen).toBe(false)
+    await click(button('Bot menu'))
+    const items = [...host.querySelectorAll<HTMLElement>('.bot-menu [role="menuitem"]')]
+    expect(items.filter((item) => item.getAttribute('aria-disabled') === 'true').map((item) => item.title)).toEqual(Array(6).fill('Laptop is offline'))
   })
 
   it('sends words and files to it by its qualified id, none of this computer\'s threads, and a / as words', async () => {

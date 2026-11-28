@@ -246,9 +246,11 @@ export interface BotSummary {
   /**
    * The computer it lives on, when that is another of the owner's computers: the viewing computer adds it to the bots
    * it lists from there (`bots.remote.list`), whose ids are qualified (`<node>:<botId>`). `offline`: that computer
-   * can't be reached now, and the row and chat are its last copy. Absent for this computer's own bots.
+   * can't be reached now, and the row and chat are its last copy. `level`: `full` where that computer lets this one set
+   * its bots up (About, the menu's setup items), absent where it lets this one only use them. Absent for this computer's
+   * own bots.
    */
-  lives?: { node: string; name: string; offline?: true }
+  lives?: { node: string; name: string; level?: 'full'; offline?: true }
 }
 
 /** How many of a bot's tasks its summary carries. */

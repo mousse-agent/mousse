@@ -88,6 +88,11 @@ export interface BotDeviceChoice {
   kind: 'computer' | 'phone' | 'unknown'
   /** Its bot level on this computer (Settings, Devices) is Off: it reaches no bot here, whatever is picked. */
   botsOff?: true
+  /**
+   * The device that asked, from another computer: the bot always reaches it (a choice it sends keeps it), so its window
+   * shows it as "This computer", locked on.
+   */
+  caller?: true
 }
 
 /**
@@ -101,9 +106,9 @@ export interface BotDevicesView {
 }
 
 /**
- * The methods of About's Devices row. Only this computer's own window and command line call them: they are not in the
- * table of methods another device may call (`REMOTE_BOT_METHODS`), never routed (`bots.` stays local), and refused
- * for a call that came through Bridge.
+ * The methods of About's Devices row. This computer's own window and command line call them locally, refused for a call
+ * that came through Bridge; another device calls them only as its remote rows at Full bot access (`REMOTE_BOT_METHODS`),
+ * where the calling device is always kept among the devices that reach the bot.
  */
 export const BOT_DEVICE_METHODS = ['bots.devices.get', 'bots.devices.set'] as const
 export type BotDeviceMethod = (typeof BOT_DEVICE_METHODS)[number]

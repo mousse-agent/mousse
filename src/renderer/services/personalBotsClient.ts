@@ -2,7 +2,7 @@ import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../share
 import type { BotLook } from '../../shared/bots/personal/look'
 import type { BotMemoryEntry, BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { BotModelPick, BotModelSlots, BotSchedule } from '../../shared/bots/personal/definition'
-import type { BotChatAttachment, BotReplyEvent, BotsElsewhereApi, BotsElsewhereMethod, BotsPersonalV2EventData, BotsPersonalV2Method, BotsPersonalV2Params, BotsPersonalV2Result } from '../../shared/bots/personal/methods'
+import type { BotChatAttachment, BotElsewhereComputer, BotReplyEvent, BotsElsewhereApi, BotsElsewhereMethod, BotsPersonalV2EventData, BotsPersonalV2Method, BotsPersonalV2Params, BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { PlatformRequestApi } from '../../shared/platform'
 import type { BotDeviceAccess, BotDevicesView, NewBotAccess } from '../../shared/bots/personal/deviceAccess'
 import type { BotMark, BotMarksApi, BotMarksByRef } from '../../shared/bots/personal/marks'
@@ -17,7 +17,7 @@ export interface PersonalBotsClient {
    * The bots of the owner's other computers, as this computer lists them (`bots.remote.list`): qualified ids, each with
    * the computer it lives on (`lives`). Read from what this computer keeps; never waits on another one.
    */
-  remoteList(): Promise<BotSummary[]>
+  remoteList(): Promise<{ bots: BotSummary[]; computers?: BotElsewhereComputer[] }>
   /** This window shows (or no longer shows) the chat of a bot of another computer: its chat streams here while it does. */
   focus(botId: string, focused: boolean): Promise<void>
   /**
@@ -34,8 +34,9 @@ export interface PersonalBotsClient {
    * `model`: one model on every row (the single picker of an older service). An older service refuses the keys.
    * `image`: the Images row (#1088), sent only to a service whose choices carry `imageProviders`. `access`: the Devices
    * step (this computer alone when it is not shown), sent only to a service whose choices carry `reachOnCreate`.
+   * `node`: made on that other computer (New bot's "Lives on"); its answer names the bot by a qualified id.
    */
-  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }): Promise<BotSummary>
+  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess; node?: string }): Promise<BotSummary>
   get(botId: string): Promise<BotDetail>
   /** `description`: the bot's prompt, as the owner edits it in About; null resets it. An older service refuses it. */
   update(botId: string, change: { name?: string; look?: BotLook; description?: string | null }): Promise<BotSummary>
@@ -85,8 +86,11 @@ export interface PersonalBotsClient {
   reset(botId: string): Promise<BotSummary>
   /** Saves the bot's face picture (a PNG in base64) drawn from `key`. Only a service whose summaries carry `facePicture` has it. */
   saveFacePicture(botId: string, key: string, png: string): Promise<{ path: string }>
-  /** What New bot's Runs on line offers before the bot exists; an older service lacks it and rejects. */
-  modelChoices(): Promise<BotsPersonalV2Result<'bots.model.choices'>>
+  /**
+   * What New bot's Runs on line offers before the bot exists; an older service lacks it and rejects. `node`: what that
+   * other computer offers, for a bot made there ("Lives on").
+   */
+  modelChoices(node?: string): Promise<BotsPersonalV2Result<'bots.model.choices'>>
   removeSchedule(botId: string, scheduleId: string): Promise<BotDetail>
   /** Cancels a waiting reminder; it never fires. */
   cancelReminder(botId: string, reminderId: string): Promise<BotDetail>
@@ -110,13 +114,13 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     transport.request<BotsElsewhereApi[M]['result']>(method, params)
   return {
     list: async () => (await call('bots.personal.list', {})).bots,
-    remoteList: async () => (await elsewhere('bots.remote.list', {})).bots,
+    remoteList: () => elsewhere('bots.remote.list', {}),
     focus: async (botId, focused) => { await elsewhere('bots.focus', { botId, focused }) },
     remoteFile: (botId, path) => elsewhere('bots.remote.file', { botId, path }),
     marks: async () => (await transport.request<BotMarksApi['bots.marks.list']['result']>('bots.marks.list', {})).marks,
     setMark: async (botId, mark, on) => (await transport.request<BotMarksApi['bots.marks.set']['result']>('bots.marks.set', { botId, mark, on })).marks,
-    create: async ({ look, name, description, clientRequestId, model, slots, image, access }) =>
-      (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}), ...(access ? { access } : {}) })).bot,
+    create: async ({ look, name, description, clientRequestId, model, slots, image, access, node }) =>
+      (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}), ...(access ? { access } : {}), ...(node ? { node } : {}) })).bot,
     get: (botId) => call('bots.get', { botId }),
     update: async (botId, change) => (await call('bots.update', { botId, ...change })).bot,
     pause: async (botId) => (await call('bots.personal.pause', { botId })).bot,
@@ -147,7 +151,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     wipeMemory: (botId, keep) => call('bots.memory.wipe', { botId, ...(keep ? { keep } : {}) }),
     reset: async (botId) => (await call('bots.reset', { botId })).bot,
     saveFacePicture: (botId, key, png) => call('bots.facePicture.save', { botId, key, png }),
-    modelChoices: () => call('bots.model.choices', {}),
+    modelChoices: (node) => call('bots.model.choices', node ? { node } : {}),
     removeSchedule: (botId, scheduleId) => call('bots.schedules.remove', { botId, scheduleId }),
     cancelReminder: (botId, reminderId) => call('bots.reminders.cancel', { botId, reminderId }),
     exportMemory: (botId, dir) => call('bots.memory.export', { botId, dir }),

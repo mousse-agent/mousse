@@ -2288,7 +2288,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'bots.remote.list': {
       // The other computers' bots a window lists beside this computer's own; none without Bridge.
       rejectUnknownKeys(isObject(params) ? params : {}, ['profileId'])
-      return { bots: ctx.mms.botRouter?.list(ctx) ?? [] }
+      const router = ctx.mms.botRouter
+      return { bots: router?.list(ctx) ?? [], computers: router?.computers?.(ctx) ?? [] }
     }
     case 'bots.remote.file': {
       // A picture or file another computer's bot has in its chat, copied here for the window to show.

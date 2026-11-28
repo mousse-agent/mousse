@@ -36,6 +36,11 @@ export interface BotsFeedSnapshot {
   kind: 'mousse.bots'
   version: 1
   bots: BotFeedRow[]
+  /**
+   * The reader's bot level here (Settings, Devices), so its window learns at once when it changes: it then asks
+   * `bridge.access.mine` for the level the gate lets through. Absent from an older computer.
+   */
+  level?: 'use' | 'full'
 }
 
 /** One bot's chat: its row and its newest messages, as `bots.chat.list` answers another device. */
@@ -134,7 +139,14 @@ export function botsFeedSource(services: BotStreamsServices, reader: string): So
         bots = []
       }
     }
-    return { kind: 'mousse.bots', version: 1, bots }
+    let level: BotsFeedSnapshot['level']
+    try {
+      const raw = services.botReach?.level(reader)
+      if (raw === 'use' || raw === 'full') level = raw
+    } catch {
+      // Not readable now: the reader keeps the level it has.
+    }
+    return { kind: 'mousse.bots', version: 1, bots, ...(level ? { level } : {}) }
   }
   return {
     snapshot: () => mmsJson(read()),
