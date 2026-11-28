@@ -38,7 +38,7 @@ export interface EngineSshJournal {
   target?: string
   host?: string
   user?: string
-  /** A: the remote shell form (`sh`). */
+  /** A: the remote shell B's SSH server runs commands in (`sh`, `cmd` or `powershell`); none means `sh`. */
   shell?: string
   /** A: the row has been `connected`; after that, `prepare` is never repeated (§3.4 retry safety). */
   everConnected?: boolean

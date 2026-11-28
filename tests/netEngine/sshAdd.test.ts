@@ -26,6 +26,8 @@ function a(answers: {
   dial?: () => Promise<number>
   /** A helper refusal to throw for `op`, as the helper channel builds it. */
   refuse?: (op: string) => Error | undefined
+  /** The shell `ssh.run` answers with; none, as a helper from before Windows remotes answers. */
+  shell?: string
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'engine-ssh-'))
   const db = new NetDatabase({ profileDir: dir })
@@ -53,9 +55,12 @@ function a(answers: {
       if (op === 'ssh.run') {
         if (fields.request.op === 'prepare') {
           atPrepare.push(peers.all().map((row) => `${row.state}:${row.source}`).join(','))
-          return { reply: answers.prepare(fields.request) }
+          return { reply: answers.prepare(fields.request), ...(answers.shell ? { shell: answers.shell } : {}) }
         }
-        return { reply: { computer: 'B', os: 'macos', profiles: [{ selector: SELECTOR, label: 'Main', networking: true }] } }
+        return {
+          reply: { computer: 'B', os: 'macos', profiles: [{ selector: SELECTOR, label: 'Main', networking: true }] },
+          ...(answers.shell ? { shell: answers.shell } : {})
+        }
       }
       return {}
     }
@@ -202,6 +207,27 @@ describe('Add over SSH (A)', () => {
       message: sshErrorText('windows_remote_unsupported', 'animatrix', 'me'),
       details: { reason: 'windows_remote_unsupported' }
     })
+  })
+
+  it('keeps the shell the helper learned for B (Windows cmd or PowerShell) and binds the route with it', async () => {
+    for (const shell of ['cmd', 'powershell'] as const) {
+      const s = a({ prepare: () => reply, shell })
+      expect((await s.ssh.profiles('r1', 'b', 'me')).shell).toBe(shell)
+      const row = await s.ssh.connect(choice)
+      expect(row.ssh!.shell).toBe(shell)
+      expect(s.asked.find(([op]) => op === 'peer.addresses.set')![1].routes).toEqual([
+        { route_id: 'r1', selector: SELECTOR, shell }
+      ])
+    }
+    // No shell in the answer (an older helper) is sh.
+    const t = a({ prepare: () => reply })
+    expect((await t.ssh.profiles('r1', 'b', 'me')).shell).toBe('sh')
+  })
+
+  it('says Mousse is missing or too old on B when its launchers are not there', () => {
+    expect(sshErrorText('remote_not_installed', 'pc', 'ana')).toBe(
+      "Mousse isn't installed for ana on pc, or needs an update. Install or update it there, then open it once."
+    )
   })
 
   it('lists only well-formed profile selectors', async () => {
