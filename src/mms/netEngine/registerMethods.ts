@@ -47,7 +47,8 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.access.ask': ['node'],
   'netEngine.access.cancel': ['node'],
   'netEngine.access.answer': ['node', 'request'],
-  'netEngine.access.let': ['node']
+  'netEngine.access.let': ['node'],
+  'netEngine.versionNotice.claim': ['node']
 }
 
 const text = (value: unknown): string | undefined =>
@@ -345,6 +346,7 @@ export function registerNetEngineMethods(
               engine.dismissRelay(p.node, p.destination)
               return engine.status()
             case 'netEngine.access.ask':
+              engine.refuseCutOff(p.node)
               engine.access().ask(p.node)
               return engine.status()
             case 'netEngine.access.cancel':
@@ -354,8 +356,13 @@ export function registerNetEngineMethods(
               await engine.access().answer(p.node, p.request, p.yes, p.access)
               return engine.status()
             case 'netEngine.access.let':
+              engine.refuseCutOff(p.node)
               await engine.access().let(p.node, p.access)
               return engine.status()
+            case 'netEngine.versionNotice.claim':
+              if (typeof p.since !== 'number' || !Number.isFinite(p.since))
+                throw new NetError('bad_request', 'since must be a number.')
+              return engine.claimVersionNotice(p.node, p.since)
           }
         } catch (error) {
           if (error instanceof NetError) {

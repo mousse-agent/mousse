@@ -103,6 +103,8 @@ import {
   relaysStatus,
   type RelayView
 } from './relays'
+import { needsUpdate, readVersionRefusals, refusalMayChange, sameRefusals, type VersionRefusal } from './versionRefusals'
+import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { automatic, handedRoutes, loopbackClass, privateRoute } from './routes'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 import { readTicket } from './ticket'
@@ -209,6 +211,23 @@ export class NetEngineService implements EngineDirectoryPort {
   private relayReading?: Promise<void>
   /** The relay destinations the owner said Not now to, or stopped using: not asked about again (`dismissKey`). */
   private relayDismissed?: Set<string>
+  /**
+   * Each device's last refusal for version (pair-with-IP design §5), by identity, as the helper running now lists
+   * them; undefined until read, and always for a helper without `version-refusals`. Read again after the events that
+   * may change one (`refusalMayChange`), gathered over `relayReadDebounceMs`, one read at a time.
+   */
+  private refusals?: Map<string, VersionRefusal>
+  private refusalTimer?: ReturnType<typeof setTimeout>
+  private refusalReading?: Promise<void>
+  private refusalAgain = false
+  private refusalTicker?: ReturnType<typeof setInterval>
+  /** When the refusals were last read (ms since 1970); 0 before the first read. */
+  private refusalReadAt = 0
+  /**
+   * The devices (identities) whose one "needs a Mousse update" notice a window was given, by the refusal's `since`;
+   * one leaves once its refusal clears or another takes its place.
+   */
+  private versionTold?: Map<string, number>
   constructor(
     private readonly options: {
       profileDir: string
@@ -337,6 +356,8 @@ export class NetEngineService implements EngineDirectoryPort {
 
   /** What Settings → Devices and the picker read: the switch, the helper and each paired computer. */
   status(): NetEngineStatus {
+    // Opening Devices shows the refusals as the helper holds them now, not only as its last event left them.
+    this.freshRefusals()
     const helper = this.helperStatus()
     const text = 'text' in helper ? helper.text : undefined
     const cloudflare = this.cloudflare.status()
@@ -474,6 +495,7 @@ export class NetEngineService implements EngineDirectoryPort {
     const started = this.require()
     const row = started.peers.serving(node)
     if (!row) throw new NetError('bad_request', 'Unknown device.')
+    this.refuseCutOff(node)
     const parsed = parseRelayDestination(destination)
     if (!parsed)
       throw new NetError('bad_request', "That isn't a relay.", { details: { reason: 'bad_destination' } })
@@ -515,6 +537,135 @@ export class NetEngineService implements EngineDirectoryPort {
     } catch {
       // Kept for this run.
     }
+  }
+
+  // ---------------------------------------------------------------- version refusals (pair-with-IP design §5)
+
+  /** `version-notices.json` in this profile's engine folder: the devices whose "needs a Mousse update" notice showed. */
+  private get versionToldPath(): string {
+    return join(this.directory, 'version-notices.json')
+  }
+
+  /** Each device's refusal (by identity) whose notice a window was given to show, by the refusal's `since`. */
+  private told(): Map<string, number> {
+    if (this.versionTold) return this.versionTold
+    const told = new Map<string, number>()
+    try {
+      const value = JSON.parse(readFileSync(this.versionToldPath, 'utf8')) as { told?: unknown }
+      if (value?.told && typeof value.told === 'object' && !Array.isArray(value.told))
+        for (const [identity, since] of Object.entries(value.told as Record<string, unknown>))
+          if (typeof since === 'number' && Number.isFinite(since)) told.set(identity, since)
+    } catch {
+      // None yet.
+    }
+    this.versionTold = told
+    return told
+  }
+
+  private saveTold(): void {
+    try {
+      atomicWriteJsonSync(this.versionToldPath, { told: Object.fromEntries(this.told()) })
+    } catch {
+      // Kept for this run.
+    }
+  }
+
+  /**
+   * A window asks to show the "needs a Mousse update" notice of `node`'s refusal recorded at `since`: only the first
+   * ask for the refusal that holds now is granted, so one window shows it, once, until that refusal clears. An ask for
+   * an older or later refusal is refused.
+   */
+  claimVersionNotice(node: NodeId, since: number): { show: boolean } {
+    const row = this.require().peers.get(node)
+    if (!row || row.state === 'removed') throw new NetError('bad_request', 'Unknown device.')
+    const identity = row.endpoint.toLowerCase()
+    const told = this.told()
+    if (this.refusals?.get(identity)?.since !== since || told.get(identity) === since) return { show: false }
+    told.set(identity, since)
+    this.saveTold()
+    this.changed()
+    return { show: true }
+  }
+
+  /** Forgets the last helper's refusals (a helper stopped, or another took over). */
+  private dropRefusals(): void {
+    this.refusals = undefined
+    if (this.refusalTimer) clearTimeout(this.refusalTimer)
+    this.refusalTimer = undefined
+    if (this.refusalTicker) clearInterval(this.refusalTicker)
+    this.refusalTicker = undefined
+    this.refusalAgain = false
+    this.refusalReadAt = 0
+  }
+
+  /** Reads the refusals every `refusalReadMs` while the helper has them. */
+  private tickRefusals(helper: EngineHelper): void {
+    if (!helper.has('version-refusals') || this.helper !== helper) return
+    this.refusalTicker = setInterval(() => this.rereadRefusals(), engineLimits().refusalReadMs)
+    this.refusalTicker.unref?.()
+  }
+
+  /** Reads the refusals again, when the helper lists `version-refusals`; requests meanwhile share one read. */
+  private rereadRefusals(): void {
+    if (!this.helper?.has('version-refusals')) return
+    if (this.refusalReading) {
+      this.refusalAgain = true
+      return
+    }
+    if (this.refusalTimer) return
+    this.refusalTimer = setTimeout(() => {
+      this.refusalTimer = undefined
+      const helper = this.helper
+      if (!helper) return
+      this.refusalReading = this.readRefusals(helper)
+        .catch(() => undefined)
+        .finally(() => {
+          this.refusalReading = undefined
+          if (!this.refusalAgain) return
+          this.refusalAgain = false
+          this.rereadRefusals()
+        })
+    }, engineLimits().relayReadDebounceMs)
+    this.refusalTimer.unref?.()
+  }
+
+  /**
+   * Both lists carry the refusals: `peers.list` the devices this computer uses, `grants.list` those that use it.
+   * Windows and the bridge hear only of a change: a pairing cut off goes offline for the bridge (its threads hidden,
+   * kept), and one that agreed a version since comes back.
+   */
+  private async readRefusals(helper: EngineHelper): Promise<void> {
+    const [peers, grants] = await Promise.all([helper.request('peers.list'), helper.request('grants.list')])
+    if (this.helper !== helper) return
+    this.refusalReadAt = Date.now()
+    const before = this.refusals
+    const after = readVersionRefusals(peers, grants)
+    // A refusal that cleared takes its notice with it: a later refusal is told again.
+    const told = this.told()
+    const cleared = [...told].filter(([identity, since]) => after.get(identity)?.since !== since).map(([identity]) => identity)
+    for (const identity of cleared) told.delete(identity)
+    if (cleared.length) this.saveTold()
+    if (before && sameRefusals(before, after)) return
+    this.refusals = after
+    this.changed()
+    const started = this.started
+    const bridge = this.options.bridge()
+    if (!started || !bridge) return
+    for (const row of started.peers.all()) {
+      const identity = row.endpoint.toLowerCase()
+      const was = !!before?.has(identity)
+      if (was === after.has(identity)) continue
+      if (!was) bridge.peerOffline(row.localId)
+      else if (this.online(row.localId)) bridge.peerOnline(row.localId)
+    }
+  }
+
+  /**
+   * The refusals as a window last read them: read again when that read is older than `refusalFreshMs` (Settings
+   * opening reads the status), as well as every `refusalReadMs` and after the events that may change one.
+   */
+  private freshRefusals(): void {
+    if (Date.now() - this.refusalReadAt >= engineLimits().refusalFreshMs) this.rereadRefusals()
   }
 
   /** The helper running now, when it has relays. */
@@ -1210,6 +1361,7 @@ export class NetEngineService implements EngineDirectoryPort {
     const started = this.require()
     const row = started.peers.serving(node)
     if (!row) throw new NetError('bad_request', 'Unknown device.')
+    this.refuseCutOff(node)
     const route = this.helper?.speaks(1) ? ownerRoute(address) : toRoute(address)
     if (!route)
       throw new NetError(
@@ -1228,6 +1380,7 @@ export class NetEngineService implements EngineDirectoryPort {
     const started = this.require()
     const row = started.peers.serving(node)
     if (!row) throw new NetError('bad_request', 'Unknown device.')
+    this.refuseCutOff(node)
     if (!(row.addresses ?? []).includes(address)) return
     await this.setAddresses(
       row,
@@ -1243,6 +1396,7 @@ export class NetEngineService implements EngineDirectoryPort {
     const started = this.require()
     const row = started.peers.serving(node)
     if (!row) throw new NetError('bad_request', 'Unknown device.')
+    this.refuseCutOff(node)
     const offered = row.offered ?? []
     if (!offered.length) return
     const addresses = [...(row.addresses ?? [])]
@@ -1397,8 +1551,19 @@ export class NetEngineService implements EngineDirectoryPort {
       await started.pairing.advance(node)
     // A computer only let in is dialled by nothing here: it connects when it uses this one.
     if (row.ways === 'in') return
-    if (!started.sessions.online(node) && this.helper && row.state !== 'consented')
+    // Check again on a pairing cut off for its version: the helper's own dial, at once, even while a session from
+    // before the refusal is still up (and with no connection the other computer dialled standing in for it).
+    if (this.cutOff(node) && this.helper && row.state !== 'consented') {
+      await this.helper.request('dial', { identity: row.endpoint }).catch(() => undefined)
+      this.rereadRefusals()
+      return
+    }
+    if (!started.sessions.online(node) && this.helper && row.state !== 'consented') {
+      // Also Check again on a device cut off for its version: a dial refused for version records the refusal (it
+      // raises no event), one that agrees a version clears it.
       await this.helper.dial(row.endpoint).catch(() => undefined)
+      this.rereadRefusals()
+    }
   }
 
   private devices(): NetEngineDevice[] {
@@ -1466,6 +1631,9 @@ export class NetEngineService implements EngineDirectoryPort {
           return !!cls && cls !== 'forbidden' && cls !== 'lan' && !row.addresses?.includes(address)
         })
         const listsError = this.options.bridge()?.lists.lastError(node)
+        const identity = row.endpoint.toLowerCase()
+        const refusal = this.refusals?.get(identity)
+        const cutOff = needsUpdate(refusal, refusal !== undefined && this.told().get(identity) === refusal.since)
         return {
           node,
           name: row.name,
@@ -1505,7 +1673,8 @@ export class NetEngineService implements EngineDirectoryPort {
               }
             : {}),
           ...(relay ? { relay } : {}),
-          ...(other ? { other } : {})
+          ...(other ? { other } : {}),
+          ...(cutOff ? { needsUpdate: cutOff } : {})
         }
       })
     for (const key of [...this.since.keys()]) if (!seen.has(key)) this.since.delete(key)
@@ -2009,6 +2178,7 @@ export class NetEngineService implements EngineDirectoryPort {
     if (this.relayTimer) clearTimeout(this.relayTimer)
     this.relayTimer = undefined
     this.relayWanted.clear()
+    this.dropRefusals()
     clearInterval(started.timer)
     this.options.net.setEngineAuthorizer(undefined)
     started.sessions.closeAll('stopped')
@@ -2053,6 +2223,7 @@ export class NetEngineService implements EngineDirectoryPort {
   async setPolicy(node: NodeId, change: NodePolicyChange): Promise<{ policy: BridgeNodePolicy }> {
     const started = this.require()
     if (!started.peers.serving(node)) throw new NetError('bad_request', 'Unknown device.')
+    this.refuseCutOff(node)
     let saved: NodePolicy | undefined
     const next = levelAfter(started.rt.policy.get(node), change)
     const applied = await started.roles.change(node, next, () => {
@@ -2114,13 +2285,18 @@ export class NetEngineService implements EngineDirectoryPort {
     this.helper = helper
     this.relayView = undefined
     this.relayWanted.clear()
+    this.dropRefusals()
     helper.onEvent((event) => started.pairing.event(event))
     helper.onEvent((event) => this.relayEvent(helper, event))
+    helper.onEvent((event) => {
+      if (this.helper === helper && refusalMayChange(event)) this.rereadRefusals()
+    })
     helper.onPaused(() => this.changed())
     helper.channel.onClose(() => {
       if (this.helper !== helper) return
       this.helper = undefined
       this.relayView = undefined
+      this.dropRefusals()
       void this.cloudflare.useOrigin(undefined)
     })
     const told = this.selfName()
@@ -2134,6 +2310,10 @@ export class NetEngineService implements EngineDirectoryPort {
     this.changed()
     // Its relays, and what each pairing's relays need (Phase 3); a helper without them says so once.
     if (this.helper === helper) this.rereadRelays()
+    // Which devices are cut off for their version, as this helper recorded them (kept across its restarts).
+    if (this.helper === helper) this.rereadRefusals()
+    // A device refused coming in again within the helper's hour between notices raises no event: read on a timer too.
+    if (this.helper === helper) this.tickRefusals(helper)
     if (this.helper === helper) await this.keepShownReach(helper).catch(() => undefined)
     // A helper that takes a managed tunnel lists `managed-tunnel`; `managed_tunnel` in its hello says its local
     // origin runs now (false when the port could not bind).
@@ -2345,15 +2525,39 @@ export class NetEngineService implements EngineDirectoryPort {
   name(node: NodeId): string | undefined {
     return this.started?.peers.get(node)?.name
   }
+  /**
+   * Which computer needs a Mousse update while `node` is cut off for its version (pair-with-IP design §5): nothing
+   * of it is used then, not even a session that outlived the refusal, until a connection agrees a version.
+   */
+  cutOff(node: NodeId): 'there' | 'here' | undefined {
+    const row = this.started?.peers.get(node)
+    return row ? needsUpdate(this.refusals?.get(row.endpoint.toLowerCase()), false)?.who : undefined
+  }
+  /**
+   * A device cut off for its version is disabled: what it may do here, its routes and the other direction are not
+   * changed until a connection agrees a version (a dialog opened before the refusal saves nothing). Remove, its update
+   * and Check again stay.
+   */
+  refuseCutOff(node: NodeId): void {
+    const who = this.cutOff(node)
+    if (!who) return
+    const name = this.started?.peers.get(node)?.name ?? 'The other computer'
+    throw new NetError(
+      'incompatible_peer',
+      who === 'here' ? `Update Mousse here to use ${name}.` : `${name} needs a Mousse update.`,
+      { details: { reason: 'needs_update' } }
+    )
+  }
   client(node: NodeId): BridgeClient {
     const started = this.started
     if (!started || !started.peers.serving(node)) throw new NetError('peer_offline')
+    if (this.cutOff(node)) throw new NetError('incompatible_peer')
     this.renewIfDue()
     return started.sessions.client(node)
   }
   online(node: NodeId): boolean {
     const started = this.started
-    return !!started && !!started.peers.serving(node) && started.sessions.online(node)
+    return !!started && !!started.peers.serving(node) && started.sessions.online(node) && !this.cutOff(node)
   }
   /** Binds a stream this computer reads to the pairing it reads it from (in the caller's transaction). */
   bind(stream: StreamId, node: NodeId): void {

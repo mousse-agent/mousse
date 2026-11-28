@@ -8,6 +8,7 @@ import { qualifyId } from '../../shared/threadRef'
 import { useAppStore } from '../stores/appStore'
 import { lastSeenLabel, type Device } from './netDevices'
 import { profileBound, readWhenIdleAfterBinding } from './readAfterBinding'
+import { tellCutOff } from './versionNotices'
 
 /**
  * One of the user's other computers, as a thread's row names it: the row carries `node`, and this is what
@@ -121,6 +122,8 @@ export function refreshComputers(): Promise<void> {
       // A profile switch during the read: the answer is for the other profile.
       if (useAppStore.getState().profileId !== profile) return
       useComputersStore.setState({ loaded: true, routed, byNode: computersFrom(nodes), devices: nodes })
+      // A device found cut off for its version has its one notice, wherever the window is.
+      if (engine?.on) tellCutOff(engine.devices ?? [])
     } catch {
       // Without an answer the last list stays; a window with Net off has none to begin with.
       if (useAppStore.getState().profileId === profile && !useComputersStore.getState().loaded)

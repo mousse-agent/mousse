@@ -27,7 +27,7 @@ export interface PaneEntry {
   /** How it is connected now, after the state in the detail's header; the tooltip lists its addresses. */
   how?: string
   howDetail?: string
-  /** Signed out, a device that is not nearby is quiet. */
+  /** Dimmed: signed out, a device that is not nearby; a device cut off for its version. */
   quiet?: boolean
   /** What waits on this owner in its detail, most pressing first: its row shows the first word. */
   needs?: PaneNeed[]

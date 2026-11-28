@@ -54,6 +54,7 @@ import { hostLabel, removalText, removalTitle } from './plusRows'
 import {
   askedLine,
   directionOf,
+  needsUpdateHint,
   engineAddresses,
   engineSideRow,
   engineSides,
@@ -263,6 +264,21 @@ export function EngineDevicesSection() {
     void useMousseIdStore.getState().refresh()
   })
 
+  // A device cut off for its version is disabled: what was open for it (its limits, Works on threads, letting it use
+  // this computer, an update request) closes. Remove and its update stay.
+  const cutOffKey = (status?.devices ?? [])
+    .filter((device) => device.needsUpdate)
+    .map((device) => device.node)
+    .join(' ')
+  useEffect(() => {
+    if (!cutOffKey) return
+    const cut = new Set(cutOffKey.split(' '))
+    setLimits((open) => (open && cut.has(open.node) ? undefined : open))
+    setGranting((open) => (open && cut.has(open.node) ? undefined : open))
+    setLetting((open) => (open && cut.has(open.node) ? undefined : open))
+    setUpdating((open) => (open && cut.has(open.node) ? undefined : open))
+  }, [cutOffKey])
+
   if (!status && !v1) return null
   const notInBuild = !status || status.helper.state === 'not_in_build'
   const switchOn = !!status?.enabled || v1On
@@ -308,11 +324,11 @@ export function EngineDevicesSection() {
     name: string,
     device: Device | undefined,
     record?: SshRecordView,
-    canAsk = false
+    canAsk = false,
+    refused = false
   ): RowUpdate | undefined => {
-    const way = computerUpdateWay(device, { name, current, record, canAsk })
-    if (!way || !device) return undefined
-    if (way.kind === 'ssh')
+    const way = computerUpdateWay(device, { name, current, record, canAsk, refused })
+    if (way?.kind === 'ssh')
       return {
         control: (
           <button
@@ -327,6 +343,10 @@ export function EngineDevicesSection() {
           </button>
         )
       }
+    // Cut off for its version: where to update it; Check again is on its row.
+    if (way?.kind === 'there' && refused)
+      return { hint: <span className="device-update-hint" title={way.detail}>{way.hint}</span> }
+    if (!way || !device) return undefined
     if (way.kind === 'request')
       return {
         control: (
@@ -372,7 +392,7 @@ export function EngineDevicesSection() {
     }
   }
 
-  /** The detail's first section: its platform and Mousse version, and its update when it is behind. */
+  /** The detail's first section: its platform and Mousse version, and its update when it is behind or cut off. */
   const versionGroup = (name: string, device: Device | undefined, update: RowUpdate | undefined) => {
     const tag = device ? versionTag({ ...device, name }, current) : undefined
     const words = [device?.platform && (PLATFORM_WORDS[device.platform] ?? device.platform), device?.version].filter(Boolean)
@@ -424,12 +444,14 @@ export function EngineDevicesSection() {
         : connected
           ? { short: 'Connected', line: 'Connected', tone: 'ok' }
           : { short: first.line, line: first.line, detail: first.detail, tone: 'off' }
-    const relay = device.relay
     const removingNow = device.state === 'removing'
+    // Cut off for its version (pair-with-IP design §5): disabled, keeping only Check again, its update and Remove.
+    const cutOff = removingNow ? undefined : device.needsUpdate
+    const relay = cutOff ? undefined : device.relay
 
     // The menu: the missing direction first, then Retry, relays, and the ways to remove it.
     const menu: RowMenuItem[] = []
-    const other = sides.length === 1 ? otherWayItem(device, sides[0]!) : undefined
+    const other = sides.length === 1 && !cutOff ? otherWayItem(device, sides[0]!) : undefined
     if (other)
       menu.push({
         ...other,
@@ -439,6 +461,14 @@ export function EngineDevicesSection() {
       })
     if (views.some(({ view }) => view.actions.includes('retry')))
       menu.push({ label: 'Retry', action: 'engine-retry', onSelect: () => void action('netEngine.retry', { node: device.node }) })
+    const checkAgainNow = () => void action('netEngine.retry', { node: device.node })
+    if (views.some(({ view }) => view.actions.includes('check')))
+      menu.push({
+        label: 'Check again',
+        action: 'engine-check',
+        title: `Connects to ${device.name} now, to see whether it was updated.`,
+        onSelect: checkAgainNow
+      })
     // An allowed relay route can be taken back (Phase 3 §B.11), before Remove.
     if (sides.includes('out') && !removingNow)
       for (const destination of relay?.allowed ?? [])
@@ -468,8 +498,8 @@ export function EngineDevicesSection() {
       menu.push({ label: 'Remove…', danger: true, action: 'engine-remove', onSelect: () => setRemoving({ device }) })
 
     // Notes that need this owner: an older Mousse, offered routes and relays, an ask for the other direction.
-    const asked = askedLine(device)
-    const notes = [
+    const asked = cutOff ? undefined : askedLine(device)
+    const notes = (cutOff ? [] : [
       device.olderApp && sides.includes('out') && (
         <SettingsRow
           key="older-out"
@@ -559,7 +589,7 @@ export function EngineDevicesSection() {
           }
         />
       )
-    ].filter(Boolean)
+    ]).filter(Boolean)
 
     const relayNotes = sides.includes('out') && (relay?.stale || relay?.limit) && (
       <span className="engine-row-line">
@@ -577,7 +607,8 @@ export function EngineDevicesSection() {
       </span>
     )
     // The same notes as words for its row, so a device that needs this owner shows it unselected too.
-    const needs: PaneNeed[] = [
+    // Cut off, its status says Needs update and nothing else is asked of this owner.
+    const needs: PaneNeed[] = cutOff ? [] : [
       ...(device.offered?.length ? [{ word: 'New route', line: `${device.name} offered new ways to reach it` }] : []),
       ...(device.relay?.offered ?? []).map((destination) => ({
         word: 'New relay',
@@ -593,7 +624,35 @@ export function EngineDevicesSection() {
     ]
     const how = connected ? engineWhere(device) : undefined
     const inView = views.find(({ side }) => side === 'in')?.view
-    const showsAccess = !!inView?.actions.includes('access')
+    const showsAccess = !cutOff && !!inView?.actions.includes('access')
+    // Its update when cut off: which computer to update, with Check again where this computer dials it. No SSH
+    // update: an SSH install record names the old networking's device id, and nothing proves it is this pairing's
+    // computer.
+    const cutOffUpdate = (): RowUpdate | undefined => {
+      if (!cutOff) return undefined
+      const update: RowUpdate | undefined =
+        cutOff.who === 'here'
+          ? { hint: <span className="device-update-hint">{needsUpdateHint(device.name, 'here')}</span> }
+          : updateView(device.name, node, undefined, false, true)
+      const checks = views.some(({ view }) => view.actions.includes('check'))
+      return update?.control || !checks
+        ? update
+        : {
+            ...update,
+            control: (
+              <button
+                type="button"
+                className="settings-icon-btn"
+                disabled={busy}
+                title={`Check again whether ${device.name} was updated`}
+                aria-label={`Check again whether ${device.name} was updated`}
+                onClick={checkAgainNow}
+              >
+                <RefreshCw size={14} />
+              </button>
+            )
+          }
+    }
     // Its level, where the panel does not show it. The old networking calls a one-way pairing disconnected, as this
     // computer never dials it; the engine's own state says whether it is connected.
     const level =
@@ -609,13 +668,16 @@ export function EngineDevicesSection() {
       status: statusView,
       how,
       howDetail: engineAddresses(device),
+      ...(cutOff ? { quiet: true } : {}),
       needs,
       menu,
       detail: (
         <>
           {notes.length > 0 && <SettingsGroup className="prov-editor-section">{notes}</SettingsGroup>}
-          {versionGroup(device.name, node, updateView(device.name, node, undefined, sides.includes('out')))}
-          {sides.includes('out') && !removingNow && (
+          {cutOff
+            ? versionGroup(device.name, node, cutOffUpdate())
+            : versionGroup(device.name, node, updateView(device.name, node, undefined, sides.includes('out')))}
+          {sides.includes('out') && !removingNow && !cutOff && (
             <SettingsGroup title="Routes" description={relayNotes || undefined} className="prov-editor-section">
               <RoutesPanel device={device} busy={busy} action={action} onChanged={reloadAll} />
             </SettingsGroup>

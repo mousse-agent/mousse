@@ -46,7 +46,12 @@ describe('a device row (§5.2)', () => {
     ['removing', { state: 'removing', online: false }, 'Removing…', []],
     ['offline', { state: 'offline', online: false }, "Can't reach it · open Mousse on Studio", ['access', 'address', 'retry', 'remove']],
     ['one direction up, within the bound', { state: 'connecting' }, 'Connecting…', ['access', 'address', 'retry', 'remove']],
-    ['one direction up, past the bound', { state: 'connecting', unreachable: 'in' }, "Studio can't reach this computer", ['retry', 'remove']]
+    ['one direction up, past the bound', { state: 'connecting', unreachable: 'in' }, "Studio can't reach this computer", ['retry', 'remove']],
+    // Cut off for its version: disabled, keeping Check again and Remove, whatever else its row would say.
+    ['cut off for its version', { needsUpdate: { who: 'there', since: 1 }, state: 'offline', online: false }, 'Needs update', ['check', 'remove']],
+    ['cut off, this computer is older', { needsUpdate: { who: 'here', since: 1 }, unreachable: 'out', online: false }, 'Needs update', ['check', 'remove']],
+    ['cut off, it only uses this computer', { needsUpdate: { who: 'there', since: 1 }, direction: 'in', state: 'offline', online: false }, 'Needs update', ['remove']],
+    ['cut off while removing', { needsUpdate: { who: 'there', since: 1 }, state: 'removing', online: false }, 'Removing…', []]
   ]
   it.each(rows)('%s', (_name, fields, line, actions) => {
     const view = engineRow(device({ node: 'n1', ...fields }))
@@ -55,7 +60,7 @@ describe('a device row (§5.2)', () => {
   })
 
   it('gives every failing state its fix as a tooltip', () => {
-    for (const [, fields] of rows.filter(([, , , actions]) => actions.includes('retry')))
+    for (const [, fields] of rows.filter(([, , , actions]) => actions.includes('retry') || actions.includes('check')))
       expect(engineRow(device({ node: 'n1', ...fields })).detail ?? '').not.toBe('')
   })
 })
@@ -81,6 +86,12 @@ describe('a direction of a pairing', () => {
     const away = device({ node: 'n1', direction: 'in', state: 'offline', online: false })
     expect(engineSideRow(away, 'in')).toMatchObject({ line: 'Not connected now' })
     expect(engineSideRow(away, 'in').warn).toBeUndefined()
+  })
+
+  it('says Needs update on both directions of a device cut off for its version, Check again only where this computer dials', () => {
+    const cut = device({ node: 'n1', needsUpdate: { who: 'there', since: 1 }, state: 'offline', online: false })
+    expect(engineSideRow(cut, 'out')).toMatchObject({ line: 'Needs update', warn: true, actions: ['check', 'remove'] })
+    expect(engineSideRow(cut, 'in')).toMatchObject({ line: 'Needs update', warn: true, actions: ['remove'] })
   })
 
   it('says on Can use when a level change is not applied yet, keeping Access and Remove', () => {
@@ -464,6 +475,64 @@ describe('Settings → Devices, new networking', () => {
     expect(detailText()).toContain('Studio runs an older Mousse')
     expect(detailText()).toContain('To use it from here, add it from this computer.')
     expect(rowText('n1')).toContain('Uses this computer')
+  })
+
+  it('disables a device cut off for its version: Needs update, where to update it, Check again and Remove only', async () => {
+    const d = daemon({
+      devices: [
+        device({
+          node: 'n1',
+          state: 'offline',
+          online: false,
+          needsUpdate: { who: 'there', since: 1 },
+          offered: ['tcp://10.0.0.9:47100'],
+          other: { offer: 'let' }
+        })
+      ]
+    })
+    await mount()
+    expect(rowText('n1')).toContain('Needs update')
+    expect(detailText()).toContain('Update Mousse on Studio to use it from here.')
+    // No remote actions: no routes, no access, no offered routes, no other direction.
+    expect(host.querySelector('[aria-label="Routes to Studio"]')).toBeNull()
+    expect(detailText()).not.toContain('Access from this device')
+    expect(detailText()).not.toContain('offered new ways')
+    expect(await menuItems('Studio')).toEqual(['Check again', 'Remove…'])
+    await click(button('Check again whether Studio was updated'))
+    expect(d.called('netEngine.retry')).toEqual([{ node: 'n1' }])
+  })
+
+  it('closes the Limits dialog of a device when it is found cut off for its version', async () => {
+    const d = daemon({ devices: [device({ node: 'n1' })] })
+    await mount()
+    await click(button('Limits…'))
+    const limits = () => document.body.textContent?.includes('Limits for Studio on this computer')
+    expect(limits()).toBe(true)
+    await d.change({ devices: [device({ node: 'n1', state: 'offline', online: false, needsUpdate: { who: 'there', since: 1 } })] })
+    expect(limits()).toBe(false)
+  })
+
+  it('offers no SSH update for a device cut off for its version, as no SSH install record is proven to be it', async () => {
+    // An install record names the old networking's device id, assigned apart from the pairing's: even one that reads
+    // the same id is not proof it is the same computer.
+    daemon(
+      { devices: [device({ node: 'n1', state: 'offline', online: false, needsUpdate: { who: 'there', since: 1 } })] },
+      {
+        'net.transport.list': () => ({ manifests: [] }),
+        'net.ssh.list': () => ({ records: [{ id: 'ssh1', node: 'n1', owner: 'managed', endpoint: 'studio', phase: 'done' }] })
+      }
+    )
+    await mount()
+    expect(button(/Update…/)).toBeFalsy()
+    expect(detailText()).toContain('Update Mousse on Studio to use it from here.')
+  })
+
+  it('says to update this computer when the device runs the newer Mousse', async () => {
+    daemon({ devices: [device({ node: 'n1', state: 'offline', online: false, needsUpdate: { who: 'here', since: 1 } })] })
+    await mount()
+    expect(rowText('n1')).toContain('Needs update')
+    expect(detailText()).toContain('Update Mousse here to use Studio.')
+    expect(detailText()).not.toContain('Update Mousse on Studio')
   })
 
   it('shows its routes, the one in use first, adds a Tailscale fallback that the add allows, and removes a route', async () => {

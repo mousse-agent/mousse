@@ -362,7 +362,7 @@ export class MemoryMonitor {
     if (toLog.length) {
       // The full breakdown; the sample has the children's memory already.
       this.log.append({ type: 'breach', t: sample.t, breaches: toLog, sample, detail: this.detail ?? readHeapDetail() })
-      logWarn('memory', `out of bounds: ${toLog.map((breach) => breach.summary).join('; ')}`)
+      logWarn('memory', `above target: ${toLog.map((breach) => breach.summary).join('; ')}`)
     }
     // One notice a day, whatever its kind.
     if (!this.pending && noticeDue(this.state.noticeShownAt, sample.t)) {
