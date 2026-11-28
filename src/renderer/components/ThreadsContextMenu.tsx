@@ -22,7 +22,15 @@ import {
   PinRegular,
   RotateCcw,
   ShieldCheck,
-  Clock
+  Clock,
+  Bell,
+  BellOff,
+  Info,
+  Lock,
+  Mail,
+  MailOpen,
+  Pause,
+  Play
 } from '../lib/icons'
 import { EXPIRY_PRESETS } from '../../shared/threadExpiry'
 import { FloatingPortal, FLOATING_LAYER_Z_INDEX } from '../lib/floatingLayer'
@@ -397,14 +405,67 @@ export function ThreadsTabMenu({ x, y, onClose, onHideAllBotThreads }: { x: numb
   )
 }
 
-/** A bot's menu in the Bots list: hide or show its checklist in its chat. */
-export function BotRowMenu({ x, y, botName, checklistHidden, onClose, onToggleChecklist }: { x: number; y: number; botName: string; checklistHidden: boolean; onClose: () => void; onToggleChecklist: () => void }) {
+/** What a bot's row menu does: its marks on this computer, its checklist, and (this computer's bots) its setup. */
+export type BotRowAction = 'pin' | 'read' | 'unread' | 'mute' | 'hide' | 'checklist' | 'about' | 'rename' | 'look' | 'pause' | 'private' | 'delete'
+
+export interface BotRowMenuTarget {
+  name: string
+  pinned: boolean
+  /** It has unread messages or is marked unread: the menu offers Mark as read. */
+  unread: boolean
+  /** Mark as read needs the bot's computer: its unread messages are counted there. */
+  readNeedsComputer: boolean
+  muted: boolean
+  hidden: boolean
+  checklistHidden: boolean
+  /** The bot's computer, when it is another one and offline now: what needs it is greyed out and says so. */
+  offlineComputer?: string
+  /** This computer's bots: what is set up on the bot itself. A bot of another computer is set up there. */
+  setup?: { paused: boolean; canWall: boolean }
+}
+
+/**
+ * A bot's menu in the Bots list (right-click or the menu key): Pin, Mark as read or unread, Mute and Hide, kept on this
+ * computer and working while the bot's computer is offline (except Mark as read of messages counted there); its
+ * checklist; and for this computer's bots, About, Rename, Change look, Pause or Resume, Make private and Delete.
+ */
+export function BotRowMenu({ x, y, target, onClose, onAction }: { x: number; y: number; target: BotRowMenuTarget; onClose: () => void; onAction: (action: BotRowAction) => void }) {
+  const item = (action: BotRowAction, icon: ReactNode, label: string, options: { title?: string; off?: string; danger?: boolean } = {}) => (
+    <button
+      type="button"
+      className={`threads-context-menu-item${options.danger ? ' threads-context-menu-item-danger' : ''}`}
+      role="menuitem"
+      aria-disabled={options.off ? true : undefined}
+      title={options.off ?? options.title}
+      onClick={() => { if (!options.off) onAction(action) }}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  )
+  const away = target.offlineComputer ? `${target.offlineComputer} is offline` : undefined
+  const setup = target.setup
   return (
-    <MenuFrame x={x} y={y} label={`${botName} menu`} onClose={onClose}>
-      <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onToggleChecklist}>
-        {checklistHidden ? <Eye /> : <EyeOff />}
-        <span>{checklistHidden ? 'Show checklist' : 'Hide checklist'}</span>
-      </button>
+    <MenuFrame x={x} y={y} label={`${target.name} menu`} onClose={onClose}>
+      {item('pin', target.pinned ? <PinOffRegular /> : <PinRegular />, target.pinned ? 'Unpin' : 'Pin')}
+      {target.unread
+        ? item('read', <MailOpen />, 'Mark as read', { off: target.readNeedsComputer ? away : undefined })
+        : item('unread', <Mail />, 'Mark as unread')}
+      {item('mute', target.muted ? <Bell /> : <BellOff />, target.muted ? 'Unmute notifications' : 'Mute notifications')}
+      {item('hide', target.hidden ? <Eye /> : <EyeOff />, target.hidden ? 'Unhide' : 'Hide', { title: target.hidden ? undefined : 'Filter → Show hidden brings it back' })}
+      {item('checklist', target.checklistHidden ? <Eye /> : <EyeOff />, target.checklistHidden ? 'Show checklist' : 'Hide checklist')}
+      {setup && (
+        <>
+          <Separator />
+          {item('about', <Info />, 'About this bot')}
+          {item('rename', <EditRegular />, 'Rename')}
+          {item('look', <Image />, 'Change look')}
+          {item('pause', setup.paused ? <Play /> : <Pause />, setup.paused ? 'Resume' : 'Pause')}
+          {setup.canWall && item('private', <Lock />, 'Make private', { title: 'Only this computer reaches it. Change it in About.' })}
+          <Separator />
+          {item('delete', <DeleteRegular />, 'Delete bot', { danger: true })}
+        </>
+      )}
     </MenuFrame>
   )
 }

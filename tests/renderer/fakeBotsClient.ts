@@ -7,6 +7,7 @@ import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../src/s
 import type { BotMemoryEntry } from '../../src/shared/bots/personal/memory'
 import type { BotDevicesView } from '../../src/shared/bots/personal/deviceAccess'
 import type { BotReplyEvent } from '../../src/shared/bots/personal/methods'
+import { noMarks, withMark, type BotMarksByRef } from '../../src/shared/bots/personal/marks'
 import type { PersonalBotsClient, PersonalBotsEvents } from '../../src/renderer/services/personalBotsClient'
 
 export const AT = '2026-11-07T09:00:00.000Z'
@@ -33,9 +34,13 @@ export interface FakeBots {
   memory: Record<string, BotMemoryEntry[]>
   /** Each bot's Devices (`bots.devices.get`); a bot without one reaches this computer alone and has no other device to pick. */
   devices: Record<string, BotDevicesView>
+  /** The marks this computer keeps on bots (`bots.marks.list`), by bot ref. */
+  marks: BotMarksByRef
   calls: Array<[string, ...unknown[]]>
   emit: {
     changed(botId: string): void
+    /** The marks changed (`bots:changed` with `marks`), from another window of this computer. */
+    marks(): void
     /** The window's service connection was opened again (`bots:changed` with `reread`); with a bot, its chat stream did. */
     reread(botId?: string): void
     /** The other computers' bots changed (`bots:changed` with `remote`). */
@@ -48,8 +53,8 @@ export interface FakeBots {
   }
 }
 
-export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, BotChatMessage[]>; details?: Record<string, BotDetail>; memory?: Record<string, BotMemoryEntry[]> } = {}): FakeBots {
-  const listeners = { changed: new Set<(e: { botId?: string; reread?: boolean; remote?: boolean }) => void>(), message: new Set<(e: { botId: string; message: BotChatMessage }) => void>(), activity: new Set<(e: { botId: string; activationId: string; chip: BotChip | null; status?: string }) => void>(), reply: new Set<(e: BotReplyEvent) => void>() }
+export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, BotChatMessage[]>; details?: Record<string, BotDetail>; memory?: Record<string, BotMemoryEntry[]>; marks?: BotMarksByRef } = {}): FakeBots {
+  const listeners = { changed: new Set<(e: { botId?: string; reread?: boolean; remote?: boolean; marks?: boolean }) => void>(), message: new Set<(e: { botId: string; message: BotChatMessage }) => void>(), activity: new Set<(e: { botId: string; activationId: string; chip: BotChip | null; status?: string }) => void>(), reply: new Set<(e: BotReplyEvent) => void>() }
   const fake: FakeBots = {
     bots: [...(initial.bots ?? [])],
     chats: { ...(initial.chats ?? {}) },
@@ -57,6 +62,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     live: {},
     memory: { ...(initial.memory ?? {}) },
     devices: {},
+    marks: { ...(initial.marks ?? {}) },
     calls: [],
     client: undefined as unknown as PersonalBotsClient,
     events: {
@@ -69,6 +75,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     },
     emit: {
       changed: (botId) => { for (const cb of listeners.changed) cb({ botId }) },
+      marks: () => { for (const cb of listeners.changed) cb({ marks: true }) },
       reread: (botId) => { for (const cb of listeners.changed) cb({ reread: true, ...(botId ? { botId } : {}) }) },
       remote: () => { for (const cb of listeners.changed) cb({ remote: true }) },
       reply: (event) => { for (const cb of listeners.reply) cb(event) },
@@ -194,6 +201,13 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       const entry = { ...old, version: old.version + 1, ref: `${old.id}v${old.version + 1}`, text, by: 'you said' as const }
       fake.memory[botId]![at] = entry
       return { ...entry }
+    })),
+    marks: vi.fn(() => record('marks', [], () => structuredClone(fake.marks))),
+    setMark: vi.fn((botId, mark, on) => record('setMark', [botId, mark, on], () => {
+      const next = withMark(fake.marks[botId] ?? {}, mark, on, AT)
+      if (noMarks(next)) delete fake.marks[botId]
+      else fake.marks[botId] = next
+      return structuredClone(fake.marks)
     })),
     devices: vi.fn((botId) => record('devices', [botId], () => fake.devices[botId] ?? { access: { mode: 'this_computer' as const }, devices: [] })),
     setDevices: vi.fn((botId, access) => record('setDevices', [botId, access], () => {

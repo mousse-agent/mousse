@@ -133,6 +133,8 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
   async openBot(botId) {
     if (botId !== get().activeBotId && !await confirmNavigation()) return
     useAppStore.getState().setThreadsSidebarView('chats')
+    // Marked unread lasts until the chat is opened here.
+    if (useBotsStore.getState().marks[botId]?.unread) void useBotsStore.getState().setMark(botId, 'unread', false)
     const show = () => {
       if (botId !== get().activeBotId) useBotsStore.setState({ aboutOpen: false, error: null })
       set({ activeBotId: botId, openingBotId: null, botThread: null, activeChatId: null, conversation: null, error: null, errorSource: null, loading: false })

@@ -1,4 +1,6 @@
 import { repositoryIdentitiesFor } from '../bridge/remote/repositoryIdentity'
+import { BOT_MARK_KINDS, type BotMark } from '../../shared/bots/personal/marks'
+import { isBotRef } from '../bots/marks/BotMarksStore'
 import { requestWorkScope } from '../execution/workScope'
 import { agentMessageWords } from '../../shared/agentMessageWords'
 import { expiryRefusal, isThreadExpired } from '../../shared/threadExpiry'
@@ -2181,7 +2183,39 @@ function requestFolders(ctx: HandlerContext, params: unknown, allowPath: boolean
   return folders
 }
 
+/**
+ * `bots.marks.*`: what this computer marks on the bots it lists (pin, hide, mute, marked unread), its own bots and the
+ * other computers' alike. Kept here and never routed, so a qualified bot id names the bot, not where the call goes. Only
+ * a window on this computer reads or sets them.
+ */
+function botMarksMethod(ctx: HandlerContext, method: 'bots.marks.list' | 'bots.marks.set', params: unknown): unknown {
+  const p = isObject(params) ? params : {}
+  if (ctx.connection?.clientType !== 'gui' || ctx.connection.bridgeCaller)
+    throw new DomainRpcError('forbidden', 'Only a Mousse window on this computer marks bots.')
+  if (method === 'bots.marks.list') {
+    rejectUnknownKeys(p, ['profileId'])
+    // A bot of this computer that is gone for good takes its marks with it.
+    const engine = ctx.mms.personalBots
+    if (engine) ctx.mms.botMarks.dropLocal((botId) => engine.botName(botId) !== undefined)
+    return { marks: ctx.mms.botMarks.list() }
+  }
+  rejectUnknownKeys(p, ['profileId', 'botId', 'mark', 'on'])
+  const botId = asString(p.botId, 'botId', 256)
+  if (!isBotRef(botId)) throw new DomainRpcError('invalid_params', 'botId is not a bot.')
+  if (!BOT_MARK_KINDS.includes(p.mark as BotMark)) throw new DomainRpcError('invalid_params', 'mark is not one of pinned, hidden, muted or unread.')
+  if (typeof p.on !== 'boolean') throw new DomainRpcError('invalid_params', 'on must be true or false.')
+  // Another computer's bot is marked only while it is listed here: a mark on one already gone would never be dropped.
+  // Clearing a mark is always allowed.
+  if (p.on && parseQualifiedId(botId) && !(ctx.mms.botRouter?.list(ctx) ?? []).some((bot) => bot.id === botId))
+    throw new DomainRpcError('bot_not_found', 'That bot is not on your other computers any more.', { botId })
+  const marks = ctx.mms.botMarks.set(botId, p.mark as BotMark, p.on)
+  // This computer's other windows show the change too.
+  ctx.mms.events.emit({ channel: 'protocol:event', data: { type: 'bots.changed', data: { marks: true } } })
+  return { marks }
+}
+
 async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+  if (method === 'bots.marks.list' || method === 'bots.marks.set') return botMarksMethod(ctx, method, params)
   // A call that names a thread (or project) of another of the user's computers goes to that computer.
   // This runs inside the profile's request barrier, so such calls drain with the profile.
   // A bot of another computer (a qualified `botId`, or a computer named by `node`) is that computer's: its call goes

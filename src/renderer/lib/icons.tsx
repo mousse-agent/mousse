@@ -119,6 +119,9 @@ import MoreHorizontalIcon from '@hugeicons/core-free-icons/MoreHorizontalIcon'
 import MoreVerticalIcon from '@hugeicons/core-free-icons/MoreVerticalIcon'
 import NetworkIcon from '@hugeicons/core-free-icons/NetworkIcon'
 import Notification02Icon from '@hugeicons/core-free-icons/Notification02Icon'
+import NotificationOff02Icon from '@hugeicons/core-free-icons/NotificationOff02Icon'
+import Mail01Icon from '@hugeicons/core-free-icons/Mail01Icon'
+import MailOpen01Icon from '@hugeicons/core-free-icons/MailOpen01Icon'
 import PaletteIcon from '@hugeicons/core-free-icons/PaletteIcon'
 import TextFontIcon from '@hugeicons/core-free-icons/TextFontIcon'
 import TextWrapIcon from '@hugeicons/core-free-icons/TextWrapIcon'
@@ -222,6 +225,9 @@ export const ArrowUpRight = /* @__PURE__ */ createIcon('ArrowUpRight', ArrowUpRi
 export const CircleArrowUp = /* @__PURE__ */ createIcon('CircleArrowUp', CircleArrowUp02Icon)
 export const AtSign = /* @__PURE__ */ createIcon('AtSign', AtIcon)
 export const Bell = /* @__PURE__ */ createIcon('Bell', Notification02Icon)
+export const BellOff = /* @__PURE__ */ createIcon('BellOff', NotificationOff02Icon)
+export const Mail = /* @__PURE__ */ createIcon('Mail', Mail01Icon)
+export const MailOpen = /* @__PURE__ */ createIcon('MailOpen', MailOpen01Icon)
 export const BookOpen = /* @__PURE__ */ createIcon('BookOpen', BookOpen01Icon)
 export const Bot = /* @__PURE__ */ createIcon('Bot', Robot01Icon)
 export const Braces = /* @__PURE__ */ createIcon('Braces', SourceCodeIcon)
