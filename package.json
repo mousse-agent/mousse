@@ -83,6 +83,7 @@
     "qrcode-generator": "^1.5.2",
     "shiki": "^3.23.0",
     "simple-git": "^3.27.0",
+    "smol-toml": "1.9.1",
     "ssh2": "1.17.0",
     "streamdown": "^2.6.0",
     "tailwind-merge": "^3.6.0",

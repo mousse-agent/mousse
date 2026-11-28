@@ -59,11 +59,12 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
-import { compareVersions, isPackageOwner, privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type NamingOrigin, type OneShotTask } from './driver'
+import { compareVersions, isPackageOwner, methodLabelOf, privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type NamingOrigin, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, ownedLaunchEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
 import { ClaudeSettingsError, claudeSettingsPath, readClaudeSettingsFile, writeClaudeSetting } from './vendors/claude/claudeSettingsFile'
 import { SharedSettingsConsentStore } from './sharedSettingsConsent'
 import type { SetVendorSettingInput, VendorSettingsView } from '../../shared/harness/vendorSettings'
+import type { CodexModelRoute, ModelRouteView, SetModelRouteInput } from '../../shared/harness/modelRoute'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { LatestVersionCache, type LatestVersionSource } from './latest'
 import { RuntimeFactsStore } from './facts'
@@ -505,6 +506,14 @@ export interface HarnessInstances {
    * the masked view.
    */
   setVendorSetting(input: SetVendorSettingInput): Promise<VendorSettingsView>
+  /** Codex: the model provider the entry runs on, or the one its config.toml offers; undefined for other agents. */
+  modelRoute(instanceId: string): ModelRouteView | undefined
+  /**
+   * Agrees to the provider config.toml offers (its table and base URL, as the person saw them), or
+   * `null` for ChatGPT again. Every process and token on the old route ends. Refused for an entry
+   * Mousse manages, and when the file no longer offers what was agreed to.
+   */
+  setModelRoute(input: SetModelRouteInput): Promise<ModelRouteView>
   refreshModels(instanceId: string): Promise<InstanceSnapshot>
   /**
    * Refreshes the model list of every enabled instance (Settings → Providers → "Refresh models"),
@@ -1076,6 +1085,8 @@ export class Harness implements HarnessGateway {
         return target ? this.readVendorSettings(target) : undefined
       },
       setVendorSetting: (input) => this.setVendorSetting(input),
+      modelRoute: (instanceId) => this.record(instanceId, { allowDisabled: true }).runtime.modelRoute?.(),
+      setModelRoute: (input) => this.setModelRoute(input),
       refreshModels: (instanceId) => this.refreshModels(instanceId),
       refreshAllModels: () => this.refreshAllModels(),
       move: (fromInstanceId, toInstanceId, options) => this.move(fromInstanceId, toInstanceId, options),
@@ -2929,7 +2940,7 @@ export class Harness implements HarnessGateway {
         state: auth.state,
         // Keyed by its salted hash: the vendor's account id never leaves the gateway.
         ...(auth.account?.label ? { account: { id: auth.subject ? this.counters.accountIdentity(record.env.homeId, auth.subject) : 'unknown', label: auth.account.label } } : {}),
-        ...(auth.methodLabel ?? driver.methodLabel ? { methodLabel: auth.methodLabel ?? driver.methodLabel } : {}),
+        ...(auth.methodLabel ?? methodLabelOf(driver, record.config) ? { methodLabel: auth.methodLabel ?? methodLabelOf(driver, record.config) } : {}),
         ...(sameAccount || dropped || auth.message ? { message: [auth.message, sameAccount, dropped].filter(Boolean).join(' ') } : {}),
         canSignOut: Boolean(runtime.signOut) && (auth.state === 'signed_in' || auth.state === 'expired') && (this.ownsSignIn(record) || auth.ownedByMousse === true),
         ...(runtime.signIn && auth.canSignIn ? { canSignIn: true } : {}),
@@ -3107,6 +3118,34 @@ export class Harness implements HarnessGateway {
       revision = undefined
     }
     return { ...target, ...(revision !== undefined ? { revision } : {}) }
+  }
+
+  private async setModelRoute(input: SetModelRouteInput): Promise<ModelRouteView> {
+    const record = this.record(input.instanceId, { allowDisabled: true })
+    const view = record.runtime.modelRoute?.()
+    if (!view) return harnessFail('unsupported', `${this.displayName(record)} has no model provider to choose.`, input.instanceId)
+    // A managed entry runs on its ChatGPT plan until its own settings can choose a provider.
+    if (record.config.setup === 'managed') return harnessFail('unsupported', `${this.displayName(record)} runs on its ChatGPT plan.`, input.instanceId)
+    let route: CodexModelRoute | undefined
+    if (input.route) {
+      // Only what the file offers now, exactly as shown: a changed address is agreed to again.
+      const offer = view.offer
+      if (!offer || offer.table !== input.route.table || offer.baseUrl !== input.route.baseUrl)
+        return harnessFail('unsupported', "Codex's config.toml changed since it was shown. Check it again.", input.instanceId)
+      route = { kind: 'custom', table: offer.table, baseUrl: offer.baseUrl }
+    }
+    const config = this.storedConfig(record)
+    if (route) config.modelRoute = route
+    else delete config.modelRoute
+    this.storeConfig(record, config)
+    // Another account: threads, limits and the sign-in check start over on the new route.
+    this.counters.bumpConfig(input.instanceId)
+    this.counters.bumpAccount(input.instanceId)
+    const next = this.record(input.instanceId, { allowDisabled: true })
+    await next.runtime.modelRouteChanged?.()
+    void this.probe(input.instanceId, true)
+    this.changed(input.instanceId)
+    return next.runtime.modelRoute?.() ?? view
   }
 
   private async setVendorSetting(input: SetVendorSettingInput): Promise<VendorSettingsView> {
@@ -3586,6 +3625,11 @@ export class Harness implements HarnessGateway {
   }
 
   /** The instance's launch settings, from its config: what its vendor service starts with. */
+  /** The model route an entry runs on (its config's), read by a vendor service built before the entry. */
+  modelRouteFor(instanceId: string): CodexModelRoute | undefined {
+    return (this.records.get(instanceId) ?? this.recordOrUndefined(instanceId))?.config.modelRoute
+  }
+
   launchFor(instanceId: string): StoredCliConfig {
     const config = (this.records.get(instanceId) ?? this.recordOrUndefined(instanceId))?.config
     if (!config) return {}
@@ -3602,7 +3646,7 @@ export class Harness implements HarnessGateway {
 
   /** What the card shows for an instance signed out in Mousse. */
   private signedOutReading(record: InstanceRecord): AuthReading {
-    const methodLabel = record.driver.methodLabel
+    const methodLabel = methodLabelOf(record.driver, record.config)
     return {
       state: 'signed_out',
       ...(methodLabel ? { methodLabel } : {}),

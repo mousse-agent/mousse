@@ -477,6 +477,8 @@ export const PROTOCOL_METHODS = [
   'providers.instances.recheck',
   'providers.instances.vendorSettings',
   'providers.instances.setVendorSetting',
+  'providers.instances.modelRoute',
+  'providers.instances.setModelRoute',
   'providers.instances.refreshModels',
   'providers.instances.refreshAllModels',
   'providers.instances.setModelPrefs',

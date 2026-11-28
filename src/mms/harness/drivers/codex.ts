@@ -1,6 +1,8 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstallOwner } from '../../../shared/harness/status'
+import type { CodexModelRoute, ModelRouteView } from '../../../shared/harness/modelRoute'
+import { maskKey, readCodexConfig, routeOffer, routeTable } from '../vendors/codex/providerRoute'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import type { PermissionLimits } from '../../../shared/permissionMode'
 import type { ProviderLoginResult } from '../../../shared/providerAuth'
@@ -141,6 +143,7 @@ interface OwnedSignIn {
 }
 
 function readAuth(service: CodexProviderService, status: Awaited<ReturnType<CodexProviderService['status']>>, owned?: OwnedSignIn): AuthReading {
+  if (service.customRoute()) return routeAuth(service, status)
   const methodLabel = 'ChatGPT sign-in'
   switch (status.state) {
     case 'connected': {
@@ -177,10 +180,24 @@ function readAuth(service: CodexProviderService, status: Awaited<ReturnType<Code
 }
 
 /**
+ * An entry on its model route: ready when the key in config.toml was accepted, with what it bills.
+ * Signing in with ChatGPT changes nothing here, so no sign-in is offered; a problem says what to fix.
+ */
+function routeAuth(service: CodexProviderService, status: Awaited<ReturnType<CodexProviderService['status']>>): AuthReading {
+  const methodLabel = ROUTE_METHOD_LABEL
+  if (status.state === 'connected') {
+    const account = service.account()
+    return { state: 'signed_in', methodLabel, credential: 'api_key', ...(account?.label ? { account: { label: account.label } } : {}), ...(account?.subject ? { subject: account.subject } : {}) }
+  }
+  return { state: 'unknown', methodLabel, ...(status.message ? { message: status.message } : {}) }
+}
+
+/**
  * The plan's limits as Codex reports them to the user's own sign-in (the same numbers the CLI
  * shows). When Codex cannot be asked now, the last snapshot it sent stands in and says so.
  */
 async function readUsage(service: CodexProviderService, signal: AbortSignal): Promise<RuntimeUsage> {
+  if (service.customRoute()) return { status: 'unavailable', windows: [], message: 'This entry bills an API key, which has no plan limits here.' }
   const limits = await service.rateLimits(signal)
   const windows = limits.live ? usageWindows(limits.snapshot) : reportedUsageWindows(limits.snapshot, Date.now())
   if (!windows.length) return { status: 'unavailable', windows: [], message: 'Codex reported no usage limits for this plan.' }
@@ -201,10 +218,46 @@ async function readUsage(service: CodexProviderService, signal: AbortSignal): Pr
 export function decodeCodexConfig(raw: Record<string, unknown> | undefined, instanceId?: string): InstanceConfig {
   const managed = raw?.setup === 'managed'
   const config = decodeInstanceConfig(raw, { privateHome: true })
+  // A managed entry runs on its ChatGPT plan only, until its own settings can choose a provider.
   if (managed) return { ...config, setup: 'managed', home: 'private' }
   if (instanceId === CODEX_INSTANCE_ID) config.home = 'default'
-  return { ...config, ...(raw?.setup === 'existing' ? { setup: 'existing' as const } : {}) }
+  const modelRoute = decodeModelRoute(raw?.modelRoute)
+  return { ...config, ...(raw?.setup === 'existing' ? { setup: 'existing' as const } : {}), ...(modelRoute ? { modelRoute } : {}) }
 }
+
+/** A stored model route; anything else is ChatGPT. */
+function decodeModelRoute(raw: unknown): CodexModelRoute | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const { kind, table, baseUrl } = raw as Record<string, unknown>
+  return kind === 'custom' && typeof table === 'string' && table && typeof baseUrl === 'string' && baseUrl ? { kind, table, baseUrl } : undefined
+}
+
+/**
+ * The model provider an entry runs on, for the provider editor: the agreed route read now, or the
+ * provider config.toml selects, offered to agree to. The key appears only masked.
+ */
+export function codexModelRouteView(route: CodexModelRoute | undefined, home: string): ModelRouteView {
+  const reading = readCodexConfig(home)
+  const found = routeOffer(reading)
+  const offer = found.kind === 'offer' && (found.table !== route?.table || found.baseUrl !== route?.baseUrl)
+    ? { offer: { table: found.table, name: found.name, baseUrl: found.baseUrl, host: found.host, keyMasked: found.keyMasked } }
+    : {}
+  if (!route) return { kind: 'chatgpt', ...offer, ...(found.kind === 'problem' ? { problem: found.message } : {}) }
+  const read = routeTable(route, reading)
+  if (!read.ok) {
+    let host = route.baseUrl
+    try {
+      host = new URL(route.baseUrl).host
+    } catch {
+      // Shown as stored.
+    }
+    return { kind: 'custom', table: route.table, host, problem: read.message, ...offer }
+  }
+  return { kind: 'custom', table: route.table, name: read.table.name, host: read.table.host, keyMasked: maskKey(read.table.key), ...offer }
+}
+
+/** An entry that runs on a route says what it bills wherever the ChatGPT sign-in was named. */
+const ROUTE_METHOD_LABEL = 'API key'
 
 /**
  * The command that updates a Codex its owner installed. Homebrew has a cask and a formula both
@@ -357,8 +410,9 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     // Thread titles, branch names, pull request drafts, commit messages (`service.oneShotTransport`). An entry on the
     // user's own Codex runs on OpenAI's provider with a ChatGPT sign-in (Mousse treats any other sign-in as signed out):
     // a direct request, held. A managed entry runs on its own provider: an app-server turn, best-effort.
-    oneShotRoute: ({ config }) => (config.setup === 'managed' ? CODEX_APP_SERVER_ROUTE : CODEX_DIRECT_ROUTE),
-    methodLabel: 'ChatGPT sign-in',
+    // An entry on its own model provider runs them as app-server turns too: the direct request is ChatGPT's.
+    oneShotRoute: ({ config }) => (config.setup === 'managed' || config.modelRoute ? CODEX_APP_SERVER_ROUTE : CODEX_DIRECT_ROUTE),
+    methodLabel: (config) => (config.modelRoute ? ROUTE_METHOD_LABEL : 'ChatGPT sign-in'),
     // Codex forks a loaded thread when its bearer changes, so the bearer is kept after turns proven drained.
     mcpTurnBinding: 'drained_turn',
     userMcp: 'native',
@@ -407,7 +461,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
   }
 
   /** What every Codex runtime does with its service: turns, listings, usage, refresh. */
-  function serviceRuntime(service: CodexProviderService): Pick<DriverRuntime, 'adapter' | 'configured' | 'configuredProvider' | 'llmProvider' | 'models' | 'modelsRefreshedAt' | 'usage' | 'useLimitReset' | 'permissionLimits' | 'refreshModels' | 'forgetConversation' | 'compactConversation' | 'oneShotTransport' | 'releaseExecutable'> {
+  function serviceRuntime(service: CodexProviderService): Pick<DriverRuntime, 'adapter' | 'configured' | 'configuredProvider' | 'llmProvider' | 'models' | 'modelsRefreshedAt' | 'usage' | 'useLimitReset' | 'permissionLimits' | 'refreshModels' | 'forgetConversation' | 'compactConversation' | 'oneShotTransport' | 'releaseExecutable' | 'modelRoute' | 'modelRouteChanged'> {
     return {
       adapter: new CodexAdapter(() => service),
       configured: () => service.configured(),
@@ -428,7 +482,9 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
       compactConversation: (request) => service.compactConversation(request.threadId, request.history, request.instanceId, request.signal),
       oneShotTransport: (spec) => service.oneShotTransport(spec),
       // Codex's app-server stays open between turns and holds codex.exe; an update needs it closed.
-      releaseExecutable: () => service.stopAll('Codex is being updated.')
+      releaseExecutable: () => service.stopAll('Codex is being updated.'),
+      modelRoute: () => codexModelRouteView(service.agreedRoute(), service.codexHome()),
+      modelRouteChanged: () => service.modelRouteChanged()
     }
   }
 
@@ -472,6 +528,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
           telemetry: () => telemetryOf(live()),
           signedOut: () => live().signedOut(),
           saveLaunch: (patch) => live().saveLaunch(patch),
+          modelRoute: () => live().config.modelRoute,
           ...(privateHome
             ? {
                 // Plain `codex login` would sign in the user's own home: every message names this account's sign-in instead.

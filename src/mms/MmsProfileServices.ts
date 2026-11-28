@@ -607,7 +607,8 @@ export class MmsProfileServices {
       launch: launchOf(CODEX_INSTANCE_ID),
       telemetry: () => this.harnessImpl?.enforcedFor(CODEX_INSTANCE_ID),
       signedOut: signedOutOf(CODEX_INSTANCE_ID),
-      saveLaunch: saveLaunchOf(CODEX_INSTANCE_ID)
+      saveLaunch: saveLaunchOf(CODEX_INSTANCE_ID),
+      modelRoute: () => this.harnessImpl?.modelRouteFor(CODEX_INSTANCE_ID)
     })
     // Seeded on load; a stored instance is never rewritten.
     this.providerInstances = new ProviderInstanceService({
