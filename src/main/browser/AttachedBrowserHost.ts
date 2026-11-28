@@ -89,8 +89,9 @@ interface WindowHost {
 function invalid(message: string): never {
   throw Object.assign(new Error(message), { code: 'browser_binding_invalid' })
 }
+/** The daemon's identifiers (`MmsBrowserService`): a thread of another computer is `nod_…:<thread id>`. */
 function identifier(value: unknown): string {
-  if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{1,160}$/.test(value)) invalid('Invalid browser identifier')
+  if (typeof value !== 'string' || !/^[a-zA-Z0-9:_-]{1,160}$/.test(value)) invalid('Invalid browser identifier')
   return value
 }
 function sameBinding(a: TrustedProfileBinding | null, b: TrustedProfileBinding): boolean {

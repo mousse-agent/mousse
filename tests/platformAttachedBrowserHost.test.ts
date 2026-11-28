@@ -248,6 +248,16 @@ describe('AttachedBrowserHost tabs and the person using them', () => {
     await w.host.shutdown()
   })
 
+  it('registers a tab of a thread on another computer under that thread, and keeps it from this thread\'s agent', async () => {
+    const w = await window()
+    const remoteThread = 'nod_50e61cd1mf5rzvgw81r63sv4xv:99864f64-cb15-40ad-b6ca-58534f6309be'
+    const remote = await w.tab('local_remote', remoteThread)
+    expect(w.requests).toContainEqual(['browser.attachments.register', expect.objectContaining({ uiTabId: remote.uiTabId, threadId: remoteThread })])
+    const refused = await w.invoke(remote.uiTabId, 'session.open', { uiTabId: remote.uiTabId, threadId: 'thread_host' })
+    expect(refused.error?.code).toBe('policy_denied')
+    await w.host.shutdown()
+  })
+
   it('offers a thread\'s agent only its own tabs and those kept in every thread, and opens its new tabs through the window', async () => {
     const w = await window()
     const a = await w.tab('local_a', 'thread_host')
