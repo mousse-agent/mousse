@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { ExpiryIcon, ExpiryMenu } from './ExpiryMenu'
 import { expiryDurationLabel, expiryShortLabel } from '../../shared/threadExpiry'
 import { Check, ChevronDown, Folder, FolderPlus, GitBranch, Incognito, Laptop, Plus, Search, Server } from '../lib/icons'
@@ -16,6 +16,8 @@ import { RemoteProjectDialog } from './RemoteProjectDialog'
 import { sourceControlClient } from '../lib/sourceControl'
 import { remoteReason } from '../lib/remoteComputers'
 import { ProjectIcon } from './ProjectIcon'
+import { shortPath } from './newThreadPickerLogic'
+import { shortenPathMiddle } from '../lib/projectTooltip'
 import { branchSearchAria, localBranchNames } from './sideCard/gitSectionLogic'
 import '../styles/composer-workspace.css'
 
@@ -88,6 +90,24 @@ function useAnchoredMenu(disabled: boolean, itemCount: number, onOpen?: () => vo
   return { open, show, close, menuRef, menuId, menuStyle, menuKeyDown, itemRefs, triggerKeyDown, triggerProps }
 }
 
+/** About the room beside a name in the project menu, at its 12px text. */
+const SAME_NAME_PATH_MAX = 36
+
+/**
+ * The folder shown dim beside a project's name in the project menu, for each project whose name another listed project
+ * also has (letter case aside): the home folder as `~`, middle folders elided to fit. A unique name gets none.
+ */
+export function sameNamePaths(projects: readonly Pick<Project, 'id' | 'name' | 'path'>[]): Map<string, string> {
+  const nameKey = (name: string) => name.trim().toLocaleLowerCase()
+  const counts = new Map<string, number>()
+  for (const project of projects) counts.set(nameKey(project.name), (counts.get(nameKey(project.name)) ?? 0) + 1)
+  const paths = new Map<string, string>()
+  for (const project of projects) {
+    if ((counts.get(nameKey(project.name)) ?? 0) > 1) paths.set(project.id, shortenPathMiddle(shortPath(project.path), SAME_NAME_PATH_MAX))
+  }
+  return paths
+}
+
 /** Above a new thread's composer: the project it starts in. */
 export function ComposerProjectPicker({ projects, workspace, disabled, device, onChange, onOpenProject, onError }: {
   projects: Project[]
@@ -108,6 +128,8 @@ export function ComposerProjectPicker({ projects, workspace, disabled, device, o
   ]
   const selectedIndex = Math.max(0, choices.findIndex((entry) => entry.id === (workspace.projectId ?? '')))
   const menu = useAnchoredMenu(disabled || opening, choices.length + 1)
+  // Two projects of one name are told apart by their folders.
+  const folders = useMemo(() => sameNamePaths(projects), [projects])
 
   return (
     <div className="new-thread-row new-thread-row-above">
@@ -131,7 +153,7 @@ export function ComposerProjectPicker({ projects, workspace, disabled, device, o
           <div
             ref={menu.menuRef}
             id={menu.menuId}
-            className="composer-workspace-menu scrollbar-ultra-thin"
+            className={`composer-workspace-menu scrollbar-ultra-thin${folders.size > 0 ? ' composer-workspace-project-menu-wide' : ''}`}
             role="menu"
             aria-label="Select project"
             style={menu.menuStyle}
@@ -154,7 +176,8 @@ export function ComposerProjectPicker({ projects, workspace, disabled, device, o
                 }}
               >
                 <ProjectIcon project={'path' in entry ? entry : undefined} fallback={<Folder size={16} aria-hidden="true" />} />
-                <span>{entry.name}</span>
+                <span className="composer-workspace-project-name">{entry.name}</span>
+                {folders.has(entry.id) && <span className="composer-workspace-project-folder">{folders.get(entry.id)}</span>}
                 {entry.id === (workspace.projectId ?? '') && <Check size={14} className="composer-workspace-menu-check" aria-hidden="true" />}
               </button>
             ))}

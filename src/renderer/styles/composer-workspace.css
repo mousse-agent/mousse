@@ -93,6 +93,10 @@ button.new-thread-chip:hover:not(:disabled),
 .composer-workspace-menu-item > span:first-child:not(:last-child) { flex: 1 1 auto; }
 .composer-workspace-menu-separator { height: 1px; background: var(--border); margin: 5px; }
 .composer-workspace-menu-label { padding: 6px 10px 3px; color: var(--text-secondary); font-size: 11px; font-weight: 500; }
+/* Projects of one name: the folder follows the name, dim, and gives way first when the row is short. */
+.composer-workspace-menu.composer-workspace-project-menu-wide { width: min(360px, calc(100vw - 16px)); }
+.composer-workspace-project-name { flex: 0 1 auto; }
+.composer-workspace-project-folder { flex: 1 1 0; min-width: 0; color: var(--text-secondary); font-size: 12px; }
 
 /* The workspace menu: a filter, about five branches then a scroll, a separator, the two modes. */
 .new-thread-branch-search {
