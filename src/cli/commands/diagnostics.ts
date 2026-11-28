@@ -149,7 +149,7 @@ function formatMemorySummary(summary: MemoryLogSummary, path: string): string {
     if (summary.hourly.some((point) => point.app !== null)) out.push(`  App ${series((point) => point.app)}`)
   }
   if (summary.growth !== null) out.push(`Growth: ${summary.growth} MB/h over ${summary.thresholds.growthWindowHours} h`)
-  out.push(summary.breaches.length ? `Out of bounds now: ${summary.breaches.map((breach) => breach.summary).join('; ')}` : `Within bounds (service limit ${summary.thresholds.servicePrivateMb} MB, ${Math.round(serviceMb(sample))} MB now)`)
+  out.push(summary.breaches.length ? `Above target now: ${summary.breaches.map((breach) => breach.summary).join('; ')}` : `Within targets (service target ${summary.thresholds.servicePrivateMb} MB, ${Math.round(serviceMb(sample))} MB now)`)
   for (const entry of summary.recentBreaches) out.push(`  ${new Date(entry.t).toLocaleString()}: ${entry.breaches.map((breach) => breach.summary).join('; ')}`)
   out.push(`Log: ${path} (${summary.samples} samples since ${summary.since ? new Date(summary.since).toLocaleString() : '-'})`)
   out.push('Report: mousse-cli diagnostics memory report')
