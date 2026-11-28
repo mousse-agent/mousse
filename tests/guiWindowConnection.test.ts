@@ -205,6 +205,32 @@ describe("a window's own service connection", () => {
     expect(acknowledged.at(-1)).toBe(alice.id)
   })
 
+  it('a switch whose answer is lost after the service bound the window follows the service, also when the connection is opened again', async () => {
+    const host = mms.getInstallationHost()!
+    const alice = host.manager.create({ displayName: 'Alice', slug: 'alice' })
+    await (await mms.getProfileServices(alice.id)).start()
+    const sender = windowSender(911)
+    await gui.prepareWindow(sender)
+    const client = (gui as unknown as Internals).windowSessions.get(911)!.client
+    const original = client.request.bind(client)
+    // The service binds the window; the answer never arrives in time.
+    const lost = vi.spyOn(client, 'request').mockImplementation(async (method, params, ...rest) => {
+      const answer = await original(method, params, ...rest)
+      if (method === 'profiles.bind') throw new Error('Request timeout: profiles.bind')
+      return answer
+    })
+
+    await expect(gui.runWithSender(sender, () => gui.request('profiles.bind', { profile: alice.id }))).rejects.toThrow('Request timeout')
+    lost.mockRestore()
+    expect(gui.getWindowBindingForSender(911)?.profileId).toBe(alice.id)
+
+    const reopened = vi.fn()
+    gui.on('window-session-reopened', reopened)
+    ;(client as unknown as { socket: { destroy: () => void } }).socket.destroy()
+    await vi.waitFor(() => expect(reopened).toHaveBeenCalledWith({ senderId: 911 }), { timeout: 5_000 })
+    expect(gui.getWindowBindingForSender(911)?.profileId).toBe(alice.id)
+  })
+
   it('stops opening a window again once the main connection gives up, and both come back when the person asks', async () => {
     gui.on('error', () => undefined)
     const limited = new GuiMmsController({ homeDir: home, managedDaemon: true, endpointOverride: endpoint, ownerTokenOverride: ownerToken, maxReconnectAttempts: 3, reconnectBaseMs: 20 })

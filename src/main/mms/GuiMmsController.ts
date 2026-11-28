@@ -706,11 +706,14 @@ export class GuiMmsController extends EventEmitter {
           session.binding = {profileId:bound.profile.id,epoch:bound.epoch}
           const subscribed = await session.client.subscribe(0)
           this.afterWindowSubscribe(sender.id, session.client, subscribed, 'profile-bound')
-          // Only a switch that finished: after a failed one the window still shows the profile it had.
+          // Only a switch that finished: after a failed one the window keeps the profile the service has it on.
           this.rememberWindowProfile(sender, bound.profile.id)
           rebound = true
         }
       }
+    } catch (error) {
+      if (transition) await this.followServiceBinding(sender)
+      throw error
     } finally {
       if (transition) {
         this.emit('window-profile-changing', {senderId:sender.id})
@@ -728,6 +731,28 @@ export class GuiMmsController extends EventEmitter {
       })
     }
     return result
+  }
+
+  /**
+   * A switch failed here, but the service may still have bound the window (its answer timed out, or a step after it
+   * failed). The service answers a later request on that connection only once the bind is done, so its status says
+   * where the window really is; the window follows it, and a connection opened again binds that profile.
+   */
+  private async followServiceBinding(sender: WebContents): Promise<void> {
+    const session = this.windowSessions.get(sender.id)
+    if (!session?.client.connected || session.closing) return
+    try {
+      const status = await session.client.request<{ binding?: { profileId?: unknown; epoch?: unknown } | null }>('profiles.status')
+      const profileId = status.binding?.profileId, epoch = status.binding?.epoch
+      if (typeof profileId !== 'string' || typeof epoch !== 'number' || !Number.isSafeInteger(epoch)) return
+      if (this.windowSessions.get(sender.id) !== session || (session.binding?.profileId === profileId && session.binding.epoch === epoch)) return
+      session.binding = { profileId, epoch }
+      this.rememberWindowProfile(sender, profileId)
+      const subscribed = await session.client.subscribe(0)
+      this.afterWindowSubscribe(sender.id, session.client, subscribed, 'profile-bound')
+    } catch (error) {
+      this.log('window.binding-check-failed', { window: sender.id, error: describeLinkError(error) })
+    }
   }
 
   /** Whether the service this window talks to has `method` (one the app can do without; see `daemonSupports`). */
