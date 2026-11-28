@@ -8,6 +8,13 @@ if /i "%~1"=="net" if /i "%~2"=="ssh-proxy" if exist "%~dp0resources\app.asar" s
 if defined MOUSSE_SSH_PROXY set "ELECTRON_RUN_AS_NODE=1"
 if defined MOUSSE_SSH_PROXY "%~dp0mousse-cli.exe" "%~dp0resources\app.asar\out\cli\ssh-proxy.js" %*
 if defined MOUSSE_SSH_PROXY exit /b %ERRORLEVEL%
+rem Another computer's Add over SSH runs "net-engine ssh" and writes its request on stdin. In the app's --cli mode
+rem stdin always reads empty on Windows, so the CLI runs it on the app's runtime as plain Node.
+set "MOUSSE_NODE_CLI="
+if /i "%~1"=="net-engine" if /i "%~2"=="ssh" if "%~3"=="" if exist "%~dp0resources\app.asar" set "MOUSSE_NODE_CLI=1"
+if defined MOUSSE_NODE_CLI set "ELECTRON_RUN_AS_NODE=1"
+if defined MOUSSE_NODE_CLI "%~dp0mousse-cli.exe" "%~dp0resources\app.asar\out\cli\index.js" %*
+if defined MOUSSE_NODE_CLI exit /b %ERRORLEVEL%
 rem The packaged console-subsystem host provides a real Windows TTY. It also
 rem keeps the daemon process separate from the Start Menu GUI executable.
 set "MOUSSE_CLI=1"

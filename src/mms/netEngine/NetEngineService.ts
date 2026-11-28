@@ -1090,7 +1090,7 @@ export class NetEngineService implements EngineDirectoryPort {
         target: choice.target,
         host: choice.host,
         user: choice.user,
-        shell: choice.shell ?? 'sh'
+        shell: choice.shell ?? this.sshAdd().shellFor(choice.routeId)
       }
       started.peers.update(paired.localId, { ssh })
       await this.setAddresses({ ...paired, ssh }, paired.addresses ?? [])
