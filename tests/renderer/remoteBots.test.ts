@@ -434,6 +434,15 @@ describe('its applets', () => {
     expect(api.mount).toHaveBeenCalledWith(expect.objectContaining({ bot: { botId: 'n_laptop:b_inbox', messageId: 'm1' } }))
     expect(transcript().querySelector('.mousse-applet-note')?.textContent).toBe('Laptop is offline · changes here aren’t saved')
   })
+
+  it('offers no repair for an applet shown from the copy here, though its computer is listed as reachable', async () => {
+    const { send } = applets({ readOnly: true })
+    await open(remote(), [withApplet])
+    await settle()
+    await act(async () => send({ runtimeId: 'rt1', type: 'error', message: 'Applet stopped.' } as never))
+    expect(transcript().querySelector('.mousse-applet-error')?.textContent).toContain('Applet stopped.')
+    expect(button('Ask the assistant to fix this', transcript())).toBeUndefined()
+  })
 })
 
 describe('what stays on its own computer', () => {

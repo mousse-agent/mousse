@@ -57,7 +57,8 @@ export function AppletPanelView({ tab, tabs, conversation }: { tab: AppletTab; t
     bot: conversation?.bot
   })
   const { error, setError, ready, conversationInput, setConversationInput } = applet
-  const away = Boolean(conversation?.bot?.offline)
+  // A remote applet whose computer is away, or shown from the copy here, can't be repaired from here.
+  const away = Boolean(conversation?.bot?.offline || applet.readOnly)
 
   const toggleSource = async () => {
     setSourceOpen((value) => !value)

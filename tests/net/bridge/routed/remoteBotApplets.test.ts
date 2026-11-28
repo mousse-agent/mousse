@@ -4,7 +4,7 @@
  * message of that bot shows, at that revision; while that computer is away the copy kept here, read only; and the copies
  * go with the bot.
  */
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -192,5 +192,50 @@ describe('an applet of another computer’s bot', () => {
     viewer.dropComputer(NODE)
     expect(existsSync(join(folder, NODE))).toBe(false)
     expect(await refused(viewer.open(NODE, tom.botId, tom.ids))).toMatchObject({ code: 'computer_offline' })
+  })
+
+  it('keeps the copies within their count: the least recently opened goes', async () => {
+    const pip = await botWithApplet('Pip')
+    const tom = await botWithApplet('Tom')
+    const kept = new RemoteBotApplets({ folder, online: () => online, maxCount: 1,
+      call: async (_node, method, params) => {
+        if (!online) throw new DomainRpcError('computer_offline', 'Laptop is offline.')
+        return call(methods, method, params)
+      }
+    })
+    await kept.open(NODE, pip.botId, pip.ids)
+    expect(readdirSync(join(folder, NODE, pip.botId))).toHaveLength(1)
+    await kept.open(NODE, tom.botId, tom.ids)
+    expect(readdirSync(join(folder, NODE, pip.botId))).toEqual([])
+    expect(readdirSync(join(folder, NODE, tom.botId))).toHaveLength(1)
+    online = false
+    expect(await kept.open(NODE, tom.botId, tom.ids)).toMatchObject({ readOnly: true })
+    expect(await refused(kept.open(NODE, pip.botId, pip.ids))).toMatchObject({ code: 'computer_offline' })
+  })
+
+  it('refuses pages shorter than a page before the last: a read never takes more calls than its size needs', async () => {
+    const pip = await botWithApplet('Pip')
+    /** The other computer answers each page with one byte of it. */
+    const tiny = (slow: 'bots.applets.get' | 'bots.applets.state.get') => {
+      const calls: string[] = []
+      const applets = new RemoteBotApplets({
+        folder: join(dir, `tiny-${slow}`),
+        online: () => true,
+        call: async (_node, method, params) => {
+          calls.push(method)
+          const page = (await call(methods, method, params)) as { dataB64: string }
+          return method === slow ? { ...page, dataB64: Buffer.from(page.dataB64, 'base64').subarray(0, 1).toString('base64') } : page
+        }
+      })
+      return { applets, calls }
+    }
+    const source = tiny('bots.applets.get')
+    expect(await refused(source.applets.open(NODE, pip.botId, pip.ids))).toMatchObject({ code: 'bad_reply' })
+    expect(source.calls.filter((method) => method === 'bots.applets.get')).toHaveLength(1)
+
+    await viewer.save(NODE, pip.botId, pip.ids, { note: 'x'.repeat(300) })
+    const state = tiny('bots.applets.state.get')
+    expect(await refused(state.applets.open(NODE, pip.botId, pip.ids))).toMatchObject({ code: 'bad_reply' })
+    expect(state.calls).toEqual(['bots.applets.state.get'])
   })
 })

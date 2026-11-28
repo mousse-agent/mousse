@@ -352,7 +352,8 @@ export class BotRouter implements BotRouterPort {
    */
   async applet(ctx: HandlerContext, botId: string, ids: RemoteAppletIds): Promise<RemoteAppletOpened> {
     const { node, id } = this.listedBot(ctx, botId)
-    if (!this.options.applets || !this.options.enabled()) throw computerOffline(this.computer(node))
+    // With networking off here, the copy kept here still opens, read-only (as a file of the chat does).
+    if (!this.options.applets) throw computerOffline(this.computer(node))
     return this.options.applets.open(node, id, ids, ctx.connection?.lifetime)
   }
 

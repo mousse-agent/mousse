@@ -99,7 +99,8 @@ export const AppletCard = memo(function AppletCard({ reference, conversation, on
   const preview = useRef<HTMLDivElement>(null)
   const applet = useAppletRuntime(preview, { host: 'transcript', threadId, profileId, reference, enabled: true, restart: 0, bot: conversation?.bot })
   const { error, conversationInput, setConversationInput } = applet
-  const away = Boolean(conversation?.bot?.offline)
+  // A remote applet whose computer is away, or shown from the copy here, can't be repaired from here.
+  const away = Boolean(conversation?.bot?.offline || applet.readOnly)
 
   const openInPanel = conversation ? onOpen : threadId ? () => useAppStore.getState().openAppletDocument(threadId, reference) : undefined
   return (

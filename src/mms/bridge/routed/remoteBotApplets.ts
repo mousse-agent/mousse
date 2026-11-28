@@ -5,6 +5,7 @@ import { join, sep } from 'node:path'
 import type { NodeId } from '../../../shared/net'
 import { appletJsonBytes, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../../shared/applets'
 import {
+  REMOTE_APPLET_PAGE_BYTES,
   REMOTE_APPLET_SAVE_BYTES,
   REMOTE_APPLET_SOURCE_BYTES,
   REMOTE_APPLET_STATE_BYTES,
@@ -58,6 +59,14 @@ interface Copy {
 
 const unreadable = (): DomainRpcError => new DomainRpcError('bad_reply', 'The other computer sent an unreadable applet.')
 const dropped = (): DomainRpcError => new DomainRpcError('bot_not_found', 'This bot is gone.')
+/**
+ * A page read fits: within the size, and full (`REMOTE_APPLET_PAGE_BYTES`) unless it is the last, so a read takes at
+ * most `ceil(size / REMOTE_APPLET_PAGE_BYTES)` calls whatever the other computer sends.
+ */
+const pageFits = (bytes: Buffer, offset: number, size: number): boolean => {
+  const end = offset + bytes.length
+  return bytes.length > 0 && end <= size && (end === size || bytes.length === REMOTE_APPLET_PAGE_BYTES)
+}
 const TEMP = '.tmp-'
 const sha = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 /** The computer is away (not a refusal): a copy kept here may show instead. */
@@ -208,7 +217,7 @@ export class RemoteBotApplets {
         throw unreadable()
       first ??= page
       const bytes = Buffer.from(page.dataB64, 'base64')
-      if (!bytes.length || offset + bytes.length > page.size) throw unreadable()
+      if (!pageFits(bytes, offset, page.size)) throw unreadable()
       parts.push(bytes)
       offset += bytes.length
     } while (offset < first.size)
@@ -240,7 +249,7 @@ export class RemoteBotApplets {
         }
         first ??= page
         const bytes = Buffer.from(page.dataB64, 'base64')
-        if (!bytes.length || offset + bytes.length > page.size) throw unreadable()
+        if (!pageFits(bytes, offset, page.size)) throw unreadable()
         parts.push(bytes)
         offset += bytes.length
       } while (offset < first.size)

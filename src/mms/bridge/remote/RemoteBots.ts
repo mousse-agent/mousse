@@ -455,10 +455,14 @@ export interface RemoteBotAppletStore {
   load(threadId: string, appletId: string, revisionId: string): AppletBundle
   loadState(threadId: string, appletId: string, revisionId: string): unknown
   saveState(threadId: string, appletId: string, revisionId: string, state: unknown): void
+  /** The applet's newest revision in the thread. */
+  head(threadId: string, appletId: string): AppletReference | undefined
 }
 
 /** What an applet that can't be read answers: never the store's own words, which may name a path on this computer. */
 const appletGone = (): NetError => new NetError('stream_unknown', 'This applet is no longer in the chat.')
+/** A save to a revision the thread has replaced: the store keeps state for an applet's newest revision only. */
+const appletStale = (): NetError => new NetError('conflict', 'This applet has a newer version. Open it again.', { details: { reason: 'applet_stale' } })
 
 /** One page of an applet's source, as JSON: `REMOTE_APPLET_PAGE_BYTES` from `offset`, with its reference. */
 export function remoteAppletPage(bundle: AppletBundle, offset: number): RemoteAppletPage {
@@ -853,12 +857,14 @@ export function remoteBotMethods(options: {
         if (error instanceof NetError) throw error
         // The store keeps state for an applet's newest revision only.
         if (/stale applet revision/i.test(error instanceof Error ? error.message : ''))
-          throw new NetError('conflict', 'This applet has a newer version. Open it again.', { details: { reason: 'applet_stale' } })
+          throw appletStale()
         throw appletGone()
       }
       return { saved: true }
     }, first((p, port) => {
-      appletAt(p, port)
+      const at = appletAt(p, port)
+      // A revision replaced since: refused before the call is taken, so the device reads it as certain.
+      if (appletStore(() => appletsOf().head(at.threadId, at.appletId))?.revisionId !== at.revisionId) throw appletStale()
     })),
     // A file for a message to this bot, in parts. Each part passes the gate again, so a device that lost the bot sends
     // no more; the file is bound to this bot and this device, and only a message of theirs takes it.
