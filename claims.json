@@ -377,20 +377,6 @@
       ],
       "claimedAt": "2026-11-27T15:53:06.509Z",
       "expiresAt": "2026-11-27T17:53:06.509Z"
-    },
-    {
-      "task": "turn-timings-daemon-log",
-      "session": "Animatrix-117a70",
-      "machine": "Animatrix",
-      "branch": "turn-timings-daemon-log",
-      "paths": [
-        "src/mms/diagnostics/turnBoundary.ts",
-        "src/mms/diagnostics/turnTiming.ts",
-        "src/mms/log/diag.ts",
-        "docs/workspace-snapshots.md"
-      ],
-      "claimedAt": "2026-11-28T06:04:07.128Z",
-      "expiresAt": "2026-11-28T08:04:07.128Z"
     }
   ]
 }
