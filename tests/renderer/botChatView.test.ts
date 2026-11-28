@@ -3309,6 +3309,29 @@ describe('tagging another of the owner\'s bots with @', () => {
     expect(chips()).toEqual(['Coxy'])
     expect(box().value).not.toContain('mousse://bot/')
   })
+
+  it('edits as one character: Copy takes the tag, and Backspace right after the chip takes it out whole', async () => {
+    await openWithBots()
+    await type(box(), 'ask @cox')
+    await press('Enter')
+    const value = box().value
+    box().setSelectionRange(0, value.length)
+    const setData = vi.fn()
+    await fire(box(), 'copy', 'clipboardData', { setData, getData: () => '' })
+    expect(setData).toHaveBeenCalledWith('text/plain', 'ask [@Coxy](mousse://bot/coxy) ')
+    // The caret right after the chip, before the space the pick left.
+    box().setSelectionRange(value.length - 1, value.length - 1)
+    await press('Backspace')
+    expect(chips()).toEqual([])
+    expect(box().value.trim()).toBe('ask')
+  })
+
+  it('a tag in the bot\'s own reply is the same face and name', async () => {
+    fake.chats.inbox = [message(1, { text: 'Sent it to [@Coxy](mousse://bot/coxy).' })]
+    await openWithBots()
+    await settle()
+    expect(words(transcript().querySelector('.bot-message .bot-tag'))).toBe('Coxy')
+  })
 })
 
 describe('a message from another of the owner\'s bots', () => {

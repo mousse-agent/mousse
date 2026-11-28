@@ -22,9 +22,12 @@ export function parseBotLink(href: string): string | null {
   return BOT_ID.test(id) ? id : null
 }
 
-/** A name as a tag's text holds it: one line, with nothing that would end the link's text early. */
+/**
+ * A name as a tag's text holds it: one line, with nothing that would end the link's text early. Brackets and
+ * backslashes are all that can: parentheses stay, so the name is still the one `bot_send` takes.
+ */
 export function botTagName(name: string): string {
-  return name.replace(/[\[\]()\\\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'bot'
+  return name.replace(/[\[\]\\\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'bot'
 }
 
 /** The tag of bot `botId`, called `name`: `[@Name](mousse://bot/<botId>)`. */

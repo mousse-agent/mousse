@@ -34,8 +34,9 @@ describe('bot tags', () => {
     expect(parseBotLink(link)).toBe(botId)
   })
 
-  it('writes a name that can not end the link early', () => {
-    expect(botTag('coxy', 'Co[x]y (beta)\nTwo')).toBe('[@Co x y beta Two](mousse://bot/coxy)')
+  it('writes a name that can not end the link early, and keeps the rest of it, as bot_send takes it', () => {
+    expect(botTag('coxy', 'Co[x]y\nTwo')).toBe('[@Co x y Two](mousse://bot/coxy)')
+    expect(botTag('coxy', 'Alpha (dev)')).toBe('[@Alpha (dev)](mousse://bot/coxy)')
   })
 })
 
