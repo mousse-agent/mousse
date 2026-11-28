@@ -1,6 +1,7 @@
 import type { NodeId } from '../../shared/net'
 import { isSubagentThread } from '../../shared/threadLineage'
 import { isThreadStarted } from '../../shared/threadTitle'
+import { isQualifiedId } from '../../shared/threadRef'
 import type { PermissionMode } from '../../shared/permissionMode'
 import type { ModelOverride } from '../../shared/providerInstances'
 import { isTurnActivePhase, type NewThreadChoice, type Project, type ThreadLineage, type TurnPhase } from '../../shared/types'
@@ -57,6 +58,19 @@ export function isNewEmptyThread(
 ): boolean {
   if (thread && isSubagentThread(thread)) return false
   return !activeThreadId || Boolean(thread && !isThreadStarted(thread) && messageCount === 0)
+}
+
+/**
+ * True for a thread of another computer that has been started, or that this window does not list (so not known to be
+ * a draft). With no messages to show (its computer offline, or its view arrived without them), it is still that
+ * thread: the chat never shows the new-chat greeting for it.
+ */
+export function isOtherComputersThread(
+  activeThreadId: string | null,
+  thread: { startedAt?: string; name?: string } | undefined
+): boolean {
+  if (!activeThreadId || !isQualifiedId(activeThreadId)) return false
+  return !thread || isThreadStarted(thread)
 }
 
 /** The projects a new thread's remembered choices are read from. */

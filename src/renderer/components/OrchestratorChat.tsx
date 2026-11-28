@@ -125,7 +125,7 @@ import { SetupFailureNotice } from '../chat/components/SetupFailureNotice'
 import { CommandInfoNotice, GoalNotice } from '../chat/components/GoalNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, isPendingRowId, pendingThreadRow, typedAfterSend, type PendingThreadRow } from '../lib/pendingThreadRows'
-import { type ComposerWorkspace, composerWorkspaceFor, isComposerWorkspaceLocked, workspaceOnOtherComputer, isNewEmptyThread, isWorkspacePending, newThreadWorktree, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
+import { type ComposerWorkspace, composerWorkspaceFor, isComposerWorkspaceLocked, workspaceOnOtherComputer, isNewEmptyThread, isOtherComputersThread, isWorkspacePending, newThreadWorktree, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
 import { ComposerProjectPicker, ComposerThreadSettings, type ComposerDeviceProps } from './ComposerWorkspaceToolbar'
 import { addTargets, computersWithProject, draftLocalProject } from '../lib/addToMachine'
 import { AddToMachineDialog } from './AddToMachineDialog'
@@ -2173,7 +2173,8 @@ export function OrchestratorChat() {
   // A subagent thread is never the new-chat empty screen either.
   const newChatAnimations = useAppStore((s) => s.newChatAnimations)
   const hidePermissionsWhileRunning = useAppStore((s) => s.hidePermissionsWhileRunning)
-  const emptyThread = !isSubagent && shownMessages.length === 0 && !transcriptPending && !openFailed && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
+  // A started thread of another computer with nothing to show (its computer offline) is that thread, not a new chat.
+  const emptyThread = !isSubagent && !isOtherComputersThread(activeThreadId, activeThread) && shownMessages.length === 0 && !transcriptPending && !openFailed && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
   // A new thread's settings (project above the composer, where it runs and Private / Archive after below) leave once the first send starts.
   const newThreadSettings = newChat && !turnActive && !loading && !firstSendShown
   // The first message shows in the transcript while its thread is made: the locked composer that still holds it (to

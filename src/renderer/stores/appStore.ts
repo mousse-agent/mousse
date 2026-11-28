@@ -52,10 +52,19 @@ const MESSAGE_CACHE_MAX = 8
 const messageCache = new Map<string, ChatMessage[]>()
 const messageCacheOrder: string[] = []
 
+/**
+ * Keeps a thread's transcript for its next visit. An empty one is not kept: a thread opened from it would show at once
+ * as known to be empty (the new-thread page) instead of waiting for its view, and a failed read of it (a computer that
+ * is offline) would not be shown.
+ */
 function rememberMessages(threadId: string, messages: ChatMessage[]): void {
   if (messageCache.has(threadId)) {
     const idx = messageCacheOrder.indexOf(threadId)
     if (idx >= 0) messageCacheOrder.splice(idx, 1)
+  }
+  if (messages.length === 0) {
+    messageCache.delete(threadId)
+    return
   }
   messageCache.set(threadId, messages)
   messageCacheOrder.push(threadId)
@@ -1258,7 +1267,12 @@ export const useAppStore = create<AppState>()(persist(tabAgreement(threadPanels(
     }),
   dropMessage: (threadId, id) => {
     const kept = threadId ? messageCache.get(threadId) : undefined
-    if (threadId && kept?.some((message) => message.id === id)) messageCache.set(threadId, kept.filter((message) => message.id !== id))
+    if (threadId && kept?.some((message) => message.id === id)) {
+      const rest = kept.filter((message) => message.id !== id)
+      // Nothing left is not a transcript to open from (see rememberMessages).
+      if (rest.length > 0) messageCache.set(threadId, rest)
+      else rememberMessages(threadId, rest)
+    }
     set((s) => {
       if (s.activeThreadId !== threadId || !s.messages.some((message) => message.id === id)) return s
       const messages = s.messages.filter((message) => message.id !== id)
