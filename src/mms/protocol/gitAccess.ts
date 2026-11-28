@@ -215,6 +215,8 @@ export const GIT_ACCESS = {
   'providers.instances.recheck': 'none',
   'providers.instances.vendorSettings': 'none',
   'providers.instances.setVendorSetting': 'none',
+  'providers.instances.modelRoute': 'none',
+  'providers.instances.setModelRoute': 'none',
   'providers.instances.refreshModels': 'none',
   'providers.instances.refreshAllModels': 'none',
   'providers.instances.setModelPrefs': 'none',

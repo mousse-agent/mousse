@@ -139,6 +139,7 @@ import type { LimitTrendRange, LimitTrendsResponse } from '../shared/limitTrends
 import type { CliInstallEvent, ProviderUsage, UsageForResponse, UsageProxyKeyResult, UsageSlotsResponse, UseLimitResetResponse } from '../shared/providerAuth'
 import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } from '../shared/harness/status'
 import type { SetVendorSettingInput, VendorSettingsView } from '../shared/harness/vendorSettings'
+import type { ModelRouteView, SetModelRouteInput } from '../shared/harness/modelRoute'
 import type { MoveResult } from '../shared/harness/move'
 import type { LocalCheckToolsInput, LocalCheckToolsResult, LocalConnectInput, LocalConnectResult, LocalServerRow, LocalSetModelInput } from '../shared/localServers'
 import type {
@@ -1397,6 +1398,12 @@ const api = {
       /** Sets or removes (`value: null`) one setting there; a file shared with the terminal needs `confirmShared`. */
       setVendorSetting: (input: SetVendorSettingInput): Promise<VendorSettingsView> =>
         ipcRenderer.invoke('providers:instances:setVendorSetting', input),
+      /** A Codex entry's model provider, or the one its config.toml offers (key masked); null for other agents. */
+      modelRoute: (instanceId: string): Promise<ModelRouteView | null> =>
+        ipcRenderer.invoke('providers:instances:modelRoute', instanceId),
+      /** Agrees to the offered provider (as shown), or `route: null` for ChatGPT again. */
+      setModelRoute: (input: SetModelRouteInput): Promise<ModelRouteView> =>
+        ipcRenderer.invoke('providers:instances:setModelRoute', input),
       /**
        * Moves a model API entry to the agent that now serves it; lists the defaults rewritten.
        * `copyKey` gives the agent the entry's saved API key.

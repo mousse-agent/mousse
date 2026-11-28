@@ -11,7 +11,7 @@ import { statSync } from 'node:fs'
 import type { BinaryFingerprint } from '../../shared/harness/types'
 import { parseCliVersion } from './cliConfig'
 import { knownProblemOf } from './compatibility'
-import { compareVersions, installOwnerOf, isPackageOwner, updateNeedsElevation, type AuthReading, type DriverRuntime, type HarnessDriver, type InstanceConfig, type ManagedInstall } from './driver'
+import { compareVersions, installOwnerOf, isPackageOwner, methodLabelOf, updateNeedsElevation, type AuthReading, type DriverRuntime, type HarnessDriver, type InstanceConfig, type ManagedInstall } from './driver'
 import { resolveBinary, type InstanceEnv } from './env'
 import { runHarness } from './spawn'
 
@@ -273,7 +273,8 @@ export async function probeInstance(input: {
   const readAuth = (force: boolean): Promise<AuthReading> => (input.auth ? input.auth() : runtime.auth({ force }))
   const timeouts = { ...PROBE_TIMEOUTS, ...input.timeouts }
   const checkedAt = (input.now?.() ?? new Date()).toISOString()
-  const notChecked: AuthReading = { state: 'unknown', ...(driver.methodLabel ? { methodLabel: driver.methodLabel } : {}) }
+  const methodLabel = methodLabelOf(driver, input.config)
+  const notChecked: AuthReading = { state: 'unknown', ...(methodLabel ? { methodLabel } : {}) }
 
   // A runtime Mousse hosts itself (the pi loop) has no binary to find.
   if (!driver.binaryNames.length && !runtime.managed && !driver.canInstall && !input.override) {

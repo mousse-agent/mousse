@@ -3,6 +3,7 @@ import { dirname } from 'node:path'
 import type { AuthState, CredentialKind, InstallOwner, PromptCacheHour } from '../../shared/harness/status'
 import type { AddOptionMethod, CustomModel, HarnessCaps, HarnessDriverKind, InstanceConfigPatch, InstanceModel, RemoveInstallResult, RuntimeFacts, TelemetrySetting, BinaryFingerprint } from '../../shared/harness/types'
 import type { NeutralTool } from '../../shared/harness/tools'
+import type { CodexModelRoute, ModelRouteView } from '../../shared/harness/modelRoute'
 import type { PermissionLimits } from '../../shared/permissionMode'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult, ProviderUsage, UseLimitResetResponse } from '../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
@@ -80,6 +81,8 @@ export interface InstanceConfig {
    * Mousse's grant gate on every call. Chosen when the entry is added; absent for every other entry.
    */
   profile?: 'locked'
+  /** Codex: the model provider the person chose instead of ChatGPT (docs/plans/codex-own-provider.md); absent = ChatGPT. */
+  modelRoute?: CodexModelRoute
 }
 
 /** Whether an entry runs in a Mousse-owned home: it must, it may, or it must not. */
@@ -449,6 +452,10 @@ export interface DriverRuntime {
    * starts them again.
    */
   releaseExecutable?(): Promise<void>
+  /** Codex: the model provider the entry runs on, or the one its config offers (`providers.instances.modelRoute`). */
+  modelRoute?(): ModelRouteView
+  /** Codex: the entry's model route was changed; every process and token on the old one ends. */
+  modelRouteChanged?(): Promise<void>
   /**
    * The instance is being removed: deletes the sign-ins Mousse keeps for it, after stopping
    * everything that used them, and revokes them. It resolves only once nothing in the instance's
@@ -568,8 +575,8 @@ export interface HarnessDriver {
    * changed since its last check is refused until it is checked again, as a known-broken version's is.
    */
   readonly binaryBoundCaps?: boolean
-  /** How the driver's instances sign in, for display. */
-  readonly methodLabel?: string
+  /** How the driver's instances sign in, for display; per entry when it depends on the entry's config (`methodLabelOf`). */
+  readonly methodLabel?: string | ((config: InstanceConfig) => string)
   /**
    * How the runtime's Mousse MCP calls are tied to the turn that made them (PR 2 §2): `per_call`
    * (every call carries the turn's token), `drained_turn` (the bearer is reused only after a turn
@@ -819,6 +826,12 @@ export function installOwner(path: string | undefined, source: 'path' | 'managed
 }
 
 /** The executable a link leads to, when it can be read. */
+/** How an entry signs in, for display: the driver's label, for that entry's config when it depends on it. */
+export function methodLabelOf(driver: Pick<HarnessDriver, 'methodLabel'>, config: InstanceConfig | undefined): string | undefined {
+  if (typeof driver.methodLabel !== 'function') return driver.methodLabel
+  return config ? driver.methodLabel(config) : undefined
+}
+
 export function realPathOf(path: string): string | undefined {
   try {
     return realpathSync(path)

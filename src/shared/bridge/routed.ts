@@ -1259,7 +1259,7 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'The inbox (runs, Needs you and Tuning notes) is kept by the computer that runs the automations, and read and changed there.'
   },
   {
-    methods: ['providers.instances.vendorSettings', 'providers.instances.setVendorSetting', 'providers.instances.move'],
+    methods: ['providers.instances.vendorSettings', 'providers.instances.setVendorSetting', 'providers.instances.modelRoute', 'providers.instances.setModelRoute', 'providers.instances.move'],
     reason:
       "A provider's own settings file is read and changed from a window of its computer only, and so is moving an entry, which can copy a saved key."
   },

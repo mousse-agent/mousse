@@ -112,8 +112,8 @@ These are my own marks; there was no separate judge, because the shapes agreed. 
 |---|---|
 | `-c model_providers.x={… auth={command}}` plus the provider pin works through the app-server with `wire_api="responses"` | Checked: the managed entry runs this way, and `codexManagedWire.test.ts` ("a turn carries the helper's bearer") proves it against a local fake server on the pinned binary |
 | The token helper's output is sent as the bearer to a base URL that isn't ChatGPT's | Checked by the same test: its fake server is a local address |
-| A project layer can't change a key that `-c` set on the same table | Not checked. Slice 1's wire test writes a malicious project config with the real id. The `config/read` refusal holds even if Codex merges it |
-| `config/read` with `includeLayers` reports the project layer for a thread's working folder | Not checked. Slice 1 checks it on the pinned binary; if it doesn't, a project layer that names the provider can't be refused before the thread starts, and the design has to be revisited |
+| A project layer can't change a key that `-c` set on the same table | Checked on 0.162.1 (`codexRouteWire.test.ts`): Codex loads a trusted project's config.toml but drops its `model_provider` and `model_providers`, so a project adds nothing to the route. The user's own config.toml can add to the table, and a thread is refused when it does |
+| `config/read` with `includeLayers` reports the project layer for a thread's working folder | Checked on 0.162.1: it lists the project, user, system and `-c` (`sessionFlags`) layers with their keys |
 | `model/list` returns the custom provider's models | Not checked. Fallback: the `model` key and a typed model id |
 | `smol-toml` reads what Codex's toml crate accepts | Not checked. A mismatch leaves the file read-only, never with a bad write |
 

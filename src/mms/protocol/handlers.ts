@@ -4624,6 +4624,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         })
       }
     }
+    // A Codex entry's model provider (docs/plans/codex-own-provider.md): read from and agreed to on
+    // its own computer only, like the settings file it comes from. The key is only ever masked.
+    case 'providers.instances.modelRoute': {
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', "A provider's model provider is read on its own computer")
+      const p = isObject(params) ? params : {}
+      return { route: harnessGateway(ctx).instances.modelRoute(asInstanceId(p.instanceId)) ?? null }
+    }
+    case 'providers.instances.setModelRoute': {
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', "A provider's model provider is chosen on its own computer")
+      const p = isObject(params) ? params : {}
+      const raw = p.route
+      if (raw !== null && !isObject(raw)) throw new DomainRpcError('invalid_params', 'route must be an object or null')
+      const route = raw === null ? null : { table: asString(raw.table, 'route.table', 256), baseUrl: asString(raw.baseUrl, 'route.baseUrl', 2048) }
+      return { route: await harnessGateway(ctx).instances.setModelRoute({ instanceId: asInstanceId(p.instanceId), route }) }
+    }
     case 'providers.instances.refreshModels': {
       const p = isObject(params) ? params : {}
       return { snapshot: await harnessGateway(ctx).instances.refreshModels(asInstanceId(p.instanceId)) }
