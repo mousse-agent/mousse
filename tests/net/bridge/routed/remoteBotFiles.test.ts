@@ -2,7 +2,7 @@
  * The copies of another computer's bots' files kept here: only real pictures, within their limits (the least recently
  * shown go first), and nothing written back for a bot or a computer dropped while a read or a copy was under way.
  */
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -27,8 +27,11 @@ describe('the copies of another computer’s bots’ files', () => {
   let online: boolean
   /** While set, a read of a first page waits for it. */
   let gate: Promise<void> | undefined
+  /** While set, a read of a later page waits for it. */
+  let later: Promise<void> | undefined
 
   beforeEach(() => {
+    later = undefined
     dir = mkdtempSync(join(tmpdir(), 'remote-bot-files-'))
     folder = join(dir, 'remote-files')
     there = new Map()
@@ -46,6 +49,7 @@ describe('the copies of another computer’s bots’ files', () => {
       read: async (_node, _botId, ref, offset): Promise<RemoteFilePage> => {
         reads.push(`${ref}@${offset}`)
         if (offset === 0 && gate) await gate
+        if (offset > 0 && later) await later
         const file = there.get(ref)
         if (!file) throw new Error('gone')
         return { name: file.name, mime: 'image/png', size: file.data.length, offset, dataB64: file.data.subarray(offset, offset + PAGE).toString('base64') }
@@ -81,6 +85,27 @@ describe('the copies of another computer’s bots’ files', () => {
     const b = await cache.fetch(NODE, BOT, 'b.png')
     const c = await cache.fetch(NODE, BOT, 'c.png')
     expect([existsSync(a.path), existsSync(b.path), existsSync(c.path)]).toEqual([false, true, true])
+  })
+
+  it('removes only what earlier runs left half written, never a copy another read is writing now', async () => {
+    // Left by an earlier run.
+    const earlier = join(folder, NODE, BOT, 'f'.repeat(32))
+    mkdirSync(earlier, { recursive: true })
+    writeFileSync(join(earlier, '.tmp-0a1b2c3d-left'), 'half')
+    const cache = files()
+    there.set('small.png', { name: 'small.png', data: png(100) })
+    there.set('large.png', { name: 'large.png', data: png(3 * PAGE) })
+    let open!: () => void
+    later = new Promise((resolve) => (open = resolve))
+    // The large one is part written when the small one is kept, which lists what is kept for the first time.
+    const large = cache.fetch(NODE, BOT, 'large.png')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(reads).toEqual(['large.png@0', 'large.png@40960'])
+    await cache.fetch(NODE, BOT, 'small.png')
+    expect(existsSync(join(earlier, '.tmp-0a1b2c3d-left'))).toBe(false)
+    open()
+    const copy = await large
+    expect(readFileSync(copy.path).equals(png(3 * PAGE))).toBe(true)
   })
 
   for (const how of ['bot', 'computer'] as const) {

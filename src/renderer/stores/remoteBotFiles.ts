@@ -86,17 +86,22 @@ export function onRemoteFileCopied(listener: (botId: string) => void): () => voi
   return () => { listeners.delete(listener) }
 }
 
-/** The copy of one file of `botId` here, read once at a time. */
-function copyOf(botId: string, ref: string, read: RemoteFileRead): Promise<string> {
+/**
+ * The copy of one file of `botId` here, read once at a time. `again`: asked for even when a copy is known, since the
+ * computer keeps its copies within limits and may have let this one go (it is read again then); the known copy shows
+ * meanwhile.
+ */
+function copyOf(botId: string, ref: string, read: RemoteFileRead, again = false): Promise<string> {
   const key = keyOf(botId, ref)
   const known = copies.get(key)
-  if (known) return Promise.resolve(known)
+  if (known && !again) return Promise.resolve(known)
   const pending = loading.get(key)
   if (pending) return pending
   const owner = generation
   const ownerBot = forgotten.get(botId) ?? 0
   const work = read(botId, ref).then((copy) => {
     if (owner !== generation || ownerBot !== (forgotten.get(botId) ?? 0)) return copy.path
+    const was = copies.get(key)
     copies.set(key, copy.path)
     failed.delete(key)
     const preview = previews.get(key)
@@ -104,7 +109,7 @@ function copyOf(botId: string, ref: string, read: RemoteFileRead): Promise<strin
       previews.delete(key)
       adoptFilePreview(copy.path, preview)
     }
-    for (const listener of listeners) listener(botId)
+    if (was !== copy.path || preview) for (const listener of listeners) listener(botId)
     return copy.path
   }).finally(() => { if (loading.get(key) === work) loading.delete(key) })
   loading.set(key, work)
@@ -132,6 +137,18 @@ export function forgetFailedRemoteFiles(botId: string): void {
 }
 
 /**
+ * The copies of `botId`'s files this window knows, asked for again as its chat is read again: each is then the most
+ * recently shown on this computer, and one let go since is read again, so Save, Show in folder and Retry find it.
+ */
+export function recheckRemoteCopies(botId: string, read: RemoteFileRead): void {
+  const prefix = `${botId}\n`
+  for (const key of [...copies.keys()]) {
+    if (!key.startsWith(prefix)) continue
+    void copyOf(botId, key.slice(prefix.length), read, true).catch(() => undefined)
+  }
+}
+
+/**
  * The composer's picture of a file just sent to `botId`, shown at its place there until its copy here is read. Takes
  * the URL over.
  */
@@ -148,7 +165,8 @@ export function holdRemotePreview(botId: string, ref: string, url: string): void
 
 /** The files to send again (Retry), each as its copy here; a file of another computer's bot is read for it first. */
 export async function filesToSend(botId: string, files: ReadonlyArray<{ name: string; path: string; remote?: string }>, read: RemoteFileRead): Promise<BotChatAttachment[]> {
-  return Promise.all(files.map(async (file) => ({ name: file.name, path: file.remote ? await copyOf(botId, file.remote, read) : file.path })))
+  // Asked for again: the copy known here may have been let go since.
+  return Promise.all(files.map(async (file) => ({ name: file.name, path: file.remote ? await copyOf(botId, file.remote, read, true) : file.path })))
 }
 
 /** Forgets what this window kept for a bot of another computer that left its list: its copies, pictures and failures. */

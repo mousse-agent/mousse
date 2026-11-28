@@ -54,8 +54,9 @@ const isPage = (value: unknown): value is RemoteFilePage => {
 const unreadable = (): DomainRpcError => new DomainRpcError('bad_reply', 'The other computer sent an unreadable file.')
 const dropped = (): DomainRpcError => new DomainRpcError('bot_not_found', 'This bot is gone.')
 /**
- * A copy being written goes under a name of its own until it is whole. No kept name starts with a dot
- * (`attachmentFileName` takes them off), so this one is never taken for a copy.
+ * A copy being written goes under a name of its own until it is whole: `.tmp-<run>-<uuid>`, `<run>` naming the
+ * `RemoteBotFiles` that writes it, so only what earlier runs left half written is ever taken for litter. No kept name
+ * starts with a dot (`attachmentFileName` takes them off), so this one is never taken for a copy.
  */
 const TEMP = '.tmp-'
 
@@ -90,6 +91,8 @@ export class RemoteBotFiles {
   private readonly running = new Set<{ node: string; botId: string; stop: AbortController }>()
   private listed?: Promise<Map<string, Kept>>
   private last = 0
+  /** This run's copies being written start so (`TEMP`); a temp file named otherwise was left by an earlier run. */
+  private readonly temp = `${TEMP}${randomUUID().slice(0, 8)}-`
 
   constructor(private readonly options: RemoteBotFilesOptions) {
     this.reads = new Lanes(options.readsPerComputer ?? 2)
@@ -139,7 +142,7 @@ export class RemoteBotFiles {
       if (this.stamp(node, botId) !== stamp) return
       try {
         await mkdir(place, { recursive: true, mode: 0o700 })
-        const temp = join(place, `${TEMP}${randomUUID()}`)
+        const temp = join(place, `${this.temp}${randomUUID()}`)
         await copyFile(from, temp)
         await this.settle(node, botId, stamp, place, temp, attachmentFileName(name))
       } catch {
@@ -166,12 +169,15 @@ export class RemoteBotFiles {
     // One file per place: an older copy under another name goes.
     for (const entry of await readdir(place)) if (entry !== basename(temp)) await rm(join(place, entry), { force: true, recursive: true })
     await rename(temp, target)
-    if (this.stamp(node, botId) !== stamp) {
+    const gone = async (): Promise<never> => {
       await rm(place, { recursive: true, force: true })
       throw dropped()
     }
+    if (this.stamp(node, botId) !== stamp) return gone()
     const size = (await stat(target)).size
     const kept = await this.kept()
+    // Dropped while it was listed: no entry, and no path to a copy that went.
+    if (this.stamp(node, botId) !== stamp) return gone()
     kept.set(place, { size, used: this.now() })
     await this.trim(place)
     return { path: target, name, size }
@@ -189,7 +195,8 @@ export class RemoteBotFiles {
             for (const entry of await list(place)) {
               const path = join(place, entry)
               if (entry.startsWith(TEMP)) {
-                await rm(path, { force: true }).catch(() => undefined)
+                // Half written by an earlier run; this run's are being written now.
+                if (!entry.startsWith(this.temp)) await rm(path, { force: true }).catch(() => undefined)
                 continue
               }
               const found = await stat(path).catch(() => undefined)
@@ -203,7 +210,7 @@ export class RemoteBotFiles {
     return this.listed
   }
 
-  /** The least recently shown copies go until the rest fit; `keep` (just written) and copies being read stay. */
+  /** The least recently shown copies go until the rest fit; `keep` (just written) and copies being read or copied in stay. */
   private async trim(keep: string): Promise<void> {
     const kept = await this.kept()
     const maxBytes = this.options.maxBytes ?? REMOTE_BOT_FILES_BYTES
@@ -212,7 +219,7 @@ export class RemoteBotFiles {
     const oldest = [...kept.entries()].sort((a, b) => a[1].used - b[1].used)
     for (const [place, entry] of oldest) {
       if (bytes <= maxBytes && kept.size <= maxFiles) break
-      if (place === keep || this.loading.has(place)) continue
+      if (place === keep || this.loading.has(place) || this.seeding.has(place)) continue
       kept.delete(place)
       bytes -= entry.size
       await rm(place, { recursive: true, force: true }).catch(() => undefined)
@@ -264,7 +271,7 @@ export class RemoteBotFiles {
         if (kept && (await this.same(kept, first.size, head))) return await this.shown(place, kept, first.size)
         if (this.stamp(node, botId) !== stamp) throw dropped()
         await mkdir(place, { recursive: true, mode: 0o700 })
-        const temp = join(place, `${TEMP}${randomUUID()}`)
+        const temp = join(place, `${this.temp}${randomUUID()}`)
         const handle = await open(temp, 'w', 0o600)
         try {
           await handle.write(head, 0, head.length, 0)

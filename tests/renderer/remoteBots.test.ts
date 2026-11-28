@@ -364,6 +364,12 @@ describe('what stays on its own computer', () => {
     await settle()
     expect(fake.calls).toContainEqual(['remoteFile', 'n_laptop:b_inbox', 'images/map.png'])
     expect(useBotsStore.getState().chats['n_laptop:b_inbox']!.messages.at(-1)!.attachments![0]!.path).toBe('/home/me/.mousse/bots/remote-files/map.png')
+    // Read again as the chat is read again: the computer may have let its copy go since.
+    const asked = () => fake.calls.filter(([name, , ref]) => name === 'remoteFile' && ref === 'images/chart.png').length
+    const before = asked()
+    await act(async () => useBotsStore.getState().loadChat('n_laptop:b_inbox'))
+    await settle()
+    expect(asked()).toBe(before + 1)
   })
 
   it('reads no file here for a full path or a file link its reply names, and offers none to open', async () => {

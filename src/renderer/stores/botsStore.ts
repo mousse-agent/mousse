@@ -20,7 +20,7 @@ import { expandComposerThreadChips } from '../lib/composerThreadChips'
 import { clearBotLiveReplies, noteBotReply, noteBots, noteBotStopAsked, noteThreadMessage, setBotLiveReplySources } from './botLiveReplies'
 import { adoptFilePreview } from '../components/bots/fileImageCache'
 import { REMOTE_BOT_FILE_BYTES } from '../../shared/bots/personal/remoteFiles'
-import { copyRemotePictures, filesToSend, forgetFailedRemoteFiles, forgetRemoteBot, holdRemotePreview, isRemoteBot, onRemoteFileCopied, placeRemoteFiles, resetRemoteBotFiles, setRemoteBotLookup, type RemoteFileRead } from './remoteBotFiles'
+import { copyRemotePictures, filesToSend, forgetFailedRemoteFiles, forgetRemoteBot, holdRemotePreview, isRemoteBot, onRemoteFileCopied, placeRemoteFiles, recheckRemoteCopies, resetRemoteBotFiles, setRemoteBotLookup, type RemoteFileRead } from './remoteBotFiles'
 import type { ChatReference } from '../../shared/chatReferences'
 import { threadLink } from '../../shared/threadLink'
 
@@ -672,6 +672,8 @@ export const useBotsStore = create<BotsState>((set, get) => {
       if (first) set((state) => ({ chatLoad: { ...state.chatLoad, [botId]: 'loading' } }))
       // Pictures of a bot of another computer that could not be read are tried again as its chat is read again.
       forgetFailedRemoteFiles(botId)
+      // Its copies known here are asked for again: kept on this computer as recently shown, or read again if let go.
+      recheckRemoteCopies(botId, readRemoteFile)
       try {
         const page = await bots().messages(botId, { limit: BOT_CHAT_PAGE })
         if (owner !== epoch) return

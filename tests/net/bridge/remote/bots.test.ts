@@ -818,7 +818,8 @@ describe('files and About from another device', () => {
   })
 
   it('opens a checked file only while it is that file: a link put at its name since is not followed', async () => {
-    const root = realpathSync(dir)
+    // As `openInside` compares it: the native form (a Windows temp folder can be named in its short 8.3 form).
+    const root = realpathSync.native(dir)
     const away = mkdtempSync(join(tmpdir(), 'remote-bot-outside-'))
     const outside = join(away, 'secret.png')
     writeFileSync(outside, png(100))
