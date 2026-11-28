@@ -174,7 +174,7 @@ describe("the plan's limits read now through the user's own Codex CLI", () => {
 describe("the user's own Codex reports its plan limits", () => {
   /** A Codex driver whose service answers `rateLimits` as scripted. */
   function runtime(read: CodexProviderService['rateLimits']) {
-    const service = { rateLimits: read, configured: () => true, vendorMirror: () => ({}) } as unknown as CodexProviderService
+    const service = { rateLimits: read, configured: () => true, customRoute: () => false, vendorMirror: () => ({}) } as unknown as CodexProviderService
     const driver = codexDriver({ builtIn: () => service })
     const home = mkdtempSync(join(tmpdir(), 'mousse-codex-usage-'))
     homes.push(home)

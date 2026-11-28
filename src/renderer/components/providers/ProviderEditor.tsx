@@ -11,6 +11,7 @@ import { Segmented, SettingsAdvanced, SettingsRow } from '../settings/SettingsRo
 import { ArgsRow, EnvRow, ExecutableRow, PromptCacheHourRow, SetupRow, TelemetryRow, UpdateChip, type InstanceActions } from './CliSections'
 import { ProviderInfoSection, agentInfoRows, apiInfoRows } from './ProviderInfo'
 import { VendorSettingsSection } from './VendorSettings'
+import { ModelRouteRows } from './ModelRoute'
 import { ProviderModelsSection, modelsSummary } from './ProviderModelsSection'
 import { EditorSection, RemoveButton, useAsyncAction, useRelativeTime } from './parts'
 import { DownloadedFilesRow, RegistrySourceRow, RemoveWithFilesButton, type RemoveOptions } from './RegistryAgents'
@@ -166,6 +167,8 @@ export function AgentEditor({
       />
       <EditorSection title="Setup">
         <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} updateRow={!info.bundled} onOpenUsage={!remote && USAGE_DRIVERS.has(snapshot.driver) ? openUsagePage : undefined} />
+        {/* Codex's model provider comes from this computer's config.toml; a managed entry runs on its ChatGPT plan. */}
+        {!remote && !managed && <ModelRouteRows snapshot={snapshot} />}
         {source && <RegistrySourceRow snapshot={snapshot} source={source} actions={actions} />}
         <DisplayNameRow snapshot={snapshot} onRename={(displayName) => actions.configure({ displayName })} />
       </EditorSection>

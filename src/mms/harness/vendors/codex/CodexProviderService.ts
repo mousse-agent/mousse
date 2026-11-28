@@ -26,7 +26,10 @@ import { killTree } from '../../spawn'
 import { cliNames, codexStandalonePaths, findOnPath, withEnforced } from '../../env'
 import { atomicWriteJsonSync } from '../../../data/AtomicFs'
 import type { UserQuestionService } from '../../../orchestrator/UserQuestionService'
-import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME, codexMcpConfigOverrides } from '../../../run/mcp/attachment'
+import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME, chatgptTokenCommand, codexMcpConfigOverrides, type CliCommand } from '../../../run/mcp/attachment'
+import type { CodexModelRoute } from '../../../../shared/harness/modelRoute'
+import { chatgptTokenBroker, type ChatGptTokenBroker } from './broker'
+import { checkRouteKey, CUSTOM_MODEL_PROVIDER, customProviderArgs, readCodexConfig, routeLayerProblem, routeSubject, routeTable, type KeyCheck } from './providerRoute'
 import type { McpAttachment } from '../../../run/mcp/MousseMcpServer'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
@@ -123,6 +126,13 @@ export const CODEX_DEFAULT_MODEL_ID = 'default'
  * credentials, out of Mousse turns.
  */
 export const CODEX_MODEL_PROVIDER = 'openai'
+/** A model route's key check is trusted this long when it passed, and tried again after this when it didn't. */
+const KEY_CHECK_OK_MS = 10 * 60_000
+const KEY_CHECK_RETRY_MS = 30_000
+/** A token refusal the broker passes on as it is (its `failure` marks it as Mousse's own, key-free words). */
+function routeRefusal(message: string): Error {
+  return Object.assign(new Error(message), { failure: 'model_route' })
+}
 const INTERRUPT_TIMEOUT_MS = 5_000
 /** A stopped `/compact`: how long Codex gets to end its compaction turn before Mousse stops relying on the thread. */
 const COMPACT_SETTLE_MS = 5_000
@@ -327,6 +337,12 @@ export interface CodexServiceOptions {
    * login`, which would sign in their own home instead of this one.
    */
   ownSignIn?: string
+  /**
+   * The model provider the person agreed to for this entry (`InstanceConfig.modelRoute`), read at
+   * each launch, check and thread start; absent = ChatGPT. Not for a service with its own
+   * `modelProvider` (the managed entry).
+   */
+  modelRoute?: () => CodexModelRoute | undefined
 }
 
 /** A turn Codex ended as failed, with what it said about why. The message is redacted. */
@@ -348,6 +364,11 @@ export class CodexTurnFailure extends Error {
 export type CodexServiceDependencies = {
   /** Starts the app-server process; tests and the replay kit substitute it. */
   launch?: (launch: CodexLaunch) => CodexProcess
+  /** A custom route's token broker and helper command (tests); default the process's broker and `mousse-cli`. */
+  tokenBroker?: ChatGptTokenBroker
+  tokenHelper?: (endpoint: string, leaseId: string) => CliCommand
+  /** A custom route's key check (tests). */
+  fetch?: typeof fetch
   /** Overrides the PATH lookup (tests). */
   findBinary?: () => string | undefined
   /** Default per-request timeout (initialize, account/read, thread/start ...). */
@@ -486,6 +507,8 @@ interface CodexApp {
   accountRevision: number
   verifiedAccountRevision?: number
   terminal?: TerminalAuth
+  /** The model route this process was launched for (`routeKey`); another one now retires it. */
+  route: string
   /** A thread opened without reusable configuration, possibly without an id. */
   recycleRequired: boolean
   threadUsers: Set<Set<string>>
@@ -1397,7 +1420,10 @@ export class CodexProviderService {
   /** Mousse MCP tokens handed to Codex; never echoed into errors or status messages. */
   private readonly secrets = new Set<string>()
 
-  private readonly modelProvider: string
+  /** The provider without a model route: the service's own (`options.modelProvider`) or OpenAI's. */
+  private readonly baseProvider: string
+  /** The model route's last key check, for the account it ran as. */
+  private keyCheck?: { subject: string; at: number; result: KeyCheck }
   /** A launch being prepared (`prepareLaunch`); callers arriving meanwhile share it. */
   private launching?: Promise<CodexConnection>
   /** Bumped by `stopAll`: a launch prepared before it never starts. */
@@ -1421,7 +1447,7 @@ export class CodexProviderService {
     private readonly options: CodexServiceOptions = {}
   ) {
     this.dir = options.dir ?? join(profileHome, 'providers', CODEX_PROVIDER_ID)
-    this.modelProvider = options.modelProvider ?? CODEX_MODEL_PROVIDER
+    this.baseProvider = options.modelProvider ?? CODEX_MODEL_PROVIDER
     this.settingsPath = join(this.dir, 'settings.json')
     try {
       const parsed: unknown = JSON.parse(readFileSync(this.settingsPath, 'utf8'))
@@ -1432,6 +1458,124 @@ export class CodexProviderService {
       if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT')
         this.settingsError = `Mousse could not read this profile's Codex settings (${this.settingsPath}). Fix or remove the file, then recheck.`
     }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Model route (docs/plans/codex-own-provider.md)
+
+  /** The provider every thread runs on now: Mousse's own table for an agreed route, else the service's. */
+  private get modelProvider(): string {
+    return this.options.modelRoute?.() ? CUSTOM_MODEL_PROVIDER : this.baseProvider
+  }
+
+  /** The agreed route as a comparable key ('' = none): a process launched for another one is retired. */
+  private routeKey(): string {
+    const route = this.options.modelRoute?.()
+    return route ? JSON.stringify([route.table, route.baseUrl]) : ''
+  }
+
+  /** Whether this entry runs on a provider the person chose instead of ChatGPT. */
+  customRoute(): boolean {
+    return Boolean(this.options.modelRoute?.())
+  }
+
+  /** The route the person agreed to, as stored; undefined = ChatGPT. */
+  agreedRoute(): CodexModelRoute | undefined {
+    return this.options.modelRoute?.()
+  }
+
+  /** The Codex home this service's processes read: their `CODEX_HOME`, else `~/.codex`. */
+  codexHome(): string {
+    const env = this.environment()
+    return env.CODEX_HOME ? resolve(this.dir, env.CODEX_HOME) : join(homedir(), '.codex')
+  }
+
+  /**
+   * The route's account: its table read now, checked once per key with one request to the provider.
+   * The subject is the address and key, one-way, so threads opened with another key aren't reused.
+   */
+  private async routeAccount(route: CodexModelRoute, signal?: AbortSignal): Promise<CodexAccountReading> {
+    const read = routeTable(route, readCodexConfig(this.codexHome()))
+    if (!read.ok) return { kind: 'error', message: read.message }
+    const { table } = read
+    this.secrets.add(table.key)
+    const subject = routeSubject(table)
+    const cached = this.keyCheck
+    const fresh = cached && cached.subject === subject && Date.now() - cached.at < (cached.result.kind === 'ok' ? KEY_CHECK_OK_MS : KEY_CHECK_RETRY_MS)
+    const result = fresh ? cached.result : await checkRouteKey(table, { ...(this.dependencies.fetch ? { fetch: this.dependencies.fetch } : {}), ...(signal ? { signal } : {}) })
+    if (!fresh) this.keyCheck = { subject, at: Date.now(), result }
+    // Only the provider refusing the key stops it. Not reaching it says nothing about the key (a slow
+    // /models, a network blip, a proxy Codex honours and Node's fetch doesn't): it stays in use.
+    if (result.kind === 'refused') return { kind: 'error', message: `${table.host} refused the API key.` }
+    return { kind: 'signed_in', planType: 'api_key', email: null, label: `API key · ${table.host}`, subject }
+  }
+
+  /**
+   * One launch on the route: Mousse's provider table with `-c`, and a token-helper lease that reads
+   * config.toml again for every token, so a changed address or key is never served.
+   */
+  private async routeLaunch(route: CodexModelRoute): Promise<CodexLaunchExtras> {
+    const home = this.codexHome()
+    const first = routeTable(route, readCodexConfig(home))
+    if (!first.ok) throw new Error(first.message)
+    this.secrets.add(first.table.key)
+    const subject = routeSubject(first.table)
+    const broker = this.dependencies.tokenBroker ?? chatgptTokenBroker()
+    const endpoint = await broker.start()
+    const lease = broker.register({
+      profileId: CODEX_PROVIDER_ID,
+      instanceId: this.dir,
+      profileKey: subject,
+      access: async () => {
+        const now = routeTable(route, readCodexConfig(home))
+        if (!now.ok) throw routeRefusal(now.message)
+        if (routeSubject(now.table) !== subject) throw routeRefusal('The API key in config.toml changed. Send the message again.')
+        return now.table.key
+      }
+    })
+    const command = (this.dependencies.tokenHelper ?? chatgptTokenCommand)(endpoint, lease.leaseId)
+    return { args: customProviderArgs(first.table, command), env: command.env, onExit: () => lease.release() }
+  }
+
+  /** The entry's own launch checks (a private home that is a link never starts) run before the route's. */
+  private async routeLaunchAfter(route: CodexModelRoute, signal: AbortSignal): Promise<CodexLaunchExtras> {
+    const base = await this.options.prepareLaunch?.(signal)
+    try {
+      const own = await this.routeLaunch(route)
+      return {
+        args: [...(base?.args ?? []), ...own.args],
+        ...(base?.env || own.env ? { env: { ...base?.env, ...own.env } } : {}),
+        onExit: () => { own.onExit(); base?.onExit() }
+      }
+    } catch (error) {
+      base?.onExit()
+      throw error
+    }
+  }
+
+  /**
+   * The person chose another provider, or ChatGPT again: every process, and every token it was
+   * given, ends now. Running chats fail; the next use starts on the new route.
+   */
+  async modelRouteChanged(): Promise<void> {
+    ;(this.dependencies.tokenBroker ?? chatgptTokenBroker()).revokeInstance(this.dir)
+    this.keyCheck = undefined
+    this.probeResult = undefined
+    // The models listed for the old provider: the next check lists the new one's.
+    this.clearModels()
+    await this.stopAll('The model provider changed.')
+  }
+
+  /** Refuses a thread whose config layers would add to, or pick another, provider than the route's. */
+  private async assertRouteLayers(conn: CodexConnection, cwd: string, signal: AbortSignal): Promise<void> {
+    if (!this.options.modelRoute?.()) return
+    const response = await abortable(conn.request('config/read', { cwd, includeLayers: true }, { timeoutMs: 15_000 }), signal).catch((error: unknown) => {
+      signal.throwIfAborted()
+      if (error instanceof CodexRpcError) return undefined
+      throw error
+    })
+    const problem = routeLayerProblem(response?.layers as Parameters<typeof routeLayerProblem>[0])
+    if (problem) throw new AppError({ code: 'policy_unenforceable', message: problem, errorInfo: { category: 'unavailable', retryable: false } })
   }
 
   private save(): void {
@@ -1499,9 +1643,10 @@ export class CodexProviderService {
   }
 
   configuredProvider(): ConfiguredProvider | undefined {
-    return this.configured()
-      ? { id: CODEX_PROVIDER_ID, label: 'Codex', authType: 'oauth', source: 'Codex CLI · ChatGPT sign-in' }
-      : undefined
+    if (!this.configured()) return undefined
+    // A route bills its key: the source says so wherever the ChatGPT sign-in was named.
+    if (this.customRoute()) return { id: CODEX_PROVIDER_ID, label: 'Codex', authType: 'api_key', source: `Codex CLI · ${this.account()?.label ?? 'API key'}` }
+    return { id: CODEX_PROVIDER_ID, label: 'Codex', authType: 'oauth', source: 'Codex CLI · ChatGPT sign-in' }
   }
 
   loginOption(): ProviderLoginOption {
@@ -1567,14 +1712,15 @@ export class CodexProviderService {
   private checkDue(force = false): boolean {
     if (this.stopped || this.settingsError || this.signedOut()) return false
     const terminal = this.app?.terminal
-    return force || Boolean(terminal && terminalAuthState(terminal.home).fingerprint !== terminal.atLaunch.fingerprint) || !this.probeResult || Date.now() - this.probeResult.at >= CODEX_ACCOUNT_TTL_MS
+    return force || Boolean(terminal && terminalAuthState(terminal.home).fingerprint !== terminal.atLaunch.fingerprint) || Boolean(this.app && this.app.route !== this.routeKey()) || !this.probeResult || Date.now() - this.probeResult.at >= CODEX_ACCOUNT_TTL_MS
   }
 
   private async probe(): Promise<AccountProbe> {
     for (let attempt = 0; ; attempt += 1) {
       const generation = this.authGeneration
       try {
-        const conn = this.options.account ? this.app?.conn : await this.connection()
+        // A route's or another source's account is read without starting Codex.
+        const conn = this.options.account || this.options.modelRoute?.() ? this.app?.conn : await this.connection()
         const result = await this.readAccount(conn)
         const app = this.app
         if (app && app.conn === conn && app.terminal?.coldOnly && !app.threadUsers.size) {
@@ -1607,8 +1753,9 @@ export class CodexProviderService {
       let result: AccountProbe
       let nativeSubject: string | undefined
       try {
-        if (this.options.account) {
-          result = await this.options.account.read(signal)
+        const route = this.options.modelRoute?.()
+        if (route || this.options.account) {
+          result = route ? await this.routeAccount(route, signal) : await this.options.account!.read(signal)
           if (result.kind === 'signed_in') nativeSubject = result.subject
         } else {
           const response = await conn!.request('account/read', { refreshToken: false }, { timeoutMs: 15_000, signal })
@@ -1668,8 +1815,8 @@ export class CodexProviderService {
 
   private assertTerminalCredentials(conn: CodexConnection): void {
     const app = this.app
-    if (app?.conn === conn && app.terminal &&
-        terminalAuthState(app.terminal.home).fingerprint !== app.terminal.atLaunch.fingerprint) {
+    if (app?.conn === conn && (app.route !== this.routeKey() || (app.terminal &&
+        terminalAuthState(app.terminal.home).fingerprint !== app.terminal.atLaunch.fingerprint))) {
       this.retireAccount(conn)
       throw new TerminalCredentialsChanged()
     }
@@ -2047,6 +2194,7 @@ export class CodexProviderService {
    */
   async consumeResetCredit(creditId: string | undefined, signal?: AbortSignal): Promise<{ outcome: ConsumeResetCreditResponse['outcome'] }> {
     // One at a time for this Codex sign-in, whichever window or entry asks: each call spends a credit.
+    if (this.customRoute()) throw new Error('This entry bills an API key: it has no ChatGPT resets.')
     if (this.resetInFlight) throw new Error('A reset is already being used.')
     this.resetInFlight = true
     this.listing += 1
@@ -2071,6 +2219,7 @@ export class CodexProviderService {
    * Codex sent stands in (`live: false`, with its age); with none, the failure is thrown.
    */
   async rateLimits(signal?: AbortSignal): Promise<{ snapshot: RateLimitSnapshot; at: number; live: boolean }> {
+    if (this.customRoute()) throw new Error('This entry bills an API key: it has no ChatGPT plan limits.')
     this.listing += 1
     try {
       const conn = await this.connection()
@@ -2180,6 +2329,7 @@ export class CodexProviderService {
       if (!owner || saved.account !== owner || this.app!.unloading.has(codexThreadId)) return false
       const wasLoaded = this.loaded.has(codexThreadId)
       if (!wasLoaded) {
+        await this.assertRouteLayers(conn, saved.cwd, signal)
         const resumed = await this.requestThread(conn, 'thread/resume', {
           threadId: codexThreadId,
           excludeTurns: true,
@@ -2316,6 +2466,7 @@ export class CodexProviderService {
         }, signal, this.dependencies.directStream)
       }
       const cwd = this.standaloneWorkspace('one-shot')
+      await this.assertRouteLayers(conn, cwd, signal)
       const locked = codexOneShotConfig((await abortable(readCodexUserSetup(conn, cwd), signal)).mcpServers)
       if (!locked)
         throw new AppError({ code: 'policy_unenforceable', message: 'Mousse could not read which MCP servers Codex has on, so it did not send this request.', errorInfo: { category: 'unavailable', retryable: false } })
@@ -2649,7 +2800,9 @@ export class CodexProviderService {
     }
     const target = this.launchTarget()
     if (!target) return Promise.reject(new Error('Codex CLI not found. Install the Codex CLI first.'))
-    const prepare = this.options.prepareLaunch
+    const route = this.options.modelRoute?.()
+    const routeKey = this.routeKey()
+    const prepare = route ? (signal: AbortSignal) => this.routeLaunchAfter(route, signal) : this.options.prepareLaunch
     if (!prepare) return this.launch(target)
     if (this.launching) return this.launching
     const epoch = this.launchEpoch
@@ -2662,7 +2815,7 @@ export class CodexProviderService {
           extras.onExit()
           throw new Error(this.stopped ? 'Codex provider is stopped' : 'Codex was restarted')
         }
-        return this.launch(target, extras)
+        return this.launch(target, extras, routeKey)
       })
       .finally(() => {
         this.preparing.delete(preparing)
@@ -2673,7 +2826,7 @@ export class CodexProviderService {
   }
 
   /** Starts the app-server process and initializes it. */
-  private launch(target: CliLaunch, extras?: CodexLaunchExtras): Promise<CodexConnection> {
+  private launch(target: CliLaunch, extras?: CodexLaunchExtras, launchedRoute = this.routeKey()): Promise<CodexConnection> {
     let process: CodexProcess
     let terminalAuth: Pick<TerminalAuth, 'home' | 'atLaunch'> | undefined
     try {
@@ -2730,7 +2883,7 @@ export class CodexProviderService {
           (config.cli_auth_credentials_store == null || config.cli_auth_credentials_store === 'file')))
         .catch(() => false)
     }
-    this.app = { conn, ready, generation: this.launchGeneration, statuses, terminal, accountRevision: 0, recycleRequired: false, threadUsers: new Set(), opening: new Set(), unloading: new Map(), capacityWaiters: new Set() }
+    this.app = { conn, ready, generation: this.launchGeneration, statuses, terminal, route: launchedRoute, accountRevision: 0, recycleRequired: false, threadUsers: new Set(), opening: new Set(), unloading: new Map(), capacityWaiters: new Set() }
     return ready
   }
 
@@ -3606,6 +3759,7 @@ export class CodexProviderService {
   private async prepareThread(conn: CodexConnection, input: CodexChatInput, signal: AbortSignal) {
     await abortable(this.ensureTreeMode(conn), signal)
     const cwd = resolve(input.cwd)
+    await this.assertRouteLayers(conn, cwd, signal)
     const instructionsHash = input.developerInstructions ? historyKey(input.developerInstructions).slice(0, 32) : undefined
     const mcpToken = input.mcp?.token ?? null
     // The MCP relay and its catalogue revision: Codex lists a server's tools when it loads a thread.

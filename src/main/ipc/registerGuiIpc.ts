@@ -8,6 +8,7 @@ import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
 import type { SubagentSummary } from '../../shared/subagents'
 import type { ThreadBackgroundWork } from '../../shared/backgroundWork'
 import type { SetVendorSettingInput } from '../../shared/harness/vendorSettings'
+import type { SetModelRouteInput } from '../../shared/harness/modelRoute'
 import { CHAT_METHODS } from '../../shared/chats'
 import { CHAT_RESOURCE_METHODS } from '../../shared/chatResources'
 import { CHAT_NETWORK_METHODS } from '../../shared/chatsNetwork'
@@ -4073,6 +4074,8 @@ export function registerGuiIpc(
   const recheckInstance = instanceCommand('providers.instances.recheck', 'snapshot')
   const instanceVendorSettings = instanceCommand('providers.instances.vendorSettings', 'settings')
   const setInstanceVendorSetting = instanceCommand('providers.instances.setVendorSetting', 'settings')
+  const instanceModelRoute = instanceCommand('providers.instances.modelRoute', 'route')
+  const setInstanceModelRoute = instanceCommand('providers.instances.setModelRoute', 'route')
   const allowKnownProblem = instanceCommand('providers.instances.allowKnownProblem', 'snapshot')
   const moveInstance = instanceCommand('providers.instances.move', 'result')
   const removeInstanceInstall = instanceCommand('providers.instances.removeInstall', 'result')
@@ -4112,6 +4115,13 @@ export function registerGuiIpc(
       value: input?.value,
       expectedRevision: input?.expectedRevision,
       ...(input?.confirmShared === true ? { confirmShared: true } : {})
+    }))
+  // A Codex entry's model provider, on this computer's service only; the key comes back masked.
+  registerHandler('providers:instances:modelRoute', async (_e, instanceId: string) => instanceModelRoute({ instanceId }))
+  registerHandler('providers:instances:setModelRoute', async (_e, input: SetModelRouteInput) =>
+    setInstanceModelRoute({
+      instanceId: input?.instanceId,
+      route: input?.route ? { table: input.route.table, baseUrl: input.route.baseUrl } : null
     }))
   registerHandler('providers:instances:allowKnownProblem', async (_e, instanceId: string, version: string) =>
     allowKnownProblem({ instanceId, version }))

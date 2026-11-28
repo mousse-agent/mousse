@@ -67,9 +67,9 @@ interface Lease extends ChatGptLeaseInput {
 const REFUSED = {
   unknownLease: 'This Codex process is no longer allowed to use the ChatGPT sign-in. Mousse restarts it with the current sign-in.',
   invalid: 'Mousse could not read the token request.',
-  timeout: 'Mousse could not get a ChatGPT token in time.',
+  timeout: 'Mousse could not get a token for Codex in time.',
   failed: 'Mousse could not get a ChatGPT token. Sign in again in Settings → Providers.',
-  tooLarge: 'The ChatGPT token is larger than Mousse can send.'
+  tooLarge: 'The token is larger than Mousse can send.'
 } as const
 
 /** Ends the write within `ms` of a blocked write, else destroys the stream. */
@@ -316,7 +316,7 @@ export class ChatGptTokenBroker {
   }
 }
 
-/** A failure's message when it is one of the sign-in's own (typed, token-free); otherwise generic. */
+/** A failure's message when it is one of the sign-in's or a model route's own (typed, token-free); otherwise generic. */
 function failureText(error: unknown): string {
   const message = error instanceof Error ? error.message : ''
   const typed = error && typeof error === 'object' && 'failure' in error
