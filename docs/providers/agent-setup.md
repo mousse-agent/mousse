@@ -81,8 +81,8 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
   organisation's policy (`requirements.toml` or `managed_config.toml` in `/etc/grok`,
   `%ProgramData%grok` or the held home, or macOS device management) can add hooks Mousse cannot
   turn off: then Grok runs only in Full access, and the card names the file.
-- **Bound to one executable.** The proof holds for the executable the last check read. A turn or
-  a title on another one (a self-update, a replaced file) is refused until Grok is checked again,
+- **Bound to one executable.** The proof holds for the executable the last check read. A turn
+  on another one (a self-update, a replaced file) is refused until Grok is checked again,
   and held processes never update Grok. A check no one asked for (the periodic one) starts the
   held check a minute later, never at app start, and the startup model listing starts none; Stop
   cancels a waiting or running check.
@@ -106,15 +106,19 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
   only chats you drive, in Full access, and the entry's Permissions row and every refusal say why.
   A check that cannot finish keeps the last record and runs again after ten minutes.
 - **Thread titles** and Mousse's other single requests (branch names, pull request drafts, commit
-  messages, a bot's name and digest) run as one headless `grok` request on a home of the request's
-  own: every built-in tool disallowed, a deny rule for every tool, `--max-turns 1`,
-  `models.max_retries = 0`, turn summaries and memory off, Grok's own session title sent to a model
-  at port 0 (Grok still tries it; nothing can receive it there), Mousse's system prompt in place of
-  Grok's, and an empty folder as the person's home, so no Claude Code, Cursor, Codex or user skill,
-  rule or MCP server loads. The held check proves one model request with no tools, Mousse's system
-  text alone, the message as written, no rule or skill from the person's home, and nothing sent
-  anywhere else (every proxy variable points at an observer that must see nothing).
-  Grok comes after Pi in Automatic naming.
+  messages, a bot's name and digest) take one of two routes, by how the entry signs in:
+  - **An xAI API key** (`grok:direct`, held): one request with no tools straight to xAI's API, in
+    Mousse's process, with the key Grok would use. Nothing of Grok's setup is read, and a failed
+    request is not sent again. It runs on a model you choose: Grok's own default has no name the
+    API takes.
+  - **The Grok account** (`acp:grok`, best-effort): Grok over ACP on a home of the request's own,
+    whose config denies every tool and sends nothing again (`models.max_retries = 0`), with Grok's
+    own session title sent to port 0, memory, turn summaries and every source from Claude Code,
+    Cursor and Codex off, and the entry's own `auth.json` read in place (never copied). Grok still
+    offers its own tools: a tool it reports, or a question it asks, ends the request.
+  An entry whose sign-in Mousse cannot tell, or one under an organisation policy, names no thread.
+  Automatic tries Grok after the providers whose routes are all held, and before Antigravity and
+  other ACP agents.
 
 - **Status without a process.** Mousse reads the credential Grok would use: an `XAI_API_KEY` (the
   entry's own key wins over an inherited one), else the home's `auth.json`. Any of `GROK_AUTH*`,

@@ -97,7 +97,7 @@ An answer is applied only if the thread's naming revision still matches.
 
 - **A cached title listing per model,** covering admitted, best-effort and unavailable models (with a reason), including disabled and signed-out entries. It's built from admission and never awaits a probe.
 - **The saved choice** always shows as a row with its exact reason, even when nothing live matches it.
-- **Older computers:** the listing still sends a per-instance `oneShot` boolean, set when at least one of the instance's models is admitted. It's removed in the last slice, once every computer reads the per-model field.
+- **Older computers:** the per-instance `oneShot` boolean is gone (slice 6). A computer from before slice 1 reads only that boolean: without it, its Thread titles picker offers Automatic and First line only, and a saved model shows its "can't name threads here" note. Naming itself runs on the computer that owns the thread, which still uses the saved model.
 
 ## Providers
 Labels are as computed; a route's slice changes its facts.
@@ -115,8 +115,8 @@ Labels are as computed; a route's slice changes its facts.
 | Codex, custom provider | app-server: native tools can't be removed by flags (`oneShot.ts:31`), so either F8 proves a launch-specific no-tools route, or it stays best-effort | detected_on_report / unenforced / env_only / sealed_child | best-effort |
 | OpenCode | sealed server: deny-all session or `generate`, whichever F6 proves; free models that need `read` are best-effort | none / one if counted / per F6 / sealed_child | held, or best-effort |
 | Cursor | `cursor:sdk` on a dedicated host process, as the draft has it | none / one if counted / verified / sealed_host | held, or best-effort |
-| Grok, account | the headless request on a throwaway home shipped in #1995; moves onto the runner in slice 6 with its facts measured there | measured in slice 6 | per facts |
-| Grok, API key | `grok:direct` | none / one / verified / in_process | held |
+| Grok, account | `acp:grok`: `acpOneShot` on a home of the request's own with a deny-any rule and `models.max_retries = 0`, the entry's `auth.json` read in place, every other agent's sources off; the prompt ends at xAI's `prompt_complete` | detected_on_report / unenforced / env_only / sealed_child | best-effort |
+| Grok, API key | `grok:direct`: one pi-ai request to xAI's API, no retry (counted at a stub on 429 and 503), nothing of Grok's setup (shown against Grok's own run) | none / one / verified / in_process | held |
 
 ## Rejected from proposal 2, and why
 - **Arbitrary ACP commands and Antigravity unavailable:** it was decided they're on by default as best-effort. Rule 1 is amended above.
@@ -153,6 +153,7 @@ Labels are as computed; a route's slice changes its facts.
 4. **Cursor** on its dedicated host, with the count.
 5. **The Bedrock worker.**
 6. **Grok** `direct`, plus the held-home route. The old boolean is removed, and the new providers are added to `namingProviders` through the catalog skill.
+   - **Decided in the slice:** the legacy route kind and `DriverRuntime.oneShot` are gone; every route has facts. Grok's headless one-shot and the held check's one-shot phase went with it: the check now proves turns only. `namingProviders` matches the most specific entry (`pi:amazon-bedrock` after `pi` ranks Bedrock after Pi's other providers), and orders held routes before best-effort ones.
 
 **Check per slice:** its named tests through `node scripts/verify.mjs`. **Not checked without a person:** real sign-ins, and macOS and Linux crash cleanup by hand.
 

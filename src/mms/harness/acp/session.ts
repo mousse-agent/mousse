@@ -2555,7 +2555,7 @@ export class AcpSessions {
   }
 
   /**
-   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a commit message. A
+   * One request with no tools (`acpOneShot`): a chat title, a pull request draft or a commit message. A
    * fresh agent process and session of its own in `cwd` (an empty folder the caller made for it), where the process
    * also starts, with no MCP server and no client file system, in the agent's `default` mode when it has one. The
    * prompt is {@link ONE_SHOT_INSTRUCTION}, the system text and the prompt. Every permission, file, terminal or
