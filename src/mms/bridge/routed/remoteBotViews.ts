@@ -2,6 +2,7 @@ import { NetError, isNetErrorCode, type NodeId } from '../../../shared/net'
 import { BOT_BROWSER_FRAME_EVENT, type BotBrowserFrameEvent, type BotBrowserView } from '../../../shared/bots/personal/browser'
 import { DomainRpcError } from '../../protocol/domainRegistry'
 import { Channel, fromWireError, type EngineStream } from '../../netEngine/session/transport'
+import { engineLimits } from '../../netEngine/limits'
 import type { EngineMessage } from '../../netEngine/session/frame'
 import type { BotViewMessage, BotViewWatch } from '../remote/RemoteBotBrowsers'
 import { qualifyBotResult } from './botIds'
@@ -46,6 +47,8 @@ interface View {
   ended: boolean
   /** Ended by this side (unwatched, the window gone): the window is not told it stalled. */
   closing: boolean
+  /** Why the bot's computer ended the view, when it said (`end`). */
+  endReason?: string
   frames: number
   bytes: number
   startedAt: number
@@ -58,6 +61,8 @@ export interface RemoteBotViewsOptions {
   online(node: NodeId): boolean
   computer(node: NodeId): ComputerRef
   answerMs?: number
+  /** How long a closed view waits for the other side to end its half before resetting the stream. */
+  lingerMs?: number
   /** Each view's count when it ends (the real check's numbers). */
   counted?(count: { node: NodeId; frames: number; bytes: number; ms: number }): void
 }
@@ -82,8 +87,10 @@ export class RemoteBotViews {
       let stream: EngineStream
       try {
         stream = this.options.open(node)
-      } catch {
-        return Promise.reject(computerOffline(this.options.computer(node)))
+      } catch (error) {
+        // An older pairing that has no view streams says to update; anything else reads as the computer offline.
+        const code = (error as { code?: unknown } | null)?.code
+        return Promise.reject(refusalOf(code === 'incompatible_peer' ? 'not_supported' : undefined, this.options.computer(node)))
       }
       view = this.start(key, window, node, botId, input.watchId, stream)
     }
@@ -126,15 +133,37 @@ export class RemoteBotViews {
       return
     }
     view.closing = true
-    if (!view.ended) view.channel.end()
+    if (!view.ended) this.linger(view.channel)
     this.end(view)
+  }
+
+  /**
+   * Ends this side of a view's stream, and resets it if the other side never ends its own (an older Mousse there): a
+   * stream keeps its place in both helpers until both sides ended it.
+   */
+  private linger(channel: Channel): void {
+    let peerEnded = false
+    const timer = setTimeout(() => {
+      if (!peerEnded) channel.reset('cancelled')
+    }, this.options.lingerMs ?? engineLimits().tunnelCloseLingerMs)
+    timer.unref?.()
+    channel.onEnd(() => {
+      peerEnded = true
+      clearTimeout(timer)
+    })
+    try {
+      channel.end()
+    } catch {
+      clearTimeout(timer)
+      channel.reset('cancelled')
+    }
   }
 
   private start(key: string, window: BotViewWindow, node: NodeId, botId: string, watchId: string, stream: EngineStream): View {
     const view: View = { key, node, botId, watchId, window, channel: new Channel(stream), answers: [], ended: false, closing: false, frames: 0, bytes: 0, startedAt: Date.now() }
     this.views.set(key, view)
     view.channel.onMessage((message) => this.heard(view, message))
-    view.channel.onEnd((reason) => this.end(view, reason ?? 'peer_offline'))
+    view.channel.onEnd((reason) => this.end(view, reason ?? view.endReason ?? 'peer_offline'))
     if (window.lifetime) {
       const lifetime = window.lifetime
       const end = () => this.close(view)
@@ -176,6 +205,9 @@ export class RemoteBotViews {
         if (view.assembling.left <= 0) this.assembled(view)
         return
       }
+      case 'end':
+        view.endReason = typeof header.reason === 'string' ? header.reason : undefined
+        return
       case 'part': {
         const assembling = view.assembling
         if (!assembling || !message.parts[0]) return
@@ -212,6 +244,14 @@ export class RemoteBotViews {
     view.ended = true
     if (this.views.get(view.key) === view) this.views.delete(view.key)
     view.release?.()
+    // The other side ended the view: this side's half ends too, so neither helper keeps the stream's place.
+    if (!view.closing) {
+      try {
+        view.channel.end()
+      } catch {
+        view.channel.reset('cancelled')
+      }
+    }
     const error = refusalOf(reason, this.options.computer(view.node))
     for (const answer of view.answers.splice(0)) {
       clearTimeout(answer.timer)

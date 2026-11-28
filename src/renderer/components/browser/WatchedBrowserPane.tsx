@@ -183,15 +183,15 @@ export function filesAskText(chooser: { multiple: boolean; site?: string }): str
  * opens this computer's own file dialog (the app's, not the page's). Only what the person chooses
  * there goes to the page; nothing goes until they do.
  */
-function FileRequest({ chooser, choose, cancel }: { chooser: { multiple: boolean; site?: string }; choose(): void; cancel(): void }) {
+function FileRequest({ chooser, choose, cancel }: { chooser: { multiple: boolean; site?: string }; choose?(): void; cancel(): void }) {
   const asks = filesAskText(chooser)
   return <div className="watched-browser-dialog" role="dialog" aria-label={asks}>
     <div className="watched-browser-dialog-card">
       <p className="watched-browser-dialog-message">{asks}.</p>
-      <p className="watched-browser-dialog-hint">Only what you choose goes to the page.</p>
+      <p className="watched-browser-dialog-hint">{choose ? 'Only what you choose goes to the page.' : 'Choose files on the computer the browser is on.'}</p>
       <div className="watched-browser-dialog-actions">
         <button type="button" onClick={cancel}>Cancel</button>
-        <button type="button" className="is-primary" onClick={choose}>Choose…</button>
+        {choose && <button type="button" className="is-primary" onClick={choose}>Choose…</button>}
       </div>
     </div>
   </div>
@@ -285,7 +285,7 @@ function ControlToggle({ user, held, elsewhere, busy, blocked, take, giveBack }:
   </button>
 }
 
-export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { percent?: number } }>({ kit, browserKey, label, user, view: given, line, lineDetail, closed, open, fullScreen, className, blocked }: {
+export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { percent?: number } }>({ kit, browserKey, label, user, view: given, line, lineDetail, closed, open, fullScreen, className, blocked, remote }: {
   kit: WatchedBrowserKit<V>
   /** The browser's key in its store (a bot's id, a thread's id). */
   browserKey: string
@@ -310,6 +310,11 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
    * and the address are refused, and Take over says this as its tooltip.
    */
   blocked?: string
+  /**
+   * The browser is on another computer: files the page asks for can't be chosen from this one (the request is only
+   * cancelled here).
+   */
+  remote?: boolean
 }) {
   // The picture and cursor as they are now: whoever passed `view` may keep it still between pictures.
   const view = (kit.useStore((state) => state.views[browserKey]) as V | undefined) ?? given
@@ -494,7 +499,7 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
         {view.open && !windowed && view.dialog && <PageDialog key={`${view.dialog.type}:${view.dialog.message}`} dialog={view.dialog} canAnswer={owner}
           answer={(accept, text) => send({ kind: 'dialog', accept, ...(text !== undefined ? { text } : {}) })} />}
         {drives && !view.dialog && view.chooser && <FileRequest chooser={view.chooser}
-          choose={() => void store().chooseFiles(browserKey, view.chooser!)} cancel={() => send({ kind: 'files' })} />}
+          {...(remote ? {} : { choose: () => void store().chooseFiles(browserKey, view.chooser!) })} cancel={() => send({ kind: 'files' })} />}
         {!view.open && !view.setup && <div className="watched-browser-closed">{closed(address.trim())}</div>}
         {windowed && <div className="watched-browser-closed"><p>{BROWSER_WINDOW_LINE}</p></div>}
       </WatchedBrowserFrame>

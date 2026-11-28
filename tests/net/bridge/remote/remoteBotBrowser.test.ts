@@ -220,3 +220,42 @@ describe('a bot’s browser watched from another computer', () => {
     await vi.waitFor(() => expect(owner.ended).toEqual([`${BOT} remote:viewer`]))
   })
 })
+
+describe('a device the bot’s computer lets go of', () => {
+  it('says the hold ended on the view before the view ends, when the device loses its reach', async () => {
+    const { host, viewer, window, shown, ownerNode, viewerNode, lose } = setup({ level: 'full' })
+    await viewer.watch(window, ownerNode, BOT, { watchId: 'w1', width: 480, fps: 5, viewId: 'v1' })
+    await host.hold(viewerNode, BOT, 'v1', { op: 'take' })
+    lose({ reach: false })
+    await vi.waitFor(() => expect(shown.at(-1)).toMatchObject({ stalled: 'forbidden' }))
+    expect(shown.map((event) => event.holdEnded ?? event.stalled)).toEqual(['expired', 'forbidden'])
+  })
+
+  it('ends its views and every hold it has when it no longer reaches this computer, one opened without a view too', async () => {
+    const { host, viewer, owner, window, shown, ownerNode, viewerNode } = setup({ level: 'full' })
+    await viewer.watch(window, ownerNode, BOT, { watchId: 'w1', width: 480, fps: 5 })
+    // An older window's open names no view: the browser is still that device's.
+    await host.open(viewerNode, BOT, {})
+    host.releaseNode(viewerNode)
+    await vi.waitFor(() => expect(owner.ended).toEqual([`${BOT} remote:${viewerNode}`]))
+    await vi.waitFor(() => expect(shown.at(-1)).toMatchObject({ stalled: 'forbidden' }))
+    expect([viewer.viewCount, host.viewCount]).toEqual([0, 0])
+  })
+
+  it('ends a hold opened without a view when Full goes', async () => {
+    const { host, owner, viewerNode, lose } = setup({ level: 'full' })
+    await host.open(viewerNode, BOT, { url: 'https://example.com/' })
+    lose({ level: 'use' })
+    await vi.waitFor(() => expect(owner.ended).toEqual([`${BOT} remote:${viewerNode}`]))
+  })
+
+  it('says to update the other computer when its pairing has no view streams', async () => {
+    const viewer = new RemoteBotViews({
+      open: () => { throw new NetError('incompatible_peer') },
+      online: () => true,
+      computer: (node) => ({ node, name: 'Studio' })
+    })
+    await expect(viewer.watch({ id: 'window-1', emit: () => undefined }, 'n_studio' as NodeId, BOT, { watchId: 'w1', width: 480, fps: 5 }))
+      .rejects.toMatchObject({ code: 'incompatible_peer', message: "Update Mousse on Studio to watch its bots' browsers." })
+  })
+})

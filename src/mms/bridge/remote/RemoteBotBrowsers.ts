@@ -6,6 +6,7 @@ import { isCount, isWatchId } from '../../browser/viewer/watchedParams'
 import type { BotBrowsers } from '../../bots/browser/BotBrowsers'
 import type { BotReachPort } from '../../protocol/botReachPort'
 import { Channel, toWireError, type EngineStream } from '../../netEngine/session/transport'
+import { engineLimits } from '../../netEngine/limits'
 import type { EngineMessage } from '../../netEngine/session/frame'
 
 /**
@@ -48,6 +49,8 @@ export type BotViewMessage =
   | { t: 'update'; event: Omit<BotBrowserFrameEvent, 'botId' | 'frame'> & { frame?: Omit<NonNullable<BotBrowserFrameEvent['frame']>, 'data'> }; pieces?: number }
   /** The next part of a picture. */
   | { t: 'part' }
+  /** The view ends, and why (`forbidden`, `stream_unknown`): its stream's FIN follows. */
+  | { t: 'end'; reason: string }
 
 /** What another computer's calls and views use of the bots' browsers. */
 export type RemoteBrowsersPort = Pick<BotBrowsers, 'view' | 'watch' | 'unwatch' | 'hold' | 'send' | 'open' | 'endHoldsOf'>
@@ -66,6 +69,8 @@ interface View {
   botId?: string
   watchId?: string
   ended: boolean
+  /** The other side ended its half: nothing waits for it when this side ends. */
+  peerEnded: boolean
   /** Ends the browser's watch with the stream. */
   lifetime: AbortController
   startedAt: number
@@ -85,7 +90,11 @@ export class RemoteBotBrowsers {
     /** Whether the bot is there; throws when it is not. */
     bot(botId: string): void
     reach?: Pick<BotReachPort, 'level' | 'canReach'> & Partial<Pick<BotReachPort, 'onChange'>>
+    /** A device this computer blocked: Off here, whatever its bot level says. */
+    blocked?(node: string): boolean
     now?(): number
+    /** How long an ended view waits for the other side to end its half before resetting the stream. */
+    lingerMs?: number
     /** Each view's count when it ends (the real check's numbers). */
     counted?(count: BotViewCount): void
   }) {
@@ -94,6 +103,7 @@ export class RemoteBotBrowsers {
 
   private level(node: string): BotLevel {
     try {
+      if (this.options.blocked?.(node)) return 'off'
       return this.options.reach?.level(node) ?? 'full'
     } catch {
       return 'off'
@@ -101,7 +111,7 @@ export class RemoteBotBrowsers {
   }
 
   private allowed(node: string, botId: string, level: 'use' | 'full'): boolean {
-    if (!this.options.reach) return true
+    if (!this.options.reach) return !this.options.blocked?.(node)
     return botLevelReaches(this.level(node), level) && this.options.reach.canReach(botId, node)
   }
 
@@ -123,7 +133,7 @@ export class RemoteBotBrowsers {
   }
 
   async hold(node: string, botId: string, viewId: string, request: BotBrowserHoldRequest): Promise<{ browser: BotBrowserView; hold?: BotBrowserHold }> {
-    if (request.op === 'take') this.holders.set(node, (this.holders.get(node) ?? new Set()).add(botId))
+    if (request.op === 'take') this.held(node, botId)
     const answer = await this.browsers().hold(botId, viewId, request, RemoteBotBrowsers.connectionOf(node))
     return { ...answer, browser: withoutFrame(answer.browser) }
   }
@@ -133,9 +143,14 @@ export class RemoteBotBrowsers {
   }
 
   async open(node: string, botId: string, input: { url?: string; viewId?: string; platform?: 'mac' | 'other' }): Promise<{ browser: BotBrowserView; hold?: BotBrowserHold }> {
-    if (input.viewId) this.holders.set(node, (this.holders.get(node) ?? new Set()).add(botId))
+    // Opened, the browser is the device's (an older window's open, with no view, too): its hold ends as any other.
+    this.held(node, botId)
     const answer = await this.browsers().open(botId, input.url, { connectionId: RemoteBotBrowsers.connectionOf(node), ...(input.viewId ? { viewId: input.viewId } : {}), ...(input.platform ? { platform: input.platform } : {}) })
     return { ...answer, browser: withoutFrame(answer.browser) }
+  }
+
+  private held(node: string, botId: string): void {
+    this.holders.set(node, (this.holders.get(node) ?? new Set()).add(botId))
   }
 
   // ------------------------------------------------------------------ the live view (`mousse.botview`)
@@ -148,13 +163,17 @@ export class RemoteBotBrowsers {
       channel,
       connectionId: `${RemoteBotBrowsers.connectionOf(node)}:v${++this.serial}`,
       ended: false,
+      peerEnded: false,
       lifetime: new AbortController(),
       startedAt: this.now(),
       frames: 0,
       bytes: 0
     }
     this.views.add(view)
-    channel.onEnd(() => this.end(view))
+    channel.onEnd(() => {
+      view.peerEnded = true
+      this.end(view)
+    })
     let queue = Promise.resolve()
     channel.onMessage((message) => {
       // One watch at a time, in order: each is answered before the next is read.
@@ -245,6 +264,19 @@ export class RemoteBotBrowsers {
     view.ended = true
     this.views.delete(view)
     view.lifetime.abort()
+    // This computer's half ends too (as a subscription's does), so neither helper keeps the stream's place; if the
+    // other side never ends its own, the stream is reset after a while.
+    try {
+      view.channel.end()
+      if (!view.peerEnded) {
+        const timer = setTimeout(() => {
+          if (!view.peerEnded) view.channel.reset('cancelled')
+        }, this.options.lingerMs ?? engineLimits().tunnelCloseLingerMs)
+        timer.unref?.()
+      }
+    } catch {
+      view.channel.reset('cancelled')
+    }
     if (view.botId && view.watchId) this.options.browsers()?.unwatch(view.botId, view.watchId, view.connectionId)
     this.options.counted?.({ frames: view.frames, bytes: view.bytes, ms: this.now() - view.startedAt })
   }
@@ -262,17 +294,48 @@ export class RemoteBotBrowsers {
       } catch {
         present = false
       }
-      if (!present) this.reset(view, 'stream_unknown')
-      else if (!this.allowed(view.node, view.botId, 'use')) this.reset(view, 'forbidden')
+      const reason = !present ? 'stream_unknown' : !this.allowed(view.node, view.botId, 'use') ? 'forbidden' : undefined
+      if (reason) this.finish(view, reason)
     }
     for (const [node, bots] of [...this.holders]) {
       for (const botId of [...bots]) {
         if (this.allowed(node, botId, 'full')) continue
-        bots.delete(botId)
-        void this.options.browsers()?.endHoldsOf(botId, RemoteBotBrowsers.connectionOf(node)).catch(() => undefined)
+        this.endHold(node, botId)
       }
-      if (!bots.size) this.holders.delete(node)
     }
+  }
+
+  /**
+   * A device no longer reaches this computer (its connection closed, it was blocked or removed): its views end and its
+   * holds end at once, as if their leases ran out.
+   */
+  releaseNode(node: string): void {
+    for (const view of [...this.views]) if (view.node === node) this.finish(view, 'forbidden')
+    for (const botId of [...(this.holders.get(node) ?? [])]) this.endHold(node, botId)
+  }
+
+  private endHold(node: string, botId: string): void {
+    const bots = this.holders.get(node)
+    bots?.delete(botId)
+    if (bots && !bots.size) this.holders.delete(node)
+    void this.options.browsers()?.endHoldsOf(botId, RemoteBotBrowsers.connectionOf(node)).catch(() => undefined)
+  }
+
+  /**
+   * Ends a view this computer no longer shows the device, in order on its stream: its window learns the hold it had
+   * ended, then why the view ends; then the stream's FIN (a reset could lose what went before it).
+   */
+  private finish(view: View, reason: string): void {
+    if (view.ended) return
+    try {
+      if (view.watchId && view.botId && this.holders.get(view.node)?.has(view.botId))
+        view.channel.send({ t: 'update', event: { watchId: view.watchId, holdEnded: 'expired' } } satisfies BotViewMessage)
+      view.channel.send({ t: 'end', reason } satisfies BotViewMessage)
+    } catch {
+      this.reset(view, reason)
+      return
+    }
+    this.end(view)
   }
 
   /** The views open now (tests). */

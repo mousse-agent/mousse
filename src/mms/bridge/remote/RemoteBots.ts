@@ -527,6 +527,8 @@ function refusal(error: unknown): never {
   if (isBotActionRefusalCode(code))
     throw new NetError('conflict', undefined, { details: { reason: code } })
   if (code === 'bot_not_found') throw new NetError('stream_unknown', 'This bot is gone.')
+  // A browser hold that ended (taken back, run out): the window says it no longer holds it.
+  if (code === 'hold_ended') throw new NetError('conflict', message, { details: { reason: 'hold_ended' } })
   if (code.endsWith('_not_found') || code === 'not_found') throw new NetError('stream_unknown', message)
   throw new NetError(code === 'invalid_params' ? 'bad_request' : 'conflict', message)
 }

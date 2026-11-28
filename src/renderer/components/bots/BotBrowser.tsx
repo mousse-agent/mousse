@@ -80,6 +80,7 @@ export function BotBrowserPane({ bot, view, fullScreen }: { bot: BotSummary; vie
   return <WatchedBrowserPane key={bot.id} kit={botBrowserKit} browserKey={bot.id} label={`${bot.name}'s browser`} user={bot.name} view={view} open={open}
     {...(fullScreen ? { fullScreen } : {})}
     {...(blocked ? { blocked } : {})}
+    {...(bot.lives ? { remote: true } : {})}
     closed={(typed) => <>
       <p>{view.stopped ? 'The browser stopped.' : `${bot.name}'s browser is closed.`}</p>
       <button type="button" disabled={busy || Boolean(blocked)} title={blocked} onClick={() => open(/^https?:\/\//i.test(typed) ? typed : undefined)}>Open it</button>

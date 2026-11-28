@@ -1866,6 +1866,8 @@ export class NetEngineService implements EngineDirectoryPort {
         onServingChanged: (node) => {
           // A pairing that can no longer reach this computer keeps no editor tunnel here.
           editor.reconcile()
+          // Nor a bot's browser it took over: the bot has it back at once.
+          if (!sessions.serving(node)) this.options.bridge()?.botViews.releaseNode(node)
           // B: A's first live inbound with the row's grant connects it ("Added over SSH from <A>").
           const row = liveRow(node)
           if (

@@ -219,6 +219,8 @@ export class BotRouter implements BotRouterPort {
       const reason = (error as { details?: { reason?: unknown } } | null)?.details?.reason
       // Refused there for this computer's bot level: its setup greys now, and the level is asked again.
       if (reason === 'bots_full_needed') this.options.registry.levelRefused?.(node)
+      // A browser hold that ended there: the window's own words for it, as for a bot of this computer.
+      if (reason === 'hold_ended') throw new DomainRpcError('hold_ended', "You don't hold this browser now.")
       // A device choice refused there before it ran: the window's own wrong params, said in its words.
       if (typeof reason === 'string' && Object.hasOwn(BOT_DEVICES_REFUSALS, reason))
         throw new DomainRpcError('invalid_params', BOT_DEVICES_REFUSALS[reason as BotDevicesRefusal], (error as { details?: unknown }).details)

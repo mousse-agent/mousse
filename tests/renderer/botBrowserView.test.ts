@@ -1158,4 +1158,55 @@ describe('the browser of a bot on another computer', () => {
     expect(button('Take over')!.title).toBe('Studio is offline')
     expect(button('Take over')!.disabled).toBe(true)
   })
+
+  it('goes back to a greyed Take over when its access falls below Full, or its computer goes offline, while held', async () => {
+    const remoteStall = async (botId: string, stalled: string) => {
+      const watchId = watches().at(-1)!.watchId as string
+      await act(async () => { for (const listener of pushes) listener({ botId, watchId, stalled }) })
+    }
+    const lower = async (lives: { node: string; name: string; level?: 'full'; offline?: true }) => {
+      fake.bots = [summary('n_studio:b_art', { name: 'Art helper', lives })]
+      await act(async () => useBotsStore.getState().refresh())
+    }
+    // Below Full: the bot's computer ends the view, and the hold it had there with it.
+    const helper = await showRemote({ ...STUDIO, level: 'full' })
+    await click(button('Take over'))
+    expect(button('Give back')).toBeDefined()
+    // The bot's computer ended the hold with the view: this window no longer holds it, nor renews it.
+    browser = { ...browser, control: 'bot', holder: 'bot' }
+    delete browser.hold
+    await remoteStall(helper.id, 'forbidden')
+    expect(useBotBrowserStore.getState().holds[helper.id]).toBeUndefined()
+    await lower({ ...STUDIO })
+    expect(button('Give back')).toBeUndefined()
+    expect(button('Take over')!.disabled).toBe(true)
+    expect(button('Take over')!.title).toBe('Needs Full bot access on Studio')
+
+    // Offline: a renewal that can't reach it says the hold is gone too.
+    await lower({ ...STUDIO, level: 'full' })
+    browser = { ...browser, control: 'bot', holder: 'bot' }
+    delete browser.hold
+    let away = false
+    setBotBrowserTransport((async (method: BotsBrowserMethod, params: Record<string, unknown>) => {
+      calls.push([method, params])
+      if (method === 'bots.browser.hold' && away) throw { code: 'computer_offline', message: 'Studio is offline.' }
+      if (method === 'bots.browser.hold') return hold((params as { request: { op: string } }).request.op)
+      if (method === 'bots.browser.unwatch') return { ok: true }
+      return { browser }
+    }) as never, (listener) => { pushes.add(listener); return () => pushes.delete(listener) })
+    await act(async () => useBotBrowserStore.getState().load(helper.id, false))
+    await click(button('Take over'))
+    expect(button('Give back')).toBeDefined()
+    expect(useBotBrowserStore.getState().holds[helper.id]).toBeDefined()
+    away = true
+    browser = { ...browser, control: 'bot', holder: 'bot' }
+    delete browser.hold
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+    await settle()
+    expect(useBotBrowserStore.getState().holds[helper.id]).toBeUndefined()
+    await lower({ ...STUDIO, level: 'full', offline: true })
+    expect(button('Give back')).toBeUndefined()
+    expect(button('Take over')!.disabled).toBe(true)
+    expect(button('Take over')!.title).toBe('Studio is offline')
+  })
 })

@@ -145,6 +145,17 @@ const missingMethod = (cause: unknown) => /method not allowed|not allowlisted|un
 const refusesPage = (cause: unknown) => /unexpected field: page/i.test(errorText(cause))
 
 /** An older service refuses a view's id (it predates holds). */
+/** Why a browser on another computer stopped picturing for this window (`RemoteBotViews`): a hold there is gone. */
+const REMOTE_STALLS: ReadonlySet<string> = new Set(['forbidden', 'stream_unknown', 'offline'])
+/**
+ * A renewal's refusal that says the hold is gone: it ended (`hold_ended`, or a conflict for that reason), or the
+ * browser's computer no longer lets this one in, no longer has the bot, or is offline (it ends a hold it loses).
+ */
+const holdGone = (cause: unknown): boolean => {
+  const code = String((cause as { code?: unknown } | null)?.code ?? '')
+  const reason = (cause as { details?: { reason?: unknown } } | null)?.details?.reason
+  return code === 'hold_ended' || (code === 'conflict' && reason === 'hold_ended') || ['forbidden', 'computer_forbidden', 'stream_unknown', 'computer_offline'].includes(code) || /don't hold this browser/i.test(errorText(cause))
+}
 const refusesViewId = (cause: unknown) => String((cause as { code?: unknown } | null)?.code ?? '') === 'unknown_field' || /unexpected field: viewId/i.test(errorText(cause))
 
 const samePage = (a: WatchedBrowserPageSize | undefined, b: WatchedBrowserPageSize | undefined) =>
@@ -446,7 +457,7 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
         unanswered = false
         put(key, answer.browser)
       }, (cause) => {
-        if (String((cause as { code?: unknown } | null)?.code ?? '') === 'hold_ended' || /don't hold this browser/i.test(errorText(cause))) {
+        if (holdGone(cause)) {
           // A browser in a window goes back when its window closes: nothing went wrong, the view reads it again.
           const inWindow = windowHolds.has(hold.id) || Boolean(useStore.getState().views[key]?.windowed)
           dropHold(key, 'You don\'t hold the browser now')
@@ -559,9 +570,11 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
     // Only the service's word, or a new picture, changes whether pictures can arrive.
     if (event.stalled) setStream(key, { live: false, since: lastGood.get(key) ?? Date.now() })
     else if (event.live || event.frame) setStream(key, { live: true })
-    // This window's hold ended without its Give back (taken in another window, run out), or another holds it now.
+    // This window's hold ended without its Give back (taken in another window, run out), or another holds it now; or
+    // the computer the browser is on stopped picturing it for this one (its access lowered, it went offline): a hold
+    // there ends with it.
     const held = useStore.getState().holds[key]
-    if (held && held.id !== LEGACY_HOLD && (event.holdEnded || (event.holder && event.holder !== 'this-view'))) {
+    if (held && held.id !== LEGACY_HOLD && (event.holdEnded || (event.holder && event.holder !== 'this-view') || (event.stalled && REMOTE_STALLS.has(event.stalled)))) {
       dropHold(key, event.holdEnded === 'taken' || event.holder === 'another-view' ? 'Taken over in another window' : 'You don\'t hold the browser now')
     }
   }

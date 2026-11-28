@@ -571,6 +571,8 @@ export class BridgeProfileService {
         port.get(botId)
       },
       reach,
+      // A blocked device is Off here, as for its bot streams (`botStreamReadable`).
+      blocked: (node) => rt.policy.isBlocked(node as NodeId),
       counted: (count) => {
         if (count.frames) console.info('a bot browser view ended', { frames: count.frames, bytes: count.bytes, ms: count.ms })
       }
@@ -1122,6 +1124,8 @@ export class BridgeProfileService {
     this.routes.pages.dropCaller(node)
     this.staging.dropCaller(node)
     this.routes.terminals.endExcept('access_lost', (other) => other !== node)
+    // Its views of the bots' browsers, and the browsers it took over.
+    this.botViews.releaseNode(node)
     this.peers.changed()
   }
 
