@@ -13,7 +13,7 @@ import { CODEX_CAPABILITIES, CodexAdapter } from './codex/adapter'
 import { cliNames, ownedLaunchEnv, ownedUserArgs, ownedUserEnv } from '../env'
 import { telemetryOf } from '../telemetry'
 import { reportedUsageWindows, snapshotPlan, snapshotResets, usageWindows } from '../vendors/codex/rateLimits'
-import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig, type RuntimeUsage } from '../driver'
+import { decodeInstanceConfig, realPathOf, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig, type RuntimeUsage } from '../driver'
 import { createManagedCodexRuntime } from '../vendors/codex/managedRuntime'
 import { ownedHomeProblem } from '../ownedHome'
 import { ptyAvailable, redactSignIn, runInPty, terminalText, transcriptLinks, type PtyRun, type PtySpawn } from '../pty'
@@ -206,6 +206,54 @@ export function decodeCodexConfig(raw: Record<string, unknown> | undefined, inst
   return { ...config, ...(raw?.setup === 'existing' ? { setup: 'existing' as const } : {}) }
 }
 
+/**
+ * The command that updates a Codex its owner installed. Homebrew has a cask and a formula both
+ * named `codex`: the one the executable comes from is upgraded. Nix and mise pin their versions in
+ * the user's own configuration, so Mousse has no command for them.
+ */
+export function codexUpdateCommand(owner: InstallOwner, _pkg?: string, path?: string): string | undefined {
+  switch (owner) {
+    // The standalone installer's Codex reinstalls itself from OpenAI's install script.
+    case 'standalone':
+      return 'codex update'
+    case 'npm':
+      return 'npm install -g @openai/codex@latest'
+    case 'pnpm':
+      return 'pnpm add -g @openai/codex@latest'
+    case 'yarn':
+      return 'yarn global add @openai/codex@latest'
+    case 'bun':
+      return 'bun add -g @openai/codex@latest'
+    case 'volta':
+      return 'volta install @openai/codex@latest'
+    case 'brew':
+      return path && isCask(path) ? 'brew upgrade --cask codex' : 'brew upgrade codex'
+    case 'winget':
+      return 'winget upgrade --id OpenAI.Codex --exact --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity'
+    case 'scoop':
+      return 'scoop update codex'
+    case 'choco':
+      return 'choco upgrade codex -y'
+    default:
+      return undefined
+  }
+}
+
+function isCask(path: string): boolean {
+  return [path, realPathOf(path)].some((candidate) => candidate?.replace(/\\/g, '/').toLowerCase().includes('/caskroom/'))
+}
+
+/**
+ * `codex update` updates the standalone install under the CODEX_HOME it reads: the home the
+ * executable sits in (`<home>/packages/standalone/...`), never a private home Mousse gave the entry.
+ */
+export function codexUpdateEnv(owner: InstallOwner, path: string): Record<string, string> | undefined {
+  if (owner !== 'standalone') return undefined
+  const target = realPathOf(path) ?? path
+  const match = /^(.*?)[\\/]packages[\\/]standalone[\\/]/i.exec(target)
+  return match?.[1] ? { CODEX_HOME: match[1] } : undefined
+}
+
 export interface CodexDriverOptions {
   /** The profile's service for the built-in `codex` instance (shared with usage and Settings). */
   builtIn: () => CodexProviderService
@@ -334,15 +382,8 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     // switched off (`codexBotSandboxConfig`, checked on the real binaries in `codexBotTools.test.ts`).
     botHold: () => ({ runtime: 'codex', hostedSearch: 'off_without_web' }),
     nativeToolNames: (neutral) => CODEX_NATIVE_TOOLS[neutral] ?? [],
-    updateCommand: (owner: InstallOwner) => {
-      // The standalone installer's Codex reinstalls itself from OpenAI's install script.
-      if (owner === 'standalone') return 'codex update'
-      if (owner === 'npm') return 'npm install -g @openai/codex@latest'
-      if (owner === 'pnpm') return 'pnpm add -g @openai/codex@latest'
-      if (owner === 'bun') return 'bun add -g @openai/codex@latest'
-      if (owner === 'brew') return 'brew upgrade codex'
-      return undefined
-    },
+    updateCommand: codexUpdateCommand,
+    updateEnv: codexUpdateEnv,
     create(context: DriverContext): DriverRuntime {
       // A managed entry keeps its own runtime and ChatGPT sign-in.
       if (context.config.setup === 'managed') return options.managed ? options.managed(context) : managedRuntime(context)
@@ -366,7 +407,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
   }
 
   /** What every Codex runtime does with its service: turns, listings, usage, refresh. */
-  function serviceRuntime(service: CodexProviderService): Pick<DriverRuntime, 'adapter' | 'configured' | 'configuredProvider' | 'llmProvider' | 'models' | 'modelsRefreshedAt' | 'usage' | 'useLimitReset' | 'permissionLimits' | 'refreshModels' | 'forgetConversation' | 'compactConversation' | 'oneShotTransport'> {
+  function serviceRuntime(service: CodexProviderService): Pick<DriverRuntime, 'adapter' | 'configured' | 'configuredProvider' | 'llmProvider' | 'models' | 'modelsRefreshedAt' | 'usage' | 'useLimitReset' | 'permissionLimits' | 'refreshModels' | 'forgetConversation' | 'compactConversation' | 'oneShotTransport' | 'releaseExecutable'> {
     return {
       adapter: new CodexAdapter(() => service),
       configured: () => service.configured(),
@@ -385,7 +426,9 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
       forgetConversation: (threadId) => service.forgetConversation(threadId),
       // Codex compacts with no focus of its own.
       compactConversation: (request) => service.compactConversation(request.threadId, request.history, request.instanceId, request.signal),
-      oneShotTransport: (spec) => service.oneShotTransport(spec)
+      oneShotTransport: (spec) => service.oneShotTransport(spec),
+      // Codex's app-server stays open between turns and holds codex.exe; an update needs it closed.
+      releaseExecutable: () => service.stopAll('Codex is being updated.')
     }
   }
 

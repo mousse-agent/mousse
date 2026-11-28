@@ -311,7 +311,7 @@ describe('the update of the user’s own opencode', () => {
     const update = updateAffordance(opencodeDriver(), binary, { state: 'untested' }, '2.4.1')
     if (command) expect(update).toMatchObject({ kind: 'advisory', command, latestVersion: '2.4.1' })
     // 2.4.1 is past the OpenCode Mousse was tested with (`COMPATIBILITY.opencode`), which the notice says.
-    else expect(update).toEqual({ kind: 'notice', latestVersion: '2.4.1', untested: true })
+    else expect(update).toEqual({ kind: 'notice', latestVersion: '2.4.1', untested: true, ...(owner !== 'unknown' ? { owner } : {}) })
   })
 })
 

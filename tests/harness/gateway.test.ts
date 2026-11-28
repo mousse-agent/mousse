@@ -763,11 +763,12 @@ describe('harness gateway: update available', () => {
     const marker = join(dir, 'updated.txt')
     const script = join(dir, 'update.js')
     writeFileSync(script, `if (process.argv[2] === '--fail') { console.error('EACCES: permission denied'); process.exit(3) } require('node:fs').writeFileSync(${JSON.stringify(marker)}, process.argv.slice(2).join(' '))`)
-    let command = `node ${script} --latest`
+    let command = `node ${script} --fail`
     let checks = 0
+    // The update writes the marker: the CLI is then the newer version.
     const base = adapterDriver(fake('claude'), {
       runtime: {
-        managed: () => ({ path: process.execPath, version: '2.1.0' }),
+        managed: () => ({ path: process.execPath, version: existsSync(marker) ? '2.2.0' : '2.1.0' }),
         auth: async () => {
           checks += 1
           return { state: 'signed_in' }
@@ -787,22 +788,46 @@ describe('harness gateway: update available', () => {
 
     const snapshot = (await harness.instances.snapshots(device)).find((entry) => entry.instanceId === 'claude')
     expect(snapshot?.update).toEqual({ kind: 'advisory', command, latestVersion: '2.2.0' })
+
+    const failing = await harness.instances.update('claude')
+    await waitFor(() => phase(failing.operationId, 'failed'), 10_000)
+    const failed = events.find((event) => event.type === 'operation' && event.data.operationId === failing.operationId && event.data.phase === 'failed')
+    expect(failed?.type === 'operation' && failed.data.phase === 'failed' && failed.data.error.message).toContain('EACCES: permission denied')
+
+    command = `node ${script} --latest`
     const checked = checks
     const started = await harness.instances.update('claude')
     expect(started).toMatchObject({ instanceId: 'claude', kind: 'update' })
     await waitFor(() => phase(started.operationId, 'completed'), 10_000)
     // The very executable the instance runs, with the command's arguments.
-    expect(spawned).toEqual([[process.execPath, script, '--latest']])
+    expect(spawned).toEqual([[process.execPath, script, '--fail'], [process.execPath, script, '--latest']])
     expect(readFileSync(marker, 'utf8')).toBe('--latest')
-    // Checked again afterwards, so a new version shows without a click on Check again.
+    // Checked again afterwards, so the new version shows without a click on Check again.
     await waitFor(() => checks > checked)
-
-    command = `node ${script} --fail`
-    const failing = await harness.instances.update('claude')
-    await waitFor(() => phase(failing.operationId, 'failed'), 10_000)
-    const failed = events.find((event) => event.type === 'operation' && event.data.operationId === failing.operationId && event.data.phase === 'failed')
-    expect(failed?.type === 'operation' && failed.data.phase === 'failed' && failed.data.error.message).toContain('EACCES: permission denied')
+    expect((await harness.instances.snapshots(device)).find((entry) => entry.instanceId === 'claude')?.update).toBeUndefined()
     stops()
+    harness.stop()
+  })
+
+  it('an owner command that succeeds but leaves the version as it was fails: it updated another copy', async () => {
+    const fetchImpl = vi.fn(async () => response('2.2.0')) as unknown as typeof fetch
+    const dir = home()
+    const latest = new LatestVersionCache(dir, { fetchImpl })
+    await latest.refresh({ kind: 'npm', package: '@anthropic-ai/claude-code' })
+    const script = join(dir, 'update.js')
+    // Exits 0, as npm does after updating a copy under another prefix.
+    writeFileSync(script, 'process.exit(0)')
+    const base = adapterDriver(fake('claude'), { runtime: { managed: () => ({ path: process.execPath, version: '2.1.0' }), auth: async () => ({ state: 'signed_in' }) } })
+    const driver: HarnessDriver = { ...base, latestVersion: { kind: 'npm', package: '@anthropic-ai/claude-code' }, updateCommand: () => `node ${script}` }
+    const harness = testHarness({ drivers: [adapterDriver(pi()), driver, adapterDriver(fake('codex')), adapterDriver(fake('antigravity'))], instances: instances(), profileHome: dir, latest })
+    const events: HarnessGatewayEvent[] = []
+    harness.instances.subscribe((event) => events.push(event))
+    await harness.instances.snapshots(device)
+    const started = await harness.instances.update('claude')
+    const failed = () => events.find((event) => event.type === 'operation' && event.data.operationId === started.operationId && event.data.phase === 'failed')
+    await waitFor(() => Boolean(failed()), 10_000)
+    const event = failed()
+    expect(event?.type === 'operation' && event.data.phase === 'failed' && event.data.error.message).toMatch(/^Still 2\.1\.0 after /)
     harness.stop()
   })
 
