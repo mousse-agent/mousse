@@ -55,3 +55,8 @@ export function groupComputers(group: Pick<ProjectGroup<Groupable>, 'members'>):
   for (const member of group.members) if (member.node && !nodes.includes(member.node)) nodes.push(member.node)
   return nodes
 }
+
+/** Whether a group's projects are on more than one computer, this one counting when it holds one of them. */
+export function groupOnSeveralComputers(group: Pick<ProjectGroup<Groupable>, 'members'>): boolean {
+  return new Set(group.members.map((member) => member.node ?? '')).size > 1
+}

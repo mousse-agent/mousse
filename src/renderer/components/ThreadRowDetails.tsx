@@ -43,16 +43,37 @@ export function ThreadModelIcon({ thread }: { thread: ModelThread }) {
 
 type LineThread = Pick<Thread, 'projectId' | 'node' | 'offline' | 'notShared' | 'worktreeEnabled' | 'modelOverride'>
 
+/** What a thread's lower line names first: its branch, the computer it runs on, or both (the computer on a line of its own). */
+export type ThreadLineShows = 'branch' | 'device' | 'both'
+
+/** The computer a thread runs on, by name: another computer's badge, or this computer's name. */
+function ThreadDevice({ thread }: { thread: Pick<Thread, 'node' | 'offline' | 'notShared'> }) {
+  const deviceName = useAppStore((s) => s.appInfo?.deviceName)
+  if (thread.node) return <ThreadComputerBadge thread={thread} withName tooltip={false} className="threads-sidebar-card-device" />
+  return (
+    <span className="computer-badge threads-sidebar-card-device" data-state="online">
+      <span className="computer-badge-icon">
+        <Monitor size={11} strokeWidth={2} aria-hidden="true" />
+      </span>
+      <span className="computer-badge-name">{deviceName || 'This computer'}</span>
+    </span>
+  )
+}
+
 /**
- * A thread's lower line, on a Projects tree row and a Threads tab card alike: the computer it runs on (when another),
- * its branch (with the branch icon when the thread has a worktree of its own), its pull requests, then `end` (a tree
- * row's time) and its model's logo.
+ * A thread's lower line, on a Projects tree row and a Threads tab card alike: its pull requests, then `end` (a tree
+ * row's time) and its model's logo, after what `shows` names:
+ * - `branch`: the computer it runs on (when another) and its branch, with the branch icon when the thread has a
+ *   worktree of its own;
+ * - `device`: the computer it runs on, this one by name too (a project on several computers); the branch is in the
+ *   row's hover card;
+ * - `both`: the computer on a line of its own, then the branch line.
  *
- * A thread with none of the first three (no Git, no other computer, no pull request) has nothing of its own for the
- * line: it is marked `data-single`, so a tree row puts what is left on its title's line, and with `hideEmpty` (a card,
- * whose logo sits on its top line) it shows nothing.
+ * A branch line with nothing of its own (no Git, no other computer, no pull request) is marked `data-single`, so a
+ * tree row puts what is left on its title's line, and with `hideEmpty` (a card, whose logo sits on its top line) it
+ * shows nothing.
  */
-export function ThreadBranchLine({ thread, threadId, pullRequests, end, wordy = false, model = true, hideEmpty = false, className }: {
+export function ThreadBranchLine({ thread, threadId, pullRequests, end, wordy = false, model = true, hideEmpty = false, shows = 'branch', className }: {
   thread: LineThread
   threadId: string
   pullRequests: readonly ThreadPullRequestSummary[]
@@ -63,25 +84,48 @@ export function ThreadBranchLine({ thread, threadId, pullRequests, end, wordy = 
   /** The model's logo at the end. */
   model?: boolean
   hideEmpty?: boolean
+  shows?: ThreadLineShows
   className: string
 }) {
   // None in a project without Git (or another computer's).
   const branch = useThreadBranch(thread, threadId)
-  const single = !wordy && !thread.node && !branch?.branch && pullRequests.length === 0
-  if (single && hideEmpty) return null
-  return (
+  const tail = (
+    <>
+      <ThreadPullRequestCount pullRequests={pullRequests} />
+      {end}
+      {model && <ThreadModelIcon thread={thread} />}
+    </>
+  )
+  if (shows === 'device') {
+    return (
+      <span className={className}>
+        <span className="threads-sidebar-branch"><ThreadDevice thread={thread} /></span>
+        {tail}
+      </span>
+    )
+  }
+  const withComputer = shows === 'branch' && !!thread.node
+  const single = !wordy && !withComputer && !branch?.branch && pullRequests.length === 0
+  const branchLine = single && hideEmpty ? null : (
     <span className={className} data-single={single || undefined}>
       {!single && (
         <span className="threads-sidebar-branch">
-          <ThreadComputerBadge thread={thread} withName tooltip={false} className="threads-sidebar-card-device" />
+          {withComputer && <ThreadComputerBadge thread={thread} withName tooltip={false} className="threads-sidebar-card-device" />}
           {branch?.worktree && <GitBranch size={11} strokeWidth={2} className="threads-sidebar-branch-icon" aria-label="Own worktree" />}
           {branch?.branch && <span className="threads-sidebar-branch-name">{branch.branch}</span>}
         </span>
       )}
-      <ThreadPullRequestCount pullRequests={pullRequests} />
-      {end}
-      {model && <ThreadModelIcon thread={thread} />}
+      {tail}
     </span>
+  )
+  if (shows === 'branch') return branchLine
+  return (
+    <>
+      <span className={className}>
+        <span className="threads-sidebar-branch"><ThreadDevice thread={thread} /></span>
+      </span>
+      {branchLine}
+    </>
   )
 }
 
