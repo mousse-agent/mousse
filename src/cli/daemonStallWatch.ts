@@ -10,7 +10,9 @@ import { Worker } from 'node:worker_threads'
  * is `thresholdMs` old, that thread opens an inspector session on the main thread, pauses it, reads its call stack and
  * resumes it at once, as a debugger's pause button would. It reads the stack again every `resampleMs` while the stall
  * lasts, up to `maxSamples` times, and writes a line when the main thread is back, so a stall shows how long it lasted
- * and where it was, also when the service is ended before it comes back.
+ * and where it was, also when the service is ended before it comes back. That closing line also says how much of the
+ * stall the main thread spent on the CPU (`busyMs`): close to all of it means it was computing, close to none that it
+ * waited on something (a lock, the disk, another thread or process).
  *
  * JavaScript running in a loop is paused at once; the first sample of a stall also turns the debugger on, which has the
  * main thread list every script it has loaded (about half a second in the service), and later samples of that stall
@@ -63,6 +65,8 @@ const { dirname } = require('node:path')
 const { beatBuffer, logPath, thresholdMs, resampleMs, maxSamples, pollMs, maxFrames, maxPerHour } = workerData
 const beat = new BigInt64Array(beatBuffer)
 const lastBeat = () => Number(Atomics.load(beat, 0))
+// The main thread's own CPU time at its last stamp, in microseconds; -1 where the runtime cannot tell.
+const lastCpu = () => Number(Atomics.load(beat, 1))
 
 try { mkdirSync(dirname(logPath), { recursive: true }) } catch {}
 const write = (text) => {
@@ -169,7 +173,15 @@ setInterval(() => {
   const since = lastBeat()
   const held = now - since
   if (stall && since > stall.since) {
-    if (!stall.quiet) write('main thread was held ' + seconds(since - stall.since) + ' ' + JSON.stringify({ samples: stall.samples }))
+    if (!stall.quiet) {
+      // CPU the main thread spent between its last stamp before the stall and its first after: near the stall's length
+      // when it was busy (a loop, parsing, garbage collection), near zero when it waited (a lock, a disk, a process).
+      const cpu = lastCpu()
+      const fields = { samples: stall.samples }
+      if (cpu >= 0 && stall.cpuSince >= 0) fields.busyMs = Math.round((cpu - stall.cpuSince) / 1000)
+      write('main thread was held ' + seconds(since - stall.since) +
+        (fields.busyMs === undefined ? '' : ', busy ' + seconds(fields.busyMs) + ' of it') + ' ' + JSON.stringify(fields))
+    }
     const ended = stall
     stall = null
     // One whose pause is still on its way is closed when it lands.
@@ -182,7 +194,7 @@ setInterval(() => {
       stall = { since, quiet: true }
       return
     }
-    stall = { since, samples: 0, nextAt: now, askedAt: null, unsampled: skipped }
+    stall = { since, cpuSince: lastCpu(), samples: 0, nextAt: now, askedAt: null, unsampled: skipped }
     skipped = 0
     if (broken) write('main thread held ' + seconds(held))
   }
@@ -207,9 +219,15 @@ setInterval(() => {
  */
 export function startDaemonStallWatch(opts: DaemonStallWatchOptions): DaemonStallWatch | null {
   if (inspectorUrl()) return null
-  const beatBuffer = new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT)
+  const beatBuffer = new SharedArrayBuffer(2 * BigInt64Array.BYTES_PER_ELEMENT)
   const beat = new BigInt64Array(beatBuffer)
-  const stamp = (): void => { Atomics.store(beat, 0, BigInt(Date.now())) }
+  const threadCpu = typeof process.threadCpuUsage === 'function' ? process.threadCpuUsage.bind(process) : null
+  const stamp = (): void => {
+    const cpu = threadCpu?.()
+    // The CPU time first: a thread that reads the new time then finds the CPU time of the same stamp.
+    Atomics.store(beat, 1, cpu ? BigInt(cpu.user + cpu.system) : -1n)
+    Atomics.store(beat, 0, BigInt(Date.now()))
+  }
   stamp()
   const heartbeat = setInterval(stamp, opts.heartbeatMs ?? 250)
   heartbeat.unref()

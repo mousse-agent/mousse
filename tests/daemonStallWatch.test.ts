@@ -26,7 +26,14 @@ function watch(log: string, resampleMs = 10_000): void {
 
 const read = (log: string): string => { try { return readFileSync(log, 'utf8') } catch { return '' } }
 const stallLines = (log: string): string[] => read(log).split('\n').filter((line) => line.includes('[warn:stall]'))
-const fields = (line: string): { stack: string[]; pauseMs: number } => JSON.parse(line.slice(line.indexOf('{')))
+const fields = (line: string): { stack: string[]; pauseMs: number; busyMs?: number } => JSON.parse(line.slice(line.indexOf('{')))
+/** The closing line's stall length and the main thread's CPU time in it, in milliseconds. */
+function closing(lines: string[]): { heldMs: number; busyMs: number } {
+  const line = lines.find((entry) => entry.includes('main thread was held'))
+  expect(line).toBeDefined()
+  const heldMs = Number(/was held ([\d.]+) s/.exec(line!)![1]) * 1000
+  return { heldMs, busyMs: fields(line!).busyMs! }
+}
 
 async function eventually(log: string, found: (lines: string[]) => boolean): Promise<string[]> {
   const until = Date.now() + 10_000
@@ -60,7 +67,7 @@ function exitStatus(result: ReturnType<typeof spawnSync>): number {
 }
 
 describe('the daemon stall watch', () => {
-  it('logs the function holding the main thread while it is held, then how long the stall lasted', async () => {
+  it('logs the function holding the main thread while it is held, then how long the stall lasted and that it was busy', async () => {
     const log = logFile()
     watch(log)
     await new Promise((resolve) => setTimeout(resolve, 500))
@@ -72,7 +79,8 @@ describe('the daemon stall watch', () => {
     expect(fields(sample!).stack.some((frame) => frame.startsWith('holdInLoop '))).toBe(true)
 
     const lines = await eventually(log, (all) => all.some((line) => line.includes('main thread was held')))
-    expect(lines.some((line) => line.includes('main thread was held'))).toBe(true)
+    const { heldMs, busyMs } = closing(lines)
+    expect(busyMs).toBeGreaterThan(heldMs / 2)
   })
 
   it('reads the stack again while the stall lasts', () => {
@@ -84,7 +92,7 @@ describe('the daemon stall watch', () => {
     for (const sample of samples) expect(sample.stack.some((frame) => frame.startsWith('holdInLoop '))).toBe(true)
   })
 
-  it('says a synchronous call holds the thread while it lasts, and names its caller once it returns', async () => {
+  it('says a synchronous call holds the thread while it lasts, names its caller once it returns, and that it waited', async () => {
     const log = logFile()
     watch(log, 400)
     await new Promise((resolve) => setTimeout(resolve, 200))
@@ -96,5 +104,7 @@ describe('the daemon stall watch', () => {
     expect(sample).toBeDefined()
     expect(fields(sample!).stack.some((frame) => frame.startsWith('waitInSyncCall '))).toBe(true)
     expect(fields(sample!).pauseMs).toBeGreaterThan(500)
+    const { heldMs, busyMs } = closing(lines)
+    expect(busyMs).toBeLessThan(heldMs / 2)
   })
 })
