@@ -37,11 +37,14 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     // A profile that was already in use keeps its own rules and sees a notice; nothing new is on until it says so.
     const review = report.review
     expect(review.legacy).toMatchObject({ inactive: 'off', captures: 'off', merged: 'false', configureCalls: 0 })
-    expect(review.legacy.notice).toContain('Recommended cleanup rules are available')
-    expect(review.legacy.notice).toContain('Nothing has changed: only the worktrees of deleted threads are removed automatically.')
+    expect(review.legacy.notice).toContain('Recommended cleanup rules')
+    expect(review.legacy.notice).toContain('Off for now; only worktrees of deleted threads are removed.')
     // The notice comes first; then disk usage and cleanup, before the rules.
     expect(review.legacy.order).toEqual(['storage-review-notice', 'storage-usage', 'storage-cleanup', 'storage-worktrees', 'storage-browser'])
-    for (const text of ['Remove worktrees inactive for 30 days', 'Remove merged worktrees', 'Delete saved browser captures after 30 days', 'Never deletes', 'A download saved by an older version with a .png name']) expect(review.dialog, text).toContain(text)
+    // The dialog lists each rule as a title and one short line; what it deletes and never deletes is in the tooltip.
+    for (const text of ['Remove worktrees inactive for 30 days', 'Remove merged worktrees', 'Delete saved browser captures after 30 days']) expect(review.dialog, text).toContain(text)
+    expect(review.dialog).not.toContain('Never deletes')
+    for (const text of ['Never deletes', 'A download saved by an older version with a .png name']) expect(review.dialogTooltips, text).toContain(text)
     expect(review.notNow).toEqual({ configureCalls: 0, notice: true })
     expect(review.turnedOn).toEqual({ saved: { schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: true }, browser: { captureDays: 30 } }, noticeGone: true })
     expect(review.dismissed).toEqual({ dismissCalls: 1, configureCallsAdded: 0, inactive: '30' })

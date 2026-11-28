@@ -1027,9 +1027,8 @@ html[data-theme='high-contrast'] .prov-update-chip {
   width: 300px;
 }
 
-/* Inputs and buttons take the select's soft fill, so every control on the page reads as one set. */
-.prov-editor .settings-group-rows .settings-input,
-.prov-editor .settings-btn {
+/* Inputs take the select's soft fill (buttons already have it), so every control on the page reads as one set. */
+.prov-editor .settings-group-rows .settings-input {
   background: color-mix(in srgb, var(--text-primary) 3%, transparent);
 }
 

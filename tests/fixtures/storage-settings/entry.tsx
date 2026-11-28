@@ -213,7 +213,8 @@ async function run() {
   $<HTMLButtonElement>(tid('storage-review-open'))!.click()
   await until(() => $(tid('storage-review-rules')), 'review dialog')
   review.dialog = text(tid('storage-review-rules'))
-  $<HTMLButtonElement>('[role="dialog"] .settings-btn')!.click()
+  review.dialogTooltips = Array.from(document.querySelectorAll(`${tid('storage-review-rules')} [title]`), (node) => node.getAttribute('title')).join(' ')
+  $<HTMLButtonElement>('[role="dialog"] .modal-close')!.click()
   await until(() => !$(tid('storage-review-rules')), 'review dialog closed')
   review.notNow = { configureCalls: callsOf('storage.configure').length, notice: Boolean($(tid('storage-review-notice'))) }
   $<HTMLButtonElement>(tid('storage-review-open'))!.click()
