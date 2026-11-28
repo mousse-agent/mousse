@@ -363,6 +363,34 @@ describe('who changes it', () => {
     expect(await outcome(methods, 'bots.create', params, as(LAPTOP))).toMatchObject({ code: 'stream_unknown' })
     expect(store.get(made.bot.id).access).toEqual({ mode: 'chosen', nodes: [PHONE] })
   })
+
+  it('while the account\'s devices can\'t be read, a device names no other device: refused before it runs, and nothing is saved', async () => {
+    const botId = (await createBot(f, { name: 'Penny', reply: 'Hello.' })).botId
+    onBoth(botId)
+    const { reach } = reachOver(store)
+    let known: string[] | undefined
+    const devices = { store, devices: async () => [], known: () => known }
+    const methods = remoteBotMethods({ bots: () => f.bots.service, reach, devices, madeBy: keepMakerInReach(store, reach) })
+    const look = { colour: 'teal', accessory: 'cap' }
+    const stranger = newId('node')
+    const count = () => f.bots.service.list().bots.length
+    const before = count()
+    const unread = { code: 'bad_request', details: { reason: 'bot_devices_unread' } }
+    expect(await outcome(methods, 'bots.devices.set', { botId, access: { mode: 'chosen', nodes: [stranger] } }, as(PHONE))).toMatchObject(unread)
+    expect(await outcome(methods, 'bots.devices.set', { botId, access: { mode: 'chosen', nodes: [LAPTOP] } }, as(PHONE))).toMatchObject(unread)
+    expect(await outcome(methods, 'bots.create', { look, description: 'Tidy', clientRequestId: 'unread-1', access: { mode: 'chosen', nodes: [stranger] } }, as(PHONE))).toMatchObject(unread)
+    expect(store.get(botId).access).toEqual({ mode: 'chosen', nodes: [PHONE, LAPTOP] })
+    expect(count()).toBe(before)
+    // Naming only itself, or no device, needs no check: it is the calling device.
+    expect(await outcome(methods, 'bots.devices.set', { botId, access: { mode: 'chosen', nodes: [PHONE] } }, as(PHONE))).toEqual({ ok: true })
+    expect(store.get(botId).access).toEqual({ mode: 'chosen', nodes: [PHONE] })
+    expect(await outcome(methods, 'bots.create', { look, description: 'Tidy', clientRequestId: 'unread-2' }, as(PHONE))).toEqual({ ok: true })
+    expect(count()).toBe(before + 1)
+    // Once read, the account's devices are taken and others are not.
+    known = [PHONE, LAPTOP]
+    expect(await outcome(methods, 'bots.devices.set', { botId, access: { mode: 'chosen', nodes: [LAPTOP] } }, as(PHONE))).toEqual({ ok: true })
+    expect(await outcome(methods, 'bots.devices.set', { botId, access: { mode: 'chosen', nodes: [stranger] } }, as(PHONE))).toMatchObject({ code: 'bad_request', details: { reason: 'bot_devices_unknown' } })
+  })
 })
 
 /**

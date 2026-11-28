@@ -65,6 +65,7 @@ export const MAX_BOT_DEVICES = 64
  */
 export const BOT_DEVICES_REFUSALS = {
   bot_devices_unknown: 'One of those devices is no longer on your account.',
+  bot_devices_unread: "Your devices can't be checked right now. Try again in a moment.",
   bot_devices_too_many: `Chosen devices are up to ${MAX_BOT_DEVICES}, this device included.`
 } as const
 export type BotDevicesRefusal = keyof typeof BOT_DEVICES_REFUSALS

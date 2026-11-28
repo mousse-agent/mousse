@@ -637,17 +637,19 @@ export function remoteBotMethods(options: {
   /**
    * A Devices choice from a device, as it will be saved (`keepingCaller`): within the limit with that device counted,
    * and naming only the account's devices (the device itself always is one, as it is calling). Checked before the call
-   * is taken, so a choice refused here is a plain bad request, never an outcome to wonder about.
+   * is taken, so a choice refused here is a plain bad request, never an outcome to wonder about. While the account's
+   * devices can't be read, only a choice naming no other device is taken.
    */
   const checkChosen = (access: BotDeviceAccess, node: string): void => {
     const refuse = (reason: BotDevicesRefusal) => new NetError('bad_request', BOT_DEVICES_REFUSALS[reason], { details: { reason } })
     const kept = keepingCaller(access, node)
-    const nodes = kept.mode === 'chosen' ? kept.nodes : []
-    if (nodes.length > MAX_BOT_DEVICES) throw refuse('bot_devices_too_many')
+    const others = (kept.mode === 'chosen' ? kept.nodes : []).filter((id) => id !== node)
+    if (others.length + 1 > MAX_BOT_DEVICES) throw refuse('bot_devices_too_many')
+    if (!others.length) return
     const known = options.devices?.known?.()
-    if (!known) return
+    if (!known) throw refuse('bot_devices_unread')
     const account = new Set(known)
-    if (nodes.some((id) => id !== node && !account.has(id))) throw refuse('bot_devices_unknown')
+    if (others.some((id) => !account.has(id))) throw refuse('bot_devices_unknown')
   }
   /** Runs on's choices as another device gets them: this computer is the only one a bot here lives on. */
   const choicesFor = <T extends Pick<BotRunsOnChoices, 'computers' | 'devices'>>(choices: T, node: string): T => ({
