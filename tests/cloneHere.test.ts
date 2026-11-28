@@ -77,16 +77,41 @@ describe('a clone for another computer', () => {
     expect(readdirSync(found)).toEqual([])
   })
 
-  it('refuses before cloning: a folder with files, one in the data folder, and one whose parent is missing', async () => {
+  it('makes the folders it goes in when they are not there, and they go again when the clone or the project fails', async () => {
+    const path = join(root, 'new', 'deeper', 'web-app')
+    const here = services()
+    await cloneHere({ repository: 'acme/web-app', path }, here, action)
+    expect(git(path, 'branch', '--show-current')).toBe('main')
+    expect(here.projects.map((project) => project.path)).toEqual([path])
+
+    const failures: Partial<CloneHereServices>[] = [
+      { clone: async () => { throw new Error('gh failed') } },
+      { openProject: () => { throw new Error('no database') } }
+    ]
+    mkdirSync(join(root, 'kept'))
+    for (const failure of failures) {
+      await expect(cloneHere({ repository: 'acme/web-app', path: join(root, 'kept', 'made', 'web-app') }, services(failure), action)).rejects.toThrow()
+      expect(readdirSync(join(root, 'kept'))).toEqual([])
+    }
+  })
+
+  it('refuses before cloning or making a folder: one with files, one in the data folder, a file in the way, and a new hidden folder', async () => {
     const full = join(root, 'full')
     mkdirSync(full)
     writeFileSync(join(full, 'mine.txt'), 'mine')
+    writeFileSync(join(root, 'a-file'), 'file')
     mkdirSync(join(root, 'mousse-home'), { recursive: true })
     const clone = vi.fn(async () => '')
-    for (const path of [full, join(root, 'mousse-home', 'web-app'), join(root, 'nowhere', 'web-app')]) {
+    const refused = [full, join(root, 'mousse-home', 'new', 'web-app'), join(root, 'a-file', 'new', 'web-app'), join(root, 'out', '.hidden', 'web-app')]
+    // Windows: the folder "streamed" by its stream's spelling, which name checks would not know.
+    if (process.platform === 'win32') refused.push(join(root, 'streamed::$INDEX_ALLOCATION', 'web-app'))
+    for (const path of refused) {
       await expect(cloneHere({ repository: 'acme/web-app', path }, services({ clone }), action), path).rejects.toThrow()
     }
     expect(clone).not.toHaveBeenCalled()
     expect(readdirSync(full)).toEqual(['mine.txt'])
+    expect(existsSync(join(root, 'mousse-home', 'new'))).toBe(false)
+    expect(existsSync(join(root, 'out'))).toBe(false)
+    expect(existsSync(join(root, 'streamed'))).toBe(false)
   })
 })
