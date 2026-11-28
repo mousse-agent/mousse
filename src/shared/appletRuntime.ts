@@ -14,8 +14,15 @@ export function appletFrameHeight(reported: unknown): number | null {
   if (typeof reported !== 'number' || !Number.isFinite(reported)) return null
   return Math.max(APPLET_MIN_HEIGHT, Math.min(APPLET_MAX_HEIGHT, Math.round(reported)))
 }
-export interface AppletIdentity { threadId: string; appletId: string; revisionId: string }
+/**
+ * An applet a bot of another computer's message shows: the bot by its qualified id, and the message. Main reads it from
+ * that computer through the bot (`bots.remote.applet`) and saves its state there; `threadId` is then only a key here.
+ */
+export interface AppletBotRef { botId: string; messageId: string }
+export interface AppletIdentity { threadId: string; appletId: string; revisionId: string; bot?: AppletBotRef }
 export interface AppletMountRequest extends AppletIdentity { sourceHash: string; appearance?: AppletAppearance; host?: 'transcript' | 'panel' }
+/** What a mount answers. `readOnly`: an applet of another computer's bot shown from the copy here while that computer is away. */
+export type AppletMounted = { runtimeId: string; src: string; readOnly?: true } | { busy: true }
 /**
  * What the window hears about one of its applets. `wheel`: a wheel turn the applet could not use (the browser chained
  * it on to the conversation); `deltaY` in CSS pixels. `escape`: the person pressed Escape in the applet, which gives the
@@ -23,12 +30,12 @@ export interface AppletMountRequest extends AppletIdentity { sourceHash: string;
  */
 export interface AppletUiEvent { runtimeId: string; type: 'ready' | 'resize' | 'error' | 'conversation-input' | 'state-changed' | 'wheel' | 'escape' | 'released'; height?: number; message?: string; text?: string; deltaY?: number }
 export interface AppletApi {
-  get(input: AppletIdentity): Promise<AppletBundle>
+  get(input: AppletIdentity): Promise<Pick<AppletBundle, 'appletId' | 'revisionId' | 'sourceHash' | 'title' | 'description' | 'source'>>
   /**
    * Prepares the applet's page; `src` is the one address the window's `<webview>` for it may load. `busy`: every slot
    * holds an applet on screen; try again once one is unmounted or leaves the screen.
    */
-  mount(input: AppletMountRequest): Promise<{runtimeId: string; src: string} | {busy: true}>
+  mount(input: AppletMountRequest): Promise<AppletMounted>
   /** The applet's card left the screen (it may be released for a newer applet) or came back. */
   visible(input: {runtimeId: string; visible: boolean}): Promise<void>
   appearance(input:{runtimeId:string;appearance:AppletAppearance}):Promise<void>

@@ -313,6 +313,8 @@ export const PROTOCOL_METHODS = [
   'bots.focus',
   'bots.remote.list',
   'bots.remote.file',
+  'bots.remote.applet',
+  'bots.remote.appletState',
   'bots.marks.list',
   'bots.marks.set',
   'threads.markSeen',

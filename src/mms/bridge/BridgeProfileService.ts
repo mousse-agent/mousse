@@ -43,6 +43,7 @@ import { ThreadRouter } from './routed/ThreadRouter'
 import { MergedLists } from './routed/mergedLists'
 import { RemoteBotRegistry } from './routed/RemoteBotRegistry'
 import { RemoteBotFiles, type RemoteFilePage } from './routed/remoteBotFiles'
+import { RemoteBotApplets } from './routed/remoteBotApplets'
 import { RemoteBotTellings } from './routed/RemoteBotTellings'
 import type { RemoteBotMessage } from './remote/RemoteBots'
 import { BotRouter } from './routed/BotRouter'
@@ -559,6 +560,8 @@ export class BridgeProfileService {
     // The owner's personal bots, from a phone or another computer: their chats, asks and pause, and a new bot.
     for (const method of remoteBotMethods({
       staging: botStaging,
+      // Each bot's applets, kept where its thread published them; read and saved only through a message of that bot.
+      applets: services.applets,
       bots: () => services.personalBots?.service ?? undefined,
       // The device's own limit here: what a bot does with threads in a turn its message started is held to it.
       deviceLimit: botDeviceLimitFrom(rt.policy),
@@ -747,12 +750,19 @@ export class BridgeProfileService {
         (await this.router.client.callBot(node, 'bots.chat.file', { botId, path, ...(offset ? { offset } : {}) }, { write: false, ...(signal ? { signal } : {}) })) as RemoteFilePage,
       online: (node) => this.router.isOnline(node) && this.bridgeOn()
     })
+    // Their applets, read from the bot's computer when a window opens one, with a copy kept here for when it is away.
+    const remoteBotApplets = new RemoteBotApplets({
+      folder: join(services.getProfileHomeDir(), 'bots', 'remote-applets'),
+      call: (node, method, params, { write, signal }) => this.router.client.callBot(node, method, params, { write, ...(signal ? { signal } : {}) }),
+      online: (node) => this.router.isOnline(node) && this.bridgeOn()
+    })
     this.remoteBots = new RemoteBotRegistry({
       hub: this.hub,
       client: (node) => this.peers.client(node),
       store: new SqliteRemoteBots(join(services.getProfileHomeDir(), 'bots', REMOTE_BOTS_DB), this.clock),
       marks: services.botMarks,
       files: remoteBotFiles,
+      applets: remoteBotApplets,
       tellings: this.remoteTellings,
       // While the engine is still starting (or the roster can't be read) the computers are not known: none is forgotten.
       // With the engine on and the v1 roster unreadable, the v1 devices are neither listed nor forgotten.
@@ -775,6 +785,7 @@ export class BridgeProfileService {
       client: this.router.client,
       registry: this.remoteBots,
       files: remoteBotFiles,
+      applets: remoteBotApplets,
       online: (node) => this.router.isOnline(node),
       name: (node) => this.router.computer(node).name,
       self: () => rt.identity.self()?.node,

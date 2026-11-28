@@ -5,8 +5,8 @@ import { Code2, Download, Eye, FileCode, Image as ImageIcon, RotateCcw, ShieldCh
 import { useAppStore } from '../../stores/appStore'
 import './applets.css'
 import { useAppletRuntime } from './useAppletRuntime'
-import { addAppletInputToDraft, exportApplet, requestAppletRepair, type AppletConversation } from './appletActions'
-import { AppletConversationInput, AppletError, AppletFrame } from './AppletCard'
+import { addAppletInputToDraft, appletBot, exportApplet, requestAppletRepair, type AppletConversation } from './appletActions'
+import { AppletAwayNote, AppletConversationInput, AppletError, AppletFrame } from './AppletCard'
 
 type AppletTab = DocumentTab & { applet: NonNullable<DocumentTab['applet']> }
 
@@ -53,22 +53,25 @@ export function AppletPanelView({ tab, tabs, conversation }: { tab: AppletTab; t
     profileId,
     reference,
     enabled: !sourceOpen,
-    restart
+    restart,
+    bot: conversation?.bot
   })
   const { error, setError, ready, conversationInput, setConversationInput } = applet
+  // A remote applet whose computer is away, or shown from the copy here, can't be repaired from here.
+  const away = Boolean(conversation?.bot?.offline || applet.readOnly)
 
   const toggleSource = async () => {
     setSourceOpen((value) => !value)
     if (bundle || !available) return
     try {
-      const result = await window.mousse.applets.get({ threadId, appletId: reference.appletId, revisionId: reference.revisionId })
+      const result = await window.mousse.applets.get({ threadId, appletId: reference.appletId, revisionId: reference.revisionId, ...appletBot(conversation) })
       if (useAppStore.getState().profileId === profileId) setBundle(result)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Source unavailable.')
     }
   }
   const runExport = (format: 'html' | 'source' | 'png') => {
-    void exportApplet(threadId, reference, format, applet.runtime.current).catch((cause) =>
+    void exportApplet(threadId, reference, format, applet.runtime.current, conversation).catch((cause) =>
       setError(cause instanceof Error ? cause.message : 'Export failed.'))
   }
 
@@ -102,8 +105,9 @@ export function AppletPanelView({ tab, tabs, conversation }: { tab: AppletTab; t
         </span>
       </div>
       {!available && <p className="mousse-applet-error" role="status">Open this applet from its thread.</p>}
+      {available && <AppletAwayNote conversation={conversation} readOnly={applet.readOnly} error={error} />}
       {available && error && (
-        <AppletError error={error} onRepair={() => requestAppletRepair(profileId, threadId, reference, error, conversation)} />
+        <AppletError error={error} onRepair={away ? undefined : () => requestAppletRepair(profileId, threadId, reference, error, conversation)} />
       )}
       {sourceOpen ? (
         <div className="mousse-applet-source scrollbar-ultra-thin">

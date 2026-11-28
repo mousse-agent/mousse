@@ -2300,6 +2300,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!ctx.mms.botRouter) throw new DomainRpcError('computer_offline', 'Your other computers are not connected. Turn on networking in Settings, Devices.')
       return ctx.mms.botRouter.file(ctx, botId, path)
     }
+    case 'bots.remote.applet':
+    case 'bots.remote.appletState': {
+      // An applet another computer's bot's message shows: opened (its source and state read there, or the copy here while
+      // that computer is away), or its state saved there. The bot's computer checks the message is that bot's, and shows
+      // that applet at that revision.
+      const p = isObject(params) ? params : {}
+      const saving = method === 'bots.remote.appletState'
+      rejectUnknownKeys(p, ['profileId', 'botId', 'messageId', 'appletId', 'revisionId', ...(saving ? ['state'] : [])])
+      const botId = asString(p.botId, 'botId', 256)
+      const ids = { messageId: asString(p.messageId, 'messageId', 200), appletId: asString(p.appletId, 'appletId', 80), revisionId: asString(p.revisionId, 'revisionId', 80) }
+      const router = ctx.mms.botRouter
+      if (!router?.applet || !router.appletSave) throw new DomainRpcError('computer_offline', 'Your other computers are not connected. Turn on networking in Settings, Devices.')
+      return saving ? router.appletSave(ctx, botId, ids, p.state) : router.applet(ctx, botId, ids)
+    }
     case 'threads.markSeen': {
       // A window opened the thread or showed it in focus: it is no longer Done (finished and unseen).
       const p = isObject(params) ? params : {}

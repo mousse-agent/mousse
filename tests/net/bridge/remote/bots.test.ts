@@ -189,11 +189,15 @@ describe('bot method params', () => {
     const methods = remoteBotMethods({ bots: () => undefined })
     expect(methods.map((entry) => entry.method).sort()).toEqual(Object.keys(REMOTE_BOT_METHODS).sort())
     // A read's result (the chat, the model rows, the devices) is never kept in the request ledger.
-    expect(methods.filter((entry) => entry.ephemeral).map((entry) => entry.method).sort()).toEqual(['bots.chat.attachment', 'bots.chat.file', 'bots.chat.list', 'bots.devices.get', 'bots.get', 'bots.memory.list', 'bots.model.choices', 'bots.model.get'])
+    expect(methods.filter((entry) => entry.ephemeral).map((entry) => entry.method).sort()).toEqual(['bots.applets.get', 'bots.applets.state.get', 'bots.chat.attachment', 'bots.chat.file', 'bots.chat.list', 'bots.devices.get', 'bots.get', 'bots.memory.list', 'bots.model.choices', 'bots.model.get'])
     expect(REMOTE_BOT_METHODS).toMatchObject({
       'bots.chat.attachment': { capability: 'read', mutating: false },
       'bots.chat.file': { capability: 'read', mutating: false },
       'bots.stage': { capability: 'chat', mutating: true },
+      // An applet a message shows: read there, and its state saved there.
+      'bots.applets.get': { capability: 'read', mutating: false },
+      'bots.applets.state.get': { capability: 'read', mutating: false },
+      'bots.applets.state.save': { capability: 'chat', mutating: true },
       'bots.memory.list': { capability: 'read', mutating: false },
       'bots.update': { capability: 'write', mutating: true },
       'bots.reminders.cancel': { capability: 'write', mutating: true },
@@ -539,6 +543,9 @@ describe('the bot level of the calling device', () => {
       'bots.chat.attachment': { botId: BOT, messageId: 'm1', index: 0 },
       'bots.chat.file': { botId: BOT, path: 'a.png' },
       'bots.stage': { botId: BOT, clientRequestId: 's1', offset: 0, dataB64: 'aGk=', name: 'a.png', size: 2 },
+      'bots.applets.get': { botId: BOT, messageId: 'm1', appletId: 'a1', revisionId: 'r1' },
+      'bots.applets.state.get': { botId: BOT, messageId: 'm1', appletId: 'a1', revisionId: 'r1' },
+      'bots.applets.state.save': { botId: BOT, messageId: 'm1', appletId: 'a1', revisionId: 'r1', state: { n: 1 } },
       'bots.memory.list': { botId: BOT },
       'bots.chat.send': { botId: BOT, text: 'Hi', clientRequestId: 'r1' },
       'bots.chat.stop': { botId: BOT },
@@ -568,7 +575,7 @@ describe('the bot level of the calling device', () => {
   }
   const names = Object.keys(REMOTE_BOT_METHODS) as RemoteBotMethod[]
   /** The rows another device may call at Use; every other remote row needs Full. */
-  const USE_ROWS = ['bots.get', 'bots.chat.list', 'bots.chat.attachment', 'bots.chat.file', 'bots.stage', 'bots.memory.list', 'bots.chat.send', 'bots.chat.stop', 'bots.work.stop', 'bots.chat.markRead', 'bots.questions.answer', 'bots.reminders.snooze', 'bots.actions.answer']
+  const USE_ROWS = ['bots.get', 'bots.chat.list', 'bots.chat.attachment', 'bots.chat.file', 'bots.stage', 'bots.applets.get', 'bots.applets.state.get', 'bots.applets.state.save', 'bots.memory.list', 'bots.chat.send', 'bots.chat.stop', 'bots.work.stop', 'bots.chat.markRead', 'bots.questions.answer', 'bots.reminders.snooze', 'bots.actions.answer']
   /** Methods over a port that counts every read, for a device at `level`. */
   const counted = (level: BotLevel) => {
     const seen = { reads: 0 }

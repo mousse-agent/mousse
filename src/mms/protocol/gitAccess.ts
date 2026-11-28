@@ -51,6 +51,8 @@ export const GIT_ACCESS = {
   'bots.focus': 'none',
   'bots.remote.list': 'none',
   'bots.remote.file': 'none',
+  'bots.remote.applet': 'none',
+  'bots.remote.appletState': 'none',
   'bots.marks.list': 'none',
   'bots.marks.set': 'none',
   'threads.markSeen': 'none',
