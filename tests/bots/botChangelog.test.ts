@@ -137,22 +137,25 @@ it('all memory wish instructions save telling wishes as owner memory', () => {
 })
 
 it('C6 support rollback omits the switch-on advice and still delivers it after re-enabling', async () => {
-  existingBot()
-  memory.write(() => memory.setState('ada', 'changelog_seen', 23))
-  let on = false
-  const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => on })
-  const off = await provider.chatPreamble({ botId: 'ada', activationId: 'c6-off' })
-  expect(off).not.toContain('Tools that send or change things now ask your owner first')
-  expect(off).not.toContain(BOT_CHANGELOG.find(entry => entry.id === 28)!.text)
-  expect(off).toContain(BOT_CHANGELOG.find(entry => entry.id === 29)!.text)
-  await settled(provider, 'c6-off')
-  on = true
-  // A later non-switch entry must not make the withheld switch entry count as delivered, including across restart.
-  const restarted = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => on })
-  expect(await restarted.chatPreamble({ botId: 'ada', activationId: 'c6-on' })).toContain('Tools that send or change things now ask your owner first')
-  await settled(restarted, 'c6-on')
-  const next = await restarted.chatPreamble({ botId: 'ada', activationId: 'c6-after' })
-  expect(next).not.toContain('Tools that send or change things now ask your owner first')
+  const undo = changelogUpTo(38)
+  try {
+    existingBot()
+    memory.write(() => memory.setState('ada', 'changelog_seen', 23))
+    let on = false
+    const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => on })
+    const off = await provider.chatPreamble({ botId: 'ada', activationId: 'c6-off' })
+    expect(off).not.toContain('Tools that send or change things now ask your owner first')
+    expect(off).not.toContain(BOT_CHANGELOG.find(entry => entry.id === 28)!.text)
+    expect(off).toContain(BOT_CHANGELOG.find(entry => entry.id === 29)!.text)
+    await settled(provider, 'c6-off')
+    on = true
+    // A later non-switch entry must not make the withheld switch entry count as delivered, including across restart.
+    const restarted = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => on })
+    expect(await restarted.chatPreamble({ botId: 'ada', activationId: 'c6-on' })).toContain('Tools that send or change things now ask your owner first')
+    await settled(restarted, 'c6-on')
+    const next = await restarted.chatPreamble({ botId: 'ada', activationId: 'c6-after' })
+    expect(next).not.toContain('Tools that send or change things now ask your owner first')
+  } finally { undo() }
 })
 
 it('C6 support rollback shows entries 29 and 30 while E1 entry 28 stays pending, then delivers 28 once', async () => {

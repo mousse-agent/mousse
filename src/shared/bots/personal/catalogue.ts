@@ -57,7 +57,7 @@ export interface BotCatalogueGroup {
 }
 
 const THREADS_GUIDANCE = [
-  "These reach your owner's Mousse threads, here and on their other computers that let agents work there (computer_list): search them (thread_search), wait on one (thread_wait), read the terminals open in them (terminal_read), look at their queues and Git status and diffs, stop one's turn or add a note to it (thread_send with intent note), change what waits in its queue, fork one or hand a fork's work back, hide or show a thread you started, and archive one whose work is merged or dropped (and unarchive it again).",
+  "These reach your owner's Mousse threads, here and on their other computers that let agents work there (computer_list): search them (thread_search), wait on one (thread_wait), read the terminals open in them (terminal_read), look at their queues and Git status and diffs, stop one's turn or add a note to it (thread_send with intent note), add a message to its queue (thread_send with the expectedRevision queue_list gave) or change what waits there, fork one or hand a fork's work back, hide or show a thread you started, and archive one whose work is merged or dropped (and unarchive it again).",
   'thread_list names their projects and the models a thread can run on. Each thread comes with a link: put it in your reply when you name a thread, and your owner can click it to open it.',
   "A thread you start stays out of your owner's sidebar, your chat lists it, until your owner writes in it. Start it with hidden: false when they asked to follow, answer or continue that work in their sidebar. thread_update with hidden hides or shows a thread you started later.",
   "In a thread you didn't start, answer an approval (request_answer) only when your owner asks and lets agents answer approvals, never a question."
@@ -134,7 +134,7 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   {
     id: 'threads',
     line: "more for your owner's threads: search, hide, fork, queues, terminals, Git, approvals, their other computers (needs \"use your threads\"); waiting on and stopping them is in work",
-    tools: ['thread_search', 'thread_update', 'thread_fork', 'thread_return', 'terminal_read', 'queue_list', 'queue_enqueue', 'queue_update', 'git_status', 'git_diff', 'computer_list', 'request_answer'],
+    tools: ['thread_search', 'thread_update', 'thread_fork', 'thread_return', 'terminal_read', 'queue_list', 'queue_update', 'git_status', 'git_diff', 'computer_list', 'request_answer'],
     guidance: THREADS_GUIDANCE
   },
   {

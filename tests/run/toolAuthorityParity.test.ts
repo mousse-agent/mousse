@@ -19,6 +19,7 @@ import type { McpToolDescriptor } from '../../src/shared/integrations'
 import type { AgentRuntimePolicy } from '../../src/shared/agents/execution'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import { BOT_THREADS_PERMISSION, botStarterManifest } from '../../src/shared/bots/personal/manifest'
+import { canonicalToolName, isBotVariant } from '../../src/shared/toolAliases'
 import { appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture } from './delegationFixture'
 
@@ -173,11 +174,12 @@ async function snapshotOf(kind: TurnKind) {
       options: { userMcp, botMcp: { call: async () => ({ text: 'ran' }) as never } }
     })
     const ran = new Set<string>()
-    // A tool of variants (`request_answer`) runs as one of them: reaching any of theirs is reaching it.
-    for (const tool of registry.list()) {
+    // A tool of variants (`request_answer`) runs as one of them: reaching any of theirs is reaching it. So does an old
+    // tool that runs as a variant of its new one (`queue_enqueue` for `thread_send`); a bot's own (`work_start`) keeps its handler.
+    for (const tool of [...registry.list(), ...registry.variantTools().filter((variant) => !isBotVariant(variant.name))]) {
       for (const handled of [tool, ...(tool.variants ?? [])]) {
         ;(handled as { handler: unknown }).handler = async () => {
-          ran.add(tool.name)
+          ran.add(canonicalToolName(tool.name))
           return { text: 'ran' }
         }
       }

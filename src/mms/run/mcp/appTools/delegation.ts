@@ -141,10 +141,11 @@ export const DELEGATION_TOOL_NAMES: ReadonlySet<string> = new Set(DELEGATION_TOO
 
 /**
  * The tools both the pi loop and the Mousse MCP server offer, in one list. The older names
- * (`create_subagent(s)`, `recall_subagent`, `integrate_delegation`, `integrate_subagent`, `list_delegations`)
- * stay dispatchable for replayed transcripts and older agents but are not listed. `task_status`, `task_cancel`,
- * `list_subagents` and `continue_subagent` are variants of the thread tools now (`toolVariant`): `thread_wait`,
- * `thread_stop`, `thread_list` and `thread_send` with `subagent`, `delegationId` or `scope: family`.
+ * (`create_subagent(s)`, `integrate_delegation`, `integrate_subagent`) stay dispatchable for replayed transcripts and
+ * older agents but are not listed. `task_status`, `task_cancel`, `list_subagents`, `continue_subagent`,
+ * `recall_subagent` and `list_delegations` are variants of the thread tools now (`toolVariant`): `thread_wait`,
+ * `thread_stop`, `thread_list` and `thread_send` with `subagent`, `delegationId` or `scope: family`, and
+ * `thread_read view: delegations`.
  */
 export const LISTED_DELEGATION_TOOL_NAMES = ['delegate_task', 'answer_subagent', 'computer_list', 'model_list'] as const
 
@@ -338,8 +339,9 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
       // A native helper's call is not the thread's own turn: what it reads never acknowledges the thread's notices (§2.7).
       const delegation = hostingTurn(ctx.turn) === ctx.turn ? own : Object.assign(Object.create(own) as DelegationToolHost, { taskStatus: (ref: SubagentRef) => own.taskStatus(ref, { acknowledge: false }) })
       // Tool arguments arrive as parsed JSON (MCP or Pi), so they are JSON values. `thread_send` names a follow-up's
-      // text content, which `continue_subagent` called prompt.
-      const named = definition.name === 'continue_subagent' && args.prompt === undefined ? { ...args, prompt: args.content } : args
+      // subagent and its text content, which `continue_subagent` called prompt and `recall_subagent` agent and task.
+      const named = definition.name === 'continue_subagent' && args.prompt === undefined ? { ...args, prompt: args.content }
+        : definition.name === 'recall_subagent' ? { ...args, agent: args.agent ?? args.subagent, task: args.task ?? args.content } : args
       const call: ToolCall = { type: 'toolCall', id: ctx.toolCallId, name: definition.name, arguments: named as JsonObject }
       return { text: await dispatchWithTimeline(delegation, call, ctx) }
     }
@@ -347,8 +349,9 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
   return DELEGATION_TOOLS.map((definition) => {
     // All three act on the caller's own thread or subagent, which the host's handler checks; they stay `actsAsCaller`
     // rather than loosening the thread-writing scope check for other tools.
-    // `continue_subagent` is `thread_send`'s variant: the same clientRequestId starts one follow-up under either name.
-    if (definition.name === 'delegate_task' || definition.name === 'continue_subagent' || definition.name === 'answer_subagent')
+    // `continue_subagent` and `recall_subagent` are `thread_send`'s variants: the same clientRequestId starts one follow-up
+    // under either name.
+    if (definition.name === 'delegate_task' || definition.name === 'continue_subagent' || definition.name === 'recall_subagent' || definition.name === 'answer_subagent')
       return tool(definition, { clientRequestId: CLIENT_REQUEST_ID_SCHEMA })
     return tool(definition, {})
   })

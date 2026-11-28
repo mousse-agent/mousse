@@ -204,10 +204,17 @@ describe('the delegation tools models are offered', () => {
       const listed = registry.listFor({ readOnly: false }).map((tool) => tool.name)
       // `create_subagent` is an old name of `thread_create kind: subagent` now (`MOUSSE_TOOL_ALIASES`).
       expect(registry.get('create_subagent')).toBe(threadCreate)
-      for (const hidden of ['create_subagents', 'recall_subagent', 'integrate_delegation', 'integrate_subagent', 'list_delegations']) {
+      for (const hidden of ['create_subagents', 'integrate_delegation', 'integrate_subagent']) {
         expect(listed).not.toContain(hidden)
         expect(registry.get(hidden)?.callable).toBe('in_process')
         expect(pi.map((tool) => tool.name)).not.toContain(hidden)
+      }
+      // `recall_subagent` and `list_delegations` are variants of `thread_send` and `thread_read` (`toolVariant`): unlisted,
+      // and called over MCP under either name.
+      for (const variant of ['recall_subagent', 'list_delegations']) {
+        expect(listed).not.toContain(variant)
+        expect(registry.variantTools().find((tool) => tool.name === variant)?.callable).toBeUndefined()
+        expect(pi.map((tool) => tool.name)).not.toContain(variant)
       }
     } finally {
       f.dispose()

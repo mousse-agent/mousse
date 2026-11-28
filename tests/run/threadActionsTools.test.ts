@@ -145,10 +145,10 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
   })
 
   describe('thread_send', () => {
-    it('refuses the caller\'s own thread and points to queue_enqueue, without a host call', async () => {
+    it('refuses the caller\'s own thread by id and says to leave threadId out to queue there, without a host call', async () => {
       const { call, host } = await world()
       const result = await call('thread_send', { threadId: 'caller', content: 'x' })
-      expect(result).toMatchObject({ isError: true, text: expect.stringContaining('queue_enqueue') })
+      expect(result).toMatchObject({ isError: true, text: expect.stringContaining('leave out threadId') })
       expect(host.sendToThread).not.toHaveBeenCalled()
     })
 
@@ -246,7 +246,8 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
 
     it('validates its input before it reaches the host', async () => {
       const { call, host } = await world()
-      for (const args of [{ threadId: 'target' }, { threadId: 'target', content: '   ' }, { content: 'x' }] as Array<Record<string, unknown>>)
+      // With no thread at all it queues on the caller's own thread (`queue_enqueue`, queueEditDaemon.test.ts).
+      for (const args of [{ threadId: 'target' }, { threadId: 'target', content: '   ' }, { content: '  ' }] as Array<Record<string, unknown>>)
         expect((await call('thread_send', args).catch((error) => ({ isError: true, error }))).isError, JSON.stringify(args)).toBe(true)
       expect(host.sendToThread).not.toHaveBeenCalled()
     })
@@ -311,6 +312,38 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(joined).not.toHaveProperty('followUp')
       expect(joined).toMatchObject({ intent: 'note', delivery: 'presented' })
       expect(host.showAgentAction).toHaveBeenLastCalledWith({ threadId: 'target' }, expect.anything(), `steered run ${targetRun.runId}`)
+    })
+
+    it('a queue_enqueue retried as thread_send to the same thread, by id or by address, queues under one key and sends nothing', async () => {
+      const { call, host, queueCommands } = await world()
+      const message = { content: 'next', expectedRevision: 'rev-0' }
+      await call('queue_enqueue', { threadId: 'target', ...message }, { toolCallId: 'mcp:queue-1' })
+      await call('thread_send', { thread: 'target', ...message }, { toolCallId: 'mcp:queue-1' })
+      await call('thread_send', { threadId: 'target', ...message }, { toolCallId: 'mcp:queue-1' })
+      expect(queueCommands.map((entry) => [entry.threadId, entry.command.op, entry.options.clientRequestId])).toEqual(Array(3).fill(['target', 'enqueue', 'queue_enqueue:caller:mcp:queue-1']))
+      expect(host.sendToThread).not.toHaveBeenCalled()
+      expect(host.steerRun).not.toHaveBeenCalled()
+    })
+
+    it('refuses expectedRevision on a send that queues nothing (a note, a run, a subagent, several threads), before anything is sent', async () => {
+      const { call, denied, host, runs, fx, callerRun, threads, queueCommands } = await world()
+      const child = await fx.delegate(callerRun.runId, 'call-1')
+      threads.set(child.childThreadId, thread(child.childThreadId))
+      const delegation = (host.delegation as unknown as () => { continueSubagent: ReturnType<typeof vi.fn> })()
+      for (const args of [
+        { threadId: 'target', runId: runs.target, intent: 'note', expectedRevision: 'stale', content: 'x' },
+        { threadId: 'target', intent: 'note', expectedRevision: 'stale', content: 'x' },
+        { threadId: 'target', runId: runs.target, expectedRevision: 'stale', content: 'x' },
+        { subagent: child.childThreadId, expectedRevision: 'stale', content: 'x' },
+        { thread: 'children', expectedRevision: 'stale', content: 'x' }
+      ]) {
+        const refusal = await denied(call('thread_send', { ...args }))
+        expect(refusal, JSON.stringify(args)).toMatchObject({ code: 'invalid_arguments', message: expect.stringContaining('expectedRevision') })
+      }
+      expect(host.steerRun).not.toHaveBeenCalled()
+      expect(host.sendToThread).not.toHaveBeenCalled()
+      expect(delegation.continueSubagent).not.toHaveBeenCalled()
+      expect(queueCommands).toEqual([])
     })
 
     it('requires the run and the text', async () => {
