@@ -571,7 +571,7 @@ const SEED_EXTENSIONS = new Set(['TREE', 'REUC', 'EOIE', 'IEOT'])
  * A Git index file's version, entries and extension names, for versions 2 and 3 with SHA-1 or SHA-256 object ids.
  * Undefined for any other file, one this cannot read, or one whose layout does not add up.
  */
-export function readIndexFile(bytes: Buffer): { version: number; entries: IndexEntry[]; extensions: string[] } | undefined {
+function readIndexFile(bytes: Buffer): { version: number; entries: IndexEntry[]; extensions: string[] } | undefined {
   if (bytes.length < 12 || bytes.toString('latin1', 0, 4) !== 'DIRC') return undefined
   const version = bytes.readUInt32BE(4)
   if (version !== 2 && version !== 3) return undefined
@@ -615,10 +615,12 @@ export function readIndexFile(bytes: Buffer): { version: number; entries: IndexE
  * reads a file again only when its stat data changed, as it does for its own index. Only an index Git writes by default
  * is used: version 2 (skip-worktree and intent-to-add need 3), no entry marked assume-unchanged, and no extension but
  * `SEED_EXTENSIONS`; Git itself refuses an unmerged one. The copy keeps its time, so Git still reads again a file
- * changed in the same moment as the index (racily clean).
+ * changed in the same moment as the index (racily clean). It is written beside the private index and renamed into
+ * place, so a snapshot of the same folder at the same moment never reads half of it.
  * Undefined, with no private index left, for any other index or anything that fails: the caller starts from HEAD.
  */
 function* seededIndex(top: string, worktreeIndex: string, index: string, head: string): Steps<Map<string, IndexEntry> | undefined> {
+  const written = join(dirname(index), `seed-${randomUUID()}.index`)
   try {
     const before = yield* disk.lstat(worktreeIndex)
     const bytes = yield* disk.readBytes(worktreeIndex)
@@ -627,11 +629,13 @@ function* seededIndex(top: string, worktreeIndex: string, index: string, head: s
     if (before.mtimeMs !== after.mtimeMs || before.size !== after.size || bytes.length !== after.size) return undefined
     const read = readIndexFile(bytes)
     if (!read || read.version !== 2 || read.extensions.some((name) => !SEED_EXTENSIONS.has(name)) || read.entries.some((entry) => entry.flags & ASSUME_VALID)) return undefined
-    yield* disk.writeBytes(index, bytes)
-    yield* disk.setTimes(index, after.atime, after.mtime)
+    yield* disk.writeBytes(written, bytes)
+    yield* disk.setTimes(written, after.atime, after.mtime)
+    yield* disk.rename(written, index)
     yield* gitStep(top, ['read-tree', '-m', head], { GIT_INDEX_FILE: index })
     return new Map(read.entries.map((entry) => [entry.path, entry]))
   } catch {
+    yield* disk.remove(written)
     yield* disk.remove(index)
     yield* disk.remove(`${index}.lock`)
     return undefined
