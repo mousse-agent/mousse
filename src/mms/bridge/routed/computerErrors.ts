@@ -27,6 +27,18 @@ export function computerOffline(computer: ComputerRef, lastSeen?: number): Domai
   })
 }
 
+/**
+ * The computer is cut off for its version (pair-with-IP design §5): offline for every call, its threads hidden, until
+ * the computer named by `who` (`there`, that one; `here`, this one) is updated.
+ */
+export function computerNeedsUpdate(computer: ComputerRef, who: 'there' | 'here'): DomainRpcError {
+  return new DomainRpcError(
+    'computer_offline',
+    who === 'here' ? `Update Mousse here to use ${computer.name}.` : `${computer.name} needs a Mousse update.`,
+    { node: computer.node, name: computer.name, needsUpdate: who }
+  )
+}
+
 const FORBIDDEN_WORDS: Record<ComputerForbiddenReason, (name: string) => string> = {
   blocked: (name) => `${name} refused this device.`,
   setting_off: (name) => `Works on threads is off on ${name}.`,

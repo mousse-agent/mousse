@@ -98,6 +98,8 @@ interface Computer {
   positionsLoaded: boolean
   /** The order the computer itself gave each thread, to see when it moves one to its front. */
   ownerOrders: Map<string, number>
+  /** Its rows are hidden: it is cut off for its version (`MergedListsOptions.cutOff`). */
+  hidden?: boolean
   /** The newest snapshot, as the computer wrote it, for the offline cache. */
   snapshot?: unknown
   /** What was last written to disk, so an unchanged copy is not written again. */
@@ -152,6 +154,11 @@ export interface MergedListsOptions {
   computers(): ComputerRef[] | undefined
   /** Whether a session with the computer is open. */
   online(node: NodeId): boolean
+  /**
+   * Whether the computer is cut off for its version (pair-with-IP design §5): its rows are not listed while it is,
+   * and its copy stays, so they come back once a connection agrees a version.
+   */
+  cutOff?(node: NodeId): boolean
   /** Whether routing is on for this profile. */
   enabled(): boolean
   clock?: { now(): number }
@@ -392,6 +399,7 @@ export class MergedLists implements RemoteListsPort {
     }
     for (const ref of present.values()) {
       const c = this.computerOf(ref)
+      this.syncHidden(c)
       const online = this.options.online(c.node)
       if (!online && c.online) this.markOffline(c)
       c.online = online
@@ -470,9 +478,25 @@ export class MergedLists implements RemoteListsPort {
     void this.reconcile()
   }
 
+  /** Whether `c`'s rows are hidden now (cut off for its version); the windows hear when that changes. */
+  private hidden(c: Computer): boolean {
+    return this.options.cutOff?.(c.node) === true
+  }
+  private syncHidden(c: Computer): void {
+    const hidden = this.hidden(c)
+    if (hidden === (c.hidden === true)) return
+    c.hidden = hidden
+    this.pushLists(c.threads.size > 0, c.projects.size > 0, c.activity.size > 0)
+  }
+  /** The computers whose rows are listed. */
+  private shown(): Computer[] {
+    return [...this.computersByNode.values()].filter((c) => !this.hidden(c))
+  }
+
   /** A session with `node` ended; if it was the last, its rows stay, marked offline. */
   nodeOffline(node: NodeId): void {
     const c = this.computersByNode.get(node)
+    if (c) this.syncHidden(c)
     if (!c || this.options.online(node)) return
     c.online = false
     this.markOffline(c)
@@ -1204,13 +1228,14 @@ export class MergedLists implements RemoteListsPort {
   row(qualifiedId: string): Thread | undefined {
     if (!this.options.enabled()) return undefined
     const ref = parseQualifiedId(qualifiedId)
-    return ref ? this.computersByNode.get(ref.node as NodeId)?.threads.get(qualifiedId) : undefined
+    const c = ref ? this.computersByNode.get(ref.node as NodeId) : undefined
+    return c && !this.hidden(c) ? c.threads.get(qualifiedId) : undefined
   }
 
   threads(scope?: { projectId: string | null }): Thread[] {
     if (!this.options.enabled()) return []
     const rows: Thread[] = []
-    for (const c of this.computersByNode.values())
+    for (const c of this.shown())
       for (const row of c.threads.values()) {
         if (!scope) rows.push(row)
         else if (scope.projectId === null) {
@@ -1224,13 +1249,13 @@ export class MergedLists implements RemoteListsPort {
 
   projects(): Project[] {
     if (!this.options.enabled()) return []
-    return [...this.computersByNode.values()].flatMap((c) => [...c.projects.values()])
+    return this.shown().flatMap((c) => [...c.projects.values()])
   }
 
   activity(): ThreadActivitySnapshot {
     if (!this.options.enabled()) return {}
     const out: ThreadActivitySnapshot = {}
-    for (const c of this.computersByNode.values())
+    for (const c of this.shown())
       for (const [id, state] of c.activity) out[id] = state
     return out
   }

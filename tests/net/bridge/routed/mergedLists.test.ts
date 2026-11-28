@@ -90,6 +90,8 @@ function harness(
   /** What the roster says now: a test changes it, or makes it unreadable (undefined). */
   const roster: { list: Array<{ node: NodeId; name: string }> | undefined } = { list: computers }
   const online = new Set<NodeId>(computers.map((computer) => computer.node))
+  /** The computers cut off for their version now. */
+  const cut = new Set<NodeId>()
   const state = {
     threads: [] as Thread[],
     projects: [] as Project[],
@@ -157,6 +159,7 @@ function harness(
       self: () => self,
       computers: () => roster.list,
       online: (node) => online.has(node),
+      cutOff: (node) => cut.has(node),
       enabled: () => state.enabled,
       clock,
       fanOutDeadlineMs: options.deadline ?? 2_000,
@@ -179,6 +182,7 @@ function harness(
     client,
     attachments,
     online,
+    cut,
     now,
     node,
     self,
@@ -798,6 +802,32 @@ describe('a computer that is out of reach', () => {
     expect(h.lists.projects()[0]).toMatchObject({ offline: true })
     // The last lists were written to disk once they settled.
     await vi.waitFor(() => expect(h.restartSnapshots()).toBe(1), { timeout: 5000 })
+  })
+
+  it('hides its rows while it is cut off for its version, keeping its copy, and lists them again once it is not', async () => {
+    const h = harness()
+    await h.feed(
+      snapshot([{ id: 'a', updatedAt: iso(20) }], { projects: [{ id: 'p', name: 'P', path: '/p', order: 0 }] })
+    )
+    await vi.waitFor(() => expect(h.restartSnapshots()).toBe(1), { timeout: 5000 })
+    expect(h.lists.row(h.q('a'))).toBeTruthy()
+    // Cut off: the bridge sees it offline, and nothing of it is listed, even its copy.
+    const before = h.events.length
+    h.cut.add(h.node)
+    h.online.delete(h.node)
+    h.lists.nodeOffline(h.node)
+    expect(h.lists.threads()).toEqual([])
+    expect(h.lists.projects()).toEqual([])
+    expect(h.lists.row(h.q('a'))).toBeUndefined()
+    expect(h.ofType('threads.updated', before).length).toBeGreaterThan(0)
+    await h.lists.reconcile()
+    expect(h.lists.threads()).toEqual([])
+    // Its copy stays for when it is back.
+    expect(h.restartSnapshots()).toBe(1)
+    // Updated: a connection agreed a version, and its rows come back from the copy at once.
+    h.cut.delete(h.node)
+    await h.lists.reconcile()
+    expect(h.lists.threads().map((row) => row.id)).toEqual([h.q('a')])
   })
 
   it('is read from disk at start, so its threads are listed before it connects', async () => {

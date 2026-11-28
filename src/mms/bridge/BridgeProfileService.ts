@@ -639,6 +639,7 @@ export class BridgeProfileService {
       self: () => rt.identity.self()?.node,
       computers: () => this.router.pairedComputers(),
       online: (node) => this.router.isOnline(node),
+      cutOff: (node) => !!this.router.cutOff(node),
       enabled: () => this.router.enabled(),
       clock: this.clock,
       // A thread a bot here started there names the bot, and its status changes reach the bot's header and list.
