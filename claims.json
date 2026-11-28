@@ -87,18 +87,6 @@
       "expiresAt": "2026-11-28T07:47:14.062Z"
     },
     {
-      "task": "first-send-shown-mode",
-      "session": "Animatrix-94a771",
-      "machine": "Animatrix",
-      "branch": "first-send-shown-mode",
-      "paths": [
-        "src/renderer/components/OrchestratorChat.tsx",
-        "src/renderer/lib/threadSetup.ts"
-      ],
-      "claimedAt": "2026-11-28T05:52:39.703Z",
-      "expiresAt": "2026-11-28T07:52:39.703Z"
-    },
-    {
       "task": "issue-2004-thread-starter-sync",
       "session": "LAPTOP-HIEROJK7-ae6a89",
       "machine": "LAPTOP-HIEROJK7",
