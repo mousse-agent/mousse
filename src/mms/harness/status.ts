@@ -66,8 +66,8 @@ export function compatibilityOf(driver: Pick<HarnessDriver, 'testedVersions' | '
  * driver's tested range; it is still offered.
  * Offered when the version is older than tested, has a known problem that a later version fixes,
  * or when `latest` (the newest published version known, from `LatestVersionCache`) is newer than
- * the installed one. An owner Mousse cannot prove has no command: a newer version is then reported
- * as a notice only, with nothing to run or click.
+ * the installed one. An owner Mousse cannot prove, or one it has no command for (Nix, mise), gives
+ * a notice only, naming the owner when known, with nothing to run or click.
  */
 export function updateAffordance(
   driver: Pick<HarnessDriver, 'canInstall' | 'updateCommand' | 'testedVersions'>,
@@ -83,10 +83,12 @@ export function updateAffordance(
   const latestVersion = newer && latest ? { latestVersion: latest, ...untested } : {}
   const owner = binary.owner ?? 'unknown'
   if (owner === 'managed' && driver.canInstall) return { kind: 'one_click', owner, ...latestVersion }
-  const command = driver.updateCommand?.(owner, binary.package)
-  if (command) return { kind: 'advisory', command, ...latestVersion, ...(binary.needsElevation ? { manual: true } : {}) }
-  // The version is worth showing; without a proven owner there is nothing to run or click.
-  return newer && latest ? { kind: 'notice', latestVersion: latest, ...untested } : undefined
+  const command = driver.updateCommand?.(owner, binary.package, binary.path)
+  // Who installed it, for the card's note; Mousse's own install and an unknown one name no one.
+  const known = owner !== 'unknown' && owner !== 'managed' ? { owner } : {}
+  if (command) return { kind: 'advisory', command, ...known, ...latestVersion, ...(binary.needsElevation ? { manual: true } : {}) }
+  // The version is worth showing; without a command for its owner there is nothing to run or click.
+  return newer && latest ? { kind: 'notice', latestVersion: latest, ...known, ...untested } : undefined
 }
 
 function withDeadline<T>(work: Promise<T>, ms: number): Promise<{ value: T } | { timedOut: true }> {

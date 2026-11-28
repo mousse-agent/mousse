@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { compareVersions, installOwnerOf, updateNeedsElevation, type HarnessDriver } from '../../src/mms/harness/driver'
 import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
-import { codexDriver } from '../../src/mms/harness/drivers/codex'
+import { codexDriver, codexUpdateEnv } from '../../src/mms/harness/drivers/codex'
 import { latestSourceFor } from '../../src/mms/harness/gateway'
 import { brewInfoVersion, LatestVersionCache } from '../../src/mms/harness/latest'
 import { compatibilityOf, updateAffordance } from '../../src/mms/harness/status'
@@ -61,17 +61,56 @@ describe('the install method, from the executable path', () => {
     expect(installOwnerOf('/any/where', 'managed', realpath)).toBe('managed')
   })
 
-  it('needs elevation when the link folder or the package folder is not writable, never on Windows', () => {
+  // Every install method Mousse tells apart, with the paths each one leaves: the link on PATH, and
+  // the file it leads to where that decides. Order matters where one manager runs another's files.
+  const ROWS: Array<[string, string | undefined, InstallOwner]> = [
+    ['/Users/me/.nix-profile/bin/codex', '/nix/store/abc-codex-0.170.0/bin/codex', 'nix'],
+    // mise's npm backend puts node_modules under its installs: still mise's.
+    ['/Users/me/.local/share/mise/shims/codex', undefined, 'mise'],
+    ['/Users/me/.local/share/mise/installs/npm-openai-codex/0.170.0/lib/node_modules/@openai/codex/bin/codex.js', undefined, 'mise'],
+    ['/Users/me/.volta/bin/codex', '/Users/me/.volta/tools/image/packages/@openai/codex/lib/node_modules/@openai/codex/bin/codex.js', 'volta'],
+    ['C:\\Users\\Me\\AppData\\Local\\Volta\\bin\\codex.exe', undefined, 'volta'],
+    ['/Users/me/.yarn/bin/codex', '/Users/me/.config/yarn/global/node_modules/@openai/codex/bin/codex.js', 'yarn'],
+    ['C:\\Users\\Me\\AppData\\Local\\Yarn\\bin\\codex.cmd', undefined, 'yarn'],
+    // npm run by Homebrew's Node is npm's; a formula's own node_modules (in the Cellar) is Homebrew's.
+    ['/opt/homebrew/bin/codex', '/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js', 'npm'],
+    ['/opt/homebrew/bin/gemini', '/opt/homebrew/Cellar/gemini-cli/0.9.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js', 'brew'],
+    ['/opt/homebrew/bin/codex', '/opt/homebrew/Caskroom/codex/0.170.0/codex-aarch64-apple-darwin', 'brew'],
+    ['C:\\Users\\Me\\scoop\\shims\\codex.exe', undefined, 'scoop'],
+    ['C:\\Users\\Me\\scoop\\apps\\codex\\current\\codex.exe', undefined, 'scoop'],
+    // npm's global folder under Scoop's Node is npm's.
+    ['C:\\Users\\Me\\scoop\\apps\\nodejs\\current\\bin\\codex.cmd', undefined, 'npm'],
+    ['C:\\ProgramData\\chocolatey\\bin\\codex.exe', undefined, 'choco'],
+    ['C:\\Users\\Me\\AppData\\Roaming\\npm\\codex.cmd', undefined, 'npm'],
+    ['C:\\Users\\Me\\AppData\\Local\\Microsoft\\WinGet\\Packages\\OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe\\codex.exe', undefined, 'winget'],
+    ['C:\\Program Files\\WinGet\\Links\\codex.exe', undefined, 'winget']
+  ]
+
+  it.each(ROWS)('%s is %s', (path, target, owner) => {
+    expect(installOwnerOf(path, 'path', (link) => (link === path && target ? target : link))).toBe(owner)
+  })
+
+  it('needs elevation when the link folder or the package folder is not writable', () => {
     const rootOwned = (path: string) => !path.startsWith('/usr/local')
     expect(updateNeedsElevation('/usr/local/bin/codex', 'npm', { realpath, canWrite: rootOwned, platform: 'darwin' })).toBe(true)
     expect(updateNeedsElevation('/opt/homebrew/bin/claude', 'brew', { realpath, canWrite: rootOwned, platform: 'darwin' })).toBe(false)
-    expect(updateNeedsElevation('/usr/local/bin/codex', 'npm', { realpath, canWrite: () => false, platform: 'win32' })).toBe(false)
     // The npm package folder is checked, not just the bin folder.
     const checked: string[] = []
     updateNeedsElevation('/usr/local/bin/codex', 'npm', { realpath, canWrite: (path) => (checked.push(path), true), platform: 'linux' })
     expect(checked).toEqual(['/usr/local/bin', '/usr/local/lib/node_modules'])
     // Nothing to run for an unknown owner or Mousse's own install.
     expect(updateNeedsElevation('/usr/local/bin/mystery', 'unknown', { realpath, canWrite: () => false, platform: 'linux' })).toBe(false)
+  })
+
+  it('on Windows, needs elevation for a machine-wide install under Program Files or ProgramData, and for Chocolatey', () => {
+    const win = (path: string, owner: InstallOwner) => updateNeedsElevation(path, owner, { realpath: (link) => link, canWrite: () => true, platform: 'win32' })
+    expect(win('C:\\Program Files\\WinGet\\Links\\codex.exe', 'winget')).toBe(true)
+    expect(win('C:\\ProgramData\\scoop\\shims\\codex.exe', 'scoop')).toBe(true)
+    expect(win('C:\\tools\\chocolatey\\bin\\codex.exe', 'choco')).toBe(true)
+    // A user's own install needs no rights, whatever the folder's access check says.
+    const userWinget = 'C:\\Users\\Me\\AppData\\Local\\Microsoft\\WinGet\\Packages\\OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe\\codex.exe'
+    expect(updateNeedsElevation(userWinget, 'winget', { realpath: (link) => link, canWrite: () => false, platform: 'win32' })).toBe(false)
+    expect(win('C:\\Users\\Me\\AppData\\Roaming\\npm\\codex.cmd', 'npm')).toBe(false)
   })
 })
 
@@ -90,15 +129,32 @@ describe('the update command per install method', () => {
   })
 
   it('Codex: its own updater for the standalone install, the package manager otherwise', () => {
-    expect(Object.fromEntries(methods.map((owner) => [owner, codex.updateCommand?.(owner)]))).toEqual({
+    const every: InstallOwner[] = ['standalone', 'npm', 'pnpm', 'yarn', 'bun', 'volta', 'brew', 'winget', 'scoop', 'choco', 'mise', 'nix', 'unknown']
+    expect(Object.fromEntries(every.map((owner) => [owner, codex.updateCommand?.(owner, undefined, '/opt/homebrew/bin/codex')]))).toEqual({
       standalone: 'codex update',
       npm: 'npm install -g @openai/codex@latest',
       pnpm: 'pnpm add -g @openai/codex@latest',
+      yarn: 'yarn global add @openai/codex@latest',
       bun: 'bun add -g @openai/codex@latest',
+      volta: 'volta install @openai/codex@latest',
       brew: 'brew upgrade codex',
-      winget: undefined,
+      winget: 'winget upgrade --id OpenAI.Codex --exact --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity',
+      scoop: 'scoop update codex',
+      choco: 'choco upgrade codex -y',
+      // Nix and mise pin the version in the user's own configuration.
+      mise: undefined,
+      nix: undefined,
       unknown: undefined
     })
+    // Homebrew's cask and formula share the name: the cask's copy upgrades as a cask.
+    expect(codex.updateCommand?.('brew', undefined, '/opt/homebrew/Caskroom/codex/0.170.0/codex-aarch64-apple-darwin')).toBe('brew upgrade --cask codex')
+  })
+
+  it("Codex: its own updater runs with the home it was installed under, never the entry's private home", () => {
+    expect(codexUpdateEnv('standalone', '/Users/me/.codex/packages/standalone/releases/0.170.0/bin/codex')).toEqual({ CODEX_HOME: '/Users/me/.codex' })
+    expect(codexUpdateEnv('standalone', 'C:\\Users\\Me\\.codex\\packages\\standalone\\current\\codex.exe')).toEqual({ CODEX_HOME: 'C:\\Users\\Me\\.codex' })
+    expect(codexUpdateEnv('standalone', 'C:\\Users\\Me\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe')).toBeUndefined()
+    expect(codexUpdateEnv('npm', '/Users/me/.codex/packages/standalone/x/codex')).toBeUndefined()
   })
 })
 
@@ -107,13 +163,19 @@ describe('the update offered, and the tested range', () => {
   const offer = (binary: InstanceBinary, latest: string, driver: HarnessDriver = claude) => updateAffordance(driver, binary, compatibilityOf(driver, binary.version), latest)
 
   it('marks a version newer than tested, and still offers it', () => {
-    expect(offer(at('2.1.300', 'standalone'), '2.1.320')).toEqual({ kind: 'advisory', command: 'claude update', latestVersion: '2.1.320' })
-    expect(offer(at('2.1.300', 'standalone'), '2.2.0')).toEqual({ kind: 'advisory', command: 'claude update', latestVersion: '2.2.0', untested: true })
+    expect(offer(at('2.1.300', 'standalone'), '2.1.320')).toEqual({ kind: 'advisory', command: 'claude update', owner: 'standalone', latestVersion: '2.1.320' })
+    expect(offer(at('2.1.300', 'standalone'), '2.2.0')).toEqual({ kind: 'advisory', command: 'claude update', owner: 'standalone', latestVersion: '2.2.0', untested: true })
   })
 
   it('shows the command to copy when updating needs administrator rights', () => {
     expect(offer(at('0.160.0', 'npm', { needsElevation: true }), '0.165.0', codex))
-      .toEqual({ kind: 'advisory', command: 'npm install -g @openai/codex@latest', latestVersion: '0.165.0', manual: true })
+      .toEqual({ kind: 'advisory', command: 'npm install -g @openai/codex@latest', owner: 'npm', latestVersion: '0.165.0', manual: true })
+  })
+
+  it('names who installed it: with the command, or alone when Mousse has none for that owner', () => {
+    expect(offer(at('0.160.0', 'winget'), '0.165.0', codex)).toMatchObject({ kind: 'advisory', owner: 'winget', command: expect.stringMatching(/^winget upgrade /) })
+    expect(offer(at('0.160.0', 'nix'), '0.165.0', codex)).toEqual({ kind: 'notice', owner: 'nix', latestVersion: '0.165.0' })
+    expect(offer(at('0.160.0', 'unknown'), '0.165.0', codex)).toEqual({ kind: 'notice', latestVersion: '0.165.0' })
   })
 })
 

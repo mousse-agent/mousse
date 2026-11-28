@@ -444,6 +444,12 @@ export interface DriverRuntime {
   /** The instance is being removed: it lets go of shared installs (its files stay unless deleted). */
   release?(): Promise<void>
   /**
+   * Closes the processes that keep the CLI's executable open, so its owner's update can replace it
+   * (Windows refuses to overwrite a running program). Called only once no turn runs; the next turn
+   * starts them again.
+   */
+  releaseExecutable?(): Promise<void>
+  /**
    * The instance is being removed: deletes the sign-ins Mousse keeps for it, after stopping
    * everything that used them, and revokes them. It resolves only once nothing in the instance's
    * folder is needed any more; when it throws, the instance is kept so removing it again retries.
@@ -712,9 +718,15 @@ export interface HarnessDriver {
   create(context: DriverContext): DriverRuntime
   /**
    * The command that updates a binary installed by `owner`, when there is one. `pkg`: the package
-   * or formula the copy came from (`packageOf`), for a driver that reads it.
+   * or formula the copy came from (`packageOf`), for a driver that reads it. `path`: the executable
+   * (a Homebrew cask and formula of one name update differently).
    */
-  updateCommand?(owner: InstallOwner, pkg?: string): string | undefined
+  updateCommand?(owner: InstallOwner, pkg?: string, path?: string): string | undefined
+  /**
+   * Variables the owner's update command needs over the entry's own environment: `codex update`
+   * updates the install under the CODEX_HOME it reads, which is not a private home's.
+   */
+  updateEnv?(owner: InstallOwner, path: string): Record<string, string> | undefined
 }
 
 /** The owners whose copies come from a package or formula (`HarnessDriver.packageOf`). */
@@ -772,21 +784,41 @@ const STANDALONE_FOLDERS = [
   '/appdata/local/agy/'
 ]
 
-/** The install owner a binary path proves, from where package managers put their executables. */
+/** Any of `folders` in `normalized` (lowercase, forward slashes). */
+function under(normalized: string, folders: string[]): boolean {
+  return folders.some((folder) => normalized.includes(folder))
+}
+
+/**
+ * The install owner a binary path proves, from where package managers put their executables. The
+ * order matters: a manager that installs npm packages itself (mise, Volta, Yarn) is checked before
+ * npm's own folders, npm's global folder before Homebrew's (npm run by Homebrew's Node is npm's),
+ * and every package manager before the shared folders an installer writes.
+ */
 export function installOwner(path: string | undefined, source: 'path' | 'managed' | 'override' | 'bundled'): InstallOwner {
   if (source === 'managed') return 'managed'
   if (!path) return 'unknown'
   const normalized = path.replace(/\\/g, '/').toLowerCase()
-  if (normalized.includes('/homebrew/') || normalized.includes('/cellar/') || normalized.includes('/caskroom/') || normalized.includes('/linuxbrew/')) return 'brew'
+  if (under(normalized, ['/nix/store/', '/.nix-profile/', '/nix/var/nix/profiles/'])) return 'nix'
+  if (under(normalized, ['/mise/installs/', '/mise/shims/'])) return 'mise'
+  if (under(normalized, ['/.volta/', '/appdata/local/volta/'])) return 'volta'
+  if (under(normalized, ['/yarn/global/', '/yarn/data/global/', '/yarn/bin/', '/.yarn/bin/'])) return 'yarn'
+  const cellar = under(normalized, ['/cellar/', '/caskroom/'])
+  if (normalized.includes('/lib/node_modules/') && !cellar) return 'npm'
+  if (cellar || under(normalized, ['/homebrew/', '/linuxbrew/'])) return 'brew'
   if (normalized.includes('/pnpm/')) return 'pnpm'
   if (normalized.includes('/.bun/')) return 'bun'
+  // Scoop's own shims and apps; an npm package under Scoop's Node is npm's.
+  if (normalized.includes('/scoop/shims/') || (normalized.includes('/scoop/apps/') && !normalized.includes('/node_modules/') && !normalized.endsWith('.cmd'))) return 'scoop'
+  if (normalized.includes('/chocolatey/')) return 'choco'
   if (normalized.includes('/node_modules/') || normalized.includes('/npm/') || normalized.endsWith('.cmd')) return 'npm'
   if (normalized.includes('/winget/')) return 'winget'
-  if (STANDALONE_FOLDERS.some((folder) => normalized.includes(folder))) return 'standalone'
+  if (under(normalized, STANDALONE_FOLDERS)) return 'standalone'
   return 'unknown'
 }
 
-function realPathOf(path: string): string | undefined {
+/** The executable a link leads to, when it can be read. */
+export function realPathOf(path: string): string | undefined {
   try {
     return realpathSync(path)
   } catch {
@@ -829,19 +861,27 @@ function writable(path: string): boolean {
   }
 }
 
+/** Windows folders only an administrator writes: a machine-wide WinGet, Chocolatey or global Scoop install. */
+const WINDOWS_ADMIN_FOLDERS = ['/program files/', '/program files (x86)/', '/programdata/']
+
 /**
  * Updating the executable needs rights this user lacks: the folder of the link on PATH or the
  * package manager's folder is not writable (an npm prefix owned by root). Mousse never runs sudo;
- * such an update is shown to run by hand. Windows folder rights cannot be read this way.
+ * such an update is shown to run by hand. Windows folder rights cannot be read this way, so there
+ * an install under Program Files or ProgramData (and any Chocolatey install) counts as one.
  */
 export function updateNeedsElevation(
   path: string | undefined,
   owner: InstallOwner | undefined,
   options: { platform?: NodeJS.Platform; realpath?: (path: string) => string | undefined; canWrite?: (path: string) => boolean } = {}
 ): boolean {
-  if (!path || !owner || owner === 'managed' || owner === 'unknown' || (options.platform ?? process.platform) === 'win32') return false
-  const canWrite = options.canWrite ?? writable
+  if (!path || !owner || owner === 'managed' || owner === 'unknown') return false
   const target = (options.realpath ?? realPathOf)(path) ?? path
+  if ((options.platform ?? process.platform) === 'win32') {
+    if (owner === 'choco') return true
+    return [path, target].some((candidate) => under(candidate.replace(/\\/g, '/').toLowerCase(), WINDOWS_ADMIN_FOLDERS))
+  }
+  const canWrite = options.canWrite ?? writable
   return !canWrite(dirname(path)) || !canWrite(installRoot(target))
 }
 

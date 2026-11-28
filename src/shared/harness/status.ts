@@ -14,7 +14,25 @@ export type AuthState = 'signed_in' | 'signed_out' | 'expired' | 'refreshing' | 
 export type CompatibilityState = 'tested' | 'newer_than_tested' | 'too_old' | 'known_broken' | 'unknown'
 export type BinarySource = 'path' | 'managed' | 'override' | 'bundled'
 /** Who installed the binary; one-click update needs a proven owner. */
-export type InstallOwner = 'npm' | 'pnpm' | 'bun' | 'brew' | 'winget' | 'standalone' | 'managed' | 'unknown'
+export type InstallOwner =
+  | 'npm' | 'pnpm' | 'yarn' | 'bun' | 'volta' | 'brew' | 'winget' | 'scoop' | 'choco' | 'mise' | 'nix'
+  | 'standalone' | 'managed' | 'unknown'
+
+/** What installed it, as copy names it ("installed with npm"); absent for `managed` and `unknown`. */
+export const INSTALL_OWNER_LABELS: Partial<Record<InstallOwner, string>> = {
+  npm: 'npm',
+  pnpm: 'pnpm',
+  yarn: 'Yarn',
+  bun: 'Bun',
+  volta: 'Volta',
+  brew: 'Homebrew',
+  winget: 'WinGet',
+  scoop: 'Scoop',
+  choco: 'Chocolatey',
+  mise: 'mise',
+  nix: 'Nix',
+  standalone: 'its own installer'
+}
 
 /** Why the binary does not run. `override_not_found` never falls back to PATH. */
 export type RunsFailure = 'override_not_found' | 'not_on_path' | 'spawn_failed' | 'exited' | 'bad_version' | 'timeout' | 'files_changed' | 'known_broken'
@@ -41,9 +59,12 @@ export type UpdateAffordance =
    * Installed by its owner (npm, brew, the CLI's own installer): Update runs `command`, which can
    * also be copied. `manual`: the command needs rights Mousse does not have, so it is only shown.
    */
-  | { kind: 'advisory'; command: string; latestVersion?: string; untested?: boolean; manual?: boolean }
-  /** A newer version is known, but Mousse cannot say how this copy was installed: no command, no action. */
-  | { kind: 'notice'; latestVersion: string; untested?: boolean }
+  | { kind: 'advisory'; command: string; owner?: InstallOwner; latestVersion?: string; untested?: boolean; manual?: boolean }
+  /**
+   * A newer version is known, but Mousse has no command for it: `owner` says who installed it when
+   * known (Nix, mise), absent when Mousse cannot tell how this copy was installed. No action.
+   */
+  | { kind: 'notice'; latestVersion: string; owner?: InstallOwner; untested?: boolean }
 
 /** The status detail for a known newer version; the provider editor shows its own update chip instead. */
 export function updateAvailableDetail(latestVersion: string): string {

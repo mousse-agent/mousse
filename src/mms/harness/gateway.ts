@@ -43,7 +43,7 @@ import type { ProviderRef } from '../run/types'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { InstanceBinary, InstanceConfigView, NextStep, PromptCacheHour, UpdateAffordance } from '../../shared/harness/status'
+import { INSTALL_OWNER_LABELS, type InstanceBinary, type InstanceConfigView, type NextStep, type PromptCacheHour, type UpdateAffordance } from '../../shared/harness/status'
 import { acceptsMove, foldedInto, foldedTarget, type MoveResult } from '../../shared/harness/move'
 import { harnessAppError, onRetiredBareRoute, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
 import type { ProviderLoginEvent, ProviderUsage, UseLimitResetResponse } from '../../shared/providerAuth'
@@ -59,7 +59,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
-import { isPackageOwner, privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type NamingOrigin, type OneShotTask } from './driver'
+import { compareVersions, isPackageOwner, privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type NamingOrigin, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, ownedLaunchEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
 import { ClaudeSettingsError, claudeSettingsPath, readClaudeSettingsFile, writeClaudeSetting } from './vendors/claude/claudeSettingsFile'
 import { SharedSettingsConsentStore } from './sharedSettingsConsent'
@@ -663,6 +663,8 @@ const RETIRED_BOT_RUNNER = { id: 'claude:bots', name: 'Claude for bots' } as con
 const SHELL_PATH_WAIT_MS = 3_000
 /** How often the newest published versions are asked for; `LATEST_TTL_MS` limits real lookups. */
 const LATEST_CHECK_INTERVAL_MS = 60 * 60_000
+/** How often an owner's update looks again whether the chats it waits for have finished. */
+const OWNER_UPDATE_WAIT_POLL_MS = 1_000
 
 /**
  * Where the newest version of an instance's CLI is read: for a driver published under several
@@ -4270,14 +4272,7 @@ export class Harness implements HarnessGateway {
     const runtime = record.runtime
     const abort = new AbortController()
     const work: DriverRuntime['install'] = ownerCommand
-      ? (onProgress) =>
-          runOwnerUpdate({
-            command: ownerCommand,
-            binary: this.probes.get(instanceId)?.lastGood?.binary,
-            env: record.env,
-            signal: abort.signal,
-            onProgress: (message) => onProgress({ message })
-          })
+      ? (onProgress) => this.runOwnerUpdate(record, ownerCommand, abort.signal, (message) => onProgress({ message }))
       : runtime.install?.bind(runtime)
     if (!work) return harnessFail('unsupported', `Mousse cannot install ${record.driver.label}. Install it yourself, then check again.`, instanceId)
     if ([...this.operations.values()].some((entry) => entry.started.instanceId === instanceId && entry.started.kind !== 'sign_in'))
@@ -4322,6 +4317,44 @@ export class Harness implements HarnessGateway {
     return started
   }
 
+  /**
+   * Updates a CLI Mousse did not install with its owner's command. Every entry running the same
+   * executable finishes its running chats first, and on Windows closes the processes holding it
+   * (a running program cannot be replaced there). Afterwards the CLI is checked again: an update
+   * that left the version as it was failed, whatever the command said (it updated another copy).
+   */
+  private async runOwnerUpdate(record: InstanceRecord, command: string, signal: AbortSignal, onProgress: (message: string) => void): Promise<void> {
+    const binary = this.probes.get(record.instanceId)?.lastGood?.binary
+    const sharing = binary?.path ? this.recordsRunning(binary.path) : [record]
+    if (sharing.some((other) => other.active > 0)) {
+      onProgress('Waiting for the running chat to finish…')
+      while (sharing.some((other) => other.active > 0)) {
+        if (signal.aborted) throw new Error('Update cancelled.')
+        await new Promise((resolve) => setTimeout(resolve, OWNER_UPDATE_WAIT_POLL_MS).unref?.())
+      }
+    }
+    if (process.platform === 'win32') await Promise.all(sharing.map((other) => other.runtime.releaseExecutable?.()))
+    if (signal.aborted) throw new Error('Update cancelled.')
+    const updateEnv = binary?.path && binary.owner ? record.driver.updateEnv?.(binary.owner, binary.path) : undefined
+    await runOwnerUpdate({ command, binary, env: record.env, ...(updateEnv ? { updateEnv } : {}), signal, onProgress })
+    if (!binary?.version) return
+    // A check started before the update would read the old version: it ends first.
+    await this.probeState(record.instanceId).probing
+    await this.probe(record.instanceId, true)
+    const after = this.probes.get(record.instanceId)?.result?.binary?.version
+    if (after && compareVersions(after, binary.version) <= 0)
+      throw new Error(`Still ${binary.version} after ${command}. It may have updated another copy of ${record.driver.label}.`)
+  }
+
+  /** The entries whose last check found the executable at `path` (one copy, several entries). */
+  private recordsRunning(path: string): InstanceRecord[] {
+    const key = (value: string) => (process.platform === 'win32' ? value.toLowerCase() : value)
+    return [...this.records.values()].filter((other) => {
+      const found = this.probes.get(other.instanceId)?.lastGood?.binary?.path
+      return found !== undefined && key(found) === key(path)
+    })
+  }
+
   private async removeInstall(instanceId: string, options: { force: boolean }): Promise<RemoveInstallResult> {
     const record = this.record(instanceId, { allowDisabled: true })
     if (!record.runtime.removeInstall) return harnessFail('unsupported', `${this.displayName(record)} has no files Mousse downloaded.`, instanceId)
@@ -4342,7 +4375,13 @@ export class Harness implements HarnessGateway {
     const update = this.updateFor(this.record(instanceId, { allowDisabled: true }))
     if (update?.kind === 'one_click') return this.install(instanceId, 'update')
     if (update?.kind === 'notice')
-      return harnessFail('unsupported', `Mousse cannot tell how this CLI was installed, so it cannot update it. Version ${update.latestVersion} is available.`, instanceId)
+      return harnessFail(
+        'unsupported',
+        update.owner
+          ? `Mousse has no update command for a copy installed with ${INSTALL_OWNER_LABELS[update.owner] ?? update.owner}. Update it there to version ${update.latestVersion}.`
+          : `Mousse cannot tell how this CLI was installed, so it cannot update it. Version ${update.latestVersion} is available.`,
+        instanceId
+      )
     if (update?.kind === 'advisory' && update.manual)
       return harnessFail('unsupported', `Updating needs administrator rights. Run this in a terminal: ${update.command}`, instanceId)
     // Not Mousse's install: its owner's own update command, the one the editor shows to copy.
