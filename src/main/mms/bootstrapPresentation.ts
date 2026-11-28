@@ -1,6 +1,7 @@
 import type { Thread } from '../../shared/types'
 import { visibleThreads } from '../../shared/threadLineage'
 import { isQualifiedId } from '../../shared/threadRef'
+import { waitsForComputer } from '../../shared/bridge/computerErrors'
 import type { GuiMmsController } from './GuiMmsController'
 import type { PresentationState } from './PresentationState'
 import { broadcastThreadSnapshot, threadListPayload } from './protocolEventBridge'
@@ -56,7 +57,18 @@ export async function bootstrapPresentation(
   void guiMms.request('threads.markSeen', { threadId: activeId }).catch(() => undefined)
   // Select before the snapshot: the renderer filters view events by its selection.
   broadcast('thread:selected', { id: activeId })
-  const snap = await guiMms.snapshotThread(activeId)
+  let snap: Awaited<ReturnType<GuiMmsController['snapshotThread']>>
+  try {
+    snap = await guiMms.snapshotThread(activeId)
+  } catch (error) {
+    // A thread of another computer that cannot be reached (the one the window showed last, its computer now offline)
+    // does not fail the window's load: the window opens, and that thread says it could not be read, with Retry.
+    if (!isQualifiedId(activeId) || !waitsForComputer(error)) throw error
+    if (isCurrent() && presentation.getActiveThreadId() === activeId) {
+      broadcast('thread:view-failed', { threadId: activeId, ...(error instanceof Error && error.message ? { reason: error.message } : {}) })
+    }
+    return
+  }
   if (!isCurrent() || presentation.getActiveThreadId() !== activeId) return
   const full = snap as {
     agents?: unknown[]

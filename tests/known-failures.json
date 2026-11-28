@@ -1,4 +1,5 @@
 [
+  { "file": "tests/net/bridge/hub/copyRetention.test.ts", "test": "with thousands of snapshots, attaches by checking only its newest, and keeps only that", "issue": 2107, "how": "intermittent under load: takes 20 to 22 s and times out at 20 s, on master too", "platform": "win32" },
   { "file": "tests/bots/botActions.test.ts", "test": "C4 authority compiler fences every registered Mousse tool for held work and its live subagent", "issue": 2081, "how": "TypeError: Cannot read properties of undefined (reading 'getReceipt'): the test's stand-in engine has no run store" },
   { "file": "tests/run/terminalRead.test.ts", "test": "quotes the error a failed command printed", "issue": 2068, "how": "npm prints Missing script: bild without the quotes the test expects", "platform": "win32" },
   { "file": "tests/run/terminalRead.test.ts", "test": "pages back through long output by line number", "issue": 2068, "how": "the shell loop prints 14 lines, not 300: fromLine 1, toLine 14", "platform": "win32" },

@@ -289,6 +289,36 @@ describe('the window before the service answers', () => {
     expect(chatText()).toContain('Ship the warm start')
   })
 
+  it('opens normally on a thread of an offline computer, which says it could not reach that computer, with Retry', async () => {
+    const node = 'nod_0123456789abcdefghjkmnpqrs'
+    const far = `${node}:thr_far`
+    const farThread = { ...thread(far, 'Work on the laptop'), node, offline: true }
+    stubBridge({ ...warmView, threads: [...warmView.threads, farThread] as never, activeThreadId: far, messages: [] })
+    await launch()
+    const { useComputersStore } = await import('../../src/renderer/lib/computers')
+    useComputersStore.setState({ loaded: true, routed: true, byNode: { [node]: { node, name: 'Laptop', online: false } as never }, devices: [] })
+    await bind(WARM_PROFILE)
+    // As main does when the thread's computer is offline: it is selected, its read fails, and the load finishes.
+    await act(async () => {
+      listeners['projects.onUpdated']!([])
+      listeners['threads.onUpdated']!([...freshThreads, farThread], { epoch: 'service', seq: 1, generation: 1 })
+      listeners['threads.onSelected']!({ id: far })
+      listeners['threads.onViewFailed']!({ threadId: far, reason: 'Laptop is offline.' })
+    })
+    initialize.resolve()
+    await settle(20)
+
+    expect(useAppStore.getState().workspaceReady).toBe(true)
+    expect(host.textContent).not.toContain('Could not connect to workspace')
+    const alert = host.querySelector('[data-mousse="chat"] [role="alert"]')
+    expect(alert?.textContent).toContain("Couldn't reach Laptop")
+    expect(host.querySelector('.chat--empty')).toBeNull()
+    const retry = [...alert!.querySelectorAll('button')].find((button) => button.textContent?.includes('Retry'))!
+    await act(async () => retry.click())
+    await settle()
+    expect(calls.some((call) => call.method === 'threads.select' && call.args[0] === far)).toBe(true)
+  })
+
   it('shows the loading skeleton as before when nothing was kept', async () => {
     stubBridge(null)
     await launch()

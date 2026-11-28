@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { GuiMmsController } from '../src/main/mms/GuiMmsController'
 import { PresentationState } from '../src/main/mms/PresentationState'
 import { bootstrapPresentation } from '../src/main/mms/bootstrapPresentation'
+import { MmsProtocolError } from '../src/mms/protocol/client'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -127,6 +128,24 @@ describe('subscribed window presentation bootstrap', () => {
     pending.resolve(snapshot)
     await boot
     expect(broadcast).not.toHaveBeenCalled()
+  })
+
+  it('opens on a thread of an offline computer, telling the window its transcript could not be read', async () => {
+    const remote = 'nod_0123456789abcdefghjkmnpqrs:thr_far'
+    const offline = new MmsProtocolError('computer_offline', 'Laptop is offline.')
+    const gui = controller(vi.fn(async () => { throw offline }))
+    gui.request.mockImplementation(async (method: string) => method === 'threads.list' ? { threads: [{ id: 'local' }, { id: remote }] } : method === 'projects.list' ? { projects: [] } : undefined)
+    const state = new PresentationState()
+    const sent: Array<[string, unknown]> = []
+    await bootstrapPresentation(gui as unknown as GuiMmsController, state, (channel, data) => { sent.push([channel, data]) }, { preferThreadId: remote })
+    expect(state.getActiveThreadId()).toBe(remote)
+    expect(sent.map(([channel]) => channel)).toEqual(['projects:updated', 'threads:updated', 'thread:selected', 'thread:view-failed'])
+    expect(sent.at(-1)?.[1]).toEqual({ threadId: remote, reason: 'Laptop is offline.' })
+  })
+
+  it('still rejects a computer error for a thread of this computer', async () => {
+    const gui = controller(vi.fn(async () => { throw new MmsProtocolError('computer_offline', 'Laptop is offline.') }))
+    await expect(bootstrapPresentation(gui as unknown as GuiMmsController, new PresentationState(), vi.fn())).rejects.toThrow('Laptop is offline.')
   })
 
   it('rejects restoration failures so the renderer can offer a retry', async () => {
