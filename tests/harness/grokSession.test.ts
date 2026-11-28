@@ -397,3 +397,43 @@ describe('Grok sessions', () => {
     })
   })
 })
+
+describe('a Grok single request (acpOneShot)', () => {
+  const oneShot = (sessions: AcpSessions) => sessions.oneShot({ cwd: process.cwd(), model: 'default', system: 'Name the chat.', prompt: 'fix the login bug', signal: new AbortController().signal, onActivity: vi.fn(), deadlineMs: 2_000 })
+
+  it('tags its prompt and answers at its prompt_complete, with no reply', async () => {
+    const agent = grokAgent(async (c) => {
+      await c.client.notify(methods.client.session.update, text(c.params.sessionId, 'Login bug fix'))
+      await c.client.notify('_x.ai/session/prompt_complete', { sessionId: c.params.sessionId, promptId: c.params._meta?.promptId, stopReason: 'end_turn' })
+      return new Promise(() => {})
+    })
+    const { sessions } = core(agent.connect)
+    await expect(oneShot(sessions)).resolves.toBe('Login bug fix')
+    expect(agent.calls.find((call) => call.method === 'session/prompt')?.params).toMatchObject({ _meta: { promptId: expect.any(String) } })
+  })
+
+  it('fails on a limit its prompt_complete reports, whatever text came before', async () => {
+    const agent = grokAgent(async (c) => {
+      await c.client.notify(methods.client.session.update, text(c.params.sessionId, 'partial'))
+      await c.client.notify('_x.ai/session/prompt_complete', { sessionId: c.params.sessionId, promptId: c.params._meta?.promptId, stopReason: 'end_turn', error: { message: 'Rate limit reached for grok-4', status: 429 } })
+      return new Promise(() => {})
+    })
+    const { sessions } = core(agent.connect)
+    await expect(oneShot(sessions)).rejects.toThrow(/Rate limit reached/)
+  })
+
+  it("refuses Grok's question and ends the request, asking nobody", async () => {
+    const agent = grokAgent(async (c) => {
+      await c.client.request('_x.ai/ask_user_question', {
+        method: 'x.ai/ask_user_question',
+        params: { sessionId: c.params.sessionId, toolCallId: 'q1', questions: [{ question: 'Strict or loose?', multiSelect: null, options: [{ label: 'Strict' }] }] }
+      }).catch(() => undefined)
+      await c.client.notify(methods.client.session.update, text(c.params.sessionId, 'A title'))
+      return { stopReason: 'end_turn' }
+    })
+    const questions = new UserQuestionService()
+    const { sessions } = core(agent.connect, questions)
+    await expect(oneShot(sessions)).rejects.toMatchObject({ code: 'one_shot_tool_refused' })
+    expect(questions.listAllPending()).toEqual([])
+  })
+})
