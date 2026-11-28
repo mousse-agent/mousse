@@ -16,6 +16,21 @@
       "expiresAt": "2026-11-27T17:32:25.878Z"
     },
     {
+      "task": "archive-blockers",
+      "session": "Animatrix-b2ac79",
+      "machine": "Animatrix",
+      "branch": "archive-blockers",
+      "paths": [
+        "src/mms/orchestrator/OrchestratorService.ts",
+        "src/mms/run/mcp/appTools/thread.ts",
+        "src/renderer/components/ui/Toast.tsx",
+        "src/renderer/components/ThreadsSidebar.tsx",
+        "src/shared/threadAttention.ts"
+      ],
+      "claimedAt": "2026-11-28T11:01:53.347Z",
+      "expiresAt": "2026-11-28T13:01:53.347Z"
+    },
+    {
       "task": "bot-chat-tags-bots",
       "session": "Animatrix-b71b0d",
       "machine": "Animatrix",
