@@ -203,6 +203,7 @@ import { forEachYielding, startupBackgroundTimed, startupPhase } from './startup
 import { logInfo } from './log/diag'
 import { onThreadBranchChanged } from './workspace/threadHeads'
 import { schedulePlaceSweep } from './harness/oneShot/sweep'
+import { sweepLegacyGrokOneShots } from './harness/grok/legacyOneShots'
 import { ANTIGRAVITY_LEFTOVER_RULES, sweepLegacyAntigravityOneShots } from './harness/acp/presets/antigravity/oneShotGuards'
 import { botDigestOneShot, botNameOneShot } from './bots/botOneShots'
 
@@ -2848,7 +2849,11 @@ export class MmsProfileServices {
     this.cancelPlaceSweep = schedulePlaceSweep(this.homeDir, {
       stopped: stopping,
       rules: ANTIGRAVITY_LEFTOVER_RULES,
-      also: () => sweepLegacyAntigravityOneShots(this.homeDir)
+      // What older versions' single requests left outside places: Grok's headless route, then Antigravity's.
+      also: () => {
+        sweepLegacyGrokOneShots(this.homeDir)
+        sweepLegacyAntigravityOneShots(this.homeDir)
+      }
     })
     await startupBackgroundTimed('threadRuntimes', () => this.threadRuntimes.settleRestartedThreads(stopping), log)
   }
