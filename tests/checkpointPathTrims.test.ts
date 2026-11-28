@@ -10,7 +10,7 @@
  * attribute: alone, and with `* text=auto`. Each row runs with its own system and global config files.
  */
 import { execFileSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -72,6 +72,42 @@ describe('the settings read once for a snapshot', () => {
     expect(execFileSync('git', ['cat-file', 'blob', `${snapshot.exactTree ?? snapshot.tree}:value.txt`], { cwd: repo }).toString()).toBe('line one\r\nline two\r\n')
     // The second index, which reads every file again with conversions off, is built only where Git converts.
     expect(existsSync(resolve(repo, git(repo, 'rev-parse', '--git-path', 'mousse/snapshot-exact-index')))).toBe(converts)
+  })
+})
+
+/**
+ * A conversion turned off after a snapshot: the private index still holds the LF blob Git stored while it converted,
+ * and Git does not read the file again while its stat data is the same. The snapshot must still record the CRLF bytes
+ * on disk. Rows: `core.autocrlf` turned off in the repository, a system-wide `true` turned off by a global `false`, and
+ * a `text=auto` attribute removed.
+ */
+const TURNED_OFF: Array<[string, (repo: string) => void, (repo: string) => void]> = [
+  ['autocrlf true, then false in the repository', (repo) => git(repo, 'config', 'core.autocrlf', 'true'), (repo) => git(repo, 'config', 'core.autocrlf', 'false')],
+  ['autocrlf true system-wide, then false globally', () => scope('system', 'core.autocrlf', 'true'), () => scope('global', 'core.autocrlf', 'false')],
+  ['text=auto, then the attribute removed', (repo) => writeFileSync(join(repo, '.git', 'info', 'attributes'), '* text=auto\n'), (repo) => rmSync(join(repo, '.git', 'info', 'attributes'))]
+]
+
+describe('a conversion turned off after a snapshot', () => {
+  it.each(TURNED_OFF)('%s: the CRLF bytes on disk are recorded, and the next snapshot reads only what changed', async (_name, on, off) => {
+    const { repo } = repository(on)
+    const crlf = 'line one\r\nline two\r\n'
+    writeFileSync(join(repo, 'value.txt'), crlf)
+    // Written a minute ago: Git reads a file again anyway when it is no older than the index (racily clean).
+    utimesSync(join(repo, 'value.txt'), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))
+    const blob = (revision: string) => execFileSync('git', ['cat-file', 'blob', `${revision}:value.txt`], { cwd: repo }).toString()
+    const converted = await takeSnapshotAsync(repo, { reason: 'converted' })
+    expect(blob(converted.tree)).toBe('line one\nline two\n')
+    off(repo)
+    const after = await takeSnapshotAsync(repo, { reason: 'turned off' })
+    // Git converts nothing now: its form of the file is the bytes on disk, and that is the exact tree too.
+    expect(blob(after.tree)).toBe(crlf)
+    expect(after.exactTree).toBe(after.tree)
+    // The index was read afresh once and marked, so the next snapshot takes it as it is.
+    expect(existsSync(resolve(repo, git(repo, 'rev-parse', '--git-path', 'mousse/snapshot-index-plain')))).toBe(true)
+    writeFileSync(join(repo, 'other.txt'), 'other\r\n')
+    const next = await takeSnapshotAsync(repo, { reason: 'next' })
+    expect(blob(next.exactTree!)).toBe(crlf)
+    expect(execFileSync('git', ['cat-file', 'blob', `${next.exactTree}:other.txt`], { cwd: repo }).toString()).toBe('other\r\n')
   })
 })
 

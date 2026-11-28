@@ -353,6 +353,12 @@ interface PrivateFiles {
   directory: string
   /** The persistent private index of the snapshot's tree. */
   index: string
+  /**
+   * Present when every entry of `index` was read while Git converted none of its paths, so its tree holds the bytes on
+   * disk (`exactTreeSteps`). Git re-reads only files whose stat data changed: one read while Git converted keeps its
+   * converted blob after the setting is turned off. Absent for a hidden store, whose index never converts.
+   */
+  plain?: string
   /** The persistent private index of its exact tree, updated with conversions off (`exactTreeSteps`). */
   exactIndex: string
   /** The persistent private index of the files under a filter, holding their raw blob ids only (`filterVerdicts`). */
@@ -383,7 +389,7 @@ function* privateFiles(top: string, facts?: RepositoryFacts): Steps<PrivateFiles
   const [mousse, info] = facts ? [facts.mousseDir, facts.infoAttributes] : (yield* gitStep(top, ['rev-parse', '--git-path', 'mousse', '--git-path', 'info/attributes'])).split(/\r?\n/)
   const directory = resolve(top, mousse!)
   yield* disk.mkdir(directory)
-  return { directory, index: join(directory, 'snapshot-index'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), stalled: join(directory, FILTER_STALLED), last: join(directory, 'snapshot-last.json'), infoAttributes: resolve(top, info!) }
+  return { directory, index: join(directory, 'snapshot-index'), plain: join(directory, 'snapshot-index-plain'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), stalled: join(directory, FILTER_STALLED), last: join(directory, 'snapshot-last.json'), infoAttributes: resolve(top, info!) }
 }
 
 /** The file name of the exact tree's persistent private index, next to the snapshot's own (`gitPolicy.ts` knows it). */
@@ -450,9 +456,14 @@ function* followTrackedFiles(top: string, env: NodeJS.ProcessEnv, head: string |
  * The tree of every file in the worktree, from the persistent private index. The index stays between snapshots so
  * Git's stat cache keeps the next one fast; a missing, locked or corrupt one is rebuilt from HEAD. Every snapshot also
  * brings it in line with the files HEAD and the real index track (`followTrackedFiles`), so a file that is ignored but
- * was force-added and committed later is in it.
+ * was force-added and committed later is in it. `plain` says whether every entry was read while Git converted nothing
+ * before this update, or the index was built from nothing now (see `PrivateFiles.plain`). The mark is taken off before
+ * the index changes, and only `exactTreeSteps` puts it back, once it knows Git converts nothing now.
  */
-function* indexTree(top: string, index: string, head: string | undefined): Steps<{ tree: string; gaps: CoverageGap[] }> {
+function* indexTree(top: string, files: PrivateFiles, head: string | undefined): Steps<{ tree: string; gaps: CoverageGap[]; plain: boolean }> {
+  const index = files.index
+  const plainBefore = files.plain ? yield* disk.exists(files.plain) : false
+  if (plainBefore) yield* disk.remove(files.plain!)
   // A hidden store first leaves out what it does not keep (files over the size limit) and refuses a folder it cannot
   // snapshot at all; what it leaves out is named with the rest.
   const store = activeHiddenStore(top)
@@ -468,8 +479,10 @@ function* indexTree(top: string, index: string, head: string | undefined): Steps
     if (result.ok || !onlyExcludedIgnored(result.stderr, [...(hidden ? [] : [MOUSSE_DIRECTORY]), ...left.map((gap) => gap.path)])) return result
     return { ...result, ok: true }
   }
-  const indexOnce = function* (): Steps<{ tree: string; gaps: CoverageGap[] }> {
-    if (!(yield* disk.exists(index))) yield* gitStep(top, head ? ['read-tree', head] : ['read-tree', '--empty'], env)
+  const indexOnce = function* (): Steps<{ tree: string; gaps: CoverageGap[]; plain: boolean }> {
+    // Built from nothing, every file is read now: none of its entries is from before.
+    const fresh = !(yield* disk.exists(index))
+    if (fresh) yield* gitStep(top, head ? ['read-tree', head] : ['read-tree', '--empty'], env)
     // What can be read is recorded; what cannot (an unreadable file or folder, a nested repository with no commit) is
     // left out and named. Git stops at the first file it cannot read, so each one found is left out and it runs again.
     const gaps: CoverageGap[] = [...(hidden?.leftOut ?? [])]
@@ -502,11 +515,11 @@ function* indexTree(top: string, index: string, head: string | undefined): Steps
       yield* gitStep(top, ['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...builtInPathspecs().match], env)
       gaps.push(...yield* nestedWithChanges(top, env, gaps))
       const tree = yield* gitStep(top, ['write-tree'], env)
-      return { tree, gaps: [...gaps, ...yield* excludedFolders(top, store!.gitDir)] }
+      return { tree, gaps: [...gaps, ...yield* excludedFolders(top, store!.gitDir)], plain: false }
     }
     yield* followTrackedFiles(top, env, head, gaps.map((gap) => gap.path))
     gaps.push(...yield* nestedWithChanges(top, env, gaps))
-    return { tree: yield* gitStep(top, ['write-tree'], env), gaps }
+    return { tree: yield* gitStep(top, ['write-tree'], env), gaps, plain: plainBefore || fresh }
   }
   try {
     return yield* indexOnce()
@@ -542,7 +555,10 @@ function* indexTree(top: string, index: string, head: string | undefined): Steps
  *
  * Where Git converts none of the snapshot's paths (`core.autocrlf` off as Git reads it in the end, and `check-attr` finds no converting
  * attribute on any of them, from any `.gitattributes`, tracked or not, or any other attributes file) the two trees are
- * the same, so the snapshot's tree is recorded as the exact tree and the second index is not run.
+ * the same, so the snapshot's tree is recorded as the exact tree and the second index is not run. That holds only for a
+ * private index whose every entry was read while Git converted nothing (`PrivateFiles.plain`): an entry read under
+ * `core.autocrlf=true` keeps its LF blob after the setting is turned off, as long as the file's stat data does not
+ * change. Any other index is rebuilt once from nothing (`rebuiltTrees`), which reads every file as Git takes it now.
  */
 const EXACT_LINE = 'Mousse-Bytes: exact'
 const EXACT_SUBJECT = `${SUBJECT}exact bytes`
@@ -706,13 +722,18 @@ function* sizedTreeEntries(top: string, tree: string): Steps<SizedEntry[]> {
  * Git's form, named as gaps. The paths come from `normal`, so the walk, the coverage-gap loop and `followTrackedFiles`
  * run once for both. When it cannot be made, even after a retry, it says why (`failed`, Git's first line): the snapshot
  * is then recorded without one, as snapshots from before exact trees, and the gap is named; the next snapshot tries
- * again. Undefined only while exact trees are off (tests).
+ * again. Undefined only while exact trees are off (tests). `STALE_INDEX` when Git converts nothing but the private index
+ * is not `plain` (see the note above): the caller rebuilds it (`rebuiltTrees`).
  */
-function* exactTreeSteps(top: string, files: PrivateFiles, normal: string, head: string | undefined): Steps<ExactResult | undefined> {
+function* exactTreeSteps(top: string, files: PrivateFiles, normal: string, head: string | undefined, plain: boolean): Steps<ExactResult | typeof STALE_INDEX | undefined> {
   if (!exactTreesRecorded) return undefined
   const entries = yield* sizedTreeEntries(top, normal)
   const conversion = yield* conversionSteps(top, files, entries.filter((entry) => isFile(entry.mode)).map((entry) => entry.path))
-  if (!conversion.converts) return { tree: normal, gaps: [] }
+  if (!conversion.converts) {
+    if (!plain) return STALE_INDEX
+    if (files.plain) yield* disk.writeText(files.plain, '')
+    return { tree: normal, gaps: [] }
+  }
   const earlier = { head, previous: yield* readLast(files.last), directory: files.directory }
   try {
     return yield* exactIndexTree(top, files, entries, conversion, earlier)
@@ -737,6 +758,21 @@ function* exactTreeSteps(top: string, files: PrivateFiles, normal: string, head:
 
 /** An exact tree and what it keeps only in Git's form, or why none could be made. */
 type ExactResult = { tree: string; gaps: CoverageGap[] } | { failed: string }
+
+/** `exactTreeSteps`: Git converts nothing, but the private index may hold blobs it converted before. */
+const STALE_INDEX = 'stale index'
+
+/**
+ * The private index rebuilt from nothing, every file read as Git takes it now (see the exact-bytes note), and both trees
+ * taken from it. Costs what a folder's first snapshot does, once, after Git stopped converting.
+ */
+function* rebuiltTrees(top: string, files: PrivateFiles, head: string | undefined): Steps<{ tree: string; gaps: CoverageGap[]; exact: ExactResult | undefined }> {
+  yield* disk.remove(files.index)
+  const { tree, gaps, plain } = yield* indexTree(top, files, head)
+  const exact = yield* exactTreeSteps(top, files, tree, head, plain)
+  if (exact === STALE_INDEX) throw new Error('A private index rebuilt from nothing was not read afresh.')
+  return { tree, gaps, exact }
+}
 
 /** The gaps an exact result names: its own, or one for the whole folder when it could not be made. */
 function exactGapsOf(exact: ExactResult | undefined): CoverageGap[] {
@@ -1088,9 +1124,11 @@ export function* worktreeTreeSteps(cwd: string): Steps<string> {
 export function* worktreeTreesSteps(cwd: string, options: { exact?: boolean } = {}): Steps<{ tree: string; exactTree?: string }> {
   const top = yield* topOf(cwd)
   const files = yield* privateFiles(top)
-  const { tree } = yield* indexTree(top, files.index, yield* headOf(top))
-  if (options.exact === false || activeHiddenStore(top)) return { tree }
-  const exact = yield* exactTreeSteps(top, files, tree, yield* headOf(top))
+  const head = yield* headOf(top)
+  const indexed = yield* indexTree(top, files, head)
+  if (options.exact === false || activeHiddenStore(top)) return { tree: indexed.tree }
+  const found = yield* exactTreeSteps(top, files, indexed.tree, head, indexed.plain)
+  const { tree, exact } = found === STALE_INDEX ? yield* rebuiltTrees(top, files, head) : { tree: indexed.tree, exact: found }
   return { tree, ...(exact && 'tree' in exact ? { exactTree: exact.tree } : {}) }
 }
 
@@ -1120,14 +1158,16 @@ export function* takeSnapshotSteps(cwd: string, input: SnapshotInput, checkpoint
   const head = facts ? facts.head : yield* headOf(top)
   // Where a turn's snapshot spends its time (`turnBoundary.ts`): nothing when no turn boundary is measured.
   turnBoundaryStep('snapshotHead')
-  const { tree, gaps: coverageGaps } = yield* indexTree(top, files.index, head)
+  const indexed = yield* indexTree(top, files, head)
   turnBoundaryStep('snapshotIndex')
   const hidden = activeHiddenStore(top) !== undefined
   const branch = hidden ? undefined : facts ? branchOfHeadRef(yield* step(() => undefined, () => facts.headRef())) : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined
   const operation = yield* operationInProgressSteps(top, facts?.markers)
   turnBoundaryStep('snapshotState')
   // The exact tree comes from the same paths (see the exact-bytes note); a hidden store's tree already holds exact bytes.
-  const exactResult = hidden ? undefined : yield* exactTreeSteps(top, files, tree, head)
+  const found = hidden ? undefined : yield* exactTreeSteps(top, files, indexed.tree, head, indexed.plain)
+  // Git converts nothing, but the index may hold blobs it converted before: rebuilt once (see the exact-bytes note).
+  const { tree, gaps: coverageGaps, exact: exactResult } = found === STALE_INDEX ? yield* rebuiltTrees(top, files, head) : { ...indexed, exact: found }
   turnBoundaryStep('snapshotExact')
   const exactTree = exactResult && 'tree' in exactResult ? exactResult.tree : undefined
   // What only Git's form of is kept is named with the rest, and recorded under its own key (`x`), never as not covered:
