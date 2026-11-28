@@ -800,7 +800,8 @@ export function installOwner(path: string | undefined, source: 'path' | 'managed
   if (!path) return 'unknown'
   const normalized = path.replace(/\\/g, '/').toLowerCase()
   if (under(normalized, ['/nix/store/', '/.nix-profile/', '/nix/var/nix/profiles/'])) return 'nix'
-  if (under(normalized, ['/mise/installs/', '/mise/shims/'])) return 'mise'
+  // npm's global folder under a Node that mise installed is npm's.
+  if (under(normalized, ['/mise/installs/', '/mise/shims/']) && !under(normalized, ['/mise/installs/node/', '/mise/installs/nodejs/'])) return 'mise'
   if (under(normalized, ['/.volta/', '/appdata/local/volta/'])) return 'volta'
   if (under(normalized, ['/yarn/global/', '/yarn/data/global/', '/yarn/bin/', '/.yarn/bin/'])) return 'yarn'
   const cellar = under(normalized, ['/cellar/', '/caskroom/'])
@@ -829,7 +830,9 @@ export function realPathOf(path: string): string | undefined {
 /**
  * The install owner of the executable a link on PATH leads to, else of the link itself.
  * `/usr/local/bin/codex` is npm's when it links into `lib/node_modules`; `/opt/homebrew/bin/claude`
- * is Homebrew's cask; `~/.local/bin/claude` is the native installer's.
+ * is Homebrew's cask; `~/.local/bin/claude` is the native installer's. A version manager's shim
+ * (mise, Volta, Scoop) is that manager's, though it links to the manager's own program, which
+ * Homebrew or an installer may own.
  */
 export function installOwnerOf(
   path: string | undefined,
@@ -837,6 +840,8 @@ export function installOwnerOf(
   realpath: (path: string) => string | undefined = realPathOf
 ): InstallOwner {
   if (source === 'managed' || !path) return installOwner(path, source)
+  const own = installOwner(path, source)
+  if (own === 'mise' || own === 'volta' || own === 'scoop') return own
   const target = realpath(path)
   const owner = target && target !== path ? installOwner(target, source) : 'unknown'
   return owner !== 'unknown' ? owner : installOwner(path, source)
@@ -879,7 +884,8 @@ export function updateNeedsElevation(
   const target = (options.realpath ?? realPathOf)(path) ?? path
   if ((options.platform ?? process.platform) === 'win32') {
     if (owner === 'choco') return true
-    return [path, target].some((candidate) => under(candidate.replace(/\\/g, '/').toLowerCase(), WINDOWS_ADMIN_FOLDERS))
+    // Where the files really are: nvm-windows links `C:\Program Files\nodejs` to the user's own folder.
+    return under(target.replace(/\\/g, '/').toLowerCase(), WINDOWS_ADMIN_FOLDERS)
   }
   const canWrite = options.canWrite ?? writable
   return !canWrite(dirname(path)) || !canWrite(installRoot(target))

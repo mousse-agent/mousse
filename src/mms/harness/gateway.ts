@@ -4343,7 +4343,10 @@ export class Harness implements HarnessGateway {
     await this.probe(record.instanceId, true)
     const after = this.probes.get(record.instanceId)?.result?.binary?.version
     if (after && compareVersions(after, binary.version) <= 0)
-      throw new Error(`Still ${binary.version} after ${command}. It may have updated another copy of ${record.driver.label}.`)
+      // The newest version is read from npm: another owner's package can trail it by hours.
+      throw new Error(
+        `Still ${binary.version} after ${command}. ${binary.owner && INSTALL_OWNER_LABELS[binary.owner] && binary.owner !== 'standalone' ? `${INSTALL_OWNER_LABELS[binary.owner]} may not offer the new version yet, or it` : 'It'} may have updated another copy of ${record.driver.label}.`
+      )
   }
 
   /** The entries whose last check found the executable at `path` (one copy, several entries). */

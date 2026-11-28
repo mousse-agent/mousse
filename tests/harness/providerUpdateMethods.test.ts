@@ -68,6 +68,13 @@ describe('the install method, from the executable path', () => {
     // mise's npm backend puts node_modules under its installs: still mise's.
     ['/Users/me/.local/share/mise/shims/codex', undefined, 'mise'],
     ['/Users/me/.local/share/mise/installs/npm-openai-codex/0.170.0/lib/node_modules/@openai/codex/bin/codex.js', undefined, 'mise'],
+    // A shim links to mise's own program, which Homebrew or mise's installer owns: still mise's.
+    ['/Users/me/.local/share/mise/shims/codex', '/opt/homebrew/Cellar/mise/2026.11.1/bin/mise', 'mise'],
+    ['/Users/me/.local/share/mise/shims/codex', '/Users/me/.local/bin/mise', 'mise'],
+    ['/Users/me/.volta/bin/codex', '/opt/homebrew/Cellar/volta/2.0.2/bin/volta-shim', 'volta'],
+    // npm's global folder under a Node mise installed is npm's.
+    ['/Users/me/.local/share/mise/installs/node/22.11.0/bin/codex', '/Users/me/.local/share/mise/installs/node/22.11.0/lib/node_modules/@openai/codex/bin/codex.js', 'npm'],
+    ['C:\\Users\\Me\\AppData\\Local\\mise\\installs\\node\\22\\codex.cmd', undefined, 'npm'],
     ['/Users/me/.volta/bin/codex', '/Users/me/.volta/tools/image/packages/@openai/codex/lib/node_modules/@openai/codex/bin/codex.js', 'volta'],
     ['C:\\Users\\Me\\AppData\\Local\\Volta\\bin\\codex.exe', undefined, 'volta'],
     ['/Users/me/.yarn/bin/codex', '/Users/me/.config/yarn/global/node_modules/@openai/codex/bin/codex.js', 'yarn'],
@@ -111,6 +118,9 @@ describe('the install method, from the executable path', () => {
     const userWinget = 'C:\\Users\\Me\\AppData\\Local\\Microsoft\\WinGet\\Packages\\OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe\\codex.exe'
     expect(updateNeedsElevation(userWinget, 'winget', { realpath: (link) => link, canWrite: () => false, platform: 'win32' })).toBe(false)
     expect(win('C:\\Users\\Me\\AppData\\Roaming\\npm\\codex.cmd', 'npm')).toBe(false)
+    // nvm-windows links Program Files\nodejs to the user's own folder: where the files are decides.
+    const nvm = (link: string) => (link === 'C:\\Program Files\\nodejs\\codex.cmd' ? 'C:\\Users\\Me\\AppData\\Roaming\\nvm\\v22.11.0\\codex.cmd' : link)
+    expect(updateNeedsElevation('C:\\Program Files\\nodejs\\codex.cmd', 'npm', { realpath: nvm, canWrite: () => true, platform: 'win32' })).toBe(false)
   })
 })
 
