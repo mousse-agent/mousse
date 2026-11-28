@@ -24,7 +24,7 @@ import { resolveCommand } from '../env'
 import { ptyAvailable, runInPty, signInPrompts, type PtySpawn } from '../pty'
 import { spawnHarness } from '../spawn'
 import { fingerprintOf } from '../status'
-import { GENERIC_ACP_ARGUMENTS, sealedEnv, type ArgumentAllowlist } from '../oneShot/launch'
+import { GENERIC_ACP_ARGUMENTS, sealedEnv } from '../oneShot/launch'
 import { releasePlace, reservePlace, spawnInPlace, type Place, type PlaceProcess } from '../oneShot/places'
 import type { OneShotRouteDecision, OneShotRouteId } from '../oneShot/route'
 import { GENERIC_ACP_FACTS } from '../oneShot/routes'
@@ -114,14 +114,13 @@ export interface AcpRuntimeHooks {
   sessionsHome?: string
   /**
    * The single requests of a driver built on this runtime (`acpOneShot` with its preset's inputs): the route its places
-   * are named after, the narrow inputs its sealed launch adds (named variables or files, never a whole folder; written
-   * under `root`, the place's own folder for them), and the rule for the launch's arguments. Without it, only an agent
-   * known by its command runs single requests here.
+   * are named after, and the narrow inputs its sealed launch adds (named variables or files, never a whole folder;
+   * written under `root`, the place's own folder for them). Without it, only an agent known by its command runs single
+   * requests here.
    */
   oneShot?: {
     route: OneShotRouteId
     inputs(root: string): Record<string, string>
-    arguments?: ArgumentAllowlist
   }
 }
 
@@ -354,8 +353,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     held.launching(resolved.path)
     const inputs = oneShotRoute?.inputs(join(held.place.dir, ONE_SHOT_INPUTS)) ?? {}
     const env = sealedEnv({ base: context.env.env, entry: launch.env, preset: { ...(context.env.enforced ?? {}), ...inputs }, root: join(held.place.dir, ONE_SHOT_ROOT) })
-    const args = (oneShotRoute?.arguments ?? GENERIC_ACP_ARGUMENTS)(launch.args)
-    const proc = spawnInPlace(held.place, { command: resolved.command, args: [...resolved.args, ...args], env, purpose: 'acp-one_shot', instanceId: context.instanceId, cwd: request.cwd! })
+    const proc = spawnInPlace(held.place, { command: resolved.command, args: [...resolved.args, ...GENERIC_ACP_ARGUMENTS(launch.args)], env, purpose: 'acp-one_shot', instanceId: context.instanceId, cwd: request.cwd! })
     held.proc = proc
     const untrack = root && agents ? agents.track(root) : track?.()
     const connection = connectAcpProcess(proc.child, request.handlers, {

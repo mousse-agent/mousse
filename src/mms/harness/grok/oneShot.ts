@@ -1,7 +1,5 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { grokArgs } from '../acp/presets/grok'
-import type { ArgumentAllowlist } from '../oneShot/launch'
 import { GROK_HELD_SWITCHES } from './held'
 
 /**
@@ -15,6 +13,7 @@ import { GROK_HELD_SWITCHES } from './held'
  *   on disk is the one the next request reads;
  * - every source Grok reads from Claude Code's, Cursor's and Codex's setups off (their rules too), memory and turn
  *   summaries off, no plugin, no self-update.
+ * Its arguments are the preset's own (`grokArgs`): the entry's are never passed on.
  * Grok still offers its own tools over ACP, and its retries are not counted here: the route is best-effort
  * (`GROK_ACP_FACTS`), and a tool it reports ends the request (`AcpSessions.oneShot`).
  */
@@ -66,6 +65,3 @@ export function grokOneShotInputs(root: string, authPath: string): Record<string
     GROK_TURN_SUMMARY: '0'
   }
 }
-
-/** A single request's arguments are the preset's own: the entry's are never passed on. */
-export const GROK_ONE_SHOT_ARGUMENTS: ArgumentAllowlist = () => grokArgs()

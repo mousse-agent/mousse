@@ -21,7 +21,7 @@ import { fingerprintOf, sameBinary } from '../status'
 import type { BinaryFingerprint } from '../../../shared/harness/types'
 import { runGrokHeldCheck } from '../grok/heldCheck'
 import { GROK_HELD_SHIPPED, GrokHeldStore, grokHeldRecord, type GrokHeldRecord } from '../grok/heldEvidence'
-import { GROK_ONE_SHOT_ARGUMENTS, grokOneShotInputs } from '../grok/oneShot'
+import { grokOneShotInputs } from '../grok/oneShot'
 import { runGrokDirectOneShot, type GrokDirectStream } from '../grok/directOneShot'
 import { ptyAvailable, runInPty, signInPrompts, type PtySpawn } from '../pty'
 import { InstanceVault } from '../vault'
@@ -400,8 +400,7 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions, r
     // `acp:grok`: a home of the request's own that denies every tool, with the entry's own sign-in read in place.
     oneShot: {
       route: 'acp:grok',
-      inputs: (root) => grokOneShotInputs(root, grokAuthPath(withUserEnv(context.env.env, { ...(context.config.env ?? {}) }))),
-      arguments: GROK_ONE_SHOT_ARGUMENTS
+      inputs: (root) => grokOneShotInputs(root, grokAuthPath(withUserEnv(context.env.env, { ...(context.config.env ?? {}) })))
     }
   })
 
