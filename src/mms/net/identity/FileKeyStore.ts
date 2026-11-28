@@ -31,7 +31,7 @@ import type { BotId, KeystoreState, NodePublicKeys } from '../../../shared/net'
 import { isId } from '../../../shared/net/ids'
 import { NetError } from '../../../shared/net/errors'
 import type { KeyStore, TlsCredentials } from '../contracts'
-import { createSecretCodec, type SecretCodec } from '../../providers/secretCodec'
+import { createSecretCodec, savedElsewhere, type SecretCodec } from '../../providers/secretCodec'
 import { generateSelfSignedCert } from '../link/selfSignedCert'
 import { syncDirectory } from '../store/directorySync'
 import {
@@ -163,20 +163,29 @@ function material(value: unknown): KeyMaterial {
 
 /**
  * Moves a profile's network data aside (`net` becomes `net.keychain-<time>`) when its keys were saved
- * through the keychain and this build never asks the keychain (`plainAtRest`), so networking starts
- * over with a new identity instead of asking for the login password. Nothing is deleted. Call it
- * before anything opens the network database.
+ * through a keychain item this build never asks (`savedElsewhere`), so networking starts over with a
+ * new identity instead of asking for the login password. Nothing is deleted. Call it before anything
+ * opens the network database.
  */
 export function setAsideKeychainNetwork(profileDir: string, codec: SecretCodec = createSecretCodec()): boolean {
-  if (!codec.plainAtRest) return false
+  if (!codec.plainAtRest && !codec.ownKeychainItem) return false
   const directory = join(profileDir, 'net')
-  let mode: unknown
+  let stored: { mode?: unknown; data?: unknown }
   try {
-    mode = (parse(readFileSync(join(directory, 'keys.json'))) as { mode?: unknown }).mode
+    stored = parse(readFileSync(join(directory, 'keys.json'))) as { mode?: unknown; data?: unknown }
   } catch {
     return false
   }
-  if (mode !== 'vault') return false
+  if (stored.mode !== 'vault') return false
+  if (!codec.plainAtRest) {
+    let plain: string | null = null
+    try {
+      plain = typeof stored.data === 'string' ? codec.decrypt(decodeBase64(stored.data)) : null
+    } catch {
+      plain = null
+    }
+    if (plain !== null || !savedElsewhere(codec)) return false
+  }
   renameSync(directory, `${directory}.keychain-${Date.now()}`)
   return true
 }

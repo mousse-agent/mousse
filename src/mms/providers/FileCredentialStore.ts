@@ -2,7 +2,7 @@ import { readFileSync } from 'fs'
 import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
 import { atomicWriteFileSync } from '../data/AtomicFs'
 import { withFileLock } from '../scheduled/fileLock'
-import { createSecretCodec, type SecretCodec } from './secretCodec'
+import { createSecretCodec, savedElsewhere, type SecretCodec } from './secretCodec'
 import { openSecretFile, sealSecretFile, SecretFileError, setAsideSecretFile } from './secretFile'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -63,8 +63,8 @@ export class FileCredentialStore implements CredentialStore {
       opened = openSecretFile(source, this.codec)
     } catch (error) {
       if (!(error instanceof SecretFileError)) throw error
-      if (error.kind !== 'unavailable' || !this.codec.plainAtRest) throw this.failure(error.reason)
-      // Saved through the keychain, which this build never asks: sign in again.
+      if (error.kind !== 'unavailable' || !savedElsewhere(this.codec)) throw this.failure(error.reason)
+      // Saved through a keychain item this build never asks: sign in again.
       setAsideSecretFile(this.path)
       this.source = null
       return
