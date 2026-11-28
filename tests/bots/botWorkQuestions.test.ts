@@ -648,7 +648,7 @@ describe("the bot's browser", () => {
     expect(bubble.attachments).toEqual([expect.objectContaining({ name: expect.stringMatching(/^browser-screenshot-.+\.png$/) })])
     expect(f.bots.service.attachmentFile(botId, bubble.id, 0).name).toBe(bubble.attachments![0]!.name)
     // In the bot's files folder, so another device reads it there.
-    expect(remoteBotMessage(bubble).attachments?.[0]?.path).toMatch(/\/browser-screenshot-.+\.png$/)
+    expect(remoteBotMessage(bubble, botId).attachments?.[0]?.path).toMatch(/\/browser-screenshot-.+\.png$/)
     await endTurn(work)
     await tap(bubble.question!.questionId, 'Flat B')
     await flush()

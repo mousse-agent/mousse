@@ -410,7 +410,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
   const saved = steps.find((chip) => chip.icon === 'memory' && chip.text.startsWith('remembered'))
   const openAsk = message.ask?.status === 'open' ? message.ask : undefined
   // Its pictures show above its words, as a messenger's image message; the words keep the rest.
-  const media = useMemo(() => replyImages(message), [message])
+  const media = useMemo(() => replyImages(message, remote), [message, remote])
   // A picture that can't be read is no picture: it shows as its file's chip only (in the words, or under them).
   const failed = useFailedFileImages(media.images.flatMap((image) => (image.path ? [image.path] : [])))
   const shownImages = failed.size ? media.images.filter((image) => !image.path || !failed.has(image.path)) : media.images
@@ -948,7 +948,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const browser = useBotBrowser(remote ? '' : bot.id)
   // The side panel docked beside the chat pane: the browser, the bot's files, Agent settings (BotSidePanel.tsx).
   const side = useBotSidePanel(bot.id)
-  const filesFolder = useMemo(() => botFilesFolder(messages, bot.id), [messages, bot.id])
+  // A bot of another computer has no files folder here.
+  const filesFolder = useMemo(() => (remote ? null : botFilesFolder(messages, bot.id)), [messages, bot.id, remote])
   // A file a chip opened, in the side panel's Files view.
   const [file, setFile] = useState<string | null>(null)
   // An applet opened beside the chat, from its name.
@@ -1092,7 +1093,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // Up in an empty composer brings back the owner's last message, as in a thread.
   const lastPrompt = () => [...pending, ...messages].reverse().find((message) => message.author === 'owner' && message.text)?.text
   // The preview steps through every picture of this chat that has loaded, read only when one opens.
-  const chatImages = () => botChatImages([...messages, ...pending], botFileImageUrl)
+  const chatImages = () => botChatImages([...messages, ...pending], botFileImageUrl, remote)
   const composerField = useCallback(() => document.querySelector<HTMLTextAreaElement>('.bot-input-area textarea'), [])
   // The typing bubble is the bot's next message: it joins the group of the bot's message right above it.
   const last = shown.at(-1)
@@ -1134,7 +1135,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     ...(modelInfo?.imageProviders ? { imageProviders: modelInfo.imageProviders } : {})
   }), [modelInfo])
 
-  return <BotFilesProvider botId={bot.id} open={openFile} failed={fileFailed}><ImageGalleryProvider images={chatImages} actions={pictureActions}>
+  return <BotFilesProvider botId={bot.id} open={openFile} failed={fileFailed} remote={remote}><ImageGalleryProvider images={chatImages} actions={pictureActions}>
     {/* The chat pane: the conversation, and an applet beside it. The side panel docks outside it. */}
     <div className="bot-chat-pane">
     {/* The bot's colour tints the quotes of its messages. */}

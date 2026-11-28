@@ -350,6 +350,23 @@ describe('what stays on its own computer', () => {
     expect(useBotsStore.getState().chats['n_laptop:b_inbox']!.messages.at(-1)!.attachments![0]!.path).toBe('/home/me/.mousse/bots/remote-files/map.png')
   })
 
+  it('reads no file here for a full path or a file link its reply names, and offers none to open', async () => {
+    const readAsset = vi.fn(async () => { throw new Error('not here') })
+    const assetStamp = vi.fn(async () => { throw new Error('not here') })
+    const openFile = vi.fn(async () => 'file')
+    const showInFolder = vi.fn(async () => undefined)
+    installPreload(fake, { fs: { readAsset, assetStamp }, localFiles: { open: openFile, showInFolder } })
+    await open(remote(), [message(1, { text: 'The chart: ![chart](file:///home/them/chart.png)\n\nThe notes are in /home/them/notes.md' })])
+    await settle()
+    const read = [...readAsset.mock.calls, ...assetStamp.mock.calls].map((call) => JSON.stringify(call))
+    expect(read.filter((call) => call.includes('/home/them'))).toEqual([])
+    expect(button('Open notes.md')).toBeUndefined()
+    expect(button('Show notes.md in folder')).toBeUndefined()
+    expect(transcript().textContent).toContain('notes.md')
+    expect(openFile).not.toHaveBeenCalled()
+    expect(showInFolder).not.toHaveBeenCalled()
+  })
+
   it('takes no file or chip from this window dropped on its composer', async () => {
     await open(remote())
     await type(box()!, 'See the notes')
@@ -378,5 +395,16 @@ describe('a bot this computer can no longer reach', () => {
     expect(state.drafts['n_laptop:b_inbox']).toBeUndefined()
     expect(useChatsStore.getState().activeBotId).toBeNull()
     expect(host.textContent).not.toContain('Three new invoices.')
+  })
+
+  it('forgets the copies of its pictures this window kept', async () => {
+    const { remoteFilesKeptFor } = await import('../../src/renderer/stores/remoteBotFiles')
+    await open(remote(), [message(1, { text: 'The chart.', attachments: [{ name: 'chart.png', path: 'images/chart.png' }] })])
+    await settle()
+    expect(remoteFilesKeptFor('n_laptop:b_inbox')).toBeGreaterThan(0)
+    fake.bots = [local]
+    await act(async () => useBotsStore.getState().refresh())
+    await settle()
+    expect(remoteFilesKeptFor('n_laptop:b_inbox')).toBe(0)
   })
 })

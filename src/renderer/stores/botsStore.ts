@@ -20,7 +20,7 @@ import { expandComposerThreadChips } from '../lib/composerThreadChips'
 import { clearBotLiveReplies, noteBotReply, noteBots, noteBotStopAsked, noteThreadMessage, setBotLiveReplySources } from './botLiveReplies'
 import { adoptFilePreview } from '../components/bots/fileImageCache'
 import { REMOTE_BOT_FILE_BYTES } from '../../shared/bots/personal/remoteFiles'
-import { copyRemotePictures, filesToSend, forgetFailedRemoteFiles, holdRemotePreview, isRemoteBot, onRemoteFileCopied, placeRemoteFiles, resetRemoteBotFiles, setRemoteBotLookup, type RemoteFileRead } from './remoteBotFiles'
+import { copyRemotePictures, filesToSend, forgetFailedRemoteFiles, forgetRemoteBot, holdRemotePreview, isRemoteBot, onRemoteFileCopied, placeRemoteFiles, resetRemoteBotFiles, setRemoteBotLookup, type RemoteFileRead } from './remoteBotFiles'
 import type { ChatReference } from '../../shared/chatReferences'
 import { threadLink } from '../../shared/threadLink'
 
@@ -1216,6 +1216,12 @@ export const useBotsStore = create<BotsState>((set, get) => {
 // A live reply follows its bot's chat turn and its chat's messages: it goes once its message is posted.
 setBotLiveReplySources({ bots: () => useBotsStore.getState().bots, messages: (botId) => useBotsStore.getState().chats[botId]?.messages ?? [] })
 useBotsStore.subscribe((state, previous) => { if (state.bots !== previous.bots || state.chats !== previous.chats) noteBots() })
+// A bot of another computer that leaves the list takes what this window kept of its files with it.
+useBotsStore.subscribe((state, previous) => {
+  if (state.bots === previous.bots) return
+  const present = new Set(state.bots.map((bot) => bot.id))
+  for (const bot of previous.bots) if (bot.lives && !present.has(bot.id)) forgetRemoteBot(bot.id)
+})
 
 /** Failures whose words come from the service and are meant for the owner as they are. */
 const PLAIN_CREATE_FAILURES = new Set(['invalid_params', 'bot_invalid', 'bots_unavailable', 'model_unavailable'])

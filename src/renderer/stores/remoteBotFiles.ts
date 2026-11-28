@@ -25,6 +25,8 @@ const failed = new Set<string>()
 const previews = new Map<string, string>()
 const listeners = new Set<(botId: string) => void>()
 let generation = 0
+/** Bumped for a bot whose copies were forgotten (`forgetRemoteBot`): a read under way for it keeps nothing. */
+const forgotten = new Map<string, number>()
 
 const keyOf = (botId: string, ref: string) => `${botId}\n${ref}`
 
@@ -92,8 +94,9 @@ function copyOf(botId: string, ref: string, read: RemoteFileRead): Promise<strin
   const pending = loading.get(key)
   if (pending) return pending
   const owner = generation
+  const ownerBot = forgotten.get(botId) ?? 0
   const work = read(botId, ref).then((copy) => {
-    if (owner !== generation) return copy.path
+    if (owner !== generation || ownerBot !== (forgotten.get(botId) ?? 0)) return copy.path
     copies.set(key, copy.path)
     failed.delete(key)
     const preview = previews.get(key)
@@ -146,6 +149,26 @@ export function holdRemotePreview(botId: string, ref: string, url: string): void
 /** The files to send again (Retry), each as its copy here; a file of another computer's bot is read for it first. */
 export async function filesToSend(botId: string, files: ReadonlyArray<{ name: string; path: string; remote?: string }>, read: RemoteFileRead): Promise<BotChatAttachment[]> {
   return Promise.all(files.map(async (file) => ({ name: file.name, path: file.remote ? await copyOf(botId, file.remote, read) : file.path })))
+}
+
+/** Forgets what this window kept for a bot of another computer that left its list: its copies, pictures and failures. */
+export function forgetRemoteBot(botId: string): void {
+  forgotten.set(botId, (forgotten.get(botId) ?? 0) + 1)
+  const mine = (key: string) => key.startsWith(`${botId}\n`)
+  for (const key of [...copies.keys()]) if (mine(key)) copies.delete(key)
+  for (const key of [...loading.keys()]) if (mine(key)) loading.delete(key)
+  for (const key of [...failed]) if (mine(key)) failed.delete(key)
+  for (const [key, url] of [...previews]) {
+    if (!mine(key)) continue
+    URL.revokeObjectURL(url)
+    previews.delete(key)
+  }
+}
+
+/** How many copies, reads, failures and pictures this window keeps for `botId` (tests). */
+export function remoteFilesKeptFor(botId: string): number {
+  const mine = (key: string) => key.startsWith(`${botId}\n`)
+  return [...copies.keys(), ...loading.keys(), ...failed, ...previews.keys()].filter(mine).length
 }
 
 /** Forgets every copy and picture (a profile switch); tests start clean. */

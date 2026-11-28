@@ -30,17 +30,23 @@ export function isBotStageId(value: unknown): value is string {
 /**
  * A file's place inside a bot's files folder as another device names it: relative, with `/` between its parts, and no
  * part that is empty, `.` or `..`. Nothing absolute (`/x`, `C:\x`, `\\server`), no backslash, no control character.
- * The bot's computer still follows links and checks that the file it reaches is inside the folder.
+ * No `:` anywhere (a Windows stream, `pic.png:secret`) and no part that ends in a dot or a space, which Windows drops
+ * (`pic.svg.` is `pic.svg` there). The bot's computer still follows links and checks that the file it reaches is
+ * inside the folder.
  */
 export function isBotFileRef(value: unknown): value is string {
   if (typeof value !== 'string' || !value || value.length > MAX_BOT_FILE_PATH) return false
   // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f\\]/.test(value)) return false
-  if (value.startsWith('/') || value.startsWith('~') || /^[A-Za-z]:/.test(value)) return false
-  return value.split('/').every((part) => part !== '' && part !== '.' && part !== '..')
+  if (/[\u0000-\u001f\u007f\\:]/.test(value)) return false
+  if (value.startsWith('/') || value.startsWith('~')) return false
+  return value.split('/').every((part) => part !== '' && part !== '.' && part !== '..' && !/[. ]$/.test(part))
 }
 
-/** Whether a file's name says SVG, which is never served to another device (it can carry scripts). */
+/**
+ * Whether a file's name says SVG, which is never served to another device (it can carry scripts). Read as a file
+ * system keeps it: dots and spaces at the end go (`evil.svg.` is `evil.svg`, as `attachmentFileName` saves it), and
+ * case does not count.
+ */
 export function isSvgName(name: string): boolean {
-  return /\.svgz?$/i.test(name.trim())
+  return /\.svgz?$/.test(name.trim().replace(/[\s.]+$/, '').toLowerCase())
 }

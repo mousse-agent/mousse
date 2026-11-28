@@ -4,9 +4,10 @@
  * stream.
  */
 import { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
+import { gzipSync } from 'node:zlib'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { NetError, newId } from '../../../../src/shared/net'
 import type { RpcContext, RpcMethod } from '../../../../src/mms/net/contracts'
@@ -24,7 +25,9 @@ import {
   type RemoteBotsPort
 } from '../../../../src/mms/bridge/remote/RemoteBots'
 import { MmsListsSource, type ListsServices } from '../../../../src/mms/bridge/remote/MmsListsSource'
-import { BotStaging } from '../../../../src/mms/bridge/remote/botStaging'
+import { BotStaging, stagedFileLost } from '../../../../src/mms/bridge/remote/botStaging'
+import { looksLikeSvg, openInside } from '../../../../src/mms/bridge/remote/botFiles'
+import { isSvgName } from '../../../../src/shared/bots/personal/remoteFiles'
 import type { BotChatMessage, BotLaunchedThread, BotSummary } from '../../../../src/shared/bots/personal/chat'
 import { qualifyId } from '../../../../src/shared/threadRef'
 import type { PermissionMode } from '../../../../src/shared/permissionMode'
@@ -97,7 +100,9 @@ describe('bot method params', () => {
     expect(validateRemoteBotParams('bots.memory.forget', { botId: BOT, id: 'm12' })).toBeTruthy()
     expect(validateRemoteBotParams('bots.memory.edit', { botId: BOT, id: 'm12v2', text: 'Call me Sam.' })).toBeTruthy()
     // A file is named by its place inside the bot's files folder: never a way out of it.
-    for (const path of ['../other/a.png', 'images/../../a.png', './a.png', '/etc/passwd', '~/a.png', 'C:/a.png', 'images\\a.png', 'images//a.png', ''])
+    // Nor a name Windows reads as another: a stream (`:`), or a part ending in a dot or a space (`pic.svg.` is `pic.svg`).
+    for (const path of ['../other/a.png', 'images/../../a.png', './a.png', '/etc/passwd', '~/a.png', 'C:/a.png', 'images\\a.png', 'images//a.png', '',
+      'pic.png:secret', 'C:a.png', 'pic.svg.', 'pic.svg ', 'images./a.png', 'images /a.png'])
       bad('bots.chat.file', { botId: BOT, path })
     bad('bots.chat.file', { botId: BOT, path: 'a.png', offset: -1 })
     bad('bots.chat.file', { botId: BOT, path: 'a.png', messageId: 'm1' })
@@ -129,6 +134,38 @@ describe('bot method params', () => {
     bad('bots.stage', { botId: BOT, clientRequestId: 's1', offset: 0, dataB64: 'aGk=', name: 'a.png', size: 25 * 1024 * 1024 + 1 })
     bad('bots.stage', { botId: BOT, clientRequestId: 's1', offset: 0, dataB64: 'not base64!', name: 'a.png', size: 2 })
     bad('bots.stage', { botId: BOT, clientRequestId: 's1', offset: 0, dataB64: 'A'.repeat(43_692), name: 'a.png', size: 32_769 })
+    // Every part carries bytes, and a first part is no longer than the file it names: refused before the call is taken.
+    bad('bots.stage', { botId: BOT, clientRequestId: 's1', offset: 0, dataB64: '', name: 'a.png', size: 2 })
+    bad('bots.stage', { botId: BOT, clientRequestId: 's2', offset: 2, dataB64: '', stage: STAGE })
+    bad('bots.stage', { botId: BOT, clientRequestId: 's1', offset: 0, dataB64: 'aGk=', name: 'a.png', size: 1 })
+  })
+
+  it('tells an SVG by its name as a file system keeps it, and by its bytes however they are written', () => {
+    for (const name of ['a.svg', 'evil.svg.', 'EVIL.SVG ', 'a.svgz..', 'x.SvG. .']) expect(isSvgName(name)).toBe(true)
+    for (const name of ['x.svg.png', 'svg', 'a.png.']) expect(isSvgName(name)).toBe(false)
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"/>'
+    const utf16be = Buffer.from(svg, 'utf16le').swap16()
+    const svgFiles: Array<[string, Buffer, boolean]> = [
+      ['plain', Buffer.from(svg), true],
+      ['UTF-8 mark', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(svg)]), true],
+      ['UTF-16 LE mark', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(svg, 'utf16le')]), true],
+      ['UTF-16 BE, no mark', utf16be, true],
+      ['declaration, comment, doctype with its own declarations', Buffer.from(`<?xml version="1.0"?>\n<!--${'c'.repeat(5000)}-->\n<!DOCTYPE x [ <!ENTITY a "b>c"> ]>\n${svg}`), true],
+      ['namespace prefix', Buffer.from('<x:svg xmlns:x="http://www.w3.org/2000/svg"/>'), true],
+      ['SVG doctype', Buffer.from('<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "x"><g/>'), true],
+      ['gzip', gzipSync(Buffer.from(svg)), true],
+      ['start of a longer file, all white space', Buffer.alloc(64 * 1024, 0x20), false]
+    ]
+    for (const [label, bytes, whole] of svgFiles) expect([label, looksLikeSvg(bytes, whole)]).toEqual([label, true])
+    const others: Array<[string, Buffer]> = [
+      ['PNG', Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(svg)])],
+      ['PDF with an svg inside', Buffer.from(`%PDF-1.7\n${svg}`)],
+      ['HTML with an inline svg', Buffer.from(`<!doctype html><html><body>${svg}</body></html>`)],
+      ['Markdown starting with a comment', Buffer.from(`<!-- notes -->\n# Title\n${svg}`)],
+      ['gzip of text', gzipSync(Buffer.from('hello, world'))],
+      ['a whole file of white space', Buffer.from('   \n')]
+    ]
+    for (const [label, bytes] of others) expect([label, looksLikeSvg(bytes, true)]).toEqual([label, false])
   })
 
   it('refuses paths, an empty or oversized message and a bad request id', () => {
@@ -178,10 +215,14 @@ describe('what a phone sees of a bot', () => {
       attachments: [{ name: 'list.txt', path: '/home/me/bots/files/list.txt' }],
       error: { text: 'Sign in again', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'claude:bots' } }
     }
-    const seen = remoteBotMessage(message)
+    const seen = remoteBotMessage(message, BOT)
     expect(seen.attachments).toEqual([{ name: 'list.txt', mime: 'text/plain' }])
-    expect(remoteBotMessage({ ...message, attachments: [{ name: 'Shot.PNG', path: '/home/me/bots/files/Shot.PNG' }, { name: 'x.svg', path: '/x.svg' }] }).attachments)
+    expect(remoteBotMessage({ ...message, attachments: [{ name: 'Shot.PNG', path: '/home/me/bots/files/Shot.PNG' }, { name: 'x.svg', path: '/x.svg' }] }, BOT).attachments)
       .toEqual([{ name: 'Shot.PNG', mime: 'image/png', image: true }, { name: 'x.svg', mime: 'application/octet-stream' }])
+    // A file's place is named only in the folder of the bot whose chat it is: another bot's file is named by its name.
+    const OTHER = 'bot-ba9876543210'
+    const placed = { ...message, attachments: [{ name: 'a.png', path: `/home/me/bots/files/${BOT}/a.png` }, { name: 'b.png', path: `/home/me/bots/files/${OTHER}/b.png` }] }
+    expect(remoteBotMessage(placed, BOT).attachments).toEqual([{ name: 'a.png', mime: 'image/png', image: true, path: 'a.png' }, { name: 'b.png', mime: 'image/png', image: true }])
     expect(seen.error).toEqual({ text: 'Sign in again', action: { kind: 'sign_in', label: 'Sign in' } })
     expect(JSON.stringify(seen)).not.toMatch(/home\/me|claude:bots/)
     const summary = { id: BOT, name: 'Penny', error: { text: 'e', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'claude:bots' } } } as BotSummary
@@ -761,6 +802,44 @@ describe('files and About from another device', () => {
     expect(await code('gone.png')).toBe('stream_unknown')
   })
 
+  it('reads no file that has another name (a hard link, which can be outside), by its place or by its message', async () => {
+    const folder = f.bots.service.filesFolderOf(botId)
+    mkdirSync(folder, { recursive: true })
+    const outside = join(dir, 'secret.png')
+    writeFileSync(outside, png(100))
+    linkSync(outside, join(folder, 'hard.png'))
+    expect(await refused(() => call(methods, 'bots.chat.file', { botId, path: 'hard.png' }))).toMatchObject({ code: 'conflict', details: { reason: 'linked' } })
+    // The phone's read by message refuses it too.
+    const message = await sendWith([{ name: 'ok.png', data: png(100) }])
+    const copy = f.bots.service.attachmentFile(botId, message.id, 0).path
+    rmSync(copy)
+    linkSync(outside, copy)
+    expect(await refused(() => call(methods, 'bots.chat.attachment', { botId, messageId: message.id, index: 0 }))).toMatchObject({ code: 'conflict', details: { reason: 'linked' } })
+  })
+
+  it('opens a checked file only while it is that file: a link put at its name since is not followed', async () => {
+    const root = realpathSync(dir)
+    const away = mkdtempSync(join(tmpdir(), 'remote-bot-outside-'))
+    const outside = join(away, 'secret.png')
+    writeFileSync(outside, png(100))
+    writeFileSync(join(root, 'other.png'), png(50))
+    const checked = join(root, 'checked.png')
+    const opens = async (): Promise<boolean> => {
+      const opened = await openInside(root, checked)
+      await opened?.handle.close()
+      return Boolean(opened)
+    }
+    writeFileSync(checked, png(100))
+    expect(await opens()).toBe(true)
+    // Swapped for a link after the check, to a file out of the folder or to another inside it: neither is read.
+    for (const target of [outside, join(root, 'other.png')]) {
+      rmSync(checked)
+      symlinkSync(target, checked)
+      expect(await opens()).toBe(false)
+    }
+    rmSync(away, { recursive: true, force: true })
+  })
+
   describe('files from another device', () => {
     const PHONE = { caller: { node: 'phone', user: 'u' } } as unknown as RpcContext
     const TABLET = { caller: { node: 'tablet', user: 'u' } } as unknown as RpcContext
@@ -769,6 +848,10 @@ describe('files and About from another device', () => {
     beforeEach(() => {
       staging = new BotStaging({ folder: join(dir, 'staging'), limits: { callerFiles: 3, callerBytes: 200 * 1024 } })
       staged = remoteBotMethods({ bots: () => f.bots.service, staging })
+    })
+    afterEach(async () => {
+      staging.close()
+      await staging.settled()
     })
 
     /** Sends `data` a part at a time; answers its staged id. */
@@ -812,7 +895,8 @@ describe('files and About from another device', () => {
       const half = (await call(staged, 'bots.stage', { botId, clientRequestId: 'h1', offset: 0, dataB64: png(10).toString('base64'), name: 'half.png', size: 20 }, PHONE)) as { stage: string }
       expect(await refused(() => call(staged, 'bots.chat.send', { botId, text: 'Half', clientRequestId: 't4', staged: [half.stage] }, PHONE))).toMatchObject({ code: 'conflict', details: { reason: 'stage_incomplete' } })
       const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>')
-      for (const [name, data] of [['a.svg', png(10)], ['a.png', svg]] as const) {
+      // By its name as a file system keeps it (`evil.svg.` is saved as `evil.svg`), or by its bytes in UTF-16.
+      for (const [name, data] of [['a.svg', png(10)], ['a.png', svg], ['evil.svg.', png(10)], ['notes.txt', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(svg.toString(), 'utf16le')])]] as const) {
         expect(await refused(() => call(staged, 'bots.stage', { botId, clientRequestId: `svg-${name}`, offset: 0, dataB64: data.toString('base64'), name, size: data.length }, PHONE))).toMatchObject({ code: 'conflict', details: { reason: 'svg' } })
       }
       expect(staging.count('phone')).toBe(2)
@@ -825,6 +909,87 @@ describe('files and About from another device', () => {
       expect(await refused(() => call(staged, 'bots.stage', { botId, clientRequestId: 'fourth', offset: 0, dataB64: 'aGk=', name: 'p4.png', size: 2 }, PHONE))).toMatchObject({ code: 'conflict', details: { reason: 'stage_full' } })
       // Another device has its own share.
       expect(await stage(png(100), 'q.png', TABLET)).toMatch(/^bst_/)
+    })
+
+    it('holds all devices together to the area\'s bytes', async () => {
+      staging = new BotStaging({ folder: join(dir, 'staging'), limits: { callerBytes: 200 * 1024, totalBytes: 300 * 1024 } })
+      staged = remoteBotMethods({ bots: () => f.bots.service, staging })
+      await stage(png(150 * 1024), 'a.png', PHONE)
+      await stage(png(100 * 1024), 'b.png', TABLET)
+      // Within the tablet's own share, past what all devices may hold.
+      expect(await refused(() => call(staged, 'bots.stage', { botId, clientRequestId: 'more', offset: 0, dataB64: 'aGk=', name: 'c.png', size: 60 * 1024 }, TABLET))).toMatchObject({ code: 'conflict', details: { reason: 'stage_full' } })
+      expect(staging.count()).toBe(2)
+    })
+
+    it('drops a file unused for its hour, off the disk too', async () => {
+      let now = 1_000_000
+      staging = new BotStaging({ folder: join(dir, 'staging'), clock: { now: () => now }, limits: { ttlMs: 60_000 } })
+      staged = remoteBotMethods({ bots: () => f.bots.service, staging })
+      const id = await stage(png(100))
+      now += 60_001
+      expect(await refused(() => call(staged, 'bots.chat.send', { botId, text: 'Late', clientRequestId: 'late', staged: [id] }, PHONE))).toMatchObject({ code: 'stream_unknown', details: { reason: 'stage_not_found' } })
+      expect(staging.count()).toBe(0)
+      await staging.settled()
+      expect(readdirSync(staging.area)).toEqual([])
+    })
+
+    it('looks at the whole file when its last part is in: an SVG behind a long comment is not kept', async () => {
+      const data = Buffer.from(`<!--${'x'.repeat(40 * 1024)}--><svg xmlns="http://www.w3.org/2000/svg"/>`)
+      const { stage: id } = await staging.begin('phone', botId, 'notes.txt', data.length, data.subarray(0, 32 * 1024))
+      await expect(staging.append('phone', botId, id, 32 * 1024, data.subarray(32 * 1024))).rejects.toMatchObject({ code: 'conflict', details: { reason: 'svg' } })
+      expect(staging.count()).toBe(0)
+      await staging.settled()
+      expect(readdirSync(staging.area)).toEqual([])
+    })
+
+    it('keeps nothing of a file a part of which fails', async () => {
+      await expect(staging.begin('phone', botId, 'a.png', 10, png(20))).rejects.toMatchObject({ code: 'bad_request' })
+      expect(staging.count()).toBe(0)
+      const { stage: id } = await staging.begin('phone', botId, 'b.png', 200, png(100))
+      await expect(staging.append('phone', botId, id, 50, png(50))).rejects.toMatchObject({ code: 'conflict', details: { reason: 'stage_offset' } })
+      expect(staging.count()).toBe(0)
+      await staging.settled()
+      expect(readdirSync(staging.area)).toEqual([])
+    })
+
+    it('a part still being written when its file is dropped does not make the file again', async () => {
+      const { stage: id } = await staging.begin('phone', botId, 'b.png', 200, png(100))
+      const writing = staging.append('phone', botId, id, 100, png(100))
+      expect(staging.dropWhere(() => true)).toBe(1)
+      await expect(writing).rejects.toMatchObject({ code: 'stream_unknown', details: { reason: 'stage_not_found' } })
+      await staging.settled()
+      expect(readdirSync(staging.area)).toEqual([])
+    })
+
+    it('drops a device\'s files when it is blocked, leaves the account, no longer reaches the bot, or the bot goes', async () => {
+      const OTHER = 'bot-ba9876543210'
+      const lost = stagedFileLost({ bots: [botId], canReach: (_bot, node) => node !== 'far', blocked: (node) => node === 'bad', present: ['phone', 'bad', 'far'] })
+      expect(lost(botId, 'phone')).toBe(false)
+      expect([lost(botId, 'bad'), lost(botId, 'gone'), lost(botId, 'far'), lost(OTHER, 'phone')]).toEqual([true, true, true, true])
+      // Without the account's devices known, only what is known drops a file.
+      expect(stagedFileLost({ canReach: () => true, blocked: () => false })(botId, 'gone')).toBe(false)
+      await stage(png(100))
+      await stage(png(100), 'q.png', TABLET)
+      expect(staging.dropWhere(stagedFileLost({ canReach: () => true, blocked: (node) => node === 'tablet' }))).toBe(1)
+      expect(staging.count('tablet')).toBe(0)
+      expect(staging.count('phone')).toBe(1)
+    })
+
+    it('leaves what earlier runs staged at the start, and tidies it in the background, never this run\'s files', async () => {
+      const folder = join(dir, 'staging')
+      mkdirSync(join(folder, 'run-old'), { recursive: true })
+      writeFileSync(join(folder, 'run-old', 'bst_old'), 'x')
+      writeFileSync(join(folder, 'loose'), 'x')
+      const fresh = new BotStaging({ folder, limits: { tidyDelayMs: 60_000 } })
+      const stop = fresh.start()
+      expect(readdirSync(folder).sort()).toEqual(['loose', 'run-old'])
+      await fresh.begin('phone', botId, 'p.png', 100, png(100))
+      expect(await fresh.tidy()).toBe(2)
+      expect(readdirSync(folder)).toEqual([basename(fresh.area)])
+      expect(readdirSync(fresh.area)).toHaveLength(1)
+      stop()
+      fresh.close()
+      await fresh.settled()
     })
   })
 

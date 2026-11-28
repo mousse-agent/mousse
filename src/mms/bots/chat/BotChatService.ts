@@ -903,9 +903,11 @@ export class BotChatService {
 
   /**
    * One file a chat message carries, for a device that can't open this computer's files (a phone): only the copy in
-   * the bot's own files folder, where every attachment is kept, never a path anywhere else.
+   * the bot's own files folder, where every attachment is kept, never a path anywhere else. `path` and `folder` are real
+   * paths (links read as the system reads them, Windows junctions too); the reader opens the file only as the one
+   * checked here (`openInside`).
    */
-  attachmentFile(botId: string, messageId: string, index: number): { name: string; path: string } {
+  attachmentFile(botId: string, messageId: string, index: number): { name: string; path: string; folder: string } {
     this.engine.definitionOf(botId)
     const folder = this.engine.filesFolder(botId)
     const row = this.store.message(messageId)
@@ -915,13 +917,13 @@ export class BotChatService {
     let real: string
     let root: string
     try {
-      real = realpathSync(file.path)
-      root = realpathSync(folder)
+      real = realpathSync.native(file.path)
+      root = realpathSync.native(folder)
     } catch {
       throw new BotEngineError('attachment_not_found', `${file.name} is no longer on the computer.`)
     }
     if (!real.startsWith(root + sep)) throw new BotEngineError('attachment_not_found', `${file.name} is not in the bot's files.`)
-    return { name: file.name, path: real }
+    return { name: file.name, path: real, folder: root }
   }
 
   /**

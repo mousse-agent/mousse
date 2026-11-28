@@ -237,11 +237,12 @@ export class BotRouter implements BotRouterPort {
       if (!(error instanceof DomainRpcError) || (error.details as { reason?: unknown } | undefined)?.reason !== 'stage_not_found') throw error
       raw = await send(`|again-${Date.now()}`)
     }
-    // The pictures just sent show from the files here, not read back from there.
+    // The pictures just sent show from the files here, not read back from there; copied in the background, so the reply
+    // never waits on the disk.
     const sent = (raw as { message?: { attachments?: Array<{ path?: unknown }> } } | null)?.message?.attachments
     sent?.forEach((copy, index) => {
       const file = files[index]
-      if (file && typeof copy.path === 'string') this.options.files?.seed(node, botId, copy.path, file.name, file.path)
+      if (file && typeof copy.path === 'string') void this.options.files?.seed(node, botId, copy.path, file.name, file.path).catch(() => undefined)
     })
     return qualifyBotResult(node, raw)
   }

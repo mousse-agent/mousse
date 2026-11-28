@@ -30,7 +30,7 @@ import type { BotReachPort } from '../protocol/botReachPort'
 import type { BotDeviceChoice } from '../../shared/bots/personal/deviceAccess'
 import { remoteListMethods } from './remote/RemoteLists'
 import { botDeviceLimitFrom, remoteBotMethods } from './remote/RemoteBots'
-import { BotStaging } from './remote/botStaging'
+import { BotStaging, stagedFileLost } from './remote/botStaging'
 import { cleanDeviceName } from '../../shared/bridge/editorAsk'
 import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
@@ -534,12 +534,18 @@ export class BridgeProfileService {
         handle: (params, context) => this.track(method.handle(params, context))
       })
     // Files another device sends a bot ahead of its message: kept apart from the bot's files folder until one takes them,
-    // and dropped once the device no longer reaches that bot (its level Off, left out of the bot's Devices, the bot gone).
+    // and dropped once the device no longer reaches that bot (its level Off, left out of the bot's Devices, the bot gone,
+    // the device blocked here or gone from the account), as a queued message of that device is (`offWithdraw`).
     const botStaging = new BotStaging({ folder: join(services.getProfileHomeDir(), 'bots', 'staging'), clock: this.clock })
     const stopStagingSweep = botStaging.start()
     const dropLostStaging = (): void => {
-      const bots = services.personalBots?.botIds()
-      botStaging.dropWhere((botId, node) => (bots !== undefined && !bots.includes(botId)) || !reach.canReach(botId, node))
+      const present = this.peers.accountDevices()
+      botStaging.dropWhere(stagedFileLost({
+        bots: services.personalBots?.botIds(),
+        canReach: (botId, node) => reach.canReach(botId, node),
+        blocked: (node) => rt.policy.isBlocked(node as NodeId),
+        ...(present ? { present } : {})
+      }))
     }
     const offStagingReach = reach.onChange(dropLostStaging)
     services.personalBots?.events.on('changed', dropLostStaging)

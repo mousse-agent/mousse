@@ -1,4 +1,3 @@
-import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
 import { botActionRefusalText, isBotActionRefusalCode } from '../../../shared/bots/personal/actionRefusal'
 import { NetError, type NodeCapability, type NodeId } from '../../../shared/net'
 import { launchedActive, type BotChatCard, type BotChatMessage, type BotDetail, type BotError, type BotSummary } from '../../../shared/bots/personal/chat'
@@ -19,7 +18,7 @@ import { isBotId } from '../../bots/definitions/BotDefinitionStore'
 import type { BotReachPort } from '../../protocol/botReachPort'
 import { REMOTE_BOT_REACH, type BotDeviceAccess } from '../../../shared/bots/personal/deviceAccess'
 import { BOT_STAGE_PART_BYTES, REMOTE_BOT_FILE_BYTES, isBotFileRef, isBotStageId, isSvgName } from '../../../shared/bots/personal/remoteFiles'
-import { botFileRef, looksLikeSvg, readBotFilePage, remoteFileType, sniffImage } from './botFiles'
+import { botFileRef, looksLikeSvg, openInside, readBotFilePage, remoteFileType, sniffImage } from './botFiles'
 import type { BotStaging } from './botStaging'
 
 /**
@@ -155,14 +154,17 @@ export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown)
       ok(isBotFileRef(p.path))
       if (p.offset !== undefined) ok(whole(p.offset, 0, REMOTE_BOT_FILE_BYTES))
       break
-    case 'bots.stage':
+    case 'bots.stage': {
       ok(whole(p.offset, 0, REMOTE_BOT_FILE_BYTES))
-      ok(typeof p.dataB64 === 'string' && p.dataB64.length <= STAGE_PART_B64 && p.dataB64.length % 4 === 0 && BASE64.test(p.dataB64) &&
-        (p.dataB64.length / 4) * 3 - (p.dataB64.endsWith('==') ? 2 : p.dataB64.endsWith('=') ? 1 : 0) <= BOT_STAGE_PART_BYTES)
-      // The first part names the file and its size; each later one the file it adds to.
-      if (p.stage === undefined) ok(p.offset === 0 && text(p.name, 255) && whole(p.size, 1, REMOTE_BOT_FILE_BYTES))
+      ok(typeof p.dataB64 === 'string' && p.dataB64.length <= STAGE_PART_B64 && p.dataB64.length % 4 === 0 && BASE64.test(p.dataB64))
+      const length = ((p.dataB64 as string).length / 4) * 3 - ((p.dataB64 as string).endsWith('==') ? 2 : (p.dataB64 as string).endsWith('=') ? 1 : 0)
+      // Every part carries bytes, never more than one part's worth.
+      ok(length >= 1 && length <= BOT_STAGE_PART_BYTES)
+      // The first part names the file and its size, and is no longer than that size; each later one the file it adds to.
+      if (p.stage === undefined) ok(p.offset === 0 && text(p.name, 255) && whole(p.size, 1, REMOTE_BOT_FILE_BYTES) && length <= (p.size as number))
       else ok(isBotStageId(p.stage) && p.name === undefined && p.size === undefined)
       break
+    }
     case 'bots.chat.send': {
       const staged = p.staged
       if (staged !== undefined)
@@ -285,14 +287,15 @@ export type RemoteBotMessage = Omit<BotChatMessage, 'attachments' | 'applets' | 
 /**
  * A chat row as another device sees it: a file's name and type and its place in the bot's files folder, without its
  * path on this computer; an error without an instance id; an applet as one line naming it (it runs only in this
- * computer's app, from the bot's thread here); and a gallery card's pictures by their places.
+ * computer's app, from the bot's thread here); and a gallery card's pictures by their places. A place is only ever in
+ * the files folder of `botId`, the bot whose chat the message is in.
  */
-export function remoteBotMessage(message: BotChatMessage): RemoteBotMessage {
+export function remoteBotMessage(message: BotChatMessage, botId: string): RemoteBotMessage {
   const { attachments, error, applets, cards, ...rest } = message
   // The title is the bot's words: plain, so it can't add a link or an image to the line.
   const named = applets?.map((applet) => `_Applet: ${applet.reference.title.replace(/[\\`*_[\]()<>!#|~]/g, '').trim()}. It opens on the computer._`).join('\n')
   const ref = (path: string): { path?: string } => {
-    const inside = botFileRef(path)
+    const inside = botFileRef(path, botId)
     return inside ? { path: inside } : {}
   }
   const remoteCards = cards?.map((card): RemoteBotCard => card.type !== 'gallery' ? card : {
@@ -342,13 +345,13 @@ type RemotePage = Omit<BotsPersonalV2Api['bots.chat.list']['result'], 'messages'
 export type RemoteBotPage = RemotePage
 
 /** A chat row as another device gets it, within one reply or one stream record. */
-export const fittedBotMessage = (message: BotChatMessage): RemoteBotMessage => fitted(remoteBotMessage(message))
+export const fittedBotMessage = (message: BotChatMessage, botId: string): RemoteBotMessage => fitted(remoteBotMessage(message, botId))
 /** The newest messages of a page that fit one reply or one snapshot, as `bots.chat.list` answers another device. */
-export const fittedBotPage = (page: BotsPersonalV2Api['bots.chat.list']['result']): RemotePage => fittedPage(page)
+export const fittedBotPage = (page: BotsPersonalV2Api['bots.chat.list']['result'], botId: string): RemotePage => fittedPage(page, botId)
 
 /** A page within one reply: the newest messages that fit; the device asks for the older ones with `beforeSeq`. */
-function fittedPage(page: BotsPersonalV2Api['bots.chat.list']['result']): RemotePage {
-  const messages = page.messages.map(remoteBotMessage)
+function fittedPage(page: BotsPersonalV2Api['bots.chat.list']['result'], botId: string): RemotePage {
+  const messages = page.messages.map((message) => remoteBotMessage(message, botId))
   const result = { ...page, messages }
   if (bytes(result) <= RESULT_BYTES) return result
   const kept: RemoteBotMessage[] = []
@@ -363,29 +366,28 @@ function fittedPage(page: BotsPersonalV2Api['bots.chat.list']['result']): Remote
   return { ...page, messages: kept }
 }
 
-/** One part of an image file of a bot's chat, checked to be a raster image within the size limit. */
-function imagePart(file: { name: string; path: string }, offset: number): { name: string; mime: string; size: number; offset: number; dataB64: string } {
+/**
+ * One part of an image file of a bot's chat, checked to be a raster image (by its first bytes) within the size limit,
+ * and opened only as the file inside the bot's files folder that was checked (`openInside`).
+ */
+async function imagePart(file: { name: string; path: string; folder: string }, offset: number): Promise<{ name: string; mime: string; size: number; offset: number; dataB64: string }> {
   if (!remoteFileType(file.name).image && !remoteFileType(file.path).image)
     throw new NetError('conflict', 'Only images open on another device.')
-  let fd: number
+  const opened = await openInside(file.folder, file.path)
+  if (!opened) throw new NetError('stream_unknown', `${file.name} is no longer on the computer.`)
+  const { handle, size } = opened
   try {
-    fd = openSync(file.path, 'r')
-  } catch {
-    throw new NetError('stream_unknown', `${file.name} is no longer on the computer.`)
-  }
-  try {
-    const size = fstatSync(fd).size
     if (size > REMOTE_BOT_IMAGE_BYTES) throw new NetError('too_large', `${file.name} is too large to show here. Open it on the computer.`)
     const head = Buffer.alloc(Math.min(16, size))
-    readSync(fd, head, 0, head.length, 0)
+    if (head.length) await handle.read(head, 0, head.length, 0)
     const mime = sniffImage(head)
     if (!mime) throw new NetError('conflict', 'Only images open on another device.')
     if (offset > size) throw new NetError('bad_request')
     const part = Buffer.alloc(Math.min(REMOTE_BOT_IMAGE_PART_BYTES, size - offset))
-    const read = part.length ? readSync(fd, part, 0, part.length, offset) : 0
-    return { name: file.name, mime, size, offset, dataB64: part.subarray(0, read).toString('base64') }
+    const { bytesRead } = part.length ? await handle.read(part, 0, part.length, offset) : { bytesRead: 0 }
+    return { name: file.name, mime, size, offset, dataB64: part.subarray(0, bytesRead).toString('base64') }
   } finally {
-    closeSync(fd)
+    await handle.close()
   }
 }
 
@@ -448,7 +450,7 @@ export function remoteBotMethods(options: {
    * Files another device sends ahead of a message (`bots.stage`), each bound to the bot and the device that sent it.
    * Absent: `bots.stage` refuses, and a message names no staged file.
    */
-  staging?: Pick<BotStaging, 'checkBegin' | 'checkAppend' | 'begin' | 'append' | 'take' | 'check' | 'release' | 'drop'>
+  staging?: Pick<BotStaging, 'checkBegin' | 'checkAppend' | 'begin' | 'append' | 'take' | 'check' | 'drop'>
 }): RpcMethod[] {
   const limitOf = (context: RpcContext): PermissionMode => {
     try {
@@ -591,7 +593,7 @@ export function remoteBotMethods(options: {
         const message = port.actionMessage(botId(p), p.actionId as string)
         // Include the page envelope too: fittedPage may cut its only message to leave room for it.
         const page = port.chatList(botId(p), { limit: 1, beforeSeq: message.seq + 1 })
-        if (bytes({ ...page, messages: [remoteBotMessage(message)] }) + 1 > RESULT_BYTES)
+        if (bytes({ ...page, messages: [remoteBotMessage(message, botId(p))] }) + 1 > RESULT_BYTES)
           throw new NetError('conflict', botActionRefusalText('bot_action_too_large'), { details: { reason: 'bot_action_too_large' } })
       }
   }
@@ -645,7 +647,8 @@ export function remoteBotMethods(options: {
         port.chatList(botId(p), {
           ...(p.beforeSeq !== undefined ? { beforeSeq: p.beforeSeq as number } : {}),
           ...(p.limit !== undefined ? { limit: p.limit as number } : {})
-        })
+        }),
+        botId(p)
       )
     ),
     method('bots.chat.attachment', async (p, port) =>
@@ -666,8 +669,9 @@ export function remoteBotMethods(options: {
       const staging = stagerOf()
       const part = Buffer.from(p.dataB64 as string, 'base64')
       if (p.stage !== undefined) return staging.checkAppend(context.caller.node, botId(p), p.stage as string, p.offset as number, part.length)
-      // An SVG is never taken from another device, by its name or its first bytes.
-      if (isSvgName(p.name as string) || looksLikeSvg(part.subarray(0, 1024)))
+      // An SVG is never taken from another device, by its name or its first bytes; the whole file's start is looked at
+      // again when its last part arrives (`BotStaging`).
+      if (isSvgName(p.name as string) || looksLikeSvg(part, part.length === p.size))
         throw new NetError('conflict', 'SVG files can’t be sent to another computer.', { details: { reason: 'svg' } })
       staging.checkBegin(context.caller.node, p.name as string, p.size as number)
     })),
@@ -692,7 +696,7 @@ export function remoteBotMethods(options: {
         // Used or refused, a staged file is done with: its copy is in the bot's files folder, or the device sends again.
         options.staging?.drop(staged)
       }
-      return { message: fitted(remoteBotMessage(message)) }
+      return { message: fitted(remoteBotMessage(message, botId(p))) }
     }, first((p, _port, context) => {
       const staged = p.staged as string[] | undefined
       if (staged?.length) stagingOf().check(context.caller.node, botId(p), staged)
@@ -712,7 +716,7 @@ export function remoteBotMethods(options: {
       'bots.asks.answer',
       async (p, port) => {
         const { message } = await port.answer(botId(p), p.askId as string, p.answer as 'allow' | 'not_now')
-        return { message: fitted(remoteBotMessage(message)) }
+        return { message: fitted(remoteBotMessage(message, botId(p))) }
       },
       first((p, port, context) => {
         const kind = port.askKind(botId(p), p.askId as string)
@@ -737,7 +741,7 @@ export function remoteBotMethods(options: {
           clientRequestId: p.clientRequestId as string,
           from: { limit: limitOf(context), node: context.caller.node }
         })
-        return { message: fitted(remoteBotMessage(message)), ...(question ? { question: fitted(remoteBotMessage(question)) } : {}) }
+        return { message: fitted(remoteBotMessage(message, botId(p))), ...(question ? { question: fitted(remoteBotMessage(question, botId(p))) } : {}) }
       },
       first((p, port) => port.questionCheck(botId(p), p.questionId as string))
     ),
@@ -748,7 +752,7 @@ export function remoteBotMethods(options: {
       port.actionCheck({ botId: botId(p), actionId: p.actionId as string, digest: p.digest as string, answer: p.answer as 'send' | 'not_now' })
       actionSize(p, port)
     })),
-    method('bots.reminders.snooze', async (p, port) => fitted(remoteBotMessage(port.reminderSnooze(botId(p), p.messageId as string, p.choice as import('../../../shared/bots/personal/chat').BotSnoozeChoice)))),
+    method('bots.reminders.snooze', async (p, port) => fitted(remoteBotMessage(port.reminderSnooze(botId(p), p.messageId as string, p.choice as import('../../../shared/bots/personal/chat').BotSnoozeChoice), botId(p)))),
     method('bots.personal.pause', async (p, port) => ({ bot: remoteBotSummary(port.pause(botId(p)).bot) })),
     method('bots.personal.resume', async (p, port) => ({ bot: remoteBotSummary((await port.resume(botId(p))).bot) })),
     method('bots.create', async (p, port, context) => {

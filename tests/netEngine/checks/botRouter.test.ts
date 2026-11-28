@@ -272,6 +272,16 @@ describe('a window’s calls about a bot of another computer', () => {
     expect(router().attached.state()).toEqual([])
   }, 60_000)
 
+  it('refuses staged ids from a window, and a copy of the bot’s files to the command line; nothing is sent', async () => {
+    const from = fabric.crossed.length
+    // Only this computer stages files, from the paths a window gives: a window never names another device's staged ids.
+    const staged = await refused(viewer.dispatch('bots.chat.send', { botId: q, text: 'Mine', clientRequestId: 'router-staged-1', staged: [`bst_${'a'.repeat(32)}`] }))
+    expect(staged.code).toBe('invalid_params')
+    expect(await refused(fromCli('bots.remote.file', { botId: q, path: 'images/chart.png' }))).toMatchObject({ code: 'forbidden' })
+    expect(sent(from)).toEqual([])
+    expect(ownerChat()).not.toContain('Mine')
+  }, 60_000)
+
   it('refuses a call too large to send, and sends nothing', async () => {
     const from = fabric.crossed.length
     const no = await refused(viewer.dispatch('bots.chat.send', { botId: q, text: 'x'.repeat(50 * 1024), clientRequestId: 'router-large-1' }))
