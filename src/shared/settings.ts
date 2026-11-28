@@ -338,7 +338,7 @@ export interface AgentAccessSettings {
    */
   computers: string[]
   /**
-   * "Threads from other devices can use them too": a thread another of the user's devices started here (or a subagent
+   * "Threads started from other devices": a thread another of the user's devices started here (or a subagent
    * under one) may reach the computers above beyond the device that started it. Off, the default: such a thread reaches
    * only the device that started it, so work never chains on to a third computer unless the person here allows it.
    */

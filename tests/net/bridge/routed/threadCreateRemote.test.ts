@@ -518,6 +518,10 @@ describe('thread_create on another computer (issue #1160)', () => {
       } finally {
         t.caller.settings.set({ agentAccess: { ...t.caller.settings.get().agentAccess, fromOtherDevices: false } } as never)
       }
+      // Turned back off, that launch goes no further: its retry is refused as a new one would be.
+      const retried = await create({ computer: t.node, title: 'Allowed', clientRequestId: 'chain-3' })
+      expect(retried.isError, JSON.stringify(retried.body)).toBe(true)
+      expect(retried.body.data).toMatchObject({ code: 'remote_from_remote' })
       expect(launchedBy(thread.id)).toHaveLength(2)
     }, 120_000)
 

@@ -63,16 +63,16 @@ export type RemoteComputerReach =
   | { ok: true; node: string; computer: string; online: boolean }
   | { ok: false; code: string; message: string; computer?: string; computers?: Array<{ id: string; name: string }> }
 
-/** One thread of `threads.list` there, its ids named the way this computer names things. */
 /**
  * Why a thread another device started may not reach `computer`, a third computer (`chainRefused`): what it can still
  * reach, and where the person allows more.
  */
-export function chainRefusal(what: 'threads' | 'subagents' | 'reach', computer: string): string {
-  const act = what === 'reach' ? `reach threads on ${computer}` : `start ${what} on ${computer}`
+export function chainRefusal(what: 'threads' | 'subagents' | 'continue' | 'reach', computer: string): string {
+  const act = what === 'reach' ? `reach threads on ${computer}` : what === 'continue' ? `continue subagents on ${computer}` : `start ${what} on ${computer}`
   return `This thread was started from another device, so it cannot ${act}. It can still work on the device that started it. The user can allow other computers with "Threads started from other devices" in Settings → Agents → Agent access.`
 }
 
+/** One thread of `threads.list` there, its ids named the way this computer names things. */
 export interface RemoteListedThread {
   id: string
   name: string

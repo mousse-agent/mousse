@@ -120,10 +120,10 @@ export function AgentAccessSettings({
               anchor="agents-from-other-devices"
               htmlFor="agent-access-from-other-devices"
               description={<>
-                Can use these computers too. They can always reach the device that started them.
+                Can use these computers too. Without it, they reach only the device that started them.
                 <MoreDetails>
-                  A thread you start on this computer from another device can always work on that device. With this on, it
-                  can also start and message threads on the computers turned on above, like a thread started here. Off by default.
+                  A thread you start on this computer from another device can work on that device when it is turned on above.
+                  With this on, it can use the other computers turned on above too, like a thread started here. Off by default.
                 </MoreDetails>
               </>}
               control={
