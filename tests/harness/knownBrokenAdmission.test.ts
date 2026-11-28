@@ -13,7 +13,7 @@ import type { BindInput, Harness, TurnSpec } from '../../src/mms/harness/gateway
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import type { ProviderAdapter, TurnResult } from '../../src/mms/harness/adapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
-import { legacyOneShotRoute } from '../../src/mms/harness/oneShot/routes'
+import { claudeFacts } from '../../src/mms/harness/oneShot/routes'
 import { PiStubAdapter } from '../support/piStub'
 
 const dirs: string[] = []
@@ -66,9 +66,11 @@ function setup(version = '2.1.5') {
       }
     })
   }
-  const oneShot = vi.fn(async () => ({ text: 'A title' }))
-  const base = adapterDriver(adapter, { runtime: { auth: async () => ({ state: 'signed_in' }), managed: () => ({ ...install }), oneShot } })
-  const driver: HarnessDriver = { ...base, oneShotRoute: legacyOneShotRoute('claude'), testedVersions: { min: '2.0.0', max: '2.1.999' }, knownBroken: KNOWN_BROKEN }
+  // A route admitted before any check (in Mousse's process), so the known-broken gate is what refuses the request.
+  const IN_PROCESS = { ...claudeFacts(false), launch: 'in_process' as const }
+  const oneShot = vi.fn(async () => 'A title')
+  const base = adapterDriver(adapter, { runtime: { auth: async () => ({ state: 'signed_in' }), managed: () => ({ ...install }), oneShotTransport: () => ({ send: oneShot }) } })
+  const driver: HarnessDriver = { ...base, oneShotRoute: () => ({ route: { id: 'claude:cli', facts: IN_PROCESS } }), testedVersions: { min: '2.0.0', max: '2.1.999' }, knownBroken: KNOWN_BROKEN }
   let stored: unknown = { claude: { driver: 'claude', enabled: true } }
   const map = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
   const harness = testHarness({ drivers: [driver], instances: map, profileHome: dir })

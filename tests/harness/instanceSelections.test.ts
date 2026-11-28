@@ -18,6 +18,7 @@ import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import { parseModelRef } from '../../src/shared/agents/schema'
 import { getDefaultSettings, resolveModelForMode, type MousseSettings } from '../../src/shared/settings'
 import type { OneShotSpec } from '../../src/mms/harness/driver'
+import type { OneShotTransport } from '../../src/mms/harness/oneShot/route'
 
 const pi = new PiStubAdapter()
 const claude: ProviderAdapter = { driver: 'claude', capabilities: pi.capabilities, configured: () => true, startTurn: async () => { throw new Error('unused') }, interrupt: async () => 'not_active' }
@@ -60,10 +61,13 @@ async function titleProfile(options: { work?: boolean } = {}) {
     providerAuth: { getConfiguredLlmProviders: () => piProviders, credentials: { listProviderIds: () => ['openai'] } } as never
   })
   const claudeListing = { id: 'claude-subscription', label: 'Claude Code', models: [{ id: 'haiku', label: 'Haiku' }, { id: 'sonnet', label: 'Sonnet' }] }
-  // The pi runtime's one request (`DriverRuntime.oneShot`) is a spy.
+  // The pi runtime's one request is a spy behind its transport (`DriverRuntime.oneShotTransport`).
   const oneShot = vi.fn(async (_spec: OneShotSpec, _signal: AbortSignal) => ({ text: '"A title."' }))
+  const oneShotTransport = (spec: Omit<OneShotSpec, 'system' | 'prompt' | 'onActivity'>): OneShotTransport => ({
+    send: async (wire, events, signal) => (await oneShot({ ...spec, system: wire.system, prompt: wire.prompt, onActivity: () => events.activity() }, signal)).text
+  })
   // The pi runtime lists its provider (as the real one does while credentialed).
-  const piListing = adapterDriver(pi, { runtime: { oneShot } })
+  const piListing = adapterDriver(pi, { runtime: { oneShotTransport } })
   // Signed in with an API key, listing its provider's models, as the real one does.
   const piDriver = { ...piListing, create: (context: Parameters<typeof piListing.create>[0]) => {
     const provider = piProviders.find((each) => `pi:${each.id}` === context.instanceId)
@@ -142,14 +146,12 @@ describe('chat title model', () => {
     expect(hidden.oneShot).not.toHaveBeenCalled()
   })
 
-  it("the listing says per model whether it names threads: the test kit's Pi on its legacy route, an agent without one-shots unavailable with why", async () => {
+  it("the listing says per model whether it names threads: the test kit's Pi held on pi:direct, an agent without one-shots unavailable with why", async () => {
     const { harness } = await titleProfile()
     const listings = harness.listedLlmProviders({ kind: 'device' })
     const openai = listings.find((option) => option.instanceId === 'pi:openai')!
-    expect(openai.oneShot).toBe(true)
-    expect(openai.models.map((model) => model.title)).toEqual(openai.models.map(() => ({ state: 'legacy', route: 'legacy:pi' })))
+    expect(openai.models.map((model) => model.title)).toEqual(openai.models.map(() => ({ state: 'held', route: 'pi:direct' })))
     const agent = listings.find((option) => option.instanceId === 'claude')!
-    expect(agent.oneShot).toBe(false)
     expect(agent.models.every((model) => model.title?.state === 'unavailable' && model.title.reason === 'Test claude cannot run a single request.')).toBe(true)
   })
 })

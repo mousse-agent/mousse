@@ -42,7 +42,7 @@ const MODEL: OneShotBinding = { kind: 'model', instanceId: 'x', model: 'm' }
 const LOCAL = (resident: boolean): OneShotBinding => ({ kind: 'local_thread', instanceId: 'x', model: 'm', resident })
 
 describe('admit', () => {
-  // Inputs: the entry (gone, retired, off, stopped, bot-only, signed out, unchecked), its route (none, refused, legacy,
+  // Inputs: the entry (gone, retired, off, stopped, bot-only, signed out, unchecked), its route (none, refused,
   // in-process, launched), the model (hidden, a local server's), the binding (a model, a local thread warm or cold)
   // and the operation (a thread's, a bot's).
   const rows: Array<[string, OneShotOp, OneShotBinding, AdmissionEntry | undefined, string | 'plan']> = [
@@ -58,10 +58,9 @@ describe('admit', () => {
     ['a refused route', 'thread_title', MODEL, entry({ decision: { refused: 'Not proven for 9.9.9.' } }), 'refused'],
     ['a launched route before its check', 'thread_title', MODEL, entry({ checked: false }), 'unchecked'],
     ['an in-process route before any check', 'thread_title', MODEL, entry({ checked: false, decision: { route: { id: 'pi:direct', facts: PI_DIRECT_FACTS } } }), 'plan'],
-    ['a legacy route before any check', 'thread_title', MODEL, entry({ checked: false, decision: { route: { id: 'legacy:claude' } } }), 'plan'],
     ['a hidden model', 'thread_title', MODEL, entry({ hidden: true }), 'model_hidden'],
     ['a local server\u2019s model for another thread', 'thread_title', MODEL, entry({ decision: { route: { id: 'pi:direct', facts: PI_LOCAL_FACTS } } }), 'local_only'],
-    ['a local server\u2019s model listed local on a legacy route', 'branch_name', MODEL, entry({ local: true, decision: { route: { id: 'legacy:pi' } } }), 'local_only'],
+    ['a local server\u2019s model listed local on a route for any thread', 'branch_name', MODEL, entry({ local: true, decision: { route: { id: 'pi:direct', facts: PI_DIRECT_FACTS } } }), 'local_only'],
     ['its own local thread, model in memory', 'thread_title', LOCAL(true), entry({ decision: { route: { id: 'pi:direct', facts: PI_LOCAL_FACTS } } }), 'plan'],
     ['its own local thread, model not loaded', 'thread_title', LOCAL(false), entry({ decision: { route: { id: 'pi:direct', facts: PI_LOCAL_FACTS } } }), 'local_unloaded'],
     ['a local thread whose entry is gone', 'thread_title', LOCAL(true), undefined, 'unknown_entry'],
@@ -87,22 +86,21 @@ describe('admit', () => {
 
 describe('the label is computed from the facts', () => {
   const held: RouteFacts = { ...PI_DIRECT_FACTS }
-  it.each<[string, RouteFacts | undefined, string]>([
+  it.each<[string, RouteFacts, string]>([
     ['none offered, one attempt, verified', held, 'held'],
     ['tools detected on report', { ...held, tools: 'detected_on_report' }, 'best_effort'],
     ['tools refused before they run', { ...held, tools: 'refused_before_run' }, 'best_effort'],
     ['attempts unenforced', { ...held, attempts: 'unenforced' }, 'best_effort'],
     ['only the environment redirected', { ...held, isolation: 'env_only' }, 'best_effort'],
     ['a launch kind alone does not lower it', { ...held, launch: 'sealed_child' }, 'held'],
-    ['no facts: a legacy route', undefined, 'legacy'],
     ['generic ACP', GENERIC_ACP_FACTS, 'best_effort']
   ])('%s', (_name, facts, label) => {
-    expect(routeLabel({ ...(facts ? { facts } : {}) })).toBe(label)
+    expect(routeLabel({ facts })).toBe(label)
   })
 })
 
 describe('the runner', () => {
-  const plan = (facts: RouteFacts | undefined = GENERIC_ACP_FACTS) => admit('thread_title', MODEL, view(entry({ decision: { route: { id: facts ? 'acp:generic' : 'legacy:x', ...(facts ? { facts } : {}) } } }))) as OneShotPlan
+  const plan = (facts: RouteFacts = GENERIC_ACP_FACTS) => admit('thread_title', MODEL, view(entry({ decision: { route: { id: 'acp:generic', facts } } }))) as OneShotPlan
   function transport(script: (events: Parameters<OneShotTransport['send']>[1], signal: AbortSignal) => Promise<string>) {
     const sent: Array<Parameters<OneShotTransport['send']>[0]> = []
     const signals: AbortSignal[] = []
