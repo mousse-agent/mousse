@@ -162,10 +162,13 @@ const MOUSSE_TOOL_ALIAS_TRANSLATIONS: Readonly<Record<string, { args(old: ToolAr
     runs: 'any',
     byName: true
   },
-  // `recall_subagent {agent, task}` is work for the subagent titled `agent`: `continue_subagent` under its older name.
+  // `recall_subagent {agent, task}` is work for the subagent titled `agent`: `continue_subagent` under its older name, so
+  // it takes the one form `thread_send` publishes, `{subagent, content}`. A `thread_send` in that form runs as
+  // `continue_subagent` (the first variant that holds); `recall_subagent` runs only by name (`byName`), and both start
+  // the same follow-up for one clientRequestId.
   recall_subagent: {
-    args: ({ task, ...rest }: ToolArgs) => ({ ...rest, ...(task !== undefined ? { content: task } : {}), intent: 'work' }),
-    holds: (args: ToolArgs) => args.threadId === undefined && args.agent !== undefined && (args.intent === undefined || args.intent === 'work'),
+    args: ({ agent, task, ...rest }: ToolArgs) => ({ ...rest, ...(agent !== undefined ? { subagent: agent } : {}), ...(task !== undefined ? { content: task } : {}), intent: 'work' }),
+    holds: (args: ToolArgs) => args.threadId === undefined && args.subagent !== undefined && (args.intent === undefined || args.intent === 'work'),
     runs: 'thread',
     byName: true
   },

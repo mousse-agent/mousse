@@ -5,7 +5,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { claudeChildToolDenial } from '../../src/mms/harness/vendors/claude/childPolicy'
-import { grantHoldsCall } from '../../src/shared/toolAliases'
+import { canonicalToolCall, grantHoldsCall } from '../../src/shared/toolAliases'
 import { appToolRegistry, appTurn, denied, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -92,15 +92,22 @@ describe('the subagent tools as variants of the thread tools', () => {
   })
 
   it('recall_subagent is a follow-up to a named subagent under either name: one request per clientRequestId', async () => {
-    const { call, fake } = await world()
+    const { call, fake, registry } = await world()
+    // The old name is thread_send in the one form thread_send publishes: `subagent` names which subagent, `content` the task.
+    const recall = canonicalToolCall('recall_subagent', { agent: 'API reviewer', task: 'Round two' })
+    expect(recall).toEqual({ name: 'thread_send', args: { subagent: 'API reviewer', content: 'Round two', intent: 'work' } })
+    const published = Object.keys((registry.listForThread('caller').find((tool) => tool.name === 'thread_send')!.inputSchema as { properties: object }).properties)
+    expect(published).toEqual(expect.arrayContaining(Object.keys(recall.args)))
+    expect(grantHoldsCall('recall_subagent', 'thread_send', { subagent: 'API reviewer', content: 'Round two' })).toBe(true)
     vi.mocked(fake.delegation.named.recall).mockResolvedValue({ name: 'API reviewer', delegationId: 'd2' } as never)
     const old = await call('recall_subagent', { agent: 'API reviewer', task: 'Round two' }, 'mcp:recall-1')
     expect(JSON.parse(old.text)).toEqual({ name: 'API reviewer', delegationId: 'd2' })
-    await call('thread_send', { agent: 'API reviewer', content: 'Round two' }, 'mcp:recall-1')
-    expect(vi.mocked(fake.delegation.named.recall).mock.calls.map(([input, key]) => [input.agent, input.task, key])).toEqual([
-      ['API reviewer', 'Round two', { toolCallId: 'mcp:recall-1' }],
-      ['API reviewer', 'Round two', { toolCallId: 'mcp:recall-1' }]
-    ])
+    // The retry takes the form thread_send publishes (`subagent`, the subagent's title): it is the follow-up
+    // continue_subagent starts, under the same call key, which the host keeps as one request (continueSubagent.test.ts).
+    vi.mocked(fake.delegation.continueSubagent).mockResolvedValue({ name: 'API reviewer', delegationId: 'd2', replayed: true } as never)
+    expect(JSON.parse((await call('thread_send', { subagent: 'API reviewer', content: 'Round two' }, 'mcp:recall-1')).text)).toMatchObject({ delegationId: 'd2' })
+    expect(vi.mocked(fake.delegation.named.recall).mock.calls.map(([input, key]) => [input.agent, input.task, key])).toEqual([['API reviewer', 'Round two', { toolCallId: 'mcp:recall-1' }]])
+    expect(vi.mocked(fake.delegation.continueSubagent).mock.calls.map(([input, key]) => [input, key])).toEqual([[expect.objectContaining({ subagent: 'API reviewer', prompt: 'Round two' }), { toolCallId: 'mcp:recall-1' }]])
     expect(grantHoldsCall('recall_subagent', 'thread_send', { threadId: 'target', content: 'x' })).toBe(false)
     expect(grantHoldsCall('list_delegations', 'thread_read', { view: 'events' })).toBe(false)
   })

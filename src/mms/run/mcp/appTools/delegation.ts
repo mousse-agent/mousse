@@ -144,7 +144,7 @@ export const DELEGATION_TOOL_NAMES: ReadonlySet<string> = new Set(DELEGATION_TOO
  * (`create_subagent(s)`, `integrate_delegation`, `integrate_subagent`) stay dispatchable for replayed transcripts and
  * older agents but are not listed. `task_status`, `task_cancel`, `list_subagents`, `continue_subagent`,
  * `recall_subagent` and `list_delegations` are variants of the thread tools now (`toolVariant`): `thread_wait`,
- * `thread_stop`, `thread_list` and `thread_send` with `subagent`, `delegationId`, `scope: family` or `agent`, and
+ * `thread_stop`, `thread_list` and `thread_send` with `subagent`, `delegationId` or `scope: family`, and
  * `thread_read view: delegations`.
  */
 export const LISTED_DELEGATION_TOOL_NAMES = ['delegate_task', 'answer_subagent', 'computer_list', 'model_list'] as const
@@ -339,9 +339,9 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
       // A native helper's call is not the thread's own turn: what it reads never acknowledges the thread's notices (§2.7).
       const delegation = hostingTurn(ctx.turn) === ctx.turn ? own : Object.assign(Object.create(own) as DelegationToolHost, { taskStatus: (ref: SubagentRef) => own.taskStatus(ref, { acknowledge: false }) })
       // Tool arguments arrive as parsed JSON (MCP or Pi), so they are JSON values. `thread_send` names a follow-up's
-      // text content, which `continue_subagent` called prompt and `recall_subagent` task.
+      // subagent and its text content, which `continue_subagent` called prompt and `recall_subagent` agent and task.
       const named = definition.name === 'continue_subagent' && args.prompt === undefined ? { ...args, prompt: args.content }
-        : definition.name === 'recall_subagent' && args.task === undefined ? { ...args, task: args.content } : args
+        : definition.name === 'recall_subagent' ? { ...args, agent: args.agent ?? args.subagent, task: args.task ?? args.content } : args
       const call: ToolCall = { type: 'toolCall', id: ctx.toolCallId, name: definition.name, arguments: named as JsonObject }
       return { text: await dispatchWithTimeline(delegation, call, ctx) }
     }

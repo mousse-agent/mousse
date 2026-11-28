@@ -215,6 +215,19 @@ describe('continue_subagent and the title address (issue #142)', () => {
       expect(out.two).toMatchObject({ delegationId: out.one.delegationId, replayed: true })
       expect(d.engine.delegations.listForChildThread(out.first.childThreadId)).toHaveLength(2)
     })
+
+    it('a recall_subagent retried as thread_send {subagent} (continue_subagent) with the same key returns its first task', async () => {
+      const { d, steps, out, say, start, settled } = world()
+      steps['go'] = async (tools) => { out.first = await start(tools, 'API reviewer') }
+      steps['again'] = async (tools) => { out.one = await tools.named.recall({ agent: 'API reviewer', task: 'More' }, { toolCallId: 'mcp:same' }) as Json }
+      steps['retry'] = async (tools) => { out.two = await tools.continueSubagent({ subagent: 'API reviewer', prompt: 'More' }, { toolCallId: 'mcp:same' }) as Json }
+      await say('go')
+      await say('again')
+      await settled(out.one.childRunId)
+      await say('retry')
+      expect(out.two).toMatchObject({ delegationId: out.one.delegationId, replayed: true })
+      expect(d.engine.delegations.listForChildThread(out.first.childThreadId)).toHaveLength(2)
+    })
   })
 
   describe('integrate_delegation by title', () => {
