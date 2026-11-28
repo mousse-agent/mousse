@@ -90,16 +90,27 @@ their worktree branches with a connected model it picks (`src/mms/orchestrator/T
 It ranks every enabled, signed-in model that can run a single request, from what is already known
 (no check is started to rank them):
 
-1. **Provider**, by the first `namingProviders` entry that matches it: a Pi provider by `pi:<provider
-   id>`, then the driver kind (`claude`, `codex`, `antigravity`, `pi`, `grok`, `opencode`), then `*`. A provider no entry
-   matches comes last.
+1. **Provider**, by the most specific `namingProviders` entry that names it: a Pi provider's own
+   `pi:<provider id>` wherever it stands, else the driver kind (`claude`, `codex`, `pi`, `cursor`,
+   `opencode`, `grok`, `antigravity`, `acp`), else `*`. A provider no entry names comes last.
 2. **Tier**: `small`, then `standard`, then `frontier`, then unknown.
 3. A subscription before an API key.
 4. A current model before an `older` one, then the newest `released`, then the order the agent lists.
 
 A model at a usage limit is skipped until its reset. A failed request tries the next model, at most
-three in all. The bundled list is `claude`, `codex`, `antigravity`, `pi:anthropic`, `pi:openai`,
-`pi:google`, `pi`, `grok`, `opencode`, `*`.
+three in all. The bundled list is `claude`, `codex`, `pi:anthropic`, `pi:openai`, `pi:google`, `pi`,
+`pi:amazon-bedrock`, `cursor`, `opencode`, `grok`, `antigravity`, `acp`, `*`:
+
+- Providers whose single requests are held come first (`docs/plans/one-shots-every-provider.md`):
+  Claude Code, Codex on its ChatGPT sign-in, and Pi's providers run one request with no tools, sent
+  once, with none of the user's setup.
+- Among them, a request in Mousse's own process comes before one that starts a process: Pi's
+  providers before Bedrock (Pi's worker), Cursor (a host of its own) and OpenCode (a server of its
+  own). Claude Code and Codex keep their places at the top.
+- Grok comes next: held on an xAI API key, best-effort on its account.
+- Antigravity and any other ACP agent are best-effort on every model, so they come last.
+- Local models are not listed: they name only the threads that run on them, never through
+  Automatic.
 
 `namingProviders` is a routing policy kept in the catalog: once catalog downloads arrive, a
 downloaded copy can change which provider receives naming requests.
