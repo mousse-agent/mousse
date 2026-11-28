@@ -1,4 +1,5 @@
 import type { BotChatMessage, BotChip, BotSummary } from '../../../shared/bots/personal/chat'
+import type { BotAttention } from '../../../shared/bots/personal/telling'
 import type { BotReachPort } from '../../protocol/botReachPort'
 import { NetError } from '../../../shared/net'
 import { mmsJson } from './jsonOutput'
@@ -16,10 +17,10 @@ export interface BotFeedTelling {
   /** The bot's newest message in its chat, and how loudly it asked to be told (`tell`); absent for an empty chat. */
   latest?: { id: string; seq: number; author: 'owner' | 'bot'; tell?: 'now' | 'soon' | 'later' }
   /**
-   * The messages past `readSeq` that ask to be told and still want the owner (an open ask, question or action, or a
-   * reply not read yet), newest first: a notification of one that leaves this list is withdrawn.
+   * The messages past `readSeq` that ask to be told now or soon and still want the owner (an open ask, question or
+   * action, or a reply not read yet), newest first, at most 20: a notification of one that leaves this list is withdrawn.
    */
-  attention: string[]
+  attention: BotAttention[]
 }
 
 /** One bot as another device lists it: its summary as the phone lists have it, its live chip, and its read state here. */

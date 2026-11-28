@@ -2,6 +2,10 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { BotStore } from '../../src/mms/bots/store/BotStore'
 import { BotChatProjection } from '../../src/mms/bots/chat/projection'
 import { botFixture, createBot, type BotFixture } from './botFixture'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { BotMarksStore } from '../../src/mms/bots/marks/BotMarksStore'
 let f: BotFixture
 let botId: string
 beforeEach(async () => { f = botFixture(); await f.bots.reconcileOnStartup(); ({ botId } = await createBot(f)) })
@@ -253,6 +257,41 @@ it('does not let a failed bot already in the fold hold back another bot', async 
   const good = f.bots.chat.post({ botId: other, author: 'bot', kind: 'text', text: 'Still delivered' })
   await f.bots.deliverDueReminders()
   expect(f.store.message(good.id)?.toldAt).toBe(f.store.now())
+})
+
+it('keeps a bot muted or hidden on this computer quiet, drops it from a fold, and tells only its new rows once unmuted', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bot-marks-'))
+  try {
+    const marks = new BotMarksStore(dir)
+    f.bots.tellings.setQuiet(id => { const m = marks.get(id); return m.muted === true || m.hidden === true })
+    const loud = (await createBot(f)).botId
+    const hidden = (await createBot(f)).botId
+    const events: import('../../src/shared/bots/personal/telling').BotTelling[] = []
+    f.bots.events.on('tell', e => events.push(e))
+    f.bots.setTellingWindows(1)
+    const folded = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Folded before the mute' })
+    await f.bots.deliverDueReminders()
+    marks.set(botId, 'muted', true)
+    marks.set(hidden, 'hidden', true)
+    const quiet = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Muted now' })
+    f.store.run("UPDATE bot_messages SET tell = 'now' WHERE id = ?", quiet.id)
+    const unseen = f.bots.chat.post({ botId: hidden, author: 'bot', kind: 'text', text: 'Hidden' })
+    const heard = f.bots.chat.post({ botId: loud, author: 'bot', kind: 'text', text: 'Heard' })
+    await f.bots.deliverDueReminders()
+    // The fold goes on without the muted bot's row; the muted and hidden rows are done with, told to nobody.
+    expect(events.at(-1)?.rows.map(r => r.messageId)).toEqual([heard.id])
+    expect(events.flatMap(e => e.rows.map(r => r.messageId))).not.toContain(quiet.id)
+    expect([quiet, unseen].map(m => f.store.message(m.id)?.toldAt)).toEqual([f.store.now(), f.store.now()])
+    expect(f.store.message(folded.id)?.toldAt).toBeTruthy()
+
+    marks.set(botId, 'muted', false)
+    f.clock.now += 200_000
+    const next = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Unmuted' })
+    await f.bots.deliverDueReminders()
+    expect(events.at(-1)?.rows.map(r => r.messageId)).toEqual([next.id])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 it('tells an owner-asked fixed schedule line now, alone in a fold and beyond both sound caps', async () => {

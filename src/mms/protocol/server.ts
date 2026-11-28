@@ -1793,7 +1793,7 @@ export class MmsProtocolServer {
     for (const [profileId, services] of this.servicesByProfile) {
       const count = [...this.clients.values()].filter(c => !c.closed && c.authenticated && c.clientType === 'gui' &&
         c.subscribeState === 'active' && c.capabilities.has(BOT_TELLING_CAPABILITY) && (c.binding?.profileId ?? this.opts.mms.profileId) === profileId).length
-      services.personalBots?.setTellingWindows(count)
+      services.setTellingWindows?.(count)
     }
   }
 

@@ -420,6 +420,16 @@ export class MmsProfileServices {
     if (!this.netEngine.on()) this.net.assertFeature('netBridge')
     return this.domainService()
   }
+  /** Windows that show bot notifications attached or left: what came while none was open is told once one is. */
+  setTellingWindows(count: number): void {
+    this.tellingWindows = count
+    this.personalBots?.setTellingWindows(count)
+    this.bridgeService?.remoteTellings.attach(count)
+  }
+  /** A bot was marked here (`bots.marks.set`): what is held of another computer's bot now muted or hidden goes. */
+  botMarksChanged(): void {
+    this.bridgeService?.remoteTellings.marksChanged()
+  }
   get spaces(): SpaceProfileService {
     this.net.assertFeature('netSpaces')
     return this.domainService().spaces
@@ -448,6 +458,8 @@ export class MmsProfileServices {
   /** Personal bots (PR 6 §4). */
   /** Null when `bots.db` could not be opened: bots are unavailable, every other thread works. */
   readonly personalBots: BotEngine | null
+  /** How many windows show bot notifications (`bots.telling.v1`): this computer's own bots and other computers' bots. */
+  tellingWindows = 0
   /** The bots' hidden model choice; also lists the Settings bot model choices (`holdable`). */
   readonly botModels: BotModelChooser
   /** Usage limits met by any of the profile's requests, shared by bots' model choice and Automatic thread naming. */
@@ -1063,6 +1075,11 @@ export class MmsProfileServices {
       }
     }
     this.personalBots = opened?.engine ?? null
+    // A bot muted or hidden on this computer tells nothing here (`bot-marks.json`); the marks are read once a row is due.
+    this.personalBots?.tellings.setQuiet((botId) => {
+      const marks = this.botMarks.get(botId)
+      return marks.muted === true || marks.hidden === true
+    })
     this.platform.onDispose(onSettingsSaved(() => this.personalBots?.settingsChanged()))
     // A bot's browser that comes back to it on its own (the window that held it went away) says so in its chat.
     const chat = opened?.engine.chat

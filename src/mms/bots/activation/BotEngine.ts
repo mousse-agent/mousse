@@ -13,6 +13,7 @@ import { BOT_CHAT_ACTION_MS, BotActions, BotActionChanged, actionContinuation, r
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
 import { settingCompactionPoint } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
+import type { BotAttention } from '../../../shared/bots/personal/telling'
 import type { SettingsStore } from '../../settings/SettingsStore'
 import { type TellMe } from '../../../shared/types'
 import { tellingClass } from '../chat/telling'
@@ -8470,7 +8471,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * What another device needs to tell of a bot and to take it back (`BotStreamSources`): how far its chat is read, its
    * newest message and how loudly it asked to be told, and the messages past the read mark that still want the owner.
    */
-  feedTelling(botId: string): { readSeq: number; latest?: { id: string; seq: number; author: 'owner' | 'bot'; tell?: 'now' | 'soon' | 'later' }; attention: string[] } {
+  feedTelling(botId: string): { readSeq: number; latest?: { id: string; seq: number; author: 'owner' | 'bot'; tell?: 'now' | 'soon' | 'later' }; attention: BotAttention[] } {
     const readSeq = this.store.registry(botId)?.readSeq ?? 0
     const last = this.store.lastMessage(botId)
     const latest = last ? { id: last.id, seq: last.seq, author: last.author, ...(last.tell ? { tell: last.tell } : {}) } : undefined

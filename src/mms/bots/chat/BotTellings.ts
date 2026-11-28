@@ -1,10 +1,11 @@
 import { actionNudgeId } from '../activation/questionFollowUps'
 import type { BotChatMessage } from '../../../shared/bots/personal/chat'
-import { botNotificationContent, botNotificationKind } from '../../../shared/bots/personal/notification'
+import { botNotificationKind } from '../../../shared/bots/personal/notification'
 import { randomUUID } from 'node:crypto'
-import type { BotTelling } from '../../../shared/bots/personal/telling'
+import type { BotAttention, BotTelling } from '../../../shared/bots/personal/telling'
 import type { BotStore, BotMessageRow } from '../store/BotStore'
 import type { BotChatProjection } from './projection'
+import { TellingSounds, tellingOf } from './tellingPresentation'
 
 /** Durable rows, transient banner presentation. Restarts reset sound counters. */
 export class BotTellings {
@@ -13,11 +14,22 @@ export class BotTellings {
   private closedThrough = 0
   private readonly banners = new Map<string, BotMessageRow[]>()
   private fold: { id: string; until: number; rows: BotMessageRow[] } | undefined
-  private readonly botSounds = new Map<string, number>()
-  private profileSounds: number[] = []
+  /**
+   * A bot this computer muted or hid (`bot-marks.json`) tells nothing: its due rows are marked told without a word, so
+   * unmuting it later never brings them back. Asked only for rows that are due.
+   */
+  private quiet: (botId: string) => boolean = () => false
   constructor(private readonly store: BotStore, private readonly chat: BotChatProjection,
     private readonly name: (id: string) => string, private readonly emit: (event: BotTelling) => void,
-    private readonly retryMs = 60_000) {}
+    private readonly retryMs = 60_000,
+    /** Shared with the other computers' bots' notifications (`RemoteBotTellings`). */
+    readonly sounds = new TellingSounds()) {}
+
+  /** Which bots this computer keeps quiet: muted or hidden here. */
+  setQuiet(quiet: (botId: string) => boolean): void { this.quiet = quiet }
+  private isQuiet(botId: string): boolean {
+    try { return this.quiet(botId) } catch { return false }
+  }
 
   attach(windows: number): void {
     if (windows && !this.windows) this.closedThrough = Number(this.store.get(`SELECT MAX(seq) AS seq FROM bot_messages
@@ -65,12 +77,12 @@ export class BotTellings {
    * The bot's messages past `readSeq` that asked to be told now or soon and still want the owner, newest first, at most
    * `limit`: what another device's notification of the bot follows, withdrawn once one leaves this list.
    */
-  attention(botId: string, readSeq: number, limit = 20): string[] {
+  attention(botId: string, readSeq: number, limit = 20): BotAttention[] {
     const ids = this.store.all(`SELECT id FROM bot_messages WHERE bot_id = ? AND seq > ? AND tell IN ('now', 'soon') ORDER BY seq DESC LIMIT ?`, botId, readSeq, limit)
-    const open: string[] = []
+    const open: BotAttention[] = []
     for (const { id } of ids) {
       const row = this.store.message(String(id))
-      if (row && this.unread(row)) open.push(row.id)
+      if (row && this.unread(row)) open.push({ id: row.id, seq: row.seq, tell: row.tell as 'now' | 'soon' })
     }
     return open
   }
@@ -106,7 +118,7 @@ export class BotTellings {
     for (const { id } of ids) {
       const row = this.store.message(String(id))!
       if ((this.retryAt.get(row.botId) ?? 0) > now) continue
-      if (!this.unread(row) || row.seq <= this.closedThrough && now - Date.parse(row.at) > 86_400_000) { this.attempt([row], now, () => this.told(row, now)); continue }
+      if (!this.unread(row) || row.seq <= this.closedThrough && now - Date.parse(row.at) > 86_400_000 || this.isQuiet(row.botId)) { this.attempt([row], now, () => this.told(row, now)); continue }
       due.push(row)
     }
     // Only project later rows if this release can count them in a fold.
@@ -114,7 +126,9 @@ export class BotTellings {
       for (const { id } of this.store.all(`SELECT id FROM bot_messages INDEXED BY bot_messages_tell_due
         WHERE tell IS NOT NULL AND tell = 'later' AND told_at IS NULL AND tell_at <= ? ORDER BY seq`, new Date(now).toISOString())) {
         const row = this.store.message(String(id))!
-        if ((this.retryAt.get(row.botId) ?? 0) <= now) due.push(row)
+        if ((this.retryAt.get(row.botId) ?? 0) > now) continue
+        if (this.isQuiet(row.botId)) this.attempt([row], now, () => this.told(row, now))
+        else due.push(row)
       }
     }
     const closed = due.filter(r => r.seq <= this.closedThrough && r.tell !== 'later')
@@ -139,8 +153,8 @@ export class BotTellings {
       const previous = this.fold
       if (!this.attempt(rows, now, () => {
         const base = previous && previous.until >= now ? previous : { id: `bt_${randomUUID()}`, until: now + 120_000, rows: [] }
-        this.fold = { ...base, rows: [...base.rows.filter(r => this.unread(r) && (this.retryAt.get(r.botId) ?? 0) <= now), ...rows] }
-        const sound = this.soundFor([bot], now)
+        this.fold = { ...base, rows: [...base.rows.filter(r => this.unread(r) && !this.isQuiet(r.botId) && (this.retryAt.get(r.botId) ?? 0) <= now), ...rows] }
+        const sound = this.sounds.soundFor([bot], now)
         this.announce(this.fold.rows, sound, this.fold.id)
         for (const row of rows) this.told(row, now)
       })) this.fold = previous
@@ -152,14 +166,6 @@ export class BotTellings {
     for (const row of rows) this.told(row, now)
   }
 
-  private soundFor(bots: string[], now: number): boolean {
-    this.profileSounds = this.profileSounds.filter(at => now - at < 3600_000)
-    if (this.profileSounds.length >= 6 || !bots.some(bot => now - (this.botSounds.get(bot) ?? -Infinity) >= 600_000)) return false
-    this.profileSounds.push(now)
-    for (const bot of bots) this.botSounds.set(bot, now)
-    return true
-  }
-
   private told(row: BotMessageRow, now: number): void {
     this.store.db.transaction(() => {
       this.store.run('UPDATE bot_messages SET told_at = ? WHERE id = ? AND told_at IS NULL', new Date(now).toISOString(), row.id)
@@ -168,18 +174,16 @@ export class BotTellings {
   }
   private announce(rows: BotMessageRow[], sound: boolean, id = `bt_${randomUUID()}`, closed: false | string = false): void {
     rows = rows.map(r => this.store.message(r.id)!).filter(Boolean)
-    const actions = new Set(rows.filter(row => this.chat.isActionMessage(row)).map(row => row.id))
-    const priority = (row: BotMessageRow): number => row.tell === 'later' ? 0 : row.askId || row.questionId || row.error || actions.has(row.id) ? 2 : 1
-    rows.sort((a, b) => priority(b) - priority(a) || a.seq - b.seq)
-    const first = this.chat.toMessage(rows[0]!)
-    const names = [...new Set(rows.map(r => this.name(r.botId)))]
-    const { body } = botNotificationContent(this.name(rows[0]!.botId), first)
-    const summary = names.map(name => {
-      const group = rows.filter(r => this.name(r.botId) === name)
-      return group.some(r => r.askId || r.questionId || r.error || actions.has(r.id)) ? `${name} needs you` : `${name} ${group.length} ${group.length === 1 ? 'message' : 'messages'}`
-    }).join(' · ')
-    const title = rows.length === 1 ? names[0]! : closed ? `${closed}: ${summary}` : `${names.join(', ')} · ${rows.length} messages`
-    this.emit({ id, rows: rows.map(r => ({ botId: r.botId, messageId: r.id, seq: r.seq, tell: r.tell! })), title, body, kind: actions.has(first.id) || first.action || first.ask || first.question ? 'question' : 'completed', sound })
+    const items = rows.map(row => {
+      const action = this.chat.isActionMessage(row)
+      const heading = () => {
+        const message = this.chat.toMessage(row)
+        return { message, asks: Boolean(action || message.action || message.ask || message.question) }
+      }
+      return { botId: row.botId, name: this.name(row.botId), messageId: row.id, seq: row.seq, tell: row.tell!, heading,
+        needsYou: Boolean(row.askId || row.questionId || row.error || action) }
+    })
+    this.emit(tellingOf(id, items, sound, closed))
     this.banners.set(id, rows)
   }
 }

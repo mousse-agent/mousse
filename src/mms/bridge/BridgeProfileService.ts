@@ -41,6 +41,8 @@ import { EditorAsks } from './routed/editorAsks'
 import { ThreadRouter } from './routed/ThreadRouter'
 import { MergedLists } from './routed/mergedLists'
 import { RemoteBotRegistry } from './routed/RemoteBotRegistry'
+import { RemoteBotTellings } from './routed/RemoteBotTellings'
+import type { RemoteBotMessage } from './remote/RemoteBots'
 import { BotRouter } from './routed/BotRouter'
 import { REMOTE_BOTS_DB, SqliteRemoteBots } from './routed/remoteBotStore'
 import { RemoteAutomations } from './routed/remoteAutomations'
@@ -70,6 +72,8 @@ export class BridgeProfileService {
   readonly lists: MergedLists
   /** The bots of the other computers this one reaches, and the copies of their chats (not used by a window yet). */
   readonly remoteBots: RemoteBotRegistry
+  /** Notifications here for those bots, as this computer's own bots notify. */
+  readonly remoteTellings: RemoteBotTellings
   readonly botRouter: BotRouter
   private readonly routerStop = new AbortController()
   readonly dispatch: DispatchService
@@ -684,11 +688,29 @@ export class BridgeProfileService {
     this.lists.start()
     // The bots of the other computers: each one's bots feed, kept with a copy on disk for when it is out of reach. Its
     // first look runs in the background; the copy is opened then, never on a start.
+    // Their notifications follow each feed's live changes, unless the bot is muted or hidden here.
+    this.remoteTellings = new RemoteBotTellings({
+      emit: (telling) => services.events.emit({ channel: 'protocol:event', data: { type: 'bots.tell', data: telling } }),
+      quiet: (ref) => {
+        const marks = services.botMarks.get(ref)
+        return marks.muted === true || marks.hidden === true
+      },
+      sounds: () => services.personalBots?.tellings.sounds,
+      cached: (node, botId) => this.remoteBots.chats.messages(node, botId),
+      messages: async (node, botId, limit) => {
+        const page = await this.router.client.callBot(node, 'bots.chat.list', { botId, limit }, { write: false, signal: AbortSignal.timeout(10_000) })
+        const messages = (page as { messages?: unknown } | null)?.messages
+        return Array.isArray(messages) ? (messages as RemoteBotMessage[]) : []
+      },
+      clock: this.clock
+    })
+    this.remoteTellings.attach(services.tellingWindows)
     this.remoteBots = new RemoteBotRegistry({
       hub: this.hub,
       client: (node) => this.peers.client(node),
       store: new SqliteRemoteBots(join(services.getProfileHomeDir(), 'bots', REMOTE_BOTS_DB), this.clock),
       marks: services.botMarks,
+      tellings: this.remoteTellings,
       // While the engine is still starting (or the roster can't be read) the computers are not known: none is forgotten.
       // With the engine on and the v1 roster unreadable, the v1 devices are neither listed nor forgotten.
       computers: () => {
@@ -730,6 +752,7 @@ export class BridgeProfileService {
       offBotPeers()
       this.botRouter.close()
       this.remoteBots.close()
+      this.remoteTellings.close()
     })
     this.disposers.add(() => {
       offPolicy()
