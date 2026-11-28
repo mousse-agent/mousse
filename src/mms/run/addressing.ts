@@ -36,6 +36,15 @@ export type AddressTarget =
  */
 export type BotReach = 'others' | 'own' | 'none'
 
+/**
+ * Whether a caller at this reach may send the bot an address names a message (`thread_send`, through the bot port):
+ * only a bot turn that holds `bot_send`. Every other reach may name a bot and is refused before anything reads the
+ * bots' store or reaches the bot port.
+ */
+export function botReachSends(reach: BotReach): boolean {
+  return reach === 'others'
+}
+
 /** How a call resolves: several targets allowed or not, which threads the caller may see named, which bots it reaches. */
 export interface ResolveOptions {
   many: boolean

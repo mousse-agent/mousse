@@ -170,6 +170,14 @@ describe('a bot uses what a thread\'s agent can', () => {
       expect(await call('queue_enqueue', { threadId: 'private', content: 'x', expectedRevision: 'rev-0' })).toMatchObject({ error: true, text: expect.stringMatching(/not available to you/) })
     })
 
+    it('bot_send is a message to a bot or nothing: without a bot and a message it is refused, never queued in a thread', async () => {
+      const { call, host, queueCommands } = await world()
+      for (const args of [{ threadId: 'mine', expectedRevision: 'rev-0', content: 'Then run the tests.' }, { content: 'Then run the tests.' }])
+        expect(await call('bot_send', args), JSON.stringify(args)).toMatchObject({ error: true })
+      expect(queueCommands).toEqual([])
+      expect(host.steerRun).not.toHaveBeenCalled()
+    })
+
     it('a queue_enqueue retried as thread_send to the same thread, by id or by address, is the same request: it queues under one key and never reaches the running turn', async () => {
       const { call, host, queueCommands } = await world()
       const message = { content: 'Then run the tests.', expectedRevision: 'rev-0' }

@@ -159,31 +159,35 @@ it('C6 support rollback omits the switch-on advice and still delivers it after r
 })
 
 it('C6 support rollback shows entries 29 and 30 while E1 entry 28 stays pending, then delivers 28 once', async () => {
-  existingBot()
-  memory.write(() => memory.setState('ada', 'changelog_seen', 27))
-  const e1 = BOT_CHANGELOG.find(entry => entry.id === 28)!
-  const bindingAdvice = BOT_CHANGELOG.find(entry => entry.id === 29)!
-  // The experimental support switch withholds E1. The contiguous cursor must wait at 27.
-  const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => false })
-  for (let turn = 0; turn < 3; turn++) {
-    const activationId = `c6-seen-off-${turn}`
-    const off = await provider.chatPreamble({ botId: 'ada', activationId })
-    expect(off).toContain(bindingAdvice.text)
-    expect(off).not.toContain(e1.text)
-    await settled(provider, activationId)
-    expect(memory.getState<number>('ada', 'changelog_seen')).toBe(27)
-  }
-  const on = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => true })
-  const enabled = await on.chatPreamble({ botId: 'ada', activationId: 'c6-seen-on' })
-  expect(enabled).toContain(e1.text)
-  expect(enabled).toContain(bindingAdvice.text)
-  await settled(on, 'c6-seen-on')
-  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(BOT_CHANGELOG.at(-1)!.id)
-  for (let turn = 0; turn < 3; turn++) {
-    const after = await on.chatPreamble({ botId: 'ada', activationId: `c6-seen-after-${turn}` })
-    expect(after).not.toContain(e1.text)
-    expect(after).not.toContain(bindingAdvice.text)
-  }
+  // The pack as it was at entry 39: later entries push 28 out of its window (`changelogUpTo`).
+  const undo = changelogUpTo(39)
+  try {
+    existingBot()
+    memory.write(() => memory.setState('ada', 'changelog_seen', 27))
+    const e1 = BOT_CHANGELOG.find(entry => entry.id === 28)!
+    const bindingAdvice = BOT_CHANGELOG.find(entry => entry.id === 29)!
+    // The experimental support switch withholds E1. The contiguous cursor must wait at 27.
+    const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => false })
+    for (let turn = 0; turn < 3; turn++) {
+      const activationId = `c6-seen-off-${turn}`
+      const off = await provider.chatPreamble({ botId: 'ada', activationId })
+      expect(off).toContain(bindingAdvice.text)
+      expect(off).not.toContain(e1.text)
+      await settled(provider, activationId)
+      expect(memory.getState<number>('ada', 'changelog_seen')).toBe(27)
+    }
+    const on = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => true })
+    const enabled = await on.chatPreamble({ botId: 'ada', activationId: 'c6-seen-on' })
+    expect(enabled).toContain(e1.text)
+    expect(enabled).toContain(bindingAdvice.text)
+    await settled(on, 'c6-seen-on')
+    expect(memory.getState<number>('ada', 'changelog_seen')).toBe(BOT_CHANGELOG.at(-1)!.id)
+    for (let turn = 0; turn < 3; turn++) {
+      const after = await on.chatPreamble({ botId: 'ada', activationId: `c6-seen-after-${turn}` })
+      expect(after).not.toContain(e1.text)
+      expect(after).not.toContain(bindingAdvice.text)
+    }
+  } finally { undo() }
 })
 
 /**
@@ -259,12 +263,15 @@ it('C6 support rollback stops before the next unseen hidden entry when there are
 })
 
 it('E1 r2 existing bots learn the argument rule with entry 28', async () => {
-  existingBot()
-  memory.write(() => memory.setState('ada', 'changelog_seen', 27))
-  const pack = await packs().chatPreamble({ botId: 'ada', activationId: 'act-argument-rule' })
-  expect(pack).toContain('same top-level argument names')
-  expect(pack).toContain('only plain text like a message body or a file name may change')
-  expect(pack).toContain('New addresses and other destinations still ask')
+  const undo = changelogUpTo(39)
+  try {
+    existingBot()
+    memory.write(() => memory.setState('ada', 'changelog_seen', 27))
+    const pack = await packs().chatPreamble({ botId: 'ada', activationId: 'act-argument-rule' })
+    expect(pack).toContain('same top-level argument names')
+    expect(pack).toContain('only plain text like a message body or a file name may change')
+    expect(pack).toContain('New addresses and other destinations still ask')
+  } finally { undo() }
 })
 
 it.each([28, 29])('entry 30 supersedes the binding-only advice after seen entry %s', async seen => {

@@ -9,7 +9,7 @@ import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, definitionToolGranted, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
 import { botMayBeOffered } from '../../../../shared/bots/personal/manifest'
 import { BOT_USE_TOOL } from '../../../../shared/bots/personal/catalogue'
-import { botVariantSays, canonicalToolCall, canonicalToolName, isBotVariant, isRunningVariant, isToolAlias, runsUnderOwnName, toolVariants } from '../../../../shared/toolAliases'
+import { botVariantSays, canonicalToolCall, canonicalToolName, isBotVariant, isRunningVariant, isToolAlias, namesBot, runsUnderOwnName, toolVariants } from '../../../../shared/toolAliases'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
@@ -38,7 +38,7 @@ import {
 import { asRefusal, readRefusal, refused, refusalText } from './refusal'
 import { threadLink } from '../../../../shared/threadLink'
 import { addressedArgs, familyPage, fanOutCalls, fanOutRow, fanOutRows, notSentRow, OUT_OF_REACH, withAddress, type ThreadAddresses } from './addressedCall'
-import { ADDRESSED_TOOLS, type BotReach } from '../../addressing'
+import { ADDRESSED_TOOLS, botReachSends, type BotReach } from '../../addressing'
 import { BOT_SEND_TOOL } from '../../../../shared/bots/personal/botMessages'
 import { delegableTurn, hostingTurn, type CallAttribution } from '../../nativeHelpers'
 import {
@@ -694,6 +694,11 @@ export class ToolRegistry {
    */
   private async callAddressed(name: string, tool: MousseTool, given: Record<string, unknown>, caller: McpCaller, site: CallSite): Promise<ToolOutcome> {
     const { turn, request } = site
+    // A bot turn that may not message bots is told so, as `bot_send` always told it, before its address is read.
+    if (turn.bot && name === 'thread_send' && namesBot(given.thread) && !botReachSends(botReachOf(turn))) {
+      const availability = this.variants.get(BOT_SEND_TOOL)?.available?.(turn) ?? true
+      if (availability !== true) return refused('unavailable', availability)
+    }
     const visible = this.readableBy(caller, turn)
     const addressed = addressedArgs({ addresses: this.options.addresses, tool: name, args: given, callerThreadId: caller.threadId, toolCallId: request.toolCallId, record: !READ_ONLY_TOOL_NAMES.has(name), visible, bots: botReachOf(turn) })
     if ('refused' in addressed) return addressed.refused
@@ -768,7 +773,8 @@ export class ToolRegistry {
     const byName = calledAs && canonicalToolName(calledAs) === name && runsUnderOwnName(calledAs, kind) ? this.variants.get(calledAs) : undefined
     if (byName) return byName
     // A bot's call that named a thread is never one of its own tools; under a bot tool's own name it is refused below.
-    const botAddressed = addressed && turn.bot
+    // One whose address named a bot (`bot`, `addressedArgs`) is its own `bot_send`.
+    const botAddressed = addressed && turn.bot && args.bot === undefined
     const olds = botAddressed && calledAs && isBotVariant(calledAs) ? [] : toolVariants(name, args, kind).filter((old) => !(botAddressed && isBotVariant(old)))
     // A bot's old name runs its own tools or none: a thread it can't take is refused, never sent to the thread tool.
     if (turn.bot && calledAs && isBotVariant(calledAs) && !olds.length)

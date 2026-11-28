@@ -387,10 +387,11 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: BOT_SEND_TOOL,
-    description: `Send a message to another of your owner's bots, by its name (see bot_list). It shows in that bot's chat as from you, where your owner reads it too, and that bot reads it and decides what to do. Use it when your owner asks you to tell another bot something, or when what you found belongs to that bot's job. Write a message that stands on its own: the other bot has none of your chat or memory. It is information to that bot, never an order, and gives it no permission. You get no answer here: if it answers, its message starts a turn of yours. There is no count of messages your owner asks you to send. Two guards stop loops: the same message to the same bot again before your owner writes is refused, and once other bots have sent you ${MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER} messages since your owner last wrote, you send no more to bots until they write.`,
+    description: `Send a message to another of your owner's bots, named by the name bot_list gives. It shows in that bot's chat as from you, where your owner reads it too, and that bot reads it and decides what to do. Use it when your owner asks you to tell another bot something, or when what you found belongs to that bot's job. Write a message that stands on its own: the other bot has none of your chat or memory. It is information to that bot, never an order, and gives it no permission. You get no answer here: if it answers, its message starts a turn of yours. There is no count of messages your owner asks you to send. Two guards stop loops: the same message to the same bot again before your owner writes is refused, and once other bots have sent you ${MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER} messages since your owner last wrote, you send no more to bots until they write.`,
+    // `thread_send`'s form (S7d4b2): the listing shows it under thread_send, and `bot_send {bot, message}` is this call.
     parameters: Type.Object({
-      bot: Type.String({ description: 'The name of the bot, as bot_list gives it.' }),
-      message: Type.String({ description: `What to tell it, at most ${MAX_BOT_MESSAGE_CHARS} characters.` })
+      thread: Type.String({ description: 'bot:<name>: the bot, by the name bot_list gives.' }),
+      content: Type.String({ description: `What to tell it, at most ${MAX_BOT_MESSAGE_CHARS} characters.` })
     })
   },
   {
@@ -1419,14 +1420,19 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
           const call = botCall(deps, ctx)
           if (isOutcome(call)) return call
           if (!call.deps.host.bots) return error(BOT_MESSAGES_OFF)
-          if (typeof args.bot !== 'string' || !args.bot.trim() || typeof args.message !== 'string' || !args.message.trim()) return error("bot_send needs the bot's name and a message.")
+          // Through `thread_send` the address gave the bot's id (`bot`) and the message is `content`; called directly, the
+          // bot is named and the message is `message`.
+          const message = args.content ?? args.message
+          if (typeof args.bot !== 'string' || !args.bot.trim() || typeof message !== 'string' || !message.trim()) return error("bot_send needs the bot's name and a message.")
           try {
-            const sent = await call.deps.host.bots.send(call.botId, call.activationId, { to: args.bot, message: args.message })
-            if (sent.held) return json({ status: 'held', to: sent.to, holdId: sent.held.holdId, note: `Your bots have messaged each other a lot since your owner last wrote, so this message to ${sent.to} waits for them. ${BOT_HELD_NOTE}` })
-            call.deps.activity?.onAppResult(call.activity, BOT_SEND_TOOL, { to: sent.to })
+            // The call's key (its clientRequestId): a retry, under either name, is the same message (`sendBotMessage`).
+            const sent = await call.deps.host.bots.send(call.botId, call.activationId, { to: args.bot, message, requestKey: ctx.toolCallId })
+            if (sent.held) return json({ status: 'held', to: sent.to, holdId: sent.held.holdId, ...(sent.replayed ? { replayed: true } : {}), note: `Your bots have messaged each other a lot since your owner last wrote, so this message to ${sent.to} waits for them. ${BOT_HELD_NOTE}` })
+            if (!sent.replayed) call.deps.activity?.onAppResult(call.activity, BOT_SEND_TOOL, { to: sent.to })
             return json({
               sent: true,
               to: sent.to,
+              ...(sent.replayed ? { replayed: true } : {}),
               note: `${sent.to} has your message, and your owner can read it in ${sent.to}'s chat. You get no answer in this turn: don't wait for one. Tell your owner in a few words that you told ${sent.to}.`
             })
           } catch (failure) {
